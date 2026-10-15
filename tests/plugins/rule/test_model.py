@@ -262,3 +262,150 @@ def test_chapter_defaults() -> None:
     assert rule.chapter.title is None
     assert rule.chapter.pages is None
     assert rule.chapter.drop == []
+
+
+# --------------------------------------------------------------------------- #
+# response format
+# --------------------------------------------------------------------------- #
+def test_format_defaults_to_html() -> None:
+    rule = parse_rule(MINIMAL)
+
+    assert rule.format == "html"
+    assert rule.search_format == "html"
+    assert rule.book_format == "html"
+    assert rule.chapter_format == "html"
+
+
+def test_top_level_format_is_normalized_and_inherited() -> None:
+    rule = parse_rule({**MINIMAL, "format": "JSON"})
+
+    assert rule.format == "json"
+    assert rule.chapter_format == "json"
+
+
+def test_invalid_format_is_rejected() -> None:
+    with pytest.raises(RuleError, match="unsupported format"):
+        parse_rule({**MINIMAL, "format": "xml"})
+
+
+def test_section_format_overrides_the_top_level() -> None:
+    rule = parse_rule(
+        {
+            **MINIMAL,
+            "format": "json",
+            "search": {"url": "https://demo.example/s", "format": "HTML"},
+            "book": {
+                "url": "{base_url}/{book_id}/",
+                "chapters": {"item": "a"},
+            },
+        }
+    )
+
+    assert rule.search_format == "html"
+    assert rule.book_format == "json"
+    assert rule.chapter_format == "json"
+
+
+def test_blank_section_format_inherits() -> None:
+    rule = parse_rule(
+        {
+            "site_key": "demo",
+            "base_url": "https://demo.example",
+            "format": "json",
+            "chapter": {"url": "{base_url}/{book_id}/{chapter_id}.html", "format": ""},
+        }
+    )
+
+    assert rule.chapter is not None
+    assert rule.chapter.format is None
+    assert rule.chapter_format == "json"
+
+
+def test_invalid_section_format_is_rejected() -> None:
+    with pytest.raises(RuleError, match="unsupported format"):
+        parse_rule(
+            {
+                **MINIMAL,
+                "book": {
+                    "url": "{base_url}/{book_id}/",
+                    "format": "yaml",
+                    "chapters": {"item": "a"},
+                },
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
+# json_body
+# --------------------------------------------------------------------------- #
+def test_search_json_body_is_kept_verbatim() -> None:
+    rule = parse_rule(
+        {
+            **MINIMAL,
+            "search": {
+                "url": "https://api.demo.example/search",
+                "method": "POST",
+                "format": "json",
+                "json_body": {"kw": "{raw_keyword}", "page": "{page}"},
+            },
+        }
+    )
+
+    assert rule.search is not None
+    assert rule.search.json_body == {"kw": "{raw_keyword}", "page": "{page}"}
+    assert rule.search.data == {}
+
+
+def test_search_json_body_must_be_an_object() -> None:
+    with pytest.raises(RuleError, match=r"json_body must be an object"):
+        parse_rule(
+            {
+                **MINIMAL,
+                "search": {
+                    "url": "https://api.demo.example/search",
+                    "json_body": ["kw"],
+                },
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
+# pages
+# --------------------------------------------------------------------------- #
+def test_pages_max_pages_is_parsed() -> None:
+    rule = parse_rule(
+        {
+            **MINIMAL,
+            "chapter": {
+                "url": "{base_url}/{book_id}/{chapter_id}.html",
+                "pages": {
+                    "url": "https://api.demo.example/{book_id}?page={page}",
+                    "start": 3,
+                    "max_pages": 20,
+                },
+            },
+        }
+    )
+
+    assert rule.chapter is not None
+    assert rule.chapter.pages is not None
+    assert rule.chapter.pages.start == 3
+    assert rule.chapter.pages.max_pages == 20
+
+
+def test_pages_max_pages_defaults_to_none() -> None:
+    rule = parse_rule(
+        {
+            **MINIMAL,
+            "book": {
+                "url": "{base_url}/{book_id}/",
+                "pages": {"url": "{base_url}/{book_id}/index_{page}.html"},
+                "chapters": {"item": "a"},
+            },
+        }
+    )
+
+    assert rule.book is not None
+    assert rule.book.pages is not None
+    assert rule.book.pages.start == 2
+    assert rule.book.pages.max_pages is None

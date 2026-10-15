@@ -51,6 +51,14 @@ class RuleSearcher(BaseSearcher):
         headers = dict(search.headers) if search.headers else None
 
         try:
+            if search.json_body is not None:
+                payload = self._render_body(search.json_body, keyword)
+                async with self.session.post(
+                    url, json=payload, headers=headers
+                ) as resp:
+                    resp.raise_for_status()
+                    return await self._response_to_str(resp, rule.encoding)
+
             if search.method == "POST":
                 data = {
                     k: render(
@@ -71,6 +79,23 @@ class RuleSearcher(BaseSearcher):
             )
             return ""
 
+    @staticmethod
+    def _render_body(payload: dict[str, Any], keyword: str) -> dict[str, Any]:
+        """Expand ``{keyword}`` / ``{page}`` templates inside a JSON body."""
+
+        def walk(value: Any) -> Any:
+            if isinstance(value, str):
+                return render(
+                    value, keyword=quote_plus(keyword), raw_keyword=keyword, page=1
+                )
+            if isinstance(value, dict):
+                return {k: walk(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [walk(v) for v in value]
+            return value
+
+        return {k: walk(v) for k, v in payload.items()}
+
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
@@ -80,15 +105,16 @@ class RuleSearcher(BaseSearcher):
             return []
 
         base = (rule.base_url or self.BASE_URL).rstrip("/")
-        tree = parse_page(html_str)
-        items = select(tree, search.item) if search.item else [tree]
+        fmt = rule.search_format
+        tree = parse_page(html_str, fmt)
+        items = select(tree, search.item, fmt) if search.item else [tree]
 
         id_rx = re.compile(search.book_id_regex) if search.book_id_regex else None
         results: list[SearchResult] = []
 
         def field(name: str, node: Any) -> str:
             fld = search.fields.get(name)
-            return extract(node, fld) if fld else ""
+            return extract(node, fld, fmt) if fld else ""
 
         for idx, item in enumerate(items):
             if limit is not None and idx >= limit:

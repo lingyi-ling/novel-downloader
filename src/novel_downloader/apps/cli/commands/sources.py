@@ -21,7 +21,7 @@ from .base import Command
 
 class SourcesCmd(Command):
     name = "sources"
-    help = t("List and validate rule-based book sources.")
+    help = t("List, validate, install and remove rule-based book sources.")
 
     @classmethod
     def add_arguments(cls, parser: ArgumentParser) -> None:
@@ -37,11 +37,28 @@ class SourcesCmd(Command):
         p_check = sub.add_parser("check", help=t("Validate a single rule file."))
         p_check.add_argument("path", help=t("Path to a rule JSON file."))
 
+        p_add = sub.add_parser(
+            "add", help=t("Install a rule file into your user rules directory.")
+        )
+        p_add.add_argument("path", help=t("Path to a rule JSON file."))
+        p_add.add_argument(
+            "--force", action="store_true", help=t("Overwrite an existing rule file.")
+        )
+
+        p_remove = sub.add_parser(
+            "remove", help=t("Remove a user-installed rule (built-ins are kept).")
+        )
+        p_remove.add_argument("site_key", help=t("site_key of the rule to remove."))
+
     @classmethod
     def run(cls, args: Namespace) -> None:
         action = getattr(args, "action", None) or "list"
         if action == "check":
             cls._check(args.path)
+        elif action == "add":
+            cls._add(args.path, force=bool(getattr(args, "force", False)))
+        elif action == "remove":
+            cls._remove(args.site_key)
         else:
             cls._list(check=bool(getattr(args, "check", False)))
 
@@ -121,4 +138,36 @@ class SourcesCmd(Command):
                 key=rule.site_key,
                 search="yes" if rule.search is not None else "no",
             )
+        )
+
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def _add(cls, path_str: str, *, force: bool) -> None:
+        from novel_downloader.plugins.rule import RuleError, install_rule
+
+        path = Path(path_str)
+        if not path.is_file():
+            ui.error(t("Rule file not found: {path}").format(path=path_str))
+            return
+
+        try:
+            target = install_rule(path, force=force)
+        except RuleError as e:
+            ui.error(t("Could not install {path}: {err}").format(path=path_str, err=e))
+            return
+
+        ui.success(t("Installed rule to {target}").format(target=target))
+
+    @classmethod
+    def _remove(cls, site_key: str) -> None:
+        from novel_downloader.plugins.rule import RuleError, remove_rule
+
+        try:
+            target = remove_rule(site_key)
+        except RuleError as e:
+            ui.error(str(e))
+            return
+
+        ui.success(
+            t("Removed rule '{key}' from {target}").format(key=site_key, target=target)
         )

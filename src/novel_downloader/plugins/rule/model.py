@@ -25,6 +25,19 @@ Field extraction semantics (see :class:`Field`):
     - anything else  : the value of that attribute (``href``, ``src``, ``content``, ...)
 * ``regex`` + ``group`` optionally post-process the extracted string.
 * ``multi`` returns every match instead of only the first.
+
+Response formats
+----------------
+The ``search`` / ``book`` / ``chapter`` sections may declare
+``"format": "json"`` to consume an AJAX/JSON endpoint instead of HTML.  When a
+section leaves it out, the site-wide :attr:`Rule.format` (default ``"html"``)
+applies.  In JSON mode a ``selector`` is a dot path (``data.list``,
+``items[*].name``) rather than a CSS/XPath expression, and ``attr`` selects a
+key of the matched object (``text`` / ``inner_text`` mean "the value itself").
+
+A JSON request body can be sent by adding ``"json_body": {...}`` to the
+``search`` section; its string values accept the same ``{keyword}`` /
+``{page}`` templates as URLs.
 """
 
 from __future__ import annotations
@@ -76,6 +89,26 @@ def _as_headers(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
     return {str(k): _as_str(v) for k, v in value.items()}
+
+
+_VALID_FORMATS = {"html", "json"}
+
+
+def _check_format(fmt: str) -> str:
+    """Validate a response format name."""
+    if fmt not in _VALID_FORMATS:
+        raise RuleError(
+            f"unsupported format {fmt!r} (expected one of {sorted(_VALID_FORMATS)})"
+        )
+    return fmt
+
+
+def _section_format(data: Any) -> str | None:
+    """Read an optional per-section ``format`` override (``None`` = inherit)."""
+    raw = data.get("format") if isinstance(data, dict) else None
+    if raw in (None, ""):
+        return None
+    return _check_format(_as_str(raw).lower())
 
 
 # --------------------------------------------------------------------------- #
@@ -132,7 +165,9 @@ class SearchRule:
     url: str
     method: str = "GET"
     data: dict[str, str] = field(default_factory=dict)
+    json_body: dict[str, Any] | None = None
     headers: dict[str, str] = field(default_factory=dict)
+    format: str | None = None
     item: str = ""
     fields: dict[str, Field] = field(default_factory=dict)
     book_id_regex: str | None = None
@@ -144,11 +179,16 @@ class SearchRule:
         if not isinstance(data, dict) or not data.get("url"):
             raise RuleError("search section requires a 'url'")
         fields = {k: Field.from_dict(v) for k, v in (data.get("fields") or {}).items()}
+        json_body = data.get("json_body")
+        if json_body is not None and not isinstance(json_body, dict):
+            raise RuleError("search.json_body must be an object")
         return cls(
             url=_as_str(data["url"]),
             method=_as_str(data.get("method"), "GET").upper(),
             data={str(k): _as_str(v) for k, v in (data.get("data") or {}).items()},
+            json_body=json_body,
             headers=_as_headers(data.get("headers")),
+            format=_section_format(data),
             item=_as_str(data.get("item")),
             fields=fields,
             book_id_regex=data.get("book_id_regex"),
@@ -185,10 +225,17 @@ class ChaptersRule:
 
 @dataclass
 class PagesRule:
-    """Extra pagination pages for info / catalog / chapter pages."""
+    """Extra pagination pages for info / catalog / chapter pages.
+
+    By default pagination stops as soon as the *next* page is no longer
+    referenced from the current page's payload.  For endpoints that carry no
+    such link (typically JSON APIs) set ``max_pages`` to fetch a fixed range
+    instead.
+    """
 
     url: str
     start: int = 2
+    max_pages: int | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> PagesRule:
@@ -196,7 +243,12 @@ class PagesRule:
             return cls(url=data)
         if not isinstance(data, dict) or not data.get("url"):
             raise RuleError("pages rule requires a 'url'")
-        return cls(url=_as_str(data["url"]), start=int(data.get("start", 2)))
+        raw_max = data.get("max_pages")
+        return cls(
+            url=_as_str(data["url"]),
+            start=int(data.get("start", 2)),
+            max_pages=None if raw_max is None else int(raw_max),
+        )
 
 
 @dataclass
@@ -206,6 +258,7 @@ class BookRule:
     chapters: ChaptersRule
     pages: PagesRule | None = None
     headers: dict[str, str] = field(default_factory=dict)
+    format: str | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> BookRule:
@@ -220,6 +273,7 @@ class BookRule:
             chapters=ChaptersRule.from_dict(data.get("chapters") or {}),
             pages=PagesRule.from_dict(pages) if pages else None,
             headers=_as_headers(data.get("headers")),
+            format=_section_format(data),
         )
 
 
@@ -235,6 +289,7 @@ class ChapterRule:
     drop: list[str] = field(default_factory=list)
     pages: PagesRule | None = None
     headers: dict[str, str] = field(default_factory=dict)
+    format: str | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> ChapterRule:
@@ -249,6 +304,7 @@ class ChapterRule:
             drop=[str(p) for p in (data.get("drop") or [])],
             pages=PagesRule.from_dict(pages) if pages else None,
             headers=_as_headers(data.get("headers")),
+            format=_section_format(data),
         )
 
 
@@ -271,6 +327,7 @@ class Rule:
     priority: int = 200
     base_url: str = ""
     encoding: str = "utf-8"
+    format: str = "html"
     hosts: list[str] = field(default_factory=list)
     headers: dict[str, str] = field(default_factory=dict)
     resolve: ResolveRule | None = None
@@ -281,6 +338,22 @@ class Rule:
     @property
     def display_name(self) -> str:
         return self.site_name or self.site_key
+
+    def format_of(self, section: str | None) -> str:
+        """Resolve the effective format for a section (``None`` = inherit)."""
+        return section or self.format
+
+    @property
+    def search_format(self) -> str:
+        return self.format_of(self.search.format if self.search else None)
+
+    @property
+    def book_format(self) -> str:
+        return self.format_of(self.book.format if self.book else None)
+
+    @property
+    def chapter_format(self) -> str:
+        return self.format_of(self.chapter.format if self.chapter else None)
 
 
 _VALID_ATTRS = {"text", "inner_text", "html"}
@@ -326,6 +399,7 @@ def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
         priority=int(data.get("priority", 200)),
         base_url=_as_str(data.get("base_url")),
         encoding=_as_str(data.get("encoding"), "utf-8"),
+        format=_check_format(_as_str(data.get("format"), "html").lower()),
         hosts=[str(h).lower() for h in (data.get("hosts") or [])],
         headers=_as_headers(data.get("headers")),
         resolve=resolve,

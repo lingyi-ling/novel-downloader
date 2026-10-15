@@ -116,25 +116,30 @@ class RuleFetcher(BaseFetcher):
         """
         Walk the extra pages and return only the *newly* fetched ones.
 
-        Pagination continues while the URL of the *next* page is still
-        referenced from the current page's HTML (mirrors the base
-        ``should_continue_pagination`` heuristic).  This stops naturally on the
-        last page, where the link is absent.
+        When ``max_pages`` is set the pages ``start .. max_pages`` are fetched
+        unconditionally, which is what JSON endpoints (that never reference the
+        next page in their payload) need.  Otherwise pagination continues while
+        the URL of the *next* page is still referenced from the current page's
+        HTML (mirrors the base ``should_continue_pagination`` heuristic) and
+        stops naturally on the last page, where the link is absent.
 
-        :param current: HTML of the page fetched just before this call.
+        :param current: payload of the page fetched just before this call.
         :return: the additional pages, in fetch order (never includes ``current``).
         """
         extra: list[str] = []
         origin = base
         page = pages_rule.start
-        while len(extra) < _MAX_EXTRA_PAGES:
+        last = pages_rule.max_pages
+
+        while len(extra) < _MAX_EXTRA_PAGES and (last is None or page <= last):
             next_url = render(pages_rule.url, base_url=base, page=page, **fmt)
-            suffix = (
-                next_url[len(origin) :] if next_url.startswith(origin) else next_url
-            )
-            basename = suffix.rsplit("/", 1)[-1]
-            if suffix not in current and basename not in current:
-                break
+            if last is None:
+                suffix = (
+                    next_url[len(origin) :] if next_url.startswith(origin) else next_url
+                )
+                basename = suffix.rsplit("/", 1)[-1]
+                if suffix not in current and basename not in current:
+                    break
             try:
                 current = await self._get(next_url, extra_headers)
             except Exception as e:

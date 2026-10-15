@@ -11,10 +11,13 @@ import pytest
 
 from novel_downloader.plugins import registrar
 from novel_downloader.plugins.rule import (
+    RuleError,
     ensure_registered,
+    install_rule,
     iter_rules,
     load_rules,
     reload_rules,
+    remove_rule,
     resolve_url,
 )
 from novel_downloader.plugins.rule.parser import RuleParser
@@ -149,6 +152,75 @@ def test_invalid_rule_files_are_skipped(
     assert "demo" in rules
     assert "broken" not in rules
     assert "incomplete" not in rules
+
+
+# --------------------------------------------------------------------------- #
+# installing / removing user rules
+# --------------------------------------------------------------------------- #
+def test_install_rule_copies_into_the_user_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_dir = tmp_path / "src"
+    install_dir = tmp_path / "installed"
+    source_dir.mkdir()
+    _write_rule(source_dir, "demo.json", _demo_rule("demo"))
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(install_dir))
+
+    target = install_rule(source_dir / "demo.json")
+
+    assert target == install_dir / "demo.json"
+    assert target.is_file()
+    assert ensure_registered("demo") is True
+
+
+def test_install_rule_refuses_to_overwrite_without_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_dir = tmp_path / "src"
+    install_dir = tmp_path / "installed"
+    install_dir.mkdir()
+    source_dir.mkdir()
+    _write_rule(source_dir, "demo.json", _demo_rule("demo"))
+    (install_dir / "demo.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(install_dir))
+
+    with pytest.raises(RuleError, match="already exists"):
+        install_rule(source_dir / "demo.json")
+
+    assert install_rule(source_dir / "demo.json", force=True).is_file()
+
+
+def test_install_rule_rejects_malformed_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_dir = tmp_path / "installed"
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(install_dir))
+    broken = tmp_path / "broken.json"
+    broken.write_text("{ not json", encoding="utf-8")
+
+    with pytest.raises(RuleError, match="invalid JSON"):
+        install_rule(broken)
+
+
+def test_remove_rule_deletes_a_user_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_rule(tmp_path, "demo.json", _demo_rule("demo"))
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(tmp_path))
+    reload_rules()
+
+    removed = remove_rule("demo")
+
+    assert removed == tmp_path / "demo.json"
+    assert not removed.exists()
+    assert "demo" not in load_rules()
+
+
+def test_remove_rule_protects_builtin_and_unknown_keys() -> None:
+    with pytest.raises(RuleError, match="built-in"):
+        remove_rule("biquge5r")
+    with pytest.raises(RuleError, match="unknown rule source"):
+        remove_rule("no-such-source")
 
 
 # --------------------------------------------------------------------------- #

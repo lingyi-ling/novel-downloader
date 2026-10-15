@@ -198,3 +198,95 @@ async def test_pagination_is_capped() -> None:
     fetched = await make_fetcher(pages).fetch_book_info("7")
 
     assert len(fetched) == 51
+
+
+# --------------------------------------------------------------------------- #
+# fixed-range pagination (max_pages)
+# --------------------------------------------------------------------------- #
+def _max_pages_rule(max_pages: int) -> Rule:
+    return parse_rule(
+        {
+            "site_key": "demo",
+            "base_url": BASE,
+            "book": {
+                "url": "{base_url}/book/{book_id}/",
+                "pages": {
+                    "url": "{base_url}/book/{book_id}/index_{page}.html",
+                    "start": 2,
+                    "max_pages": max_pages,
+                },
+                "chapters": {"item": "div.list a"},
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_max_pages_fetches_the_fixed_range() -> None:
+    # JSON-style endpoints never reference the next page, so the fetcher must
+    # not depend on the "next link present" heuristic.
+    pages = {
+        BOOK_URL: "<div>无下一页链接</div>",
+        f"{BASE}/book/7/index_2.html": "<div>第二页</div>",
+        f"{BASE}/book/7/index_3.html": "<div>第三页</div>",
+    }
+
+    fetched = await _StubFetcher(_max_pages_rule(3), pages).fetch_book_info("7")
+
+    assert fetched == [
+        "<div>无下一页链接</div>",
+        "<div>第二页</div>",
+        "<div>第三页</div>",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_max_pages_stops_at_the_limit() -> None:
+    pages = {BOOK_URL: _pager(2)}
+    for page in range(2, 10):
+        pages[f"{BASE}/book/7/index_{page}.html"] = _pager(page + 1)
+
+    fetched = await _StubFetcher(_max_pages_rule(3), pages).fetch_book_info("7")
+
+    assert len(fetched) == 3
+
+
+@pytest.mark.asyncio
+async def test_max_pages_tolerates_a_missing_page() -> None:
+    pages = {BOOK_URL: "<div>第一页</div>"}
+
+    fetched = await _StubFetcher(_max_pages_rule(4), pages).fetch_book_info("7")
+
+    assert fetched == ["<div>第一页</div>"]
+
+
+@pytest.mark.asyncio
+async def test_max_pages_applies_to_chapter_content() -> None:
+    rule = parse_rule(
+        {
+            "site_key": "demo",
+            "base_url": BASE,
+            "chapter": {
+                "url": "{base_url}/book/{book_id}/{chapter_id}.html",
+                "pages": {
+                    "url": "{base_url}/book/{book_id}/{chapter_id}_{page}.html",
+                    "start": 2,
+                    "max_pages": 3,
+                },
+                "content": {"selector": "article"},
+            },
+        }
+    )
+    pages = {
+        CHAPTER_URL: "<article>第一页</article>",
+        f"{BASE}/book/7/5_2.html": "<article>第二页</article>",
+        f"{BASE}/book/7/5_3.html": "<article>第三页</article>",
+    }
+
+    fetched = await _StubFetcher(rule, pages).fetch_chapter_content("7", "5")
+
+    assert fetched == [
+        "<article>第一页</article>",
+        "<article>第二页</article>",
+        "<article>第三页</article>",
+    ]

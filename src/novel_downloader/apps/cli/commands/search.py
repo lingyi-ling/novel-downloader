@@ -5,6 +5,7 @@ novel_downloader.apps.cli.commands.search
 
 """
 
+import json
 from argparse import ArgumentParser, Namespace
 from collections.abc import Sequence
 from pathlib import Path
@@ -69,12 +70,29 @@ class SearchCmd(Command):
             nargs="+",
             help=t("Output format(s) (default: config)"),
         )
+        parser.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help=t("Print every search result as JSON on stdout and exit."),
+        )
+        parser.add_argument(
+            "--first",
+            action="store_true",
+            help=t("Download the top result without asking (non-interactive)."),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
         sites: Sequence[str] | None = args.site or None
         keyword: str = args.keyword
         formats: list[str] | None = args.format
+        as_json: bool = bool(args.as_json)
+        interactive = not as_json
+
+        if as_json and args.first:
+            ui.error(t("--json and --first cannot be combined."))
+            return
 
         overall_limit = None if args.limit is None else max(1, args.limit)
         per_site_limit = max(1, args.site_limit)
@@ -88,10 +106,22 @@ class SearchCmd(Command):
         ui.setup_logging(
             log_dir=adapter.get_log_dir(),
             console_level=adapter.get_log_level(),
+            console=interactive,
         )
 
         async def _run() -> None:
             from novel_downloader.plugins.search import search
+
+            if as_json:
+                results = await search(
+                    keyword=keyword,
+                    sites=sites,
+                    limit=overall_limit,
+                    per_site_limit=per_site_limit,
+                    timeout=timeout,
+                )
+                ui.emit(json.dumps(list(results), ensure_ascii=False, indent=2))
+                return
 
             with ui.status(t("Searching for '{keyword}'...").format(keyword=keyword)):
                 results = await search(
@@ -102,7 +132,11 @@ class SearchCmd(Command):
                     timeout=timeout,
                 )
 
-            chosen = prompts.select_search_result(results)
+            if not results:
+                ui.warn(t("No results found for '{keyword}'.").format(keyword=keyword))
+                return
+
+            chosen = results[0] if args.first else prompts.select_search_result(results)
             if chosen is None:
                 return
 

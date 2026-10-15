@@ -9,10 +9,13 @@ from novel_downloader.plugins.rule.engine import (
     abs_url,
     extract,
     extract_multi,
+    json_to_str,
     node_to_str,
+    parse_json,
     parse_page,
     render,
     select,
+    select_json,
     strip_nested_html,
 )
 from novel_downloader.plugins.rule.model import Field, RuleError
@@ -190,3 +193,97 @@ def test_abs_url_variants() -> None:
     assert abs_url(base, "http://other.example/a") == "http://other.example/a"
     assert abs_url(base, "   ") == ""
     assert abs_url(base, "") == ""
+
+
+# --------------------------------------------------------------------------- #
+# JSON mode
+# --------------------------------------------------------------------------- #
+DOC = {
+    "code": 0,
+    "data": {
+        "list": [
+            {"title": "斗破苍穹", "bookId": 11, "tags": ["玄幻"], "author": "天蚕土豆"},
+            {"title": "武动乾坤", "bookId": 22, "tags": [], "author": "天蚕土豆"},
+        ],
+        "total": 2,
+    },
+}
+
+
+def test_parse_json_rejects_empty_and_malformed() -> None:
+    with pytest.raises(RuleError, match="empty response"):
+        parse_json("  ")
+    with pytest.raises(RuleError, match="unparseable JSON"):
+        parse_json("{not json")
+
+
+def test_parse_page_dispatches_on_format() -> None:
+    assert parse_page('{"a": 1}', "json") == {"a": 1}
+    assert select(parse_page("<div id='x'>hi</div>"), "#x")[0].text == "hi"
+
+
+def test_select_json_empty_path_returns_root() -> None:
+    assert select_json(DOC, "") == [DOC]
+
+
+def test_select_json_expands_trailing_array() -> None:
+    assert len(select_json(DOC, "data.list")) == 2
+
+
+def test_select_json_leading_dollar_is_optional() -> None:
+    assert select_json(DOC, "$.data.total") == [2]
+    assert select_json(DOC, "data.total") == [2]
+
+
+def test_select_json_wildcard_over_nested_objects() -> None:
+    assert select_json(DOC, "items[*].name") == []
+    assert select_json(DOC, "data.list[*].title") == ["斗破苍穹", "武动乾坤"]
+
+
+def test_select_json_fans_out_over_arrays_of_objects() -> None:
+    assert select_json(DOC, "data.list.title") == ["斗破苍穹", "武动乾坤"]
+
+
+def test_select_json_index_and_missing_key() -> None:
+    assert select_json(DOC, "data.list[1].title") == ["武动乾坤"]
+    assert select_json(DOC, "data.nope") == []
+    assert select_json(DOC, "data.list[9]") == []
+
+
+def test_select_json_returns_key_of_first_element_via_index() -> None:
+    value = select_json(DOC, "data.list[0]")
+    assert value == [DOC["data"]["list"][0]]
+
+
+def test_json_to_str_scalars() -> None:
+    assert json_to_str(None, "text") == ""
+    assert json_to_str(True, "text") == "true"
+    assert json_to_str(False, "text") == "false"
+    assert json_to_str(11, "text") == "11"
+    assert json_to_str("  hi  ", "text") == "hi"
+
+
+def test_json_to_str_object_and_array() -> None:
+    assert json_to_str({"a": 1}, "a") == "1"
+    assert json_to_str({"a": 1}, "missing") == ""
+    assert json_to_str(["x", "y"], "text") == "xy"
+    assert json_to_str(["x", "y"], "inner_text") == "x\ny"
+    assert json_to_str({"a": 1}, "text") == '{"a": 1}'
+
+
+def test_extract_json_scalar_and_attribute_lookup() -> None:
+    item = select_json(DOC, "data.list[0]")[0]
+    assert extract(item, Field(selector="title"), "json") == "斗破苍穹"
+    assert extract(item, Field(selector="bookId", attr="bookId"), "json") == "11"
+
+
+def test_extract_json_multi_collects_every_item() -> None:
+    fld = Field(selector="data.list[*].title")
+    assert extract_multi(DOC, fld, "json") == ["斗破苍穹", "武动乾坤"]
+    assert extract(DOC, fld, "json") == "斗破苍穹"
+
+
+def test_extract_json_applies_regex_and_default() -> None:
+    assert extract(DOC, Field(selector="data.nope", default="n/a"), "json") == "n/a"
+    fld = Field(selector="data.list[*].title", regex=r"(\S+)苍穹", group=1)
+    assert extract(DOC, fld, "json") == "斗破"

@@ -1,14 +1,17 @@
 {
   "_comment": [
-    "规则书源示例模板 —— 复制到 ./rules/ 或 $NOVEL_RULES_DIR 下即可被自动加载。",
-    "常用键: 顶层 site_key/base_url/encoding/hosts/headers/resolve/priority",
+    "规则书源示例模板 —— 复制到 ./rules/ 或 $NOVEL_RULES_DIR 下即可被自动加载 (文件名以 _ 开头的会被跳过)。",
+    "常用键: 顶层 site_key/base_url/encoding/format/hosts/headers/resolve/priority",
     "        搜索 search, 详情+目录 book, 正文 chapter, 分页 pages",
-    "校验: novel-cli sources check ./rules/example-template.json"
+    "JSON 接口: 顶层或段内写 \"format\": \"json\", selector 改用点号路径 (见下方注释)",
+    "校验: novel-cli sources check ./rules/_example-template.json",
+    "安装: novel-cli sources add ./rules/_example-template.json"
   ],
   "site_key": "example",
   "site_name": "示例书源",
   "base_url": "https://www.example.com",
   "encoding": "utf-8",
+  "format": "html",
   "priority": 200,
   "hosts": ["www.example.com", "example.com"],
   "headers": {
@@ -29,6 +32,19 @@
       "update": { "selector": "dd.update", "attr": "text" }
     }
   },
+
+  "_comment_json": [
+    "若某段是 AJAX/JSON 接口, 在该段 (或顶层) 加 \"format\": \"json\" 后, selector 改用点号路径:",
+    "  \"format\": \"json\",",
+    "  \"method\": \"POST\",",
+    "  \"json_body\": { \"kw\": \"{raw_keyword}\", \"page\": \"{page}\" },",
+    "  \"item\": \"data.list\",          路径末尾的数组会自动展开为各元素",
+    "  \"fields\": {",
+    "    \"title\": { \"selector\": \"name\", \"attr\": \"text\" },",
+    "    \"tags\":  { \"selector\": \"tags[*]\", \"attr\": \"text\", \"multi\": true }",
+    "  }",
+    "分页: JSON 响应通常不回链下一页, 请改用 \"pages\": { \"url\": \"...\", \"start\": 2, \"max_pages\": 20 }"
+  ],
 
   "book": {
     "url": "{base_url}/book/{book_id}/",

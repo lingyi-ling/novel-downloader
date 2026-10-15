@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from novel_downloader.plugins.rule.model import Rule, parse_rule
+import pytest
+
+from novel_downloader.plugins.rule.model import Rule, RuleError, parse_rule
 from novel_downloader.plugins.rule.searcher import RuleSearcher
 
 RULE_DICT: dict[str, Any] = {
@@ -153,3 +155,102 @@ def test_default_item_falls_back_to_root() -> None:
     assert len(results) == 1
     assert results[0]["title"] == "只有一个结果"
     assert results[0]["book_url"] == "https://demo.example/book/1/"
+
+
+# --------------------------------------------------------------------------- #
+# JSON / AJAX search
+# --------------------------------------------------------------------------- #
+JSON_RULE: dict[str, Any] = {
+    "site_key": "demo-api",
+    "base_url": "https://api.demo.example",
+    "search": {
+        "url": "https://api.demo.example/search",
+        "method": "POST",
+        "format": "json",
+        "json_body": {"kw": "{raw_keyword}", "page": "{page}"},
+        "item": "data.list",
+        "book_id_regex": r"/book/(\d+)",
+        "fields": {
+            "title": {"selector": "name", "attr": "text"},
+            "url": {"selector": "url", "attr": "text"},
+            "cover": {"selector": "coverUrl", "attr": "text"},
+            "author": {"selector": "author", "attr": "text"},
+            "tags": {"selector": "tags[*]", "attr": "text", "multi": True},
+        },
+    },
+    "chapter": {"url": "{base_url}/read/{book_id}/{chapter_id}.html"},
+}
+
+JSON_PAYLOAD = """
+{
+  "data": {
+    "total": 2,
+    "list": [
+      {
+        "name": "斗破苍穹",
+        "url": "https://api.demo.example/book/7",
+        "author": "天蚕土豆",
+        "coverUrl": "https://cdn.example/7.jpg",
+        "tags": ["玄幻", "热血"]
+      },
+      {
+        "name": "武动乾坤",
+        "url": "https://api.demo.example/book/9"
+      }
+    ]
+  }
+}
+"""
+
+
+def test_parse_json_search_maps_every_field() -> None:
+    results = make_searcher(parse_rule(JSON_RULE))._parse_html(JSON_PAYLOAD)
+
+    assert len(results) == 2
+    first = results[0]
+    assert first["site"] == "demo-api"
+    assert first["title"] == "斗破苍穹"
+    assert first["author"] == "天蚕土豆"
+    assert first["book_id"] == "7"
+    assert first["book_url"] == "https://api.demo.example/book/7"
+    assert first["cover_url"] == "https://cdn.example/7.jpg"
+
+
+def test_parse_json_search_tolerates_missing_keys() -> None:
+    results = make_searcher(parse_rule(JSON_RULE))._parse_html(JSON_PAYLOAD)
+
+    second = results[1]
+    assert second["title"] == "武动乾坤"
+    assert second["author"] == ""
+    assert second["cover_url"] == ""
+
+
+def test_parse_json_search_rejects_malformed_body() -> None:
+    searcher = make_searcher(parse_rule(JSON_RULE))
+
+    with pytest.raises(RuleError, match="unparseable JSON"):
+        searcher._parse_html("{ not json")
+
+
+def test_render_body_expands_templates_recursively() -> None:
+    payload = {
+        "kw": "{raw_keyword}",
+        "q": "{keyword}",
+        "page": "{page}",
+        "flags": {"nested": "{raw_keyword}"},
+    }
+
+    rendered = RuleSearcher._render_body(payload, "斗 破")
+
+    assert rendered == {
+        "kw": "斗 破",
+        "q": "%E6%96%97+%E7%A0%B4",
+        "page": "1",
+        "flags": {"nested": "斗 破"},
+    }
+
+
+def test_render_body_leaves_non_strings_untouched() -> None:
+    payload: dict[str, Any] = {"limit": 20, "enabled": True, "items": [1, 2]}
+
+    assert RuleSearcher._render_body(payload, "x") == payload

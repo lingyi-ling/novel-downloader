@@ -18,6 +18,7 @@ Public API:
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Iterable, Sequence
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -31,7 +32,14 @@ from novel_downloader.infra.paths import PACKAGE_NAME
 _MUTE_LOGGERS: set[str] = {
     "fontTools.ttLib.tables._p_o_s_t",
 }
-_CONSOLE = Console()
+# Diagnostics (tables, spinners, warnings) go to stderr so that data printed on
+# stdout -- e.g. ``search --json`` -- stays machine readable.
+_CONSOLE = Console(stderr=True)
+
+
+def emit(text: str) -> None:
+    """Write machine-readable data to stdout, untouched by rich formatting."""
+    print(text)
 
 
 def info(message: str) -> None:
@@ -254,7 +262,7 @@ def setup_logging(
         fh.setLevel(file_level)
         logger.addHandler(fh)
 
-        print(f"Logging to {log_path}")
+        print(f"Logging to {log_path}", file=sys.stderr)
 
     # Console handler
     if console:

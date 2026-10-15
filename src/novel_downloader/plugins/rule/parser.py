@@ -49,14 +49,15 @@ class RuleParser(BaseParser):
             return None
 
         base = (rule.base_url or "").rstrip("/")
-        tree = parse_page(raw_pages[0])
+        fmt = rule.book_format
+        tree = parse_page(raw_pages[0], fmt)
 
         def field_value(name: str) -> str:
             fld = book_rule.fields.get(name)
-            return extract(tree, fld) if fld else ""
+            return extract(tree, fld, fmt) if fld else ""
 
         tags_field = book_rule.fields.get("tags")
-        tags = extract_multi(tree, tags_field) if tags_field else []
+        tags = extract_multi(tree, tags_field, fmt) if tags_field else []
 
         chapters = self._parse_chapters(raw_pages, base)
         if not chapters:
@@ -90,14 +91,15 @@ class RuleParser(BaseParser):
 
         chapters_rule = book_rule.chapters
         id_rx = re.compile(chapters_rule.id_regex) if chapters_rule.id_regex else None
+        fmt = rule.book_format
 
         out: list[ChapterInfoDict] = []
         seen: set[str] = set()
 
         for raw in raw_pages:
-            tree = parse_page(raw)
-            for node in select(tree, chapters_rule.item):
-                href = extract(node, chapters_rule.url)
+            tree = parse_page(raw, fmt)
+            for node in select(tree, chapters_rule.item, fmt):
+                href = extract(node, chapters_rule.url, fmt)
                 if not href:
                     continue
                 book_url = abs_url(base, href)
@@ -105,7 +107,7 @@ class RuleParser(BaseParser):
                     continue
                 seen.add(book_url)
 
-                title = extract(node, chapters_rule.title)
+                title = extract(node, chapters_rule.title, fmt)
                 cid = self._chapter_id(href, id_rx, chapters_rule.id_group)
                 out.append({"title": title, "url": book_url, "chapterId": cid})
         return out
@@ -132,17 +134,18 @@ class RuleParser(BaseParser):
 
         title = ""
         bodies: list[str] = []
+        fmt = rule.chapter_format
 
         for raw in raw_pages:
             try:
-                tree = parse_page(raw)
+                tree = parse_page(raw, fmt)
             except RuleError:
                 # Blank / degenerate responses (interstitials, empty extra
                 # pages) simply contribute nothing instead of aborting.
                 continue
             if chapter_rule.title is not None and not title:
-                title = extract(tree, chapter_rule.title)
-            body = extract(tree, chapter_rule.content)
+                title = extract(tree, chapter_rule.title, fmt)
+            body = extract(tree, chapter_rule.content, fmt)
             if body:
                 bodies.append(body)
 

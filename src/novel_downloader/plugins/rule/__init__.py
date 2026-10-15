@@ -52,6 +52,9 @@ __all__ = [
     "ensure_registered",
     "register_all",
     "resolve_url",
+    "install_dir",
+    "install_rule",
+    "remove_rule",
 ]
 
 _BUILTIN_PKG = "novel_downloader.plugins.rule.builtin"
@@ -164,6 +167,72 @@ def iter_rules() -> list[tuple[str, Rule, dict[str, str]]]:
     """Return ``(site_key, rule, meta)`` tuples for every loaded rule."""
     load_rules()
     return [(key, rule, _meta.get(key, {})) for key, rule in _rules.items()]
+
+
+# --------------------------------------------------------------------------- #
+# installing / removing user rules
+# --------------------------------------------------------------------------- #
+def install_dir() -> Path:
+    """
+    Directory new user rule files are installed into.
+
+    ``$NOVEL_RULES_DIR`` when set, otherwise the per-user config directory,
+    which is also the last directory :func:`load_rules` scans.
+    """
+    env = os.environ.get("NOVEL_RULES_DIR")
+    if env:
+        return Path(env).expanduser()
+    return _user_dirs()[-1]
+
+
+def install_rule(path: Path, *, force: bool = False) -> Path:
+    """
+    Validate ``path`` and copy it into :func:`install_dir`.
+
+    :raises RuleError: when the file is unreadable, malformed, or the target
+        already exists and ``force`` is false.
+    """
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError as e:
+        raise RuleError(f"cannot read {path}: {e}") from e
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuleError(f"{path.name}: invalid JSON: {e}") from e
+    parse_rule(data, source=path.name)
+
+    target_dir = install_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{path.stem}.json"
+    if target.exists() and not force:
+        raise RuleError(f"{target} already exists (pass --force to overwrite)")
+    target.write_text(text, encoding="utf-8")
+    reload_rules()
+    return target
+
+
+def remove_rule(site_key: str) -> Path:
+    """
+    Delete the user-installed rule file backing ``site_key``.
+
+    :raises RuleError: when the key is unknown, built-in, or its file is gone.
+    """
+    load_rules()
+    key = _normalize_key(site_key)
+    meta = _meta.get(key)
+    if meta is None:
+        raise RuleError(f"unknown rule source {site_key!r}")
+    if meta.get("origin") == "builtin":
+        raise RuleError(f"'{key}' is a built-in source and cannot be removed")
+
+    target = Path(meta.get("file", ""))
+    if not target.is_file():
+        raise RuleError(f"rule file not found: {target}")
+    target.unlink()
+    reload_rules()
+    return target
 
 
 # --------------------------------------------------------------------------- #
