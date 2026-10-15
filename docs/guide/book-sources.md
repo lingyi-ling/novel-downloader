@@ -15,7 +15,9 @@
 | `$NOVEL_RULES_DIR/*.json` | 环境变量指定的目录 |
 | `<用户配置目录>/novel_downloader/rules/*.json` | 每个用户的私有书源 |
 
-仓库中的 [`rules/example-template.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/example-template.json) 是一个覆盖全部字段的示例模板, 可直接复制到上述任一位置后修改。
+文件名以 `_` 开头的规则文件会被跳过, 适合存放模板与草稿。
+
+仓库中的 [`rules/_example-template.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-template.json) 是一个覆盖全部字段的示例模板 (因带 `_` 前缀默认不会被加载), 可直接复制并去掉下划线后使用。
 
 ---
 
@@ -26,7 +28,7 @@
 novel-cli sources list --check
 
 # 校验单个规则文件
-novel-cli sources check ./rules/example-template.json
+novel-cli sources check ./rules/_example-template.json
 
 # 使用规则书源搜索 / 下载
 novel-cli search "斗破苍穹" -s biquge5r

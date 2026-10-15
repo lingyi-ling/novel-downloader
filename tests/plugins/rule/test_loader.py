@@ -123,6 +123,19 @@ def test_numeric_site_key_gets_a_letter_prefix(
     assert ensure_registered("n123") is True
 
 
+def test_underscore_prefixed_files_are_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_rule(tmp_path, "_draft.json", _demo_rule("draft"))
+    _write_rule(tmp_path, "live.json", _demo_rule("live"))
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(tmp_path))
+
+    rules = reload_rules()
+
+    assert "live" in rules
+    assert "draft" not in rules
+
+
 def test_invalid_rule_files_are_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

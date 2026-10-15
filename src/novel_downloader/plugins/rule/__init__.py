@@ -113,6 +113,11 @@ def _load_payload(text: str, origin: str, filename: str) -> None:
         _host_map[host] = key
 
 
+def _is_ignored(filename: str) -> bool:
+    """Rule files starting with ``_`` are templates/drafts and never loaded."""
+    return filename.startswith("_")
+
+
 def load_rules(*, force: bool = False) -> dict[str, Rule]:
     """Discover and parse every available rule file (idempotent)."""
     global _loaded
@@ -138,6 +143,8 @@ def load_rules(*, force: bool = False) -> dict[str, Rule]:
         if not directory.is_dir():
             continue
         for path in sorted(directory.glob("*.json")):
+            if _is_ignored(path.name):
+                continue
             try:
                 _load_payload(path.read_text(encoding="utf-8-sig"), "user", str(path))
             except OSError as e:
