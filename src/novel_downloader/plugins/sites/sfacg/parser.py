@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""
+novel_downloader.plugins.sites.sfacg.parser
+-------------------------------------------
+
+"""
+
+import base64
+import logging
+from typing import Any
+
+from lxml import html
+
+from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.registry import registrar
+from novel_downloader.schemas import (
+    BookInfoDict,
+    ChapterDict,
+    ChapterInfoDict,
+    MediaResource,
+    VolumeInfoDict,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@registrar.register_parser()
+class SfacgParser(BaseParser):
+    """
+    Parser for sfacg book pages.
+    """
+
+    site_name: str = "sfacg"
+
+    def parse_book_info(
+        self,
+        raw_pages: list[str],
+        **kwargs: Any,
+    ) -> BookInfoDict | None:
+        if len(raw_pages) < 2:
+            return None
+
+        info_tree = html.fromstring(raw_pages[0])
+        catalog_tree = html.fromstring(raw_pages[1])
+
+        # Book metadata
+        book_name = self._first_str(
+            info_tree.xpath('//span[@class="book_newtitle"]/text()')
+        )
+
+        book_info2 = info_tree.xpath('//div[@class="book_info2"]/span/text()')
+        book_type = self._first_str(book_info2[0:1])
+        serial_status = self._first_str(book_info2[1:2])
+
+        # author / word_count / update_time
+        book_info3_nodes = info_tree.xpath('//span[@class="book_info3"]//text()')
+        author, word_count, update_time = "", "", ""
+        if book_info3_nodes:
+            # first part "author / word_count / skipped"
+            parts = [p.strip() for p in book_info3_nodes[0].split("/") if p.strip()]
+            if len(parts) >= 2:
+                author = parts[0]
+                word_count = parts[1]  # keep with "字"
+            if len(book_info3_nodes) >= 2:
+                update_time = book_info3_nodes[-1].strip()
+
+        cover_url = "https:" + self._first_str(
+            info_tree.xpath('//ul[@class="book_info"]//img/@src')
+        )
+
+        summary = self._join_strs(
+            info_tree.xpath(
+                '//ul[@class="book_profile"]/li[@class="book_bk_qs1"]//text()'
+            )
+        )
+
+        # --- catalog parsing ---
+        volumes: list[VolumeInfoDict] = []
+        vol_nodes = catalog_tree.xpath('//div[@class="mulu"]')
+        for vol_node in vol_nodes:
+            vol_name = vol_node.text_content().strip()
+            ul = vol_node.getnext()
+            chapters: list[ChapterInfoDict] = []
+            if ul is not None:
+                for a in ul.xpath('.//ul[@class="mulu_list"]/a'):
+                    url = self._first_str(a.xpath("./@href"))
+                    if not url:
+                        continue
+                    chapter_id = url.strip("/").rsplit("/", 1)[-1]
+                    title_texts = a.xpath(".//li//text()")
+                    title = self._join_strs(title_texts)
+
+                    chap: ChapterInfoDict = {
+                        "title": title,
+                        "url": url,
+                        "chapterId": chapter_id,
+                    }
+                    chapters.append(chap)
+            volumes.append(
+                {
+                    "volume_name": vol_name,
+                    "chapters": chapters,
+                }
+            )
+
+        if not volumes:
+            return None
+
+        return {
+            "book_name": book_name,
+            "author": author,
+            "cover_url": cover_url,
+            "update_time": update_time,
+            "word_count": word_count,
+            "serial_status": serial_status,
+            "summary": summary,
+            "tags": [book_type] if book_type else [],
+            "volumes": volumes,
+            "extra": {},
+        }
+
+    def parse_chapter_content(
+        self,
+        raw_pages: list[str],
+        chapter_id: str,
+        **kwargs: Any,
+    ) -> ChapterDict | None:
+        if not raw_pages:
+            return None
+
+        # check if chapter is locked
+        keywords = ["本章为VIP章节"]  # 本章为VIP章节，订阅后可立即阅读
+        if any(kw in raw_pages[0] for kw in keywords):
+            return None
+
+        tree = html.fromstring(raw_pages[0])
+        content = ""
+        resources: list[MediaResource] = []
+
+        is_vip = "/ajax/ashx/common.ashx" in raw_pages[0]
+
+        # case: VIP chapter -> needs OCR from base64 image
+        if is_vip:
+            if len(raw_pages) < 2:
+                logger.warning("sfacg chapter %s :: missing VIP img data", chapter_id)
+                return None
+
+            if not self._enable_ocr:
+                logger.warning(
+                    "sfacg chapter %s :: VIP chapter not decoded "
+                    "(enable enable_ocr to OCR)",
+                    chapter_id,
+                )
+                resources.append(
+                    {
+                        "type": "image",
+                        "paragraph_index": 0,
+                        "base64": raw_pages[1].strip(),
+                        "mime": "image/gif",
+                    }
+                )
+
+            else:
+                content = self.parse_vip_chapter(raw_pages[1])
+
+        # case: normal HTML text chapter
+        else:
+            content_divs = tree.xpath('//div[@class="yuedu Content_Frame"]/div[1]')
+            if not content_divs:
+                logger.warning("sfacg chapter %s :: missing content div", chapter_id)
+                return None
+
+            lines, new_resources = self.parse_normal_chapter(content_divs[0])
+            content = "\n".join(lines)
+            resources.extend(new_resources)
+
+        if not (content or resources):
+            return None
+
+        title = self._first_str(
+            tree.xpath('//ul[@class="menu_top_list book_view_top"]/li[2]/text()')
+        )
+
+        return {
+            "id": chapter_id,
+            "title": title,
+            "content": content,
+            "extra": {
+                "site": self.site_name,
+                "vip": is_vip,
+                "resources": resources,
+            },
+        }
+
+    def parse_normal_chapter(
+        self, content_div: html.HtmlElement
+    ) -> tuple[list[str], list[MediaResource]]:
+        paragraphs: list[str] = []
+        resources: list[MediaResource] = []
+        curr_paragraph_idx = 0
+
+        def append_para(txt: str | None) -> None:
+            nonlocal curr_paragraph_idx
+            if not txt:
+                return
+            cleaned = txt.strip()
+            if cleaned:
+                paragraphs.append(cleaned)
+                curr_paragraph_idx += 1
+
+        for elem in content_div.iter():
+            if elem.text and elem.tag not in ("img",):
+                append_para(elem.text)
+
+            if elem.tag == "img":
+                src = elem.get("src")
+                if src:
+                    if src.startswith("//"):
+                        src = "https:" + src
+
+                    resources.append(
+                        {
+                            "type": "image",
+                            "paragraph_index": curr_paragraph_idx,
+                            "url": src,
+                        }
+                    )
+
+            if elem is content_div:  # trailing text (skip the root itself)
+                continue
+            if elem.tail and elem.tail.strip():
+                append_para(elem.tail)
+
+        return paragraphs, resources
+
+    def parse_vip_chapter(self, img_base64: str) -> str:
+        from novel_downloader.libs import image_utils
+
+        img_bytes = base64.b64decode(img_base64)
+        paragraphs: list[str] = []
+        cache: list[str] = []
+
+        # decode & preprocess
+        img = image_utils.load_image_array_bytes(img_bytes, white_bg=True)
+        img = image_utils.filter_orange_watermark(img)
+        lines = image_utils.split_by_height(
+            img,
+            height=38,
+            top_offset=10,
+            bottom_offset=10,
+            per_chunk_top_ignore=10,
+        )
+
+        # filter out completely empty (white) lines
+        non_empty_lines = [
+            line for line in lines if not image_utils.is_empty_image(line)
+        ]
+
+        preds = self._extract_text_from_image(
+            non_empty_lines, batch_size=self._batch_size
+        )
+        for line, (text, _) in zip(non_empty_lines, preds, strict=False):
+            first_2 = image_utils.crop_chars_region(
+                line, 2, left_margin=14, char_width=28
+            )
+            if image_utils.is_empty_image(first_2) and cache:
+                paragraphs.append("".join(cache))
+                cache.clear()
+
+            if text.strip():
+                cache.append(text.strip())
+
+        # flush cache
+        if cache:
+            paragraphs.append("".join(cache))
+
+        return "\n".join(paragraphs)

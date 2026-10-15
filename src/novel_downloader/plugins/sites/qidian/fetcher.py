@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""
+novel_downloader.plugins.sites.qidian.fetcher
+---------------------------------------------
+
+"""
+
+import base64
+import hashlib
+import json
+import logging
+import random
+import time
+from collections.abc import Mapping
+from typing import Any, ClassVar
+
+from novel_downloader.libs.crypto.rc4 import rc4_init, rc4_stream
+from novel_downloader.libs.time_utils import async_jitter_sleep
+from novel_downloader.plugins.base.fetcher import BaseFetcher
+from novel_downloader.plugins.registry import registrar
+from novel_downloader.schemas import FetcherConfig, LoginField
+
+logger = logging.getLogger(__name__)
+
+
+@registrar.register_fetcher()
+class QidianFetcher(BaseFetcher):
+    """
+    A session class for interacting with the 起点中文网 (www.qidian.com) novel.
+    """
+
+    site_name: str = "qidian"
+
+    HOMEPAGE_URL = "https://www.qidian.com/"
+    BOOKCASE_URL = "https://my.qidian.com/bookcase/"
+    BOOK_INFO_URL = "https://www.qidian.com/book/{book_id}/"
+    CHAPTER_URL = "https://www.qidian.com/chapter/{book_id}/{chapter_id}/"
+
+    LOGIN_URL = "https://passport.qidian.com/"
+
+    _cookie_keys: ClassVar[list[str]] = ["eXdndWlk"]
+
+    def __init__(
+        self,
+        config: FetcherConfig,
+        cookies: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(config, cookies, **kwargs)
+        self._s_init = rc4_init(self._d2("dGcwOUl0Myo5aA=="))
+        self._cookie_key = self._d("d190c2Zw")
+        self._fp_key = self._d("ZmluZ2VycHJpbnQ=")
+        self._ab_key = self._d("YWJub3JtYWw=")
+        self._ck_key = self._d("Y2hlY2tzdW0=")
+        self._lt_key = self._d("bG9hZHRz")
+        self._ts_key = self._d("dGltZXN0YW1w")
+        self._fp_val: str = ""
+        self._ab_val: str = ""
+
+    async def login(
+        self,
+        username: str = "",
+        password: str = "",
+        cookies: dict[str, str] | None = None,
+        attempt: int = 1,
+        **kwargs: Any,
+    ) -> bool:
+        """
+        Restore cookies persisted by the session-based workflow.
+        """
+        if not cookies or not self._check_cookies(cookies):
+            return False
+        self.session.update_cookies(cookies)
+
+        is_logged_in = await self._check_login_status()
+        if is_logged_in:
+            logger.info("Login check failed; refreshing cookie base values.")
+            self._update_fp_val(reflush=True)
+            # retry once
+            is_logged_in = await self._check_login_status()
+
+        self._is_logged_in = is_logged_in
+        return is_logged_in
+
+    async def fetch_book_info(
+        self,
+        book_id: str,
+        **kwargs: Any,
+    ) -> list[str]:
+        url = self.book_info_url(book_id=book_id)
+        return [await self.fetch(url, **kwargs)]
+
+    async def fetch_chapter_content(
+        self,
+        book_id: str,
+        chapter_id: str,
+        **kwargs: Any,
+    ) -> list[str]:
+        url = self.chapter_url(book_id=book_id, chapter_id=chapter_id)
+        return [await self.fetch(url, **kwargs)]
+
+    async def get_bookcase(
+        self,
+        **kwargs: Any,
+    ) -> list[str]:
+        """
+        Retrieve the user's *bookcase* page.
+
+        :return: The HTML markup of the bookcase page.
+        """
+        return [await self.fetch(self.BOOKCASE_URL, **kwargs)]
+
+    @property
+    def login_fields(self) -> list[LoginField]:
+        return [
+            LoginField(
+                name="cookies",
+                label="Cookie",
+                type="cookie",
+                required=True,
+                placeholder="Paste your login cookies here",
+                description="Copy the cookies from your browser's developer tools while logged in.",  # noqa: E501
+            ),
+        ]
+
+    async def fetch(
+        self,
+        url: str,
+        encoding: str = "utf-8",
+        **kwargs: Any,
+    ) -> str:
+        """
+        Same as :py:meth:`BaseFetcher.fetch`, but transparently refreshes
+        a cookie-based token used for request validation.
+        The method:
+          1. Reads the existing cookie (if any);
+          2. Generates a new value tied to *url*;
+          3. Updates the live ``requests.Session``;
+        """
+        if self._rate_limiter:
+            await self._rate_limiter.wait()
+
+        for attempt in range(self._retry_times + 1):
+            refreshed_token = self._build_payload_token(url)
+            self.session.update_cookies({self._cookie_key: refreshed_token})
+            resp = await self.session.get(url, encoding=encoding, **kwargs)
+            if not resp.ok:
+                if attempt < self._retry_times:
+                    await async_jitter_sleep(
+                        self._backoff_factor,
+                        mul_spread=1.1,
+                        max_sleep=self._backoff_factor + 2,
+                    )
+                    continue
+                raise ConnectionError(
+                    f"Request to {url} failed with status {resp.status}"
+                )
+            return resp.text
+
+        raise RuntimeError("Unreachable code reached in fetch()")
+
+    @classmethod
+    def book_info_url(cls, book_id: str) -> str:
+        """
+        Construct the URL for fetching a book's info page.
+
+        :param book_id: The identifier of the book.
+        :return: Fully qualified URL for the book info page.
+        """
+        return cls.BOOK_INFO_URL.format(book_id=book_id)
+
+    @classmethod
+    def chapter_url(cls, book_id: str, chapter_id: str) -> str:
+        """
+        Construct the URL for fetching a specific chapter.
+
+        :param book_id: The identifier of the book.
+        :param chapter_id: The identifier of the chapter.
+        :return: Fully qualified chapter URL.
+        """
+        return cls.CHAPTER_URL.format(book_id=book_id, chapter_id=chapter_id)
+
+    def _update_fp_val(self, reflush: bool = False) -> None:
+        """
+        Decrypt the payload from cookie and update `_fp_val` and `_ab_val`.
+        """
+        enc_token = self.session.get_cookie(self._cookie_key)
+        if enc_token and not reflush:
+            cipher_bytes = base64.b64decode(enc_token)
+            plain_bytes = rc4_stream(self._s_init, cipher_bytes)
+            decrypted_json = plain_bytes.decode("utf-8", errors="replace")
+            payload: dict[str, Any] = json.loads(decrypted_json)
+            self._fp_val = payload.get(self._fp_key, "")
+            self._ab_val = payload.get(self._ab_key, "0" * 32)
+
+        if not self._ab_val:
+            self._ab_val = "0" * 32
+        if not self._fp_val or reflush:
+            self._fp_val = hashlib.md5(str(random.random()).encode()).hexdigest()
+
+    def _build_payload_token(self, new_uri: str) -> str:
+        """
+        Patch a timestamp-bearing token with fresh timing and checksum info.
+        :param new_uri: URI used in checksum generation.
+        :return: Updated token with new timing and checksum values.
+        """
+        if not self._fp_val or not self._ab_val:
+            self._update_fp_val()
+
+        # rebuild timing fields
+        loadts = int(time.time() * 1000)  # ms since epoch
+        # Simulate the JS duration: N(600, 150)  pushed into [300, 1000]
+        duration = max(300, min(1000, int(random.normalvariate(600, 150))))
+        timestamp = loadts + duration
+
+        comb = f"{new_uri}{loadts}{self._fp_val}"
+        ck_val = hashlib.md5(comb.encode("utf-8")).hexdigest()
+
+        new_payload = {
+            self._lt_key: loadts,
+            self._ts_key: timestamp,
+            self._fp_key: self._fp_val,
+            self._ab_key: self._ab_val,
+            self._ck_key: ck_val,
+        }
+        plain_bytes = json.dumps(new_payload, separators=(",", ":")).encode("utf-8")
+        cipher_bytes = rc4_stream(self._s_init, plain_bytes)
+        return base64.b64encode(cipher_bytes).decode("utf-8")
+
+    async def _check_login_status(self) -> bool:
+        """
+        Check whether the user is currently logged in by
+        inspecting the bookcase page content.
+
+        :return: True if the user is logged in, False otherwise.
+        """
+        keywords = [
+            'var buid = "fffffffffffffffffff"',
+            "C2WF946J0/probe.js",
+            "login-area-wrap",
+        ]
+        resp_text = await self.get_bookcase()
+        if not resp_text:
+            return False
+        return not any(kw in resp_text[0] for kw in keywords)
+
+    def _check_cookies(self, cookies: dict[str, str]) -> bool:
+        """
+        Check if the provided cookies contain all required keys.
+
+        :param cookies: The cookie dictionary to validate.
+        :return: True if all required keys are present, False otherwise.
+        """
+        required = {self._d(k) for k in self._cookie_keys}
+        actual = set(cookies)
+        missing = required - actual
+        if missing:
+            logger.warning("Missing required cookies (qidian): %s", ", ".join(missing))
+        return not missing
+
+    @staticmethod
+    def _filter_cookies(
+        raw_cookies: list[Mapping[str, Any]],
+    ) -> dict[str, str]:
+        ALLOWED_DOMAINS = {".qidian.com", "www.qidian.com", ""}
+        return {
+            c["name"]: c["value"]
+            for c in raw_cookies
+            if c.get("domain", "") in ALLOWED_DOMAINS
+        }
+
+    @staticmethod
+    def _d(b: str) -> str:
+        return base64.b64decode(b).decode()
+
+    @staticmethod
+    def _d2(b: str) -> bytes:
+        return base64.b64decode(b)

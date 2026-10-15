@@ -1,0 +1,205 @@
+[project]
+name = "novel-downloader"
+description = "A toolkit for downloading and processing novels."
+authors = [
+    { name = "lingyi-ling" }
+]
+license = {file = "LICENSE"}
+readme = {file = "README.md", content-type = "text/markdown"}
+requires-python = ">=3.11"
+keywords = [
+  "novel",
+  "web novel",
+  "light novel",
+  "crawler",
+  "scraper",
+  "ebook",
+  "epub",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Chinese (Simplified)",
+    "Natural Language :: Chinese (Traditional)",
+    "Topic :: Utilities",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13"
+]
+dynamic = ["version"]
+dependencies = [
+    "rich",
+    "requests",
+    "pycryptodome",
+    "aiohttp",
+    "lxml",
+    "cssselect",
+    "platformdirs",
+]
+
+[project.optional-dependencies]
+web-ui = [
+    "nicegui",
+]
+image-utils = [
+    "brotli",
+    "numpy",
+    "fonttools",
+    "pillow",
+]
+httpx = [
+    "httpx[http2]",
+]
+curl_cffi = [
+    "curl_cffi",
+]
+all-backends = [
+    "httpx[http2]",
+    "curl_cffi",
+]
+all = [
+    "nicegui",
+    "brotli",
+    "numpy",
+    "fonttools",
+    "pillow",
+    "httpx[http2]",
+    "curl_cffi",
+]
+
+docs = [
+    "mkdocs-material",
+    "mkdocstrings",
+    "mkdocstrings-python",
+]
+tests = [
+    "brotli",
+    "numpy",
+    "fonttools",
+    "pillow",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-aiohttp",
+    "pytest-cov",
+    "pytest-mock",
+    "types-requests",
+    "types-lxml",
+]
+ci = [
+    "brotli",
+    "numpy",
+    "fonttools",
+    "pillow",
+    "curl_cffi",
+    "httpx[http2]",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-aiohttp",
+    "pytest-cov",
+    "pytest-mock",
+    "types-requests",
+    "types-lxml",
+    "nicegui",
+    "mypy",
+    "ruff",
+    "pre-commit",
+]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-aiohttp",
+    "pytest-cov",
+    "pytest-mock",
+    "types-requests",
+    "types-lxml",
+    "mypy",
+    "ruff",
+    "pre-commit",
+    "commitizen",
+    "babel",
+    # "genbadge[all]",
+]
+
+[project.scripts]
+novel-cli = "novel_downloader.apps.cli.main:cli_main"
+novel-web = "novel_downloader.apps.web.main:web_main"
+
+[project.urls]
+Homepage = "https://github.com/lingyi-ling/novel-downloader"
+Source = "https://github.com/lingyi-ling/novel-downloader"
+Issues = "https://github.com/lingyi-ling/novel-downloader/issues"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["novel_downloader", "novel_downloader.*"]
+
+[tool.setuptools.package-data]
+"novel_downloader" = ["py.typed"]
+"novel_downloader.resources.config" = ["*.toml"]
+"novel_downloader.resources.text" = ["*.txt"]
+"novel_downloader.resources.scripts" = ["*.js"]
+"novel_downloader.resources.json" = ["*.json"]
+"novel_downloader.resources.styles" = ["*.css"]
+"novel_downloader.locales" = ["*/LC_MESSAGES/*.mo"]
+"novel_downloader.plugins.rule.builtin" = ["*.json"]
+
+[tool.setuptools.dynamic]
+version = {attr = "novel_downloader.__version__"}
+
+[tool.ruff]
+line-length = 88
+indent-width = 4
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle (error)
+    "F",  # pyflakes
+    "B",  # bugbear
+    "C4", # flake8-comprehensions
+    "I",  # isort
+    "UP", # pyupgrade
+    "SIM" # flake8-simplify
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+strict = true
+
+[tool.pytest.ini_options]
+minversion = "7.1"
+addopts = "--strict-markers"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+omit = [
+  "src/novel_downloader/apps/*",
+  "src/novel_downloader/plugins/*",
+  "src/novel_downloader/__main__.py",
+]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "3.1.1"
+version_files = [
+    "src/novel_downloader/__init__.py"
+]
+update_changelog_on_bump = true
+changelog_file = "CHANGELOG.md"
+changelog_incremental = true
+tag_format = "v$version"
+bump_message = "chore(release): bump version to $new_version"

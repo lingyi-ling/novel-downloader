@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""
+novel_downloader.plugins.archived.wanbengo.fetcher
+--------------------------------------------------
+
+"""
+
+from novel_downloader.plugins.base.fetcher import GenericFetcher
+from novel_downloader.plugins.registry import registrar
+
+
+@registrar.register_fetcher()
+class WanbengoFetcher(GenericFetcher):
+    """
+    A session class for interacting with the 完本神站 (www.wanbengo.com) novel.
+    """
+
+    site_name: str = "wanbengo"
+
+    BOOK_INFO_URL = "https://www.wanbengo.com/{book_id}/"
+    CHAPTER_URL = "https://www.wanbengo.com/{book_id}/{chapter_id}.html"
