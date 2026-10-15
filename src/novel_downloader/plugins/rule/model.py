@@ -71,6 +71,13 @@ def _as_replace(value: Any) -> list[tuple[str, str]]:
     return out
 
 
+def _as_headers(value: Any) -> dict[str, str]:
+    """Normalize a request header mapping into ``{str: str}``."""
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): _as_str(v) for k, v in value.items()}
+
+
 # --------------------------------------------------------------------------- #
 # field
 # --------------------------------------------------------------------------- #
@@ -136,15 +143,12 @@ class SearchRule:
     def from_dict(cls, data: Any) -> SearchRule:
         if not isinstance(data, dict) or not data.get("url"):
             raise RuleError("search section requires a 'url'")
-        fields = {
-            k: Field.from_dict(v)
-            for k, v in (data.get("fields") or {}).items()
-        }
+        fields = {k: Field.from_dict(v) for k, v in (data.get("fields") or {}).items()}
         return cls(
             url=_as_str(data["url"]),
             method=_as_str(data.get("method"), "GET").upper(),
             data={str(k): _as_str(v) for k, v in (data.get("data") or {}).items()},
-            headers={str(k): _as_str(v) for k, v in (data.get("headers") or {}).items()},
+            headers=_as_headers(data.get("headers")),
             item=_as_str(data.get("item")),
             fields=fields,
             book_id_regex=data.get("book_id_regex"),
@@ -201,6 +205,7 @@ class BookRule:
     fields: dict[str, Field]
     chapters: ChaptersRule
     pages: PagesRule | None = None
+    headers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Any) -> BookRule:
@@ -210,11 +215,11 @@ class BookRule:
         return cls(
             url=_as_str(data["url"]),
             fields={
-                k: Field.from_dict(v)
-                for k, v in (data.get("fields") or {}).items()
+                k: Field.from_dict(v) for k, v in (data.get("fields") or {}).items()
             },
             chapters=ChaptersRule.from_dict(data.get("chapters") or {}),
             pages=PagesRule.from_dict(pages) if pages else None,
+            headers=_as_headers(data.get("headers")),
         )
 
 
@@ -229,6 +234,7 @@ class ChapterRule:
     replace: list[tuple[str, str]] = field(default_factory=list)
     drop: list[str] = field(default_factory=list)
     pages: PagesRule | None = None
+    headers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Any) -> ChapterRule:
@@ -242,6 +248,7 @@ class ChapterRule:
             replace=_as_replace(data.get("replace")),
             drop=[str(p) for p in (data.get("drop") or [])],
             pages=PagesRule.from_dict(pages) if pages else None,
+            headers=_as_headers(data.get("headers")),
         )
 
 
@@ -320,9 +327,7 @@ def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
         base_url=_as_str(data.get("base_url")),
         encoding=_as_str(data.get("encoding"), "utf-8"),
         hosts=[str(h).lower() for h in (data.get("hosts") or [])],
-        headers={
-            str(k): _as_str(v) for k, v in (data.get("headers") or {}).items()
-        },
+        headers=_as_headers(data.get("headers")),
         resolve=resolve,
         search=search,
         book=book,

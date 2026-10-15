@@ -24,7 +24,7 @@ from novel_downloader.schemas import (
 )
 
 from .engine import abs_url, extract, extract_multi, parse_page, select
-from .model import Rule
+from .model import Rule, RuleError
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +35,14 @@ class RuleParser(BaseParser):
     """Rule-driven parser. Concrete per-site subclasses set ``_rule``."""
 
     _rule: ClassVar[Rule]
-    site_name: ClassVar[str] = "rule"
+    site_name: str = "rule"
 
     # ------------------------------------------------------------------ #
     # book info
     # ------------------------------------------------------------------ #
-    def parse_book_info(self, raw_pages: list[str], **kwargs: Any) -> BookInfoDict | None:
+    def parse_book_info(
+        self, raw_pages: list[str], **kwargs: Any
+    ) -> BookInfoDict | None:
         rule = self._rule
         book_rule = rule.book
         if not raw_pages or book_rule is None:
@@ -77,7 +79,7 @@ class RuleParser(BaseParser):
         for optional in ("word_count", "serial_status", "summary_brief"):
             value = field_value(optional)
             if value:
-                info[optional] = value  # type: ignore[literal-required]
+                info[optional] = value
         return info
 
     def _parse_chapters(self, raw_pages: list[str], base: str) -> list[ChapterInfoDict]:
@@ -87,9 +89,7 @@ class RuleParser(BaseParser):
             return []
 
         chapters_rule = book_rule.chapters
-        id_rx = (
-            re.compile(chapters_rule.id_regex) if chapters_rule.id_regex else None
-        )
+        id_rx = re.compile(chapters_rule.id_regex) if chapters_rule.id_regex else None
 
         out: list[ChapterInfoDict] = []
         seen: set[str] = set()
@@ -134,7 +134,12 @@ class RuleParser(BaseParser):
         bodies: list[str] = []
 
         for raw in raw_pages:
-            tree = parse_page(raw)
+            try:
+                tree = parse_page(raw)
+            except RuleError:
+                # Blank / degenerate responses (interstitials, empty extra
+                # pages) simply contribute nothing instead of aborting.
+                continue
             if chapter_rule.title is not None and not title:
                 title = extract(tree, chapter_rule.title)
             body = extract(tree, chapter_rule.content)

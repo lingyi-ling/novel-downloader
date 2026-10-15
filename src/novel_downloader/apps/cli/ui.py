@@ -136,14 +136,19 @@ def prompt_choice(prompt_text: str, choices: Sequence[str]) -> str:
     :param choices: Valid choices (strings). Empty string is treated as cancel.
     :return: The raw user input, lowercased and trimmed. Returns "" if cancelled.
     """
-    resp: str = Prompt.ask(
-        prompt_text,
-        choices=list(choices) + [""],
-        show_choices=False,
-        default="",
-        show_default=False,
-    )
-    return resp.strip().lower()
+    try:
+        resp: str = Prompt.ask(
+            prompt_text,
+            choices=list(choices) + [""],
+            show_choices=False,
+            default="",
+            show_default=False,
+        )
+        return resp.strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        # Non-interactive stdin (a pipe, a closed terminal, Ctrl-C, ...):
+        # treat as "cancel" instead of letting the exception escape.
+        return ""
 
 
 class ProgressUI:

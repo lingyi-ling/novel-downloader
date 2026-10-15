@@ -32,17 +32,25 @@ class RuleFetcher(BaseFetcher):
     """Rule-driven fetcher. Concrete per-site subclasses set ``_rule``."""
 
     _rule: ClassVar[Rule]
-    site_name: ClassVar[str] = "rule"
-    DEFAULT_BASE_URL: ClassVar[str] = ""
+    site_name: str = "rule"
+    DEFAULT_BASE_URL: str = ""
 
     def _base(self) -> str:
         return (self._rule.base_url or self._base_url).rstrip("/")
 
-    async def _get(self, url: str, **kwargs: Any) -> str:
-        headers = dict(self._rule.headers)
+    async def _get(
+        self, url: str, extra_headers: dict[str, str] | None = None, **kwargs: Any
+    ) -> str:
+        headers = {**self._rule.headers, **(extra_headers or {})}
         if headers:
             kwargs.setdefault("headers", headers)
         return await self.fetch(url, encoding=self._rule.encoding, **kwargs)
+
+    def _render_headers(
+        self, headers: dict[str, str], base: str, **fmt: Any
+    ) -> dict[str, str]:
+        """Render ``{base_url}`` / ``{book_id}`` ... placeholders inside headers."""
+        return {k: render(v, base_url=base, **fmt) for k, v in headers.items()}
 
     async def fetch_book_info(self, book_id: str, **kwargs: Any) -> list[str]:
         rule = self._rule
@@ -51,12 +59,18 @@ class RuleFetcher(BaseFetcher):
 
         base = self._base()
         url = render(rule.book.url, base_url=base, book_id=book_id)
-        pages = [await self._get(url, **kwargs)]
+        headers = self._render_headers(rule.book.headers, base, book_id=book_id)
+        pages = [await self._get(url, headers, **kwargs)]
 
         if rule.book.pages is not None:
             pages.extend(
                 await self._collect_pages(
-                    rule.book.pages, pages, base, book_id=book_id, **kwargs
+                    rule.book.pages,
+                    pages[-1],
+                    base,
+                    headers,
+                    book_id=book_id,
+                    **kwargs,
                 )
             )
         return pages
@@ -72,14 +86,18 @@ class RuleFetcher(BaseFetcher):
         url = render(
             rule.chapter.url, base_url=base, book_id=book_id, chapter_id=chapter_id
         )
-        pages = [await self._get(url, **kwargs)]
+        headers = self._render_headers(
+            rule.chapter.headers, base, book_id=book_id, chapter_id=chapter_id
+        )
+        pages = [await self._get(url, headers, **kwargs)]
 
         if rule.chapter.pages is not None:
             pages.extend(
                 await self._collect_pages(
                     rule.chapter.pages,
-                    pages,
+                    pages[-1],
                     base,
+                    headers,
                     book_id=book_id,
                     chapter_id=chapter_id,
                     **kwargs,
@@ -90,29 +108,35 @@ class RuleFetcher(BaseFetcher):
     async def _collect_pages(
         self,
         pages_rule: PagesRule,
-        pages: list[str],
+        current: str,
         base: str,
+        extra_headers: dict[str, str] | None,
         **fmt: Any,
     ) -> list[str]:
         """
-        Walk the extra pages.
+        Walk the extra pages and return only the *newly* fetched ones.
 
         Pagination continues while the URL of the *next* page is still
         referenced from the current page's HTML (mirrors the base
         ``should_continue_pagination`` heuristic).  This stops naturally on the
         last page, where the link is absent.
+
+        :param current: HTML of the page fetched just before this call.
+        :return: the additional pages, in fetch order (never includes ``current``).
         """
         extra: list[str] = []
         origin = base
         page = pages_rule.start
         while len(extra) < _MAX_EXTRA_PAGES:
             next_url = render(pages_rule.url, base_url=base, page=page, **fmt)
-            suffix = next_url[len(origin) :] if next_url.startswith(origin) else next_url
+            suffix = (
+                next_url[len(origin) :] if next_url.startswith(origin) else next_url
+            )
             basename = suffix.rsplit("/", 1)[-1]
-            if suffix not in pages[-1] and basename not in pages[-1]:
+            if suffix not in current and basename not in current:
                 break
             try:
-                html = await self._get(next_url)
+                current = await self._get(next_url, extra_headers)
             except Exception as e:
                 logger.warning(
                     "Failed extra page (site=%s, url=%s): %s",
@@ -121,7 +145,6 @@ class RuleFetcher(BaseFetcher):
                     e,
                 )
                 break
-            pages.append(html)
-            extra.append(html)
+            extra.append(current)
             page += 1
         return extra

@@ -18,7 +18,7 @@ from uuid import uuid4
 from novel_downloader.schemas import LoginField
 
 
-class Status(str, Enum):
+class Status(str, Enum):  # noqa: UP042 - keep the explicit ``str`` mixin
     QUEUED = "queued"
     RUNNING = "running"
     PROCESSING = "processing"

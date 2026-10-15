@@ -20,6 +20,7 @@ import re
 from typing import Any
 from urllib.parse import urljoin
 
+from lxml import etree
 from lxml import html as lxml_html
 
 from .model import Field, RuleError
@@ -47,10 +48,20 @@ def strip_nested_html(s: str) -> str:
 
 
 def parse_page(raw: str) -> Any:
-    """Parse a raw HTML string into an lxml element tree."""
-    if not raw or not raw.strip():
+    """
+    Parse a raw HTML string into an lxml element tree.
+
+    Pages that are empty *after* removing a nested document wrapper (which
+    happens on some sites' interstitial/blank responses) are reported as a
+    :class:`RuleError` rather than leaking an ``lxml`` parser exception.
+    """
+    text = strip_nested_html(raw or "")
+    if not text.strip():
         raise RuleError("empty page cannot be parsed")
-    return lxml_html.fromstring(strip_nested_html(raw))
+    try:
+        return lxml_html.fromstring(text)
+    except etree.ParserError as e:
+        raise RuleError(f"unparseable page: {e}") from e
 
 
 def select(root: Any, selector: str) -> list[Any]:
@@ -79,9 +90,7 @@ def node_to_str(node: Any, attr: str) -> str:
         return "\n".join(lines)
 
     if attr == "html":
-        return "".join(
-            lxml_html.tostring(child, encoding="unicode") for child in node
-        )
+        return "".join(lxml_html.tostring(child, encoding="unicode") for child in node)
 
     return (node.get(attr) or "").strip()
 
@@ -92,10 +101,7 @@ def _extract_one(node: Any, fld: Field) -> str:
         m = fld._pattern.search(value)
         if m:
             group = fld.group
-            if group and group <= len(m.groups()):
-                value = m.group(group)
-            else:
-                value = m.group(0)
+            value = m.group(group) if group and group <= len(m.groups()) else m.group(0)
     return fld.apply_replace(value).strip()
 
 

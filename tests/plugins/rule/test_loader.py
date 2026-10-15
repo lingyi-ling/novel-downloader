@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Loader tests: rule discovery, registration and URL resolution."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from novel_downloader.plugins import registrar
+from novel_downloader.plugins.rule import (
+    ensure_registered,
+    iter_rules,
+    load_rules,
+    reload_rules,
+    resolve_url,
+)
+from novel_downloader.plugins.rule.parser import RuleParser
+from novel_downloader.schemas import ParserConfig
+
+
+@pytest.fixture(autouse=True)
+def _clean_rule_state() -> Any:
+    """Every test starts and ends with rules loaded from the real locations."""
+    reload_rules()
+    yield
+    reload_rules()
+
+
+def _write_rule(directory: Path, filename: str, payload: dict[str, Any]) -> None:
+    (directory / filename).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _demo_rule(site_key: str) -> dict[str, Any]:
+    return {
+        "site_key": site_key,
+        "base_url": "https://demo.example",
+        "hosts": ["demo.example"],
+        "resolve": {"book": r"^/book/(\d+)/$"},
+        "chapter": {"url": "{base_url}/{book_id}/{chapter_id}.html"},
+    }
+
+
+# --------------------------------------------------------------------------- #
+# builtin rules
+# --------------------------------------------------------------------------- #
+def test_builtin_rule_is_loaded_with_every_section() -> None:
+    rules = load_rules()
+
+    assert "biquge5r" in rules
+    rule = rules["biquge5r"]
+    assert rule.base_url.startswith("https://")
+    assert rule.search is not None
+    assert rule.book is not None
+    assert rule.chapter is not None
+    assert rule.hosts
+
+
+def test_iter_rules_reports_the_loading_origin() -> None:
+    meta = {key: info for key, _, info in iter_rules()}
+
+    assert meta["biquge5r"]["origin"] == "builtin"
+    assert meta["biquge5r"]["file"] == "biquge5r.json"
+
+
+def test_ensure_registered_wires_a_usable_parser() -> None:
+    assert ensure_registered("biquge5r") is True
+
+    parser = registrar.get_parser("biquge5r", ParserConfig())
+    assert isinstance(parser, RuleParser)
+    assert parser.site_name == "biquge5r"
+    assert parser._rule.site_key == "biquge5r"
+
+
+def test_ensure_registered_normalizes_the_key() -> None:
+    assert ensure_registered("BIQUGE5R") is True
+    assert ensure_registered("biquge5r") is True
+
+
+def test_ensure_registered_returns_false_for_unknown_site() -> None:
+    assert ensure_registered("no-such-source") is False
+
+
+# --------------------------------------------------------------------------- #
+# user rules
+# --------------------------------------------------------------------------- #
+def test_user_rule_is_loaded_from_novel_rules_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_rule(tmp_path, "demo.json", _demo_rule("demo"))
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(tmp_path))
+
+    rules = reload_rules()
+
+    assert rules["demo"].base_url == "https://demo.example"
+    assert ensure_registered("demo") is True
+
+
+def test_user_rule_overrides_a_builtin_with_the_same_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_rule(tmp_path, "override.json", _demo_rule("biquge5r"))
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(tmp_path))
+
+    rules = reload_rules()
+    meta = {key: info for key, _, info in iter_rules()}
+
+    assert rules["biquge5r"].base_url == "https://demo.example"
+    assert meta["biquge5r"]["origin"] == "user"
+
+
+def test_numeric_site_key_gets_a_letter_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_rule(tmp_path, "123.json", _demo_rule("123"))
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(tmp_path))
+
+    reload_rules()
+
+    assert ensure_registered("123") is True
+    assert ensure_registered("n123") is True
+
+
+def test_invalid_rule_files_are_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "broken.json").write_text("{ not json", encoding="utf-8")
+    _write_rule(tmp_path, "incomplete.json", {"base_url": "https://demo.example"})
+    _write_rule(tmp_path, "valid.json", _demo_rule("demo"))
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(tmp_path))
+
+    rules = reload_rules()
+
+    assert "demo" in rules
+    assert "broken" not in rules
+    assert "incomplete" not in rules
+
+
+# --------------------------------------------------------------------------- #
+# url resolution
+# --------------------------------------------------------------------------- #
+def test_resolve_url_matches_a_chapter_link() -> None:
+    assert resolve_url("www.biquge5.com", "/0_143/155832.html") == {
+        "site_key": "biquge5r",
+        "book_id": "0_143",
+        "chapter_id": "155832",
+    }
+
+
+def test_resolve_url_matches_a_book_link() -> None:
+    assert resolve_url("www.biquge5.com", "/0_143/") == {
+        "site_key": "biquge5r",
+        "book_id": "0_143",
+        "chapter_id": None,
+    }
+
+
+def test_resolve_url_is_host_case_insensitive() -> None:
+    resolved = resolve_url("WWW.Biquge5.com", "/0_143/")
+    assert resolved is not None
+    assert resolved["site_key"] == "biquge5r"
+
+
+def test_resolve_url_returns_none_for_unknown_host_or_path() -> None:
+    assert resolve_url("unknown.example", "/0_143/") is None
+    assert resolve_url("www.biquge5.com", "/not-a-book") is None

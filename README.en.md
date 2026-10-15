@@ -19,6 +19,7 @@ Supports resumable crawling, multi-format exporting, text processing pipeline, C
 * Text processing pipeline: ad removal, zh conversion, translation, etc.
 * Optional support for image chapters and obfuscated content
 * Plugin system for site parsers, exporters, and processing pipelines
+* Rule-driven book sources: add a site with a JSON rule, no Python code required
 * CLI and optional Web GUI
 
 ---

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import ClassVar
+from typing import Any, ClassVar
 from urllib.parse import quote_plus, urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
@@ -53,7 +53,9 @@ class RuleSearcher(BaseSearcher):
         try:
             if search.method == "POST":
                 data = {
-                    k: render(v, keyword=quote_plus(keyword), raw_keyword=keyword, page=1)
+                    k: render(
+                        v, keyword=quote_plus(keyword), raw_keyword=keyword, page=1
+                    )
                     for k, v in search.data.items()
                 }
                 async with self.session.post(url, data=data, headers=headers) as resp:
@@ -69,7 +71,9 @@ class RuleSearcher(BaseSearcher):
             )
             return ""
 
-    def _parse_html(self, html_str: str, limit: int | None = None) -> list[SearchResult]:
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
         rule = self._rule
         search = rule.search
         if search is None or not html_str:
@@ -82,15 +86,15 @@ class RuleSearcher(BaseSearcher):
         id_rx = re.compile(search.book_id_regex) if search.book_id_regex else None
         results: list[SearchResult] = []
 
+        def field(name: str, node: Any) -> str:
+            fld = search.fields.get(name)
+            return extract(node, fld) if fld else ""
+
         for idx, item in enumerate(items):
             if limit is not None and idx >= limit:
                 break
 
-            def field(name: str) -> str:
-                fld = search.fields.get(name)
-                return extract(item, fld) if fld else ""
-
-            book_url = abs_url(base, field("url"))
+            book_url = abs_url(base, field("url", item))
             if not book_url:
                 continue
 
@@ -99,21 +103,19 @@ class RuleSearcher(BaseSearcher):
                     site=rule.site_key,
                     book_id=self._book_id(book_url, id_rx, search.book_id_group),
                     book_url=book_url,
-                    cover_url=abs_url(base, field("cover")),
-                    title=field("title"),
-                    author=field("author"),
-                    latest_chapter=field("latest"),
-                    update_date=field("update"),
-                    word_count=field("word") or "-",
+                    cover_url=abs_url(base, field("cover", item)),
+                    title=field("title", item),
+                    author=field("author", item),
+                    latest_chapter=field("latest", item),
+                    update_date=field("update", item),
+                    word_count=field("word", item) or "-",
                     priority=search.priority + idx,
                 )
             )
         return results
 
     @staticmethod
-    def _book_id(
-        book_url: str, id_rx: re.Pattern[str] | None, group: int
-    ) -> str:
+    def _book_id(book_url: str, id_rx: re.Pattern[str] | None, group: int) -> str:
         if id_rx is not None:
             m = id_rx.search(book_url)
             if m:

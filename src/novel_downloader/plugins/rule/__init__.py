@@ -139,9 +139,7 @@ def load_rules(*, force: bool = False) -> dict[str, Rule]:
             continue
         for path in sorted(directory.glob("*.json")):
             try:
-                _load_payload(
-                    path.read_text(encoding="utf-8-sig"), "user", str(path)
-                )
+                _load_payload(path.read_text(encoding="utf-8-sig"), "user", str(path))
             except OSError as e:
                 logger.warning("Could not read rule file %s: %s", path, e)
 
@@ -230,9 +228,7 @@ def register_all() -> None:
 # --------------------------------------------------------------------------- #
 # url -> source resolution
 # --------------------------------------------------------------------------- #
-def resolve_url(
-    host: str, path: str, query: str = ""
-) -> dict[str, Any] | None:
+def resolve_url(host: str, path: str, query: str = "") -> dict[str, Any] | None:
     """
     Resolve a URL to a rule-based source.
 
@@ -248,22 +244,20 @@ def resolve_url(
     if resolve is None:
         return None
 
-    if resolve.chapter:
-        if m := re.search(resolve.chapter, path):
-            groups = m.groups()
-            return {
-                "site_key": key,
-                "book_id": groups[0] if groups else None,
-                "chapter_id": groups[1] if len(groups) > 1 else None,
-            }
+    if resolve.chapter and (m := re.search(resolve.chapter, path)):
+        groups = m.groups()
+        return {
+            "site_key": key,
+            "book_id": groups[0] if groups else None,
+            "chapter_id": groups[1] if len(groups) > 1 else None,
+        }
 
-    if resolve.book:
-        if m := re.search(resolve.book, path):
-            groups = m.groups()
-            return {
-                "site_key": key,
-                "book_id": groups[0] if groups else None,
-                "chapter_id": None,
-            }
+    if resolve.book and (m := re.search(resolve.book, path)):
+        groups = m.groups()
+        return {
+            "site_key": key,
+            "book_id": groups[0] if groups else None,
+            "chapter_id": None,
+        }
 
     return None

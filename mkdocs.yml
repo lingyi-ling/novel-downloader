@@ -78,6 +78,7 @@ nav:
     - Processors Reference: guide/processors-reference.md
     - CLI Usage: guide/cli-examples.md
     - Web Usage: guide/web-examples.md
+    - Book Sources: guide/book-sources.md
     - File Saving: guide/file-saving.md
     - Copy Cookies: guide/copy-cookies.md
 

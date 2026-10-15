@@ -178,6 +178,12 @@ python_version = "3.13"
 ignore_missing_imports = true
 strict = true
 
+# NiceGUI decorators (``ui.page`` / ``ui.refreshable`` ...) are not typed, so
+# the strict-mode ``untyped-decorator`` check cannot be satisfied for the web app.
+[[tool.mypy.overrides]]
+module = "novel_downloader.apps.web.*"
+disable_error_code = ["untyped-decorator"]
+
 [tool.pytest.ini_options]
 minversion = "7.1"
 addopts = "--strict-markers"

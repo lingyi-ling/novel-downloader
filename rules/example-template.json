@@ -1,0 +1,73 @@
+{
+  "_comment": [
+    "规则书源示例模板 —— 复制到 ./rules/ 或 $NOVEL_RULES_DIR 下即可被自动加载。",
+    "常用键: 顶层 site_key/base_url/encoding/hosts/headers/resolve/priority",
+    "        搜索 search, 详情+目录 book, 正文 chapter, 分页 pages",
+    "校验: novel-cli sources check ./rules/example-template.json"
+  ],
+  "site_key": "example",
+  "site_name": "示例书源",
+  "base_url": "https://www.example.com",
+  "encoding": "utf-8",
+  "priority": 200,
+  "hosts": ["www.example.com", "example.com"],
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+  },
+
+  "search": {
+    "url": "https://www.example.com/search.php?q={keyword}",
+    "item": "div.result-list dl",
+    "priority": 200,
+    "book_id_regex": "/book/(\\d+)",
+    "fields": {
+      "title": { "selector": "dd h3 a", "attr": "text" },
+      "url": { "selector": "dt a", "attr": "href" },
+      "cover": { "selector": "dt a img", "attr": "src" },
+      "author": { "selector": "dd.book_other", "attr": "text", "regex": "作者：\\s*(\\S+)", "group": 1 },
+      "latest": { "selector": "dd.book_other a", "attr": "text" },
+      "update": { "selector": "dd.update", "attr": "text" }
+    }
+  },
+
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "headers": { "Referer": "{base_url}/" },
+    "pages": {
+      "url": "{base_url}/book/{book_id}/index_{page}.html",
+      "start": 2
+    },
+    "fields": {
+      "book_name": { "selector": "meta[property='og:novel:book_name']", "attr": "content" },
+      "author": { "selector": "meta[property='og:novel:author']", "attr": "content" },
+      "cover_url": { "selector": "meta[property='og:image']", "attr": "content" },
+      "summary": { "selector": "meta[property='og:description']", "attr": "content" },
+      "tags": { "selector": "meta[property='og:novel:category']", "attr": "content", "multi": true }
+    },
+    "chapters": {
+      "item": "div.listmain dl dd a",
+      "title": { "attr": "text" },
+      "url": { "attr": "href" },
+      "id_regex": "/(\\d+)\\.html",
+      "id_group": 1
+    }
+  },
+
+  "chapter": {
+    "url": "{base_url}/book/{book_id}/{chapter_id}.html",
+    "headers": { "Referer": "{base_url}/book/{book_id}/" },
+    "pages": {
+      "url": "{base_url}/book/{book_id}/{chapter_id}_{page}.html",
+      "start": 2
+    },
+    "title": { "selector": "div.bookname h1", "attr": "text" },
+    "content": { "selector": "div#content", "attr": "inner_text" },
+    "replace": [["&nbsp;", " "], ["\u3000", " "]],
+    "drop": ["^第\\(\\d+/\\d+\\)页$", "^本章未完"]
+  },
+
+  "resolve": {
+    "book": "^/book/(\\d+)/?$",
+    "chapter": "^/book/(\\d+)/(\\d+)\\.html$"
+  }
+}
