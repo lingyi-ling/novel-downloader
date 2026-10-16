@@ -15,6 +15,7 @@ from novel_downloader.apps.utils import load_or_init_config
 from novel_downloader.infra.config import ConfigAdapter
 from novel_downloader.infra.i18n import t
 from novel_downloader.plugins import registrar
+from novel_downloader.plugins.ranking import SORT_KEYS
 from novel_downloader.schemas import BookConfig
 
 from ..ui_adapters import (
@@ -81,6 +82,12 @@ class SearchCmd(Command):
             action="store_true",
             help=t("Download the top result without asking (non-interactive)."),
         )
+        parser.add_argument(
+            "--sort",
+            choices=list(SORT_KEYS),
+            default="quality",
+            help=t("Result ordering (default: quality)."),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
@@ -97,6 +104,7 @@ class SearchCmd(Command):
         overall_limit = None if args.limit is None else max(1, args.limit)
         per_site_limit = max(1, args.site_limit)
         timeout = max(0.1, float(args.timeout))
+        result_sort: str = args.sort
         config_path: Path | None = Path(args.config) if args.config else None
 
         config_data = load_or_init_config(config_path)
@@ -119,6 +127,7 @@ class SearchCmd(Command):
                     limit=overall_limit,
                     per_site_limit=per_site_limit,
                     timeout=timeout,
+                    sort=result_sort,
                 )
                 ui.emit(json.dumps(list(results), ensure_ascii=False, indent=2))
                 return
@@ -130,6 +139,7 @@ class SearchCmd(Command):
                     limit=overall_limit,
                     per_site_limit=per_site_limit,
                     timeout=timeout,
+                    sort=result_sort,
                 )
 
             if not results:

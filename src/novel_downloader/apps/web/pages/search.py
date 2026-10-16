@@ -19,6 +19,7 @@ from nicegui.events import KeyEventArguments, ValueChangeEventArguments
 
 from novel_downloader.apps.constants import SEARCH_SUPPORT_SITES
 from novel_downloader.infra.i18n import t
+from novel_downloader.plugins.ranking import default_order, sort_results
 from novel_downloader.plugins.search import search_stream
 from novel_downloader.schemas import SearchResult
 
@@ -46,8 +47,8 @@ def _get_state() -> dict[str, Any]:
             "page_size": _PAGE_SIZE,
             "search_task": None,  # asyncio.Task | None
             "searching": False,  # bool
-            "sort_key": "priority",  # site | title | author | priority
-            "sort_order": "asc",  # asc | desc
+            "sort_key": "quality",  # quality | priority | site | title | author
+            "sort_order": "desc",  # asc | desc
         }
     return _STATE[cid]
 
@@ -104,46 +105,17 @@ def _site_label(site_key: str) -> str:
     return SEARCH_SUPPORT_SITES.get(site_key, site_key)
 
 
-def _norm_text(v: Any) -> str:
-    return str(v or "").strip().casefold()
-
-
 def _apply_sort(state: dict[str, Any]) -> None:
-    """Sort state['results'] in place according to sort_key/order."""
-    key = state.get("sort_key") or "priority"
-    order = state.get("sort_order") or "desc"
-    reverse = order == "desc"
-
-    def k_site(r: SearchResult) -> tuple[str, str, str]:
-        # Sort by Chinese label; tie-break by site key for stability, then title
-        return (
-            _norm_text(_site_label(r.get("site", "unknown"))),
-            _norm_text(r.get("site")),
-            _norm_text(r.get("title")),
-        )
-
-    def k_title(r: SearchResult) -> tuple[str, str]:
-        return (_norm_text(r.get("title")), _norm_text(r.get("author")))
-
-    def k_author(r: SearchResult) -> tuple[str, str]:
-        return (_norm_text(r.get("author")), _norm_text(r.get("title")))
-
-    def k_priority(r: SearchResult) -> float:
-        try:
-            return float(r.get("priority", 0))
-        except Exception:
-            return 0.0
-
-    key_map: dict[str, Callable[[SearchResult], Any]] = {
-        "site": k_site,
-        "title": k_title,
-        "author": k_author,
-        "priority": k_priority,
-    }
-    key_fn = key_map.get(key, k_priority)
-
-    # NOTE: for numeric priority, reverse flag already handles desc/asc
-    state["results"].sort(key=key_fn, reverse=reverse)
+    """Rank state['results'] in place according to sort_key/order."""
+    key = state.get("sort_key") or "quality"
+    order = state.get("sort_order") or default_order(key)
+    sort_results(
+        state["results"],
+        by=key,
+        order=order,
+        keyword=str(state.get("query") or ""),
+        site_labels=SEARCH_SUPPORT_SITES,
+    )
 
 
 def _render_result_row(r: SearchResult) -> None:
@@ -299,6 +271,7 @@ def page_search() -> None:
 
             with ui.row().classes("items-center gap-3 w-full q-mt-xs flex-wrap"):
                 sort_key_labels = {
+                    "quality": t("Quality"),
                     "priority": t("Priority"),
                     "site": t("Site"),
                     "title": t("Title"),
@@ -321,8 +294,17 @@ def page_search() -> None:
                 ).props("dense")
 
                 def _on_sort_change(_: Any = None) -> None:
-                    state["sort_key"] = sort_key_sel.value or "priority"
-                    state["sort_order"] = sort_order_sel.value or "desc"
+                    new_key = sort_key_sel.value or "quality"
+                    if new_key != state["sort_key"]:
+                        # Switching keys resets to the key's natural direction.
+                        state["sort_key"] = new_key
+                        state["sort_order"] = default_order(new_key)
+                        sort_order_sel.set_value(state["sort_order"])
+                    else:
+                        state["sort_key"] = new_key
+                        state["sort_order"] = sort_order_sel.value or default_order(
+                            new_key
+                        )
                     _apply_sort(state)
                     state["page"] = 1
                     render_results.refresh()

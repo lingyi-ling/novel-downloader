@@ -13,6 +13,7 @@ from collections.abc import AsyncGenerator, Sequence
 import aiohttp
 
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
+from novel_downloader.plugins.ranking import sort_results
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -24,10 +25,16 @@ async def search(
     per_site_limit: int = 5,
     timeout: float = 5.0,
     nsfw: bool = False,
+    sort: str = "quality",
+    order: str | None = None,
 ) -> list[SearchResult]:
     """
     Perform a search for the given keyword across one or more registered sites,
-    then aggregate and sort the results by their `priority` value.
+    then aggregate and rank the results.
+
+    By default the results are ordered by an estimated quality score (keyword
+    relevance, word count, update recency, site priority and completeness); pass
+    ``sort="priority"`` to fall back to the legacy per-site priority ordering.
 
     :param keyword: The search term or keyword to query.
     :param sites: An optional sequence of site keys to limit which searchers.
@@ -35,6 +42,8 @@ async def search(
     :param per_site_limit: Maximum number of search results per site.
     :param timeout: Per-request time budget (seconds)
     :param nsfw: Whether to include NSFW searchers.
+    :param sort: Ranking key (see ``ranking.SORT_KEYS``); default ``"quality"``.
+    :param order: ``"asc"``/``"desc"``; defaults to the key's natural direction.
     :return: A flat list of `SearchResult` objects.
     """
     classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
@@ -63,7 +72,7 @@ async def search(
             continue
         results.extend(item)
 
-    results.sort(key=lambda res: res["priority"])
+    sort_results(results, by=sort, order=order, keyword=keyword)
     return results[:limit] if limit is not None else results
 
 
