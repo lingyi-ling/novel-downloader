@@ -83,6 +83,7 @@
 | [霹雳书屋](./site-details/pilibook.md) | `pilibook` | :material-check: | :material-close: | :material-close: | :material-open-in-new: |
 | [全本同人小说](./site-details/qbtr.md) | `qbtr` | :material-close: | :material-close: | :material-close: | :material-check: |
 | [起点中文网](./site-details/qidian.md) | `qidian` | :material-check: | :material-close: | :material-check: | :material-check: |
+| [七猫中文网](./site-details/qimao.md) | `qimao` | :material-close: | :material-close: | :material-close: | :material-check: |
 | [QQ 阅读](./site-details/qqbook.md) | `qqbook` | :material-close: | :material-close: | :material-check: | :material-open-in-new: |
 | [全本小说网](./site-details/quanben5.md) | `quanben5` | :material-close: | :material-close: | :material-close: | :material-check: |
 | [若初文学网](./site-details/ruochu.md) | `ruochu` | :material-close: | :material-close: | :material-help-circle: | :material-close: |

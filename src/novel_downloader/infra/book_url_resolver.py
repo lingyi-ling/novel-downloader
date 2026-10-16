@@ -634,6 +634,15 @@ def extract_qidian(path: str, query: str) -> BookURLInfo | None:
     return None
 
 
+@register_extractor(["www.qimao.com"])
+def extract_qimao(path: str, query: str) -> BookURLInfo | None:
+    if m := re.search("^/shuku/(\\d+)-(\\d+)", path):
+        return _make_info("qimao", m.group(1), m.group(2))
+    if m := re.search("^/shuku/(\\d+)", path):
+        return _make_info("qimao", m.group(1), None)
+    return None
+
+
 @register_extractor(["book.qq.com"])
 def extract_qq(path: str, query: str) -> BookURLInfo | None:
     if m := re.search("^/book-read/(\\d+)/(\\d+)", path):

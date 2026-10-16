@@ -57,6 +57,45 @@ content = """
 * 新章节可能出现字体混淆，可开启 `enable_ocr`
 """
 
+[sites.qimao]
+name = "七猫中文网"
+homepage = "https://www.qimao.com/"
+alt_domains = []
+site_status = "active"
+description = """
+七猫中文网是上海七猫文化传媒有限公司旗下的免费小说阅读平台，提供玄幻、都市、言情、历史等全品类网络小说，支持免费在线阅读。
+
+七猫中文网中的章节正文由前端解密后渲染，下载器已内置对应的解密逻辑，无需登录即可获取 VIP 章节内容。
+"""
+
+languages = ["zh-CN"]
+tags = ["原创", "免费", "男性向", "女性向"]
+
+[sites.qimao.supports]
+volumes = "no"
+images = "no"
+login = "no"
+search = "yes"
+
+[[sites.qimao.url_examples]]
+title = "Book URL"
+url = "https://www.qimao.com/shuku/1690157/"
+book_id = "1690157"
+hidden = false
+
+[[sites.qimao.url_examples]]
+title = "Chapter URL"
+url = "https://www.qimao.com/shuku/1690157-16812033970001/"
+chapter_id = "16812033970001"
+hidden = false
+
+[[sites.qimao.notes]]
+title = "其它说明"
+content = """
+* 站点的章节列表与正文均通过公开接口获取，支持 `https://www.qimao.com/shuku/<book_id>/` 与 `https://www.qimao.com/shuku/<book_id>-<chapter_id>/` 形式的链接解析
+* VIP 章节正文在前端为加密内容，下载器会自动解密，一般无需额外配置
+"""
+
 [sites.qqbook]
 name = "QQ 阅读"
 homepage = "https://book.qq.com/"
