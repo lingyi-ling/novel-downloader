@@ -114,6 +114,7 @@ SEARCH_SUPPORT_SITES = {
     "czbooks": "小说狂人",
     "dxmwx": "大熊猫文学网",
     "esjzone": "ESJ Zone",
+    "fanqienovel": "番茄小说网",
     "fsshu": "笔趣阁 (fsshu)",
     "hetushu": "和图书",
     "i25zw": "25中文网",

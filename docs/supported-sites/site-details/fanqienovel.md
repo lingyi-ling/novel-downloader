@@ -23,7 +23,7 @@ tags:
 * 支持分卷: :material-check: 是
 * 支持插图: :material-close: 否
 * 支持登录: :material-help-circle: 部分支持
-* 支持搜索: :material-open-in-new: 站点支持，需站内操作
+* 支持搜索: :material-check: 是
 
 ---
 
@@ -48,3 +48,13 @@ https://fanqienovel.com/reader/7276663560427471412
 ```
 
 * Chapter ID: `7276663560427471412`
+
+---
+
+## 搜索需要登录 (Search Requires Login)
+
+* 番茄的搜索接口只对已登录会话返回结果, 因此**聚合搜索需要提供登录 Cookie**
+* 提供方式任选其一:
+    * 设置环境变量 `FANQIENOVEL_COOKIE`
+    * 先用下载流程登录一次番茄 (在提示中粘贴 Cookie), Cookie 会保存到 `<缓存目录>/fanqienovel/` 供搜索复用
+* 未提供 Cookie 时, 番茄搜索会被自动跳过, 不影响其它站点的结果

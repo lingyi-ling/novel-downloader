@@ -216,7 +216,7 @@ tags = ["原创", "免费", "男性向", "女性向", "抖音"]
 volumes = "yes"
 images = "no"
 login = "partial"
-search = "external"
+search = "yes"
 
 [[sites.fanqienovel.url_examples]]
 title = "Book URL"
@@ -235,6 +235,16 @@ title = "Chapter URL"
 url = "https://fanqienovel.com/reader/7276663560427471412?enter_from=page"
 chapter_id = "7276663560427471412"
 hidden = true
+
+[[sites.fanqienovel.notes]]
+title = "搜索需要登录 (Search Requires Login)"
+content = """
+* 番茄的搜索接口只对已登录会话返回结果, 因此**聚合搜索需要提供登录 Cookie**
+* 提供方式任选其一:
+    * 设置环境变量 `FANQIENOVEL_COOKIE`
+    * 先用下载流程登录一次番茄 (在提示中粘贴 Cookie), Cookie 会保存到 `<缓存目录>/fanqienovel/` 供搜索复用
+* 未提供 Cookie 时, 番茄搜索会被自动跳过, 不影响其它站点的结果
+"""
 
 [sites.faloo]
 name = "飞卢小说网"

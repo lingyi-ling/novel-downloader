@@ -45,7 +45,7 @@
 | [大熊猫文学网](./site-details/dxmwx.md) | `dxmwx` | :material-close: | :material-close: | :material-close: | :material-check: |
 | [ESJ Zone](./site-details/esjzone.md) | `esjzone` | :material-check: | :material-check: | :material-check: | :material-check: |
 | [飞卢小说网](./site-details/faloo.md) | `faloo` | :material-close: | :material-check: | :material-check: | :material-open-in-new: |
-| [番茄小说网](./site-details/fanqienovel.md) | `fanqienovel` | :material-check: | :material-close: | :material-help-circle: | :material-open-in-new: |
+| [番茄小说网](./site-details/fanqienovel.md) | `fanqienovel` | :material-check: | :material-close: | :material-help-circle: | :material-check: |
 | [笔趣阁](./site-details/fsshu.md) | `fsshu` | :material-close: | :material-close: | :material-help-circle: | :material-check: |
 | [名著阅读](./site-details/guidaye.md) | `guidaye` | :material-close: | :material-close: | :material-close: | :material-open-in-new: |
 | [海外书包](./site-details/haiwaishubao.md) | `haiwaishubao` | :material-close: | :material-close: | :material-help-circle: | :material-check: |
