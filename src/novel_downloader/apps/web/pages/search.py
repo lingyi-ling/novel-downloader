@@ -9,8 +9,12 @@ Search UI with a settings dropdown, persistent state, and paginated results.
 from __future__ import annotations
 
 import asyncio
+import logging
+import subprocess
+import sys
 from collections.abc import Callable
 from contextlib import aclosing, suppress
+from functools import partial
 from typing import Any
 
 from nicegui import ui
@@ -18,6 +22,7 @@ from nicegui.elements.number import Number
 from nicegui.events import KeyEventArguments, ValueChangeEventArguments
 
 from novel_downloader.apps.constants import SEARCH_SUPPORT_SITES
+from novel_downloader.apps.login import LOGIN_SITES
 from novel_downloader.infra.i18n import t
 from novel_downloader.plugins.ranking import default_order, sort_results
 from novel_downloader.plugins.search import search_stream
@@ -25,6 +30,8 @@ from novel_downloader.schemas import SearchResult
 
 from ..components import navbar
 from ..services import manager, setup_dialog
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 10.0
 _DEFAULT_SITE_LIMIT = 30
@@ -103,6 +110,22 @@ def _render_placeholder_cover() -> None:
 
 def _site_label(site_key: str) -> str:
     return SEARCH_SUPPORT_SITES.get(site_key, site_key)
+
+
+def _spawn_login_window(site: str) -> subprocess.Popen[bytes] | None:
+    """
+    Launch the interactive login window in a separate process.
+
+    pywebview must own its process' main thread, so it cannot share the server
+    process; a child process keeps the UI responsive meanwhile.
+    """
+    try:
+        return subprocess.Popen(
+            [sys.executable, "-m", "novel_downloader.apps.login.main", site]
+        )
+    except OSError:
+        logger.exception("Failed to open the login window for %s", site)
+        return None
 
 
 def _apply_sort(state: dict[str, Any]) -> None:
@@ -268,6 +291,29 @@ def page_search() -> None:
                 ui.button(t("Stop"), on_click=lambda: _cancel_current(state)).props(
                     "outline"
                 )
+
+                async def _open_login(site: str) -> None:
+                    proc = _spawn_login_window(site)
+                    if proc is None:
+                        ui.notify(
+                            t("Could not open the login window."), type="negative"
+                        )
+                        return
+                    ui.notify(t("Login window opened; complete the sign-in there."))
+                    code = await asyncio.to_thread(proc.wait)
+                    if code == 0:
+                        ui.notify(
+                            t("Login successful; session cookies saved."),
+                            type="positive",
+                        )
+                    else:
+                        ui.notify(t("Login was not completed."), type="warning")
+
+                for site_key in sorted(LOGIN_SITES):
+                    ui.button(
+                        t("Log in to {site}").format(site=_site_label(site_key)),
+                        on_click=partial(_open_login, site_key),
+                    ).props("outline")
 
             with ui.row().classes("items-center gap-3 w-full q-mt-xs flex-wrap"):
                 sort_key_labels = {

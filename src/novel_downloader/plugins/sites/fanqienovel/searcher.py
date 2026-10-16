@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 import aiohttp
 
+from novel_downloader.infra.config import get_config_value
 from novel_downloader.infra.cookies import CookieStore, parse_cookies
 from novel_downloader.plugins.base.searcher import BaseSearcher
 from novel_downloader.plugins.registry import registrar
@@ -53,7 +54,15 @@ class FanqienovelSearcher(BaseSearcher):
         raw = os.environ.get(COOKIE_ENV_VAR, "").strip()
         if raw:
             return parse_cookies(raw)
-        cache_dir = Path(os.environ.get("NOVEL_CACHE_DIR") or "./novel_cache")
+        override = os.environ.get("NOVEL_CACHE_DIR", "").strip()
+        if override:
+            cache_dir = Path(override)
+        else:
+            try:
+                configured = get_config_value(["general", "cache_dir"], "./novel_cache")
+            except Exception:  # no config file on disk yet
+                configured = "./novel_cache"
+            cache_dir = Path(str(configured))
         store = CookieStore(cache_dir / "fanqienovel")
         store.load_all()
         return store.cache

@@ -21,6 +21,18 @@ novel-cli export --format epub 88888
 
 当配置启用 `login_required: true` 时, CLI 会检测登录状态; 若未登录, 将提示在命令行输入当前站点的有效 Cookie 或账号信息。
 
+部分站点的搜索/下载必须先登录 (例如番茄小说)。除了手工粘贴 Cookie 外, 也可以让下载器打开一个真实浏览器窗口完成登录, 自动抓取并保存会话 Cookie:
+
+```bash
+# 打开登录窗口, 登录成功后 Cookies 会保存到 <缓存目录>/<站点>/
+novel-cli login fanqienovel
+
+# 查看支持交互式登录的站点
+novel-cli login --list
+```
+
+> Web UI 的搜索页同样提供「登录」按钮, 效果与 `novel-cli login` 一致。
+
 ---
 
 ### 全局用法与帮助
@@ -43,6 +55,7 @@ Commands:
   download    下载小说
   search      搜索小说
   export      导出已下载的小说
+  login       打开站点登录窗口并保存会话 Cookies
   config      管理配置与语言
   clean       清理缓存与配置
 ```
@@ -408,6 +421,43 @@ novel-cli clean book --site qidian 1010868264 --all -y
 ```
 
 > 提示: `--start/--end` 接收**章节唯一 ID**, 并非 "第几章" 的序号
+
+---
+
+#### 6. login 子命令
+
+为需要登录的站点打开一个真实浏览器窗口, 登录成功后自动保存会话 Cookie, 供后续搜索/下载复用。
+
+需要安装可选依赖 `pywebview` (即 `.[desktop]` 扩展), 否则会提示安装。
+
+**Synopsis**
+
+```bash
+novel-cli login [site] [--timeout SECONDS] [--list]
+```
+
+**Options**
+
+* `site`: 站点键, 默认为 `fanqienovel`
+* `--timeout SECONDS`: 等待登录完成的秒数, 默认 `300`
+* `--list`: 列出支持交互式登录的站点
+
+**Examples**
+
+```bash
+# 登录番茄小说并保存 Cookies
+novel-cli login fanqienovel
+
+# 自定义等待时间 (秒)
+novel-cli login fanqienovel --timeout 600
+
+# 查看支持交互式登录的站点
+novel-cli login --list
+```
+
+> 保存位置: `<缓存目录>/<站点>/aiohttp.cookies`
+>
+> 登录窗口关闭且未检测到登录时命令以非零状态退出, 不会保存任何 Cookies。
 
 ---
 

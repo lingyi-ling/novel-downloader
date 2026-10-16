@@ -44,3 +44,22 @@ copy(document.cookie)
 ```
 
 (5) Cookies 会自动复制至剪贴板, 可直接粘贴使用。
+
+---
+
+### 方法 3 (推荐): 用内置登录窗口自动获取
+
+对于需要登录的站点 (例如番茄小说), 无需手工复制 Cookie, 让下载器打开一个真实浏览器窗口登录即可:
+
+```bash
+# 打开登录窗口, 登录成功后自动保存会话 Cookies
+novel-cli login fanqienovel
+
+# 查看支持交互式登录的站点
+novel-cli login --list
+```
+
+也可以在 Web UI 的搜索页点击对应的「登录」按钮。
+
+登录窗口需要可选的 `pywebview` 依赖 (即 `.[desktop]` 扩展)。检测到已登录后, Cookies 会自动写入 `<缓存目录>/<站点>/aiohttp.cookies`, 后续搜索与下载会直接复用。
+

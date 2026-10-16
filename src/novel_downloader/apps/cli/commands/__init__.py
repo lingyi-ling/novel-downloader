@@ -12,7 +12,16 @@ from .clean import CleanCmd
 from .config import ConfigCmd
 from .download import DownloadCmd
 from .export import ExportCmd
+from .login import LoginCmd
 from .search import SearchCmd
 from .sources import SourcesCmd
 
-commands = [CleanCmd, ConfigCmd, DownloadCmd, ExportCmd, SearchCmd, SourcesCmd]
+commands = [
+    CleanCmd,
+    ConfigCmd,
+    DownloadCmd,
+    ExportCmd,
+    LoginCmd,
+    SearchCmd,
+    SourcesCmd,
+]

@@ -21,6 +21,18 @@ novel-cli export --format epub 88888
 
 When `login_required: true` is enabled in the configuration, the CLI checks the login status; if not logged in, it prompts you to enter a valid Cookie or account information for the current site on the command line.
 
+Some sites require a logged-in session for search/download (for example fanqienovel). Besides pasting cookies by hand, the downloader can open a real browser window for you to sign in, then capture and save the session cookies automatically:
+
+```bash
+# Open a login window; cookies are saved to <cache_dir>/<site>/ on success
+novel-cli login fanqienovel
+
+# List sites that support an interactive login
+novel-cli login --list
+```
+
+> The Web UI search page offers the same login button; it behaves exactly like `novel-cli login`.
+
 ---
 
 ### Global Usage and Help
@@ -43,6 +55,7 @@ Commands:
   download    下载小说
   search      搜索小说
   export      导出已下载的小说
+  login       打开站点登录窗口并保存会话 Cookies
   config      管理配置与语言
   clean       清理缓存与配置
 ```
@@ -408,6 +421,43 @@ novel-cli clean book --site qidian 1010868264 --all -y
 ```
 
 > Tip: `--start/--end` accept a **chapter unique ID**, not the "N-th chapter" ordinal
+
+---
+
+#### 6. login Subcommand
+
+Open a real browser window for a site that requires a login, then save the session cookies automatically for later search/download.
+
+The optional `pywebview` dependency is required (the `.[desktop]` extra); otherwise the command tells you to install it.
+
+**Synopsis**
+
+```bash
+novel-cli login [site] [--timeout SECONDS] [--list]
+```
+
+**Options**
+
+* `site`: Site key, defaults to `fanqienovel`
+* `--timeout SECONDS`: Seconds to wait for the login to complete, defaults to `300`
+* `--list`: List sites that support an interactive login
+
+**Examples**
+
+```bash
+# Log in to fanqienovel and save the cookies
+novel-cli login fanqienovel
+
+# Custom wait time (seconds)
+novel-cli login fanqienovel --timeout 600
+
+# List sites that support an interactive login
+novel-cli login --list
+```
+
+> Saved to: `<cache_dir>/<site>/aiohttp.cookies`
+>
+> If the window is closed without a detected session the command exits non-zero and saves nothing.
 
 ---
 
