@@ -5,14 +5,34 @@ novel_downloader.infra.paths
 
 """
 
+import os
 from importlib.resources import files
+from pathlib import Path
 
-from platformdirs import user_config_path
+from platformdirs import user_data_path
 
 PACKAGE_NAME = "novel_downloader"  # Python package name
 
-# Base config directory (e.g. ~/AppData/Local/novel_downloader/)
-STATE_PATH = user_config_path(PACKAGE_NAME, appauthor=False) / "state.json"
+
+def app_home() -> Path:
+    """
+    Return the application's home directory.
+
+    Resolution order:
+      1. ``NOVEL_HOME`` environment variable (used by the desktop app / tests)
+      2. Platform data directory, e.g. ``%LOCALAPPDATA%\\novel_downloader``
+         on Windows, ``~/.local/share/novel_downloader`` on Linux.
+
+    :return: Absolute path to the application home directory.
+    """
+    override = os.environ.get("NOVEL_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    return user_data_path(PACKAGE_NAME, appauthor=False)
+
+
+# Base directory holding state/config data (e.g. ~/AppData/Local/novel_downloader/)
+STATE_PATH = app_home() / "state.json"
 
 RES = files("novel_downloader.resources")
 
@@ -21,6 +41,10 @@ DEFAULT_CONFIG_FILE = RES.joinpath("config", "settings.sample.toml")
 
 # Default config filename (used when copying embedded template)
 DEFAULT_CONFIG_FILENAME = "settings.toml"
+
+# Brand assets used by the desktop window / favicon
+APP_ICON_PATH = RES.joinpath("icons", "app.ico")
+APP_FAVICON_PATH = RES.joinpath("icons", "app.png")
 
 # CSS Styles
 EPUB_CSS_STYLE_PATH = RES.joinpath("styles", "epub_style.css")
