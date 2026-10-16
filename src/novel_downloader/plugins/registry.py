@@ -11,6 +11,8 @@ import logging
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from novel_downloader.infra.i18n import t
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -147,7 +149,7 @@ class PluginRegistry:
             cls = self._fetchers.get(key)
 
         if cls is None:
-            raise ValueError(f"Unsupported site: {site!r}")
+            raise ValueError(t("Unsupported site: {site!r}").format(site=site))
         return cls(config)
 
     def get_parser(self, site: str, config: ParserConfig) -> ParserProtocol:
@@ -161,7 +163,7 @@ class PluginRegistry:
             cls = self._parsers.get(key)
 
         if cls is None:
-            raise ValueError(f"Unsupported site: {site!r}")
+            raise ValueError(t("Unsupported site: {site!r}").format(site=site))
         return cls(config)
 
     def get_client(
@@ -191,7 +193,7 @@ class PluginRegistry:
             self._try_import_processor(key)
             builder = self._processors.get(key)
         if builder is None:
-            raise ValueError(f"Unsupported processor: {name!r}")
+            raise ValueError(t("Unsupported processor: {name!r}").format(name=name))
         return builder(config)
 
     def get_searcher_class(self, site: str) -> type[BaseSearcher]:
@@ -204,7 +206,7 @@ class PluginRegistry:
             self._ensure_rule_site(key)
             cls = self._searchers.get(key)
         if cls is None:
-            raise ValueError(f"Unsupported site: {site!r}")
+            raise ValueError(t("Unsupported site: {site!r}").format(site=site))
         return cls
 
     def get_searcher_classes(

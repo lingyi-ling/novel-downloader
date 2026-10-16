@@ -10,16 +10,10 @@ from pathlib import Path
 
 from novel_downloader.apps.cli import ui
 from novel_downloader.infra.config import copy_default_config
-from novel_downloader.infra.i18n import t
+from novel_downloader.infra.i18n import available_languages, set_language, t
 from novel_downloader.infra.paths import DEFAULT_CONFIG_FILENAME
-from novel_downloader.infra.persistence.state import state_mgr
 
 from .base import Command
-
-LANG_MAP = {
-    "zh": "zh_CN",
-    "en": "en_US",
-}
 
 
 class ConfigCmd(Command):
@@ -98,11 +92,17 @@ class ConfigSetLangCmd(Command):
 
     @classmethod
     def add_arguments(cls, parser: ArgumentParser) -> None:
-        parser.add_argument("lang", help="Language code (e.g. zh, zh_CN)")
+        parser.add_argument("lang", help=t("Language code (e.g. zh, en, zh_CN)."))
 
     @classmethod
     def run(cls, args: Namespace) -> None:
-        lang_input: str = args.lang
-        lang_std = LANG_MAP.get(lang_input, lang_input)
-        state_mgr.set_language(lang_std)
-        ui.success(t("Language switched to {lang}").format(lang=lang_std))
+        code = set_language(args.lang)
+        if not code:
+            langs = ", ".join(sorted(available_languages()))
+            ui.error(
+                t("Unsupported language: {lang}. Available: {langs}").format(
+                    lang=args.lang, langs=langs
+                )
+            )
+            raise SystemExit(2)
+        ui.success(t("Language switched to {lang}").format(lang=code))

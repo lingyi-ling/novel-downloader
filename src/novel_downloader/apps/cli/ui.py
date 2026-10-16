@@ -27,6 +27,7 @@ from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from rich.status import Status
 
+from novel_downloader.infra.i18n import t
 from novel_downloader.infra.paths import PACKAGE_NAME
 
 _MUTE_LOGGERS: set[str] = {
@@ -79,7 +80,7 @@ def confirm(message: str, *, default: bool = False) -> bool:
         result: bool = Confirm.ask(f"[bold]{message}[/bold]", default=default)
         return result
     except (KeyboardInterrupt, EOFError):
-        warn("Cancelled.")
+        warn(t("Cancelled."))
         return False
 
 
@@ -95,7 +96,7 @@ def prompt(message: str, *, default: str | None = None) -> str:
         result: str = Prompt.ask(message, default=default or "", show_default=False)
         return result
     except (KeyboardInterrupt, EOFError):
-        warn("Cancelled.")
+        warn(t("Cancelled."))
         return default or ""
 
 
@@ -110,7 +111,7 @@ def prompt_password(message: str) -> str:
         result: str = Prompt.ask(message, password=True)
         return result
     except (KeyboardInterrupt, EOFError):
-        warn("Cancelled.")
+        warn(t("Cancelled."))
         return ""
 
 
@@ -160,7 +161,7 @@ def prompt_choice(prompt_text: str, choices: Sequence[str]) -> str:
 
 
 class ProgressUI:
-    def __init__(self, prefix: str = "Progress", unit: str = "item"):
+    def __init__(self, prefix: str = t("Progress"), unit: str = t("item")):
         from rich.progress import Progress, TaskID
 
         self._progress = Progress(console=_CONSOLE)
@@ -262,7 +263,7 @@ def setup_logging(
         fh.setLevel(file_level)
         logger.addHandler(fh)
 
-        print(f"Logging to {log_path}", file=sys.stderr)
+        print(t("Logging to {log_path}").format(log_path=log_path), file=sys.stderr)
 
     # Console handler
     if console:

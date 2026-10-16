@@ -7,6 +7,7 @@ novel_downloader.infra.config.adapter
 from pathlib import Path
 from typing import Any
 
+from novel_downloader.infra.i18n import t
 from novel_downloader.schemas import (
     BookConfig,
     ClientConfig,
@@ -265,7 +266,9 @@ class ConfigAdapter:
 
         if not isinstance(raw, list):
             raise ValueError(
-                f"book_ids must be a list or string, got {type(raw).__name__}"
+                t("book_ids must be a list or string, got {type}").format(
+                    type=type(raw).__name__
+                )
             )
 
         result: list[BookConfig] = []
@@ -276,7 +279,9 @@ class ConfigAdapter:
                 result.append(self._dict_to_book_cfg(item))
             else:
                 raise ValueError(
-                    f"Invalid book_id entry: expected str|int|dict, got {type(item).__name__}"  # noqa: E501
+                    t(
+                        "Invalid book_id entry: expected str|int|dict, got {type}"
+                    ).format(type=type(item).__name__)
                 )
         return result
 
@@ -379,7 +384,7 @@ class ConfigAdapter:
             ValueError: If ``"book_id"`` is missing.
         """
         if "book_id" not in data:
-            raise ValueError("Missing required field 'book_id'")
+            raise ValueError(t("Missing required field 'book_id'"))
 
         book_id = str(data["book_id"])
         start_id = str(data["start_id"]) if "start_id" in data else None

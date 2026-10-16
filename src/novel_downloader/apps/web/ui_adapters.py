@@ -17,6 +17,7 @@ from novel_downloader.apps.web.services.cred_broker import (
     create_cred_request,
 )
 from novel_downloader.infra.cookies import parse_cookies
+from novel_downloader.infra.i18n import t
 from novel_downloader.schemas import BookConfig, LoginField
 
 from .models import Status
@@ -71,7 +72,7 @@ class WebLoginUI:
 
     def on_login_failed(self) -> None:
         self.task.status = Status.FAILED
-        self.task.error = "登录失败"
+        self.task.error = t("Login failed.")
 
     def on_login_success(self) -> None:
         self.task.status = Status.RUNNING

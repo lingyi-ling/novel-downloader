@@ -6,10 +6,17 @@ novel_downloader.apps.web.components.navigation
 A tiny NiceGUI component that renders the app's top navigation bar
 """
 
-from nicegui import ui
-from nicegui.events import ClickEventArguments
+from typing import Any
 
-from novel_downloader.infra.i18n import t
+from nicegui import ui
+from nicegui.events import ClickEventArguments, ValueChangeEventArguments
+
+from novel_downloader.infra.i18n import (
+    available_languages,
+    get_language,
+    set_language,
+    t,
+)
 
 _dark_state = {"value": False}
 
@@ -33,6 +40,10 @@ def navbar(active: str) -> None:
         _dark_state["value"] = new_val
         theme_btn.props(_theme_props(new_val))
 
+    def switch_language(e: ValueChangeEventArguments[Any]) -> None:
+        if set_language(str(e.value)):
+            ui.navigate.reload()
+
     with ui.header().classes("px-3 items-center justify-between bg-primary text-white"):
         with ui.row().classes("items-center gap-2 flex-wrap"):
             _nav_btn(t("Search"), "/", active == "search", icon="search")
@@ -46,6 +57,15 @@ def navbar(active: str) -> None:
             _nav_btn(t("History"), "/history", active == "history", icon="history")
 
         with ui.row().classes("items-center gap-2"):
+            lang_sel = ui.select(
+                available_languages(),
+                value=get_language(),
+                with_input=False,
+                on_change=switch_language,
+            ).props("dense outlined dark options-dense")
+            lang_sel.classes("min-w-[130px]")
+            lang_sel.tooltip(t("Language"))
+
             theme_btn = ui.button(on_click=toggle).props(_theme_props(dark.value))
 
 

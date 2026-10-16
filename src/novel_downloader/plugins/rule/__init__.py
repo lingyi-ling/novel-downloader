@@ -28,6 +28,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+from novel_downloader.infra.i18n import t
 from novel_downloader.plugins.registry import registrar
 
 from .fetcher import RuleFetcher
@@ -195,19 +196,25 @@ def install_rule(path: Path, *, force: bool = False) -> Path:
     try:
         text = path.read_text(encoding="utf-8-sig")
     except OSError as e:
-        raise RuleError(f"cannot read {path}: {e}") from e
+        raise RuleError(t("cannot read {path}: {err}").format(path=path, err=e)) from e
 
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
-        raise RuleError(f"{path.name}: invalid JSON: {e}") from e
+        raise RuleError(
+            t("{path}: invalid JSON: {err}").format(path=path.name, err=e)
+        ) from e
     parse_rule(data, source=path.name)
 
     target_dir = install_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{path.stem}.json"
     if target.exists() and not force:
-        raise RuleError(f"{target} already exists (pass --force to overwrite)")
+        raise RuleError(
+            t("{target} already exists (pass --force to overwrite)").format(
+                target=target
+            )
+        )
     target.write_text(text, encoding="utf-8")
     reload_rules()
     return target
@@ -223,13 +230,15 @@ def remove_rule(site_key: str) -> Path:
     key = _normalize_key(site_key)
     meta = _meta.get(key)
     if meta is None:
-        raise RuleError(f"unknown rule source {site_key!r}")
+        raise RuleError(t("unknown rule source {site_key!r}").format(site_key=site_key))
     if meta.get("origin") == "builtin":
-        raise RuleError(f"'{key}' is a built-in source and cannot be removed")
+        raise RuleError(
+            t("'{key}' is a built-in source and cannot be removed").format(key=key)
+        )
 
     target = Path(meta.get("file", ""))
     if not target.is_file():
-        raise RuleError(f"rule file not found: {target}")
+        raise RuleError(t("rule file not found: {target}").format(target=target))
     target.unlink()
     reload_rules()
     return target

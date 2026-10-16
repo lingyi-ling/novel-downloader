@@ -46,7 +46,19 @@ class TaskManager:
         self._clients: dict[str, ClientProtocol] = {}
 
         self._lock = asyncio.Lock()
-        self._adapter = ConfigAdapter(load_config())
+        self._adapter: ConfigAdapter | None = None
+
+    @property
+    def adapter(self) -> ConfigAdapter:
+        """
+        Lazily build the config adapter.
+
+        Loading the config reads from disk, which must not happen at import
+        time (the app can be imported from outside the project root).
+        """
+        if self._adapter is None:
+            self._adapter = ConfigAdapter(load_config())
+        return self._adapter
 
     # ---------- public API ----------
     async def add_task(self, *, title: str, site: str, book_id: str) -> DownloadTask:
@@ -120,7 +132,7 @@ class TaskManager:
         """Get or create a client instance for a site."""
         if site not in self._clients:
             self._clients[site] = registrar.get_client(
-                site, self._adapter.get_client_config(site)
+                site, self.adapter.get_client_config(site)
             )
 
         return self._clients[site]
@@ -168,7 +180,7 @@ class TaskManager:
     async def _run_task(self, task: DownloadTask) -> None:
         """Run a single download task and dispatch to processing or export."""
         task.status = Status.RUNNING
-        adapter = self._adapter
+        adapter = self.adapter
         client = self._get_client(task.site)
 
         login_ui = WebLoginUI(task)
@@ -205,7 +217,7 @@ class TaskManager:
                 continue
             try:
                 client = self._get_client(current_task.site)
-                processors = self._adapter.get_processor_configs(current_task.site)
+                processors = self.adapter.get_processor_configs(current_task.site)
                 if not processors:
                     self._queue_for_export(current_task)
                     continue
@@ -239,7 +251,7 @@ class TaskManager:
                 await asyncio.to_thread(
                     client.export_book,
                     BookConfig(book_id=current_task.book_id),
-                    cfg=self._adapter.get_exporter_config(current_task.site),
+                    cfg=self.adapter.get_exporter_config(current_task.site),
                     ui=WebExportUI(current_task),
                 )
                 current_task.status = Status.COMPLETED

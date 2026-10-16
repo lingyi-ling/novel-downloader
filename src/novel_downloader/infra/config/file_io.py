@@ -13,7 +13,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from novel_downloader.infra.paths import DEFAULT_CONFIG_FILE
+from novel_downloader.infra.i18n import t
+from novel_downloader.infra.paths import DEFAULT_CONFIG_FILE, app_home
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ def _resolve_file_path(
     Priority:
       1. A user-specified path (if provided and exists)
       2. A file in the current working directory with the given name
+      3. A file in the application home directory (see ``app_home()``)
 
     :return: Resolved Path or None if not found.
     """
@@ -42,6 +44,13 @@ def _resolve_file_path(
         if local_path.is_file():
             logger.debug("Using local file: %s", local_path)
             return local_path
+
+    home = app_home()
+    for name in local_filename:
+        home_path = (home / name).resolve()
+        if home_path.is_file():
+            logger.debug("Using home file: %s", home_path)
+            return home_path
 
     return None
 
@@ -82,7 +91,9 @@ def _load_by_extension(path: Path) -> dict[str, Any]:
             with path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
-            raise ValueError(f"Invalid JSON in {path}: {e}") from e
+            raise ValueError(
+                t("Invalid JSON in {path}: {err}").format(path=path, err=e)
+            ) from e
         return _validate_dict(data, path, "json")
 
     elif ext == ".toml":
@@ -92,10 +103,12 @@ def _load_by_extension(path: Path) -> dict[str, Any]:
             with path.open("rb") as f:
                 data = tomllib.load(f)
         except Exception as e:
-            raise ValueError(f"Invalid TOML in {path}: {e}") from e
+            raise ValueError(
+                t("Invalid TOML in {path}: {err}").format(path=path, err=e)
+            ) from e
         return _validate_dict(data, path, "toml")
 
-    raise ValueError(f"Unsupported config file extension: {ext}")
+    raise ValueError(t("Unsupported config file extension: {ext}").format(ext=ext))
 
 
 def load_config(

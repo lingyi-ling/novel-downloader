@@ -11,7 +11,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote
 
 from nicegui import ui
@@ -24,9 +24,14 @@ from ..components import navbar
 from ..services import setup_dialog
 
 _EXTS = {"txt", "epub"}
-_OUTPUT_DIR = Path(get_config_value(["general", "output_dir"], "./downloads"))
 _PAGE_SIZE = 20
 _PAGER_WIDTH = 9
+
+
+def _output_dir() -> Path:
+    """Resolve the export directory at runtime (config may not exist on import)."""
+    return Path(get_config_value(["general", "output_dir"], "./downloads"))
+
 
 SortKey = Literal["name", "mtime"]
 SortOrder = Literal["asc", "desc"]
@@ -44,7 +49,7 @@ class FileItem:
 def _scan_files() -> list[FileItem]:
     """Scan the output directory for txt/epub files."""
     try:
-        it = os.scandir(_OUTPUT_DIR)
+        it = os.scandir(_output_dir())
     except FileNotFoundError:
         return []
     items: list[FileItem] = []
@@ -233,7 +238,7 @@ def page_history() -> None:
             pager_area.clear()
             if total_pages > 1:
 
-                def _on_page_change(e: ValueChangeEventArguments) -> None:
+                def _on_page_change(e: ValueChangeEventArguments[Any]) -> None:
                     nonlocal page
                     try:
                         page = int(e.value)
@@ -251,19 +256,19 @@ def page_history() -> None:
                     ).props(f"max-pages={_PAGER_WIDTH} boundary-numbers ellipses")
 
         # Handlers
-        def _on_type_change(e: ValueChangeEventArguments) -> None:
+        def _on_type_change(e: ValueChangeEventArguments[Any]) -> None:
             nonlocal type_filter
             type_filter = e.value
             _recompute_from_cache()
             _refresh()
 
-        def _on_sort_key_change(e: ValueChangeEventArguments) -> None:
+        def _on_sort_key_change(e: ValueChangeEventArguments[Any]) -> None:
             nonlocal sort_by
             sort_by = e.value
             _recompute_from_cache()
             _refresh()
 
-        def _on_sort_order_change(e: ValueChangeEventArguments) -> None:
+        def _on_sort_order_change(e: ValueChangeEventArguments[Any]) -> None:
             nonlocal sort_order, sorted_items, page
             new_order = e.value
             # Optimization: if only order changes, reverse current list

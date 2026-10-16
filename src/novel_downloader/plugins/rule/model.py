@@ -46,6 +46,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from novel_downloader.infra.i18n import t
+
 __all__ = [
     "Field",
     "SearchRule",
@@ -98,7 +100,9 @@ def _check_format(fmt: str) -> str:
     """Validate a response format name."""
     if fmt not in _VALID_FORMATS:
         raise RuleError(
-            f"unsupported format {fmt!r} (expected one of {sorted(_VALID_FORMATS)})"
+            t("unsupported format {fmt!r} (expected one of {formats})").format(
+                fmt=fmt, formats=sorted(_VALID_FORMATS)
+            )
         )
     return fmt
 
@@ -133,14 +137,22 @@ class Field:
             try:
                 self._pattern = re.compile(self.regex, re.S)
             except re.error as e:  # pragma: no cover - defensive
-                raise RuleError(f"invalid field regex {self.regex!r}: {e}") from e
+                raise RuleError(
+                    t("invalid field regex {regex!r}: {err}").format(
+                        regex=self.regex, err=e
+                    )
+                ) from e
 
     @classmethod
     def from_dict(cls, data: Any) -> Field:
         if isinstance(data, str):
             return cls(selector=data)
         if not isinstance(data, dict):
-            raise RuleError(f"field must be a string or object, got {type(data)!r}")
+            raise RuleError(
+                t("field must be a string or object, got {type!r}").format(
+                    type=type(data)
+                )
+            )
         return cls(
             selector=data.get("selector"),
             attr=_as_str(data.get("attr"), "text"),
@@ -177,11 +189,11 @@ class SearchRule:
     @classmethod
     def from_dict(cls, data: Any) -> SearchRule:
         if not isinstance(data, dict) or not data.get("url"):
-            raise RuleError("search section requires a 'url'")
+            raise RuleError(t("search section requires a 'url'"))
         fields = {k: Field.from_dict(v) for k, v in (data.get("fields") or {}).items()}
         json_body = data.get("json_body")
         if json_body is not None and not isinstance(json_body, dict):
-            raise RuleError("search.json_body must be an object")
+            raise RuleError(t("search.json_body must be an object"))
         return cls(
             url=_as_str(data["url"]),
             method=_as_str(data.get("method"), "GET").upper(),
@@ -212,7 +224,7 @@ class ChaptersRule:
     @classmethod
     def from_dict(cls, data: Any) -> ChaptersRule:
         if not isinstance(data, dict) or not data.get("item"):
-            raise RuleError("book.chapters requires an 'item' selector")
+            raise RuleError(t("book.chapters requires an 'item' selector"))
         return cls(
             item=_as_str(data["item"]),
             title=Field.from_dict(data.get("title", {"attr": "text"})),
@@ -242,7 +254,7 @@ class PagesRule:
         if isinstance(data, str):
             return cls(url=data)
         if not isinstance(data, dict) or not data.get("url"):
-            raise RuleError("pages rule requires a 'url'")
+            raise RuleError(t("pages rule requires a 'url'"))
         raw_max = data.get("max_pages")
         return cls(
             url=_as_str(data["url"]),
@@ -263,7 +275,7 @@ class BookRule:
     @classmethod
     def from_dict(cls, data: Any) -> BookRule:
         if not isinstance(data, dict) or not data.get("url"):
-            raise RuleError("book section requires a 'url'")
+            raise RuleError(t("book section requires a 'url'"))
         pages = data.get("pages")
         return cls(
             url=_as_str(data["url"]),
@@ -294,7 +306,7 @@ class ChapterRule:
     @classmethod
     def from_dict(cls, data: Any) -> ChapterRule:
         if not isinstance(data, dict) or not data.get("url"):
-            raise RuleError("chapter section requires a 'url'")
+            raise RuleError(t("chapter section requires a 'url'"))
         pages = data.get("pages")
         return cls(
             url=_as_str(data["url"]),
@@ -362,17 +374,19 @@ _VALID_ATTRS = {"text", "inner_text", "html"}
 def _validate_fields(fields: dict[str, Field], where: str) -> None:
     for name, fld in fields.items():
         if fld.attr not in _VALID_ATTRS and not fld.attr:
-            raise RuleError(f"{where}.{name}: empty 'attr'")
+            raise RuleError(
+                t("{where}.{name}: empty 'attr'").format(where=where, name=name)
+            )
 
 
 def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
     """Validate a raw rule mapping and return a :class:`Rule`."""
     if not isinstance(data, dict):
-        raise RuleError(f"{source}: rule must be a JSON object")
+        raise RuleError(t("{source}: rule must be a JSON object").format(source=source))
 
     site_key = _as_str(data.get("site_key"))
     if not site_key:
-        raise RuleError(f"{source}: missing 'site_key'")
+        raise RuleError(t("{source}: missing 'site_key'").format(source=source))
 
     resolve_raw = data.get("resolve")
     resolve = None
@@ -387,7 +401,11 @@ def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
     search = SearchRule.from_dict(data["search"]) if data.get("search") else None
 
     if book is None and chapter is None:
-        raise RuleError(f"{source}: rule needs at least a 'book' or 'chapter' section")
+        raise RuleError(
+            t("{source}: rule needs at least a 'book' or 'chapter' section").format(
+                source=source
+            )
+        )
     if book is not None:
         _validate_fields(book.fields, "book.fields")
     if search is not None:

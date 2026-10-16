@@ -15,6 +15,7 @@
     - [2. 安装开发依赖](#2-安装开发依赖)
     - [3. 安装 pre-commit 钩子](#3-安装-pre-commit-钩子)
   - [代码风格与静态检查](#代码风格与静态检查)
+  - [Localization (i18n)](#localization-i18n)
   - [提交规范](#提交规范)
     - [常用类型](#常用类型)
     - [示例](#示例)
@@ -133,6 +134,26 @@ pre-commit run --all-files
 ```
 
 > 建议: 本地检查通过后再提交，可避免 CI 失败。
+
+---
+
+## Localization (i18n)
+
+User-facing text is localized through the runtime helper
+`from novel_downloader.infra.i18n import t`. Every UI/CLI label and every
+user-facing error message (those echoed by CLI subcommands or the web UI)
+must be wrapped in `t("English msgid")`, with arguments applied at the call
+site rather than inside `t()` itself.
+
+```python
+raise ValueError(t("Invalid JSON in {path}: {err}").format(path=path, err=e))
+```
+
+`logger.debug/info/warning/error` messages are intentionally **not**
+translated: diagnostics stay in English so they remain greppable and easy
+for maintainers to correlate across issues and CI logs. Exported artifact
+labels (the inner labels written into TXT/EPUB output) are a separate
+domain and are out of scope for UI localization.
 
 ---
 

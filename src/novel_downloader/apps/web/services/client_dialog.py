@@ -147,7 +147,9 @@ def setup_dialog() -> None:
         if not req:
             return
         curr_req_id = req.req_id
-        title_label.text = f"'{req.title}' 需要登录信息"
+        title_label.text = t("'{title}' requires login information").format(
+            title=req.title
+        )
         _build_form(req.fields, req.prefill)
         dialog.open()
 

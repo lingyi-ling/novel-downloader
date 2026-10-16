@@ -47,14 +47,14 @@ def _meta_row(label: str, value: str) -> None:
 
 def _format_seconds(sec: float | None) -> str:
     if sec is None:
-        return "?"
+        return t("?")
     if sec > 86400:
-        return "> 1 day"
+        return t("> 1 day")
     m, s = divmod(int(sec), 60)
     h, m = divmod(m, 60)
     if h > 0:
-        return f"{h}h {m}m"
-    return f"{m}m {s}s"
+        return t("{hours}h {minutes}m").format(hours=h, minutes=m)
+    return t("{minutes}m {seconds}s").format(minutes=m, seconds=s)
 
 
 def _progress_block(tsk: DownloadTask) -> None:
@@ -90,13 +90,10 @@ def _progress_block(tsk: DownloadTask) -> None:
         }.get(tsk.status, "")
 
         if tsk.chapters_total > 0:
-            ui.label(f"{tsk.chapters_done}/{tsk.chapters_total} · {suffix}").classes(
-                "text-xs text-caption"
-            )
+            summary = f"{tsk.chapters_done}/{tsk.chapters_total} · {suffix}"
         else:
-            ui.label(f"{tsk.chapters_done}/? · {suffix}").classes(
-                "text-xs text-caption"
-            )
+            summary = f"{tsk.chapters_done}/? · {suffix}"
+        ui.label(summary).classes("text-xs text-caption")
 
         if tsk.status == "completed" and tsk.exported_paths:
             with ui.row().classes("w-full gap-2 mt-1"):
@@ -120,8 +117,9 @@ def _task_card(tsk: DownloadTask, *, active: bool) -> None:
 
                 async def cancel_this(tid: str = tsk.task_id) -> None:
                     ok = await manager.cancel_task(tid)
+                    status = t("Cancelled") if ok else t("Cancel failed")
                     ui.notify(
-                        f"Task {tid[:8]} {t('Cancelled') if ok else t('Cancel failed')}",  # noqa: E501
+                        t("Task {task} {status}").format(task=tid[:8], status=status),  # noqa: E501
                         color=("primary" if ok else "negative"),
                     )
 

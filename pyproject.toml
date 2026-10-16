@@ -42,6 +42,9 @@ dependencies = [
 web-ui = [
     "nicegui",
 ]
+desktop = [
+    "nicegui[native]",
+]
 image-utils = [
     "brotli",
     "numpy",
@@ -59,7 +62,7 @@ all-backends = [
     "curl_cffi",
 ]
 all = [
-    "nicegui",
+    "nicegui[native]",
     "brotli",
     "numpy",
     "fonttools",
@@ -70,10 +73,12 @@ all = [
 
 docs = [
     "mkdocs-material",
+    "mkdocs-static-i18n",
     "mkdocstrings",
     "mkdocstrings-python",
 ]
 tests = [
+    "babel",
     "brotli",
     "numpy",
     "fonttools",
@@ -87,6 +92,7 @@ tests = [
     "types-lxml",
 ]
 ci = [
+    "babel",
     "brotli",
     "numpy",
     "fonttools",
@@ -124,6 +130,7 @@ dev = [
 [project.scripts]
 novel-cli = "novel_downloader.apps.cli.main:cli_main"
 novel-web = "novel_downloader.apps.web.main:web_main"
+novel-desktop = "novel_downloader.apps.desktop.main:desktop_main"
 
 [project.urls]
 Homepage = "https://github.com/lingyi-ling/novel-downloader"
@@ -131,7 +138,7 @@ Source = "https://github.com/lingyi-ling/novel-downloader"
 Issues = "https://github.com/lingyi-ling/novel-downloader/issues"
 
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "babel>=2.12"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -148,7 +155,8 @@ include = ["novel_downloader", "novel_downloader.*"]
 "novel_downloader.resources.scripts" = ["*.js"]
 "novel_downloader.resources.json" = ["*.json"]
 "novel_downloader.resources.styles" = ["*.css"]
-"novel_downloader.locales" = ["*/LC_MESSAGES/*.mo"]
+"novel_downloader.resources.icons" = ["*.ico", "*.png"]
+"novel_downloader.locales" = ["*/LC_MESSAGES/*.mo", "*/LC_MESSAGES/*.po"]
 "novel_downloader.plugins.rule.builtin" = ["*.json"]
 
 [tool.setuptools.dynamic]
