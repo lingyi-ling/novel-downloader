@@ -173,6 +173,20 @@ novel-web --listen public
 * 支持站点见: [支持站点列表](supported-sites/index.md)
 * 更多示例见: [WEB 使用说明](guide/web-examples.md)
 
+### 桌面应用 (Desktop App)
+
+桌面版把同一个 Web 界面装进原生窗口 (Windows 上基于 WebView2)。
+
+```bash
+pip install "novel-downloader[desktop]"
+novel-desktop
+```
+
+* 首次运行会在用户数据目录 (Windows: `%LOCALAPPDATA%\novel_downloader`) 生成 `settings.toml`, 并以该目录为工作目录
+* 可用 `--check` 输出环境体检报告, 或用 `NOVEL_HOME` 环境变量指定数据目录
+* pywebview 缺失或 WebView2 运行时不可用时, 会自动退回浏览器模式
+* 不支持打包为 exe, 也不支持移动端
+
 ---
 
 ## 编程接口示例
@@ -240,8 +254,8 @@ git clone https://github.com/lingyi-ling/novel-downloader.git
 cd novel-downloader
 
 # 可选: 为多语言支持编译翻译文件
-# pip install babel
-# pybabel compile -d src/novel_downloader/locales
+# pip install -e ".[dev]"
+# python scripts/compile_mo.py
 
 pip install .
 # 或安装带可选功能:

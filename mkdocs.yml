@@ -27,6 +27,47 @@ theme:
       scheme: slate
 
 plugins:
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: zh
+          default: true
+          name: 中文
+          build: true
+        - locale: en
+          name: English
+          build: true
+          nav_translations:
+            首页: Home
+            使用指南: Guide
+            安装: Install
+            配置: Configuration
+            设置项参考: Settings Reference
+            处理器参考: Processors Reference
+            CLI 用法: CLI Usage
+            Web 用法: Web Usage
+            书源: Book Sources
+            文件保存: File Saving
+            复制 Cookies: Copy Cookies
+            支持站点: Supported Sites
+            总览: Overview
+            标签: Tags
+            参考: Reference
+            API 示例: API Examples
+            插件: Plugins
+            技术笔记: Notes
+            AES 笔记: AES Notes
+            多看的 EPUB 笔记: Duokan EPUB Notes
+            飞卢 Web 笔记: Faloo Web Notes
+            轻之文库笔记: Linovelib Notes
+            JS IIFE 解析笔记: JS IIFE Parsing Notes
+            起点 App 笔记: Qidian App Notes
+            起点 Web 笔记: Qidian Web Notes
+            西瓜书屋笔记: Xiguashuwu Notes
+            其他: Misc
   - search
   - tags
   - privacy:
@@ -70,37 +111,37 @@ extra_javascript:
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 nav:
-  - Home: index.md
-  - Guide:
-    - Install: guide/installation.md
-    - Configuration: guide/configuration.md
-    - Settings Reference: guide/settings-reference.md
-    - Processors Reference: guide/processors-reference.md
-    - CLI Usage: guide/cli-examples.md
-    - Web Usage: guide/web-examples.md
-    - Book Sources: guide/book-sources.md
-    - File Saving: guide/file-saving.md
-    - Copy Cookies: guide/copy-cookies.md
+  - 首页: index.md
+  - 使用指南:
+    - 安装: guide/installation.md
+    - 配置: guide/configuration.md
+    - 设置项参考: guide/settings-reference.md
+    - 处理器参考: guide/processors-reference.md
+    - CLI 用法: guide/cli-examples.md
+    - Web 用法: guide/web-examples.md
+    - 书源: guide/book-sources.md
+    - 文件保存: guide/file-saving.md
+    - 复制 Cookies: guide/copy-cookies.md
 
-  - Supported Sites:
-    - Overview: supported-sites/index.md
-    - Tags: supported-sites/tags.md
+  - 支持站点:
+    - 总览: supported-sites/index.md
+    - 标签: supported-sites/tags.md
 
-  - Reference:
-    - API Examples: reference/api-examples.md
-    - Plugins: reference/plugins.md
+  - 参考:
+    - API 示例: reference/api-examples.md
+    - 插件: reference/plugins.md
 
-  - Notes:
-    - AES Notes: notes/aes.md
-    - Duokan EPUB Notes: notes/duokan_epub.md
-    - Faloo Web Notes: notes/faloo_web.md
-    - Linovelib Notes: notes/linovelib.md
-    - JS IIFE Parsing Notes: notes/parse_js_iife.md
-    - Qidian App Notes: notes/qidian_app.md
-    - Qidian Web Notes: notes/qidian_web.md
-    - Xiguashuwu Notes: notes/xiguashuwu.md
+  - 技术笔记:
+    - AES 笔记: notes/aes.md
+    - 多看的 EPUB 笔记: notes/duokan_epub.md
+    - 飞卢 Web 笔记: notes/faloo_web.md
+    - 轻之文库笔记: notes/linovelib.md
+    - JS IIFE 解析笔记: notes/parse_js_iife.md
+    - 起点 App 笔记: notes/qidian_app.md
+    - 起点 Web 笔记: notes/qidian_web.md
+    - 西瓜书屋笔记: notes/xiguashuwu.md
 
-  - Misc:
+  - 其他:
     - TODO: misc/todo.md
 
 not_in_nav: |
