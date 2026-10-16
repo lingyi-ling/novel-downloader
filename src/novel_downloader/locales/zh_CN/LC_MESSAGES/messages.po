@@ -1230,12 +1230,12 @@ msgid "Modified Time"
 msgstr "修改时间"
 
 #: src/novel_downloader/apps/web/pages/history.py:168
-#: src/novel_downloader/apps/web/pages/search.py:292
+#: src/novel_downloader/apps/web/pages/search.py:294
 msgid "Ascending"
 msgstr "升序"
 
 #: src/novel_downloader/apps/web/pages/history.py:168
-#: src/novel_downloader/apps/web/pages/search.py:292
+#: src/novel_downloader/apps/web/pages/search.py:294
 msgid "Descending"
 msgstr "降序"
 
@@ -1410,25 +1410,33 @@ msgstr "优选"
 msgid "Priority"
 msgstr "优先级"
 
-#: src/novel_downloader/apps/web/pages/search.py:284
+#: src/novel_downloader/apps/web/pages/search.py:279
+msgid "Word count"
+msgstr "字数"
+
+#: src/novel_downloader/apps/web/pages/search.py:280
+msgid "Update time"
+msgstr "更新时间"
+
+#: src/novel_downloader/apps/web/pages/search.py:286
 msgid "Sort"
 msgstr "排序"
 
-#: src/novel_downloader/apps/web/pages/search.py:330
+#: src/novel_downloader/apps/web/pages/search.py:332
 msgid "Searching (results will appear progressively)..."
 msgstr "正在搜索 (结果将陆续显示)..."
 
-#: src/novel_downloader/apps/web/pages/search.py:336
+#: src/novel_downloader/apps/web/pages/search.py:338
 #, python-brace-format
 msgid "Currently retrieved {total} results"
 msgstr "当前已获取 {total} 条结果"
 
-#: src/novel_downloader/apps/web/pages/search.py:360
+#: src/novel_downloader/apps/web/pages/search.py:362
 #, python-brace-format
 msgid "Total {total} results (page {page}/{pages})"
 msgstr "共 {total} 条结果 (第 {page}/{pages} 页)"
 
-#: src/novel_downloader/apps/web/pages/search.py:441
+#: src/novel_downloader/apps/web/pages/search.py:443
 msgid "Please enter a keyword"
 msgstr "请输入关键词"
 

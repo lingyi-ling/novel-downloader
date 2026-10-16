@@ -276,6 +276,8 @@ def page_search() -> None:
                     "site": t("Site"),
                     "title": t("Title"),
                     "author": t("Author"),
+                    "words": t("Word count"),
+                    "update": t("Update time"),
                 }
                 sort_key_sel = (
                     ui.select(
