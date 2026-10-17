@@ -94,6 +94,9 @@ def test_load_by_extension_unsupported(tmp_path):
 
 def test_load_config_not_found(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    # Point the app home at an empty directory so a config file that happens to
+    # exist on the host machine cannot satisfy the lookup.
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path / "home"))
     with pytest.raises(FileNotFoundError):
         load_config(None)
 
