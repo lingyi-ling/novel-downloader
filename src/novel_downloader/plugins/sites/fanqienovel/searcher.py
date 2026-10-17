@@ -4,11 +4,13 @@ novel_downloader.plugins.sites.fanqienovel.searcher
 --------------------------------------------------
 """
 
+import asyncio
 import datetime
 import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 import aiohttp
@@ -29,14 +31,17 @@ class FanqienovelSearcher(BaseSearcher):
     """
     Searcher for 番茄小说网 (fanqienovel.com).
 
-    The site's search endpoint only answers requests carrying a logged-in
-    session, so a login cookie is required. It is resolved, in order, from:
+    The site's search endpoint signs every request inside its own JavaScript
+    (``msToken`` + ``a_bogus``); plain HTTP requests are answered with an empty
+    body, with or without a login cookie. Searching therefore works in two
+    steps, and only when the caller explicitly selected this site (an automatic
+    "all sites" search skips it, so it stays fast and window-free):
 
-      1. the ``FANQIENOVEL_COOKIE`` environment variable
-      2. the persisted cookie store under ``<cache_dir>/fanqienovel``
-
-    Without a cookie the searcher logs a warning and returns no results, so
-    aggregate searches keep working.
+      1. the site itself performs the search in a real browser window, and the
+         response JSON is captured through the DevTools Protocol
+      2. the captured entries are completed with their book detail page, which
+         exposes the title and author in plain text (the search response writes
+         them with a private-use font)
     """
 
     site_name = "fanqienovel"
@@ -44,6 +49,9 @@ class FanqienovelSearcher(BaseSearcher):
     BASE_URL = "https://fanqienovel.com"
     SEARCH_URL = "https://fanqienovel.com/api/author/search/search_book/v1"
     PAGE_SIZE = 10
+
+    #: Seconds the browser window may take to answer.
+    BROWSER_SEARCH_TIMEOUT = 60.0
 
     def __init__(self, session: aiohttp.ClientSession) -> None:
         super().__init__(session)
@@ -66,6 +74,111 @@ class FanqienovelSearcher(BaseSearcher):
         store = CookieStore(cache_dir / "fanqienovel")
         store.load_all()
         return store.cache
+
+    async def search(
+        self, keyword: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        """
+        Search fanqienovel, driving a browser window when asked to explicitly.
+
+        :param keyword: Search keyword.
+        :param limit: Maximum number of results to return.
+        :return: List of search results.
+        """
+        if not self.explicitly_selected:
+            return await super().search(keyword, limit)
+
+        results = await self._search_with_browser(keyword, limit)
+        if results:
+            return results
+
+        logger.warning(
+            "fanqienovel: browser-assisted search returned nothing "
+            "(run 'novel-cli login fanqienovel' if no session is available)"
+        )
+        return await super().search(keyword, limit)
+
+    async def _search_with_browser(
+        self, keyword: str, limit: int | None
+    ) -> list[SearchResult]:
+        """Capture the search response from a browser window and enrich it."""
+        from novel_downloader.apps.browser import search_via_browser
+
+        try:
+            body = await asyncio.to_thread(
+                search_via_browser,
+                self.site_name,
+                keyword,
+                timeout=self.BROWSER_SEARCH_TIMEOUT,
+            )
+        except Exception:
+            logger.exception("fanqienovel: browser-assisted search failed")
+            return []
+        if not body:
+            return []
+
+        results = self._parse_html(body, limit)
+        await self._fill_book_metadata(results)
+        return results
+
+    async def _fill_book_metadata(self, results: list[SearchResult]) -> None:
+        """
+        Replace the obfuscated titles and authors with the real ones.
+
+        ``book_name``/``author`` are written with a private-use font in the
+        search response, so they decode to junk. The book detail pages expose
+        the same fields in plain text, and are publicly reachable, so they are
+        fetched to fix the entries up.
+        """
+        if not results:
+            return
+
+        headers = dict(self.session.headers)
+        if self._cookies:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in self._cookies.items())
+        await asyncio.gather(
+            *(self._fill_one(item, headers) for item in results),
+            return_exceptions=True,
+        )
+
+    async def _fill_one(self, item: SearchResult, headers: dict[str, str]) -> None:
+        """Complete a single search result with its book detail page."""
+        page = await self._fetch_book_page(item["book_id"], headers)
+        if not page:
+            return
+
+        title = page.get("bookName") or page.get("book_name")
+        author = page.get("authorName") or page.get("author") or page.get("author_name")
+        if isinstance(title, str) and title:
+            item["title"] = title
+        if isinstance(author, str) and author:
+            item["author"] = author
+
+    async def _fetch_book_page(
+        self, book_id: str, headers: dict[str, str]
+    ) -> dict[str, Any]:
+        """Fetch a book detail page and return its ``page`` state."""
+        from novel_downloader.plugins.sites.fanqienovel.parser import (
+            FanqienovelParser,
+        )
+
+        url = f"{self.BASE_URL}/page/{book_id}"
+        try:
+            async with self.session.get(url, headers=headers) as resp:
+                resp.raise_for_status()
+                html_str = await self._response_to_str(resp)
+        except Exception:
+            logger.debug("fanqienovel: could not read book page %s", url, exc_info=True)
+            return {}
+
+        try:
+            state = FanqienovelParser._extract_initial_state(html_str)
+        except ValueError:
+            logger.debug("fanqienovel: no book state found on %s", url, exc_info=True)
+            return {}
+
+        page = state.get("page")
+        return page if isinstance(page, dict) else {}
 
     async def _fetch_html(self, keyword: str) -> str:
         if not self._cookies:

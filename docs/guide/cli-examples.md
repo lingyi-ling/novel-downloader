@@ -156,6 +156,17 @@ novel-cli search --limit 20 --site-limit 5 三体
 novel-cli search -s b520 -s n23qb 三体
 ```
 
+!!! note "浏览器辅助搜索"
+    少数站点 (如番茄) 的搜索接口需要站点自身 JS 生成的签名, 纯 HTTP 请求拿不到结果, 因此**聚合搜索时会跳过这些站点** (不影响其它站点)。
+    显式指定该站点时会启用浏览器辅助搜索: 复用登录会话启动一个隐藏浏览器窗口, 由站点自身 JS 发起已签名的搜索请求并截获结果 JSON。
+
+    ```bash
+    novel-cli login fanqienovel        # 先建立登录会话
+    novel-cli search -s fanqienovel 斗破苍穹
+    ```
+
+    浏览器辅助搜索需要安装 `desktop` 额外依赖 (`pip install 'novel-downloader[desktop]'`)。
+
 ---
 
 #### 3. export 子命令

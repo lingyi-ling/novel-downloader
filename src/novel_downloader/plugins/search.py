@@ -63,7 +63,11 @@ async def search(
                 inst for cls in classes if ((inst := cls(session)).nsfw == nsfw)
             ]
         else:
-            instances = [cls(session) for cls in classes]
+            instances = []
+            for cls in classes:
+                explicit = cls(session)
+                explicit.explicitly_selected = True
+                instances.append(explicit)
         coros = [inst.search(keyword, limit=per_site_limit) for inst in instances]
         site_lists = await asyncio.gather(*coros, return_exceptions=True)
 
@@ -109,7 +113,11 @@ async def search_stream(
                 inst for cls in classes if ((inst := cls(session)).nsfw == nsfw)
             ]
         else:
-            instances = [cls(session) for cls in classes]
+            instances = []
+            for cls in classes:
+                explicit = cls(session)
+                explicit.explicitly_selected = True
+                instances.append(explicit)
         tasks = [
             asyncio.create_task(
                 inst.search(keyword, limit=per_site_limit),

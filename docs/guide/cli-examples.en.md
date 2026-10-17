@@ -156,6 +156,17 @@ novel-cli search --limit 20 --site-limit 5 三体
 novel-cli search -s b520 -s n23qb 三体
 ```
 
+!!! note "Browser-assisted search"
+    A few sites (e.g. fanqienovel) sign their search requests inside their own JavaScript, so a plain HTTP request returns nothing and these sites are **skipped during aggregate searches** (other sites are unaffected).
+    Selecting such a site explicitly enables browser-assisted search: the login session is reused to open a hidden browser window, let the site's own script issue the signed request, and capture the resulting JSON.
+
+    ```bash
+    novel-cli login fanqienovel        # establish the login session first
+    novel-cli search -s fanqienovel 斗破苍穹
+    ```
+
+    Browser-assisted search requires the `desktop` extra (`pip install 'novel-downloader[desktop]'`).
+
 ---
 
 #### 3. export Subcommand

@@ -20,6 +20,11 @@ class BaseSearcher(abc.ABC):
     priority: ClassVar[int] = 1000
     BASE_URL: ClassVar[str] = ""
 
+    #: Set by the search orchestrator when the caller asked for this site
+    #: explicitly (e.g. ``--site``). Searchers whose site is slow or intrusive
+    #: can use it to only run expensive fallbacks on an explicit request.
+    explicitly_selected: bool = False
+
     def __init__(self, session: aiohttp.ClientSession) -> None:
         self.session = session
 
