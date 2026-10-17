@@ -130,27 +130,33 @@ def page_download() -> None:
             preview_row.visible = False
 
         def _clear_all() -> None:
+            mode.value = "url"
             url_input.value = ""
             book_id.value = ""
             site.value = _DEFAULT_SITE
             _reset_preview()
+            _apply_visibility()
 
         mode.on_value_change(lambda _: _apply_visibility())
         _apply_visibility()
 
-        async def _preview_on_blur() -> None:
-            raw = (url_input.value or "").strip()
-            if not raw:
-                _reset_preview()
-                return
+        async def _update_preview(raw: str) -> bool:
             site_key, bid = await _resolve(raw)
             if site_key and bid:
                 site_display = DOWNLOAD_SUPPORT_SITES.get(site_key, site_key)
                 site_badge.text = t("Site: {site}").format(site=site_display)
                 id_badge.text = t("Book ID: {bid}").format(bid=bid)
                 preview_row.visible = True
-            else:
+                return True
+            _reset_preview()
+            return False
+
+        async def _preview_on_blur() -> None:
+            raw = (url_input.value or "").strip()
+            if not raw:
                 _reset_preview()
+                return
+            if not await _update_preview(raw):
                 ui.notify(
                     t("Parsing failed: The link may not be supported or is invalid"),
                     type="warning",
@@ -208,8 +214,15 @@ def page_download() -> None:
                 add_btn.enable()
                 add_btn.props(remove="loading")
 
+        async def _submit_from_url() -> None:
+            # refresh the parse preview first so the banner matches the input
+            raw = (url_input.value or "").strip()
+            if raw:
+                await _update_preview(raw)
+            await add_task()
+
         # enter key submits in both modes
-        url_input.on("keydown.enter", lambda _: add_task())
+        url_input.on("keydown.enter", lambda _: _submit_from_url())
         book_id.on("keydown.enter", lambda _: add_task())
 
         add_btn.on("click", add_task)

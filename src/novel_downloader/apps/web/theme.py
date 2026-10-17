@@ -141,6 +141,13 @@ body .nicegui-card {
   border: 1px solid var(--nd-border);
   border-radius: var(--nd-radius-card);
   box-shadow: var(--nd-elevation) !important;
+  transition: border-color 0.15s ease, background-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+body .q-card:hover,
+body .nicegui-card:hover {
+  border-color: var(--nd-border-strong);
 }
 
 body .nicegui-card {
@@ -196,6 +203,12 @@ body .q-btn {
   min-height: 36px;
   padding: 0 14px;
   box-shadow: none !important;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+body .q-btn:focus-visible {
+  outline: 2px solid var(--nd-accent) !important;
+  outline-offset: 2px;
 }
 
 body .q-btn .q-icon {
@@ -242,6 +255,11 @@ body .q-field--outlined.q-field--focused .q-field__control:after {
   border-radius: var(--nd-radius-control);
 }
 
+body .q-field--outlined:focus-within .q-field__control:before {
+  outline: 2px solid var(--nd-accent);
+  outline-offset: 2px;
+}
+
 body .q-field__label,
 body .q-field__bottom {
   color: var(--nd-text-muted);
@@ -280,6 +298,14 @@ body .q-pagination__content .q-btn {
   padding: 0;
   border-radius: 9px;
   font-size: 13px;
+}
+
+/* Quasar marks the current page with bg-primary (filled) while every
+   other pager button stays flat text-primary; mute the flat ones so the
+   active page reads as the accent-filled button. */
+body .q-pagination .q-btn:not(.bg-primary) {
+  background: transparent !important;
+  color: var(--nd-text-muted) !important;
 }
 
 /* -------------------------------------------------------------- utilities */
@@ -494,6 +520,7 @@ body .nd-side-tagline {
 }
 
 body .nd-side-item {
+  position: relative;
   width: 100%;
   justify-content: flex-start;
   gap: 0.65rem;
@@ -515,6 +542,17 @@ body .nd-side-item--active:hover {
   color: var(--nd-accent) !important;
 }
 
+body .nd-side-item--active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  border-radius: var(--nd-radius-pill);
+  background: var(--nd-accent);
+}
+
 /* -------------------------------------------------------------- page head */
 body .nd-page-head {
   gap: 0.15rem;
@@ -527,12 +565,14 @@ body .nd-empty {
   text-align: center;
   padding: 3.5rem 1rem;
   gap: 0.8rem;
+  color: var(--nd-text-muted);
 }
 
 body .nd-icon-tile--lg {
   width: 64px;
   height: 64px;
   border-radius: 16px;
+  flex: 0 0 auto;
 }
 
 body .nd-icon-tile--lg .q-icon {

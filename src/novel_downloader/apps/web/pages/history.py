@@ -77,11 +77,17 @@ def _scan_files() -> list[FileItem]:
     return items
 
 
-def _apply_filter(items: list[FileItem], type_filter: TypeFilter) -> list[FileItem]:
-    """Filter by extension; 'All' returns everything."""
-    if type_filter == "All":
-        return items
-    return [it for it in items if it.ext == type_filter]
+def _apply_filter(
+    items: list[FileItem], type_filter: TypeFilter, name_query: str = ""
+) -> list[FileItem]:
+    """Filter by extension and case-insensitive name substring."""
+    result = items
+    if type_filter != "All":
+        result = [it for it in result if it.ext == type_filter]
+    query = name_query.strip().lower()
+    if query:
+        result = [it for it in result if query in it.name.lower()]
+    return result
 
 
 def _apply_sort(
@@ -113,7 +119,7 @@ def _render_file_row(item: FileItem) -> None:
 
     with (
         ui.card().props("flat").classes("w-full"),
-        ui.row().classes("items-center gap-4 w-full"),
+        ui.row().classes("items-center gap-4 w-full no-wrap"),
     ):
         icon_tile("menu_book" if item.ext == "epub" else "description")
 
@@ -128,7 +134,7 @@ def _render_file_row(item: FileItem) -> None:
             t("Download"),
             icon="download",
             on_click=lambda e, url=url: ui.download(url),
-        ).props("flat no-caps").classes("nd-btn-ghost")
+        ).props("flat no-caps").classes("nd-btn-ghost shrink-0")
 
 
 @ui.page("/history")
@@ -139,6 +145,7 @@ def page_history() -> None:
     # reactive state
     page: int = 1
     type_filter: TypeFilter = "All"
+    name_query: str = ""
     sort_by: SortKey = "mtime"
     sort_order: SortOrder = "desc"
 
@@ -163,6 +170,12 @@ def page_history() -> None:
                 {"All": t("All"), "txt": "txt", "epub": "epub"},
                 value=type_filter,
             ).props("dense no-caps")
+
+            name_filter_input = (
+                ui.input(placeholder=t("Filter by filename"))
+                .props("outlined dense clearable")
+                .classes("w-[200px]")
+            )
 
             ui.element("div").classes("grow")
 
@@ -206,26 +219,27 @@ def page_history() -> None:
         def _recompute_from_cache() -> None:
             """Recompute filtered+sorted items from cached all_items."""
             nonlocal sorted_items, page
-            filtered = _apply_filter(all_items, type_filter)
+            filtered = _apply_filter(all_items, type_filter, name_query)
             sorted_items = _apply_sort(filtered, sort_by, sort_order)
             page = 1
 
-        def _refresh_status(total: int, filtered_total: int) -> None:
+        def _refresh_status(total: int, filtered_total: int, total_size: int) -> None:
             status_area.clear()
             with status_area:
                 if filtered_total == total:
-                    ui.label(t("Total {total} files").format(total=total))
+                    count_text = t("Total {total} files").format(total=total)
                 else:
-                    ui.label(
-                        t("Total {total} files · After filter {filtered} files").format(
-                            total=total, filtered=filtered_total
-                        )
-                    )
+                    count_text = t(
+                        "Total {total} files · After filter {filtered} files"
+                    ).format(total=total, filtered=filtered_total)
+                size_text = t("Total size {size}").format(size=_format_size(total_size))
+                ui.label(f"{count_text} · {size_text}")
 
         def _refresh() -> None:
             nonlocal page
             total_all = len(all_items)
             total = len(sorted_items)
+            total_size = sum(it.size for it in sorted_items)
             total_pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
 
             # clamp page
@@ -235,7 +249,7 @@ def page_history() -> None:
             end = min(start + _PAGE_SIZE, total)
             current_slice = sorted_items[start:end]
 
-            _refresh_status(total_all, total)
+            _refresh_status(total_all, total, total_size)
 
             list_area.clear()
             with list_area:
@@ -272,6 +286,13 @@ def page_history() -> None:
             _recompute_from_cache()
             _refresh()
 
+        def _on_name_query_change(e: ValueChangeEventArguments[Any]) -> None:
+            nonlocal name_query
+            value = e.value
+            name_query = value.strip() if isinstance(value, str) else ""
+            _recompute_from_cache()
+            _refresh()
+
         def _on_sort_key_change(e: ValueChangeEventArguments[Any]) -> None:
             nonlocal sort_by
             sort_by = e.value
@@ -293,6 +314,7 @@ def page_history() -> None:
                 _refresh()
 
         type_sel.on_value_change(_on_type_change)
+        name_filter_input.on_value_change(_on_name_query_change)
         sort_key_sel.on_value_change(_on_sort_key_change)
         sort_order_sel.on_value_change(_on_sort_order_change)
 

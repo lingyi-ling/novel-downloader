@@ -32,8 +32,11 @@ def setup_dialog() -> None:
     # local state per page instance
     curr_req_id: str | None = None
 
-    with ui.dialog() as dialog, ui.card().props("flat").classes("min-w-[360px]"):
-        title_label = ui.label(t("Login Request")).classes("nd-h2")
+    with ui.dialog() as dialog, ui.card().props("flat").classes("min-w-[380px]"):
+        with ui.row().classes("items-center gap-3 no-wrap w-full"):
+            with ui.element("div").classes("nd-icon-tile"):
+                ui.icon("key")
+            title_label = ui.label(t("Login Request")).classes("nd-h2 flex-1")
 
         # dynamic form container
         form_col = ui.column().classes("w-full gap-2 mt-2")

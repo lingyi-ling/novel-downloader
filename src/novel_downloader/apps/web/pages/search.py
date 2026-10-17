@@ -12,6 +12,7 @@ import asyncio
 import logging
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from contextlib import aclosing, suppress
 from functools import partial
@@ -55,6 +56,8 @@ def _get_state() -> dict[str, Any]:
             "page_size": _PAGE_SIZE,
             "search_task": None,  # asyncio.Task | None
             "searching": False,  # bool
+            "searched": False,  # bool (True once a search has been started)
+            "started_at": 0.0,  # float (monotonic timestamp of last search start)
             "sort_key": "quality",  # quality | priority | site | title | author
             "sort_order": "desc",  # asc | desc
         }
@@ -160,20 +163,32 @@ def _render_result_row(r: SearchResult) -> None:
                     author=r["author"], words=r["word_count"], date=r["update_date"]
                 )
             ).classes("text-xs nd-muted")
-            ui.label(r["latest_chapter"]).classes("text-sm nd-muted")
+            if r["latest_chapter"].strip():
+                ui.label(r["latest_chapter"]).classes("text-sm nd-muted")
 
             with ui.row().classes("items-center gap-2"):
                 ui.label(_site_label(r["site"])).classes("nd-pill")
                 ui.label(f"ID: {r['book_id']}").classes("text-xs nd-muted")
 
-        async def _add_task() -> None:
-            title = r["title"]
-            ui.notify(t("Task added: {title}").format(title=title))
-            await manager.add_task(title=title, site=r["site"], book_id=r["book_id"])
-
-        ui.button(t("Download"), icon="download", on_click=_add_task).props(
+        dl_btn = ui.button(t("Download"), icon="download").props(
             "unelevated no-caps color=primary"
         )
+
+        async def _add_task() -> None:
+            title = r["title"]
+            # guard against double submission while the task is being queued
+            dl_btn.disable()
+            dl_btn.props("loading")
+            try:
+                ui.notify(t("Task added: {title}").format(title=title))
+                await manager.add_task(
+                    title=title, site=r["site"], book_id=r["book_id"]
+                )
+            finally:
+                dl_btn.props(remove="loading")
+                dl_btn.enable()
+
+        dl_btn.on_click(_add_task)
 
 
 def _build_settings_dropdown(
@@ -299,11 +314,16 @@ def page_search() -> None:
                 search_btn = ui.button(t("Search"), icon="search").props(
                     "unelevated no-caps color=primary"
                 )
-                ui.button(
-                    t("Stop"),
-                    icon="stop",
-                    on_click=lambda: _cancel_current(state),
-                ).props("flat no-caps").classes("nd-btn-ghost")
+                stop_btn = (
+                    ui.button(
+                        t("Stop"),
+                        icon="stop",
+                        on_click=lambda: _cancel_current(state),
+                    )
+                    .props("flat no-caps")
+                    .classes("nd-btn-ghost")
+                )
+                stop_btn.disable()  # nothing to stop until a search runs
 
             with ui.row().classes(
                 "items-center justify-between w-full gap-2 flex-wrap"
@@ -389,19 +409,36 @@ def page_search() -> None:
         list_area = ui.column().classes("w-full gap-3")
         pager_area = ui.row().classes("items-center justify-center w-full q-mt-md")
 
+    # applied disabled state of the Stop button, to avoid redundant toggling
+    stop_disabled = True
+
     @ui.refreshable
     def render_status() -> None:
+        nonlocal stop_disabled
+        want_disabled = not bool(state.get("searching"))
+        if want_disabled != stop_disabled:
+            stop_disabled = want_disabled
+            if want_disabled:
+                stop_btn.disable()
+            else:
+                stop_btn.enable()
+
         status_area.clear()
         with status_area:
-            if state.get("searching"):
+            searching = bool(state.get("searching"))
+            if searching:
                 ui.icon("hourglass_top").classes("nd-muted")
                 ui.label(t("Searching (results will appear progressively)...")).classes(
                     "text-caption"
                 )
             total = len(state.get("results") or [])
-            if total > 0:
+            if searching or total > 0:
+                started_at = float(state.get("started_at") or 0.0)
+                seconds = time.monotonic() - started_at if started_at > 0.0 else 0.0
                 ui.label(
-                    t("Currently retrieved {total} results").format(total=total)
+                    t("Retrieved {total} results in {seconds}s").format(
+                        total=total, seconds=f"{seconds:.1f}"
+                    )
                 ).classes("text-caption")
 
     @ui.refreshable
@@ -432,6 +469,10 @@ def page_search() -> None:
             with list_area:
                 for _ in range(3):
                     skeleton_card()
+        elif state.get("searched"):
+            # a search has run to completion but matched nothing
+            with list_area:
+                empty_state("search_off", t("No books found for this keyword"))
         else:
             with list_area:
                 empty_state("search", t("Enter a keyword to start searching"))
@@ -514,6 +555,10 @@ def page_search() -> None:
         state["sites"] = get_sites()
         per_site_limit = get_psl()
         timeout_val = get_timeout()
+
+        # mark that a search has run and record its start time
+        state["searched"] = True
+        state["started_at"] = time.monotonic()
 
         # kick off streaming search as a background task
         task = asyncio.create_task(

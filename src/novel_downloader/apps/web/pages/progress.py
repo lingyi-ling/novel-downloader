@@ -11,15 +11,19 @@ from nicegui import ui
 from novel_downloader.infra.i18n import t
 
 from ..components import page_frame
-from ..components.widgets import page_header, status_pill
+from ..components.widgets import empty_state, page_header, status_pill
 from ..models import DownloadTask
 from ..services import manager, setup_dialog
 
 
-def _meta_row(label: str, value: str) -> None:
-    with ui.row().classes("items-center justify-between text-xs nd-muted w-full"):
-        ui.label(label)
-        ui.label(value)
+def _meta_grid(tsk: DownloadTask) -> None:
+    with ui.row().classes("w-full gap-4 items-start"):
+        with ui.column().classes("gap-0 min-w-0 flex-1"):
+            ui.label(t("Site")).classes("text-xs nd-muted")
+            ui.label(tsk.site).classes("text-xs ellipsis")
+        with ui.column().classes("gap-0 min-w-0 flex-1"):
+            ui.label(t("Book ID")).classes("text-xs nd-muted")
+            ui.label(tsk.book_id).classes("text-xs ellipsis")
 
 
 def _format_seconds(sec: float | None) -> str:
@@ -113,8 +117,7 @@ def _task_card(tsk: DownloadTask, *, active: bool) -> None:
 
         # Meta grid
         with ui.column().classes("w-full gap-1 mt-2"):
-            _meta_row(t("Site"), tsk.site)
-            _meta_row(t("Book ID"), tsk.book_id)
+            _meta_grid(tsk)
             if tsk.status == "failed" and tsk.error:
                 with ui.row().classes("items-start justify-between w-full"):
                     ui.label(t("Error")).classes("text-xs nd-muted")
@@ -142,11 +145,15 @@ def page_progress() -> None:
 
             # Active section
             with ui.card().props("flat").classes("w-full"):
-                ui.label(t("Running / Queued")).classes("nd-h2")
                 running = s["running"]
                 pending = s["pending"]
+                active_count = len(running) + len(pending)
+                with ui.row().classes("items-center justify-between w-full"):
+                    ui.label(t("Running / Queued")).classes("nd-h2")
+                    if active_count:
+                        ui.label(str(active_count)).classes("nd-pill")
                 if not running and not pending:
-                    ui.label(t("None")).classes("text-sm nd-muted")
+                    empty_state("download_done", t("No tasks yet"))
                 else:
                     for tsk in running:
                         _task_card(tsk, active=True)
@@ -155,11 +162,15 @@ def page_progress() -> None:
 
             # History section
             with ui.card().props("flat").classes("w-full"):
-                ui.label(t("Completed / Cancelled / Failed")).classes("nd-h2")
-                if not s["completed"]:
-                    ui.label(t("None")).classes("text-sm nd-muted")
+                completed = s["completed"]
+                with ui.row().classes("items-center justify-between w-full"):
+                    ui.label(t("Completed / Cancelled / Failed")).classes("nd-h2")
+                    if completed:
+                        ui.label(str(len(completed))).classes("nd-pill")
+                if not completed:
+                    empty_state("cloud_off", t("No finished tasks yet"))
                 else:
-                    for tsk in s["completed"]:
+                    for tsk in completed:
                         _task_card(tsk, active=False)
 
         # periodic refresh

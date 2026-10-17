@@ -15,6 +15,7 @@ from typing import Any
 from nicegui import ui
 from nicegui.events import ClickEventArguments, ValueChangeEventArguments
 
+from novel_downloader import __version__
 from novel_downloader.infra.i18n import (
     available_languages,
     get_language,
@@ -82,6 +83,8 @@ def page_frame(active: str) -> None:
                 _side_item(icon, _nav_label(key), path, key == active)
 
         ui.element("div").classes("grow")
+
+        ui.label(f"v{__version__}").classes("nd-side-tagline q-px-sm")
 
     with ui.header().classes("nd-topbar items-center gap-2"):
         ui.button(icon="menu", on_click=drawer.toggle).props(
