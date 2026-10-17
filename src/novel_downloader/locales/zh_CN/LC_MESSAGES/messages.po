@@ -685,9 +685,9 @@ msgstr "名称"
 
 #: src/novel_downloader/apps/cli/commands/sources.py:78
 #: src/novel_downloader/apps/web/components/shell.py:41
-#: src/novel_downloader/apps/web/pages/search.py:290
-#: src/novel_downloader/apps/web/pages/search.py:299
-#: src/novel_downloader/apps/web/pages/search.py:317
+#: src/novel_downloader/apps/web/pages/search.py:421
+#: src/novel_downloader/apps/web/pages/search.py:430
+#: src/novel_downloader/apps/web/pages/search.py:448
 msgid "Search"
 msgstr "搜索"
 
@@ -940,13 +940,13 @@ msgstr "书籍 ID"
 
 #: src/novel_downloader/apps/cli/prompts.py:145
 #: src/novel_downloader/apps/cli/prompts.py:202
-#: src/novel_downloader/apps/web/pages/search.py:366
+#: src/novel_downloader/apps/web/pages/search.py:497
 msgid "Title"
 msgstr "书名"
 
 #: src/novel_downloader/apps/cli/prompts.py:145
 #: src/novel_downloader/apps/cli/prompts.py:203
-#: src/novel_downloader/apps/web/pages/search.py:367
+#: src/novel_downloader/apps/web/pages/search.py:498
 msgid "Author"
 msgstr "作者"
 
@@ -1168,13 +1168,13 @@ msgid "Opening a login window for {site}..."
 msgstr "正在为 {site} 打开登录窗口……"
 
 #: src/novel_downloader/apps/login/main.py:217
-#: src/novel_downloader/apps/web/pages/search.py:356
+#: src/novel_downloader/apps/web/pages/search.py:487
 #, python-brace-format
 msgid "Log in to {site}"
 msgstr "登录 {site}"
 
 #: src/novel_downloader/apps/login/main.py:224
-#: src/novel_downloader/apps/web/pages/search.py:339
+#: src/novel_downloader/apps/web/pages/search.py:470
 msgid "Could not open the login window."
 msgstr "无法打开登录窗口。"
 
@@ -1231,7 +1231,7 @@ msgstr "加载配置失败: {err}"
 #: src/novel_downloader/apps/web/pages/download.py:23
 #: src/novel_downloader/apps/web/pages/download.py:29
 #: src/novel_downloader/apps/web/pages/history.py:134
-#: src/novel_downloader/apps/web/pages/search.py:175
+#: src/novel_downloader/apps/web/pages/search.py:269
 msgid "Download"
 msgstr "下载"
 
@@ -1250,7 +1250,7 @@ msgstr "历史记录"
 #: src/novel_downloader/apps/web/pages/download.py:23
 #: src/novel_downloader/apps/web/pages/history.py:142
 #: src/novel_downloader/apps/web/pages/progress.py:133
-#: src/novel_downloader/apps/web/pages/search.py:290
+#: src/novel_downloader/apps/web/pages/search.py:421
 msgid "Novel Downloader"
 msgstr "小说下载器"
 
@@ -1334,7 +1334,7 @@ msgstr "粘贴完整的小说详情页链接, 系统会自动解析站点和书�
 
 #: src/novel_downloader/apps/web/pages/download.py:77
 #: src/novel_downloader/apps/web/pages/progress.py:22
-#: src/novel_downloader/apps/web/pages/search.py:365
+#: src/novel_downloader/apps/web/pages/search.py:496
 msgid "Site"
 msgstr "站点"
 
@@ -1343,8 +1343,8 @@ msgid "If you already know the site and book ID, you can enter them directly her
 msgstr "若已知站点与书籍ID, 可在此直接输入"
 
 #: src/novel_downloader/apps/web/pages/download.py:99
-#: src/novel_downloader/apps/web/pages/search.py:232
-#: src/novel_downloader/apps/web/pages/search.py:428
+#: src/novel_downloader/apps/web/pages/search.py:336
+#: src/novel_downloader/apps/web/pages/search.py:559
 msgid "Clear"
 msgstr "清空"
 
@@ -1376,7 +1376,8 @@ msgstr "无法解析该 URL, 请检查链接或站点支持情况"
 
 #: src/novel_downloader/apps/web/pages/download.py:182
 #: src/novel_downloader/apps/web/pages/download.py:193
-#: src/novel_downloader/apps/web/pages/search.py:185
+#: src/novel_downloader/apps/web/pages/search.py:212
+#: src/novel_downloader/apps/web/pages/search.py:279
 #, python-brace-format
 msgid "Task added: {title}"
 msgstr "已添加任务: {title}"
@@ -1416,12 +1417,12 @@ msgid "Filename"
 msgstr "文件名"
 
 #: src/novel_downloader/apps/web/pages/history.py:194
-#: src/novel_downloader/apps/web/pages/search.py:383
+#: src/novel_downloader/apps/web/pages/search.py:514
 msgid "Ascending"
 msgstr "升序"
 
 #: src/novel_downloader/apps/web/pages/history.py:194
-#: src/novel_downloader/apps/web/pages/search.py:383
+#: src/novel_downloader/apps/web/pages/search.py:514
 msgid "Descending"
 msgstr "降序"
 
@@ -1523,114 +1524,118 @@ msgstr "已完成 / 已取消 / 失败"
 msgid "No finished tasks yet"
 msgstr "暂无已完成的任务"
 
-#: src/novel_downloader/apps/web/pages/search.py:87
+#: src/novel_downloader/apps/web/pages/search.py:94
 msgid "Timeout must be > 0 seconds, reset to 10.0"
 msgstr "超时需 > 0 秒, 已重置为 10.0"
 
-#: src/novel_downloader/apps/web/pages/search.py:102
+#: src/novel_downloader/apps/web/pages/search.py:109
 msgid "Per-site limit must be a positive integer, reset to 30"
 msgstr "单站条数上限需为正整数, 已重置为 30"
 
-#: src/novel_downloader/apps/web/pages/search.py:164
+#: src/novel_downloader/apps/web/pages/search.py:258
 #, python-brace-format
 msgid "{author} · {words} · Updated at {date}"
 msgstr "{author} · {words} · 更新于 {date}"
 
-#: src/novel_downloader/apps/web/pages/search.py:210
+#: src/novel_downloader/apps/web/pages/search.py:310
 msgid "Settings"
 msgstr "设置"
 
-#: src/novel_downloader/apps/web/pages/search.py:217
+#: src/novel_downloader/apps/web/pages/search.py:317
 msgid "Site Selection"
 msgstr "站点选择"
 
-#: src/novel_downloader/apps/web/pages/search.py:229
+#: src/novel_downloader/apps/web/pages/search.py:333
 msgid "Select All"
 msgstr "全选"
 
-#: src/novel_downloader/apps/web/pages/search.py:245
+#: src/novel_downloader/apps/web/pages/search.py:341
+msgid "Filter sites"
+msgstr "过滤站点"
+
+#: src/novel_downloader/apps/web/pages/search.py:376
 msgid "Advanced Settings"
 msgstr "高级设置"
 
-#: src/novel_downloader/apps/web/pages/search.py:249
+#: src/novel_downloader/apps/web/pages/search.py:380
 msgid "Per-site Limit"
 msgstr "单个站点结果上限"
 
-#: src/novel_downloader/apps/web/pages/search.py:259
+#: src/novel_downloader/apps/web/pages/search.py:390
 msgid "Timeout (seconds)"
 msgstr "超时(秒)"
 
-#: src/novel_downloader/apps/web/pages/search.py:300
+#: src/novel_downloader/apps/web/pages/search.py:431
 msgid "Search across supported sites and queue downloads in one click"
 msgstr "跨站点搜索小说，一键加入下载队列"
 
-#: src/novel_downloader/apps/web/pages/search.py:312
+#: src/novel_downloader/apps/web/pages/search.py:443
 msgid "Enter keyword"
 msgstr "输入关键字"
 
-#: src/novel_downloader/apps/web/pages/search.py:322
+#: src/novel_downloader/apps/web/pages/search.py:453
 msgid "Stop"
 msgstr "停止"
 
-#: src/novel_downloader/apps/web/pages/search.py:342
+#: src/novel_downloader/apps/web/pages/search.py:473
 msgid "Login window opened; complete the sign-in there."
 msgstr "登录窗口已打开，请在该窗口中完成登录。"
 
-#: src/novel_downloader/apps/web/pages/search.py:346
+#: src/novel_downloader/apps/web/pages/search.py:477
 msgid "Login successful; session cookies saved."
 msgstr "登录成功，会话 Cookies 已保存。"
 
-#: src/novel_downloader/apps/web/pages/search.py:350
+#: src/novel_downloader/apps/web/pages/search.py:481
 msgid "Login was not completed."
 msgstr "登录未完成。"
 
-#: src/novel_downloader/apps/web/pages/search.py:363
+#: src/novel_downloader/apps/web/pages/search.py:494
 msgid "Quality"
 msgstr "优选"
 
-#: src/novel_downloader/apps/web/pages/search.py:364
+#: src/novel_downloader/apps/web/pages/search.py:495
 msgid "Priority"
 msgstr "优先级"
 
-#: src/novel_downloader/apps/web/pages/search.py:368
+#: src/novel_downloader/apps/web/pages/search.py:499
 msgid "Word count"
 msgstr "字数"
 
-#: src/novel_downloader/apps/web/pages/search.py:369
+#: src/novel_downloader/apps/web/pages/search.py:500
 msgid "Update time"
 msgstr "更新时间"
 
-#: src/novel_downloader/apps/web/pages/search.py:375
+#: src/novel_downloader/apps/web/pages/search.py:506
 msgid "Sort"
 msgstr "排序"
 
-#: src/novel_downloader/apps/web/pages/search.py:413
+#: src/novel_downloader/apps/web/pages/search.py:544
 msgid "Recent searches"
 msgstr "最近搜索"
 
-#: src/novel_downloader/apps/web/pages/search.py:462
+#: src/novel_downloader/apps/web/pages/search.py:593
 msgid "Searching (results will appear progressively)..."
 msgstr "正在搜索 (结果将陆续显示)..."
 
-#: src/novel_downloader/apps/web/pages/search.py:470
+#: src/novel_downloader/apps/web/pages/search.py:602
 #, python-brace-format
-msgid "Retrieved {total} results in {seconds}s"
-msgstr "已检索到 {total} 条结果，用时 {seconds} 秒"
+msgid "Retrieved {total} results from {sites} sites in {seconds}s"
+msgstr "已从 {sites} 个站点获取 {total} 条结果，用时 {seconds} 秒"
 
-#: src/novel_downloader/apps/web/pages/search.py:492
+#: src/novel_downloader/apps/web/pages/search.py:625
 #, python-brace-format
-msgid "Total {total} results (page {page}/{pages})"
-msgstr "共 {total} 条结果 (第 {page}/{pages} 页)"
+msgid "Total {total} books (page {page}/{pages})"
+msgstr "共 {total} 本书（第 {page}/{pages} 页）"
 
-#: src/novel_downloader/apps/web/pages/search.py:506
+#: src/novel_downloader/apps/web/pages/search.py:639
 msgid "No books found for this keyword"
 msgstr "未找到与该关键词匹配的书籍"
 
-#: src/novel_downloader/apps/web/pages/search.py:509
+#: src/novel_downloader/apps/web/pages/search.py:642
 msgid "Enter a keyword to start searching"
 msgstr "请输入搜索关键字"
 
-#: src/novel_downloader/apps/web/pages/search.py:578
+#: src/novel_downloader/apps/web/pages/search.py:711
 msgid "Please enter a keyword"
 msgstr "请输入关键词"
 

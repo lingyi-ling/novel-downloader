@@ -9,22 +9,29 @@ Search UI with a settings dropdown, persistent state, and paginated results.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import aclosing, suppress
 from functools import partial
 from typing import Any
 
 from nicegui import ui
 from nicegui.elements.number import Number
-from nicegui.events import KeyEventArguments, ValueChangeEventArguments
+from nicegui.events import (
+    GenericEventArguments,
+    KeyEventArguments,
+    ValueChangeEventArguments,
+)
 
 from novel_downloader.apps.constants import SEARCH_SUPPORT_SITES
 from novel_downloader.apps.login import LOGIN_SITES
 from novel_downloader.infra.i18n import t
+from novel_downloader.plugins.grouping import ResultGroup, group_results
 from novel_downloader.plugins.ranking import default_order, sort_results
 from novel_downloader.plugins.search import search_stream
 from novel_downloader.schemas import SearchResult
@@ -107,9 +114,28 @@ def _coerce_psl(inp: Number) -> int:
     return int(v)
 
 
-def _render_placeholder_cover() -> None:
-    with ui.element("div").classes("nd-cover-empty"):
+def _render_placeholder_cover() -> ui.element:
+    with ui.element("div").classes("nd-cover-empty") as box:
         ui.icon("menu_book").classes("text-2xl")
+    return box
+
+
+def _render_cover(cover: str) -> None:
+    """Render the cover image, falling back to a placeholder on load error."""
+    if not cover.startswith(("http://", "https://")):
+        _render_placeholder_cover()
+        return
+
+    img = ui.image(cover).classes("nd-cover")
+    fallback = _render_placeholder_cover()
+    fallback.set_visibility(False)
+
+    def _on_error(_: GenericEventArguments) -> None:
+        # swap the broken remote cover for the empty-cover placeholder
+        img.set_visibility(False)
+        fallback.set_visibility(True)
+
+    img.on("error", _on_error)
 
 
 def _site_label(site_key: str) -> str:
@@ -145,46 +171,116 @@ def _apply_sort(state: dict[str, Any]) -> None:
     )
 
 
-def _render_result_row(r: SearchResult) -> None:
+def _compute_groups(st: dict[str, Any], query: str) -> list[ResultGroup]:
+    """Sort the flat results, then merge same-book sources into groups."""
+    _apply_sort(st)
+    return group_results(st["results"], keyword=query)
+
+
+def _highlighted_title(title: str, query: str) -> str:
+    """HTML-escape ``title`` and wrap case-insensitive query hits in nd-hl."""
+    safe_title = html.escape(title)
+    q = query.strip()
+    if not q:
+        return safe_title
+    pattern = re.compile(re.escape(q), re.IGNORECASE)
+    parts: list[str] = []
+    last = 0
+    for m in pattern.finditer(title):
+        parts.append(html.escape(title[last : m.start()]))
+        parts.append(f'<span class="nd-hl">{html.escape(m.group())}</span>')
+        last = m.end()
+    parts.append(html.escape(title[last:]))
+    return "".join(parts)
+
+
+def _is_same_source(a: SearchResult, b: SearchResult) -> bool:
+    return a["site"] == b["site"] and a["book_id"] == b["book_id"]
+
+
+def _queue_source_handler(
+    src: SearchResult, btn: ui.button
+) -> Callable[[], Awaitable[None]]:
+    """Build an on_click handler that queues ``src`` with double-submit guard."""
+
+    async def _add_task() -> None:
+        title = src["title"]
+        # guard against double submission while the task is being queued
+        btn.disable()
+        btn.props("loading")
+        try:
+            ui.notify(t("Task added: {title}").format(title=title))
+            await manager.add_task(
+                title=title, site=src["site"], book_id=src["book_id"]
+            )
+        finally:
+            btn.props(remove="loading")
+            btn.enable()
+
+    return _add_task
+
+
+def _render_sources_row(group: ResultGroup) -> None:
+    """One clickable pill per source; the primary source is highlighted."""
+    primary = group.primary
+    multi = len(group.sources) > 1
+    with ui.row().classes("items-center gap-2 flex-wrap"):
+        for src in group.sources:
+            btn = (
+                ui.button(_site_label(src["site"]))
+                .props("flat no-caps dense")
+                .classes("nd-pill")
+            )
+            if multi and _is_same_source(src, primary):
+                btn.classes(add="nd-pill--running")
+            btn.on_click(_queue_source_handler(src, btn))
+        if not multi:
+            # single-source group: keep the old "site pill + ID" look
+            ui.label(f"ID: {primary['book_id']}").classes("text-xs nd-muted")
+
+
+def _render_group_row(group: ResultGroup, query: str) -> None:
+    primary = group.primary
     with (
         ui.card().props("flat").classes("w-full"),
         ui.row().classes("items-start justify-between w-full gap-4"),
     ):
-        cover = (r.get("cover_url") or "").strip()
-        if cover.startswith(("http://", "https://")):
-            ui.image(cover).classes("nd-cover")
-        else:
-            _render_placeholder_cover()
+        _render_cover((primary.get("cover_url") or "").strip())
 
         with ui.column().classes("gap-1 grow"):
-            ui.link(r["title"], r["book_url"], new_tab=True).classes(
-                "nd-link text-base"
-            )
+            href = html.escape(primary["book_url"], quote=True)
+            title_html = _highlighted_title(primary["title"], query)
+            ui.html(
+                f'<a href="{href}" target="_blank" rel="noopener" '
+                f'class="nd-link">{title_html}</a>'
+            ).classes("text-base")
             ui.label(
                 t("{author} · {words} · Updated at {date}").format(
-                    author=r["author"], words=r["word_count"], date=r["update_date"]
+                    author=primary["author"],
+                    words=primary["word_count"],
+                    date=primary["update_date"],
                 )
             ).classes("text-xs nd-muted")
-            if r["latest_chapter"].strip():
-                ui.label(r["latest_chapter"]).classes("text-sm nd-muted")
+            if primary["latest_chapter"].strip():
+                ui.label(primary["latest_chapter"]).classes("text-sm nd-muted")
 
-            with ui.row().classes("items-center gap-2"):
-                ui.label(_site_label(r["site"])).classes("nd-pill")
-                ui.label(f"ID: {r['book_id']}").classes("text-xs nd-muted")
+            _render_sources_row(group)
 
         dl_btn = ui.button(t("Download"), icon="download").props(
             "unelevated no-caps color=primary"
         )
 
         async def _add_task() -> None:
-            title = r["title"]
+            title = primary["title"]
             # guard against double submission while the task is being queued
             dl_btn.disable()
             dl_btn.props("loading")
             try:
                 ui.notify(t("Task added: {title}").format(title=title))
                 await manager.add_task(
-                    title=title, site=r["site"], book_id=r["book_id"]
+                    title=title,
+                    site=primary["site"],
+                    book_id=primary["book_id"],
                 )
             finally:
                 dl_btn.props(remove="loading")
@@ -204,6 +300,10 @@ def _build_settings_dropdown(
       * get_psl(): per-site limit (int)
       * get_timeout(): timeout (float)
     """
+    selected = set(state.get("sites") or [])
+    site_values: dict[str, bool] = {
+        key: key in selected for key in SEARCH_SUPPORT_SITES
+    }
     site_cbs: dict[str, Any] = {}
 
     settings_btn = (
@@ -218,13 +318,17 @@ def _build_settings_dropdown(
 
             with ui.row().classes("gap-2"):
 
-                def _select_all() -> None:
+                def _set_all(value: bool) -> None:
+                    for key in site_values:
+                        site_values[key] = value
                     for cb in site_cbs.values():
-                        cb.set_value(True)
+                        cb.set_value(value)
+
+                def _select_all() -> None:
+                    _set_all(True)
 
                 def _clear_all() -> None:
-                    for cb in site_cbs.values():
-                        cb.set_value(False)
+                    _set_all(False)
 
                 ui.button(t("Select All"), on_click=_select_all).props(
                     "flat no-caps dense"
@@ -233,13 +337,40 @@ def _build_settings_dropdown(
 
             ui.separator()
 
-            with (
-                ui.scroll_area().classes("w-[300px] max-h-[260px] q-mt-xs"),
-                ui.column().classes("gap-1"),
-            ):
-                selected = set(state.get("sites") or [])
-                for key, label in SEARCH_SUPPORT_SITES.items():
-                    site_cbs[key] = ui.checkbox(label, value=(key in selected))
+            site_filter_in = (
+                ui.input(t("Filter sites"))
+                .props("outlined dense clearable")
+                .classes("w-[300px] q-mt-xs")
+            )
+
+            @ui.refreshable
+            def render_site_list() -> None:
+                flt = (site_filter_in.value or "").strip().casefold()
+                site_cbs.clear()
+                with (
+                    ui.scroll_area().classes("w-[300px] max-h-[260px] q-mt-xs"),
+                    ui.column().classes("gap-1"),
+                ):
+                    for key, label in SEARCH_SUPPORT_SITES.items():
+                        haystack = f"{label} {key}".casefold()
+                        if flt and flt not in haystack:
+                            continue
+
+                        def _on_site_toggle(
+                            e: ValueChangeEventArguments[Any], k: str = key
+                        ) -> None:
+                            site_values[k] = bool(e.value)
+
+                        site_cbs[key] = ui.checkbox(
+                            label, value=site_values[key]
+                        ).on_value_change(_on_site_toggle)
+
+            render_site_list()
+
+            def _on_filter_change(_: ValueChangeEventArguments[Any]) -> None:
+                render_site_list.refresh()
+
+            site_filter_in.on_value_change(_on_filter_change)
 
             ui.separator()
             ui.label(t("Advanced Settings")).classes("text-sm nd-muted q-mt-sm")
@@ -269,7 +400,7 @@ def _build_settings_dropdown(
     settings_btn.on("click", lambda: menu.open())
 
     def _get_sites() -> list[str] | None:
-        chosen = [k for k, cb in site_cbs.items() if bool(cb.value)]
+        chosen = [k for k in SEARCH_SUPPORT_SITES if site_values.get(k)]
         return chosen or None
 
     def _get_psl() -> int:
@@ -462,14 +593,15 @@ def page_search() -> None:
                 ui.label(t("Searching (results will appear progressively)...")).classes(
                     "text-caption"
                 )
-            total = len(state.get("results") or [])
+            results: list[SearchResult] = state.get("results") or []
+            total = len(results)
+            sites = len({r["site"] for r in results})
             if searching or total > 0:
                 started_at = float(state.get("started_at") or 0.0)
                 seconds = time.monotonic() - started_at if started_at > 0.0 else 0.0
+                msg = t("Retrieved {total} results from {sites} sites in {seconds}s")
                 ui.label(
-                    t("Retrieved {total} results in {seconds}s").format(
-                        total=total, seconds=f"{seconds:.1f}"
-                    )
+                    msg.format(total=total, sites=sites, seconds=f"{seconds:.1f}")
                 ).classes("text-caption")
 
     @ui.refreshable
@@ -477,8 +609,9 @@ def page_search() -> None:
         list_area.clear()
         pager_area.clear()
 
-        results: list[SearchResult] = state["results"]
-        total = len(results)
+        query = str(state.get("query") or "")
+        groups = _compute_groups(state, query)
+        total = len(groups)
         page_size = int(state["page_size"])
         total_pages = max(1, (total + page_size - 1) // page_size)
         page = max(1, min(int(state["page"]), total_pages))
@@ -486,16 +619,16 @@ def page_search() -> None:
 
         start = (page - 1) * page_size
         end = min(total, start + page_size)
-        current = results[start:end]
+        current = groups[start:end]
 
         if total > 0:
-            tip = t("Total {total} results (page {page}/{pages})").format(
+            tip = t("Total {total} books (page {page}/{pages})").format(
                 total=total, page=page, pages=total_pages
             )
             with list_area:
                 ui.label(tip).classes("text-sm text-caption")
-                for r in current:
-                    _render_result_row(r)
+                for group in current:
+                    _render_group_row(group, query)
         elif state.get("searching"):
             with list_area:
                 for _ in range(3):
@@ -607,7 +740,8 @@ def page_search() -> None:
         if not e.action.keyup:
             return
 
-        total = len(state["results"])
+        query = str(state.get("query") or "")
+        total = len(_compute_groups(state, query))
         if total == 0:
             return
         page_size = int(state["page_size"])

@@ -616,6 +616,13 @@ body .nd-parse-banner {
   padding: 0.5rem 0.75rem;
 }
 
+/* --------------------------------------------------------- search results */
+body .nd-hl {
+  background: var(--nd-accent-soft);
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
 @keyframes nd-shimmer {
   0% {
     background-position: 100% 50%;
