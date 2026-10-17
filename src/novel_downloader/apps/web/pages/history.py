@@ -96,22 +96,22 @@ def _render_file_card(item: FileItem) -> None:
     url = f"/downloads/{quote(item.name)}?v={int(item.mtime)}"
     human_mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item.mtime))
 
-    with ui.card().classes("w-full"), ui.row().classes("items-start gap-4"):
-        if item.ext == "epub":
-            ui.icon("menu_book").classes("text-4xl")
-        else:  # txt
-            ui.icon("description").classes("text-4xl")
+    with (
+        ui.card().props("flat").classes("w-full"),
+        ui.row().classes("items-center gap-4 w-full"),
+    ):
+        with ui.element("div").classes("nd-icon-tile"):
+            ui.icon("menu_book" if item.ext == "epub" else "description")
 
         # Meta & actions
-        with ui.column().classes("min-w-0"):
+        with ui.column().classes("min-w-0 grow gap-1"):
             ui.label(item.name).classes("text-base font-medium break-words")
-            ui.label(f"Modified: {human_mtime}").classes("text-xs text-caption")
-            with ui.row().classes("mt-2"):
-                ui.button(
-                    "Download",
-                    icon="download",
-                    on_click=lambda e, url=url: ui.download(url),
-                ).props("outline size=sm")
+            ui.label(f"Modified: {human_mtime}").classes("text-xs nd-muted")
+            ui.button(
+                "Download",
+                icon="download",
+                on_click=lambda e, url=url: ui.download(url),
+            ).props("flat no-caps size=sm").classes("nd-btn-ghost")
 
 
 @ui.page("/history")
@@ -130,15 +130,15 @@ def page_history() -> None:
     sorted_items: list[FileItem] = []
 
     # centered, responsive container
-    with ui.column().classes("w-full max-w-screen-lg min-w-[320px] mx-auto gap-4"):
-        ui.label(t("Download History")).classes("text-lg")
+    with ui.column().classes("nd-page w-full max-w-screen-lg min-w-[320px] mx-auto"):
+        ui.label(t("Download History")).classes("nd-h1")
 
         # Toolbar (filters & sorting)
         with (
-            ui.card().classes("w-full"),
+            ui.card().props("flat").classes("w-full"),
             ui.row().classes("items-center gap-3 w-full flex-wrap"),
         ):
-            ui.label(t("Type")).classes("text-sm text-caption")
+            ui.label(t("Type")).classes("text-sm nd-muted")
             type_sel = (
                 ui.select(
                     ["All", "txt", "epub"],
@@ -153,7 +153,7 @@ def page_history() -> None:
                 "mx-1 self-stretch hidden md:block"
             )
 
-            ui.label(t("Sort Field")).classes("text-sm text-caption")
+            ui.label(t("Sort Field")).classes("text-sm nd-muted")
             sort_key_sel = (
                 ui.select(
                     {"name": t("Filename"), "mtime": t("Modified Time")},
@@ -166,7 +166,7 @@ def page_history() -> None:
 
             sort_order_sel = ui.toggle(
                 {"asc": t("Ascending"), "desc": t("Descending")}, value=sort_order
-            ).props("dense")
+            ).props("dense no-caps")
 
             def _on_refresh() -> None:
                 _reload()
@@ -176,12 +176,10 @@ def page_history() -> None:
                 t("Refresh"),
                 icon="refresh",
                 on_click=_on_refresh,
-            ).props("dense flat")
+            ).props("flat no-caps").classes("nd-btn-ghost")
 
         # status line (counts)
-        status_area = ui.row().classes(
-            "items-center gap-2 w-full text-sm text-secondary"
-        )
+        status_area = ui.row().classes("items-center gap-2 w-full text-sm nd-muted")
 
         # list + pager
         list_area = ui.column().classes("w-full gap-3")

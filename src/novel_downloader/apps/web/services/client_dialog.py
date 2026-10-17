@@ -32,8 +32,8 @@ def setup_dialog() -> None:
     # local state per page instance
     curr_req_id: str | None = None
 
-    with ui.dialog() as dialog, ui.card().classes("min-w-[360px]"):
-        title_label = ui.label(t("Login Request")).classes("text-base font-medium")
+    with ui.dialog() as dialog, ui.card().props("flat").classes("min-w-[360px]"):
+        title_label = ui.label(t("Login Request")).classes("nd-h2")
 
         # dynamic form container
         form_col = ui.column().classes("w-full gap-2 mt-2")
@@ -52,7 +52,7 @@ def setup_dialog() -> None:
                     with ui.column().classes("w-full gap-1"):
                         ui.label(f.label).classes("text-sm font-medium")
                         if getattr(f, "description", ""):
-                            ui.label(t(f.description)).classes("text-xs text-caption")
+                            ui.label(t(f.description)).classes("text-xs nd-muted")
 
                         initial = prefill.get(f.name, f.default or "")
 
@@ -65,7 +65,7 @@ def setup_dialog() -> None:
                                     value=initial,
                                     placeholder=t(f.placeholder) or "",
                                 )
-                                .props("dense")
+                                .props("outlined dense")
                                 .classes("w-full")
                             )
                             w.label = None
@@ -77,7 +77,7 @@ def setup_dialog() -> None:
                                     value=initial,
                                     placeholder=t(f.placeholder) or "",
                                 )
-                                .props("dense")
+                                .props("outlined dense")
                                 .classes("w-full")
                             )
                             w.label = None
@@ -89,7 +89,7 @@ def setup_dialog() -> None:
                                     value=initial,
                                     placeholder=t(f.placeholder) or "",
                                 )
-                                .props("dense")
+                                .props("outlined dense")
                                 .classes("w-full")
                             )
                             w.label = None
@@ -124,9 +124,13 @@ def setup_dialog() -> None:
             dialog.close()
             ui.notify(t("Submitted successfully"))
 
-        with ui.row().classes("justify-end w-full mt-2"):
-            ui.button(t("Cancel"), on_click=on_cancel).props("flat color=secondary")
-            ui.button(t("Submit"), on_click=on_submit)
+        with ui.row().classes("justify-end w-full mt-2 gap-2"):
+            ui.button(t("Cancel"), on_click=on_cancel).props("flat no-caps").classes(
+                "nd-btn-ghost"
+            )
+            ui.button(t("Submit"), on_click=on_submit).props(
+                "unelevated no-caps color=primary"
+            )
 
     dialog.props("persistent")
 

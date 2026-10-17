@@ -102,10 +102,8 @@ def _coerce_psl(inp: Number) -> int:
 
 
 def _render_placeholder_cover() -> None:
-    with ui.element("div").classes(
-        "w-[72px] h-[96px] bg-grey-3 rounded-md flex items-center justify-center"
-    ):
-        ui.icon("book").classes("text-secondary text-3xl")
+    with ui.element("div").classes("nd-cover-empty"):
+        ui.icon("menu_book").classes("text-2xl")
 
 
 def _site_label(site_key: str) -> str:
@@ -143,28 +141,28 @@ def _apply_sort(state: dict[str, Any]) -> None:
 
 def _render_result_row(r: SearchResult) -> None:
     with (
-        ui.card().classes("w-full"),
-        ui.row().classes("items-start justify-between w-full gap-3"),
+        ui.card().props("flat").classes("w-full"),
+        ui.row().classes("items-start justify-between w-full gap-4"),
     ):
         cover = (r.get("cover_url") or "").strip()
         if cover.startswith(("http://", "https://")):
-            ui.image(cover).classes("w-[72px] h-[96px] object-cover rounded-md")
+            ui.image(cover).classes("nd-cover")
         else:
             _render_placeholder_cover()
 
         with ui.column().classes("gap-1 grow"):
             ui.link(r["title"], r["book_url"], new_tab=True).classes(
-                "text-base font-medium"
+                "nd-link text-base"
             )
             ui.label(
                 t("{author} · {words} · Updated at {date}").format(
                     author=r["author"], words=r["word_count"], date=r["update_date"]
                 )
-            ).classes("text-xs text-caption")
-            ui.label(r["latest_chapter"]).classes("text-sm text-secondary")
+            ).classes("text-xs nd-muted")
+            ui.label(r["latest_chapter"]).classes("text-sm nd-muted")
 
             ui.label(f"{_site_label(r['site'])} · ID: {r['book_id']}").classes(
-                "text-xs text-caption"
+                "text-xs nd-muted"
             )
 
         async def _add_task() -> None:
@@ -172,8 +170,8 @@ def _render_result_row(r: SearchResult) -> None:
             ui.notify(t("Task added: {title}").format(title=title))
             await manager.add_task(title=title, site=r["site"], book_id=r["book_id"])
 
-        ui.button(t("Download"), color="primary", on_click=_add_task).props(
-            "unelevated"
+        ui.button(t("Download"), on_click=_add_task).props(
+            "unelevated no-caps color=primary"
         )
 
 
@@ -190,7 +188,11 @@ def _build_settings_dropdown(
     """
     site_cbs: dict[str, Any] = {}
 
-    settings_btn = ui.button(t("Settings")).props("outline icon=settings")
+    settings_btn = (
+        ui.button(t("Settings"))
+        .props("flat no-caps icon=settings")
+        .classes("nd-btn-ghost")
+    )
     with settings_btn:
         menu = ui.menu().props("no-parent-event")
         with menu:
@@ -206,8 +208,10 @@ def _build_settings_dropdown(
                     for cb in site_cbs.values():
                         cb.set_value(False)
 
-                ui.button(t("Select All"), on_click=_select_all).props("dense")
-                ui.button(t("Clear"), on_click=_clear_all).props("dense")
+                ui.button(t("Select All"), on_click=_select_all).props(
+                    "flat no-caps dense"
+                )
+                ui.button(t("Clear"), on_click=_clear_all).props("flat no-caps dense")
 
             ui.separator()
 
@@ -271,13 +275,11 @@ def page_search() -> None:
     state = _get_state()
 
     # ---------- Outer container ----------
-    with ui.column().classes("w-full max-w-screen-lg min-w-[320px] mx-auto gap-4"):
+    with ui.column().classes("nd-page w-full max-w-screen-lg min-w-[320px] mx-auto"):
+        ui.label(t("Search")).classes("nd-h1")
+
         # ---------- Sticky toolbar ----------
-        with (
-            ui.card()
-            .props("flat bordered")
-            .classes("w-full sticky top-0 z-10 backdrop-blur")
-        ):
+        with ui.card().props("flat").classes("nd-toolbar w-full"):
             with ui.row().classes("items-center gap-2 w-full flex-wrap"):
                 get_sites, get_psl, get_timeout = _build_settings_dropdown(state)
 
@@ -287,10 +289,12 @@ def page_search() -> None:
                     .classes("min-w-[260px] grow")
                 )
 
-                search_btn = ui.button(t("Search"), color="primary").props("unelevated")
-                ui.button(t("Stop"), on_click=lambda: _cancel_current(state)).props(
-                    "outline"
+                search_btn = ui.button(t("Search")).props(
+                    "unelevated no-caps color=primary"
                 )
+                ui.button(t("Stop"), on_click=lambda: _cancel_current(state)).props(
+                    "flat no-caps"
+                ).classes("nd-btn-ghost")
 
                 async def _open_login(site: str) -> None:
                     proc = _spawn_login_window(site)
@@ -313,7 +317,7 @@ def page_search() -> None:
                     ui.button(
                         t("Log in to {site}").format(site=_site_label(site_key)),
                         on_click=partial(_open_login, site_key),
-                    ).props("outline")
+                    ).props("flat no-caps").classes("nd-btn-ghost")
 
             with ui.row().classes("items-center gap-3 w-full q-mt-xs flex-wrap"):
                 sort_key_labels = {
@@ -362,7 +366,7 @@ def page_search() -> None:
 
         # ---------- Status ----------
         status_area = ui.row().classes(
-            "items-center gap-2 my-2 w-full text-sm text-caption"
+            "items-center gap-2 my-2 w-full text-sm nd-muted"
         )
 
         # ---------- Results + pager ----------
@@ -374,7 +378,7 @@ def page_search() -> None:
         status_area.clear()
         with status_area:
             if state.get("searching"):
-                ui.icon("hourglass_top").classes("text-secondary")
+                ui.icon("hourglass_top").classes("nd-muted")
                 ui.label(t("Searching (results will appear progressively)...")).classes(
                     "text-caption"
                 )
@@ -385,7 +389,7 @@ def page_search() -> None:
                 ).classes("text-caption")
 
     def _render_skeleton_card() -> None:
-        with ui.card().props("flat bordered").classes("w-full h-[120px] animate-pulse"):
+        with ui.card().props("flat").classes("nd-skeleton w-full h-[120px]"):
             pass
 
     @ui.refreshable

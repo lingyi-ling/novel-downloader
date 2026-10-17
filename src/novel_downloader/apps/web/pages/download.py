@@ -22,13 +22,15 @@ def page_download() -> None:
     navbar("download")
     setup_dialog()
 
-    with ui.column().classes("w-full max-w-screen-lg min-w-[320px] mx-auto gap-4"):
+    with ui.column().classes("nd-page w-full max-w-screen-lg min-w-[320px] mx-auto"):
+        ui.label(t("Download")).classes("nd-h1")
+
         with ui.row().classes("items-center justify-between w-full"):
-            ui.label(t("Select input method")).classes("text-md")
+            ui.label(t("Select input method")).classes("text-sm nd-muted")
             # mode toggle on the right
             mode = ui.toggle(
                 {"url": t("Via URL"), "id": t("Site + ID")}, value="url"
-            ).props("dense")
+            ).props("dense no-caps")
 
         ui.separator()
 
@@ -42,16 +44,16 @@ def page_download() -> None:
 
             preview_row = ui.row().classes("items-center gap-2 w-full")
             with preview_row:
-                ui.chip(t("Parsed result")).props("dense outline color=secondary")
-                site_badge = ui.label("").classes("text-xs text-secondary")
-                id_badge = ui.label("").classes("text-xs text-secondary")
+                ui.label(t("Parsed result")).classes("nd-pill")
+                site_badge = ui.label("").classes("text-xs nd-muted")
+                id_badge = ui.label("").classes("text-xs nd-muted")
             preview_row.visible = False
 
             ui.label(
                 t(
                     "Paste the full novel detail page link, the system will automatically parse the site and book ID"  # noqa: E501
                 )
-            ).classes("text-caption q-ml-sm")
+            ).classes("text-caption nd-muted q-ml-sm")
 
         ui.separator()
 
@@ -77,13 +79,15 @@ def page_download() -> None:
                 t(
                     "If you already know the site and book ID, you can enter them directly here"  # noqa: E501
                 )
-            ).classes("text-caption q-ml-sm")
+            ).classes("text-caption nd-muted q-ml-sm")
 
         # Shared actions
-        with ui.row().classes("justify-end items-center gap-2 w-full q-mt-sm"):
-            clear_btn = ui.button(t("Clear"), color="secondary").props("outline")
-            add_btn = ui.button(t("Add to download queue"), color="primary").props(
-                "unelevated"
+        with ui.row().classes("justify-end items-center gap-3 w-full q-mt-sm"):
+            clear_btn = (
+                ui.button(t("Clear")).props("flat no-caps").classes("nd-btn-ghost")
+            )
+            add_btn = ui.button(t("Add to download queue")).props(
+                "unelevated no-caps color=primary"
             )
 
         # ---------- logic ----------

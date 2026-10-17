@@ -18,12 +18,14 @@ from novel_downloader.infra.i18n import (
     t,
 )
 
+from ..theme import install
+
 _dark_state = {"value": False}
 
 
 def _theme_props(is_dark: bool | None) -> str:
     icon = "dark_mode" if is_dark else "light_mode"
-    return f"flat round dense icon={icon} text-color=white"
+    return f"flat round dense icon={icon}"
 
 
 def navbar(active: str) -> None:
@@ -32,6 +34,7 @@ def navbar(active: str) -> None:
 
     :param active: Key of the current page to highlight.
     """
+    install()
     dark = ui.dark_mode(value=_dark_state["value"])
 
     def toggle(e: ClickEventArguments) -> None:
@@ -44,17 +47,13 @@ def navbar(active: str) -> None:
         if set_language(str(e.value)):
             ui.navigate.reload()
 
-    with ui.header().classes("px-3 items-center justify-between bg-primary text-white"):
-        with ui.row().classes("items-center gap-2 flex-wrap"):
-            _nav_btn(t("Search"), "/", active == "search", icon="search")
-            _nav_btn(t("Download"), "/download", active == "download", icon="download")
-            _nav_btn(
-                t("In Progress"),
-                "/progress",
-                active == "progress",
-                icon="cloud_download",
-            )
-            _nav_btn(t("History"), "/history", active == "history", icon="history")
+    with ui.header().classes("items-center justify-between gap-4"):
+        with ui.row().classes("items-center gap-1"):
+            ui.label(t("Novel Downloader")).classes("nd-brand q-mr-md")
+            _nav_btn(t("Search"), "/", active == "search")
+            _nav_btn(t("Download"), "/download", active == "download")
+            _nav_btn(t("In Progress"), "/progress", active == "progress")
+            _nav_btn(t("History"), "/history", active == "history")
 
         with ui.row().classes("items-center gap-2"):
             lang_sel = ui.select(
@@ -62,19 +61,19 @@ def navbar(active: str) -> None:
                 value=get_language(),
                 with_input=False,
                 on_change=switch_language,
-            ).props("dense outlined dark options-dense")
-            lang_sel.classes("min-w-[130px]")
+            ).props("dense outlined options-dense")
+            lang_sel.classes("w-[132px]")
             lang_sel.tooltip(t("Language"))
 
-            theme_btn = ui.button(on_click=toggle).props(_theme_props(dark.value))
+            theme_btn = (
+                ui.button(on_click=toggle)
+                .props(_theme_props(dark.value))
+                .classes("nd-icon-btn")
+            )
 
 
-def _nav_btn(label: str, path: str, is_active: bool, icon: str | None = None) -> None:
-    if is_active:
-        ui.button(label, icon=icon, on_click=lambda: ui.navigate.to(path)).props(
-            "unelevated color=white text-color=primary"
-        )
-    else:
-        ui.button(label, icon=icon, on_click=lambda: ui.navigate.to(path)).props(
-            "flat text-color=white"
-        )
+def _nav_btn(label: str, path: str, is_active: bool) -> None:
+    classes = "nd-nav-item" + (" nd-nav-item--active" if is_active else "")
+    ui.button(label, on_click=lambda: ui.navigate.to(path)).props(
+        "flat no-caps dense"
+    ).classes(classes)
