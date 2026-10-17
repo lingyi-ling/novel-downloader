@@ -39,6 +39,7 @@ _DEFAULT_TIMEOUT = 10.0
 _DEFAULT_SITE_LIMIT = 30
 _PAGE_SIZE = 20
 _PAGER_WIDTH = 9
+_RECENT_MAX = 6  # remembered search keywords (most recent first)
 
 _STATE: dict[str, dict[str, Any]] = {}
 
@@ -48,6 +49,7 @@ def _get_state() -> dict[str, Any]:
     if cid not in _STATE:
         _STATE[cid] = {
             "query": "",
+            "recent": [],  # list[str] (recent keywords, most recent first)
             "sites": None,  # list[str] | None (None => search all)
             "per_site_limit": _DEFAULT_SITE_LIMIT,
             "timeout": _DEFAULT_TIMEOUT,
@@ -285,6 +287,7 @@ def _build_settings_dropdown(
 
 @ui.page("/")
 def page_search() -> None:
+    ui.page_title(f"{t('Search')} · {t('Novel Downloader')}")
     page_frame("search")
     setup_dialog()
 
@@ -399,6 +402,34 @@ def page_search() -> None:
 
                     sort_key_sel.on_value_change(_on_sort_change)
                     sort_order_sel.on_value_change(_on_sort_change)
+
+        # ---------- Recent searches ----------
+        @ui.refreshable
+        def render_recent() -> None:
+            keywords: list[str] = state.get("recent") or []
+            if not keywords:
+                return
+            with ui.row().classes("items-center gap-2 w-full flex-wrap"):
+                ui.label(t("Recent searches")).classes("text-xs nd-muted")
+                for kw in keywords:
+
+                    async def _pick(k: str = kw) -> None:
+                        query_in.set_value(k)
+                        await do_search()
+
+                    ui.button(kw, on_click=_pick).props("flat no-caps dense").classes(
+                        "nd-pill"
+                    )
+
+                def _clear_recent() -> None:
+                    state["recent"] = []
+                    render_recent.refresh()
+
+                ui.button(t("Clear"), on_click=_clear_recent).props(
+                    "flat no-caps dense"
+                ).classes("nd-btn-ghost")
+
+        render_recent()
 
         # ---------- Status ----------
         status_area = ui.row().classes(
@@ -546,6 +577,12 @@ def page_search() -> None:
         if not q:
             ui.notify(t("Please enter a keyword"), type="warning")
             return
+
+        # record the keyword among the recent searches (dedup, newest first)
+        recent: list[str] = [k for k in state["recent"] if k != q]
+        recent.insert(0, q)
+        state["recent"] = recent[:_RECENT_MAX]
+        render_recent.refresh()
 
         # Cancel any previous search
         _cancel_current(state)

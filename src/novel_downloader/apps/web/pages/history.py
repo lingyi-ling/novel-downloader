@@ -139,6 +139,7 @@ def _render_file_row(item: FileItem) -> None:
 
 @ui.page("/history")
 def page_history() -> None:
+    ui.page_title(f"{t('Download History')} · {t('Novel Downloader')}")
     page_frame("history")
     setup_dialog()
 

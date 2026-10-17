@@ -130,6 +130,7 @@ def _task_card(tsk: DownloadTask, *, active: bool) -> None:
 
 @ui.page("/progress")
 def page_progress() -> None:
+    ui.page_title(f"{t('In Progress')} · {t('Novel Downloader')}")
     page_frame("progress")
     setup_dialog()
 

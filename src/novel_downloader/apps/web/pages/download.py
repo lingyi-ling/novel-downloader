@@ -20,6 +20,7 @@ _DEFAULT_SITE = "qidian"
 
 @ui.page("/download")
 def page_download() -> None:
+    ui.page_title(f"{t('Download')} · {t('Novel Downloader')}")
     page_frame("download")
     setup_dialog()
 
