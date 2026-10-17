@@ -28,7 +28,8 @@ from novel_downloader.plugins.ranking import default_order, sort_results
 from novel_downloader.plugins.search import search_stream
 from novel_downloader.schemas import SearchResult
 
-from ..components import navbar
+from ..components import page_frame
+from ..components.widgets import empty_state, page_header, skeleton_card
 from ..services import manager, setup_dialog
 
 logger = logging.getLogger(__name__)
@@ -161,16 +162,16 @@ def _render_result_row(r: SearchResult) -> None:
             ).classes("text-xs nd-muted")
             ui.label(r["latest_chapter"]).classes("text-sm nd-muted")
 
-            ui.label(f"{_site_label(r['site'])} · ID: {r['book_id']}").classes(
-                "text-xs nd-muted"
-            )
+            with ui.row().classes("items-center gap-2"):
+                ui.label(_site_label(r["site"])).classes("nd-pill")
+                ui.label(f"ID: {r['book_id']}").classes("text-xs nd-muted")
 
         async def _add_task() -> None:
             title = r["title"]
             ui.notify(t("Task added: {title}").format(title=title))
             await manager.add_task(title=title, site=r["site"], book_id=r["book_id"])
 
-        ui.button(t("Download"), on_click=_add_task).props(
+        ui.button(t("Download"), icon="download", on_click=_add_task).props(
             "unelevated no-caps color=primary"
         )
 
@@ -189,14 +190,14 @@ def _build_settings_dropdown(
     site_cbs: dict[str, Any] = {}
 
     settings_btn = (
-        ui.button(t("Settings"))
-        .props("flat no-caps icon=settings")
+        ui.button(t("Settings"), icon="settings")
+        .props("flat no-caps")
         .classes("nd-btn-ghost")
     )
     with settings_btn:
         menu = ui.menu().props("no-parent-event")
         with menu:
-            ui.label(t("Site Selection")).classes("text-sm text-secondary q-mb-xs")
+            ui.label(t("Site Selection")).classes("text-sm nd-muted q-mb-xs")
 
             with ui.row().classes("gap-2"):
 
@@ -224,7 +225,7 @@ def _build_settings_dropdown(
                     site_cbs[key] = ui.checkbox(label, value=(key in selected))
 
             ui.separator()
-            ui.label(t("Advanced Settings")).classes("text-sm text-secondary q-mt-sm")
+            ui.label(t("Advanced Settings")).classes("text-sm nd-muted q-mt-sm")
 
             psl_in = (
                 ui.number(
@@ -269,17 +270,23 @@ def _build_settings_dropdown(
 
 @ui.page("/")
 def page_search() -> None:
-    navbar("search")
+    page_frame("search")
     setup_dialog()
 
     state = _get_state()
 
     # ---------- Outer container ----------
     with ui.column().classes("nd-page w-full max-w-screen-lg min-w-[320px] mx-auto"):
-        ui.label(t("Search")).classes("nd-h1")
+        page_header(
+            t("Search"),
+            t("Search across supported sites and queue downloads in one click"),
+        )
 
         # ---------- Sticky toolbar ----------
-        with ui.card().props("flat").classes("nd-toolbar w-full"):
+        with (
+            ui.card().props("flat").classes("nd-toolbar w-full"),
+            ui.column().classes("w-full gap-3"),
+        ):
             with ui.row().classes("items-center gap-2 w-full flex-wrap"):
                 get_sites, get_psl, get_timeout = _build_settings_dropdown(state)
 
@@ -289,12 +296,18 @@ def page_search() -> None:
                     .classes("min-w-[260px] grow")
                 )
 
-                search_btn = ui.button(t("Search")).props(
+                search_btn = ui.button(t("Search"), icon="search").props(
                     "unelevated no-caps color=primary"
                 )
-                ui.button(t("Stop"), on_click=lambda: _cancel_current(state)).props(
-                    "flat no-caps"
-                ).classes("nd-btn-ghost")
+                ui.button(
+                    t("Stop"),
+                    icon="stop",
+                    on_click=lambda: _cancel_current(state),
+                ).props("flat no-caps").classes("nd-btn-ghost")
+
+            with ui.row().classes(
+                "items-center justify-between w-full gap-2 flex-wrap"
+            ):
 
                 async def _open_login(site: str) -> None:
                     proc = _spawn_login_window(site)
@@ -313,56 +326,59 @@ def page_search() -> None:
                     else:
                         ui.notify(t("Login was not completed."), type="warning")
 
-                for site_key in sorted(LOGIN_SITES):
-                    ui.button(
-                        t("Log in to {site}").format(site=_site_label(site_key)),
-                        on_click=partial(_open_login, site_key),
-                    ).props("flat no-caps").classes("nd-btn-ghost")
+                # sites that need a signed-in session
+                with ui.row().classes("items-center gap-2 flex-wrap"):
+                    for site_key in sorted(LOGIN_SITES):
+                        ui.button(
+                            t("Log in to {site}").format(site=_site_label(site_key)),
+                            on_click=partial(_open_login, site_key),
+                        ).props("flat no-caps dense").classes("nd-btn-ghost")
 
-            with ui.row().classes("items-center gap-3 w-full q-mt-xs flex-wrap"):
-                sort_key_labels = {
-                    "quality": t("Quality"),
-                    "priority": t("Priority"),
-                    "site": t("Site"),
-                    "title": t("Title"),
-                    "author": t("Author"),
-                    "words": t("Word count"),
-                    "update": t("Update time"),
-                }
-                sort_key_sel = (
-                    ui.select(
-                        sort_key_labels,
-                        value=state["sort_key"],
-                        label=t("Sort"),
-                        with_input=False,
-                    )
-                    .props("outlined dense")
-                    .classes("w-[180px]")
-                )
-
-                sort_order_sel = ui.toggle(
-                    {"asc": t("Ascending"), "desc": t("Descending")},
-                    value=state["sort_order"],
-                ).props("dense")
-
-                def _on_sort_change(_: Any = None) -> None:
-                    new_key = sort_key_sel.value or "quality"
-                    if new_key != state["sort_key"]:
-                        # Switching keys resets to the key's natural direction.
-                        state["sort_key"] = new_key
-                        state["sort_order"] = default_order(new_key)
-                        sort_order_sel.set_value(state["sort_order"])
-                    else:
-                        state["sort_key"] = new_key
-                        state["sort_order"] = sort_order_sel.value or default_order(
-                            new_key
+                # sort controls
+                with ui.row().classes("items-center gap-2 flex-wrap"):
+                    sort_key_labels = {
+                        "quality": t("Quality"),
+                        "priority": t("Priority"),
+                        "site": t("Site"),
+                        "title": t("Title"),
+                        "author": t("Author"),
+                        "words": t("Word count"),
+                        "update": t("Update time"),
+                    }
+                    sort_key_sel = (
+                        ui.select(
+                            sort_key_labels,
+                            value=state["sort_key"],
+                            label=t("Sort"),
+                            with_input=False,
                         )
-                    _apply_sort(state)
-                    state["page"] = 1
-                    render_results.refresh()
+                        .props("outlined dense")
+                        .classes("w-[180px]")
+                    )
 
-                sort_key_sel.on_value_change(_on_sort_change)
-                sort_order_sel.on_value_change(_on_sort_change)
+                    sort_order_sel = ui.toggle(
+                        {"asc": t("Ascending"), "desc": t("Descending")},
+                        value=state["sort_order"],
+                    ).props("dense no-caps")
+
+                    def _on_sort_change(_: Any = None) -> None:
+                        new_key = sort_key_sel.value or "quality"
+                        if new_key != state["sort_key"]:
+                            # Switching keys resets to the natural direction.
+                            state["sort_key"] = new_key
+                            state["sort_order"] = default_order(new_key)
+                            sort_order_sel.set_value(state["sort_order"])
+                        else:
+                            state["sort_key"] = new_key
+                            state["sort_order"] = sort_order_sel.value or default_order(
+                                new_key
+                            )
+                        _apply_sort(state)
+                        state["page"] = 1
+                        render_results.refresh()
+
+                    sort_key_sel.on_value_change(_on_sort_change)
+                    sort_order_sel.on_value_change(_on_sort_change)
 
         # ---------- Status ----------
         status_area = ui.row().classes(
@@ -387,10 +403,6 @@ def page_search() -> None:
                 ui.label(
                     t("Currently retrieved {total} results").format(total=total)
                 ).classes("text-caption")
-
-    def _render_skeleton_card() -> None:
-        with ui.card().props("flat").classes("nd-skeleton w-full h-[120px]"):
-            pass
 
     @ui.refreshable
     def render_results() -> None:
@@ -419,9 +431,10 @@ def page_search() -> None:
         elif state.get("searching"):
             with list_area:
                 for _ in range(3):
-                    _render_skeleton_card()
+                    skeleton_card()
         else:
-            pass
+            with list_area:
+                empty_state("search", t("Enter a keyword to start searching"))
 
         if total_pages > 1:
 

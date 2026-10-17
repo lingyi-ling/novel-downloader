@@ -11,7 +11,8 @@ from novel_downloader.apps.constants import DOWNLOAD_SUPPORT_SITES
 from novel_downloader.infra.book_url_resolver import resolve_book_url
 from novel_downloader.infra.i18n import t
 
-from ..components import navbar
+from ..components import page_frame
+from ..components.widgets import page_header
 from ..services import manager, setup_dialog
 
 _DEFAULT_SITE = "qidian"
@@ -19,76 +20,86 @@ _DEFAULT_SITE = "qidian"
 
 @ui.page("/download")
 def page_download() -> None:
-    navbar("download")
+    page_frame("download")
     setup_dialog()
 
     with ui.column().classes("nd-page w-full max-w-screen-lg min-w-[320px] mx-auto"):
-        ui.label(t("Download")).classes("nd-h1")
+        page_header(
+            t("Download"),
+            t(
+                "Add books by pasting a detail-page link, or fill in the site "
+                "and book ID"
+            ),
+        )
 
-        with ui.row().classes("items-center justify-between w-full"):
-            ui.label(t("Select input method")).classes("text-sm nd-muted")
-            # mode toggle on the right
-            mode = ui.toggle(
-                {"url": t("Via URL"), "id": t("Site + ID")}, value="url"
-            ).props("dense no-caps")
+        with ui.card().props("flat").classes("w-full"):
+            with ui.row().classes("items-center justify-between w-full"):
+                ui.label(t("Select input method")).classes("text-sm nd-muted")
+                mode = ui.toggle(
+                    {"url": t("Via URL"), "id": t("Site + ID")}, value="url"
+                ).props("dense no-caps")
 
-        ui.separator()
+            ui.separator().classes("q-my-md")
 
-        # --- URL mode controls ---
-        with ui.column().classes("gap-2 w-full") as url_section:
-            url_input = (
-                ui.input(t("Novel URL"))
-                .props("outlined dense clearable autocomplete=off")
-                .classes("w-full")
-            )
-
-            preview_row = ui.row().classes("items-center gap-2 w-full")
-            with preview_row:
-                ui.label(t("Parsed result")).classes("nd-pill")
-                site_badge = ui.label("").classes("text-xs nd-muted")
-                id_badge = ui.label("").classes("text-xs nd-muted")
-            preview_row.visible = False
-
-            ui.label(
-                t(
-                    "Paste the full novel detail page link, the system will automatically parse the site and book ID"  # noqa: E501
-                )
-            ).classes("text-caption nd-muted q-ml-sm")
-
-        ui.separator()
-
-        # --- Site + ID controls ---
-        with ui.column().classes("gap-2 w-full") as site_id_section:
-            with ui.row().classes("items-start gap-2 w-full"):
-                site = (
-                    ui.select(
-                        DOWNLOAD_SUPPORT_SITES,
-                        value=_DEFAULT_SITE,
-                        label=t("Site"),
-                        with_input=True,
-                    )
-                    .props("outlined dense")
-                    .classes("w-full md:w-[40%]")
-                )
-                book_id = (
-                    ui.input(t("Book ID"))
+            # --- URL mode controls ---
+            with ui.column().classes("gap-2 w-full") as url_section:
+                url_input = (
+                    ui.input(t("Novel URL"))
                     .props("outlined dense clearable autocomplete=off")
-                    .classes("w-full md:w-[60%]")
+                    .classes("w-full")
                 )
-            ui.label(
-                t(
-                    "If you already know the site and book ID, you can enter them directly here"  # noqa: E501
-                )
-            ).classes("text-caption nd-muted q-ml-sm")
 
-        # Shared actions
-        with ui.row().classes("justify-end items-center gap-3 w-full q-mt-sm"):
-            clear_btn = (
-                ui.button(t("Clear")).props("flat no-caps").classes("nd-btn-ghost")
-            )
-            add_btn = ui.button(t("Add to download queue")).props(
-                "unelevated no-caps color=primary"
-            )
+                preview_row = ui.row().classes(
+                    "nd-parse-banner items-center gap-2 w-full"
+                )
+                with preview_row:
+                    ui.icon("check_circle").classes("text-positive")
+                    site_badge = ui.label("").classes("nd-pill")
+                    id_badge = ui.label("").classes("nd-pill")
+                preview_row.visible = False
+
+                ui.label(
+                    t(
+                        "Paste the full novel detail page link, the system will automatically parse the site and book ID"  # noqa: E501
+                    )
+                ).classes("text-caption nd-muted q-ml-sm")
+
+            ui.separator().classes("q-my-md")
+
+            # --- Site + ID controls ---
+            with ui.column().classes("gap-2 w-full") as site_id_section:
+                with ui.row().classes("items-start gap-2 w-full"):
+                    site = (
+                        ui.select(
+                            DOWNLOAD_SUPPORT_SITES,
+                            value=_DEFAULT_SITE,
+                            label=t("Site"),
+                            with_input=True,
+                        )
+                        .props("outlined dense")
+                        .classes("w-full md:w-[40%]")
+                    )
+                    book_id = (
+                        ui.input(t("Book ID"))
+                        .props("outlined dense clearable autocomplete=off")
+                        .classes("w-full md:w-[60%]")
+                    )
+                ui.label(
+                    t(
+                        "If you already know the site and book ID, you can enter them directly here"  # noqa: E501
+                    )
+                ).classes("text-caption nd-muted q-ml-sm")
+
+            ui.separator().classes("q-my-md")
+
+            # Shared actions
+            with ui.row().classes("justify-end items-center gap-3 w-full"):
+                clear_btn = (
+                    ui.button(t("Clear")).props("flat no-caps").classes("nd-btn-ghost")
+                )
+                add_btn = ui.button(t("Add to download queue"), icon="add").props(
+                    "unelevated no-caps color=primary"
+                )
 
         # ---------- logic ----------
 

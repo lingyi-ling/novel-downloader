@@ -287,10 +287,6 @@ body .nd-page {
   gap: 1.25rem;
 }
 
-body .nd-hero {
-  gap: 0.3rem;
-}
-
 body .nd-h1 {
   font-family: var(--nd-font-serif);
   font-size: 2rem;
@@ -318,7 +314,7 @@ body .nd-muted {
 
 body .nd-toolbar {
   position: sticky;
-  top: 72px;
+  top: 56px;
   z-index: 5;
   padding: 1rem 1.15rem;
   gap: 0.85rem;
@@ -357,25 +353,6 @@ body .nd-icon-btn {
 
 body .nd-icon-btn:hover {
   border-color: var(--nd-accent);
-  color: var(--nd-accent) !important;
-}
-
-body .nd-nav-item {
-  min-height: 36px;
-  padding: 0 14px;
-  border-radius: var(--nd-radius-pill);
-  color: var(--nd-text-muted) !important;
-  font-weight: 500;
-}
-
-body .nd-nav-item:hover {
-  background: var(--nd-surface-2) !important;
-  color: var(--nd-text) !important;
-}
-
-body .nd-nav-item--active,
-body .nd-nav-item--active:hover {
-  background: var(--nd-accent-soft) !important;
   color: var(--nd-accent) !important;
 }
 
@@ -479,6 +456,124 @@ body .nd-skeleton {
 body .nd-code {
   font-family: var(--nd-font-mono);
   font-size: 0.85rem;
+}
+
+/* ------------------------------------------------------------- app shell */
+body .q-header,
+body.body--dark .q-header {
+  background: var(--nd-surface);
+  color: var(--nd-text);
+  border-bottom: 1px solid var(--nd-border);
+}
+
+body .nd-topbar {
+  height: 56px;
+  min-height: 56px;
+  padding: 0 1rem;
+}
+
+body .q-drawer,
+body.body--dark .q-drawer {
+  background: var(--nd-surface) !important;
+  color: var(--nd-text);
+  border-right: 1px solid var(--nd-border);
+}
+
+body .q-drawer > .q-drawer__content {
+  padding: 0;
+}
+
+body .nd-side {
+  height: 100%;
+  padding: 1.25rem 0.875rem 1.25rem 1rem;
+}
+
+body .nd-side-tagline {
+  color: var(--nd-text-faint);
+  font-size: 0.8rem;
+}
+
+body .nd-side-item {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 0.65rem;
+  min-height: 42px;
+  padding: 0 14px;
+  border-radius: var(--nd-radius-control);
+  color: var(--nd-text-muted) !important;
+  font-weight: 500;
+}
+
+body .nd-side-item:hover {
+  background: var(--nd-surface-2) !important;
+  color: var(--nd-text) !important;
+}
+
+body .nd-side-item--active,
+body .nd-side-item--active:hover {
+  background: var(--nd-accent-soft) !important;
+  color: var(--nd-accent) !important;
+}
+
+/* -------------------------------------------------------------- page head */
+body .nd-page-head {
+  gap: 0.15rem;
+  margin-bottom: 0.25rem;
+}
+
+/* ------------------------------------------------------------ empty state */
+body .nd-empty {
+  align-items: center;
+  text-align: center;
+  padding: 3.5rem 1rem;
+  gap: 0.8rem;
+}
+
+body .nd-icon-tile--lg {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+}
+
+body .nd-icon-tile--lg .q-icon {
+  font-size: 30px;
+}
+
+/* ----------------------------------------------------------- task states */
+body .nd-task {
+  border-left: 3px solid var(--nd-border-strong);
+}
+
+body .nd-task--queued {
+  border-left-color: var(--nd-warning);
+}
+
+body .nd-task--running {
+  border-left-color: var(--nd-accent);
+}
+
+body .nd-task--processing,
+body .nd-task--exporting {
+  border-left-color: var(--nd-info);
+}
+
+body .nd-task--completed {
+  border-left-color: var(--nd-positive);
+}
+
+body .nd-task--failed {
+  border-left-color: var(--nd-negative);
+}
+
+body .nd-task--cancelled {
+  border-left-color: var(--nd-text-faint);
+}
+
+/* ---------------------------------------------------------- parse banner */
+body .nd-parse-banner {
+  background: var(--nd-positive-soft);
+  border-radius: var(--nd-radius-control);
+  padding: 0.5rem 0.75rem;
 }
 
 @keyframes nd-shimmer {

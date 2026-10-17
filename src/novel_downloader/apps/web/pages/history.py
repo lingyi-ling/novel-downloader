@@ -20,7 +20,8 @@ from nicegui.events import KeyEventArguments, ValueChangeEventArguments
 from novel_downloader.infra.config import get_config_value
 from novel_downloader.infra.i18n import t
 
-from ..components import navbar
+from ..components import page_frame
+from ..components.widgets import empty_state, icon_tile, page_header
 from ..services import setup_dialog
 
 _EXTS = {"txt", "epub"}
@@ -43,6 +44,7 @@ class FileItem:
     path: Path
     name: str
     ext: str  # 'txt' or 'epub'
+    size: int  # bytes
     mtime: float
 
 
@@ -66,6 +68,7 @@ def _scan_files() -> list[FileItem]:
                     path=Path(entry.path),
                     name=entry.name,
                     ext=ext,
+                    size=st.st_size,
                     mtime=st.st_mtime,
                 )
             )
@@ -91,32 +94,46 @@ def _apply_sort(
     return sorted(items, key=lambda it: it.mtime, reverse=reverse)
 
 
-def _render_file_card(item: FileItem) -> None:
-    """Render a single file as a card with icon, meta, and a Download button."""
+def _format_size(size: int) -> str:
+    """Render a byte count as a compact human-readable string."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            if unit in ("B", "KB"):
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{int(value)} GB"
+
+
+def _render_file_row(item: FileItem) -> None:
+    """Render a single file row with icon, meta, and a Download button."""
     url = f"/downloads/{quote(item.name)}?v={int(item.mtime)}"
-    human_mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item.mtime))
+    human_mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(item.mtime))
 
     with (
         ui.card().props("flat").classes("w-full"),
         ui.row().classes("items-center gap-4 w-full"),
     ):
-        with ui.element("div").classes("nd-icon-tile"):
-            ui.icon("menu_book" if item.ext == "epub" else "description")
+        icon_tile("menu_book" if item.ext == "epub" else "description")
 
         # Meta & actions
         with ui.column().classes("min-w-0 grow gap-1"):
             ui.label(item.name).classes("text-base font-medium break-words")
-            ui.label(f"Modified: {human_mtime}").classes("text-xs nd-muted")
-            ui.button(
-                "Download",
-                icon="download",
-                on_click=lambda e, url=url: ui.download(url),
-            ).props("flat no-caps size=sm").classes("nd-btn-ghost")
+            ui.label(
+                f"{t('Modified Time')}: {human_mtime} · {_format_size(item.size)}"
+            ).classes("text-xs nd-muted")
+
+        ui.button(
+            t("Download"),
+            icon="download",
+            on_click=lambda e, url=url: ui.download(url),
+        ).props("flat no-caps").classes("nd-btn-ghost")
 
 
 @ui.page("/history")
 def page_history() -> None:
-    navbar("history")
+    page_frame("history")
     setup_dialog()
 
     # reactive state
@@ -131,29 +148,24 @@ def page_history() -> None:
 
     # centered, responsive container
     with ui.column().classes("nd-page w-full max-w-screen-lg min-w-[320px] mx-auto"):
-        ui.label(t("Download History")).classes("nd-h1")
+        page_header(
+            t("Download History"),
+            t("Browse and re-download exported files"),
+        )
 
         # Toolbar (filters & sorting)
         with (
-            ui.card().props("flat").classes("w-full"),
+            ui.card().props("flat").classes("nd-toolbar w-full"),
             ui.row().classes("items-center gap-3 w-full flex-wrap"),
         ):
             ui.label(t("Type")).classes("text-sm nd-muted")
-            type_sel = (
-                ui.select(
-                    ["All", "txt", "epub"],
-                    value=type_filter,
-                    with_input=False,
-                )
-                .props("dense outlined")
-                .classes("w-[140px]")
-            )
+            type_sel = ui.toggle(
+                {"All": t("All"), "txt": "txt", "epub": "epub"},
+                value=type_filter,
+            ).props("dense no-caps")
 
-            ui.separator().props("vertical").classes(
-                "mx-1 self-stretch hidden md:block"
-            )
+            ui.element("div").classes("grow")
 
-            ui.label(t("Sort Field")).classes("text-sm nd-muted")
             sort_key_sel = (
                 ui.select(
                     {"name": t("Filename"), "mtime": t("Modified Time")},
@@ -228,10 +240,10 @@ def page_history() -> None:
             list_area.clear()
             with list_area:
                 if not current_slice:
-                    ui.label(t("No files")).classes("text-caption")
+                    empty_state("folder_open", t("No files"))
                 else:
                     for item in current_slice:
-                        _render_file_card(item)
+                        _render_file_row(item)
 
             pager_area.clear()
             if total_pages > 1:

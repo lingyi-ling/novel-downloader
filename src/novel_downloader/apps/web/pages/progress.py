@@ -3,29 +3,17 @@
 novel_downloader.apps.web.pages.progress
 ----------------------------------------
 
-Layout for active/history tasks with compact cards and status chips.
+Layout for active/history tasks with compact cards and status pills.
 """
 
 from nicegui import ui
 
 from novel_downloader.infra.i18n import t
 
-from ..components import navbar
-from ..models import DownloadTask, Status
+from ..components import page_frame
+from ..components.widgets import page_header, status_pill
+from ..models import DownloadTask
 from ..services import manager, setup_dialog
-
-
-def _status_chip(status: Status) -> None:
-    label_map = {
-        "queued": t("Queued"),
-        "running": t("Downloading"),
-        "processing": t("Processing"),
-        "exporting": t("Exporting"),
-        "completed": t("Completed"),
-        "cancelled": t("Cancelled"),
-        "failed": t("Failed"),
-    }
-    ui.label(label_map[status]).classes(f"nd-pill nd-pill--{status} q-ml-sm")
 
 
 def _meta_row(label: str, value: str) -> None:
@@ -94,12 +82,12 @@ def _progress_block(tsk: DownloadTask) -> None:
 
 
 def _task_card(tsk: DownloadTask, *, active: bool) -> None:
-    with ui.card().props("flat").classes("w-full"):
+    with ui.card().props("flat").classes(f"w-full nd-task nd-task--{tsk.status.value}"):
         # Header
-        with ui.row().classes("items-center justify-between w-full"):
-            with ui.row().classes("items-center gap-2"):
-                ui.label(tsk.title).classes("text-sm font-medium")
-                _status_chip(tsk.status)
+        with ui.row().classes("items-center justify-between w-full gap-2"):
+            with ui.row().classes("items-center gap-2 min-w-0"):
+                ui.label(tsk.title).classes("text-sm font-medium ellipsis")
+                status_pill(tsk.status)
 
             # Cancel button (active tasks only)
             if active and tsk.status in ("running", "queued"):
@@ -139,11 +127,14 @@ def _task_card(tsk: DownloadTask, *, active: bool) -> None:
 
 @ui.page("/progress")
 def page_progress() -> None:
-    navbar("progress")
+    page_frame("progress")
     setup_dialog()
 
     with ui.column().classes("nd-page w-full max-w-screen-lg min-w-[320px] mx-auto"):
-        ui.label(t("In Progress")).classes("nd-h1")
+        page_header(
+            t("In Progress"),
+            t("Follow running, queued, and finished downloads"),
+        )
 
         @ui.refreshable
         def section() -> None:

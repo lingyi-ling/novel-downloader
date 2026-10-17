@@ -6,6 +6,6 @@ novel_downloader.apps.web.components
 Reusable web UI components.
 """
 
-__all__ = ["navbar"]
+__all__ = ["page_frame"]
 
-from .navigation import navbar
+from .shell import page_frame
