@@ -15,7 +15,11 @@ import aiohttp
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
 from novel_downloader.plugins.ranking import sort_results
 from novel_downloader.plugins.registry import registrar
+from novel_downloader.plugins.search_cache import SearchCache, build_key
 from novel_downloader.schemas import SearchResult
+
+#: Process-wide short-lived cache shared by ``search`` and ``search_stream``.
+_CACHE = SearchCache()
 
 
 async def search(
@@ -46,6 +50,14 @@ async def search(
     :param order: ``"asc"``/``"desc"``; defaults to the key's natural direction.
     :return: A flat list of `SearchResult` objects.
     """
+    key = build_key(keyword, sites, per_site_limit, nsfw)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        # Cache holds the merged, unranked snapshot: rank/slice per call so a
+        # different sort order or limit still honours this client's request.
+        sort_results(cached, by=sort, order=order, keyword=keyword)
+        return cached[:limit] if limit is not None else cached
+
     classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
 
     if not classes:
@@ -76,6 +88,11 @@ async def search(
             continue
         results.extend(item)
 
+    # Cache the unranked merged results; callers rank/slice their own copy.
+    # Empty aggregates are not cached: they often stem from transient site
+    # failures and should not be pinned for the whole TTL.
+    if results:
+        _CACHE.put(key, results)
     sort_results(results, by=sort, order=order, keyword=keyword)
     return results[:limit] if limit is not None else results
 
@@ -97,6 +114,12 @@ async def search_stream(
     :param nsfw: Whether to include NSFW searchers.
     :yield: Lists of `SearchResult` objects from each completed site.
     """
+    key = build_key(keyword, sites, per_site_limit, nsfw)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        yield cached
+        return
+
     classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
     if not classes:
         if False:
@@ -126,6 +149,7 @@ async def search_stream(
             for cls, inst in zip(classes, instances, strict=False)
         ]
 
+        accumulated: list[SearchResult] = []
         try:
             for fut in asyncio.as_completed(tasks):
                 try:
@@ -135,6 +159,7 @@ async def search_stream(
                 except Exception:
                     continue
                 if site_results:
+                    accumulated.extend(site_results)
                     yield site_results
         finally:
             # ensure no background tasks are left running after cancel/exit
@@ -142,3 +167,8 @@ async def search_stream(
                 if not t.done():
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Only reached on normal completion; cancelled/closed streams skip this.
+    # Empty streams are not cached (transient failures must not be pinned).
+    if accumulated:
+        _CACHE.put(key, accumulated)
