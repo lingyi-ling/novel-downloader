@@ -51,6 +51,20 @@ def _theme_props(is_dark: bool | None) -> str:
     return f"flat round dense icon={icon}"
 
 
+def _aria_props(label: str) -> str:
+    """
+    Build a quote-safe ``aria-label`` prop string.
+
+    NiceGUI tokenizes prop strings itself, so an unescaped double quote in
+    ``label`` (as a translation may contain) would silently truncate the value.
+
+    :param label: Accessible name to expose on the element.
+    :return: A prop string such as ``aria-label="Open navigation"``.
+    """
+    escaped = label.replace("\\", "\\\\").replace('"', '\\"')
+    return 'aria-label="' + escaped + '"'
+
+
 def page_frame(active: str) -> None:
     """
     Render the shared shell: top bar and navigation drawer.
@@ -78,7 +92,11 @@ def page_frame(active: str) -> None:
 
         ui.separator().classes("q-my-md")
 
-        with ui.column().classes("gap-1 w-full q-px-sm"):
+        with (
+            ui.column()
+            .classes("gap-1 w-full q-px-sm")
+            .props(f"role=navigation {_aria_props(t('Main navigation'))}")
+        ):
             for key, icon, path in _NAV_ITEMS:
                 _side_item(icon, _nav_label(key), path, key == active)
 
@@ -88,7 +106,7 @@ def page_frame(active: str) -> None:
 
     with ui.header().classes("nd-topbar items-center gap-2"):
         ui.button(icon="menu", on_click=drawer.toggle).props(
-            "flat round dense"
+            f"flat round dense {_aria_props(t('Open navigation'))}"
         ).classes("nd-icon-btn lt-lg")
         ui.element("div").classes("grow")
 
@@ -101,11 +119,14 @@ def page_frame(active: str) -> None:
         lang_sel.classes("w-[132px]")
         lang_sel.tooltip(t("Language"))
 
+        theme_label = t("Toggle theme")
         theme_btn = (
             ui.button(on_click=toggle)
             .props(_theme_props(dark.value))
+            .props(_aria_props(theme_label))
             .classes("nd-icon-btn")
         )
+        theme_btn.tooltip(theme_label)
 
 
 def _side_item(icon: str, label: str, path: str, is_active: bool) -> None:

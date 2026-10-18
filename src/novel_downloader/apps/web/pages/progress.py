@@ -6,6 +6,10 @@ novel_downloader.apps.web.pages.progress
 Layout for active/history tasks with compact cards and status pills.
 """
 
+from __future__ import annotations
+
+import time
+
 from nicegui import ui
 
 from novel_downloader.infra.i18n import t
@@ -36,6 +40,37 @@ def _format_seconds(sec: float | None) -> str:
     if h > 0:
         return t("{hours}h {minutes}m").format(hours=h, minutes=m)
     return t("{minutes}m {seconds}s").format(minutes=m, seconds=s)
+
+
+def _format_clock(ts: float) -> str:
+    """Format a wall-clock timestamp as local HH:MM:SS."""
+    return time.strftime("%H:%M:%S", time.localtime(ts))
+
+
+def _timing_row(*parts: str) -> None:
+    with ui.row().classes("w-full gap-4 items-center"):
+        for part in parts:
+            ui.label(part).classes("text-xs nd-muted")
+
+
+def _timing_block(tsk: DownloadTask) -> None:
+    """Show start/elapsed for in-progress tasks and finish/duration for done ones."""
+    if tsk.status in ("completed", "cancelled", "failed"):
+        if tsk.finished_at is None:
+            return
+        _timing_row(
+            t("Duration {duration}").format(
+                duration=_format_seconds(tsk.finished_at - tsk.created_at)
+            ),
+            t("Finished at {time}").format(time=_format_clock(tsk.finished_at)),
+        )
+    elif tsk.status in ("running", "processing", "exporting"):
+        _timing_row(
+            t("Started at {time}").format(time=_format_clock(tsk.created_at)),
+            t("Elapsed {duration}").format(
+                duration=_format_seconds(time.time() - tsk.created_at)
+            ),
+        )
 
 
 def _progress_block(tsk: DownloadTask) -> None:
@@ -118,6 +153,7 @@ def _task_card(tsk: DownloadTask, *, active: bool) -> None:
         # Meta grid
         with ui.column().classes("w-full gap-1 mt-2"):
             _meta_grid(tsk)
+            _timing_block(tsk)
             if tsk.status == "failed" and tsk.error:
                 with ui.row().classes("items-start justify-between w-full"):
                     ui.label(t("Error")).classes("text-xs nd-muted")

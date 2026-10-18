@@ -62,6 +62,10 @@ class DownloadTask:
     error: str | None = None
     exported_paths: dict[str, Path] = field(default_factory=dict)
 
+    # lifecycle (wall-clock times)
+    created_at: float = field(default_factory=time.time)
+    finished_at: float | None = None
+
     asyncio_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
     _recent: deque[float] = field(default_factory=lambda: deque(maxlen=20), repr=False)

@@ -30,16 +30,28 @@ def status_pill(status: Status) -> None:
 
 
 def page_header(title: str, subtitle: str) -> None:
-    """Render the standard page heading: serif title plus muted subtitle."""
+    """Render the standard page heading: serif title plus muted subtitle.
+
+    The title is exposed as a level-1 heading so assistive technology can
+    navigate to the page's main heading.
+    """
     with ui.column().classes("nd-page-head w-full"):
-        ui.label(title).classes("nd-h1")
+        ui.label(title).classes("nd-h1").props("role=heading aria-level=1")
         ui.label(subtitle).classes("nd-sub")
 
 
 def empty_state(icon: str, text: str) -> None:
-    """Render a centered hint block for empty lists."""
+    """Render a centered hint block for empty lists.
+
+    The leading icon is purely decorative, so it is hidden from assistive
+    technology; ``text`` carries the meaning.
+    """
     with ui.column().classes("nd-empty w-full"):
-        with ui.element("div").classes("nd-icon-tile nd-icon-tile--lg"):
+        with (
+            ui.element("div")
+            .classes("nd-icon-tile nd-icon-tile--lg")
+            .props("aria-hidden=true")
+        ):
             ui.icon(icon)
         ui.label(text).classes("nd-sub")
 
@@ -51,6 +63,10 @@ def skeleton_card() -> None:
 
 
 def icon_tile(icon: str) -> None:
-    """Render a rounded square tile holding an icon."""
-    with ui.element("div").classes("nd-icon-tile"):
+    """Render a rounded square tile holding an icon.
+
+    The tile is decorative: callers always render the meaning as adjacent
+    text, so it is hidden from assistive technology.
+    """
+    with ui.element("div").classes("nd-icon-tile").props("aria-hidden=true"):
         ui.icon(icon)

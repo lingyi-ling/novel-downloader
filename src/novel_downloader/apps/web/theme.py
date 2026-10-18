@@ -109,8 +109,14 @@ body.body--dark {
   color: var(--nd-text);
 }
 
+/* The soft accent is too weak to read as a selection at 10-16% alpha, so
+   the tint is rebuilt from the same accent token at a stronger mix; the
+   plain token stays first as the fallback. Text keeps the theme colour,
+   which measures ~12.4:1 on light and ~8.1:1 on dark. */
 ::selection {
   background: var(--nd-accent-soft);
+  background: color-mix(in srgb, var(--nd-accent) 28%, transparent);
+  color: var(--nd-text);
 }
 
 * {
@@ -270,6 +276,20 @@ body .q-field__input,
 body .q-field__prefix,
 body .q-field__suffix {
   color: var(--nd-text);
+}
+
+/* Chrome washes autofilled fields with its own blue/yellow fill, which
+   clashes with both variants. A huge inset shadow repaints the field with
+   the surface token, the text-fill keeps the theme ink, and the long
+   transition keeps the UA fill from flashing in. */
+body input:-webkit-autofill,
+body input:-webkit-autofill:hover,
+body input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--nd-text);
+  caret-color: var(--nd-text);
+  box-shadow: 0 0 0 100px var(--nd-surface) inset;
+  -webkit-box-shadow: 0 0 0 100px var(--nd-surface) inset;
+  transition: background-color 9999s ease-in-out 0s;
 }
 
 body .q-checkbox__label {
@@ -470,7 +490,7 @@ body .nd-skeleton {
   background: linear-gradient(
     90deg,
     var(--nd-surface-2) 25%,
-    var(--nd-border) 37%,
+    var(--nd-border-strong) 37%,
     var(--nd-surface-2) 63%
   );
   background-size: 400% 100%;
@@ -629,6 +649,79 @@ body .nd-hl {
   }
   100% {
     background-position: 0 50%;
+  }
+}
+
+/* --------------------------------------------------- motion preferences */
+/* Honour the OS request: state changes stay instantaneous and the
+   shimmer stops instead of pulsing. */
+@media (prefers-reduced-motion: reduce) {
+  body .q-card,
+  body .nicegui-card,
+  body .q-btn {
+    transition: none !important;
+  }
+
+  body .nd-skeleton {
+    animation: none !important;
+  }
+}
+
+/* ----------------------------------------------------------------- print */
+/* Paper has a single palette, so the existing tokens are re-pinned to
+   paper values before the rules below run. No new token is introduced and
+   no colour literal leaves this block; every rule still uses var(--nd-*). */
+@media print {
+  body,
+  body.body--dark {
+    --nd-bg: #FFFFFF;
+    --nd-surface: #FFFFFF;
+    --nd-surface-2: #FFFFFF;
+    --nd-text: #000000;
+    --nd-text-muted: #333333;
+    --nd-text-faint: #555555;
+    --nd-border: #BFBFBF;
+    --nd-border-strong: #8C8C8C;
+    --nd-accent: #000000;
+    --nd-accent-strong: #000000;
+    --nd-accent-soft: transparent;
+    --nd-positive-soft: transparent;
+    --nd-negative-soft: transparent;
+    --nd-warning-soft: transparent;
+    --nd-info-soft: transparent;
+    --nd-elevation: none;
+    --nd-elevation-lg: none;
+  }
+
+  body {
+    background: var(--nd-bg) !important;
+    color: var(--nd-text) !important;
+    -webkit-print-color-adjust: economy;
+    print-color-adjust: economy;
+  }
+
+  /* Quasar reserves top padding for the header it no longer shows. */
+  body .q-page-container {
+    padding-top: 0 !important;
+  }
+
+  /* interactive chrome carries no meaning on paper */
+  body .q-header,
+  body .q-drawer,
+  body .q-drawer__backdrop,
+  body .q-menu,
+  body .q-btn,
+  body .q-notifications,
+  body .nd-toolbar {
+    display: none !important;
+  }
+
+  /* drop fills and shadows so ink lands on white, not tinted panels */
+  body .q-card,
+  body .nicegui-card,
+  body .q-field--outlined .q-field__control {
+    background: transparent !important;
+    box-shadow: none !important;
   }
 }
 """

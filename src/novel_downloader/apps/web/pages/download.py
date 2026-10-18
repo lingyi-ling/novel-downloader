@@ -5,6 +5,8 @@ novel_downloader.apps.web.pages.download
 
 """
 
+import asyncio
+
 from nicegui import ui
 
 from novel_downloader.apps.constants import DOWNLOAD_SUPPORT_SITES
@@ -16,6 +18,14 @@ from ..components.widgets import page_header
 from ..services import manager, setup_dialog
 
 _DEFAULT_SITE = "qidian"
+
+#: Quiet period (in seconds) after the last keystroke before the URL is
+#: parsed while the user is still typing or pasting.
+_INPUT_PARSE_THROTTLE = 0.5
+
+#: Only surface the parsing indicator once a resolve takes longer than this
+#: (in seconds), so fast parses do not flash the banner.
+_PARSE_FEEDBACK_DELAY = 0.3
 
 
 @ui.page("/download")
@@ -49,6 +59,14 @@ def page_download() -> None:
                     .props("outlined dense clearable autocomplete=off")
                     .classes("w-full")
                 )
+
+                parsing_row = ui.row().classes(
+                    "nd-parse-banner items-center gap-2 w-full"
+                )
+                with parsing_row:
+                    ui.spinner(size="1rem", color="primary")
+                    ui.label(t("Parsing link...")).classes("text-caption nd-muted")
+                parsing_row.visible = False
 
                 preview_row = ui.row().classes(
                     "nd-parse-banner items-center gap-2 w-full"
@@ -108,20 +126,23 @@ def page_download() -> None:
             is_url = mode.value == "url"
             url_section.visible = is_url
             site_id_section.visible = not is_url
+            if not is_url:
+                parsing_row.visible = False
             preview_row.visible = (
                 is_url and bool(site_badge.text) and bool(id_badge.text)
             )
 
-        async def _resolve(url: str) -> tuple[str | None, str | None]:
+        async def _resolve(raw: str) -> tuple[str | None, str | None]:
             try:
-                info = resolve_book_url(url)
+                # resolving may lazily load rule-based sources from disk
+                info = await asyncio.to_thread(resolve_book_url, raw)
             except Exception:
                 return None, None
             if not info:
                 return None, None
             site_key = info["site_key"]
             bid = info.get("book_id")
-            if not book_id:
+            if not bid:
                 return None, None
             return site_key, bid
 
@@ -130,19 +151,37 @@ def page_download() -> None:
             id_badge.text = ""
             preview_row.visible = False
 
+        def _set_parsing(active: bool) -> None:
+            parsing_row.visible = active
+            if active:
+                _reset_preview()
+
+        async def _resolve_with_feedback(raw: str) -> tuple[str | None, str | None]:
+            """Resolve ``raw``, showing the parsing state only if it is slow."""
+            task = asyncio.ensure_future(_resolve(raw))
+            done, _ = await asyncio.wait({task}, timeout=_PARSE_FEEDBACK_DELAY)
+            if done:
+                return task.result()
+            _set_parsing(True)
+            try:
+                return await task
+            finally:
+                _set_parsing(False)
+
         def _clear_all() -> None:
             mode.value = "url"
             url_input.value = ""
             book_id.value = ""
             site.value = _DEFAULT_SITE
             _reset_preview()
+            parsing_row.visible = False
             _apply_visibility()
 
         mode.on_value_change(lambda _: _apply_visibility())
         _apply_visibility()
 
         async def _update_preview(raw: str) -> bool:
-            site_key, bid = await _resolve(raw)
+            site_key, bid = await _resolve_with_feedback(raw)
             if site_key and bid:
                 site_display = DOWNLOAD_SUPPORT_SITES.get(site_key, site_key)
                 site_badge.text = t("Site: {site}").format(site=site_display)
@@ -163,7 +202,24 @@ def page_download() -> None:
                     type="warning",
                 )
 
+        async def _preview_on_input() -> None:
+            # Parsing while the user is still typing must stay silent: no toast
+            # on failure, so a half-typed link never pops up an error.
+            raw = (url_input.value or "").strip()
+            if not raw:
+                _reset_preview()
+                return
+            await _update_preview(raw)
+
         url_input.on("blur", _preview_on_blur)
+        url_input.on(
+            "update:model-value",
+            _preview_on_input,
+            args=[],
+            throttle=_INPUT_PARSE_THROTTLE,
+            leading_events=False,
+            trailing_events=True,
+        )
 
         async def _add_task_from_url() -> None:
             raw = (url_input.value or "").strip()
@@ -202,7 +258,8 @@ def page_download() -> None:
                 if mode.value == "url":
                     await _add_task_from_url()
                 else:
-                    # if pasted a URL into ID field
+                    # safety net: a URL pasted into the ID field is handled on
+                    # input already, but keep the check in case it slipped through
                     bid = (book_id.value or "").strip()
                     if bid.startswith(("http://", "https://")):
                         mode.value = "url"
@@ -221,6 +278,19 @@ def page_download() -> None:
             if raw:
                 await _update_preview(raw)
             await add_task()
+
+        async def _book_id_to_url() -> None:
+            # Pasting a link into the ID field switches back to URL mode at once.
+            raw = (book_id.value or "").strip()
+            if not raw.startswith(("http://", "https://")):
+                return
+            book_id.value = ""
+            url_input.value = raw
+            mode.value = "url"
+            _apply_visibility()
+            await _update_preview(raw)
+
+        book_id.on_value_change(_book_id_to_url)
 
         # enter key submits in both modes
         url_input.on("keydown.enter", lambda _: _submit_from_url())

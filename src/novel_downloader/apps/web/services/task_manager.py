@@ -6,6 +6,7 @@ novel_downloader.apps.web.services.task_manager
 """
 
 import asyncio
+import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -83,6 +84,7 @@ class TaskManager:
                 for i, pending_task in enumerate(queue):
                     if pending_task.task_id == task_id:
                         pending_task.status = Status.CANCELLED
+                        pending_task.finished_at = time.time()
                         self.completed.append(pending_task)
                         queue.pop(i)
                         return True
@@ -93,6 +95,7 @@ class TaskManager:
                     if running_task.asyncio_task:
                         running_task.asyncio_task.cancel()
                     running_task.status = Status.CANCELLED
+                    running_task.finished_at = time.time()
                     return True
         return False
 
@@ -168,9 +171,11 @@ class TaskManager:
                 await self._run_task(current_task)
             except asyncio.CancelledError:
                 current_task.status = Status.CANCELLED
+                current_task.finished_at = time.time()
                 current_task.error = "Cancelled by user"
             except Exception as e:
                 current_task.status = Status.FAILED
+                current_task.finished_at = time.time()
                 current_task.error = str(e)
             finally:
                 async with self._lock:
@@ -232,9 +237,11 @@ class TaskManager:
 
             except asyncio.CancelledError:
                 current_task.status = Status.CANCELLED
+                current_task.finished_at = time.time()
                 break
             except Exception as e:
                 current_task.status = Status.FAILED
+                current_task.finished_at = time.time()
                 current_task.error = str(e)
             finally:
                 self._process_waiting.task_done()
@@ -255,11 +262,14 @@ class TaskManager:
                     ui=WebExportUI(current_task),
                 )
                 current_task.status = Status.COMPLETED
+                current_task.finished_at = time.time()
             except asyncio.CancelledError:
                 current_task.status = Status.CANCELLED
+                current_task.finished_at = time.time()
                 break
             except Exception as e:
                 current_task.status = Status.FAILED
+                current_task.finished_at = time.time()
                 current_task.error = str(e)
             finally:
                 self._export_waiting.task_done()

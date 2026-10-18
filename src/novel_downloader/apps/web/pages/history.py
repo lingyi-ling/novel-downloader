@@ -34,9 +34,17 @@ def _output_dir() -> Path:
     return Path(get_config_value(["general", "output_dir"], "./downloads"))
 
 
-SortKey = Literal["name", "mtime"]
+SortKey = Literal["name", "mtime", "size"]
 SortOrder = Literal["asc", "desc"]
 TypeFilter = Literal["All", "txt", "epub"]
+
+# Direction applied when the user switches to a sort key: names read best
+# ascending, while time and size are most useful newest/largest first.
+_DEFAULT_ORDER: dict[SortKey, SortOrder] = {
+    "name": "asc",
+    "mtime": "desc",
+    "size": "desc",
+}
 
 
 @dataclass(frozen=True)
@@ -93,10 +101,16 @@ def _apply_filter(
 def _apply_sort(
     items: list[FileItem], sort_by: SortKey, order: SortOrder
 ) -> list[FileItem]:
-    """Sort items by name/mtime in given order."""
+    """Sort items by name/mtime/size in the given order.
+
+    An empty list (no files, or everything filtered out) is safe: ``sorted``
+    simply yields an empty list for every key.
+    """
     reverse = order == "desc"
     if sort_by == "name":
         return sorted(items, key=lambda it: it.name.lower(), reverse=reverse)
+    if sort_by == "size":
+        return sorted(items, key=lambda it: it.size, reverse=reverse)
     return sorted(items, key=lambda it: it.mtime, reverse=reverse)
 
 
@@ -125,7 +139,9 @@ def _render_file_row(item: FileItem) -> None:
 
         # Meta & actions
         with ui.column().classes("min-w-0 grow gap-1"):
-            ui.label(item.name).classes("text-base font-medium break-words")
+            with ui.row().classes("items-center gap-2 min-w-0 w-full no-wrap"):
+                ui.label(item.name).classes("text-base font-medium break-words")
+                ui.label(item.ext).classes("nd-pill shrink-0")
             ui.label(
                 f"{t('Modified Time')}: {human_mtime} · {_format_size(item.size)}"
             ).classes("text-xs nd-muted")
@@ -149,6 +165,7 @@ def page_history() -> None:
     name_query: str = ""
     sort_by: SortKey = "mtime"
     sort_order: SortOrder = "desc"
+    syncing_sort_order: bool = False
 
     # cached lists
     all_items: list[FileItem] = []
@@ -182,7 +199,11 @@ def page_history() -> None:
 
             sort_key_sel = (
                 ui.select(
-                    {"name": t("Filename"), "mtime": t("Modified Time")},
+                    {
+                        "name": t("Filename"),
+                        "mtime": t("Modified Time"),
+                        "size": t("File Size"),
+                    },
                     value=sort_by,
                     with_input=False,
                 )
@@ -255,7 +276,11 @@ def page_history() -> None:
             list_area.clear()
             with list_area:
                 if not current_slice:
-                    empty_state("folder_open", t("No files"))
+                    has_filter = type_filter != "All" or bool(name_query)
+                    if has_filter and total_all > 0:
+                        empty_state("folder_open", t("No files match the filter"))
+                    else:
+                        empty_state("folder_open", t("No files"))
                 else:
                     for item in current_slice:
                         _render_file_row(item)
@@ -295,13 +320,25 @@ def page_history() -> None:
             _refresh()
 
         def _on_sort_key_change(e: ValueChangeEventArguments[Any]) -> None:
-            nonlocal sort_by
+            nonlocal sort_by, sort_order, syncing_sort_order
             sort_by = e.value
+            # Switching the key resets the direction to that key's default.
+            default_order = _DEFAULT_ORDER.get(sort_by, "desc")
+            if sort_order != default_order:
+                sort_order = default_order
+                # Keep the toggle in sync without re-entering its handler.
+                syncing_sort_order = True
+                try:
+                    sort_order_sel.value = default_order
+                finally:
+                    syncing_sort_order = False
             _recompute_from_cache()
             _refresh()
 
         def _on_sort_order_change(e: ValueChangeEventArguments[Any]) -> None:
             nonlocal sort_order, sorted_items, page
+            if syncing_sort_order:
+                return
             new_order = e.value
             # Optimization: if only order changes, reverse current list
             if sort_order != new_order and len(sorted_items) > 1:
