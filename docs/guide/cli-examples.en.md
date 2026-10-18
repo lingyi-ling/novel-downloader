@@ -38,10 +38,12 @@ novel-cli login --list
 ### Global Usage and Help
 
 ```text
-novel-cli COMMAND [ARGS]...
+novel-cli [-h] [-v] [--lang LANG] COMMAND [ARGS]...
 
 Options:
-  --help    显示此帮助信息并退出
+  -h, --help     show this help message and exit
+  -v, --version  show program's version number and exit
+  --lang LANG    override the interface language for this run (e.g. en, zh); place before the subcommand
 ```
 
 > All subcommands support `--help` to view their respective help text.
@@ -52,12 +54,13 @@ Options:
 
 ```text
 Commands:
-  download    下载小说
-  search      搜索小说
-  export      导出已下载的小说
-  login       打开站点登录窗口并保存会话 Cookies
-  config      管理配置与语言
-  clean       清理缓存与配置
+  download    download a novel by book ID or URL
+  search      search for books across one or more sites
+  export      export downloaded novels
+  login       open a login window for a site and save its session cookies
+  config      manage application configuration and settings
+  clean       clean application logs, cache and book data
+  sources     list, verify, install and remove rule-based site sources
 ```
 
 ---
@@ -73,7 +76,7 @@ Download a complete novel, supporting three approaches:
 **Synopsis**
 
 ```bash
-novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [book_ids | url]
+novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [--format FORMAT [FORMAT ...]] [book_ids ...]
 ```
 
 **Options**
@@ -125,15 +128,20 @@ Search for novels by keyword
 **Synopsis**
 
 ```bash
-novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] keyword
+novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] keyword
 ```
 
 **Options**
 
 * `keyword`: search keyword
 * `--site SITE`, `-s SITE`: specify the search site; can be used multiple times to specify multiple sites; if not specified, all supported sites are searched
-* `--limit N`: overall result limit (minimum 1), defaults to `200`
+* `--limit N`, `-l N`: overall result limit (minimum 1), defaults to **no limit**
 * `--site-limit M`: per-site result limit (minimum 1), defaults to `10`
+* `--timeout SECS`: request timeout in seconds, defaults to `5.0`
+* `--format FORMAT [FORMAT ...]`: export format used when auto-downloading a confirmed result (defaults to the config file)
+* `--json`: print all search results to stdout as JSON and exit (for scripts)
+* `--first`: download the top-ranked result directly without confirmation (non-interactive)
+* `--sort {quality,priority,site,title,author,words,update}`: result ordering, defaults to `quality`
 
 **Examples**
 
@@ -176,17 +184,18 @@ Export downloaded novels to a specified format
 **Synopsis**
 
 ```bash
-novel-cli export [-h] [--format FORMAT] [--site SITE] [--config CONFIG] [book_id ...]
+novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CONFIG] [--start START] [--end END] [--stage STAGE] [book_ids ...]
 ```
 
 **Options**
 
 * `book_ids`: one or more book IDs to export (optional; if omitted, you will be prompted to select interactively)
-* `--format FORMAT`: export format: `txt` / `epub`; defaults to the setting in the configuration file
+* `--format FORMAT [FORMAT ...]`: export format: `txt` / `epub`; multiple values allowed; defaults to the setting in the configuration file
 * `--site SITE`: site key (e.g. `b520`, `qidian`, ...), (optional; if omitted, you will be prompted to select interactively)
 * `--config CONFIG`: specify the configuration file path (optional)
-* `--start`: start chapter ID, applied only to the first book
-* `--end`: end chapter ID, applied only to the first book
+* `--start START`: start chapter ID, applied only to the first book
+* `--end END`: end chapter ID, applied only to the first book
+* `--stage STAGE`: export stage (e.g. `raw`, `cleaner`); defaults to the last stage
 
 **Examples**
 
@@ -444,7 +453,7 @@ The optional `pywebview` dependency is required (the `.[desktop]` extra); otherw
 **Synopsis**
 
 ```bash
-novel-cli login [site] [--timeout SECONDS] [--list]
+novel-cli login [-h] [--timeout SECONDS] [--list] [site]
 ```
 
 **Options**

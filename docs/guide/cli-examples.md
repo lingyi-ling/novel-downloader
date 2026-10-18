@@ -38,10 +38,12 @@ novel-cli login --list
 ### 全局用法与帮助
 
 ```text
-novel-cli COMMAND [ARGS]...
+novel-cli [-h] [-v] [--lang LANG] COMMAND [ARGS]...
 
 Options:
-  --help    显示此帮助信息并退出
+  -h, --help     显示此帮助信息并退出
+  -v, --version  显示程序版本号并退出
+  --lang LANG    覆盖本次运行使用的界面语言（例如 en、zh）。需放在子命令之前。
 ```
 
 > 所有子命令均支持 `--help` 查看对应帮助文本。
@@ -52,12 +54,13 @@ Options:
 
 ```text
 Commands:
-  download    下载小说
-  search      搜索小说
+  download    通过书籍 ID 或 URL 下载小说
+  search      在一个或多个站点搜索书籍
   export      导出已下载的小说
-  login       打开站点登录窗口并保存会话 Cookies
-  config      管理配置与语言
-  clean       清理缓存与配置
+  login       为站点打开登录窗口并保存其会话 Cookies
+  config      管理应用配置和设置
+  clean       清理应用日志、缓存与书籍数据
+  sources     列出、校验、安装和移除规则书源
 ```
 
 ---
@@ -73,7 +76,7 @@ Commands:
 **Synopsis**
 
 ```bash
-novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [book_ids | url]
+novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [--format FORMAT [FORMAT ...]] [book_ids ...]
 ```
 
 **Options**
@@ -125,15 +128,20 @@ novel-cli download --site n23qb
 **Synopsis**
 
 ```bash
-novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] keyword
+novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] keyword
 ```
 
 **Options**
 
 * `keyword`: 搜索关键字
 * `--site SITE`, `-s SITE`: 指定搜索站点, 可多次使用以指定多个站点, 不指定则搜索全部支持站点
-* `--limit N`: 总体结果上限 (最小 1), 默认为 `200`
+* `--limit N`, `-l N`: 总体结果上限 (最小 1), 默认为**不限制**
 * `--site-limit M`: 单站点结果上限 (最小 1), 默认为 `10`
+* `--timeout SECS`: 请求超时时间 (秒), 默认为 `5.0`
+* `--format FORMAT [FORMAT ...]`: 结果确认后自动下载时的导出格式 (默认使用配置文件设定)
+* `--json`: 将所有搜索结果以 JSON 输出到标准输出后退出 (便于脚本消费)
+* `--first`: 直接下载排名第一的结果, 无需确认 (非交互模式)
+* `--sort {quality,priority,site,title,author,words,update}`: 结果排序方式, 默认为 `quality` (优选)
 
 **Examples**
 
@@ -176,17 +184,18 @@ novel-cli search -s b520 -s n23qb 三体
 **Synopsis**
 
 ```bash
-novel-cli export [-h] [--format FORMAT] [--site SITE] [--config CONFIG] [book_id ...]
+novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CONFIG] [--start START] [--end END] [--stage STAGE] [book_ids ...]
 ```
 
 **Options**
 
 * `book_ids`: 要导出的一个或多个书籍 ID (可选; 若省略则会交互式选择)
-* `--format FORMAT`: 导出格式: `txt` / `epub`, 默认使用配置文件设定
+* `--format FORMAT [FORMAT ...]`: 导出格式: `txt` / `epub`, 可指定多个, 默认使用配置文件设定
 * `--site SITE`: 站点键 (如 `b520`, `qidian`, ...), (可选; 若省略则会交互式选择)
 * `--config CONFIG`: 指定配置文件路径 (可选)
-* `--start`: 起始章节 ID, 仅应用于第一本书
-* `--end`: 结束章节 ID, 仅应用于第一本书
+* `--start START`: 起始章节 ID (仅对第一本书生效)
+* `--end END`: 结束章节 ID (仅对第一本书生效)
+* `--stage STAGE`: 导出阶段 (例如 `raw`、`cleaner`), 默认使用最后阶段
 
 **Examples**
 
@@ -444,7 +453,7 @@ novel-cli clean book --site qidian 1010868264 --all -y
 **Synopsis**
 
 ```bash
-novel-cli login [site] [--timeout SECONDS] [--list]
+novel-cli login [-h] [--timeout SECONDS] [--list] [site]
 ```
 
 **Options**
