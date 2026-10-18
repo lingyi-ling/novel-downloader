@@ -34,7 +34,8 @@ class LoginCmd(Command):
             "--timeout",
             type=float,
             default=300.0,
-            help=t("Seconds to wait for the login to complete."),
+            metavar="SECONDS",
+            help=t("Seconds to wait for the login to complete (default: 300)."),
         )
         parser.add_argument(
             "--list",
@@ -58,7 +59,9 @@ class LoginCmd(Command):
                     site=site
                 )
             )
-            return
+            # Invalid argument: exit 2, like ``config set-lang`` for an
+            # unsupported language.
+            raise SystemExit(2)
 
         if run_login(site, timeout=float(args.timeout)):
             ui.success(
@@ -66,3 +69,5 @@ class LoginCmd(Command):
             )
         else:
             ui.error(t("Login was not completed; no cookies were saved."))
+            # Documented contract: a login that was not completed exits non-zero.
+            raise SystemExit(1)

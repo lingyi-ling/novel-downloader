@@ -7,12 +7,12 @@ A small set of Rich-based helpers to keep CLI presentation and prompts
 consistent across subcommands.
 
 Public API:
-  * info, success, warn, error
+  * emit, info, success, warn, error, status
   * confirm
-  * prompt, prompt_password
+  * prompt, prompt_password, prompt_choice
   * render_table
-  * select_index
-  * print_progress
+  * ProgressUI
+  * setup_logging
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.prompt import Confirm, Prompt
 from rich.status import Status
 
@@ -45,27 +46,27 @@ def emit(text: str) -> None:
 
 def info(message: str) -> None:
     """Print a neutral informational message."""
-    _CONSOLE.print(message)
+    _CONSOLE.print(escape(message))
 
 
 def success(message: str) -> None:
     """Print a success message in a friendly color."""
-    _CONSOLE.print(f"[green]{message}[/]")
+    _CONSOLE.print(escape(message), style="green")
 
 
 def warn(message: str) -> None:
     """Print a warning message."""
-    _CONSOLE.print(f"[yellow]{message}[/]")
+    _CONSOLE.print(escape(message), style="yellow")
 
 
 def error(message: str) -> None:
     """Print an error message."""
-    _CONSOLE.print(f"[red]{message}[/]")
+    _CONSOLE.print(escape(message), style="red")
 
 
 def status(message: str) -> Status:
     """Context manager to show a spinner with a message."""
-    return _CONSOLE.status(f"[bold cyan]{message}[/]", spinner="dots")
+    return _CONSOLE.status(f"[bold cyan]{escape(message)}[/]", spinner="dots")
 
 
 def confirm(message: str, *, default: bool = False) -> bool:
@@ -132,8 +133,11 @@ def render_table(
     table = Table(title=title, show_lines=True, expand=True)
     for col in columns:
         table.add_column(col, overflow="fold")
+    # Cell values come from remote/user data (book titles, rule names, ...);
+    # escape them so a stray "[...]" is printed literally instead of being
+    # parsed as rich markup.
     for row in rows:
-        table.add_row(*[str(x) for x in row])
+        table.add_row(*[escape(str(x)) for x in row])
     _CONSOLE.print(table)
 
 

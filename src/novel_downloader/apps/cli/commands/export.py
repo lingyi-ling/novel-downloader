@@ -17,7 +17,7 @@ from novel_downloader.plugins import registrar
 from novel_downloader.schemas import BookConfig
 
 from ..ui_adapters import CLIExportUI
-from .base import Command
+from .base import Command, parse_book_args
 
 
 class ExportCmd(Command):
@@ -134,19 +134,4 @@ class ExportCmd(Command):
         """
         Convert CLI arguments into a list of `BookConfig`.
         """
-        if not book_ids:
-            return []
-
-        result: list[BookConfig] = []
-        result.append(
-            BookConfig(
-                book_id=book_ids[0],
-                start_id=start_id,
-                end_id=end_id,
-            )
-        )
-
-        for book_id in book_ids[1:]:
-            result.append(BookConfig(book_id=book_id))
-
-        return result
+        return parse_book_args(book_ids, start_id, end_id)

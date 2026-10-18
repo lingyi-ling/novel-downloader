@@ -21,7 +21,7 @@ from ..ui_adapters import (
     CLILoginUI,
     CLIProcessUI,
 )
-from .base import Command
+from .base import Command, parse_book_args
 
 
 class DownloadCmd(Command):
@@ -71,9 +71,14 @@ class DownloadCmd(Command):
         if site:  # SITE MODE
             books = cls._parse_book_args(args.book_ids, args.start, args.end)
         else:  # URL MODE
-            from novel_downloader.infra.book_url_resolver import resolve_book_url
-
-            ui.info(t("No --site provided; detecting site from URL..."))
+            if not args.book_ids:
+                ui.error(
+                    t(
+                        "No book ID or URL provided. Pass a book URL, "
+                        "or use --site SITE [book_id ...]."
+                    )
+                )
+                return
 
             if len(args.book_ids) != 1:
                 ui.error(
@@ -82,6 +87,10 @@ class DownloadCmd(Command):
                     ).format(n=len(args.book_ids))
                 )
                 return
+
+            from novel_downloader.infra.book_url_resolver import resolve_book_url
+
+            ui.info(t("No --site provided; detecting site from URL..."))
 
             raw_url = args.book_ids[0]
             resolved = resolve_book_url(raw_url)
@@ -214,19 +223,4 @@ class DownloadCmd(Command):
         """
         Convert CLI arguments into a list of `BookConfig`.
         """
-        if not book_ids:
-            return []
-
-        result: list[BookConfig] = []
-        result.append(
-            BookConfig(
-                book_id=book_ids[0],
-                start_id=start_id,
-                end_id=end_id,
-            )
-        )
-
-        for book_id in book_ids[1:]:
-            result.append(BookConfig(book_id=book_id))
-
-        return result
+        return parse_book_args(book_ids, start_id, end_id)

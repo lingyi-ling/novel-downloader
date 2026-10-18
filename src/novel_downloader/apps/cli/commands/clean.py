@@ -16,7 +16,7 @@ from novel_downloader.infra.paths import PACKAGE_NAME, STATE_PATH
 from novel_downloader.plugins import registrar
 from novel_downloader.schemas import BookConfig
 
-from .base import Command
+from .base import Command, localize_help, parse_book_args
 
 
 class CleanCmd(Command):
@@ -25,8 +25,13 @@ class CleanCmd(Command):
 
     @classmethod
     def register(cls, subparsers: "_SubParsersAction[ArgumentParser]") -> None:
-        parser = subparsers.add_parser(cls.name, help=cls.help)
-        sub = parser.add_subparsers(dest="subcommand", required=True)
+        parser = subparsers.add_parser(
+            cls.name, help=cls.help, description=cls.help, add_help=False
+        )
+        localize_help(parser)
+        sub = parser.add_subparsers(
+            dest="subcommand", required=True, title=t("Subcommands")
+        )
 
         for subcmd in (CleanStateCmd, CleanLogsCmd, CleanCacheCmd, CleanBookCmd):
             subcmd.register(sub)
@@ -214,7 +219,7 @@ class CleanCacheCmd(Command):
                 return
 
         try:
-            shutil.rmtree(target_dir, ignore_errors=True)
+            shutil.rmtree(target_dir)
             ui.success(t("Successfully removed {desc}.").format(desc=target_desc))
         except Exception as exc:
             ui.error(
@@ -322,7 +327,7 @@ class CleanBookCmd(Command):
             return
 
         try:
-            shutil.rmtree(target_dir, ignore_errors=True)
+            shutil.rmtree(target_dir)
             ui.success(t("Successfully removed {desc}.").format(desc=desc))
         except Exception as exc:
             ui.error(t("Failed to remove {desc}: {error}").format(desc=desc, error=exc))
@@ -440,19 +445,4 @@ class CleanBookCmd(Command):
         """
         Convert CLI arguments into a list of `BookConfig`.
         """
-        if not book_ids:
-            return []
-
-        result: list[BookConfig] = []
-        result.append(
-            BookConfig(
-                book_id=book_ids[0],
-                start_id=start_id,
-                end_id=end_id,
-            )
-        )
-
-        for book_id in book_ids[1:]:
-            result.append(BookConfig(book_id=book_id))
-
-        return result
+        return parse_book_args(book_ids, start_id, end_id)

@@ -19,7 +19,9 @@ class CLIDownloadUI:
 
     async def on_start(self, book: BookConfig) -> None:
         ui.info(t("Downloading book {book_id}...").format(book_id=book.book_id))
-        self._progress = ui.ProgressUI(prefix=t("Download progress"), unit="chapters")
+        self._progress = ui.ProgressUI(
+            prefix=t("Download progress"), unit=t("chapters")
+        )
         self._progress.start()
 
     async def on_progress(self, done: int, total: int) -> None:
@@ -136,7 +138,9 @@ class CLIProcessUI:
                 stage=stage, book_id=book.book_id
             )
         )
-        self._progress = ui.ProgressUI(prefix=f"{t('Stage')} {stage}", unit="chapters")
+        self._progress = ui.ProgressUI(
+            prefix=f"{t('Stage')} {stage}", unit=t("chapters")
+        )
         self._progress.start()
 
     def on_stage_progress(

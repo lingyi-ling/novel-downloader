@@ -17,11 +17,11 @@ from .search import SearchCmd
 from .sources import SourcesCmd
 
 commands = [
-    CleanCmd,
-    ConfigCmd,
     DownloadCmd,
+    SearchCmd,
     ExportCmd,
     LoginCmd,
-    SearchCmd,
+    ConfigCmd,
+    CleanCmd,
     SourcesCmd,
 ]

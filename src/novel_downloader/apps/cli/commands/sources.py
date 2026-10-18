@@ -10,13 +10,13 @@ validate a rule file without touching any network.
 from __future__ import annotations
 
 import json
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser, Namespace, _SubParsersAction
 from pathlib import Path
 
 from novel_downloader.apps.cli import ui
 from novel_downloader.infra.i18n import t
 
-from .base import Command
+from .base import Command, localize_help
 
 
 class SourcesCmd(Command):
@@ -25,30 +25,45 @@ class SourcesCmd(Command):
 
     @classmethod
     def add_arguments(cls, parser: ArgumentParser) -> None:
-        sub = parser.add_subparsers(dest="action")
+        sub = parser.add_subparsers(dest="action", title=t("Subcommands"))
 
-        p_list = sub.add_parser("list", help=t("List available rule-based sources."))
+        p_list = cls._add_subparser(
+            sub, "list", t("List available rule-based sources.")
+        )
         p_list.add_argument(
             "--check",
             action="store_true",
             help=t("Also verify that each source can be registered."),
         )
 
-        p_check = sub.add_parser("check", help=t("Validate a single rule file."))
+        p_check = cls._add_subparser(sub, "check", t("Validate a single rule file."))
         p_check.add_argument("path", help=t("Path to a rule JSON file."))
 
-        p_add = sub.add_parser(
-            "add", help=t("Install a rule file into your user rules directory.")
+        p_add = cls._add_subparser(
+            sub, "add", t("Install a rule file into your user rules directory.")
         )
         p_add.add_argument("path", help=t("Path to a rule JSON file."))
         p_add.add_argument(
             "--force", action="store_true", help=t("Overwrite an existing rule file.")
         )
 
-        p_remove = sub.add_parser(
-            "remove", help=t("Remove a user-installed rule (built-ins are kept).")
+        p_remove = cls._add_subparser(
+            sub, "remove", t("Remove a user-installed rule (built-ins are kept).")
         )
         p_remove.add_argument("site_key", help=t("site_key of the rule to remove."))
+
+    @staticmethod
+    def _add_subparser(
+        sub: _SubParsersAction[ArgumentParser],
+        name: str,
+        help_text: str,
+    ) -> ArgumentParser:
+        """Create a subcommand parser with a localized help action."""
+        parser = sub.add_parser(
+            name, help=help_text, description=help_text, add_help=False
+        )
+        localize_help(parser)
+        return parser
 
     @classmethod
     def run(cls, args: Namespace) -> None:
@@ -87,7 +102,7 @@ class SourcesCmd(Command):
             row = [
                 key,
                 rule.display_name,
-                "yes" if rule.search is not None else "no",
+                t("yes") if rule.search is not None else t("no"),
                 ", ".join(rule.hosts) or "-",
                 meta.get("origin", "-"),
             ]
@@ -108,8 +123,8 @@ class SourcesCmd(Command):
             if has_search:
                 registrar.get_searcher_class(key)
         except Exception as e:
-            return f"FAIL: {e}"
-        return "ok"
+            return t("FAIL: {err}").format(err=e)
+        return t("ok")
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -136,7 +151,7 @@ class SourcesCmd(Command):
             t("Rule OK: {name} (site_key={key}, search={search})").format(
                 name=rule.display_name,
                 key=rule.site_key,
-                search="yes" if rule.search is not None else "no",
+                search=t("yes") if rule.search is not None else t("no"),
             )
         )
 

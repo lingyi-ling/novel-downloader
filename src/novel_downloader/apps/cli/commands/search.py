@@ -50,7 +50,7 @@ class SearchCmd(Command):
             type=int,
             default=None,
             metavar="N",
-            help=t("Maximum number of total results"),
+            help=t("Maximum number of total results (default: no limit)"),
         )
         parser.add_argument(
             "--site-limit",
@@ -145,6 +145,12 @@ class SearchCmd(Command):
             if not results:
                 ui.warn(t("No results found for '{keyword}'.").format(keyword=keyword))
                 return
+
+            ui.info(
+                t("Found {count} result(s) for '{keyword}'.").format(
+                    count=len(results), keyword=keyword
+                )
+            )
 
             chosen = results[0] if args.first else prompts.select_search_result(results)
             if chosen is None:

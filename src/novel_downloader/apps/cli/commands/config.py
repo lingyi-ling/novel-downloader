@@ -13,7 +13,7 @@ from novel_downloader.infra.config import copy_default_config
 from novel_downloader.infra.i18n import available_languages, set_language, t
 from novel_downloader.infra.paths import DEFAULT_CONFIG_FILENAME
 
-from .base import Command
+from .base import Command, localize_help
 
 
 class ConfigCmd(Command):
@@ -22,8 +22,13 @@ class ConfigCmd(Command):
 
     @classmethod
     def register(cls, subparsers: "_SubParsersAction[ArgumentParser]") -> None:
-        parser = subparsers.add_parser(cls.name, help=cls.help)
-        sub = parser.add_subparsers(dest="subcommand", required=True)
+        parser = subparsers.add_parser(
+            cls.name, help=cls.help, description=cls.help, add_help=False
+        )
+        localize_help(parser)
+        sub = parser.add_subparsers(
+            dest="subcommand", required=True, title=t("Subcommands")
+        )
 
         for subcmd in (ConfigInitCmd, ConfigSetLangCmd):
             subcmd.register(sub)

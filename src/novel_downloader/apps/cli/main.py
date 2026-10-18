@@ -8,6 +8,7 @@ Unified CLI entry point. Parses arguments and delegates to parser or interactive
 
 import argparse
 import os
+import sys
 
 from novel_downloader import __version__
 from novel_downloader.infra.i18n import LANG_ENV_VAR, normalize_language, t
@@ -39,9 +40,33 @@ def cli_main() -> None:
     # Imported lazily so localized ``help`` strings pick up ``--lang``.
     from novel_downloader.apps.cli.commands import commands
 
-    parser = argparse.ArgumentParser(description=t("Novel Downloader CLI tool."))
+    parser = argparse.ArgumentParser(
+        prog="novel-cli",
+        description=t("Novel Downloader CLI tool."),
+        epilog=t(
+            "Examples:\n"
+            "  %(prog)s download https://example.com/book/123/\n"
+            "  %(prog)s download --site b520 8_8187\n"
+            "  %(prog)s search --site b520 --limit 5 KEYWORD\n"
+            "  %(prog)s export --format epub 88888\n"
+            "\n"
+            "Run '%(prog)s COMMAND --help' for command-specific options."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+    )
     parser.add_argument(
-        "-v", "--version", action="version", version=f"NovelDownloader {__version__}"
+        "-h",
+        "--help",
+        action="help",
+        help=t("Show this help message and exit."),
+    )
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"NovelDownloader {__version__}",
+        help=t("Show program's version number and exit."),
     )
     parser.add_argument(
         "--lang",
@@ -51,7 +76,7 @@ def cli_main() -> None:
         ),
     )
 
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", title=t("Commands"))
 
     for cmd in commands:
         cmd.register(subparsers)
@@ -68,7 +93,9 @@ def cli_main() -> None:
         try:
             args.func(args)
         except KeyboardInterrupt as err:
-            print("\n" + t("Aborted."))
+            # Diagnostics belong on stderr: stdout stays machine readable
+            # (``search --json``, ``login --list``, ...).
+            print("\n" + t("Aborted."), file=sys.stderr)
             raise SystemExit(1) from err
     else:
         parser.print_help()
