@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">小说下载器</string>
+
+    <!-- 底部导航 -->
+    <string name="nav_search">搜索</string>
+    <string name="nav_tasks">任务</string>
+    <string name="nav_history">历史</string>
+    <string name="nav_music">音乐</string>
+    <string name="nav_settings">设置</string>
+
+    <!-- 通用 -->
+    <string name="action_refresh">刷新</string>
+    <string name="action_cancel">取消</string>
+    <string name="action_save">保存</string>
+    <string name="action_download">下载</string>
+    <string name="action_add_to_queue">加入下载队列</string>
+    <string name="state_loading">加载中…</string>
+    <string name="state_empty">暂无数据</string>
+    <string name="state_error">出错：%1$s</string>
+    <string name="state_ready">就绪</string>
+
+    <!-- 搜索 -->
+    <string name="search_hint">输入关键字</string>
+    <string name="search_sites_hint">站点（逗号分隔，留空搜索全部）</string>
+    <string name="search_button">搜索</string>
+    <string name="search_searching">搜索中…</string>
+    <string name="search_results">共 %1$d 条结果</string>
+    <string name="search_no_results">没有找到结果</string>
+    <string name="search_task_added">已加入下载队列</string>
+    <string name="search_meta">%1$s · %2$s · %3$s</string>
+
+    <!-- 任务 -->
+    <string name="tasks_running">进行中</string>
+    <string name="tasks_pending">排队中</string>
+    <string name="tasks_completed">已完成 / 已取消 / 失败</string>
+    <string name="tasks_progress">%1$d/%2$s 章</string>
+    <string name="tasks_cancel_done">已取消</string>
+    <string name="tasks_status_queued">排队中</string>
+    <string name="tasks_status_running">下载中</string>
+    <string name="tasks_status_processing">处理中</string>
+    <string name="tasks_status_exporting">导出中</string>
+    <string name="tasks_status_completed">已完成</string>
+    <string name="tasks_status_cancelled">已取消</string>
+    <string name="tasks_status_failed">失败</string>
+
+    <!-- 历史 -->
+    <string name="history_files">共 %1$d 个文件</string>
+    <string name="history_open_failed">无法打开：%1$s</string>
+
+    <!-- 音乐 -->
+    <string name="music_platform">平台</string>
+    <string name="music_keyword_hint">歌曲关键词</string>
+    <string name="music_search_button">搜索歌曲</string>
+    <string name="music_tracks">共 %1$d 首</string>
+    <string name="music_download_selected">下载选中</string>
+    <string name="music_job_progress">下载中 %1$d/%2$d</string>
+    <string name="music_job_done">完成：成功 %1$d，跳过 %2$d，失败 %3$d</string>
+    <string name="music_job_failed">任务失败：%1$s</string>
+    <string name="music_no_selection">请先选择歌曲</string>
+    <string name="music_vip">VIP</string>
+    <string name="music_unknown_artist">未知歌手</string>
+
+    <!-- 设置 -->
+    <string name="settings_base_url">API 地址</string>
+    <string name="settings_api_key">API 密钥（可选）</string>
+    <string name="settings_saved">已保存</string>
+    <string name="settings_hint">模拟器访问电脑用 http://10.0.2.2:8081/；真机用电脑局域网 IP（电脑需以 novel-api --host 0.0.0.0 启动）。</string>
+</resources>

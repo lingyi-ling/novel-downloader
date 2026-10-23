@@ -24,6 +24,7 @@
 - **插件系统:** 可扩展站点解析器、导出器、Pipeline 等
 - **规则书源 (Book Source):** 新增站点只需写 JSON 规则，无需编写 Python 代码
 - **CLI + 本地 REST API:** 面向终端用户与第三方程序集成的双端点
+- **Android 客户端:** 原生 Kotlin/Compose App（`android/`），通过本地 API 连接电脑端
 
 ---
 

@@ -119,6 +119,7 @@ nav:
     - 处理器参考: guide/processors-reference.md
     - CLI 用法: guide/cli-examples.md
     - 本地 API 服务: guide/api.md
+    - Android 客户端: guide/android-app.md
     - 书源: guide/book-sources.md
     - 文件保存: guide/file-saving.md
     - 复制 Cookies: guide/copy-cookies.md

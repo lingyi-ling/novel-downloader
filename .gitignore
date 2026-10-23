@@ -221,3 +221,12 @@ check_format.py
 
 # Local configuration (created by `novel-cli config init`)
 settings.toml
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.apk
+*.aab

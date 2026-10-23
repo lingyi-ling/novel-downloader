@@ -1,0 +1,73 @@
+package com.lingyi.noveldl.ui.settings
+
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import com.lingyi.noveldl.R
+import com.lingyi.noveldl.data.Api
+import com.lingyi.noveldl.data.ApiSettings
+import com.lingyi.noveldl.data.SettingsStore
+import kotlinx.coroutines.launch
+
+@Composable
+fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val settings by store.settings.collectAsState(initial = ApiSettings())
+    var baseUrl by remember(settings) { mutableStateOf(settings.baseUrl) }
+    var apiKey by remember(settings) { mutableStateOf(settings.apiKey) }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        OutlinedTextField(
+            value = baseUrl,
+            onValueChange = { baseUrl = it },
+            label = { Text(stringResource(R.string.settings_base_url)) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = apiKey,
+            onValueChange = { apiKey = it },
+            label = { Text(stringResource(R.string.settings_api_key)) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = {
+                scope.launch {
+                    store.save(baseUrl, apiKey)
+                    Api.configure(baseUrl, apiKey)
+                    onMessage(context.getString(R.string.settings_saved))
+                }
+            },
+        ) {
+            Text(stringResource(R.string.action_save))
+        }
+        Spacer(Modifier.height(16.dp))
+        Text(
+            stringResource(R.string.settings_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}

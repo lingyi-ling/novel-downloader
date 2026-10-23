@@ -24,6 +24,7 @@ Supports resumable crawling, download queues with progress, multi-format exporti
 * Plugin system for site parsers, exporters, and processing pipelines
 * Rule-driven book sources: add a site with a JSON rule, no Python code required
 * CLI + local REST API: dual endpoints for terminal users and third-party integrations
+* Android client: native Kotlin/Compose app (`android/`) that talks to the local API
 
 ---
 

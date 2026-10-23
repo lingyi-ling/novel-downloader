@@ -1,0 +1,161 @@
+package com.lingyi.noveldl.data
+
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class Health(val status: String = "", val version: String = "")
+
+@Serializable
+data class SitesResponse(
+    val search: Map<String, String> = emptyMap(),
+    val download: Map<String, String> = emptyMap(),
+)
+
+@Serializable
+data class SearchResult(
+    val site: String = "",
+    val book_id: String = "",
+    val book_url: String = "",
+    val cover_url: String = "",
+    val title: String = "",
+    val author: String = "",
+    val latest_chapter: String = "",
+    val update_date: String = "",
+    val word_count: String = "",
+    val priority: Int = 0,
+)
+
+@Serializable
+data class SearchRequest(
+    val keyword: String,
+    val sites: List<String>? = null,
+    val per_site_limit: Int = 5,
+    val timeout: Double = 5.0,
+    val sort: String = "quality",
+    val order: String? = null,
+    val limit: Int? = null,
+)
+
+@Serializable
+data class SearchResponse(
+    val total: Int = 0,
+    val results: List<SearchResult> = emptyList(),
+)
+
+@Serializable
+data class Task(
+    val task_id: String = "",
+    val title: String = "",
+    val site: String = "",
+    val book_id: String = "",
+    val status: String = "",
+    val chapters_done: Int = 0,
+    val chapters_total: Int = 0,
+    val progress: Double = 0.0,
+    val error: String? = null,
+    val exported_paths: Map<String, String> = emptyMap(),
+    val created_at: Double = 0.0,
+    val finished_at: Double? = null,
+)
+
+@Serializable
+data class TasksResponse(
+    val pending: List<Task> = emptyList(),
+    val running: List<Task> = emptyList(),
+    val completed: List<Task> = emptyList(),
+)
+
+@Serializable
+data class AddTaskRequest(
+    val site: String,
+    val book_id: String,
+    val title: String? = null,
+)
+
+@Serializable
+data class CancelResponse(val ok: Boolean = false)
+
+@Serializable
+data class HistoryFile(
+    val name: String = "",
+    val ext: String = "",
+    val size: Long = 0,
+    val mtime: Double = 0.0,
+    val download_url: String = "",
+)
+
+@Serializable
+data class HistoryResponse(
+    val total: Int = 0,
+    val files: List<HistoryFile> = emptyList(),
+)
+
+@Serializable
+data class MusicPlatform(
+    val key: String = "",
+    val label: String = "",
+    val note: String = "",
+)
+
+@Serializable
+data class MusicPlatformsResponse(
+    val platforms: List<MusicPlatform> = emptyList(),
+)
+
+@Serializable
+data class MusicTrack(
+    val provider: String = "",
+    val id: String = "",
+    val name: String = "",
+    val artists: String = "",
+    val album: String = "",
+    val duration_s: Int = 0,
+    val cover_url: String = "",
+    val vip: Boolean = false,
+)
+
+@Serializable
+data class MusicSearchRequest(
+    val platform: String,
+    val keyword: String,
+    val limit: Int = 20,
+)
+
+@Serializable
+data class MusicSearchResponse(
+    val total: Int = 0,
+    val tracks: List<MusicTrack> = emptyList(),
+)
+
+@Serializable
+data class MusicJobRequest(
+    val platform: String,
+    val tracks: List<MusicTrack>,
+    val level: String? = null,
+)
+
+@Serializable
+data class MusicJobCreated(val job_id: String = "")
+
+@Serializable
+data class MusicJobProgress(
+    val done: Int = 0,
+    val total: Int = 0,
+)
+
+@Serializable
+data class MusicJobResult(
+    val status: String = "",
+    val reason: String = "",
+    val path: String = "",
+    val bytes: Long = 0,
+)
+
+@Serializable
+data class MusicJob(
+    val job_id: String = "",
+    val status: String = "",
+    val progress: MusicJobProgress = MusicJobProgress(),
+    val results: List<MusicJobResult> = emptyList(),
+    val error: String? = null,
+)
