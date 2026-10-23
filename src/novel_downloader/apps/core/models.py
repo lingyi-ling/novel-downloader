@@ -28,6 +28,28 @@ class Status(str, Enum):  # noqa: UP042 - keep the explicit ``str`` mixin
     FAILED = "failed"
 
 
+class TaskError(Exception):
+    """Base class for a failure surfaced while running a download task."""
+
+
+class RetryableTaskError(TaskError):
+    """
+    A transient failure (network/timeout) worth another attempt.
+
+    Clients or adapters may raise this to opt an otherwise unclassified error
+    into the task manager's retry policy.
+    """
+
+
+class NonRetryableTaskError(TaskError):
+    """
+    A permanent failure (auth/permission/business rule) that must not be retried.
+
+    Raising this always stops the retry loop, regardless of the configured
+    retry budget.
+    """
+
+
 @dataclass
 class CredRequest:
     task_id: str
@@ -60,6 +82,9 @@ class DownloadTask:
     chapters_total: int = 0
     chapters_done: int = 0
     error: str | None = None
+    #: Number of extra attempts already spent on transient failures (0 means the
+    #: task succeeded or failed on its first attempt).
+    retry_count: int = 0
     exported_paths: dict[str, Path] = field(default_factory=dict)
 
     # lifecycle (wall-clock times)

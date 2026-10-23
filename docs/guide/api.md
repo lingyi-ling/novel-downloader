@@ -38,6 +38,10 @@ novel-api --host 127.0.0.1 --port 8081 --token my-secret
 NOVEL_API_TOKEN=my-secret novel-api
 ```
 
+若 `--host` 不是回环地址（`127.0.0.1`/`localhost`/`::1`）且未设置 token，
+启动时会向 stderr 打印显著警告：此时任何能访问该端口的人都可以控制下载并
+读取 `/downloads` 下的导出文件。在非本地监听上同时使用 `--cors` 会额外告警。
+
 启动后：
 
 - Swagger UI：<http://127.0.0.1:8081/docs>
@@ -264,7 +268,8 @@ curl -s "$BASE/api/v1/tasks/<task_id>" -H "Authorization: Bearer $TOKEN"
 ```
 
 `level` 可选 `hires`、`lossless`、`exhigh`、`higher`、`standard`；
-`out_dir` 省略时使用音乐模块的默认下载目录。
+`out_dir` 省略时使用音乐模块的默认下载目录。单次请求最多提交 `200` 首曲目
+（`tracks` 超限返回 `422`）。
 
 响应：
 
@@ -347,6 +352,38 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
 {"detail": "Music support is not available: ... Install it with: pip install \"novel-downloader[music]\""}
 ```
 
+## 请求限制与超时
+
+为避免单个请求占用过多资源，API 对携带 JSON 请求体的端点设置了大小上限，
+并对阻塞型端点设置了整体墙钟预算。
+
+请求体上限（默认 `1 MiB`，超出返回 `413`）：
+
+| 端点 | 请求体 | 列表长度 |
+| --- | --- | --- |
+| `POST /api/v1/search` | ≤ 1 MiB | — |
+| `POST /api/v1/music/search` | ≤ 1 MiB | — |
+| `POST /api/v1/music/download` | ≤ 1 MiB | `tracks` ≤ 200 |
+| `POST /api/v1/music/jobs` | ≤ 1 MiB | `tracks` ≤ 200 |
+
+`tracks` 超过 `200` 首返回 `422`，`detail` 会指明数量上限。
+
+阻塞型端点的默认超时预算（超出返回 `504`）：
+
+| 端点 | 默认预算 | 说明 |
+| --- | --- | --- |
+| `POST /api/v1/search` | `120` 秒 | 在每个站点的 `timeout` 之上再加的总预算 |
+| `POST /api/v1/music/search` | `120` 秒 | 音乐平台搜索 |
+| `POST /api/v1/music/download` | `1800` 秒 | 同步下载全部曲目 |
+| `POST /api/v1/music/jobs` | `1800` 秒 | 后台任务超过预算会被标记为 `failed` |
+
+超时只结束**请求的等待**：底层阻塞线程无法被中断，会在后台继续运行到结束。
+如需调整默认值，可用 `create_app(timeouts={...})` 覆盖（主要供测试使用）：
+
+```python
+app = create_app(timeouts={"search": 30.0, "music_download": 600.0})
+```
+
 ## 错误码
 
 错误响应统一为 `{"detail": "..."}`（`detail` 为英文，便于客户端判断）：
@@ -355,9 +392,23 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
 | --- | --- |
 | `400` | 未知音乐平台；音乐平台初始化失败；同步音乐下载失败。 |
 | `401` | 已配置 token，但请求缺少或携带了错误的 token。 |
-| `404` | 任务 ID 不存在；音乐任务 ID 不存在。 |
-| `422` | 请求参数校验失败（缺少必填字段、数值越界等）。 |
+| `404` | 任务 ID 不存在；音乐任务 ID 不存在；静态文件不存在。 |
+| `413` | 请求体超过该端点的大小上限。 |
+| `422` | 请求参数校验失败（缺少必填字段、数值越界、`tracks` 过多等）。 |
+| `500` | 服务端内部错误，固定返回 `{"detail": "Internal server error"}`，不泄漏堆栈。 |
 | `503` | 未安装音乐可选依赖，音乐相关端点不可用。 |
+| `504` | 阻塞型端点超过超时预算。 |
+
+校验失败（`422`）时 `detail` 为一句话描述，另有 `errors` 提供原始校验条目：
+
+```json
+{
+  "detail": "Request validation failed: keyword: Field required",
+  "errors": [
+    {"type": "missing", "loc": ["body", "keyword"], "msg": "Field required"}
+  ]
+}
+```
 
 ## 完整调用示例
 
@@ -437,6 +488,9 @@ asyncio.run(main())
 - 通过非回环地址提供服务时，**务必设置 token**，并建议放在反向代理/防火墙之后。
 - `--cors` 会允许任意网页跨域调用本 API。仅在本机使用时开启；切勿与公网监听、
   无 token 的组合一起使用。
-- `/downloads` 是静态目录挂载，不带鉴权，暴露的只是导出文件本身。
+- `/downloads` 是静态目录挂载，不带鉴权，暴露的只是导出文件本身；目录穿越
+  路径（如 `..`、`%2e%2e`）会被拒绝并返回 `404`。
 - API 具备添加下载任务的能力，等同于本机上的下载器权限，请像保护本地账号一样
   保护 token。
+- 请求体大小、曲目数量与阻塞端点耗时都有上限（见「请求限制与超时」），
+  超限分别返回 `413`、`422`、`504`。

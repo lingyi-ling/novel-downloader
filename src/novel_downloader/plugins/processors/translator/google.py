@@ -29,7 +29,9 @@ class GoogleTranslaterProcessor:
     def __init__(self, config: dict[str, Any]) -> None:
         self._source: str = config.get("source") or "auto"
         self._target: str = config.get("target") or "zh-CN"
-        self._sleep: float = float(config.get("sleep", 2.0))
+        # ``time.sleep`` rejects negative values, and the delay is applied
+        # outside the guarded request block, so clamp instead of crashing.
+        self._sleep: float = max(0.0, float(config.get("sleep", 2.0)))
         self._endpoint = "https://translate.googleapis.com/translate_a/single"
         self._headers = {
             "Accept": "*/*",
@@ -43,18 +45,18 @@ class GoogleTranslaterProcessor:
         Apply translate to book metadata and nested structures.
         """
         bi = copy.deepcopy(book_info)
-        bi["book_name"] = self._translate(bi.get("book_name", ""))
-        bi["summary"] = self._translate(bi.get("summary", ""))
+        bi["book_name"] = self._tr(bi.get("book_name", ""))
+        bi["summary"] = self._tr(bi.get("summary", ""))
 
         if "summary_brief" in bi:
-            bi["summary_brief"] = self._translate(bi["summary_brief"])
+            bi["summary_brief"] = self._tr(bi["summary_brief"])
 
         for vol in bi.get("volumes", []):
-            vol["volume_name"] = self._translate(vol.get("volume_name", ""))
+            vol["volume_name"] = self._tr(vol.get("volume_name", ""))
             if "volume_intro" in vol:
-                vol["volume_intro"] = self._translate(vol["volume_intro"])
+                vol["volume_intro"] = self._tr(vol["volume_intro"])
             for ch in vol.get("chapters", []):
-                ch["title"] = self._translate(ch.get("title", ""))
+                ch["title"] = self._tr(ch.get("title", ""))
 
         return bi
 
@@ -63,9 +65,19 @@ class GoogleTranslaterProcessor:
         Apply cleaning rules to a single chapter (title + content).
         """
         ch = copy.deepcopy(chapter)
-        ch["title"] = self._translate(ch.get("title", ""))
-        ch["content"] = self._translate(ch.get("content", ""))
+        ch["title"] = self._tr(ch.get("title", ""))
+        ch["content"] = self._tr(ch.get("content", ""))
         return ch
+
+    def _tr(self, value: Any) -> Any:
+        """
+        Translate a field, leaving non-string values untouched.
+
+        Parsed metadata occasionally carries ``None`` for an optional field;
+        passing that to :meth:`_translate` would raise ``AttributeError`` and
+        abort the whole stage.
+        """
+        return self._translate(value) if isinstance(value, str) else value
 
     def _translate(self, text: str) -> str:
         """Send text to the unofficial Google Translate endpoint."""

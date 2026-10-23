@@ -16,6 +16,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -31,16 +32,9 @@ import androidx.compose.ui.unit.dp
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.HistoryFile
+import com.lingyi.noveldl.ui.formatTimestamp
+import com.lingyi.noveldl.ui.humanSize
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-
-private fun humanSize(bytes: Long): String = when {
-    bytes >= 1024 * 1024 -> String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
-    bytes >= 1024 -> String.format(Locale.US, "%.0f KB", bytes / 1024.0)
-    else -> "$bytes B"
-}
 
 @Composable
 fun HistoryScreen(onMessage: (String) -> Unit) {
@@ -76,8 +70,6 @@ fun HistoryScreen(onMessage: (String) -> Unit) {
         }
     }
 
-    val timeFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()) }
-
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -99,6 +91,9 @@ fun HistoryScreen(onMessage: (String) -> Unit) {
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
+            TextButton(onClick = { load() }) {
+                Text(stringResource(R.string.action_retry))
+            }
         }
         Spacer(Modifier.height(8.dp))
         if (files.isEmpty() && !loading && error == null) {
@@ -115,7 +110,7 @@ fun HistoryScreen(onMessage: (String) -> Unit) {
                         Text(file.name, style = MaterialTheme.typography.titleSmall)
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            "${timeFormat.format(Date((file.mtime * 1000).toLong()))} · " +
+                            "${formatTimestamp(file.mtime)} · " +
                                 humanSize(file.size) + " · ${file.ext}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,

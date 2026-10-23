@@ -5,6 +5,7 @@ novel_downloader.apps.cli.commands.clean
 """
 
 import shutil
+import sys
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from pathlib import Path
 
@@ -16,7 +17,14 @@ from novel_downloader.infra.paths import PACKAGE_NAME, STATE_PATH
 from novel_downloader.plugins import registrar
 from novel_downloader.schemas import BookConfig
 
-from .base import Command, localize_help, parse_book_args
+from .base import (
+    EXIT_FAILURE,
+    EXIT_USAGE,
+    Command,
+    fail,
+    localize_help,
+    parse_book_args,
+)
 
 
 class CleanCmd(Command):
@@ -69,8 +77,7 @@ class CleanStateCmd(Command):
             STATE_PATH.unlink()
             ui.success(t("Internal state removed successfully."))
         except Exception as exc:
-            ui.error(t("Failed to remove internal state: {error}").format(error=exc))
-            return
+            fail(t("Failed to remove internal state: {error}").format(error=exc))
 
         parent = STATE_PATH.parent
         try:
@@ -103,7 +110,8 @@ class CleanLogsCmd(Command):
         config_path: Path | None = Path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
-            return
+            # ``load_or_init_config`` already reported the reason on stderr.
+            raise SystemExit(EXIT_FAILURE)
 
         adapter = ConfigAdapter(config=config_data)
         log_dir = adapter.get_log_dir()
@@ -113,8 +121,7 @@ class CleanLogsCmd(Command):
             return
 
         if not log_dir.is_dir():
-            ui.error(t("Log path is not a directory: {path}").format(path=log_dir))
-            return
+            fail(t("Log path is not a directory: {path}").format(path=log_dir))
 
         prefix = f"{PACKAGE_NAME}."
         log_files = [
@@ -144,12 +151,14 @@ class CleanLogsCmd(Command):
                 return
 
         removed_count = 0
+        failed_count = 0
         for file in log_files:
             try:
                 file.unlink()
                 removed_count += 1
                 ui.info(t("Removed log file: {file}").format(file=file.name))
             except Exception as exc:
+                failed_count += 1
                 ui.error(
                     t("Failed to remove log file {file}: {error}").format(
                         file=file.name, error=exc
@@ -162,6 +171,9 @@ class CleanLogsCmd(Command):
             )
         else:
             ui.warn(t("No log files were removed."))
+
+        if failed_count > 0:
+            raise SystemExit(EXIT_FAILURE)
 
 
 class CleanCacheCmd(Command):
@@ -188,7 +200,8 @@ class CleanCacheCmd(Command):
         config_path: Path | None = Path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
-            return
+            # ``load_or_init_config`` already reported the reason on stderr.
+            raise SystemExit(EXIT_FAILURE)
 
         adapter = ConfigAdapter(config=config_data)
         cache_base = adapter.get_cache_dir()
@@ -222,7 +235,7 @@ class CleanCacheCmd(Command):
             shutil.rmtree(target_dir)
             ui.success(t("Successfully removed {desc}.").format(desc=target_desc))
         except Exception as exc:
-            ui.error(
+            fail(
                 t("Failed to remove {desc}: {error}").format(
                     desc=target_desc, error=exc
                 )
@@ -257,7 +270,7 @@ class CleanBookCmd(Command):
             "--stage",
             type=str,
             default="raw",
-            help=t("Cleanup stage (e.g. 'raw', 'cleaned'). Defaults to 'raw'."),
+            help=t("Cleanup stage (e.g. 'raw', 'cleaner'). Defaults to 'raw'."),
         )
 
         parser.add_argument(
@@ -297,7 +310,8 @@ class CleanBookCmd(Command):
         config_path: Path | None = Path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
-            return
+            # ``load_or_init_config`` already reported the reason on stderr.
+            raise SystemExit(EXIT_FAILURE)
 
         adapter = ConfigAdapter(config=config_data)
         raw_data_base = adapter.get_raw_data_dir()
@@ -330,29 +344,36 @@ class CleanBookCmd(Command):
             shutil.rmtree(target_dir)
             ui.success(t("Successfully removed {desc}.").format(desc=desc))
         except Exception as exc:
-            ui.error(t("Failed to remove {desc}: {error}").format(desc=desc, error=exc))
+            fail(t("Failed to remove {desc}: {error}").format(desc=desc, error=exc))
 
     @classmethod
     def _remove_book(cls, args: Namespace) -> None:
         books = cls._parse_book_args(args.book_ids, args.start, args.end)
 
         if not books:
-            ui.warn(t("No book IDs provided. Exiting."))
-            return
+            fail(t("No book IDs provided. Exiting."), EXIT_USAGE)
 
         # Determine site
         site: str | None = args.site
         if not site:
+            if not sys.stdin.isatty():
+                fail(
+                    t(
+                        "Interactive selection requires a terminal; "
+                        "pass the required arguments explicitly."
+                    ),
+                    EXIT_USAGE,
+                )
             site = ui.prompt(t("Please enter the site key for these book(s):")).strip()
             if not site:
-                ui.warn(t("No site provided."))
-                return
+                fail(t("No site provided."), EXIT_USAGE)
 
         # Load config
         config_path: Path | None = Path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
-            return
+            # ``load_or_init_config`` already reported the reason on stderr.
+            raise SystemExit(EXIT_FAILURE)
 
         adapter = ConfigAdapter(config=config_data)
         client = registrar.get_client(site, adapter.get_client_config(site))
@@ -364,6 +385,7 @@ class CleanBookCmd(Command):
         remove_media = args.media or False
 
         stage = args.stage or "raw"
+        cleanup_failed = False
 
         if remove_all:
             if not args.yes:
@@ -385,6 +407,7 @@ class CleanBookCmd(Command):
                         stage=stage,
                     )
                 except Exception as exc:
+                    cleanup_failed = True
                     ui.error(
                         t("Failed to clean book '{id}': {error}").format(
                             id=book.book_id, error=exc
@@ -392,6 +415,8 @@ class CleanBookCmd(Command):
                     )
 
             ui.success(t("Finished cleaning all requested books."))
+            if cleanup_failed:
+                raise SystemExit(EXIT_FAILURE)
             return
 
         summary = []
@@ -428,6 +453,7 @@ class CleanBookCmd(Command):
                     stage=stage,
                 )
             except Exception as exc:
+                cleanup_failed = True
                 ui.error(
                     t("Failed to clean book '{id}': {error}").format(
                         id=book.book_id, error=exc
@@ -435,6 +461,8 @@ class CleanBookCmd(Command):
                 )
 
         ui.success(t("Finished cleaning all requested books."))
+        if cleanup_failed:
+            raise SystemExit(EXIT_FAILURE)
 
     @staticmethod
     def _parse_book_args(

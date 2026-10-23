@@ -20,14 +20,14 @@ import asyncio
 import json
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import aclosing
 from dataclasses import asdict, dataclass
-from typing import Annotated, Any
+from typing import Annotated, Any, TypeVar
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -67,6 +67,52 @@ router = APIRouter(
 def get_manager() -> TaskManager:
     """FastAPI dependency returning the process-wide task manager."""
     return manager
+
+
+# ---------------------------------------------------------------------------
+# Timeouts for blocking endpoints
+# ---------------------------------------------------------------------------
+
+#: Default wall-clock budgets (seconds) for endpoints that wait on a slow,
+#: potentially network-bound operation. They can be overridden per app through
+#: ``create_app(timeouts={...})`` (see ``app.state.api_timeouts``).
+BLOCKING_TIMEOUTS: dict[str, float] = {
+    "search": 120.0,
+    "music_search": 120.0,
+    "music_download": 1800.0,
+}
+
+_T = TypeVar("_T")
+
+
+def _blocking_timeout(request: Request, key: str) -> float:
+    """Return the configured budget for ``key``, falling back to the default."""
+    overrides = getattr(request.app.state, "api_timeouts", None)
+    if isinstance(overrides, dict) and key in overrides:
+        try:
+            return float(overrides[key])
+        except (TypeError, ValueError):
+            pass
+    return BLOCKING_TIMEOUTS[key]
+
+
+async def _with_timeout(awaitable: Awaitable[_T], timeout: float, label: str) -> _T:
+    """
+    Await ``awaitable`` with a hard deadline.
+
+    :raises HTTPException: 504 with a readable ``detail`` when the deadline is
+        exceeded. A ``TimeoutError`` raised by the operation itself is reported
+        the same way. Note that cancelling a threadpool job only stops the
+        *request* from waiting: the worker thread itself is not interrupted, so
+        a stuck provider call keeps running in the background until it returns.
+    """
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"{label} timed out after {timeout:g}s",
+        ) from exc
 
 
 def _task_to_dict(task: DownloadTask) -> dict[str, Any]:
@@ -113,16 +159,26 @@ async def sites() -> dict[str, dict[str, str]]:
 
 
 @router.post("/search", tags=["search"])
-async def search_books(body: SearchRequest) -> dict[str, Any]:
-    """Search all (or the selected) sites and return ranked results."""
-    results = await search(
-        body.keyword,
-        sites=body.sites,
-        limit=body.limit,
-        per_site_limit=body.per_site_limit,
-        timeout=body.timeout,
-        sort=body.sort,
-        order=body.order,
+async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
+    """
+    Search all (or the selected) sites and return ranked results.
+
+    The aggregate search is bounded by an overall deadline (in addition to the
+    per-site ``timeout``); exceeding it returns ``504``.
+    """
+    timeout = _blocking_timeout(request, "search")
+    results = await _with_timeout(
+        search(
+            body.keyword,
+            sites=body.sites,
+            limit=body.limit,
+            per_site_limit=body.per_site_limit,
+            timeout=body.timeout,
+            sort=body.sort,
+            order=body.order,
+        ),
+        timeout,
+        "Search",
     )
     return {
         "total": len(results),
@@ -271,7 +327,12 @@ async def cancel_task(
 
 @router.get("/history", tags=["history"])
 async def history() -> dict[str, Any]:
-    """List exported ``txt`` / ``epub`` files in the configured output dir."""
+    """
+    List exported ``txt`` / ``epub`` files in the configured output dir.
+
+    ``download_url`` percent-encodes the file name (``safe=""``), so names with
+    spaces, ``#``, ``?`` or non-ASCII characters produce a directly usable URL.
+    """
     items = _apply_sort(_scan_files(), "mtime", "desc")
     files = [
         {
@@ -279,7 +340,7 @@ async def history() -> dict[str, Any]:
             "ext": item.ext,
             "size": item.size,
             "mtime": item.mtime,
-            "download_url": f"/downloads/{quote(item.name)}",
+            "download_url": f"/downloads/{quote(item.name, safe='')}",
         }
         for item in items
     ]
@@ -380,8 +441,12 @@ async def music_platforms() -> dict[str, Any]:
 
 
 @router.post("/music/search", tags=["music"])
-async def music_search(body: MusicSearchRequest) -> dict[str, Any]:
-    """Search a music platform. The blocking provider call runs in a thread."""
+async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, Any]:
+    """
+    Search a music platform. The blocking provider call runs in a thread.
+
+    Exceeding the configured budget returns ``504``.
+    """
     components = _load_music_components()
     provider = _create_provider(components, body.platform)
 
@@ -390,17 +455,25 @@ async def music_search(body: MusicSearchRequest) -> dict[str, Any]:
         payload = [asdict(track) for track in tracks]
         return int(total or len(payload)), payload
 
-    total, tracks = await run_in_threadpool(_run)
+    timeout = _blocking_timeout(request, "music_search")
+    total, tracks = await _with_timeout(
+        run_in_threadpool(_run), timeout, "Music search"
+    )
     return {"total": total, "tracks": tracks}
 
 
 @router.post("/music/download", tags=["music"])
-async def music_download(body: MusicDownloadRequest) -> dict[str, Any]:
+async def music_download(
+    body: MusicDownloadRequest, request: Request
+) -> dict[str, Any]:
     """
     Download one or more tracks.
 
     Note: the underlying engine is synchronous, so this request blocks until
-    every track has finished; for large batches prefer one track per request.
+    every track has finished; for large batches prefer one track per request or
+    the asynchronous ``/music/jobs`` endpoint. The call is bounded by a
+    generous wall-clock budget (default 30 minutes) and returns ``504`` when it
+    is exceeded.
     """
     components = _load_music_components()
     provider = _create_provider(components, body.platform)
@@ -423,14 +496,20 @@ async def music_download(body: MusicDownloadRequest) -> dict[str, Any]:
             results.append((index, item))
 
     try:
-        ok, skip, fail, _failed_pairs, _failed_tracks = await run_in_threadpool(
-            components.download_many,
-            provider,
-            tracks,
-            options,
-            on_result=on_result,
+        ok, skip, fail, _failed_pairs, _failed_tracks = await _with_timeout(
+            run_in_threadpool(
+                components.download_many,
+                provider,
+                tracks,
+                options,
+                on_result=on_result,
+            ),
+            _blocking_timeout(request, "music_download"),
+            "Music download",
         )
     except Exception as exc:  # noqa: BLE001 - download engine errors
+        if isinstance(exc, HTTPException):
+            raise
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Music download failed: {exc}",
@@ -506,8 +585,14 @@ async def _run_music_job(
     provider: Any,
     tracks: list[Any],
     options: Any,
+    timeout: float,
 ) -> None:
-    """Execute one queued music job; never raises into the event loop."""
+    """
+    Execute one queued music job; never raises into the event loop.
+
+    ``timeout`` bounds how long the job may stay active; a job that exceeds it
+    is marked ``failed`` (the worker thread is left to finish on its own).
+    """
     _music_job_update(job_id, status="running")
 
     results: list[tuple[int, dict[str, Any]]] = []
@@ -520,23 +605,32 @@ async def _run_music_job(
             done = len(results)
         _music_job_set_progress(job_id, done)
 
-    try:
-        await run_in_threadpool(
-            components.download_many,
-            provider,
-            tracks,
-            options,
-            on_result=on_result,
-        )
-    except Exception as exc:  # noqa: BLE001 - download engine errors
+    def _finish_failed(reason: str) -> None:
         ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
         _music_job_update(
             job_id,
             status="failed",
             results=ordered,
-            error=f"{type(exc).__name__}: {exc}",
+            error=reason,
             finished_at=time.time(),
         )
+
+    try:
+        await asyncio.wait_for(
+            run_in_threadpool(
+                components.download_many,
+                provider,
+                tracks,
+                options,
+                on_result=on_result,
+            ),
+            timeout=timeout,
+        )
+    except TimeoutError:
+        _finish_failed(f"Music download timed out after {timeout:g}s")
+        return
+    except Exception as exc:  # noqa: BLE001 - download engine errors
+        _finish_failed(f"{type(exc).__name__}: {exc}")
         return
 
     ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
@@ -554,7 +648,9 @@ async def _run_music_job(
     tags=["music"],
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def create_music_job(body: MusicDownloadRequest) -> dict[str, str]:
+async def create_music_job(
+    body: MusicDownloadRequest, request: Request
+) -> dict[str, str]:
     """Queue a music download and return immediately with a job id."""
     components = _load_music_components()
     provider = _create_provider(components, body.platform)
@@ -582,7 +678,14 @@ async def create_music_job(body: MusicDownloadRequest) -> dict[str, str]:
         }
 
     task = asyncio.create_task(
-        _run_music_job(job_id, components, provider, tracks, options)
+        _run_music_job(
+            job_id,
+            components,
+            provider,
+            tracks,
+            options,
+            _blocking_timeout(request, "music_download"),
+        )
     )
     _MUSIC_JOB_TASKS.add(task)
     task.add_done_callback(_MUSIC_JOB_TASKS.discard)

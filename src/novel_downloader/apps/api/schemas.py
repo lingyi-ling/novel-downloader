@@ -26,6 +26,11 @@ SearchSortKey = Literal[
     "update",
 ]
 
+#: Maximum number of tracks accepted by the music download endpoints in one
+#: request. Bounds the work a single (synchronous) call can queue up and keeps
+#: the in-memory job table meaningful.
+MAX_MUSIC_TRACKS = 200
+
 
 class SearchRequest(BaseModel):
     """Body of ``POST /api/v1/search``."""
@@ -80,9 +85,14 @@ class MusicTrack(BaseModel):
 
 
 class MusicDownloadRequest(BaseModel):
-    """Body of ``POST /api/v1/music/download``."""
+    """
+    Body of ``POST /api/v1/music/download`` and ``POST /api/v1/music/jobs``.
+
+    At most :data:`MAX_MUSIC_TRACKS` tracks may be submitted per request; a
+    larger list is rejected with ``422`` rather than queued.
+    """
 
     platform: str = Field(min_length=1)
-    tracks: list[MusicTrack] = Field(min_length=1)
+    tracks: list[MusicTrack] = Field(min_length=1, max_length=MAX_MUSIC_TRACKS)
     level: str | None = None
     out_dir: str | None = None

@@ -49,6 +49,7 @@ from novel_downloader.schemas import SearchResult
 
 from .engine import AsyncEngine
 from .formatting import (
+    format_error,
     history_row,
     music_row,
     parse_sites,
@@ -336,7 +337,7 @@ class DesktopApp:
         try:
             labels: list[tuple[str, str]] = list(engine["available_labels"]())
         except Exception as exc:  # noqa: BLE001 - optional engine registry
-            self._music_error = f"{type(exc).__name__}: {exc}"
+            self._music_error = format_error(exc)
             ttk.Label(
                 self.music_tab,
                 text=t("Could not load music platforms: {error}").format(
@@ -468,13 +469,13 @@ class DesktopApp:
                 self._handle_event(kind, payload)
             except Exception as exc:  # noqa: BLE001 - never kill the poll loop
                 logger.exception("Failed to handle desktop event %s", kind)
-                self._show_error(f"{type(exc).__name__}: {exc}")
+                self._show_error(format_error(exc))
 
         try:
             self._refresh_tasks_if_due()
         except Exception as exc:  # noqa: BLE001 - keep the UI alive
             logger.exception("Failed to refresh task snapshots")
-            self._set_status(f"{type(exc).__name__}: {exc}")
+            self._set_status(format_error(exc))
 
         if not self._closing:
             self.root.after(_POLL_MS, self._poll)
@@ -521,14 +522,14 @@ class DesktopApp:
             future = self.engine.submit(coro)
         except Exception as exc:  # noqa: BLE001 - loop startup failure
             coro.close()
-            self._show_error(f"{type(exc).__name__}: {exc}")
+            self._show_error(format_error(exc))
             return
 
         def on_done(done: Future[T]) -> None:
             try:
                 value = done.result()
             except Exception as exc:  # noqa: BLE001 - reported by the UI
-                self.events.put(("error", f"{type(exc).__name__}: {exc}"))
+                self.events.put(("error", format_error(exc)))
             else:
                 if describe is not None:
                     self.events.put(("status", describe(value)))
@@ -572,7 +573,7 @@ class DesktopApp:
                 )
             )
         except Exception as exc:  # noqa: BLE001 - delivered to the UI thread
-            self.events.put(("search_error", f"{type(exc).__name__}: {exc}"))
+            self.events.put(("search_error", format_error(exc)))
             return
         self.events.put(("search_results", (keyword, results)))
 
@@ -644,7 +645,7 @@ class DesktopApp:
                 logger.exception("Task snapshot failed")
                 self._set_status(
                     t("Could not refresh tasks: {error}").format(
-                        error=f"{type(exc).__name__}: {exc}"
+                        error=format_error(exc)
                     )
                 )
                 return
@@ -746,7 +747,7 @@ class DesktopApp:
             )
         except Exception as exc:  # noqa: BLE001 - configuration/IO failure
             error = t("Could not scan the output directory: {error}").format(
-                error=f"{type(exc).__name__}: {exc}"
+                error=format_error(exc)
             )
             logger.exception("Failed to scan the output directory")
 
@@ -847,7 +848,7 @@ class DesktopApp:
                 "default_download_dir": music_paths.default_download_dir,
             }
         except Exception as exc:  # noqa: BLE001 - optional dependency guard
-            self._music_error = f"{type(exc).__name__}: {exc}"
+            self._music_error = format_error(exc)
             self._music_engine = None
 
         return self._music_engine
@@ -910,7 +911,7 @@ class DesktopApp:
                 keyword, limit=_MUSIC_SEARCH_LIMIT
             )
         except Exception as exc:  # noqa: BLE001 - delivered to the UI thread
-            self.events.put(("music_search_error", f"{type(exc).__name__}: {exc}"))
+            self.events.put(("music_search_error", format_error(exc)))
             return
         count = int(total) if total else len(tracks)
         self.events.put(("music_results", (list(tracks), count)))
@@ -971,7 +972,7 @@ class DesktopApp:
         except Exception as exc:  # noqa: BLE001 - settings/engine failure
             self._show_error(
                 t("Could not prepare the music download: {error}").format(
-                    error=f"{type(exc).__name__}: {exc}"
+                    error=format_error(exc)
                 )
             )
             return
@@ -1024,7 +1025,7 @@ class DesktopApp:
                 should_stop=self._music_stop.is_set,
             )
         except Exception as exc:  # noqa: BLE001 - delivered to the UI thread
-            self.events.put(("music_download_error", f"{type(exc).__name__}: {exc}"))
+            self.events.put(("music_download_error", format_error(exc)))
             return
 
         self.events.put(
@@ -1139,7 +1140,7 @@ def run_app() -> None:
         DesktopApp(root)
     except Exception as exc:  # noqa: BLE001 - report instead of a silent crash
         logger.exception("Failed to build the desktop window")
-        messagebox.showerror(t("Error"), f"{type(exc).__name__}: {exc}", parent=root)
+        messagebox.showerror(t("Error"), format_error(exc), parent=root)
         root.destroy()
         return
     root.mainloop()

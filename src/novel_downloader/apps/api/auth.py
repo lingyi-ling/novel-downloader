@@ -29,6 +29,18 @@ def _provided_token(authorization: str | None, x_api_key: str | None) -> str | N
     return None
 
 
+def _token_matches(provided: str, expected: str) -> bool:
+    """
+    Compare two tokens in constant time.
+
+    ``secrets.compare_digest`` only accepts ASCII-only ``str`` values and raises
+    :class:`TypeError` otherwise, so both sides are encoded to UTF-8 bytes
+    first. That keeps the comparison constant-time and also supports tokens
+    containing non-ASCII characters.
+    """
+    return secrets.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+
 async def require_token(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
@@ -45,7 +57,7 @@ async def require_token(
         return
 
     provided = _provided_token(authorization, x_api_key)
-    if provided is None or not secrets.compare_digest(provided, expected):
+    if provided is None or not _token_matches(provided, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API token",

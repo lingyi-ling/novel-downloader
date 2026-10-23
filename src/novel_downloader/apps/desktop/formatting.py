@@ -23,6 +23,7 @@ from novel_downloader.schemas import SearchResult
 
 __all__ = [
     "format_duration",
+    "format_error",
     "format_mtime",
     "format_size",
     "format_task_progress",
@@ -100,12 +101,30 @@ def parse_sites(text: str) -> list[str] | None:
     """
     Split a comma/space separated site list.
 
+    Site keys are registry slugs written in lower case, so the input is folded
+    to lower case as well; this makes ``"Qidian"`` behave like ``"qidian"`` and
+    lets differently-cased duplicates collapse into one entry.
+
     :param text: Raw input such as ``"qidian, b520"``.
-    :return: De-duplicated site keys, or ``None`` when the input is empty.
+    :return: De-duplicated, lower-cased site keys, or ``None`` when empty.
     """
-    parts = [part for part in _SITE_SEPARATORS.split(text.strip()) if part]
+    parts = [part.lower() for part in _SITE_SEPARATORS.split(text.strip()) if part]
     unique = list(dict.fromkeys(parts))
     return unique or None
+
+
+def format_error(exc: BaseException) -> str:
+    """
+    Render an exception for the status bar and the log.
+
+    The type name is kept next to the message because several worker errors
+    (network, parsing, configuration) would otherwise be indistinguishable in
+    the status line.
+
+    :param exc: The exception to describe.
+    :return: A compact ``"TypeName: message"`` string.
+    """
+    return f"{type(exc).__name__}: {exc}"
 
 
 def search_row(result: SearchResult) -> tuple[str, str, str, str, str]:

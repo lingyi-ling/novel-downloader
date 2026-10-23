@@ -18,6 +18,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -31,18 +32,9 @@ import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.Task
 import com.lingyi.noveldl.data.TasksResponse
+import com.lingyi.noveldl.ui.taskStatusLabelRes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-
-private fun statusLabel(status: String): Int = when (status) {
-    "queued" -> R.string.tasks_status_queued
-    "running" -> R.string.tasks_status_running
-    "processing" -> R.string.tasks_status_processing
-    "exporting" -> R.string.tasks_status_exporting
-    "completed" -> R.string.tasks_status_completed
-    "cancelled" -> R.string.tasks_status_cancelled
-    else -> R.string.tasks_status_failed
-}
 
 @Composable
 fun TasksScreen(onMessage: (String) -> Unit) {
@@ -50,8 +42,9 @@ fun TasksScreen(onMessage: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     var snapshot by remember { mutableStateOf(TasksResponse()) }
     var error by remember { mutableStateOf<String?>(null) }
+    var refreshKey by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(refreshKey) {
         while (true) {
             Api.call { Api.service().tasks() }
                 .onSuccess {
@@ -72,11 +65,34 @@ fun TasksScreen(onMessage: (String) -> Unit) {
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = { refreshKey++ }) {
+                Text(stringResource(R.string.action_refresh))
+            }
+        }
         error?.let {
             Text(
                 stringResource(R.string.state_error, it),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
+            )
+            TextButton(onClick = { refreshKey++ }) {
+                Text(stringResource(R.string.action_retry))
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        val isEmpty = snapshot.running.isEmpty() &&
+            snapshot.pending.isEmpty() &&
+            snapshot.completed.isEmpty()
+        if (isEmpty && error == null) {
+            Text(
+                stringResource(R.string.tasks_empty),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
         }
@@ -112,7 +128,7 @@ private fun TaskCard(task: Task, cancellable: Boolean, onCancel: (Task) -> Unit)
             ) {
                 Text(task.title, style = MaterialTheme.typography.titleSmall)
                 Text(
-                    stringResource(statusLabel(task.status)),
+                    stringResource(taskStatusLabelRes(task.status)),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                 )

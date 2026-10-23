@@ -22,13 +22,29 @@ class ZhConvertProcessor:
     简繁转换处理器 (Simplified/Traditional Chinese conversion via OpenCC)
     """
 
+    #: Conversion directions shipped by ``opencc-python-reimplemented``.
+    DIRECTION_WHITELIST: frozenset[str] = frozenset(
+        {
+            "hk2s",
+            "s2hk",
+            "s2t",
+            "s2tw",
+            "s2twp",
+            "t2hk",
+            "t2s",
+            "t2tw",
+            "tw2s",
+            "tw2sp",
+        }
+    )
+
     def __init__(self, config: dict[str, Any]) -> None:
         self._apply_title = bool(config.get("apply_title", True))
         self._apply_content = bool(config.get("apply_content", True))
         self._apply_author = bool(config.get("apply_author", False))
         self._apply_tags = bool(config.get("apply_tags", False))
 
-        direction = (config.get("direction") or "t2s").lower()
+        direction = str(config.get("direction") or "t2s").strip().lower()
         self._convert = self._build_converter(direction)
 
     def process_book_info(self, book_info: BookInfoDict) -> BookInfoDict:
@@ -84,7 +100,11 @@ class ZhConvertProcessor:
 
     def _build_converter(self, direction: str) -> Callable[[str], str]:
         """
-        Build the pycorrector converter based on direction.
+        Build the OpenCC converter for ``direction``.
+
+        Raises:
+            ImportError: When OpenCC is not installed (degraded-mode signal).
+            ValueError: When ``direction`` is not a known OpenCC profile.
         """
         try:
             from opencc import OpenCC
@@ -93,6 +113,12 @@ class ZhConvertProcessor:
                 "ZhConvertProcessor requires OpenCC. Install with:\n"
                 "  pip install opencc-python-reimplemented"
             ) from e
+
+        if direction not in self.DIRECTION_WHITELIST:
+            raise ValueError(
+                f"Unknown OpenCC conversion direction: {direction!r}. "
+                f"Valid directions: {', '.join(sorted(self.DIRECTION_WHITELIST))}."
+            )
 
         return OpenCC(direction).convert  # type: ignore[no-any-return]
 

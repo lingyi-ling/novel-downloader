@@ -23,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,8 +41,8 @@ import kotlinx.coroutines.launch
 fun SearchScreen(onMessage: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var keyword by remember { mutableStateOf("") }
-    var sitesText by remember { mutableStateOf("") }
+    var keyword by rememberSaveable { mutableStateOf("") }
+    var sitesText by rememberSaveable { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     var total by remember { mutableStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -130,6 +131,9 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
+            TextButton(onClick = { runSearch() }) {
+                Text(stringResource(R.string.action_retry))
+            }
         }
         Spacer(Modifier.height(8.dp))
         if (results.isNotEmpty()) {

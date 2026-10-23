@@ -101,7 +101,10 @@ def select(root: Any, selector: str, fmt: str = "html") -> list[Any]:
     if not selector:
         return [root]
     if selector.startswith(("/", "(", "./")):
-        return list(root.xpath(selector))
+        try:
+            return list(root.xpath(selector))
+        except etree.XPathError as e:
+            raise RuleError(f"invalid selector {selector!r}: {e}") from e
     try:
         return list(root.cssselect(selector))
     except Exception as e:  # cssselect raises various errors on bad input

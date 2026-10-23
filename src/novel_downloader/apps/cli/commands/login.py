@@ -15,7 +15,7 @@ from argparse import ArgumentParser, Namespace
 from novel_downloader.apps.cli import ui
 from novel_downloader.infra.i18n import t
 
-from .base import Command
+from .base import EXIT_FAILURE, EXIT_USAGE, Command
 
 
 class LoginCmd(Command):
@@ -61,7 +61,7 @@ class LoginCmd(Command):
             )
             # Invalid argument: exit 2, like ``config set-lang`` for an
             # unsupported language.
-            raise SystemExit(2)
+            raise SystemExit(EXIT_USAGE)
 
         if run_login(site, timeout=float(args.timeout)):
             ui.success(
@@ -70,4 +70,4 @@ class LoginCmd(Command):
         else:
             ui.error(t("Login was not completed; no cookies were saved."))
             # Documented contract: a login that was not completed exits non-zero.
-            raise SystemExit(1)
+            raise SystemExit(EXIT_FAILURE)

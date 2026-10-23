@@ -17,12 +17,19 @@ browser extensions / local tools can call the API from a web page. This is
 dangerous on a non-localhost bind: any website the user visits could then call
 the API with the user's network position. Only enable it for local use and keep
 a token configured when the server is exposed beyond ``127.0.0.1``.
+
+Additional hardening
+--------------------
+* Request bodies of the JSON endpoints are capped (see
+  :class:`novel_downloader.apps.api.middleware.BodySizeLimitMiddleware`).
+* Every error response is shaped as ``{"detail": ...}`` and unexpected
+  exceptions are turned into a stack-trace-free ``500``.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -34,6 +41,11 @@ from novel_downloader import __version__
 from novel_downloader.apps.core.task_manager import manager
 from novel_downloader.infra.config import get_config_value
 
+from .middleware import (
+    DEFAULT_MAX_BODY_BYTES,
+    BodySizeLimitMiddleware,
+    register_error_handlers,
+)
 from .routes import OPENAPI_TAGS, router
 
 
@@ -64,6 +76,8 @@ def create_app(
     token: str | None = None,
     cors: bool = False,
     output_dir: str | Path | None = None,
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+    timeouts: Mapping[str, float] | None = None,
 ) -> FastAPI:
     """
     Build the REST API application.
@@ -73,6 +87,13 @@ def create_app(
     :param cors: Add a permissive CORS middleware (see module docstring).
     :param output_dir: Override ``general.output_dir`` for ``/downloads``;
         mainly useful in tests.
+    :param max_body_bytes: Request-body ceiling for the JSON endpoints
+        (``413`` above it). Defaults to 1 MiB.
+    :param timeouts: Per-endpoint wall-clock budgets in seconds, keyed by
+        ``search``, ``music_search`` and ``music_download``; unset keys fall
+        back to the defaults in
+        :data:`novel_downloader.apps.api.routes.BLOCKING_TIMEOUTS`. Mainly
+        useful in tests.
     :return: A configured :class:`fastapi.FastAPI` instance.
     """
     resolved_token = token if token is not None else os.environ.get("NOVEL_API_TOKEN")
@@ -89,6 +110,16 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.api_token = resolved_token or None
+    application.state.api_timeouts = dict(timeouts or {})
+
+    # Registered before the app is served: turns unhandled exceptions into a
+    # minimal 500 body and gives validation errors a readable ``detail``.
+    register_error_handlers(application)
+
+    # Added first so it ends up *inside* the CORS layer: the size check runs
+    # before FastAPI buffers the body, while its 413 response still passes back
+    # out through CORSMiddleware and therefore keeps the CORS headers.
+    application.add_middleware(BodySizeLimitMiddleware, max_bytes=max_body_bytes)
 
     if cors:
         application.add_middleware(

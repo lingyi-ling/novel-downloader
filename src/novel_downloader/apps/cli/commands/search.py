@@ -24,7 +24,7 @@ from ..ui_adapters import (
     CLILoginUI,
     CLIProcessUI,
 )
-from .base import Command
+from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail
 
 
 class SearchCmd(Command):
@@ -69,7 +69,7 @@ class SearchCmd(Command):
         parser.add_argument(
             "--format",
             nargs="+",
-            help=t("Output format(s) (default: config)"),
+            help=t("Output format(s): txt, epub, html. Default: from config."),
         )
         parser.add_argument(
             "--json",
@@ -98,8 +98,7 @@ class SearchCmd(Command):
         interactive = not as_json
 
         if as_json and args.first:
-            ui.error(t("--json and --first cannot be combined."))
-            return
+            fail(t("--json and --first cannot be combined."), EXIT_USAGE)
 
         overall_limit = None if args.limit is None else max(1, args.limit)
         per_site_limit = max(1, args.site_limit)
@@ -109,7 +108,8 @@ class SearchCmd(Command):
 
         config_data = load_or_init_config(config_path)
         if config_data is None:
-            return
+            # ``load_or_init_config`` already reported the reason on stderr.
+            raise SystemExit(EXIT_FAILURE)
         adapter = ConfigAdapter(config=config_data)
         ui.setup_logging(
             log_dir=adapter.get_log_dir(),
@@ -171,7 +171,8 @@ class SearchCmd(Command):
                             login_cfg=adapter.get_login_config(site),
                         )
                         if not succ:
-                            return
+                            ui.error(t("Login failed."))
+                            raise SystemExit(EXIT_FAILURE)
 
                     for book in books:
                         await client.download_book(book, ui=download_ui)
@@ -181,13 +182,13 @@ class SearchCmd(Command):
                         site=site, err=e
                     )
                 )
-                return
+                raise SystemExit(EXIT_FAILURE) from e
             except Exception as e:
                 ui.error(t("Site error ({site}): {err}").format(site=site, err=e))
-                return
+                raise SystemExit(EXIT_FAILURE) from e
 
             if not download_ui.completed_books:
-                return
+                raise SystemExit(EXIT_FAILURE)
 
             process_ui = CLIProcessUI()
             export_ui = CLIExportUI()

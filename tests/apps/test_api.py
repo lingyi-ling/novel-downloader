@@ -174,7 +174,11 @@ async def test_history_lists_exported_files(
     assert first["ext"] == "txt"
     assert first["size"] == 5
     assert first["download_url"] == "/downloads/b.txt"
-    assert payload["files"][1]["download_url"].startswith("/downloads/")
+    # Chinese characters and spaces are percent-encoded, so the URL is usable
+    # verbatim (see test_api_security for the fetch-it-back round trip).
+    assert (
+        payload["files"][1]["download_url"] == "/downloads/%E7%A9%BA%20%E6%A0%BC.epub"
+    )
 
 
 # ---------------------------------------------------------------------------

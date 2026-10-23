@@ -56,6 +56,8 @@ if TYPE_CHECKING:
 
         def _xp_epub_extras(self, extras: dict[str, Any]) -> str: ...
 
+        def _unique_output_path(self, path: Path, used: set[Path]) -> Path: ...
+
         def _xp_epub_chap_post(
             self, html_parts: list[str], chap: ChapterDict
         ) -> list[str]: ...
@@ -111,6 +113,7 @@ class ExportEpubMixin:
 
         # --- Compile columes ---
         outputs: list[Path] = []
+        used_paths: set[Path] = set()
         with ChapterStorage(raw_base, filename=f"chapter.{stage}.sqlite") as storage:
             for v_idx, vol in enumerate(vols, start=1):
                 vol_title = vol.get("volume_name") or f"卷 {v_idx}"
@@ -176,7 +179,9 @@ class ExportEpubMixin:
                     append_timestamp=cfg.append_timestamp,
                     ext="epub",
                 )
-                out_path = self._output_dir / sanitize_filename(out_name)
+                out_path = self._unique_output_path(
+                    self._output_dir / sanitize_filename(out_name), used_paths
+                )
 
                 try:
                     outputs.append(builder.export(out_path))
@@ -489,9 +494,10 @@ class ExportEpubMixin:
         xhtml_str = "\n".join(html_parts)
         extra_content = self._xp_epub_extras(chap.get("extra") or {})
 
+        safe_name = sanitize_filename(f"c{cid}")
         return EpubChapter(
-            id=f"c_{cid}",
-            filename=f"c{cid}.xhtml",
+            id=f"c_{safe_name}",
+            filename=f"{safe_name}.xhtml",
             title=title,
             fonts=added_fonts,
             content=xhtml_str,
@@ -512,9 +518,10 @@ class ExportEpubMixin:
 
         xhtml_str = "<p>本章内容暂不可用</p>"
 
+        safe_name = sanitize_filename(f"c{cid}")
         return EpubChapter(
-            id=f"c_{cid}",
-            filename=f"c{cid}.xhtml",
+            id=f"c_{safe_name}",
+            filename=f"{safe_name}.xhtml",
             title=title,
             fonts=[],
             content=xhtml_str,
@@ -528,6 +535,28 @@ class ExportEpubMixin:
         Subclasses may override this method to render extra info.
         """
         return ""
+
+    @staticmethod
+    def _unique_output_path(path: Path, used: set[Path]) -> Path:
+        """
+        Return ``path`` unless it was already produced in this run.
+
+        When two volumes share the same name (and therefore the same
+        filename template output), appending a numeric suffix prevents the
+        later export from silently overwriting the earlier one.
+        """
+        if path not in used:
+            used.add(path)
+            return path
+
+        stem, suffix = path.stem, path.suffix
+        index = 2
+        while True:
+            candidate = path.with_name(f"{stem}_{index}{suffix}")
+            if candidate not in used:
+                used.add(candidate)
+                return candidate
+            index += 1
 
     def _xp_epub_chap_post(self, html_parts: list[str], chap: ChapterDict) -> list[str]:
         """Allows subclasses to inject HTML or modify structure."""

@@ -1,6 +1,8 @@
 package com.lingyi.noveldl.ui.settings
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,6 +36,35 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
     val settings by store.settings.collectAsState(initial = ApiSettings())
     var baseUrl by remember(settings) { mutableStateOf(settings.baseUrl) }
     var apiKey by remember(settings) { mutableStateOf(settings.apiKey) }
+    var testing by remember { mutableStateOf(false) }
+
+    fun save() {
+        scope.launch {
+            store.save(baseUrl, apiKey)
+            Api.configure(baseUrl, apiKey)
+            if (baseUrl.isBlank()) {
+                onMessage(context.getString(R.string.settings_url_empty, Api.baseUrl))
+            } else {
+                onMessage(context.getString(R.string.settings_saved))
+            }
+        }
+    }
+
+    fun testConnection() {
+        if (testing) return
+        testing = true
+        scope.launch {
+            Api.configure(baseUrl, apiKey)
+            Api.call { Api.service().health() }
+                .onSuccess {
+                    onMessage(context.getString(R.string.settings_test_ok, it.status, it.version))
+                }
+                .onFailure {
+                    onMessage(context.getString(R.string.state_error, it.message ?: ""))
+                }
+            testing = false
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         OutlinedTextField(
@@ -52,16 +83,13 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(8.dp))
-        Button(
-            onClick = {
-                scope.launch {
-                    store.save(baseUrl, apiKey)
-                    Api.configure(baseUrl, apiKey)
-                    onMessage(context.getString(R.string.settings_saved))
-                }
-            },
-        ) {
-            Text(stringResource(R.string.action_save))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { save() }) {
+                Text(stringResource(R.string.action_save))
+            }
+            Button(onClick = { testConnection() }, enabled = !testing) {
+                Text(stringResource(R.string.settings_test_connection))
+            }
         }
         Spacer(Modifier.height(16.dp))
         Text(

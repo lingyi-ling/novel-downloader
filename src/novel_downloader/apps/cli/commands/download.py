@@ -5,6 +5,7 @@ novel_downloader.apps.cli.commands.download
 
 """
 
+import json
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from ..ui_adapters import (
     CLILoginUI,
     CLIProcessUI,
 )
-from .base import Command, parse_book_args
+from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail, parse_book_args
 
 
 class DownloadCmd(Command):
@@ -58,11 +59,18 @@ class DownloadCmd(Command):
         parser.add_argument(
             "--format",
             nargs="+",
-            help=t("Output format(s) (default: config)"),
+            help=t("Output format(s): txt, epub, html. Default: from config."),
+        )
+        parser.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help=t("Print machine-readable JSON on stdout and exit."),
         )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
+        as_json = bool(getattr(args, "as_json", False))
         config_path: Path | None = Path(args.config) if args.config else None
         site: str | None = args.site
         formats: list[str] | None = args.format
@@ -72,21 +80,21 @@ class DownloadCmd(Command):
             books = cls._parse_book_args(args.book_ids, args.start, args.end)
         else:  # URL MODE
             if not args.book_ids:
-                ui.error(
+                fail(
                     t(
                         "No book ID or URL provided. Pass a book URL, "
                         "or use --site SITE [book_id ...]."
-                    )
+                    ),
+                    EXIT_USAGE,
                 )
-                return
 
             if len(args.book_ids) != 1:
-                ui.error(
+                fail(
                     t(
                         "Expected exactly one URL argument when --site is omitted (got {n})."  # noqa: E501
-                    ).format(n=len(args.book_ids))
+                    ).format(n=len(args.book_ids)),
+                    EXIT_USAGE,
                 )
-                return
 
             from novel_downloader.infra.book_url_resolver import resolve_book_url
 
@@ -95,19 +103,21 @@ class DownloadCmd(Command):
             raw_url = args.book_ids[0]
             resolved = resolve_book_url(raw_url)
             if not resolved:
-                ui.error(
+                fail(
                     t("Could not resolve site and book from URL: {url}").format(
                         url=raw_url
-                    )
+                    ),
+                    EXIT_USAGE,
                 )
-                return
 
             site = resolved["site_key"]
             book_id = resolved.get("book_id")
 
             if not book_id:
-                ui.error(t("The provided URL does not contain a valid book ID."))
-                return
+                fail(
+                    t("The provided URL does not contain a valid book ID."),
+                    EXIT_USAGE,
+                )
 
             books = [
                 BookConfig(
@@ -124,7 +134,8 @@ class DownloadCmd(Command):
 
         config_data = load_or_init_config(config_path)
         if config_data is None:
-            return
+            # ``load_or_init_config`` already reported the reason on stderr.
+            raise SystemExit(EXIT_FAILURE)
 
         ui.info(t("Using site: {site}").format(site=site))
         adapter = ConfigAdapter(config=config_data)
@@ -133,20 +144,19 @@ class DownloadCmd(Command):
             try:
                 books = adapter.get_book_ids(site)
             except Exception as e:
-                ui.error(
+                fail(
                     t("Failed to read book IDs from configuration: {err}").format(
                         err=str(e)
                     )
                 )
-                return
 
         if not books:
-            ui.warn(t("No book IDs provided. Exiting."))
-            return
+            fail(t("No book IDs provided. Exiting."), EXIT_FAILURE)
 
         ui.setup_logging(
             log_dir=adapter.get_log_dir(),
             console_level=adapter.get_log_level(),
+            console=not as_json,
         )
 
         plugins_cfg = adapter.get_plugins_config()
@@ -166,7 +176,13 @@ class DownloadCmd(Command):
 
         client = registrar.get_client(site, adapter.get_client_config(site))
 
+        # Errors are collected instead of raised so a ``--json`` caller still
+        # gets a machine-readable summary before the non-zero exit code.
+        download_error: str | None = None
+        unsupported_error: str | None = None
+
         async def download_books() -> None:
+            nonlocal download_error, unsupported_error
             try:
                 async with client:
                     if adapter.get_login_required(site):
@@ -175,27 +191,26 @@ class DownloadCmd(Command):
                             login_cfg=adapter.get_login_config(site),
                         )
                         if not succ:
+                            download_error = t("Login failed.")
                             return
 
                     for book in books:
                         await client.download_book(book, ui=download_ui)
             except ValueError as e:
-                ui.warn(
-                    t("'{site}' is currently not supported: {err}").format(
-                        site=site, err=e
-                    )
-                )
-                return
+                unsupported_error = t(
+                    "'{site}' is currently not supported: {err}"
+                ).format(site=site, err=e)
             except Exception as e:
-                ui.error(t("Site error ({site}): {err}").format(site=site, err=e))
-                return
+                download_error = t("Site error ({site}): {err}").format(
+                    site=site, err=e
+                )
 
         asyncio.run(download_books())
-        if not download_ui.completed_books:
-            return
 
         # export
-        if not args.no_export:
+        exported: dict[str, dict[str, list[str]]] = {}
+        export_failed = False
+        if not args.no_export and download_ui.completed_books:
             process_ui = CLIProcessUI()
             export_ui = CLIExportUI()
 
@@ -205,14 +220,56 @@ class DownloadCmd(Command):
                     processors=adapter.get_processor_configs(site),
                     ui=process_ui,
                 )
-                client.export_book(
+                results = client.export_book(
                     book,
                     cfg=adapter.get_exporter_config(site),
                     formats=formats,
                     ui=export_ui,
                 )
-        else:
+                paths_by_fmt = {
+                    fmt: [str(path) for path in paths] for fmt, paths in results.items()
+                }
+                exported[book.book_id] = paths_by_fmt
+                if not any(paths_by_fmt.values()):
+                    export_failed = True
+        elif args.no_export:
             ui.info(t("Export skipped (--no-export)"))
+
+        if as_json:
+            ui.emit(
+                json.dumps(
+                    {
+                        "site": site,
+                        "books": [
+                            {
+                                "book_id": book.book_id,
+                                "downloaded": book in download_ui.completed_books,
+                                "exported": (
+                                    None
+                                    if args.no_export
+                                    else exported.get(book.book_id, {})
+                                ),
+                            }
+                            for book in books
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+
+        # Exit codes: usage errors were handled above; here anything that
+        # prevented the requested work from completing is a runtime failure.
+        if unsupported_error:
+            ui.warn(unsupported_error)
+            raise SystemExit(EXIT_FAILURE)
+        if download_error:
+            ui.error(download_error)
+            raise SystemExit(EXIT_FAILURE)
+        if not download_ui.completed_books:
+            raise SystemExit(EXIT_FAILURE)
+        if export_failed:
+            raise SystemExit(EXIT_FAILURE)
 
     @staticmethod
     def _parse_book_args(

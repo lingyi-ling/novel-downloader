@@ -94,6 +94,7 @@ class ExportTxtMixin:
 
         # --- Build body by volumes & chapters ---
         parts: list[str] = [header_txt]
+        seen_cids: set[str] = set()
         with ChapterStorage(raw_base, filename=f"chapter.{stage}.sqlite") as storage:
             for v_idx, volume in enumerate(vols, start=1):
                 vol_title = volume.get("volume_name") or f"卷 {v_idx}"
@@ -111,8 +112,11 @@ class ExportTxtMixin:
                 for ch_info in volume.get("chapters", []):
                     cid = ch_info.get("chapterId")
                     ch_title = ch_info.get("title")
-                    if not cid:
+                    # A chapter may be linked more than once in the same
+                    # volume (or across volumes); keep only the first hit.
+                    if not cid or cid in seen_cids:
                         continue
+                    seen_cids.add(cid)
 
                     ch = chap_map.get(cid)
                     if not ch:

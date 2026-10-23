@@ -15,6 +15,7 @@ from novel_downloader.libs.filesystem import (
     font_filename,
     format_filename,
     image_filename,
+    sanitize_filename,
 )
 from novel_downloader.libs.html_builder import HtmlBuilder, HtmlChapter, HtmlVolume
 from novel_downloader.schemas import (
@@ -115,6 +116,7 @@ class ExportHtmlMixin:
         )
 
         # --- Compile columes ---
+        seen_cids: set[str] = set()
         with ChapterStorage(raw_base, filename=f"chapter.{stage}.sqlite") as storage:
             for v_idx, vol in enumerate(vols, start=1):
                 vol_title = vol.get("volume_name") or f"卷 {v_idx}"
@@ -138,8 +140,11 @@ class ExportHtmlMixin:
                 for ch_info in vol.get("chapters", []):
                     cid = ch_info.get("chapterId")
                     ch_title = ch_info.get("title")
-                    if not cid:
+                    # A chapter may be linked more than once in the same
+                    # volume (or across volumes); keep only the first hit.
+                    if not cid or cid in seen_cids:
                         continue
+                    seen_cids.add(cid)
 
                     ch = chap_map.get(cid)
                     if not ch:
@@ -339,7 +344,7 @@ class ExportHtmlMixin:
         extras_part = self._xp_html_extras(chap.get("extra") or {})
 
         return HtmlChapter(
-            filename=f"c{cid}.html",
+            filename=f"{sanitize_filename(f'c{cid}')}.html",
             title=title,
             content=html_str,
             extra_content=extras_part,
@@ -361,7 +366,7 @@ class ExportHtmlMixin:
         html_str = "<p>本章内容暂不可用</p>"
 
         return HtmlChapter(
-            filename=f"c{cid}.html",
+            filename=f"{sanitize_filename(f'c{cid}')}.html",
             title=title,
             content=html_str,
             extra_content="",

@@ -16,7 +16,7 @@ from pathlib import Path
 from novel_downloader.apps.cli import ui
 from novel_downloader.infra.i18n import t
 
-from .base import Command, localize_help
+from .base import EXIT_FAILURE, Command, fail, localize_help
 
 
 class SourcesCmd(Command):
@@ -34,6 +34,12 @@ class SourcesCmd(Command):
             "--check",
             action="store_true",
             help=t("Also verify that each source can be registered."),
+        )
+        p_list.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help=t("Print machine-readable JSON on stdout and exit."),
         )
 
         p_check = cls._add_subparser(sub, "check", t("Validate a single rule file."))
@@ -75,14 +81,42 @@ class SourcesCmd(Command):
         elif action == "remove":
             cls._remove(args.site_key)
         else:
-            cls._list(check=bool(getattr(args, "check", False)))
+            cls._list(
+                check=bool(getattr(args, "check", False)),
+                as_json=bool(getattr(args, "as_json", False)),
+            )
 
     # ------------------------------------------------------------------ #
     @classmethod
-    def _list(cls, *, check: bool) -> None:
+    def _list(cls, *, check: bool, as_json: bool = False) -> None:
         from novel_downloader.plugins.rule import iter_rules
 
         rules = sorted(iter_rules(), key=lambda item: item[0])
+
+        if as_json:
+            payload: list[dict[str, object]] = []
+            failed = False
+            for key, rule, meta in rules:
+                status: str | None = None
+                if check:
+                    status = cls._probe(key, rule.search is not None)
+                    if status != t("ok"):
+                        failed = True
+                payload.append(
+                    {
+                        "site_key": key,
+                        "name": rule.display_name,
+                        "search": rule.search is not None,
+                        "hosts": list(rule.hosts),
+                        "origin": meta.get("origin", "-"),
+                        "status": status,
+                    }
+                )
+            ui.emit(json.dumps(payload, ensure_ascii=False, indent=2))
+            if failed:
+                raise SystemExit(EXIT_FAILURE)
+            return
+
         if not rules:
             ui.warn(t("No rule-based sources found."))
             return
@@ -98,6 +132,7 @@ class SourcesCmd(Command):
             columns.append(t("Status"))
 
         rows: list[list[str]] = []
+        probe_failed = False
         for key, rule, meta in rules:
             row = [
                 key,
@@ -107,10 +142,16 @@ class SourcesCmd(Command):
                 meta.get("origin", "-"),
             ]
             if check:
-                row.append(cls._probe(key, rule.search is not None))
+                status = cls._probe(key, rule.search is not None)
+                if status != t("ok"):
+                    probe_failed = True
+                row.append(status)
             rows.append(row)
 
         ui.render_table(t("Rule-based sources"), columns, rows)
+
+        if probe_failed:
+            raise SystemExit(EXIT_FAILURE)
 
     @classmethod
     def _probe(cls, key: str, has_search: bool) -> str:
@@ -133,19 +174,16 @@ class SourcesCmd(Command):
 
         path = Path(path_str)
         if not path.is_file():
-            ui.error(t("Rule file not found: {path}").format(path=path_str))
-            return
+            fail(t("Rule file not found: {path}").format(path=path_str))
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
-            ui.error(t("Invalid JSON in {path}: {err}").format(path=path_str, err=e))
-            return
+            fail(t("Invalid JSON in {path}: {err}").format(path=path_str, err=e))
 
         try:
             rule = parse_rule(data, source=path.name)
         except RuleError as e:
-            ui.error(t("Invalid rule in {path}: {err}").format(path=path_str, err=e))
-            return
+            fail(t("Invalid rule in {path}: {err}").format(path=path_str, err=e))
 
         ui.success(
             t("Rule OK: {name} (site_key={key}, search={search})").format(
@@ -162,14 +200,12 @@ class SourcesCmd(Command):
 
         path = Path(path_str)
         if not path.is_file():
-            ui.error(t("Rule file not found: {path}").format(path=path_str))
-            return
+            fail(t("Rule file not found: {path}").format(path=path_str))
 
         try:
             target = install_rule(path, force=force)
         except RuleError as e:
-            ui.error(t("Could not install {path}: {err}").format(path=path_str, err=e))
-            return
+            fail(t("Could not install {path}: {err}").format(path=path_str, err=e))
 
         ui.success(t("Installed rule to {target}").format(target=target))
 
@@ -180,8 +216,7 @@ class SourcesCmd(Command):
         try:
             target = remove_rule(site_key)
         except RuleError as e:
-            ui.error(str(e))
-            return
+            fail(str(e))
 
         ui.success(
             t("Removed rule '{key}' from {target}").format(key=site_key, target=target)

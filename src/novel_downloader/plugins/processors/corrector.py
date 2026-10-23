@@ -35,10 +35,34 @@ class CorrectorProcessor:
         self._apply_author = bool(config.get("apply_author", False))
         self._apply_tags = bool(config.get("apply_tags", False))
 
-        self._skip_if_len_le = config.get("skip_if_len_le")
+        self._skip_if_len_le = self._parse_skip_len(config.get("skip_if_len_le"))
 
-        self._engine = (config.get("engine") or "kenlm").lower()
+        # ``str(...)`` keeps a malformed (non-string) engine value from raising
+        # an obscure AttributeError on ``.lower()``; the unknown-engine check
+        # below then reports it properly.
+        self._engine = str(config.get("engine") or "kenlm").lower()
         self._batch_handler = self._build_batch_handler(self._engine, config)
+
+    @staticmethod
+    def _parse_skip_len(value: Any) -> int | None:
+        """
+        Normalize ``skip_if_len_le`` to an ``int`` (or ``None``).
+
+        A malformed value must not make every later ``process_chapter`` call
+        explode inside the per-line predicate, so it is dropped here with a
+        warning and the processor degrades to "never skip".
+        """
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "CorrectorProcessor: invalid skip_if_len_le=%r; ignoring it "
+                "(no line will be skipped).",
+                value,
+            )
+            return None
 
     def process_book_info(self, book_info: BookInfoDict) -> BookInfoDict:
         """
@@ -193,13 +217,25 @@ class CorrectorProcessor:
             for t in texts:
                 try:
                     res = model.correct(t)
-                    out.append(_norm(res, t))
                 except (ModuleNotFoundError, ImportError) as e:
                     missing = getattr(e, "name", "unknown")
                     raise ImportError(
                         f"Missing runtime dependency '{missing}' "
                         f"during .correct() for engine='{engine}'."
                     ) from e
+                except Exception as e:
+                    # A single-line engine hiccup must not abort the whole
+                    # stage (the batch path above already degrades to
+                    # passthrough): keep the original segment.
+                    logger.warning(
+                        ".correct() failed for engine='%s'; keeping original "
+                        "text. Error: %s",
+                        engine,
+                        e,
+                    )
+                    out.append(t)
+                    continue
+                out.append(_norm(res, t))
             return out
 
         return _batch
@@ -222,7 +258,7 @@ class CorrectorProcessor:
             s = seg.strip()
             if not s:
                 return False
-            return not (th is not None and len(s) <= int(th))
+            return not (th is not None and len(s) <= th)
 
         mask = [_needs(seg) for seg in lines]
         batch = [seg for seg, m in zip(lines, mask, strict=False) if m]

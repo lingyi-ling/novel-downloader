@@ -20,9 +20,11 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -39,6 +41,7 @@ import com.lingyi.noveldl.data.MusicJobRequest
 import com.lingyi.noveldl.data.MusicPlatform
 import com.lingyi.noveldl.data.MusicSearchRequest
 import com.lingyi.noveldl.data.MusicTrack
+import com.lingyi.noveldl.ui.progressFraction
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -56,11 +59,13 @@ fun MusicScreen(onMessage: (String) -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var jobRunning by remember { mutableStateOf(false) }
     var jobProgress by remember { mutableStateOf(MusicJobProgress()) }
+    var platformKey by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(platformKey) {
         Api.call { Api.service().musicPlatforms() }
             .onSuccess {
                 platforms = it.platforms
+                error = null
                 if (selectedPlatform.isEmpty()) {
                     selectedPlatform = it.platforms.firstOrNull()?.key.orEmpty()
                 }
@@ -188,13 +193,7 @@ fun MusicScreen(onMessage: (String) -> Unit) {
             )
             Spacer(Modifier.height(4.dp))
             LinearProgressIndicator(
-                progress = {
-                    if (jobProgress.total > 0) {
-                        jobProgress.done.toFloat() / jobProgress.total
-                    } else {
-                        0f
-                    }
-                },
+                progress = { progressFraction(jobProgress.done, jobProgress.total) },
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -205,6 +204,17 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
+            TextButton(
+                onClick = {
+                    if (platforms.isEmpty()) {
+                        platformKey++
+                    } else {
+                        search()
+                    }
+                },
+            ) {
+                Text(stringResource(R.string.action_retry))
+            }
         }
         if (tracks.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))

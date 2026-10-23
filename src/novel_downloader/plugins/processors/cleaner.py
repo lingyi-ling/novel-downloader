@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 from re import Match, Pattern
 from typing import Any
 
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import BookInfoDict, ChapterDict
+
+logger = logging.getLogger(__name__)
 
 
 @registrar.register_processor()
@@ -50,17 +53,13 @@ class CleanerProcessor:
         self._content_repl_map: dict[str, str] = content_replacements
 
         # build combined regexes (longer first to avoid prefix collisions)
-        self._title_combined_rx: Pattern[str] | None = None
-        if title_remove or self._title_repl_map:
-            parts = title_remove + [re.escape(k) for k in self._title_repl_map]
-            parts.sort(key=len, reverse=True)
-            self._title_combined_rx = re.compile("|".join(parts))
-
-        self._content_combined_rx: Pattern[str] | None = None
-        if content_remove or self._content_repl_map:
-            parts = content_remove + [re.escape(k) for k in self._content_repl_map]
-            parts.sort(key=len, reverse=True)
-            self._content_combined_rx = re.compile("|".join(parts), flags=re.MULTILINE)
+        self._title_combined_rx: Pattern[str] | None = self._compile(
+            title_remove + [re.escape(k) for k in self._title_repl_map]
+        )
+        self._content_combined_rx: Pattern[str] | None = self._compile(
+            content_remove + [re.escape(k) for k in self._content_repl_map],
+            re.MULTILINE,
+        )
 
     def process_book_info(self, book_info: BookInfoDict) -> BookInfoDict:
         """
@@ -144,35 +143,110 @@ class CleanerProcessor:
         return text.strip()
 
     @staticmethod
+    def _compile(patterns: list[str], flags: int = 0) -> Pattern[str] | None:
+        """
+        Compile a single alternation regex out of ``patterns``.
+
+        Patterns are ordered longest-first so that a longer literal is matched
+        before any of its prefixes. Returns ``None`` when there is nothing to
+        compile, keeping the "no rules configured" fast path.
+
+        Raises:
+            ValueError: If one of the user-provided removal patterns is not a
+                valid regular expression (surfaced eagerly with a clear message
+                instead of a raw :class:`re.error`).
+        """
+        if not patterns:
+            return None
+        parts = sorted(patterns, key=len, reverse=True)
+        try:
+            return re.compile("|".join(parts), flags)
+        except re.error as e:
+            raise ValueError(
+                f"CleanerProcessor: invalid removal regex ({e}). "
+                "Check the patterns inside the *_removes JSON files."
+            ) from e
+
+    @staticmethod
     def _load_str_list(path: str) -> list[str]:
         """
         Load a JSON file containing a list of strings.
-        Returns [] if path is empty/invalid/unreadable.
+
+        Returns [] if path is empty/invalid/unreadable (logged as a warning
+        rather than silently swallowed). Non-string entries are dropped so that
+        a malformed config can never blow up inside :func:`re.compile`.
         """
         if not path:
             return []
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-                return list(data) if isinstance(data, list) else []
-        except Exception:
+        except Exception as e:  # a bad rule file must not abort the stage
+            logger.warning(
+                "CleanerProcessor: cannot load removal list %r (%s); ignoring.",
+                path,
+                e,
+            )
             return []
+
+        if not isinstance(data, list):
+            logger.warning(
+                "CleanerProcessor: %r must contain a JSON array, got %s; ignoring.",
+                path,
+                type(data).__name__,
+            )
+            return []
+
+        out: list[str] = []
+        for item in data:
+            if isinstance(item, str):
+                out.append(item)
+            else:
+                logger.warning(
+                    "CleanerProcessor: ignoring non-string entry %r in %r.",
+                    item,
+                    path,
+                )
+        return out
 
     @staticmethod
     def _load_str_dict(path: str) -> dict[str, str]:
         """
         Load a JSON file containing a dict of string-to-string mappings.
-        Returns {} if path is empty/invalid/unreadable.
+
+        Returns {} if path is empty/invalid/unreadable (logged as a warning
+        rather than silently swallowed). Non-string values are dropped: a JSON
+        ``null`` must not silently turn into the literal text ``"None"``.
         """
         if not path:
             return {}
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-                return (
-                    {str(k): str(v) for k, v in data.items()}
-                    if isinstance(data, dict)
-                    else {}
-                )
-        except Exception:
+        except Exception as e:  # a bad rule file must not abort the stage
+            logger.warning(
+                "CleanerProcessor: cannot load replacement map %r (%s); ignoring.",
+                path,
+                e,
+            )
             return {}
+
+        if not isinstance(data, dict):
+            logger.warning(
+                "CleanerProcessor: %r must contain a JSON object, got %s; ignoring.",
+                path,
+                type(data).__name__,
+            )
+            return {}
+
+        out: dict[str, str] = {}
+        for k, v in data.items():
+            if isinstance(k, str) and isinstance(v, str):
+                out[k] = v
+            else:
+                logger.warning(
+                    "CleanerProcessor: ignoring non-string mapping entry %r: %r.",
+                    k,
+                    v,
+                )
+        return out

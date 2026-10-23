@@ -16,6 +16,8 @@ Provides:
 
 from __future__ import annotations
 
+import os
+import tempfile
 import zipfile
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZIP_STORED
@@ -464,59 +466,77 @@ class EpubBuilder:
     def _build_epub(self, output_path: Path) -> Path:
         """
         Write out the .epub ZIP file.
+
+        The archive is assembled in a temporary file next to the target and
+        then atomically replaced, so a failure mid-write can never truncate
+        or corrupt an already exported EPUB.
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with zipfile.ZipFile(output_path, "w") as epub:
-            # must be first and uncompressed
-            epub.writestr(
-                "mimetype",
-                "application/epub+zip",
-                compress_type=ZIP_STORED,
-            )
+        fd, tmp_name = tempfile.mkstemp(
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
 
-            # container.xml
-            epub.writestr(
-                "META-INF/container.xml",
-                CONTAINER_TEMPLATE,
-                compress_type=ZIP_DEFLATED,
-            )
+        try:
+            with zipfile.ZipFile(tmp_path, "w") as epub:
+                # must be first and uncompressed
+                epub.writestr(
+                    "mimetype",
+                    "application/epub+zip",
+                    compress_type=ZIP_STORED,
+                )
 
-            # core documents
-            epub.writestr(
-                f"{ROOT_PATH}/nav.xhtml",
-                self.nav.to_xhtml(),
-                compress_type=ZIP_DEFLATED,
-            )
-            epub.writestr(
-                f"{ROOT_PATH}/toc.ncx",
-                self.ncx.to_xml(),
-                compress_type=ZIP_DEFLATED,
-            )
-            epub.writestr(
-                f"{ROOT_PATH}/content.opf",
-                self.opf.to_xml(),
-                compress_type=ZIP_DEFLATED,
-            )
+                # container.xml
+                epub.writestr(
+                    "META-INF/container.xml",
+                    CONTAINER_TEMPLATE,
+                    compress_type=ZIP_DEFLATED,
+                )
 
-            # stylesheets
-            style_text = EPUB_CSS_STYLE_PATH.read_text("utf-8")
-            path = f"{ROOT_PATH}/{CSS_DIR}/style.css"
-            epub.writestr(path, style_text, compress_type=ZIP_DEFLATED)
+                # core documents
+                epub.writestr(
+                    f"{ROOT_PATH}/nav.xhtml",
+                    self.nav.to_xhtml(),
+                    compress_type=ZIP_DEFLATED,
+                )
+                epub.writestr(
+                    f"{ROOT_PATH}/toc.ncx",
+                    self.ncx.to_xml(),
+                    compress_type=ZIP_DEFLATED,
+                )
+                epub.writestr(
+                    f"{ROOT_PATH}/content.opf",
+                    self.opf.to_xml(),
+                    compress_type=ZIP_DEFLATED,
+                )
 
-            # items
-            for item in self.items:
-                path = f"{ROOT_PATH}/{TEXT_DIR}/{item.filename}"
-                epub.writestr(path, item.to_xhtml(), compress_type=ZIP_DEFLATED)
+                # stylesheets
+                style_text = EPUB_CSS_STYLE_PATH.read_text("utf-8")
+                path = f"{ROOT_PATH}/{CSS_DIR}/style.css"
+                epub.writestr(path, style_text, compress_type=ZIP_DEFLATED)
 
-            # images
-            for img in self.images:
-                path = f"{ROOT_PATH}/{IMAGE_DIR}/{img.filename}"
-                epub.writestr(path, img.data, compress_type=ZIP_DEFLATED)
+                # items
+                for item in self.items:
+                    path = f"{ROOT_PATH}/{TEXT_DIR}/{item.filename}"
+                    epub.writestr(path, item.to_xhtml(), compress_type=ZIP_DEFLATED)
 
-            # fonts
-            for font in self.fonts:
-                path = f"{ROOT_PATH}/{FONT_DIR}/{font.filename}"
-                epub.writestr(path, font.data, compress_type=ZIP_DEFLATED)
+                # images
+                for img in self.images:
+                    path = f"{ROOT_PATH}/{IMAGE_DIR}/{img.filename}"
+                    epub.writestr(path, img.data, compress_type=ZIP_DEFLATED)
+
+                # fonts
+                for font in self.fonts:
+                    path = f"{ROOT_PATH}/{FONT_DIR}/{font.filename}"
+                    epub.writestr(path, font.data, compress_type=ZIP_DEFLATED)
+
+            os.replace(tmp_path, output_path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
         return output_path

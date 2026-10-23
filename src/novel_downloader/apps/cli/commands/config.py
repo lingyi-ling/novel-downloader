@@ -13,7 +13,7 @@ from novel_downloader.infra.config import copy_default_config
 from novel_downloader.infra.i18n import available_languages, set_language, t
 from novel_downloader.infra.paths import DEFAULT_CONFIG_FILENAME
 
-from .base import Command, localize_help
+from .base import EXIT_FAILURE, EXIT_USAGE, Command, localize_help
 
 
 class ConfigCmd(Command):
@@ -88,7 +88,7 @@ class ConfigInitCmd(Command):
                     filename=DEFAULT_CONFIG_FILENAME, err=str(e)
                 )
             )
-            raise
+            raise SystemExit(EXIT_FAILURE) from e
 
 
 class ConfigSetLangCmd(Command):
@@ -97,7 +97,13 @@ class ConfigSetLangCmd(Command):
 
     @classmethod
     def add_arguments(cls, parser: ArgumentParser) -> None:
-        parser.add_argument("lang", help=t("Language code (e.g. zh, en, zh_CN)."))
+        languages = ", ".join(sorted(available_languages()))
+        parser.add_argument(
+            "lang",
+            help=t("Language code (choices: {choices}; e.g. zh, en).").format(
+                choices=languages
+            ),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
@@ -109,5 +115,5 @@ class ConfigSetLangCmd(Command):
                     lang=args.lang, langs=langs
                 )
             )
-            raise SystemExit(2)
+            raise SystemExit(EXIT_USAGE)
         ui.success(t("Language switched to {lang}").format(lang=code))

@@ -32,7 +32,7 @@ class YoudaoTranslaterProcessor:
     def __init__(self, config: dict[str, Any]) -> None:
         self._source: str = config.get("source") or "auto"
         self._target: str = config.get("target") or "zh-CHS"
-        self._sleep: float = float(config.get("sleep", 1.0))
+        self._sleep: float = max(0.0, float(config.get("sleep", 1.0)))
         self._client = _YoudaoWebFanyi()
 
     def process_book_info(self, book_info: BookInfoDict) -> BookInfoDict:
@@ -41,17 +41,17 @@ class YoudaoTranslaterProcessor:
         """
         bi = copy.deepcopy(book_info)
 
-        bi["book_name"] = self._translate(bi.get("book_name", ""))
-        bi["summary"] = self._translate(bi.get("summary", ""))
+        bi["book_name"] = self._tr(bi.get("book_name", ""))
+        bi["summary"] = self._tr(bi.get("summary", ""))
         if "summary_brief" in bi:
-            bi["summary_brief"] = self._translate(bi["summary_brief"])
+            bi["summary_brief"] = self._tr(bi["summary_brief"])
 
         for vol in bi.get("volumes", []):
-            vol["volume_name"] = self._translate(vol.get("volume_name", ""))
+            vol["volume_name"] = self._tr(vol.get("volume_name", ""))
             if "volume_intro" in vol:
-                vol["volume_intro"] = self._translate(vol["volume_intro"])
+                vol["volume_intro"] = self._tr(vol["volume_intro"])
             for ch in vol.get("chapters", []):
-                ch["title"] = self._translate(ch.get("title", ""))
+                ch["title"] = self._tr(ch.get("title", ""))
 
         return bi
 
@@ -62,13 +62,25 @@ class YoudaoTranslaterProcessor:
         """
         ch = copy.deepcopy(chapter)
 
-        ch["title"] = self._translate(ch.get("title", ""))
+        ch["title"] = self._tr(ch.get("title", ""))
 
-        paragraphs = self._split_text(ch.get("content", ""))
-        translated = [self._translate(p) for p in paragraphs]
-        ch["content"] = "\n".join(translated)
+        content = ch.get("content", "")
+        if isinstance(content, str):
+            paragraphs = self._split_text(content)
+            translated = [self._translate(p) for p in paragraphs]
+            ch["content"] = "\n".join(translated)
 
         return ch
+
+    def _tr(self, value: Any) -> Any:
+        """
+        Translate a field, leaving non-string values untouched.
+
+        Parsed metadata occasionally carries ``None`` for an optional field;
+        passing that to :meth:`_translate` would raise ``AttributeError`` and
+        abort the whole stage.
+        """
+        return self._translate(value) if isinstance(value, str) else value
 
     @staticmethod
     def _split_text(text: str, max_length: int = 3000) -> list[str]:
@@ -228,9 +240,19 @@ class _YoudaoWebFanyi:
         if not c:
             return ""  # let server auto-detect
         c_low = c.lower()
-        if c_low in ("zh", "zh_cn", "zh-cn", "zh-cns"):
+        if c_low in (
+            "zh",
+            "zh_cn",
+            "zh-cn",
+            "zh_cns",
+            "zh-cns",  # legacy typo kept for backwards compatibility
+            "zh_chs",
+            "zh-chs",
+            "zh_hans",
+            "zh-hans",
+        ):
             return "zh-CHS"  # simplified
-        if c_low in ("zh_tw", "zh-tw", "zh-cht"):
+        if c_low in ("zh_tw", "zh-tw", "zh_cht", "zh-cht", "zh_hant", "zh-hant"):
             return "zh-CHT"  # traditional
         return c
 

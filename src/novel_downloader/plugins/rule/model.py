@@ -93,6 +93,52 @@ def _as_headers(value: Any) -> dict[str, str]:
     return {str(k): _as_str(v) for k, v in value.items()}
 
 
+def _as_int(value: Any, default: int, *, where: str) -> int:
+    """
+    Coerce an optional integer field, raising :class:`RuleError` on bad input.
+
+    Accepts ``None`` (-> ``default``), a real ``int`` or a numeric string.
+    Anything else (a float, a list, a non-numeric string, a bool) is rejected
+    instead of leaking a raw ``ValueError``/``TypeError`` to the caller.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise RuleError(f"{where} must be an integer, got {value!r}")
+    try:
+        return int(value)
+    except ValueError as e:
+        raise RuleError(f"{where} must be an integer, got {value!r}") from e
+
+
+def _check_regex(pattern: Any, *, where: str) -> str | None:
+    """
+    Validate an optional regex string, returning it unchanged.
+
+    A non-string or syntactically invalid pattern is a hard :class:`RuleError`
+    so a bad rule is rejected when it is *parsed* rather than crashing later
+    inside the fetcher/parser/searcher (where the exception would be opaque).
+    """
+    if pattern is None:
+        return None
+    if not isinstance(pattern, str):
+        raise RuleError(f"{where} must be a regex string, got {type(pattern).__name__}")
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise RuleError(f"{where}: invalid regex {pattern!r}: {e}") from e
+    return pattern
+
+
+def _as_str_list(value: Any, *, where: str) -> list[str]:
+    """Normalize an optional list-of-strings field, rejecting other shapes."""
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise RuleError(f"{where} must be a list")
+    return [str(item) for item in value]
+
+
 _VALID_FORMATS = {"html", "json"}
 
 
@@ -136,7 +182,8 @@ class Field:
         if self.regex:
             try:
                 self._pattern = re.compile(self.regex, re.S)
-            except re.error as e:  # pragma: no cover - defensive
+            except (re.error, TypeError) as e:
+                # TypeError covers a non-string ``regex`` (e.g. a number/list).
                 raise RuleError(
                     t("invalid field regex {regex!r}: {err}").format(
                         regex=self.regex, err=e
@@ -153,11 +200,21 @@ class Field:
                     type=type(data)
                 )
             )
+        selector = data.get("selector")
+        if selector is not None and not isinstance(selector, str):
+            raise RuleError(
+                f"field 'selector' must be a string, got {type(selector).__name__}"
+            )
+        raw_attr = data.get("attr", "text")
+        if raw_attr is not None and not isinstance(raw_attr, str):
+            raise RuleError(
+                f"field 'attr' must be a string, got {type(raw_attr).__name__}"
+            )
         return cls(
-            selector=data.get("selector"),
-            attr=_as_str(data.get("attr"), "text"),
+            selector=selector,
+            attr=_as_str(raw_attr, "text"),
             regex=data.get("regex"),
-            group=int(data.get("group", 1)),
+            group=_as_int(data.get("group"), 1, where="field 'group'"),
             multi=bool(data.get("multi", False)),
             replace=_as_replace(data.get("replace")),
             default=_as_str(data.get("default")),
@@ -194,18 +251,28 @@ class SearchRule:
         json_body = data.get("json_body")
         if json_body is not None and not isinstance(json_body, dict):
             raise RuleError(t("search.json_body must be an object"))
+        raw_data = data.get("data")
+        if raw_data is not None and not isinstance(raw_data, dict):
+            raise RuleError("search.data must be an object")
+        method = _as_str(data.get("method"), "GET")
+        if data.get("method") is not None and not isinstance(data["method"], str):
+            raise RuleError("search.method must be a string")
         return cls(
             url=_as_str(data["url"]),
-            method=_as_str(data.get("method"), "GET").upper(),
-            data={str(k): _as_str(v) for k, v in (data.get("data") or {}).items()},
+            method=method.upper(),
+            data={str(k): _as_str(v) for k, v in (raw_data or {}).items()},
             json_body=json_body,
             headers=_as_headers(data.get("headers")),
             format=_section_format(data),
             item=_as_str(data.get("item")),
             fields=fields,
-            book_id_regex=data.get("book_id_regex"),
-            book_id_group=int(data.get("book_id_group", 1)),
-            priority=int(data.get("priority", 200)),
+            book_id_regex=_check_regex(
+                data.get("book_id_regex"), where="search.book_id_regex"
+            ),
+            book_id_group=_as_int(
+                data.get("book_id_group"), 1, where="search.book_id_group"
+            ),
+            priority=_as_int(data.get("priority"), 200, where="search.priority"),
         )
 
 
@@ -229,8 +296,8 @@ class ChaptersRule:
             item=_as_str(data["item"]),
             title=Field.from_dict(data.get("title", {"attr": "text"})),
             url=Field.from_dict(data.get("url", {"attr": "href"})),
-            id_regex=data.get("id_regex"),
-            id_group=int(data.get("id_group", 1)),
+            id_regex=_check_regex(data.get("id_regex"), where="book.chapters.id_regex"),
+            id_group=_as_int(data.get("id_group"), 1, where="book.chapters.id_group"),
             volume_name=_as_str(data.get("volume_name"), "正文"),
         )
 
@@ -258,8 +325,12 @@ class PagesRule:
         raw_max = data.get("max_pages")
         return cls(
             url=_as_str(data["url"]),
-            start=int(data.get("start", 2)),
-            max_pages=None if raw_max is None else int(raw_max),
+            start=_as_int(data.get("start"), 2, where="pages.start"),
+            max_pages=(
+                None
+                if raw_max is None
+                else _as_int(raw_max, 2, where="pages.max_pages")
+            ),
         )
 
 
@@ -308,12 +379,16 @@ class ChapterRule:
         if not isinstance(data, dict) or not data.get("url"):
             raise RuleError(t("chapter section requires a 'url'"))
         pages = data.get("pages")
+        drop = [
+            _check_regex(p, where="chapter.drop") or ""
+            for p in _as_str_list(data.get("drop"), where="chapter.drop")
+        ]
         return cls(
             url=_as_str(data["url"]),
             content=Field.from_dict(data.get("content", {"selector": "body"})),
             title=Field.from_dict(data["title"]) if data.get("title") else None,
             replace=_as_replace(data.get("replace")),
-            drop=[str(p) for p in (data.get("drop") or [])],
+            drop=drop,
             pages=PagesRule.from_dict(pages) if pages else None,
             headers=_as_headers(data.get("headers")),
             format=_section_format(data),
@@ -390,10 +465,12 @@ def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
 
     resolve_raw = data.get("resolve")
     resolve = None
-    if isinstance(resolve_raw, dict):
+    if resolve_raw is not None:
+        if not isinstance(resolve_raw, dict):
+            raise RuleError(f"{source}: 'resolve' must be an object")
         resolve = ResolveRule(
-            book=resolve_raw.get("book"),
-            chapter=resolve_raw.get("chapter"),
+            book=_check_regex(resolve_raw.get("book"), where="resolve.book"),
+            chapter=_check_regex(resolve_raw.get("chapter"), where="resolve.chapter"),
         )
 
     book = BookRule.from_dict(data["book"]) if data.get("book") else None
@@ -414,11 +491,11 @@ def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
     return Rule(
         site_key=site_key,
         site_name=_as_str(data.get("site_name")),
-        priority=int(data.get("priority", 200)),
+        priority=_as_int(data.get("priority"), 200, where="priority"),
         base_url=_as_str(data.get("base_url")),
         encoding=_as_str(data.get("encoding"), "utf-8"),
         format=_check_format(_as_str(data.get("format"), "html").lower()),
-        hosts=[str(h).lower() for h in (data.get("hosts") or [])],
+        hosts=[h.lower() for h in _as_str_list(data.get("hosts"), where="hosts")],
         headers=_as_headers(data.get("headers")),
         resolve=resolve,
         search=search,

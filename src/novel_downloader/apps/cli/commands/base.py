@@ -7,11 +7,46 @@ novel_downloader.apps.cli.commands.base
 
 from abc import ABC, abstractmethod
 from argparse import ArgumentParser, Namespace, _SubParsersAction
+from typing import NoReturn
 
 from novel_downloader.infra.i18n import t
 from novel_downloader.schemas import BookConfig
 
-__all__ = ["Command", "localize_help", "parse_book_args"]
+__all__ = [
+    "EXIT_FAILURE",
+    "EXIT_SUCCESS",
+    "EXIT_USAGE",
+    "Command",
+    "fail",
+    "localize_help",
+    "parse_book_args",
+]
+
+#: Exit code for a successful run.
+EXIT_SUCCESS = 0
+#: Exit code for a run that failed at runtime (network, site, config, file...).
+EXIT_FAILURE = 1
+#: Exit code for a command-line usage error (missing/conflicting arguments, ...).
+EXIT_USAGE = 2
+
+
+def fail(message: str, code: int = EXIT_FAILURE) -> NoReturn:
+    """
+    Report a message on stderr and terminate with a non-zero exit code.
+
+    Centralizes the "print an error and exit non-zero" pattern so every
+    command uses the same stream (stderr, keeping stdout machine readable) and
+    the same codes (see :data:`EXIT_USAGE`, :data:`EXIT_FAILURE`).
+
+    :param message: Human-readable error message.
+    :param code: Exit code to terminate with; defaults to ``EXIT_FAILURE``.
+    """
+    # Imported lazily: ``ui`` imports ``i18n`` only, but keeping this local
+    # avoids any chance of an import cycle at module load time.
+    from novel_downloader.apps.cli import ui
+
+    ui.error(message)
+    raise SystemExit(code)
 
 
 def localize_help(parser: ArgumentParser) -> None:
