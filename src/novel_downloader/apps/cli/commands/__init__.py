@@ -13,6 +13,7 @@ from .config import ConfigCmd
 from .download import DownloadCmd
 from .export import ExportCmd
 from .login import LoginCmd
+from .music import MusicCmd
 from .search import SearchCmd
 from .sources import SourcesCmd
 
@@ -24,4 +25,5 @@ commands = [
     ConfigCmd,
     CleanCmd,
     SourcesCmd,
+    MusicCmd,
 ]
