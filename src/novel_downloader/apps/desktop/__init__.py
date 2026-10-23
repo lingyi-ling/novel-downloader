@@ -3,11 +3,9 @@
 novel_downloader.apps.desktop
 -----------------------------
 
-Desktop application entry point (NiceGUI native window mode).
+Native Tkinter desktop client.
 """
 
-__all__ = [
-    "desktop_main",
-]
+__all__ = ["desktop_main"]
 
 from .main import desktop_main
