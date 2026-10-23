@@ -35,6 +35,30 @@ _NAV_ITEMS: tuple[tuple[str, str, str], ...] = (
     ("music", "music_note", "/music"),
 )
 
+#: PWA head markup injected on every page. Static strings only (no i18n): the
+#: install metadata and the service-worker registration are user invisible.
+_PWA_HEAD_HTML = """
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#F5F4EF">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<script>
+(() => {
+  if (!('serviceWorker' in navigator)) return;
+  const register = () => {
+    try {
+      navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+    } catch (error) {
+      // Non-secure origins (plain HTTP on a LAN address) reject registration
+      // synchronously or asynchronously; stay silent and let the app run.
+    }
+  };
+  if (document.readyState === 'complete') register();
+  else window.addEventListener('load', register, { once: true });
+})();
+</script>
+"""
+
 
 def _nav_label(key: str) -> str:
     """Translate a nav key lazily so language switches re-render labels."""
@@ -74,6 +98,7 @@ def page_frame(active: str) -> None:
     :param active: Key of the current page to highlight in the drawer.
     """
     install()
+    ui.add_head_html(_PWA_HEAD_HTML)
     dark = ui.dark_mode(value=_dark_state["value"])
 
     def toggle(e: ClickEventArguments) -> None:

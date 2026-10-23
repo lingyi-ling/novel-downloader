@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from importlib.resources import files
 from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 
+from fastapi.responses import FileResponse, Response
 from nicegui import app, ui
 
 from novel_downloader.apps.web.services import manager
@@ -57,6 +59,58 @@ def _static_path(resource: Traversable) -> str | None:
         return None
 
 
+def mount_web_assets() -> None:
+    """
+    Serve the packaged PWA assets from ``/static``.
+
+    The manifest is additionally exposed at ``/manifest.webmanifest`` (same
+    origin as ``start_url``) so the browser can offer installation. The service
+    worker is served with ``Service-Worker-Allowed: /`` because a worker loaded
+    from ``/static/sw.js`` would otherwise be limited to the ``/static/`` scope
+    and could not handle offline navigations.
+
+    Missing assets are skipped silently: older/editable installs may not ship
+    the ``static`` folder, and the regular UI must keep working without it.
+    """
+    static_root = files("novel_downloader.apps.web").joinpath("static")
+    try:
+        if not static_root.is_dir():
+            return
+    except OSError:
+        return
+
+    manifest = _static_path(static_root.joinpath("manifest.webmanifest"))
+    service_worker = _static_path(static_root.joinpath("sw.js"))
+
+    if manifest is not None:
+
+        def serve_manifest() -> Response:
+            return FileResponse(
+                manifest,
+                media_type="application/manifest+json",
+                headers={"Cache-Control": "no-cache"},
+            )
+
+        app.get("/manifest.webmanifest", include_in_schema=False)(serve_manifest)
+        app.get("/static/manifest.webmanifest", include_in_schema=False)(serve_manifest)
+
+    if service_worker is not None:
+
+        def serve_service_worker() -> Response:
+            return FileResponse(
+                service_worker,
+                media_type="text/javascript",
+                headers={
+                    "Service-Worker-Allowed": "/",
+                    "Cache-Control": "no-cache",
+                },
+            )
+
+        app.get("/static/sw.js", include_in_schema=False)(serve_service_worker)
+
+    app.add_static_files("/static", local_directory=str(static_root))
+
+
 def setup_app(
     *,
     host: str,
@@ -88,6 +142,7 @@ def setup_app(
 
     app.on_startup(mount_exports)
     app.on_shutdown(shutdown)
+    mount_web_assets()
 
     run_kwargs: dict[str, Any] = {
         "host": host,
