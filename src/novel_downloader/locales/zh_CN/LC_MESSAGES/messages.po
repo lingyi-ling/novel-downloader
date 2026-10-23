@@ -707,7 +707,8 @@ msgid "Name"
 msgstr "名称"
 
 #: src/novel_downloader/apps/cli/commands/sources.py:93
-#: src/novel_downloader/apps/web/components/shell.py:41
+#: src/novel_downloader/apps/web/components/shell.py:42
+#: src/novel_downloader/apps/web/pages/music.py:785
 #: src/novel_downloader/apps/web/pages/search.py:421
 #: src/novel_downloader/apps/web/pages/search.py:430
 #: src/novel_downloader/apps/web/pages/search.py:448
@@ -1300,50 +1301,60 @@ msgstr "没有配置文件, 无法继续执行"
 msgid "Failed to load configuration: {err}"
 msgstr "加载配置失败: {err}"
 
-#: src/novel_downloader/apps/web/components/shell.py:42
+#: src/novel_downloader/apps/web/components/shell.py:43
 #: src/novel_downloader/apps/web/pages/download.py:33
 #: src/novel_downloader/apps/web/pages/download.py:39
 #: src/novel_downloader/apps/web/pages/history.py:150
+#: src/novel_downloader/apps/web/pages/music.py:860
+#: src/novel_downloader/apps/web/pages/music.py:1001
 #: src/novel_downloader/apps/web/pages/search.py:269
 msgid "Download"
 msgstr "下载"
 
-#: src/novel_downloader/apps/web/components/shell.py:43
+#: src/novel_downloader/apps/web/components/shell.py:44
 #: src/novel_downloader/apps/web/pages/progress.py:169
 #: src/novel_downloader/apps/web/pages/progress.py:175
 msgid "In Progress"
 msgstr "正在下载"
 
-#: src/novel_downloader/apps/web/components/shell.py:44
+#: src/novel_downloader/apps/web/components/shell.py:45
 msgid "History"
 msgstr "历史记录"
 
-#: src/novel_downloader/apps/web/components/shell.py:90
+#: src/novel_downloader/apps/web/components/shell.py:46
+#: src/novel_downloader/apps/web/pages/music.py:120
+#: src/novel_downloader/apps/web/pages/music.py:140
+#: src/novel_downloader/apps/web/pages/music.py:758
+msgid "Music"
+msgstr "音乐"
+
+#: src/novel_downloader/apps/web/components/shell.py:92
 #: src/novel_downloader/apps/web/main.py:96
 #: src/novel_downloader/apps/web/pages/download.py:33
 #: src/novel_downloader/apps/web/pages/history.py:158
+#: src/novel_downloader/apps/web/pages/music.py:140
 #: src/novel_downloader/apps/web/pages/progress.py:169
 #: src/novel_downloader/apps/web/pages/search.py:421
 msgid "Novel Downloader"
 msgstr "小说下载器"
 
-#: src/novel_downloader/apps/web/components/shell.py:91
+#: src/novel_downloader/apps/web/components/shell.py:93
 msgid "Local-first novel downloader"
 msgstr "本地优先的小说下载器"
 
-#: src/novel_downloader/apps/web/components/shell.py:98
+#: src/novel_downloader/apps/web/components/shell.py:100
 msgid "Main navigation"
 msgstr "主导航"
 
-#: src/novel_downloader/apps/web/components/shell.py:109
+#: src/novel_downloader/apps/web/components/shell.py:111
 msgid "Open navigation"
 msgstr "打开导航"
 
-#: src/novel_downloader/apps/web/components/shell.py:120
+#: src/novel_downloader/apps/web/components/shell.py:122
 msgid "Language"
 msgstr "语言"
 
-#: src/novel_downloader/apps/web/components/shell.py:122
+#: src/novel_downloader/apps/web/components/shell.py:124
 msgid "Toggle theme"
 msgstr "切换主题"
 
@@ -1375,6 +1386,7 @@ msgid "Cancelled"
 msgstr "已取消"
 
 #: src/novel_downloader/apps/web/components/widgets.py:27
+#: src/novel_downloader/apps/web/pages/music.py:226
 #: src/novel_downloader/apps/web/pages/progress.py:105
 msgid "Failed"
 msgstr "失败"
@@ -1546,6 +1558,287 @@ msgstr "没有匹配的文件"
 msgid "No files"
 msgstr "暂无文件"
 
+#: src/novel_downloader/apps/web/pages/music.py:121
+msgid "Download songs from multiple platforms"
+msgstr "从多个平台下载歌曲"
+
+#: src/novel_downloader/apps/web/pages/music.py:127
+msgid ""
+"Install the music extras to enable this page: pip install \"novel-"
+"downloader[music]\""
+msgstr "请安装音乐扩展后使用此页面：pip install \"novel-downloader[music]\""
+
+#: src/novel_downloader/apps/web/pages/music.py:133
+#, python-brace-format
+msgid "Import error: {error}"
+msgstr "导入错误：{error}"
+
+#: src/novel_downloader/apps/web/pages/music.py:152
+#, python-brace-format
+msgid "Could not load music platforms: {error}"
+msgstr "无法加载音乐平台：{error}"
+
+#: src/novel_downloader/apps/web/pages/music.py:178
+#, python-brace-format
+msgid "Could not start the NetEase provider: {error}"
+msgstr "无法启动网易云平台：{error}"
+
+#: src/novel_downloader/apps/web/pages/music.py:222
+msgid "OK"
+msgstr "成功"
+
+#: src/novel_downloader/apps/web/pages/music.py:224
+msgid "Skipped"
+msgstr "已跳过"
+
+#: src/novel_downloader/apps/web/pages/music.py:241
+#, python-brace-format
+msgid "Done: {ok} succeeded, {skip} skipped, {fail} failed"
+msgstr "完成：成功 {ok} 首，跳过 {skip} 首，失败 {fail} 首"
+
+#: src/novel_downloader/apps/web/pages/music.py:251
+#, python-brace-format
+msgid "Download stopped: {error}"
+msgstr "下载已停止：{error}"
+
+#: src/novel_downloader/apps/web/pages/music.py:252
+#, python-brace-format
+msgid "Download failed: {error}"
+msgstr "下载失败：{error}"
+
+#: src/novel_downloader/apps/web/pages/music.py:264
+#: src/novel_downloader/apps/web/pages/music.py:722
+msgid "Session expired, please log in again."
+msgstr "登录已失效，请重新登录。"
+
+#: src/novel_downloader/apps/web/pages/music.py:268
+msgid "A download is already running"
+msgstr "已有下载任务正在进行"
+
+#: src/novel_downloader/apps/web/pages/music.py:271
+msgid "Select at least one song first"
+msgstr "请先选择至少一首歌曲"
+
+#: src/novel_downloader/apps/web/pages/music.py:277
+#: src/novel_downloader/apps/web/pages/music.py:395
+#, python-brace-format
+msgid "Could not start this platform: {error}"
+msgstr "无法启动该平台：{error}"
+
+#: src/novel_downloader/apps/web/pages/music.py:303
+#: src/novel_downloader/apps/web/pages/music.py:699
+#, python-brace-format
+msgid "Completed {done} of {total}"
+msgstr "已完成 {done}/{total}"
+
+#: src/novel_downloader/apps/web/pages/music.py:305
+msgid "Downloading..."
+msgstr "正在下载…"
+
+#: src/novel_downloader/apps/web/pages/music.py:371
+msgid "Stopping..."
+msgstr "正在停止…"
+
+#: src/novel_downloader/apps/web/pages/music.py:387
+#: src/novel_downloader/apps/web/pages/search.py:711
+msgid "Please enter a keyword"
+msgstr "请输入关键词"
+
+#: src/novel_downloader/apps/web/pages/music.py:403
+msgid "Search results"
+msgstr "搜索结果"
+
+#: src/novel_downloader/apps/web/pages/music.py:431
+#, python-brace-format
+msgid "Playlist: {name}"
+msgstr "歌单：{name}"
+
+#: src/novel_downloader/apps/web/pages/music.py:500
+#, python-brace-format
+msgid "Log out failed: {error}"
+msgstr "退出登录失败：{error}"
+
+#: src/novel_downloader/apps/web/pages/music.py:516
+msgid "Logged out"
+msgstr "已退出登录"
+
+#: src/novel_downloader/apps/web/pages/music.py:528
+msgid "Opening the browser..."
+msgstr "正在打开浏览器…"
+
+#: src/novel_downloader/apps/web/pages/music.py:543
+msgid "Complete the sign-in in the browser window."
+msgstr "请在浏览器窗口中完成登录。"
+
+#: src/novel_downloader/apps/web/pages/music.py:553
+msgid "Verifying the session..."
+msgstr "正在校验登录态…"
+
+#: src/novel_downloader/apps/web/pages/music.py:600
+#: src/novel_downloader/apps/web/pages/music.py:1033
+#, python-brace-format
+msgid "{count} selected"
+msgstr "已选择 {count} 首"
+
+#: src/novel_downloader/apps/web/pages/music.py:630
+#, python-brace-format
+msgid "Search results ({shown} of {total})"
+msgstr "搜索结果（显示 {shown} / 共 {total}）"
+
+#: src/novel_downloader/apps/web/pages/music.py:643
+#, python-brace-format
+msgid "Could not load songs: {error}"
+msgstr "无法加载歌曲：{error}"
+
+#: src/novel_downloader/apps/web/pages/music.py:662
+#, python-brace-format
+msgid "Could not load playlists: {error}"
+msgstr "无法加载歌单：{error}"
+
+#: src/novel_downloader/apps/web/pages/music.py:683
+msgid "Login successful"
+msgstr "登录成功"
+
+#: src/novel_downloader/apps/web/pages/music.py:692
+#, python-brace-format
+msgid "Login failed: {error}"
+msgstr "登录失败：{error}"
+
+#: src/novel_downloader/apps/web/pages/music.py:744
+msgid "Hi-Res"
+msgstr "Hi-Res（高解析度）"
+
+#: src/novel_downloader/apps/web/pages/music.py:745
+msgid "Lossless"
+msgstr "无损"
+
+#: src/novel_downloader/apps/web/pages/music.py:746
+msgid "Ex-High"
+msgstr "极高"
+
+#: src/novel_downloader/apps/web/pages/music.py:747
+msgid "Higher"
+msgstr "较高"
+
+#: src/novel_downloader/apps/web/pages/music.py:748
+msgid "Standard"
+msgstr "标准"
+
+#: src/novel_downloader/apps/web/pages/music.py:759
+#, python-brace-format
+msgid "Search and download music from {count} platforms"
+msgstr "搜索并下载来自 {count} 个平台的音乐"
+
+#: src/novel_downloader/apps/web/pages/music.py:774
+msgid "Platform"
+msgstr "平台"
+
+#: src/novel_downloader/apps/web/pages/music.py:781
+msgid "Search songs"
+msgstr "搜索歌曲"
+
+#: src/novel_downloader/apps/web/pages/music.py:805
+msgid "Download settings"
+msgstr "下载设置"
+
+#: src/novel_downloader/apps/web/pages/music.py:808
+msgid "Output directory"
+msgstr "输出目录"
+
+#: src/novel_downloader/apps/web/pages/music.py:816
+msgid "Audio quality"
+msgstr "音质"
+
+#: src/novel_downloader/apps/web/pages/music.py:824
+msgid "Embed tags"
+msgstr "嵌入标签"
+
+#: src/novel_downloader/apps/web/pages/music.py:827
+msgid "Embed cover"
+msgstr "嵌入封面"
+
+#: src/novel_downloader/apps/web/pages/music.py:830
+msgid "Save lyrics"
+msgstr "保存歌词"
+
+#: src/novel_downloader/apps/web/pages/music.py:833
+msgid "Split by artist/album"
+msgstr "按歌手/专辑分类"
+
+#: src/novel_downloader/apps/web/pages/music.py:837
+msgid "Skip existing files"
+msgstr "跳过已存在文件"
+
+#: src/novel_downloader/apps/web/pages/music.py:843
+msgid "Concurrent downloads"
+msgstr "并发下载数"
+
+#: src/novel_downloader/apps/web/pages/music.py:863
+msgid "Download selected"
+msgstr "下载选中"
+
+#: src/novel_downloader/apps/web/pages/music.py:868
+#: src/novel_downloader/apps/web/pages/search.py:453
+msgid "Stop"
+msgstr "停止"
+
+#: src/novel_downloader/apps/web/pages/music.py:912
+msgid "Waiting for login..."
+msgstr "等待登录…"
+
+#: src/novel_downloader/apps/web/pages/music.py:917
+msgid "Logged in"
+msgstr "已登录"
+
+#: src/novel_downloader/apps/web/pages/music.py:921
+msgid "Log out"
+msgstr "退出登录"
+
+#: src/novel_downloader/apps/web/pages/music.py:926
+msgid "Not logged in"
+msgstr "未登录"
+
+#: src/novel_downloader/apps/web/pages/music.py:928
+msgid "Browser login"
+msgstr "浏览器登录"
+
+#: src/novel_downloader/apps/web/pages/music.py:944
+msgid "Untitled playlist"
+msgstr "未命名歌单"
+
+#: src/novel_downloader/apps/web/pages/music.py:949
+msgid "Liked Songs"
+msgstr "我喜欢的音乐"
+
+#: src/novel_downloader/apps/web/pages/music.py:957
+#, python-brace-format
+msgid "{count} songs"
+msgstr "{count} 首"
+
+#: src/novel_downloader/apps/web/pages/music.py:968
+msgid "My Playlists"
+msgstr "我的歌单"
+
+#: src/novel_downloader/apps/web/pages/music.py:980
+msgid "No playlists found"
+msgstr "未找到歌单"
+
+#: src/novel_downloader/apps/web/pages/music.py:993
+msgid "VIP"
+msgstr "VIP（会员）"
+
+#: src/novel_downloader/apps/web/pages/music.py:1020
+msgid "Search or pick a playlist to load songs"
+msgstr "搜索或选择歌单以加载歌曲"
+
+#: src/novel_downloader/apps/web/pages/music.py:1026
+msgid "Select all"
+msgstr "全选"
+
+#: src/novel_downloader/apps/web/pages/music.py:1029
+msgid "Invert selection"
+msgstr "反选"
+
 #: src/novel_downloader/apps/web/pages/progress.py:35
 msgid "?"
 msgstr "未知"
@@ -1690,10 +1983,6 @@ msgstr "跨站点搜索小说，一键加入下载队列"
 msgid "Enter keyword"
 msgstr "输入关键字"
 
-#: src/novel_downloader/apps/web/pages/search.py:453
-msgid "Stop"
-msgstr "停止"
-
 #: src/novel_downloader/apps/web/pages/search.py:473
 msgid "Login window opened; complete the sign-in there."
 msgstr "登录窗口已打开，请在该窗口中完成登录。"
@@ -1751,10 +2040,6 @@ msgstr "未找到与该关键词匹配的书籍"
 #: src/novel_downloader/apps/web/pages/search.py:642
 msgid "Enter a keyword to start searching"
 msgstr "请输入搜索关键字"
-
-#: src/novel_downloader/apps/web/pages/search.py:711
-msgid "Please enter a keyword"
-msgstr "请输入关键词"
 
 #: src/novel_downloader/apps/web/services/client_dialog.py:39
 msgid "Login Request"

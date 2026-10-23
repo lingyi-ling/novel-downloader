@@ -32,6 +32,7 @@ _NAV_ITEMS: tuple[tuple[str, str, str], ...] = (
     ("download", "download", "/download"),
     ("progress", "cloud_download", "/progress"),
     ("history", "history", "/history"),
+    ("music", "music_note", "/music"),
 )
 
 
@@ -42,6 +43,7 @@ def _nav_label(key: str) -> str:
         "download": t("Download"),
         "progress": t("In Progress"),
         "history": t("History"),
+        "music": t("Music"),
     }
     return labels[key]
 

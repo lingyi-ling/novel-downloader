@@ -45,6 +45,19 @@ web-ui = [
 desktop = [
     "nicegui[native]",
 ]
+music = [
+    "mutagen",
+    "pillow",
+    "qrcode",
+    "websocket-client",
+]
+music-desktop = [
+    "customtkinter",
+    "mutagen",
+    "pillow",
+    "qrcode",
+    "websocket-client",
+]
 image-utils = [
     "brotli",
     "numpy",
@@ -69,6 +82,9 @@ all = [
     "pillow",
     "httpx[http2]",
     "curl_cffi",
+    "mutagen",
+    "qrcode",
+    "websocket-client",
 ]
 
 docs = [
@@ -158,6 +174,7 @@ include = ["novel_downloader", "novel_downloader.*"]
 "novel_downloader.resources.icons" = ["*.ico", "*.png"]
 "novel_downloader.locales" = ["*/LC_MESSAGES/*.mo", "*/LC_MESSAGES/*.po"]
 "novel_downloader.plugins.rule.builtin" = ["*.json"]
+"novel_downloader.apps.music.providers._vendor.musicdl" = ["SOURCE.txt"]
 
 [tool.setuptools.dynamic]
 version = {attr = "novel_downloader.__version__"}
@@ -166,6 +183,8 @@ version = {attr = "novel_downloader.__version__"}
 line-length = 88
 indent-width = 4
 target-version = "py311"
+# Vendored third-party code is kept byte-for-byte close to upstream.
+exclude = ["src/novel_downloader/apps/music/providers/_vendor"]
 
 [tool.ruff.lint]
 select = [
@@ -197,6 +216,20 @@ disable_error_code = ["untyped-decorator"]
 [[tool.mypy.overrides]]
 module = "novel_downloader.libs.image_utils"
 disable_error_code = ["call-overload"]
+
+# The music engine was merged from a standalone tool written without type
+# annotations; it is relaxed here while annotations are added incrementally.
+[[tool.mypy.overrides]]
+module = "novel_downloader.apps.music.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disable_error_code = ["var-annotated", "type-arg"]
+
+# Vendored musicdl (upstream code) is not type-checked.
+[[tool.mypy.overrides]]
+module = "novel_downloader.apps.music.providers._vendor.*"
+ignore_errors = true
 
 [tool.pytest.ini_options]
 minversion = "7.1"

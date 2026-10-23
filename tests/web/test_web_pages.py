@@ -11,7 +11,7 @@ executed against the in-process ASGI application, driven through an ``httpx``
 ``ASGITransport`` client.  No TCP port is opened and no server process is
 started, so these tests stay fast and host independent.
 
-The assertions are deliberately structural -- presence of the shell, the four
+The assertions are deliberately structural -- presence of the shell, the five
 navigation entries, toolbars and page headings, the mutual visibility of the
 download input sections, and one rendered history row -- rather than styling
 or exact-copy based, so restyling the pages does not break them.
@@ -37,11 +37,11 @@ from novel_downloader.infra.i18n import t
 _PAGES_MODULE = "novel_downloader.apps.web.pages"
 _WEB_PREFIX = "novel_downloader.apps.web"
 
-#: The four routes the shell is expected to expose.
-_ROUTES = ("/", "/download", "/progress", "/history")
+#: The five routes the shell is expected to expose.
+_ROUTES = ("/", "/download", "/progress", "/history", "/music")
 
 #: Navigation keys shared with ``components.shell``.
-_NAV_KEYS = ("search", "download", "progress", "history")
+_NAV_KEYS = ("search", "download", "progress", "history", "music")
 
 #: Set once a transient import failure has already consumed its single retry.
 _retry_used = False
@@ -102,6 +102,8 @@ def _elements(
 ) -> list[Any]:
     """Return the visible elements matching the given filter (empty if none)."""
     try:
+        if kind is None:
+            return list(user.find(content=content).elements)
         return list(user.find(kind=kind, content=content).elements)
     except AssertionError:
         return []
@@ -140,14 +142,14 @@ def _body_elements(
 
 
 def _nav_labels() -> set[str]:
-    """Return the translated labels of the four expected navigation items."""
+    """Return the translated labels of the five expected navigation items."""
     from novel_downloader.apps.web.components.shell import _nav_label
 
     return {_nav_label(key) for key in _NAV_KEYS}
 
 
 # ------------------------------------
-# shell / navigation (all four routes)
+# shell / navigation (all five routes)
 # ------------------------------------
 
 
@@ -161,13 +163,15 @@ async def test_route_renders_shell(route: str) -> None:
         await user.should_see(kind=ui.header)
         await user.should_see(kind=ui.left_drawer)
 
-        # the drawer holds the four i18n navigation entries
+        # the drawer holds exactly the five i18n navigation entries
         nav_labels = _nav_labels()
-        assert nav_labels
+        assert len(nav_labels) == 5
         assert all(label.strip() for label in nav_labels)
-        nav_texts = {btn.text for btn in _drawer_elements(user, kind=ui.button)}
+        nav_buttons = _drawer_elements(user, kind=ui.button)
+        nav_texts = {btn.text for btn in nav_buttons}
         missing = nav_labels - nav_texts
         assert nav_labels <= nav_texts, f"missing nav items on {route}: {missing}"
+        assert len(nav_buttons) == len(_NAV_KEYS)
 
         # the page body renders its heading block (title + subtitle)
         body_labels = {
@@ -219,7 +223,9 @@ async def test_download_page_toggle_swaps_input_sections() -> None:
         assert before, "no input is visible in the initial mode"
 
         # ... switching the mode swaps which section is visible
-        with user.client:
+        client = user.client
+        assert client is not None
+        with client:
             toggles[0].value = "id"
 
         after = {element.id for element in _elements(user, kind=ui.input)}
@@ -274,3 +280,33 @@ async def test_history_page_toolbar_and_file_row(
 
         # the single fake export shows up as a file row
         assert _count(user, content="novel_one.txt") >= 1
+
+
+# ------------------------------------
+# music page
+# ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_music_page_title_and_platform_select() -> None:
+    async with page_user() as user:
+        from novel_downloader.apps.web.pages import music
+
+        if not music._MUSIC_AVAILABLE:
+            pytest.skip("music extras are not installed")
+
+        await user.open("/music")
+
+        # the heading block (title + subtitle) is rendered in the page body
+        body_labels = {
+            lbl.text.strip()
+            for lbl in _body_elements(user, kind=ui.label)
+            if isinstance(lbl.text, str) and lbl.text.strip()
+        }
+        assert t("Music") in body_labels
+
+        # the platform dropdown is present (it carries one option per provider)
+        selects = _body_elements(user, kind=ui.select)
+        assert any(len(getattr(sel, "options", {}) or {}) > 10 for sel in selects), (
+            "platform selector is missing"
+        )

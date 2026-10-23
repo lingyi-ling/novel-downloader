@@ -1,0 +1,4 @@
+vendored from musicdl v2.14.0 (https://github.com/CharlesPikachu/musicdl)
+license: PolyForm-Noncommercial-1.0.0
+本目录为裁剪后的平台实现：base + 19 个「轻」档平台 + 5 个「中」档平台(QQ/Qobuz/Spotify/TIDAL/Soda)与所需 utils。
+如需对比上游修复：见 SOURCE.txt 中仓库，diff modules/sources 与 modules/utils 对应文件。
