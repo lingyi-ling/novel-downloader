@@ -31,10 +31,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from novel_downloader import __version__
-from novel_downloader.apps.web.services.task_manager import manager
+from novel_downloader.apps.core.task_manager import manager
 from novel_downloader.infra.config import get_config_value
 
-from .routes import router
+from .routes import OPENAPI_TAGS, router
 
 
 def _resolve_output_dir(output_dir: str | Path | None) -> Path:
@@ -79,8 +79,13 @@ def create_app(
 
     application = FastAPI(
         title="Novel Downloader API",
-        description="Local REST API for the Novel Downloader toolkit.",
+        description=(
+            "Local REST API for the Novel Downloader toolkit: aggregated book "
+            "search (including a Server-Sent Events stream), download task "
+            "management, exported-file history and the optional music engine."
+        ),
         version=__version__,
+        openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
     )
     application.state.api_token = resolved_token or None

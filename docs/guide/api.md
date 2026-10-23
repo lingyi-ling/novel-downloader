@@ -66,20 +66,29 @@ X-API-Key: my-secret
 
 ## 端点一览
 
-所有业务端点前缀为 `/api/v1`，请求与响应均为 JSON。
+所有业务端点前缀为 `/api/v1`，请求与响应通常为 JSON（流式搜索端点除外）。
+下文示例中的 `$BASE` 指 API 根地址（如 `http://127.0.0.1:8081`），
+`$TOKEN` 指启动时配置的 token。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/v1/health` | 健康检查，返回 `{status, version}`。 |
 | `GET` | `/api/v1/sites` | 搜索/下载支持的站点，返回 `{search: {...}, download: {...}}`。 |
 | `POST` | `/api/v1/search` | 聚合搜索多个站点。 |
+| `GET` | `/api/v1/search/stream` | 以 SSE 流式返回各站点搜索结果。 |
 | `GET` | `/api/v1/tasks` | 任务快照：`{pending, running, completed}`。 |
+| `GET` | `/api/v1/tasks/{task_id}` | 查询单个任务；不存在返回 `404`。 |
 | `POST` | `/api/v1/tasks` | 新增下载任务。 |
 | `POST` | `/api/v1/tasks/{task_id}/cancel` | 取消待执行或运行中的任务。 |
 | `GET` | `/api/v1/history` | 列出导出目录中的 `txt`/`epub` 文件。 |
 | `GET` | `/api/v1/music/platforms` | 音乐平台列表与使用提示。 |
 | `POST` | `/api/v1/music/search` | 在指定音乐平台搜索歌曲。 |
-| `POST` | `/api/v1/music/download` | 下载一首或多首歌曲。 |
+| `POST` | `/api/v1/music/download` | 同步下载一首或多首歌曲。 |
+| `POST` | `/api/v1/music/jobs` | 创建异步音乐下载任务，返回 `202 {job_id}`。 |
+| `GET` | `/api/v1/music/jobs/{job_id}` | 查询异步音乐任务状态与进度。 |
+
+Swagger UI（`/docs`）按 `system`、`search`、`tasks`、`history`、`music`
+分组展示以上端点。
 
 任务对象字段：
 
@@ -136,6 +145,49 @@ X-API-Key: my-secret
 }
 ```
 
+## 流式搜索（SSE）
+
+`GET /api/v1/search/stream` 在搜索过程中逐站点推送结果，适合边搜边展示。
+查询参数与 `POST /search` 的请求体对应：
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `keyword` | string | 必填 | 搜索关键词。 |
+| `sites` | string | 全部启用站点 | 逗号分隔的站点列表，如 `qidian,biquge5`。 |
+| `per_site_limit` | int | `5` | 每个站点的结果上限。 |
+| `timeout` | float | `5` | 单个站点的请求预算（秒）。 |
+
+响应为 `text/event-stream`，事件格式：
+
+```
+event: results
+data: [{"site":"qidian","book_id":"123456","title":"斗破苍穹", ...}]
+
+event: results
+data: [{"site":"biquge5","book_id":"...","title":"...", ...}]
+
+event: done
+data: {"total":2}
+```
+
+- 每个站点完成时推送一个 `results` 事件，`data` 是该站点的结果数组。
+- 全部站点结束后推送一个 `done` 事件，`data.total` 为本次推送的总条数。
+- 客户端断开连接时，服务端会关闭底层搜索生成器并取消仍在进行的站点请求。
+- 响应头包含 `Cache-Control: no-cache` 与 `X-Accel-Buffering: no`，
+  使用反向代理时也不会被缓冲。
+
+用 `curl -N` 观察实时事件流：
+
+```bash
+curl -N "http://127.0.0.1:8081/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&sites=qidian,biquge5&per_site_limit=5&timeout=5" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+!!! note "鉴权与客户端选择"
+    SSE 端点同样受 token 保护，只能通过 `Authorization` 或 `X-API-Key`
+    请求头传递。浏览器的 `EventSource` 无法自定义请求头，因此请改用
+    `fetch` 读取响应流，或使用 `curl` 等可设置请求头的客户端。
+
 ## 下载任务
 
 新增任务：
@@ -149,6 +201,14 @@ X-API-Key: my-secret
 ```
 
 `title` 可省略，此时自动生成 `<site> (id = <book_id>)`。
+
+查询单个任务：
+
+```bash
+curl -s "$BASE/api/v1/tasks/<task_id>" -H "Authorization: Bearer $TOKEN"
+```
+
+返回与任务列表中相同的任务对象；任务不存在返回 `404`。
 
 取消任务成功返回 `{"ok": true}`；任务不存在返回 `404`。
 
@@ -223,12 +283,81 @@ X-API-Key: my-secret
     音乐引擎是同步实现，`/music/download` 会等待所有曲目下载完成才返回。
     批量下载时请控制单次请求的曲目数量，或拆成多个请求。
 
+### 异步下载任务
+
+批量较大时建议使用异步任务端点。`POST /api/v1/music/jobs` 立即返回
+`202 Accepted` 和任务 ID，下载在后台线程池中执行：
+
+```bash
+# 创建任务（请求体与 /music/download 相同）
+curl -s -X POST "$BASE/api/v1/music/jobs" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "platform": "netease",
+        "tracks": [{"id": "186016", "name": "晴天", "artists": "周杰伦"}],
+        "level": "exhigh",
+        "out_dir": "D:/Music"
+      }'
+```
+
+响应：
+
+```json
+{"job_id": "3f2c1b0a9d8e4f7c8b6a5d4e3c2b1a09"}
+```
+
+轮询任务状态：
+
+```bash
+curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "job_id": "3f2c1b0a9d8e4f7c8b6a5d4e3c2b1a09",
+  "status": "running",
+  "progress": {"done": 1, "total": 3},
+  "results": [
+    {"status": "ok", "reason": "", "path": "D:/Music/晴天.mp3", "bytes": 8345678}
+  ],
+  "error": null,
+  "created_at": 1710000000.0,
+  "finished_at": null
+}
+```
+
+- `status` 取值：`queued`、`running`、`done`、`failed`。
+- `progress.done` 随已完成曲目递增，`progress.total` 为提交的曲目数。
+- `results` 与同步端点相同，按提交顺序排列；任务失败时包含已完成的部分结果。
+- `error` 仅在 `status=failed` 时非空。
+- 任务表保存在进程内存中，最多保留最近 `100` 个任务（优先清理已结束的任务）；
+  进程重启后任务记录丢失。
+- 任务不存在返回 `404`。
+
+!!! note "单进程内存状态"
+    异步任务不跨进程共享。多 worker 部署 uvicorn 时，请将 `POST /music/jobs`
+    与后续 `GET /music/jobs/{job_id}` 请求路由到同一进程，或改用
+    `POST /music/download` 同步端点。
+
 若未安装音乐可选依赖（`mutagen`、`qrcode`、`websocket-client` 等），
 音乐端点返回 `503` 并附安装提示，而不是 `500`：
 
 ```json
 {"detail": "Music support is not available: ... Install it with: pip install \"novel-downloader[music]\""}
 ```
+
+## 错误码
+
+错误响应统一为 `{"detail": "..."}`（`detail` 为英文，便于客户端判断）：
+
+| 状态码 | 场景 |
+| --- | --- |
+| `400` | 未知音乐平台；音乐平台初始化失败；同步音乐下载失败。 |
+| `401` | 已配置 token，但请求缺少或携带了错误的 token。 |
+| `404` | 任务 ID 不存在；音乐任务 ID 不存在。 |
+| `422` | 请求参数校验失败（缺少必填字段、数值越界等）。 |
+| `503` | 未安装音乐可选依赖，音乐相关端点不可用。 |
 
 ## 完整调用示例
 
@@ -244,18 +373,31 @@ curl -s -X POST "$BASE/api/v1/search" \
   -H "Content-Type: application/json" \
   -d '{"keyword":"斗破苍穹","sites":["qidian"],"per_site_limit":5}'
 
+# 1b. 流式搜索（实时输出 SSE 事件）
+curl -N "$BASE/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&sites=qidian,biquge5" \
+  -H "Authorization: Bearer $TOKEN"
+
 # 2. 新增下载任务
 curl -s -X POST "$BASE/api/v1/tasks" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"title":"斗破苍穹","site":"qidian","book_id":"123456"}'
 
-# 3. 查询进度
+# 3. 查询进度（列表或单个任务）
 curl -s "$BASE/api/v1/tasks" -H "Authorization: Bearer $TOKEN"
+curl -s "$BASE/api/v1/tasks/<task_id>" -H "Authorization: Bearer $TOKEN"
 
 # 4. 查看并下载导出文件
 curl -s "$BASE/api/v1/history" -H "Authorization: Bearer $TOKEN"
 curl -s -OJ "$BASE/downloads/%E6%96%97%E7%A0%B4%E8%8B%8D%E7%A9%B9.txt"
+
+# 5. 异步音乐下载与轮询
+JOB=$(curl -s -X POST "$BASE/api/v1/music/jobs" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"platform":"netease","tracks":[{"id":"186016"}]}' \
+  | sed -E 's/.*"job_id":"([^"]+)".*/\1/')
+curl -s "$BASE/api/v1/music/jobs/$JOB" -H "Authorization: Bearer $TOKEN"
 ```
 
 `/downloads/*` 不受 token 保护（它是静态文件挂载），因此在公网暴露 API 时，
