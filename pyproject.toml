@@ -42,11 +42,16 @@ dependencies = [
 web-ui = [
     "nicegui",
 ]
+api = [
+    "fastapi",
+    "uvicorn",
+]
 desktop = [
     "nicegui[native]",
 ]
 music = [
     "mutagen",
+    "pathvalidate",
     "pillow",
     "qrcode",
     "websocket-client",
@@ -54,6 +59,7 @@ music = [
 music-desktop = [
     "customtkinter",
     "mutagen",
+    "pathvalidate",
     "pillow",
     "qrcode",
     "websocket-client",
@@ -76,6 +82,8 @@ all-backends = [
 ]
 all = [
     "nicegui[native]",
+    "fastapi",
+    "uvicorn",
     "brotli",
     "numpy",
     "fonttools",
@@ -99,6 +107,8 @@ tests = [
     "numpy",
     "fonttools",
     "pillow",
+    "fastapi",
+    "httpx[http2]",
     "pytest",
     "pytest-asyncio",
     "pytest-aiohttp",
@@ -115,6 +125,7 @@ ci = [
     "pillow",
     "curl_cffi",
     "httpx[http2]",
+    "fastapi",
     "pytest",
     "pytest-asyncio",
     "pytest-aiohttp",
@@ -146,6 +157,7 @@ dev = [
 [project.scripts]
 novel-cli = "novel_downloader.apps.cli.main:cli_main"
 novel-web = "novel_downloader.apps.web.main:web_main"
+novel-api = "novel_downloader.apps.api.main:api_main"
 novel-desktop = "novel_downloader.apps.desktop.main:desktop_main"
 
 [project.urls]
