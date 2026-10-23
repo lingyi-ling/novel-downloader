@@ -55,10 +55,10 @@ https://fanqienovel.com/reader/7276663560427471412
 
 * 番茄的搜索接口需要站点自身 JS 生成的签名, 纯 HTTP 请求即使带上有效 Cookie 也拿不到结果, 因此**聚合搜索不会包含番茄的结果** (不影响其它站点)
 * 显式指定番茄时才会启用**浏览器辅助搜索**:
-    * 命令行: `novel-cli search -s fanqienovel <关键字>`; Web UI: 在搜索页勾选番茄
+    * 命令行: `novel-cli search -s fanqienovel <关键字>`
     * 下载器会复用登录会话启动一个隐藏浏览器窗口, 由站点自身 JS 发起已签名的搜索请求, 再通过 DevTools 协议截获结果 JSON
     * 截获结果中的书名/作者经过字体混淆, 下载器会用书籍详情页回填真实书名与作者
 * 使用浏览器辅助搜索前需要先建立登录会话, 任选其一:
-    * 用内置登录窗口一键登录: 命令行执行 `novel-cli login fanqienovel`, 或在 Web UI 搜索页点击「登录」按钮; 登录成功后 Cookie 自动写入 `<缓存目录>/fanqienovel/`
+    * 用内置登录窗口一键登录: 命令行执行 `novel-cli login fanqienovel`; 登录成功后 Cookie 自动写入 `<缓存目录>/fanqienovel/`
     * 设置环境变量 `FANQIENOVEL_COOKIE`
-* 浏览器辅助搜索需要安装 `desktop` 额外依赖 (`pip install 'novel-downloader[desktop]'`)
+* 浏览器辅助搜索依赖可选的浏览器组件, 缺失时命令会给出安装提示

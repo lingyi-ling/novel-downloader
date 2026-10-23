@@ -31,8 +31,6 @@ novel-cli login fanqienovel
 novel-cli login --list
 ```
 
-> Web UI 的搜索页同样提供「登录」按钮, 效果与 `novel-cli login` 一致。
-
 ---
 
 ### 全局用法与帮助
@@ -61,6 +59,7 @@ Commands:
   config      管理应用配置和设置
   clean       清理应用日志、缓存与书籍数据
   sources     列出、校验、安装和移除规则书源
+  music       搜索并下载来自多个音乐平台的歌曲
 ```
 
 ---
@@ -173,7 +172,7 @@ novel-cli search -s b520 -s n23qb 三体
     novel-cli search -s fanqienovel 斗破苍穹
     ```
 
-    浏览器辅助搜索需要安装 `desktop` 额外依赖 (`pip install 'novel-downloader[desktop]'`)。
+    浏览器辅助搜索需要安装可选的浏览器组件; 若组件缺失, 命令会给出安装提示。
 
 ---
 
@@ -448,7 +447,7 @@ novel-cli clean book --site qidian 1010868264 --all -y
 
 为需要登录的站点打开一个真实浏览器窗口, 登录成功后自动保存会话 Cookie, 供后续搜索/下载复用。
 
-需要安装可选依赖 `pywebview` (即 `.[desktop]` 扩展), 否则会提示安装。
+需要安装可选的图形界面组件, 否则命令会提示安装。
 
 **Synopsis**
 
@@ -478,6 +477,99 @@ novel-cli login --list
 > 保存位置: `<缓存目录>/<站点>/aiohttp.cookies`
 >
 > 登录窗口关闭且未检测到登录时命令以非零状态退出, 不会保存任何 Cookies。
+
+---
+
+#### 7. music 子命令
+
+搜索并下载来自多个音乐平台的歌曲。该功能依赖可选组 `music`, 未安装时命令会打印安装提示:
+
+```bash
+pip install "novel-downloader[music]"
+```
+
+`music` 包含三个子命令: `platforms`、`search`、`download`。
+
+**Synopsis**
+
+```bash
+novel-cli music [-h] {platforms,search,download} ...
+
+novel-cli music platforms
+
+novel-cli music search [-h] [--platform KEY] [--limit N] [--json] keyword
+
+novel-cli music download [-h] [--keyword KEYWORD] [--platform KEY] [--limit N]
+                         [--level {hires,lossless,exhigh,higher,standard}]
+                         [--out DIR] [--pick N[,N|ID]] [--yes]
+                         [KEYWORD]
+```
+
+**General Options**
+
+* `--platform KEY`: 音乐平台标识, 默认为 `netease` (网易云音乐); 完整列表见 `novel-cli music platforms`
+* `--limit N`, `-l N`: 最大结果数, 默认 `20`
+
+**platforms**
+
+列出可用的音乐平台及其说明:
+
+```bash
+novel-cli music platforms
+```
+
+**search**
+
+按关键字搜索歌曲, 输出结果表格 (序号、标题、歌手、专辑、时长、是否 VIP):
+
+```bash
+novel-cli music search "关键词" --platform netease --limit 10
+```
+
+* `--json`: 以 JSON 输出搜索结果 (包含 `platform`、`keyword`、`total` 与 `tracks` 列表) 后退出, 便于脚本消费
+
+```bash
+novel-cli music search "关键词" --json
+```
+
+**download**
+
+先搜索, 再选择并下载歌曲:
+
+* 位置参数 `KEYWORD` 或 `--keyword KEYWORD`: 下载前搜索的关键词 (二选一)
+* `--level`: 音质档位, 可选 `hires` / `lossless` / `exhigh` / `higher` / `standard`; 省略时取音乐设置, 通常为 `exhigh`
+* `--out DIR`: 输出目录; 省略时取音乐设置 (未配置则使用默认下载目录)
+* `--pick N[,N|ID]`: 无需确认, 按搜索结果序号 (从 1 开始) 或歌曲 ID 下载, 可传入多个值
+* `--yes`: 无需确认, 直接下载全部搜索结果
+
+未指定 `--pick` 或 `--yes` 且处于交互式终端时, 会进入分页选择界面 (输入编号、`a` 全选、`n` 下一页、`p` 上一页, 回车取消)。非交互式环境下必须显式提供 `--pick` 或 `--yes`。
+
+**Examples**
+
+```bash
+# 查看可用平台
+novel-cli music platforms
+
+# 在网易云音乐搜索
+novel-cli music search "关键词"
+
+# 在 QQ 音乐搜索并输出 JSON
+novel-cli music search "关键词" --platform qq --json
+
+# 下载第 1 条搜索结果
+novel-cli music download "关键词" --pick 1
+
+# 下载第 1、3 条结果, 指定高解析度音质与输出目录
+novel-cli music download "关键词" --pick 1,3 --level hires --out ./music
+
+# 下载全部搜索结果 (无需确认)
+novel-cli music download "关键词" --yes
+
+# 通过搜索结果中的歌曲 ID 下载
+novel-cli music download "关键词" --pick 123456789
+```
+
+> 下载进度、标签写入、封面与歌词保存等行为遵循音乐设置 (如 `embed_tags`、`embed_cover`、`save_lyric`、`split_folder`、`skip_existing`)。
 
 ---
 

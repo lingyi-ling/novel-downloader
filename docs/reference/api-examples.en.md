@@ -6,7 +6,8 @@
 
 * **apps/**: application entry points and interfaces
     * **cli/**: command line (`argparse`, `rich`), `ui_adapters` implements the UI protocol
-    * **web/**: NiceGUI frontend (pages, components, task management, login dialog)
+    * **api/**: local REST API (FastAPI app, routes, and service adapters)
+    * **music/**: multi-platform music download engine
 * **infra/**: infrastructure (configuration, networking, paths/files, logging, i18n, persistence)
 * **libs/**: general-purpose libraries (EPUB, file utilities, encryption/decryption, time utilities)
 * **plugins/**: site plugin layer (managed uniformly by `registry`)
@@ -259,7 +260,7 @@ plugins/sites/<site_key>/
 **3. Optional modules**:
 
 * `client.py`: if missing, falls back to the `common` implementation
-* `searcher.py`: used for CLI / Web search
+* `searcher.py`: used for CLI / API search
 
 **4. Apply the corresponding registrar decorator to the class**
 

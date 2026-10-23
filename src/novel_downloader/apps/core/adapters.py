@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-novel_downloader.apps.web.ui_adapters
+novel_downloader.apps.core.adapters
 -------------------------------------
 """
 
@@ -9,18 +9,17 @@ import contextlib
 from pathlib import Path
 from typing import Any
 
-from novel_downloader.apps.web.models import DownloadTask
-from novel_downloader.apps.web.services.cred_broker import (
+from novel_downloader.infra.cookies import parse_cookies
+from novel_downloader.infra.i18n import t
+from novel_downloader.schemas import BookConfig, LoginField
+
+from .cred_broker import (
     REQUEST_TIMEOUT,
     cleanup_request,
     complete_request,
     create_cred_request,
 )
-from novel_downloader.infra.cookies import parse_cookies
-from novel_downloader.infra.i18n import t
-from novel_downloader.schemas import BookConfig, LoginField
-
-from .models import Status
+from .models import DownloadTask, Status
 
 
 class WebLoginUI:

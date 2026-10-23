@@ -6,7 +6,8 @@
 
 * **apps/**：应用入口与界面
     * **cli/**：命令行 (`argparse`、`rich`), `ui_adapters` 实现 UI 协议
-    * **web/**：NiceGUI 前端 (页面、组件、任务管理、登录对话)
+    * **api/**：本地 REST API (FastAPI 应用、路由与服务适配)
+    * **music/**：多平台音乐下载引擎
 * **infra/**：基础设施 (配置、网络、路径/文件、日志、i18n、持久化)
 * **libs/**：通用库 (EPUB、文件工具、加解密、时间工具)
 * **plugins/**：站点插件层 (统一由 `registry` 管理)
@@ -259,7 +260,7 @@ plugins/sites/<site_key>/
 **3. 可选模块**:
 
 * `client.py`: 若缺失则回退到 `common` 实现
-* `searcher.py`: 用于 CLI / Web 搜索
+* `searcher.py`: 用于 CLI / API 搜索
 
 **4. 在类上使用对应注册器装饰器**
 

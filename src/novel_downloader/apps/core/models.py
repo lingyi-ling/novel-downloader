@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-novel_downloader.apps.web.models
+novel_downloader.apps.core.models
 --------------------------------
 """
 

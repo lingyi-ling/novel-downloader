@@ -8,7 +8,7 @@ Pure helpers for browsing exported book files.
 The functions here are shared by the NiceGUI history page and the REST API,
 so they deliberately contain no UI or framework imports. Behaviour matches the
 original implementations that used to live in
-:mod:`novel_downloader.apps.web.pages.history`.
+:mod:`novel_downloader.apps.core` consumers.
 """
 
 from __future__ import annotations

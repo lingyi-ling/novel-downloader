@@ -1,6 +1,6 @@
 # NovelDownloader 文档
 
-> 一个异步、可扩展的小说下载与处理工具包
+> 一个异步、可扩展的小说下载与处理工具包, 同时内置多平台音乐下载
 
 ---
 
@@ -10,12 +10,14 @@
 
 核心特性包括:
 
-* 异步下载与断点续传
+* 多站点搜索与下载, 支持断点续传
+* 下载队列与进度显示
 * 多格式导出 (TXT / EPUB / HTML)
 * 文本清洗与增强流水线 (processors)
 * 可插拔站点解析器与处理器
+* 多平台音乐下载
+* CLI (`novel-cli`) 与本地 REST API (`novel-api`) 双端点
 * 可编程 API
-* 命令行 (CLI) 与可选 Web GUI
 
 > 运行要求: **Python 3.11+** (开发环境: Python 3.13)
 
@@ -23,8 +25,17 @@
 
 ## 功能特性
 
+### 多站点搜索
+
+* 覆盖 57 个搜索站点, 可聚合搜索或指定单个/多个站点
+* 结果支持排序 (质量、优先级、站点、标题、作者、字数、更新时间)
+* 支持规则书源扩展, 无需编写 Python 代码即可新增站点
+
+---
+
 ### 下载能力
 
+* 下载队列与实时进度
 * 支持断点续爬: 自动识别已下载的章节
 * 可插拔 HTTP 后端:
     * `aiohttp` (默认)
@@ -59,6 +70,15 @@
 
 ---
 
+### 多平台音乐下载
+
+* 支持 25 个音乐平台 (网易云、QQ 音乐、酷狗、酷我、咪咕、Spotify、TIDAL 等)
+* 平台关键字搜索与按序号/歌曲 ID 下载
+* 可选音质档位, 输出目录与标签写入遵循音乐设置
+* 提供 `--json` 输出, 便于脚本与第三方程序消费
+
+---
+
 ### 扩展能力
 
 * 插件系统: 可扩展站点解析、文本处理、导出格式等
@@ -69,8 +89,8 @@
 
 ### 使用方式
 
-* 命令行 (CLI)
-* Web 图形界面 (可选安装)
+* 命令行 (`novel-cli`)
+* 本地 REST API (`novel-api`)
 * Python 编程接口
 
 ---
@@ -83,10 +103,17 @@
 pip install -U novel-downloader
 ```
 
-安装全部可选功能:
+安装汇总的运行时可选依赖:
 
 ```bash
 pip install novel-downloader[all]
+```
+
+按需安装可选组:
+
+```bash
+pip install "novel-downloader[api]"      # 本地 REST API
+pip install "novel-downloader[music]"    # 音乐下载
 ```
 
 更多安装方式见: [安装指南](guide/installation.md)。
@@ -139,53 +166,42 @@ novel-cli download --help
 * 支持站点见: [支持站点列表](supported-sites/index.md)
 * 更多示例见: [CLI 使用说明](guide/cli-examples.md)
 * 运行中可使用 `CTRL+C` 取消任务
+* 音乐下载见: [CLI 使用说明 - music 子命令](guide/cli-examples.md#7-music)
 
-### 图形界面 (Web GUI)
+### 本地 REST API
 
-Web GUI 依赖额外组件 (如 NiceGUI), 默认不会随主程序一起安装。
-
-如需使用 Web 图形界面，请先安装对应的可选依赖。
-
-**安装 Web GUI 依赖**
+本地 REST API 依赖可选组 `api`, 默认监听 `127.0.0.1:8081`, 只应在本机使用。
 
 ```bash
-pip install novel-downloader[web-ui]
+pip install "novel-downloader[api]"
+novel-api
 ```
 
-> 若只需使用 CLI，可忽略此步骤。
+API 复用与 CLI 相同的服务层, 提供站点列表、聚合搜索、下载任务队列、历史导出与音乐下载端点, 便于第三方程序集成。
 
-**启动 Web GUI**
+* 端点与鉴权说明见: [本地 REST API](guide/api.md)
+* Swagger UI: `http://127.0.0.1:8081/docs`
+
+### 音乐下载 (CLI)
+
+音乐功能依赖可选组 `music`:
 
 ```bash
-novel-web
+pip install "novel-downloader[music]"
 ```
-
-如需提供局域网/外网访问 (请自行留意安全与网络环境):
 
 ```bash
-novel-web --listen public
+# 查看可用平台
+novel-cli music platforms
+
+# 搜索歌曲
+novel-cli music search "关键词" --platform netease
+
+# 下载指定的搜索结果
+novel-cli music download "关键词" --pick 1
 ```
 
-在运行过程中, 可使用 `CTRL+C` 停止服务。
-
-**更多资料**
-
-* 支持站点见: [支持站点列表](supported-sites/index.md)
-* 更多示例见: [WEB 使用说明](guide/web-examples.md)
-
-### 桌面应用 (Desktop App)
-
-桌面版把同一个 Web 界面装进原生窗口 (Windows 上基于 WebView2)。
-
-```bash
-pip install "novel-downloader[desktop]"
-novel-desktop
-```
-
-* 首次运行会在用户数据目录 (Windows: `%LOCALAPPDATA%\novel_downloader`) 生成 `settings.toml`, 并以该目录为工作目录
-* 可用 `--check` 输出环境体检报告, 或用 `NOVEL_HOME` 环境变量指定数据目录
-* pywebview 缺失或 WebView2 运行时不可用时, 会自动退回浏览器模式
-* 不支持打包为 exe, 也不支持移动端
+参数说明见: [CLI 使用说明 - music 子命令](guide/cli-examples.md#7-music)。
 
 ---
 

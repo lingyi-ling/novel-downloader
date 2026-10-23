@@ -22,8 +22,8 @@ pip install novel-downloader
 
 After installation, the following executable commands are provided:
 
-* `novel-cli`
-* `novel-web` (to use the Web GUI, its dependencies must be installed separately, see below)
+* `novel-cli`: command-line entry point
+* `novel-api`: local REST API entry point (requires the `api` extra, see below)
 
 (2) Install the latest development version (GitHub)
 
@@ -49,31 +49,66 @@ pip install .
 
 ## Optional Features and Dependencies
 
-`novel-downloader` provides several optional modules that can be installed selectively as needed.
+`novel-downloader` provides several optional dependency groups that can be installed selectively as needed.
 
-### Web Graphical Interface (Optional)
+### Optional Dependency Groups
 
-The Web GUI is based on `NiceGUI` and is not installed with the main program by default.
+| Group | Install command | Description |
+| --- | --- | --- |
+| `api` | `pip install "novel-downloader[api]"` | Local REST API (FastAPI + uvicorn) |
+| `music` | `pip install "novel-downloader[music]"` | Music downloads (mutagen, pathvalidate, qrcode, websocket-client, etc.) |
+| `music-desktop` | `pip install "novel-downloader[music-desktop]"` | Music downloads plus desktop UI dependencies (customtkinter) |
+| `image-utils` | `pip install "novel-downloader[image-utils]"` | Image/font processing (pillow, numpy, fonttools, brotli) |
+| `httpx` | `pip install "novel-downloader[httpx]"` | httpx HTTP/2 backend |
+| `curl_cffi` | `pip install "novel-downloader[curl_cffi]"` | curl_cffi backend and browser impersonation |
+| `all-backends` | `pip install "novel-downloader[all-backends]"` | Both httpx and curl_cffi backends |
+| `all` | `pip install "novel-downloader[all]"` | Aggregated runtime optional dependencies |
+| `docs` | `pip install "novel-downloader[docs]"` | Dependencies for building the documentation |
+| `tests` | `pip install "novel-downloader[tests]"` | Dependencies for running the test suite |
+| `ci` | `pip install "novel-downloader[ci]"` | Dependencies used in CI |
+| `dev` | `pip install "novel-downloader[dev]"` | Local development tools (tests, lint, type checking, etc.) |
 
-To use the Web graphical interface, first install the corresponding optional dependencies:
+> Without any optional group, only the core search, download, and export features of `novel-cli` are available.
+
+### Local REST API (Optional)
+
+The local REST API depends on the `api` group and listens on `127.0.0.1:8081` by default:
 
 ```bash
-pip install novel-downloader[web-ui]
+pip install "novel-downloader[api]"
+novel-api
 ```
 
-Start the GUI:
+Common options (see [Local REST API](api.md) for the full reference):
 
 ```bash
-novel-web
+novel-api --host 127.0.0.1 --port 8081 --token my-secret
 ```
 
-For LAN / public network access (assess the risk yourself):
+### Music Download (Optional)
+
+Music downloads depend on the `music` group:
 
 ```bash
-novel-web --listen public
+pip install "novel-downloader[music]"
 ```
 
-Press `CTRL+C` while running to stop the service.
+```bash
+# List available platforms
+novel-cli music platforms
+
+# Search for songs
+novel-cli music search "keyword" --platform netease
+
+# Download a chosen search result
+novel-cli music download "keyword" --pick 1
+```
+
+Install `music-desktop` if you also need the desktop UI dependencies:
+
+```bash
+pip install "novel-downloader[music-desktop]"
+```
 
 ### Pluggable HTTP Backend (Optional)
 
@@ -84,7 +119,7 @@ Press `CTRL+C` while running to stop the service.
 Supports HTTP/1.1 and HTTP/2:
 
 ```bash
-pip install httpx[http2]
+pip install "novel-downloader[httpx]"
 ```
 
 How to enable (`settings.toml`):
@@ -99,7 +134,7 @@ backend = "httpx"
 Supports `libcurl` and browser impersonation (impersonate):
 
 ```bash
-pip install curl_cffi
+pip install "novel-downloader[curl_cffi]"
 ```
 
 How to enable:

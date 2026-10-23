@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-novel_downloader.apps.web.services.cred_broker
+novel_downloader.apps.core.cred_broker
 ----------------------------------------------
 
 In-memory credential request broker
@@ -13,7 +13,7 @@ import time
 
 from novel_downloader.schemas import LoginField
 
-from ..models import CredRequest
+from .models import CredRequest
 
 # wait time for credentials before timing out (seconds)
 REQUEST_TIMEOUT: int = 120

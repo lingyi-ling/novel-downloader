@@ -1,6 +1,6 @@
 # NovelDownloader Documentation
 
-> An asynchronous, extensible novel downloader and processing toolkit
+> An asynchronous, extensible novel downloader and processing toolkit with built-in multi-platform music downloading
 
 ---
 
@@ -10,12 +10,14 @@
 
 Core features include:
 
-* Asynchronous downloading with resumable transfers
+* Multi-site search and download with resumable transfers
+* Download queue and progress display
 * Multi-format export (TXT / EPUB / HTML)
 * Text cleaning and enhancement pipeline (processors)
 * Pluggable site parsers and processors
+* Multi-platform music downloading
+* CLI (`novel-cli`) and local REST API (`novel-api`) endpoints
 * Programmable API
-* Command line (CLI) and optional Web GUI
 
 > Requirements: **Python 3.11+** (development environment: Python 3.13)
 
@@ -23,8 +25,17 @@ Core features include:
 
 ## Features
 
+### Multi-site Search
+
+* Covers 57 search sites; aggregate searches or target one or more sites
+* Results can be sorted by quality, priority, site, title, author, word count, or update time
+* Extensible through rule-driven book sources, adding a site without writing Python code
+
+---
+
 ### Download Capabilities
 
+* Download queue with live progress
 * Resumable crawling: automatically detects already-downloaded chapters
 * Pluggable HTTP backends:
     * `aiohttp` (default)
@@ -59,6 +70,15 @@ Core features include:
 
 ---
 
+### Multi-platform Music Download
+
+* Supports 25 music platforms (NetEase, QQ Music, Kugou, Kuwo, Migu, Spotify, TIDAL, and more)
+* Keyword search per platform, then download by result index or song ID
+* Optional audio quality level; output directory and tag embedding follow the music settings
+* `--json` output for scripts and third-party integrations
+
+---
+
 ### Extensibility
 
 * Plugin system: extendable site parsing, text processing, export formats, and more
@@ -69,8 +89,8 @@ Core features include:
 
 ### Usage
 
-* Command line (CLI)
-* Web graphical interface (optional installation)
+* Command line (`novel-cli`)
+* Local REST API (`novel-api`)
 * Python programming interface
 
 ---
@@ -83,10 +103,17 @@ Install with pip:
 pip install -U novel-downloader
 ```
 
-Install all optional features:
+Install the aggregated runtime extras:
 
 ```bash
 pip install novel-downloader[all]
+```
+
+Install optional groups as needed:
+
+```bash
+pip install "novel-downloader[api]"      # local REST API
+pip install "novel-downloader[music]"    # music downloads
 ```
 
 For more installation options, see: [Installation Guide](guide/installation.md).
@@ -139,53 +166,42 @@ novel-cli download --help
 * For supported sites, see: [Supported Sites List](supported-sites/index.md)
 * For more examples, see: [CLI Usage Guide](guide/cli-examples.md)
 * You can use `CTRL+C` during a run to cancel the task
+* For music downloads, see: [CLI Usage Guide - music subcommand](guide/cli-examples.md#7-music-subcommand)
 
-### Graphical Interface (Web GUI)
+### Local REST API
 
-The Web GUI depends on additional components (such as NiceGUI) and is not installed with the main program by default.
-
-To use the Web graphical interface, install the corresponding optional dependencies first.
-
-**Install Web GUI Dependencies**
+The local REST API depends on the `api` extra and listens on `127.0.0.1:8081` by default; it should only be used on the local machine.
 
 ```bash
-pip install novel-downloader[web-ui]
+pip install "novel-downloader[api]"
+novel-api
 ```
 
-> If you only need the CLI, you can skip this step.
+The API reuses the same service layer as the CLI and exposes endpoints for site listing, aggregate search, the download task queue, history export, and music downloads, making third-party integrations straightforward.
 
-**Start the Web GUI**
+* See [Local REST API](guide/api.md) for endpoints and authentication
+* Swagger UI: `http://127.0.0.1:8081/docs`
+
+### Music Download (CLI)
+
+Music support depends on the optional `music` group:
 
 ```bash
-novel-web
+pip install "novel-downloader[music]"
 ```
-
-To provide LAN/WAN access (please mind security and your network environment):
 
 ```bash
-novel-web --listen public
+# List available platforms
+novel-cli music platforms
+
+# Search for songs
+novel-cli music search "keyword" --platform netease
+
+# Download a chosen search result
+novel-cli music download "keyword" --pick 1
 ```
 
-During a run, you can use `CTRL+C` to stop the service.
-
-**More Resources**
-
-* For supported sites, see: [Supported Sites List](supported-sites/index.md)
-* For more examples, see: [Web Usage Guide](guide/web-examples.md)
-
-### Desktop App
-
-The desktop version puts the same Web interface into a native window (based on WebView2 on Windows).
-
-```bash
-pip install "novel-downloader[desktop]"
-novel-desktop
-```
-
-* On first run, it generates `settings.toml` in the user data directory (on Windows: `%LOCALAPPDATA%\novel_downloader`) and uses that directory as the working directory
-* You can use `--check` to output an environment health report, or specify the data directory with the `NOVEL_HOME` environment variable
-* If pywebview is missing or the WebView2 runtime is unavailable, it automatically falls back to browser mode
-* Packaging as an exe is not supported, nor is mobile
+For option details, see: [CLI Usage Guide - music subcommand](guide/cli-examples.md#7-music-subcommand).
 
 ---
 

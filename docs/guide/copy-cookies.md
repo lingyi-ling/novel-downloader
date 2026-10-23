@@ -59,7 +59,5 @@ novel-cli login fanqienovel
 novel-cli login --list
 ```
 
-也可以在 Web UI 的搜索页点击对应的「登录」按钮。
-
-登录窗口需要可选的 `pywebview` 依赖 (即 `.[desktop]` 扩展)。检测到已登录后, Cookies 会自动写入 `<缓存目录>/<站点>/aiohttp.cookies`, 后续搜索与下载会直接复用。
+登录窗口需要可选的图形界面组件 (不随主程序安装, 缺失时命令会给出提示)。检测到已登录后, Cookies 会自动写入 `<缓存目录>/<站点>/aiohttp.cookies`, 后续搜索与下载会直接复用。
 

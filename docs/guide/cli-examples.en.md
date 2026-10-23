@@ -31,8 +31,6 @@ novel-cli login fanqienovel
 novel-cli login --list
 ```
 
-> The Web UI search page offers the same login button; it behaves exactly like `novel-cli login`.
-
 ---
 
 ### Global Usage and Help
@@ -61,6 +59,7 @@ Commands:
   config      manage application configuration and settings
   clean       clean application logs, cache and book data
   sources     list, verify, install and remove rule-based site sources
+  music       search and download songs from music platforms
 ```
 
 ---
@@ -173,7 +172,7 @@ novel-cli search -s b520 -s n23qb 三体
     novel-cli search -s fanqienovel 斗破苍穹
     ```
 
-    Browser-assisted search requires the `desktop` extra (`pip install 'novel-downloader[desktop]'`).
+    Browser-assisted search requires an optional browser component; if it is missing, the command prints an installation hint.
 
 ---
 
@@ -448,7 +447,7 @@ novel-cli clean book --site qidian 1010868264 --all -y
 
 Open a real browser window for a site that requires a login, then save the session cookies automatically for later search/download.
 
-The optional `pywebview` dependency is required (the `.[desktop]` extra); otherwise the command tells you to install it.
+The optional graphical interface components are required; otherwise the command tells you to install them.
 
 **Synopsis**
 
@@ -478,6 +477,99 @@ novel-cli login --list
 > Saved to: `<cache_dir>/<site>/aiohttp.cookies`
 >
 > If the window is closed without a detected session the command exits non-zero and saves nothing.
+
+---
+
+#### 7. music Subcommand
+
+Search and download songs from multiple music platforms. This feature depends on the optional `music` group; when it is missing, the command prints an installation hint:
+
+```bash
+pip install "novel-downloader[music]"
+```
+
+`music` has three subcommands: `platforms`, `search`, and `download`.
+
+**Synopsis**
+
+```bash
+novel-cli music [-h] {platforms,search,download} ...
+
+novel-cli music platforms
+
+novel-cli music search [-h] [--platform KEY] [--limit N] [--json] keyword
+
+novel-cli music download [-h] [--keyword KEYWORD] [--platform KEY] [--limit N]
+                         [--level {hires,lossless,exhigh,higher,standard}]
+                         [--out DIR] [--pick N[,N|ID]] [--yes]
+                         [KEYWORD]
+```
+
+**General Options**
+
+* `--platform KEY`: music platform key, defaults to `netease`; run `novel-cli music platforms` for the full list
+* `--limit N`, `-l N`: maximum number of results, defaults to `20`
+
+**platforms**
+
+List the available music platforms with their notes:
+
+```bash
+novel-cli music platforms
+```
+
+**search**
+
+Search songs by keyword and print a result table (index, title, artist, album, duration, VIP):
+
+```bash
+novel-cli music search "keyword" --platform netease --limit 10
+```
+
+* `--json`: print the search results as JSON (`platform`, `keyword`, `total`, and a `tracks` list) and exit, for script consumption
+
+```bash
+novel-cli music search "keyword" --json
+```
+
+**download**
+
+Search first, then select and download songs:
+
+* Positional `KEYWORD` or `--keyword KEYWORD`: keyword to search for before downloading (use one of them)
+* `--level`: audio quality level, one of `hires` / `lossless` / `exhigh` / `higher` / `standard`; defaults to the music setting, usually `exhigh`
+* `--out DIR`: output directory; defaults to the music setting (falling back to the default download directory)
+* `--pick N[,N|ID]`: download the given search result index/indices (1-based) or song ID(s) without prompting
+* `--yes`: download every search result without prompting
+
+When neither `--pick` nor `--yes` is given and the terminal is interactive, a paged selector appears (enter numbers, `a` for all, `n` next, `p` previous, Enter to cancel). In a non-interactive environment you must pass `--pick` or `--yes`.
+
+**Examples**
+
+```bash
+# List available platforms
+novel-cli music platforms
+
+# Search on NetEase
+novel-cli music search "keyword"
+
+# Search on QQ Music and output JSON
+novel-cli music search "keyword" --platform qq --json
+
+# Download the first search result
+novel-cli music download "keyword" --pick 1
+
+# Download results 1 and 3 with hi-res quality into a custom directory
+novel-cli music download "keyword" --pick 1,3 --level hires --out ./music
+
+# Download every search result without confirmation
+novel-cli music download "keyword" --yes
+
+# Download by a song ID present in the search results
+novel-cli music download "keyword" --pick 123456789
+```
+
+> Progress display, tag embedding, cover and lyric saving, folder splitting, and skip-existing behavior follow the music settings (`embed_tags`, `embed_cover`, `save_lyric`, `split_folder`, `skip_existing`).
 
 ---
 

@@ -39,15 +39,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-web-ui = [
-    "nicegui",
-]
 api = [
     "fastapi",
     "uvicorn",
-]
-desktop = [
-    "nicegui[native]",
 ]
 music = [
     "mutagen",
@@ -81,7 +75,6 @@ all-backends = [
     "curl_cffi",
 ]
 all = [
-    "nicegui[native]",
     "fastapi",
     "uvicorn",
     "brotli",
@@ -133,7 +126,6 @@ ci = [
     "pytest-mock",
     "types-requests",
     "types-lxml",
-    "nicegui",
     "mypy",
     "ruff",
     "pre-commit",
@@ -156,7 +148,6 @@ dev = [
 
 [project.scripts]
 novel-cli = "novel_downloader.apps.cli.main:cli_main"
-novel-web = "novel_downloader.apps.web.main:web_main"
 novel-api = "novel_downloader.apps.api.main:api_main"
 novel-desktop = "novel_downloader.apps.desktop.main:desktop_main"
 
@@ -216,12 +207,6 @@ quote-style = "double"
 python_version = "3.11"
 ignore_missing_imports = true
 strict = true
-
-# NiceGUI decorators (``ui.page`` / ``ui.refreshable`` ...) are not typed, so
-# the strict-mode ``untyped-decorator`` check cannot be satisfied for the web app.
-[[tool.mypy.overrides]]
-module = "novel_downloader.apps.web.*"
-disable_error_code = ["untyped-decorator"]
 
 # ``np.bitwise_and.reduce(...)`` is valid at runtime but the NumPy stubs only
 # expose the two-argument overload, which trips ``call-overload`` under strict.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-novel_downloader.apps.web.services.task_manager
+novel_downloader.apps.core.task_manager
 -----------------------------------------------
 
 """
@@ -15,8 +15,8 @@ from novel_downloader.infra.config import ConfigAdapter, load_config
 from novel_downloader.plugins import ClientProtocol, registrar
 from novel_downloader.schemas import BookConfig
 
-from ..models import DownloadTask, Status
-from ..ui_adapters import WebDownloadUI, WebExportUI, WebLoginUI, WebProcessUI
+from .adapters import WebDownloadUI, WebExportUI, WebLoginUI, WebProcessUI
+from .models import DownloadTask, Status
 
 MAX_COMPLETED_TASKS = 100
 

@@ -22,8 +22,8 @@ pip install novel-downloader
 
 安装后将提供以下可执行命令:
 
-* `novel-cli`
-* `novel-web` (如需使用 Web GUI, 需另行安装其依赖, 见下文)
+* `novel-cli`: 命令行入口
+* `novel-api`: 本地 REST API 入口 (需安装 `api` 可选依赖, 见下文)
 
 (2) 安装最新开发版 (GitHub)
 
@@ -49,31 +49,66 @@ pip install .
 
 ## 可选功能与依赖说明
 
-`novel-downloader` 提供多个可选模块，可根据需要选择性安装。
+`novel-downloader` 提供多个可选依赖组, 可根据需要选择性安装。
 
-### Web 图形界面 (可选)
+### 可选依赖组一览
 
-Web GUI 基于 `NiceGUI`, 默认不会随主程序安装。
+| 依赖组 | 安装命令 | 说明 |
+| --- | --- | --- |
+| `api` | `pip install "novel-downloader[api]"` | 本地 REST API (FastAPI + uvicorn) |
+| `music` | `pip install "novel-downloader[music]"` | 音乐下载 (mutagen、pathvalidate、qrcode、websocket-client 等) |
+| `music-desktop` | `pip install "novel-downloader[music-desktop]"` | 音乐下载及桌面界面附加依赖 (customtkinter) |
+| `image-utils` | `pip install "novel-downloader[image-utils]"` | 图片/字体处理 (pillow、numpy、fonttools、brotli) |
+| `httpx` | `pip install "novel-downloader[httpx]"` | httpx HTTP/2 后端 |
+| `curl_cffi` | `pip install "novel-downloader[curl_cffi]"` | curl_cffi 后端与浏览器仿真 |
+| `all-backends` | `pip install "novel-downloader[all-backends]"` | 同时安装 httpx 与 curl_cffi 后端 |
+| `all` | `pip install "novel-downloader[all]"` | 汇总的运行时可选依赖 |
+| `docs` | `pip install "novel-downloader[docs]"` | 构建文档所需的依赖 |
+| `tests` | `pip install "novel-downloader[tests]"` | 运行测试所需的依赖 |
+| `ci` | `pip install "novel-downloader[ci]"` | CI 环境所需的依赖 |
+| `dev` | `pip install "novel-downloader[dev]"` | 本地开发工具 (测试、lint、类型检查等) |
 
-如需使用 Web 图形界面, 请先安装对应可选依赖:
+> 不安装任何可选组时, 仅 `novel-cli` 的核心搜索、下载与导出功能可用。
+
+### 本地 REST API (可选)
+
+本地 REST API 依赖可选组 `api`, 默认监听 `127.0.0.1:8081`:
 
 ```bash
-pip install novel-downloader[web-ui]
+pip install "novel-downloader[api]"
+novel-api
 ```
 
-启动 GUI：
+常用参数 (完整说明见 [本地 REST API](api.md)):
 
 ```bash
-novel-web
+novel-api --host 127.0.0.1 --port 8081 --token my-secret
 ```
 
-若需局域网 / 外网访问 (请自行评估风险):
+### 音乐下载 (可选)
+
+音乐下载依赖可选组 `music`:
 
 ```bash
-novel-web --listen public
+pip install "novel-downloader[music]"
 ```
 
-运行中可按 `CTRL+C` 停止服务。
+```bash
+# 列出可用平台
+novel-cli music platforms
+
+# 搜索歌曲
+novel-cli music search "关键词" --platform netease
+
+# 下载指定的搜索结果
+novel-cli music download "关键词" --pick 1
+```
+
+如需额外的桌面界面依赖, 可安装 `music-desktop`:
+
+```bash
+pip install "novel-downloader[music-desktop]"
+```
 
 ### 可插拔式 HTTP 后端 (可选)
 
@@ -84,7 +119,7 @@ novel-web --listen public
 支持 HTTP/1.1 与 HTTP/2:
 
 ```bash
-pip install httpx[http2]
+pip install "novel-downloader[httpx]"
 ```
 
 启用方式 (`settings.toml`):
@@ -99,7 +134,7 @@ backend = "httpx"
 支持 `libcurl` 与浏览器仿真 (impersonate):
 
 ```bash
-pip install curl_cffi
+pip install "novel-downloader[curl_cffi]"
 ```
 
 启用方式:

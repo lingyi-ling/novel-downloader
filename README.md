@@ -2,9 +2,9 @@
 
 [中文](./README.md) | [English](./README.en.md)
 
-异步、可扩展的小说下载与处理工具包。
+异步、可扩展的小说下载与处理工具包, 同时内置多平台音乐下载。
 
-支持断点续爬、多格式导出、文本处理流水线, 并提供 CLI 与可选 Web 界面。
+支持断点续爬、下载队列与进度、多格式导出、文本处理流水线, 提供 CLI (`novel-cli`) 与本地 REST API (`novel-api`) 双端点。
 
 **运行要求**: Python 3.11+ (开发环境: Python 3.13)
 
@@ -12,15 +12,18 @@
 
 ## 功能特性
 
-- **异步与高性能下载**
-- **可恢复下载 (断点续爬)**
-- **可插拔 HTTP 后端:** `aiohttp` / `httpx` / `curl_cffi`
+- **多站点搜索:** 覆盖 57 个搜索站点, 支持聚合搜索、排序与结果筛选
+- **下载队列与进度:** 支持断点续爬、队列调度与实时进度显示
 - **多格式导出:** TXT / EPUB / HTML
+- **历史导出:** 从已下载的书目中随时重新导出
+- **异步与高性能下载**
+- **可插拔 HTTP 后端:** `aiohttp` / `httpx` / `curl_cffi`
 - **文本处理流水线:** 去广告、繁简转换、自动翻译等
 - **图片章节与混淆章节支持 (可选)**
+- **多平台音乐下载:** 支持 25 个音乐平台的搜索与下载
 - **插件系统:** 可扩展站点解析器、导出器、Pipeline 等
 - **规则书源 (Book Source):** 新增站点只需写 JSON 规则，无需编写 Python 代码
-- **CLI 与可选 Web GUI**
+- **CLI + 本地 REST API:** 面向终端用户与第三方程序集成的双端点
 
 ---
 
@@ -32,13 +35,19 @@
 pip install -U novel-downloader
 ```
 
-如需启用 Web GUI:
+如需启用本地 REST API:
 
 ```bash
-pip install novel-downloader[web-ui]
+pip install "novel-downloader[api]"
 ```
 
-如需启用其它可选功能 (Web UI、图片转文字、额外后端等), 请参见: [安装指南](./docs/guide/installation.md)
+如需启用音乐下载:
+
+```bash
+pip install "novel-downloader[music]"
+```
+
+如需启用其它可选功能 (本地 API、音乐、图片转文字、额外后端等), 请参见: [安装指南](./docs/guide/installation.md)
 
 ---
 
@@ -50,9 +59,23 @@ novel-cli download https://www.example.com/book/123/
 
 # 使用站点 + 书籍 ID
 novel-cli download --site n23qb 12282
+
+# 搜索并下载音乐
+novel-cli music search "关键词" --platform netease
+novel-cli music download "关键词" --pick 1
 ```
 
 更多示例见: [CLI 使用示例](./docs/guide/cli-examples.md)
+
+## 本地 REST API
+
+安装 `api` 可选依赖后, 使用 `novel-api` 启动仅监听本机的 REST 服务 (默认 `127.0.0.1:8081`), 供第三方程序调用搜索、任务队列、历史导出与音乐下载:
+
+```bash
+novel-api
+```
+
+端点、鉴权与请求示例见: [本地 REST API](docs/guide/api.md)
 
 ## 规则书源 (无需写代码即可新增站点)
 

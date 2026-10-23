@@ -2,9 +2,9 @@
 
 [中文](./README.md) | [English](./README.en.md)
 
-Asynchronous, modular, and extensible toolkit for downloading and processing online novels.
+Asynchronous, modular, and extensible toolkit for downloading and processing online novels, with built-in multi-platform music downloading.
 
-Supports resumable crawling, multi-format exporting, text processing pipeline, CLI, and optional Web UI.
+Supports resumable crawling, download queues with progress, multi-format exporting, and a text processing pipeline, exposed through two endpoints: the CLI (`novel-cli`) and a local REST API (`novel-api`).
 
 **Requirements**: Python 3.11+ (development tested on Python 3.13)
 
@@ -12,15 +12,18 @@ Supports resumable crawling, multi-format exporting, text processing pipeline, C
 
 ## Features
 
-* Asynchronous and high-performance crawling
-* Resumable downloads (checkpoint recovery)
-* Pluggable HTTP backends: `aiohttp`, `httpx`, `curl_cffi`
+* Multi-site search: 57 search sites, with aggregate search, ranking, and filtering
+* Download queue and progress: resumable crawling, queue scheduling, and live progress
 * Export to TXT, EPUB, and HTML
+* History export: re-export previously downloaded books at any time
+* Asynchronous and high-performance crawling
+* Pluggable HTTP backends: `aiohttp`, `httpx`, `curl_cffi`
 * Text processing pipeline: ad removal, zh conversion, translation, etc.
 * Optional support for image chapters and obfuscated content
+* Multi-platform music download: search and download across 25 music platforms
 * Plugin system for site parsers, exporters, and processing pipelines
 * Rule-driven book sources: add a site with a JSON rule, no Python code required
-* CLI and optional Web GUI
+* CLI + local REST API: dual endpoints for terminal users and third-party integrations
 
 ---
 
@@ -32,13 +35,19 @@ Install the latest stable release:
 pip install -U novel-downloader
 ```
 
-Install with Web UI support:
+Install local REST API support:
 
 ```bash
-pip install novel-downloader[web-ui]
+pip install "novel-downloader[api]"
 ```
 
-For all optional features (Web UI, OCR, image-to-text, extra backends, exporters, etc.), refer to the [Full Installation Guide](./docs/guide/installation.md).
+Install music download support:
+
+```bash
+pip install "novel-downloader[music]"
+```
+
+For other optional features (local API, music, OCR, image-to-text, extra backends, etc.), refer to the [Full Installation Guide](./docs/guide/installation.md).
 
 ---
 
@@ -53,9 +62,25 @@ novel-cli download https://www.example.com/book/123/
 
 # Using site + book ID
 novel-cli download --site n23qb 12282
+
+# Search and download music
+novel-cli music search "keyword" --platform netease
+novel-cli music download "keyword" --pick 1
 ```
 
 More examples: [CLI Examples](./docs/guide/cli-examples.md)
+
+---
+
+## Local REST API
+
+After installing the `api` extra, start the local-only REST service with `novel-api` (defaults to `127.0.0.1:8081`) for third-party integrations covering search, task queues, history export, and music downloads:
+
+```bash
+novel-api
+```
+
+See [Local REST API](docs/guide/api.md) for endpoints, authentication, and request examples.
 
 ---
 

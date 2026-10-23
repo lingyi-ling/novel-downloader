@@ -48,7 +48,7 @@ plugins:
             设置项参考: Settings Reference
             处理器参考: Processors Reference
             CLI 用法: CLI Usage
-            Web 用法: Web Usage
+            本地 API 服务: Local API Service
             书源: Book Sources
             文件保存: File Saving
             复制 Cookies: Copy Cookies
@@ -118,9 +118,7 @@ nav:
     - 设置项参考: guide/settings-reference.md
     - 处理器参考: guide/processors-reference.md
     - CLI 用法: guide/cli-examples.md
-    - Web 用法: guide/web-examples.md
     - 本地 API 服务: guide/api.md
-    - Windows 桌面应用: guide/desktop-build.md
     - 书源: guide/book-sources.md
     - 文件保存: guide/file-saving.md
     - 复制 Cookies: guide/copy-cookies.md
