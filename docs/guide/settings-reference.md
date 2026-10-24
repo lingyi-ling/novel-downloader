@@ -25,6 +25,12 @@
 | `backend`            | `str`   | `"aiohttp"`       | 全局 HTTP 请求后端, 可选 `"aiohttp"`, `"httpx"`, `"curl_cffi"` |
 | `http2`              | `bool`  | `true`            | 仅对 `httpx` 生效, 启用 HTTP/2 支持           |
 | `impersonate`        | `str/None` | `None`         | 仅对 `curl_cffi` 生效, 启用浏览器指纹仿真模式  |
+| `download_retry_times` | `int`  | 2                 | 下载任务遇到瞬时网络错误时的额外重试次数       |
+| `proxy`              | `str/None` | `None`         | HTTP/HTTPS 代理地址, 如 `"http://127.0.0.1:7890"` |
+| `proxy_user`         | `str/None` | `None`         | 代理用户名                                    |
+| `proxy_pass`         | `str/None` | `None`         | 代理密码                                      |
+| `trust_env`          | `bool`  | `false`           | 是否读取系统代理等环境变量                     |
+| `verify_ssl`         | `bool`  | `true`            | 是否校验 TLS 证书 (排查代理问题时才考虑关闭)   |
 
 **站点压力与 503**
 

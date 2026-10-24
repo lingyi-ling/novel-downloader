@@ -55,7 +55,7 @@ msgstr "在此粘贴您的登录 Cookies"
 msgid "Copy the cookies from your browser's developer tools while logged in."
 msgstr "请在已登录状态下从浏览器开发者工具复制 Cookies"
 
-#: src/novel_downloader/apps/browser/main.py:272
+#: src/novel_downloader/apps/browser/main.py:339
 msgid ""
 "pywebview is required for browser-assisted search. Install the 'desktop' "
 "extra: pip install 'novel-downloader[desktop]'"
@@ -63,41 +63,41 @@ msgstr ""
 "浏览器辅助搜索需要 pywebview。请安装『desktop』扩展依赖：pip install 'novel-"
 "downloader[desktop]'"
 
-#: src/novel_downloader/apps/browser/main.py:287
-#: src/novel_downloader/apps/browser/main.py:364
+#: src/novel_downloader/apps/browser/main.py:361
+#: src/novel_downloader/apps/browser/main.py:735
 #, python-brace-format
 msgid "Searching {site} in a browser window..."
 msgstr "正在浏览器窗口中搜索 {site}…"
 
-#: src/novel_downloader/apps/browser/main.py:295
+#: src/novel_downloader/apps/browser/main.py:374
 msgid "Could not open the browser search window."
 msgstr "无法打开浏览器搜索窗口。"
 
-#: src/novel_downloader/apps/browser/main.py:358
+#: src/novel_downloader/apps/browser/main.py:708
 #, python-brace-format
 msgid "Site '{site}' does not support browser-assisted search."
 msgstr "站点「{site}」不支持浏览器辅助搜索。"
 
-#: src/novel_downloader/apps/browser/main.py:369
+#: src/novel_downloader/apps/browser/main.py:742
 #, python-brace-format
 msgid ""
 "Browser-assisted search for {site} returned no data; run 'novel-cli login"
 " {site}' if no session is available."
 msgstr "站点 {site} 的浏览器辅助搜索未返回数据; 若尚无登录会话, 请运行 `novel-cli login {site}`。"
 
-#: src/novel_downloader/apps/browser/main.py:452
+#: src/novel_downloader/apps/browser/main.py:787
 msgid "Search a site through a browser window and print the raw JSON response."
 msgstr "在浏览器窗口中搜索站点并输出原始 JSON 响应。"
 
-#: src/novel_downloader/apps/browser/main.py:455
+#: src/novel_downloader/apps/browser/main.py:790
 msgid "Site key to search."
 msgstr "要搜索的站点键。"
 
-#: src/novel_downloader/apps/browser/main.py:456
+#: src/novel_downloader/apps/browser/main.py:791
 msgid "Search keyword."
 msgstr "搜索关键词"
 
-#: src/novel_downloader/apps/browser/main.py:461
+#: src/novel_downloader/apps/browser/main.py:796
 msgid "Seconds to wait for the search response."
 msgstr "等待搜索响应的秒数。"
 
@@ -112,6 +112,7 @@ msgstr "清理应用日志、缓存与书籍数据"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:41
 #: src/novel_downloader/apps/cli/commands/config.py:30
+#: src/novel_downloader/apps/cli/commands/follow.py:137
 #: src/novel_downloader/apps/cli/commands/music.py:341
 #: src/novel_downloader/apps/cli/commands/sources.py:28
 msgid "Subcommands"
@@ -148,6 +149,7 @@ msgstr "确定要删除内部状态吗?"
 #: src/novel_downloader/apps/cli/commands/clean.py:396
 #: src/novel_downloader/apps/cli/commands/clean.py:442
 #: src/novel_downloader/apps/cli/commands/music.py:551
+#: src/novel_downloader/apps/cli/commands/storage.py:147
 #: src/novel_downloader/apps/cli/interactive.py:84
 #: src/novel_downloader/apps/cli/interactive.py:103
 #: src/novel_downloader/apps/cli/ui.py:84
@@ -237,6 +239,8 @@ msgstr "清理指定站点的缓存, 若未指定站点则清理全部站点的�
 
 #: src/novel_downloader/apps/cli/commands/clean.py:192
 #: src/novel_downloader/apps/cli/commands/clean.py:254
+#: src/novel_downloader/apps/cli/commands/follow.py:159
+#: src/novel_downloader/apps/cli/commands/follow.py:192
 msgid "Source site key"
 msgstr "站点键值"
 
@@ -267,12 +271,14 @@ msgstr "确定要删除缓存目录 {desc} 吗？"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:236
 #: src/novel_downloader/apps/cli/commands/clean.py:345
+#: src/novel_downloader/apps/cli/commands/storage.py:154
 #, python-brace-format
 msgid "Successfully removed {desc}."
 msgstr "已成功删除 {desc}"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:239
 #: src/novel_downloader/apps/cli/commands/clean.py:347
+#: src/novel_downloader/apps/cli/commands/storage.py:158
 #, python-brace-format
 msgid "Failed to remove {desc}: {error}"
 msgstr "删除 {desc} 失败: {error}"
@@ -472,6 +478,143 @@ msgstr "不支持的语言：{lang}。可用语言：{langs}"
 msgid "Language switched to {lang}"
 msgstr "语言已切换为 {lang}"
 
+#: src/novel_downloader/apps/cli/commands/doctor.py:93
+#: src/novel_downloader/apps/cli/commands/doctor.py:96
+msgid "Python version"
+msgstr "Python 版本"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:99
+#, python-brace-format
+msgid "Install Python {minimum} or newer."
+msgstr "请安装 Python {minimum} 或更高版本。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:112
+#: src/novel_downloader/apps/cli/commands/doctor.py:113
+msgid "Package version"
+msgstr "包版本"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:121
+#: src/novel_downloader/apps/cli/commands/doctor.py:126
+msgid "settings.toml"
+msgstr "settings.toml"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:123
+#: src/novel_downloader/apps/cli/commands/doctor.py:136
+msgid "No configuration file found."
+msgstr "未找到配置文件。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:124
+#: src/novel_downloader/apps/cli/commands/doctor.py:137
+msgid "Run 'novel-cli config init' to create settings.toml."
+msgstr "运行 'novel-cli config init' 创建 settings.toml。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:134
+#: src/novel_downloader/apps/cli/commands/doctor.py:143
+#: src/novel_downloader/apps/cli/commands/doctor.py:150
+#: src/novel_downloader/apps/cli/commands/doctor.py:155
+msgid "Configuration"
+msgstr "配置"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:146
+#: src/novel_downloader/apps/cli/commands/doctor.py:153
+msgid "Fix the file or recreate it with 'novel-cli config init'."
+msgstr "请修复该文件，或运行 'novel-cli config init' 重新生成。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:152
+msgid "The configuration root is not a table."
+msgstr "配置根节点不是表（table）。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:183
+#: src/novel_downloader/apps/cli/commands/doctor.py:185
+msgid "Output directory"
+msgstr "输出目录"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:188
+msgid "Check the permissions of the output directory or change output_dir."
+msgstr "请检查输出目录权限或修改 output_dir。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:195
+msgid "Sites"
+msgstr "站点"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:195
+#, python-brace-format
+msgid "{count} site(s)"
+msgstr "{count} 个站点"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:204
+#: src/novel_downloader/apps/cli/commands/doctor.py:210
+msgid "Searchers"
+msgstr "搜索器"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:207
+msgid "Reinstall the package or check the plugin directory."
+msgstr "请重新安装本包，或检查插件目录。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:212
+#, python-brace-format
+msgid "{count} searcher(s)"
+msgstr "{count} 个搜索器"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:222
+#: src/novel_downloader/apps/cli/commands/doctor.py:224
+msgid "Music dependencies"
+msgstr "音乐依赖"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:222
+msgid "installed"
+msgstr "已安装"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:226
+#, python-brace-format
+msgid "missing: {names}"
+msgstr "缺失：{names}"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:227
+msgid "Install the optional music extra: pip install \"novel-downloader[music]\""
+msgstr "请安装音乐可选依赖：pip install \"novel-downloader[music]\""
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:245
+#: src/novel_downloader/apps/cli/commands/doctor.py:247
+#, python-brace-format
+msgid "API port {port}"
+msgstr "API 端口 {port}"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:245
+msgid "free"
+msgstr "空闲"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:249
+msgid "already in use"
+msgstr "已被占用"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:251
+msgid ""
+"Stop the process using the port, or start the API with 'novel-api --port "
+"PORT'."
+msgstr "请停止占用该端口的进程，或用 'novel-api --port PORT' 启动 API。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:274
+msgid "Check the environment and diagnose common problems."
+msgstr "检查运行环境并诊断常见问题。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:283
+msgid "API port to check for availability (default: 8081)."
+msgstr "要检查可用性的 API 端口（默认：8081）。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:306
+msgid "optional"
+msgstr "可选"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:311
+#, python-brace-format
+msgid "{count} check(s) failed."
+msgstr "{count} 项检查失败。"
+
+#: src/novel_downloader/apps/cli/commands/doctor.py:314
+msgid "All checks passed."
+msgstr "全部检查通过。"
+
 #: src/novel_downloader/apps/cli/commands/download.py:30
 msgid "Download novels by book ID or URL."
 msgstr "通过书籍 ID 或 URL 下载小说"
@@ -496,7 +639,9 @@ msgstr "导出格式：txt、epub、html。默认取配置文件。"
 
 #: src/novel_downloader/apps/cli/commands/download.py:68
 #: src/novel_downloader/apps/cli/commands/export.py:67
+#: src/novel_downloader/apps/cli/commands/follow.py:224
 #: src/novel_downloader/apps/cli/commands/sources.py:42
+#: src/novel_downloader/apps/cli/commands/storage.py:175
 msgid "Print machine-readable JSON on stdout and exit."
 msgstr "以 JSON 输出到标准输出并退出。"
 
@@ -545,6 +690,8 @@ msgstr "从配置读取书籍 ID 失败: {err}"
 #: src/novel_downloader/apps/cli/commands/search.py:174
 #: src/novel_downloader/apps/cli/interactive.py:153
 #: src/novel_downloader/apps/core/adapters.py:74
+#: src/novel_downloader/apps/login/main.py:611
+#: src/novel_downloader/apps/login/main.py:726
 msgid "Login failed."
 msgstr "登录失败"
 
@@ -591,6 +738,162 @@ msgstr "未选择任何站点"
 msgid "No books selected."
 msgstr "未选择任何书籍"
 
+#: src/novel_downloader/apps/cli/commands/follow.py:128
+msgid "Follow books and check them for new chapters."
+msgstr "追更书籍并检查新章节。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:155
+msgid "Add a book to the follow list."
+msgstr "将书籍加入追更列表。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:160
+#: src/novel_downloader/apps/cli/commands/follow.py:193
+#: src/novel_downloader/apps/cli/commands/follow.py:257
+#: src/novel_downloader/apps/cli/prompts.py:145
+#: src/novel_downloader/apps/cli/prompts.py:207
+msgid "Book ID"
+msgstr "书籍 ID"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:164
+msgid "Display title used when checking for new chapters."
+msgstr "检查新章节时使用的显示标题。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:172
+#, python-brace-format
+msgid "Added to the follow list: {site}/{book_id}"
+msgstr "已加入追更列表：{site}/{book_id}"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:174
+#, python-brace-format
+msgid "Updated follow entry: {site}/{book_id}"
+msgstr "已更新追更条目：{site}/{book_id}"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:180
+#, python-brace-format
+msgid ""
+"No title set for this book. Run 'follow add {site} {book_id} --title "
+"TEXT' so 'follow check' can find it by name."
+msgstr ""
+"该书未设置标题。请运行 'follow add {site} {book_id} --title TEXT'，以便 'follow check' "
+"按名称查找。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:188
+msgid "Remove a book from the follow list."
+msgstr "从追更列表移除书籍。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:202
+#, python-brace-format
+msgid "Removed from the follow list: {site}/{book_id}"
+msgstr "已从追更列表移除：{site}/{book_id}"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:208
+#, python-brace-format
+msgid "Not in the follow list: {site}/{book_id}"
+msgstr "不在追更列表中：{site}/{book_id}"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:216
+msgid "List followed books."
+msgstr "列出追更书籍。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:242
+msgid "No followed books."
+msgstr "追更列表为空。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:256
+msgid "Followed books"
+msgstr "追更列表"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:257
+#: src/novel_downloader/apps/desktop/ui.py:251
+#: src/novel_downloader/apps/desktop/ui.py:323
+msgid "Site"
+msgstr "站点"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:257
+#: src/novel_downloader/apps/cli/commands/music.py:208
+#: src/novel_downloader/apps/cli/commands/music.py:254
+#: src/novel_downloader/apps/cli/prompts.py:145
+#: src/novel_downloader/apps/cli/prompts.py:202
+#: src/novel_downloader/apps/desktop/ui.py:249
+#: src/novel_downloader/apps/desktop/ui.py:322
+#: src/novel_downloader/apps/desktop/ui.py:554
+msgid "Title"
+msgstr "书名"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:257
+msgid "Latest chapter"
+msgstr "最新章节"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:257
+#: src/novel_downloader/apps/cli/prompts.py:205
+#: src/novel_downloader/apps/desktop/ui.py:253
+msgid "Updated"
+msgstr "更新时间"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:264
+msgid "Check followed books for new chapters."
+msgstr "检查追更书籍是否有新章节。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:271
+msgid "Show every followed book, including ones that are up to date."
+msgstr "显示所有追更书籍（包括已是最新的）。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:276
+msgid "Print the download command for books with new chapters."
+msgstr "为有新章节的书籍打印下载命令。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:283
+msgid "Search timeout per book in seconds (default: 5.0)."
+msgstr "每本书的搜索超时（秒，默认：5.0）。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:291
+msgid "No followed books to check."
+msgstr "没有可检查的追更书籍。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:309
+#, python-brace-format
+msgid "Check failed for {book}: {error}"
+msgstr "检查失败：{book}：{error}"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:317
+#, python-brace-format
+msgid "No result found for {book}."
+msgstr "未找到 {book} 的搜索结果。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:323
+#, python-brace-format
+msgid "Up to date: {book} ({latest})"
+msgstr "已是最新：{book}（{latest}）"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:338
+#, python-brace-format
+msgid "New chapter for {book}: {latest}"
+msgstr "{book} 有新章节：{latest}"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:340
+#, python-brace-format
+msgid "First chapter recorded for {book}: {latest}"
+msgstr "已记录 {book} 的首个章节：{latest}"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:347
+#, python-brace-format
+msgid "Run: {command}"
+msgstr "运行：{command}"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:352
+msgid ""
+"'follow check' does not start downloads; run the command(s) above to "
+"fetch the new chapters."
+msgstr "'follow check' 不会启动下载；请运行上面的命令以下载新章节。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:359
+msgid "All followed books are up to date."
+msgstr "所有追更书籍均为最新。"
+
+#: src/novel_downloader/apps/cli/commands/follow.py:361
+msgid "No new chapters found."
+msgstr "没有发现新章节。"
+
 #: src/novel_downloader/apps/cli/commands/login.py:23
 msgid "Open a login window for a site and save its session cookies."
 msgstr "为站点打开登录窗口并保存其会话 Cookies。"
@@ -604,12 +907,12 @@ msgid "Seconds to wait for the login to complete (default: 300)."
 msgstr "等待登录完成的秒数（默认：300）。"
 
 #: src/novel_downloader/apps/cli/commands/login.py:43
-#: src/novel_downloader/apps/login/main.py:300
+#: src/novel_downloader/apps/login/main.py:832
 msgid "List sites that support an interactive login."
 msgstr "列出支持交互式登录的站点。"
 
 #: src/novel_downloader/apps/cli/commands/login.py:58
-#: src/novel_downloader/apps/login/main.py:199
+#: src/novel_downloader/apps/login/main.py:663
 #, python-brace-format
 msgid "Site '{site}' does not support an interactive login."
 msgstr "站点「{site}」不支持交互式登录。"
@@ -620,6 +923,7 @@ msgid "Session cookies saved to {path}"
 msgstr "会话 Cookies 已保存至 {path}"
 
 #: src/novel_downloader/apps/cli/commands/login.py:71
+#: src/novel_downloader/apps/login/main.py:770
 msgid "Login was not completed; no cookies were saved."
 msgstr "登录未完成，未保存任何 Cookies。"
 
@@ -650,7 +954,7 @@ msgstr "网易云登录已失效。请用浏览器重新登录以刷新音乐会
 #: src/novel_downloader/apps/cli/commands/music.py:161
 #: src/novel_downloader/apps/cli/commands/search.py:135
 #: src/novel_downloader/apps/cli/interactive.py:75
-#: src/novel_downloader/apps/desktop/ui.py:557
+#: src/novel_downloader/apps/desktop/ui.py:703
 #, python-brace-format
 msgid "Searching for '{keyword}'..."
 msgstr "正在搜索 '{keyword}'..."
@@ -682,29 +986,19 @@ msgstr "序号"
 
 #: src/novel_downloader/apps/cli/commands/music.py:208
 #: src/novel_downloader/apps/cli/commands/music.py:254
-#: src/novel_downloader/apps/cli/prompts.py:145
-#: src/novel_downloader/apps/cli/prompts.py:202
-#: src/novel_downloader/apps/desktop/ui.py:207
-#: src/novel_downloader/apps/desktop/ui.py:259
-#: src/novel_downloader/apps/desktop/ui.py:411
-msgid "Title"
-msgstr "书名"
-
-#: src/novel_downloader/apps/cli/commands/music.py:208
-#: src/novel_downloader/apps/cli/commands/music.py:254
-#: src/novel_downloader/apps/desktop/ui.py:412
+#: src/novel_downloader/apps/desktop/ui.py:555
 msgid "Artist"
 msgstr "歌手"
 
 #: src/novel_downloader/apps/cli/commands/music.py:208
 #: src/novel_downloader/apps/cli/commands/music.py:254
-#: src/novel_downloader/apps/desktop/ui.py:413
+#: src/novel_downloader/apps/desktop/ui.py:556
 msgid "Album"
 msgstr "专辑"
 
 #: src/novel_downloader/apps/cli/commands/music.py:208
 #: src/novel_downloader/apps/cli/commands/music.py:254
-#: src/novel_downloader/apps/desktop/ui.py:414
+#: src/novel_downloader/apps/desktop/ui.py:557
 msgid "Duration"
 msgstr "时长"
 
@@ -723,6 +1017,7 @@ msgstr "输入序号 (如 1,3,5), 'a' 全选, 'n' 下一页, 'p' 上一页 (回�
 
 #: src/novel_downloader/apps/cli/commands/music.py:284
 #: src/novel_downloader/apps/cli/prompts.py:177
+#: src/novel_downloader/apps/login/main.py:843
 msgid "Invalid input."
 msgstr "输入无效"
 
@@ -740,7 +1035,7 @@ msgid "List available music platforms."
 msgstr "列出可用的音乐平台。"
 
 #: src/novel_downloader/apps/cli/commands/music.py:361
-#: src/novel_downloader/apps/desktop/ui.py:354
+#: src/novel_downloader/apps/desktop/ui.py:437
 msgid "No music platforms are available."
 msgstr "没有可用的音乐平台。"
 
@@ -749,7 +1044,7 @@ msgid "Music platforms"
 msgstr "音乐平台"
 
 #: src/novel_downloader/apps/cli/commands/music.py:369
-#: src/novel_downloader/apps/desktop/ui.py:371
+#: src/novel_downloader/apps/desktop/ui.py:454
 msgid "Platform"
 msgstr "平台"
 
@@ -801,7 +1096,7 @@ msgstr "未找到与 '{keyword}' 相关的结果。"
 #: src/novel_downloader/apps/cli/commands/music.py:442
 #: src/novel_downloader/apps/cli/commands/music.py:532
 #: src/novel_downloader/apps/cli/commands/search.py:150
-#: src/novel_downloader/apps/desktop/ui.py:596
+#: src/novel_downloader/apps/desktop/ui.py:761
 #, python-brace-format
 msgid "Found {count} result(s) for '{keyword}'."
 msgstr "找到 {count} 条结果（'{keyword}'）。"
@@ -847,7 +1142,7 @@ msgid ""
 msgstr "网易云未登录；会员曲目可能下载失败。可通过浏览器登录后再下载。"
 
 #: src/novel_downloader/apps/cli/commands/music.py:572
-#: src/novel_downloader/apps/desktop/ui.py:746
+#: src/novel_downloader/apps/desktop/ui.py:1071
 #, python-brace-format
 msgid "Output directory: {path}"
 msgstr "输出目录：{path}"
@@ -866,7 +1161,7 @@ msgid "song"
 msgstr "歌曲"
 
 #: src/novel_downloader/apps/cli/commands/music.py:589
-#: src/novel_downloader/apps/desktop/ui.py:1092
+#: src/novel_downloader/apps/desktop/ui.py:1488
 #, python-brace-format
 msgid "Download failed: {error}"
 msgstr "下载失败：{error}"
@@ -877,7 +1172,7 @@ msgid "Failed: {name} ({reason})"
 msgstr "失败：{name}（{reason}）"
 
 #: src/novel_downloader/apps/cli/commands/music.py:597
-#: src/novel_downloader/apps/desktop/ui.py:1076
+#: src/novel_downloader/apps/desktop/ui.py:1472
 #, python-brace-format
 msgid "Done: {ok} succeeded, {skip} skipped, {fail} failed"
 msgstr "完成：成功 {ok} 首，跳过 {skip} 首，失败 {fail} 首"
@@ -971,9 +1266,9 @@ msgid "Site Key"
 msgstr "站点键"
 
 #: src/novel_downloader/apps/cli/commands/sources.py:127
-#: src/novel_downloader/apps/desktop/ui.py:161
-#: src/novel_downloader/apps/desktop/ui.py:183
-#: src/novel_downloader/apps/desktop/ui.py:393
+#: src/novel_downloader/apps/desktop/ui.py:203
+#: src/novel_downloader/apps/desktop/ui.py:225
+#: src/novel_downloader/apps/desktop/ui.py:476
 msgid "Search"
 msgstr "搜索"
 
@@ -986,7 +1281,8 @@ msgid "Origin"
 msgstr "来源"
 
 #: src/novel_downloader/apps/cli/commands/sources.py:132
-#: src/novel_downloader/apps/desktop/ui.py:258
+#: src/novel_downloader/apps/desktop/formatting.py:208
+#: src/novel_downloader/apps/desktop/ui.py:321
 msgid "Status"
 msgstr "状态"
 
@@ -1016,7 +1312,7 @@ msgid "Rule file not found: {path}"
 msgstr "未找到规则文件：{path}"
 
 #: src/novel_downloader/apps/cli/commands/sources.py:181
-#: src/novel_downloader/infra/config/file_io.py:95
+#: src/novel_downloader/infra/config/file_io.py:97
 #, python-brace-format
 msgid "Invalid JSON in {path}: {err}"
 msgstr "{path} 中的 JSON 无效: {err}"
@@ -1045,6 +1341,77 @@ msgstr "已将规则安装到 {target}"
 #, python-brace-format
 msgid "Removed rule '{key}' from {target}"
 msgstr "已从 {target} 移除规则 '{key}'"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:32
+msgid "Raw data"
+msgstr "原始数据"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:33
+msgid "Cache"
+msgstr "缓存"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:34
+msgid "Downloads"
+msgstr "下载"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:35
+msgid "Logs"
+msgstr "日志"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:124
+msgid "Total"
+msgstr "总计"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:126
+msgid "Storage usage"
+msgstr "存储占用"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:127
+msgid "Directory"
+msgstr "目录"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:127
+msgid "Path"
+msgstr "路径"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:127
+msgid "Files"
+msgstr "文件"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:127
+#: src/novel_downloader/apps/desktop/ui.py:385
+msgid "Size"
+msgstr "大小"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:136
+msgid "Nothing to clean."
+msgstr "没有需要清理的内容。"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:140
+#, python-brace-format
+msgid "{label}: {path}"
+msgstr "{label}：{path}"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:143
+#, python-brace-format
+msgid "Remove all data in these {count} director(ies)?"
+msgstr "要删除这 {count} 个目录中的全部数据吗？"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:167
+msgid "Show disk usage of the application's data directories."
+msgstr "显示应用数据目录的磁盘占用。"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:180
+msgid "Remove the data directories listed by this command."
+msgstr "删除本命令列出的数据目录。"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:186
+msgid "Skip the confirmation prompt used by --clean."
+msgstr "跳过 --clean 的确认提示。"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:195
+msgid "--json and --clean cannot be combined."
+msgstr "--json 与 --clean 不能同时使用。"
 
 #: src/novel_downloader/apps/cli/interactive.py:36
 msgid "Starting interactive mode..."
@@ -1240,13 +1607,8 @@ msgid "Available Books for {site} · Page {page}/{total}"
 msgstr "{site} 的可用书籍 · 第 {page}/{total} 页"
 
 #: src/novel_downloader/apps/cli/prompts.py:145
-#: src/novel_downloader/apps/cli/prompts.py:207
-msgid "Book ID"
-msgstr "书籍 ID"
-
-#: src/novel_downloader/apps/cli/prompts.py:145
 #: src/novel_downloader/apps/cli/prompts.py:203
-#: src/novel_downloader/apps/desktop/ui.py:208
+#: src/novel_downloader/apps/desktop/ui.py:250
 msgid "Author"
 msgstr "作者"
 
@@ -1262,13 +1624,8 @@ msgstr "未找到结果"
 msgid "Latest"
 msgstr "最新章节"
 
-#: src/novel_downloader/apps/cli/prompts.py:205
-#: src/novel_downloader/apps/desktop/ui.py:211
-msgid "Updated"
-msgstr "更新时间"
-
 #: src/novel_downloader/apps/cli/ui.py:168
-#: src/novel_downloader/apps/desktop/ui.py:261
+#: src/novel_downloader/apps/desktop/ui.py:324
 msgid "Progress"
 msgstr "进度"
 
@@ -1368,346 +1725,486 @@ msgstr "完成阶段 '{stage}' (书籍 {book_id})"
 msgid "Missing data ({what}) for {book_id}: {path}"
 msgstr "书籍 {book_id} 缺少数据 ({what}): {path}"
 
-#: src/novel_downloader/apps/desktop/formatting.py:43
-#: src/novel_downloader/apps/desktop/ui.py:675
+#: src/novel_downloader/apps/desktop/formatting.py:49
+#: src/novel_downloader/apps/desktop/ui.py:841
 msgid "Queued"
 msgstr "排队中"
 
-#: src/novel_downloader/apps/desktop/formatting.py:44
-#: src/novel_downloader/apps/desktop/ui.py:674
+#: src/novel_downloader/apps/desktop/formatting.py:50
+#: src/novel_downloader/apps/desktop/ui.py:840
 msgid "Running"
 msgstr "进行中"
 
-#: src/novel_downloader/apps/desktop/formatting.py:45
+#: src/novel_downloader/apps/desktop/formatting.py:51
 msgid "Processing"
 msgstr "正在处理"
 
-#: src/novel_downloader/apps/desktop/formatting.py:46
+#: src/novel_downloader/apps/desktop/formatting.py:52
 msgid "Exporting"
 msgstr "正在导出"
 
-#: src/novel_downloader/apps/desktop/formatting.py:47
-#: src/novel_downloader/apps/desktop/ui.py:676
+#: src/novel_downloader/apps/desktop/formatting.py:53
+#: src/novel_downloader/apps/desktop/ui.py:842
 msgid "Completed"
 msgstr "已完成"
 
-#: src/novel_downloader/apps/desktop/formatting.py:48
+#: src/novel_downloader/apps/desktop/formatting.py:54
 msgid "Cancelled"
 msgstr "已取消"
 
-#: src/novel_downloader/apps/desktop/formatting.py:49
-#: src/novel_downloader/apps/desktop/ui.py:1064
-#: src/novel_downloader/apps/desktop/ui.py:1086
+#: src/novel_downloader/apps/desktop/formatting.py:55
+#: src/novel_downloader/apps/desktop/ui.py:1460
+#: src/novel_downloader/apps/desktop/ui.py:1482
 msgid "Failed"
 msgstr "失败"
 
-#: src/novel_downloader/apps/desktop/formatting.py:77
+#: src/novel_downloader/apps/desktop/formatting.py:83
 #, python-brace-format
 msgid "{done}/?"
 msgstr "{done}/?"
 
-#: src/novel_downloader/apps/desktop/formatting.py:79
+#: src/novel_downloader/apps/desktop/formatting.py:85
 #, python-brace-format
 msgid "{done}/{total} ({percent}%)"
 msgstr "{done}/{total}（{percent}%）"
 
-#: src/novel_downloader/apps/desktop/ui.py:90
-msgid "Ready"
-msgstr "就绪"
+#: src/novel_downloader/apps/desktop/formatting.py:201
+#: src/novel_downloader/apps/desktop/ui.py:127
+msgid "Select a task to view its details."
+msgstr "请选择一个任务查看详情。"
 
-#: src/novel_downloader/apps/desktop/ui.py:141
-msgid "Novel Downloader"
-msgstr "小说下载器"
-
-#: src/novel_downloader/apps/desktop/ui.py:162
-msgid "Download"
-msgstr "下载"
-
-#: src/novel_downloader/apps/desktop/ui.py:163
-msgid "History"
-msgstr "历史记录"
-
-#: src/novel_downloader/apps/desktop/ui.py:164
-msgid "Music"
-msgstr "音乐"
-
-#: src/novel_downloader/apps/desktop/ui.py:176
-#: src/novel_downloader/apps/desktop/ui.py:386
-msgid "Keyword"
-msgstr "关键词"
-
-#: src/novel_downloader/apps/desktop/ui.py:187
-msgid "Sites (comma separated, empty = all)"
-msgstr "站点（逗号分隔，留空表示全部）"
-
-#: src/novel_downloader/apps/desktop/ui.py:195
-msgid "e.g. qidian, b520, syosetu"
-msgstr "例如 qidian、b520、syosetu"
-
-#: src/novel_downloader/apps/desktop/ui.py:209
-#: src/novel_downloader/apps/desktop/ui.py:260
-msgid "Site"
-msgstr "站点"
-
-#: src/novel_downloader/apps/desktop/ui.py:210
-msgid "Word count"
-msgstr "字数"
-
-#: src/novel_downloader/apps/desktop/ui.py:227
-msgid "Add to download queue"
-msgstr "加入下载队列"
-
-#: src/novel_downloader/apps/desktop/ui.py:236
-msgid "Cancel selected task"
-msgstr "取消所选任务"
-
-#: src/novel_downloader/apps/desktop/ui.py:241
-msgid "Progress refreshes automatically."
-msgstr "进度会自动刷新。"
-
-#: src/novel_downloader/apps/desktop/ui.py:255
-msgid "Tasks"
-msgstr "任务"
-
-#: src/novel_downloader/apps/desktop/ui.py:262
-#: src/novel_downloader/apps/desktop/ui.py:513
-#: src/novel_downloader/apps/desktop/ui.py:1143
+#: src/novel_downloader/apps/desktop/formatting.py:212
+#: src/novel_downloader/apps/desktop/ui.py:325
+#: src/novel_downloader/apps/desktop/ui.py:656
+#: src/novel_downloader/apps/desktop/ui.py:1539
 msgid "Error"
 msgstr "错误"
 
-#: src/novel_downloader/apps/desktop/ui.py:280
+#: src/novel_downloader/apps/desktop/formatting.py:217
+msgid "Exported files"
+msgstr "导出文件"
+
+#: src/novel_downloader/apps/desktop/preferences.py:54
+msgid "Hi-Res"
+msgstr "Hi-Res（高解析度）"
+
+#: src/novel_downloader/apps/desktop/preferences.py:55
+msgid "Lossless"
+msgstr "无损"
+
+#: src/novel_downloader/apps/desktop/preferences.py:56
+msgid "ExHigh"
+msgstr "极高"
+
+#: src/novel_downloader/apps/desktop/preferences.py:57
+msgid "Higher"
+msgstr "较高"
+
+#: src/novel_downloader/apps/desktop/preferences.py:58
+msgid "Standard"
+msgstr "标准"
+
+#: src/novel_downloader/apps/desktop/preferences.py:221
+#, python-brace-format
+msgid "API: {api} | Data: {data}"
+msgstr "API：{api} | 数据：{data}"
+
+#: src/novel_downloader/apps/desktop/ui.py:107
+msgid "Ready"
+msgstr "就绪"
+
+#: src/novel_downloader/apps/desktop/ui.py:177
+msgid "Novel Downloader"
+msgstr "小说下载器"
+
+#: src/novel_downloader/apps/desktop/ui.py:204
+msgid "Download"
+msgstr "下载"
+
+#: src/novel_downloader/apps/desktop/ui.py:205
+msgid "History"
+msgstr "历史记录"
+
+#: src/novel_downloader/apps/desktop/ui.py:206
+msgid "Music"
+msgstr "音乐"
+
+#: src/novel_downloader/apps/desktop/ui.py:218
+#: src/novel_downloader/apps/desktop/ui.py:469
+msgid "Keyword"
+msgstr "关键词"
+
+#: src/novel_downloader/apps/desktop/ui.py:229
+msgid "Sites (comma separated, empty = all)"
+msgstr "站点（逗号分隔，留空表示全部）"
+
+#: src/novel_downloader/apps/desktop/ui.py:237
+msgid "e.g. qidian, b520, syosetu"
+msgstr "例如 qidian、b520、syosetu"
+
+#: src/novel_downloader/apps/desktop/ui.py:252
+msgid "Word count"
+msgstr "字数"
+
+#: src/novel_downloader/apps/desktop/ui.py:269
+msgid "Restore last search"
+msgstr "恢复上次搜索"
+
+#: src/novel_downloader/apps/desktop/ui.py:276
+msgid "Add to download queue"
+msgstr "加入下载队列"
+
+#: src/novel_downloader/apps/desktop/ui.py:285
+msgid "Cancel selected task"
+msgstr "取消所选任务"
+
+#: src/novel_downloader/apps/desktop/ui.py:290
+#: src/novel_downloader/apps/desktop/ui.py:942
+msgid "Open file"
+msgstr "打开文件"
+
+#: src/novel_downloader/apps/desktop/ui.py:297
+#: src/novel_downloader/apps/desktop/ui.py:945
+msgid "Open folder"
+msgstr "打开目录"
+
+#: src/novel_downloader/apps/desktop/ui.py:304
+msgid "Progress refreshes automatically."
+msgstr "进度会自动刷新。"
+
+#: src/novel_downloader/apps/desktop/ui.py:318
+msgid "Tasks"
+msgstr "任务"
+
+#: src/novel_downloader/apps/desktop/ui.py:363
 msgid "Refresh"
 msgstr "刷新"
 
-#: src/novel_downloader/apps/desktop/ui.py:284
+#: src/novel_downloader/apps/desktop/ui.py:367
 msgid "Open containing folder"
 msgstr "打开所在文件夹"
 
-#: src/novel_downloader/apps/desktop/ui.py:301
+#: src/novel_downloader/apps/desktop/ui.py:384
 msgid "File name"
 msgstr "文件名"
 
-#: src/novel_downloader/apps/desktop/ui.py:302
-msgid "Size"
-msgstr "大小"
-
-#: src/novel_downloader/apps/desktop/ui.py:303
+#: src/novel_downloader/apps/desktop/ui.py:386
 msgid "Modified"
 msgstr "修改时间"
 
-#: src/novel_downloader/apps/desktop/ui.py:322
+#: src/novel_downloader/apps/desktop/ui.py:405
 msgid ""
 "Install the music extras to enable this tab: pip install \"novel-"
 "downloader[music]\""
 msgstr "安装音乐扩展后可启用此标签页：pip install \"novel-downloader[music]\""
 
-#: src/novel_downloader/apps/desktop/ui.py:331
+#: src/novel_downloader/apps/desktop/ui.py:414
 #, python-brace-format
 msgid "Import error: {error}"
 msgstr "导入错误：{error}"
 
-#: src/novel_downloader/apps/desktop/ui.py:343
+#: src/novel_downloader/apps/desktop/ui.py:426
 #, python-brace-format
 msgid "Could not load music platforms: {error}"
 msgstr "无法加载音乐平台：{error}"
 
-#: src/novel_downloader/apps/desktop/ui.py:428
+#: src/novel_downloader/apps/desktop/ui.py:492
+msgid "Download settings"
+msgstr "下载设置"
+
+#: src/novel_downloader/apps/desktop/ui.py:497
+msgid "Output folder"
+msgstr "输出目录"
+
+#: src/novel_downloader/apps/desktop/ui.py:506
+msgid "Browse..."
+msgstr "浏览…"
+
+#: src/novel_downloader/apps/desktop/ui.py:510
+msgid "Audio quality"
+msgstr "音质"
+
+#: src/novel_downloader/apps/desktop/ui.py:526
+msgid "Save lyrics"
+msgstr "保存歌词"
+
+#: src/novel_downloader/apps/desktop/ui.py:527
+msgid "Save cover"
+msgstr "保存封面"
+
+#: src/novel_downloader/apps/desktop/ui.py:528
+msgid "Embed tags"
+msgstr "嵌入标签"
+
+#: src/novel_downloader/apps/desktop/ui.py:529
+msgid "Split into folders"
+msgstr "按文件夹分类"
+
+#: src/novel_downloader/apps/desktop/ui.py:530
+msgid "Skip existing"
+msgstr "跳过已存在"
+
+#: src/novel_downloader/apps/desktop/ui.py:571
 msgid "Download selected"
 msgstr "下载所选"
 
-#: src/novel_downloader/apps/desktop/ui.py:433
+#: src/novel_downloader/apps/desktop/ui.py:576
 msgid "Stop"
 msgstr "停止"
 
-#: src/novel_downloader/apps/desktop/ui.py:545
+#: src/novel_downloader/apps/desktop/ui.py:688
 msgid "Enter a keyword to search."
 msgstr "请输入搜索关键词。"
 
-#: src/novel_downloader/apps/desktop/ui.py:552
+#: src/novel_downloader/apps/desktop/ui.py:698
 msgid "No known site selected."
 msgstr "未选择已知站点。"
 
-#: src/novel_downloader/apps/desktop/ui.py:583
+#: src/novel_downloader/apps/desktop/ui.py:714
+msgid "No previous search to restore."
+msgstr "没有可恢复的上次搜索。"
+
+#: src/novel_downloader/apps/desktop/ui.py:720
+msgid "Restored the last search."
+msgstr "已恢复上次搜索。"
+
+#: src/novel_downloader/apps/desktop/ui.py:748
 #, python-brace-format
 msgid "Search failed: {error}"
 msgstr "搜索失败：{error}"
 
-#: src/novel_downloader/apps/desktop/ui.py:610
+#: src/novel_downloader/apps/desktop/ui.py:775
 msgid "Select one or more search results first."
 msgstr "请先选择一个或多个搜索结果。"
 
-#: src/novel_downloader/apps/desktop/ui.py:626
+#: src/novel_downloader/apps/desktop/ui.py:791
 #, python-brace-format
 msgid "Task added: {title}"
 msgstr "已添加任务：{title}"
 
-#: src/novel_downloader/apps/desktop/ui.py:631
+#: src/novel_downloader/apps/desktop/ui.py:796
 #, python-brace-format
 msgid "Queued {count} task(s)."
 msgstr "已加入 {count} 个任务。"
 
-#: src/novel_downloader/apps/desktop/ui.py:647
+#: src/novel_downloader/apps/desktop/ui.py:812
 #, python-brace-format
 msgid "Could not refresh tasks: {error}"
 msgstr "无法刷新任务：{error}"
 
-#: src/novel_downloader/apps/desktop/ui.py:721
+#: src/novel_downloader/apps/desktop/ui.py:874
+msgid "No tasks yet. Search for a book and add it to the queue."
+msgstr "暂无任务。搜索一本书并加入下载队列吧。"
+
+#: src/novel_downloader/apps/desktop/ui.py:949
+msgid "Copy error"
+msgstr "复制错误信息"
+
+#: src/novel_downloader/apps/desktop/ui.py:952
+msgid "Show details"
+msgstr "显示详情"
+
+#: src/novel_downloader/apps/desktop/ui.py:969
+msgid "No exported file for the selected task."
+msgstr "所选任务没有导出文件。"
+
+#: src/novel_downloader/apps/desktop/ui.py:976
+msgid "No exported folder for the selected task."
+msgstr "所选任务没有导出目录。"
+
+#: src/novel_downloader/apps/desktop/ui.py:984
+msgid "The selected task has no error message."
+msgstr "所选任务没有错误信息。"
+
+#: src/novel_downloader/apps/desktop/ui.py:994
+#, python-brace-format
+msgid "Could not copy to the clipboard: {error}"
+msgstr "无法复制到剪贴板：{error}"
+
+#: src/novel_downloader/apps/desktop/ui.py:997
+msgid "Copied to the clipboard."
+msgstr "已复制到剪贴板。"
+
+#: src/novel_downloader/apps/desktop/ui.py:1006
+msgid "Task details"
+msgstr "任务详情"
+
+#: src/novel_downloader/apps/desktop/ui.py:1026
+msgid "Copy"
+msgstr "复制"
+
+#: src/novel_downloader/apps/desktop/ui.py:1029
+msgid "Close"
+msgstr "关闭"
+
+#: src/novel_downloader/apps/desktop/ui.py:1046
 msgid "Select a task to cancel."
 msgstr "请选择要取消的任务。"
 
-#: src/novel_downloader/apps/desktop/ui.py:727
+#: src/novel_downloader/apps/desktop/ui.py:1052
 #, python-brace-format
 msgid "Task {task} cancelled"
 msgstr "任务 {task} 已取消"
 
-#: src/novel_downloader/apps/desktop/ui.py:729
+#: src/novel_downloader/apps/desktop/ui.py:1054
 #, python-brace-format
 msgid "Task {task} could not be cancelled"
 msgstr "任务 {task} 无法取消"
 
-#: src/novel_downloader/apps/desktop/ui.py:749
+#: src/novel_downloader/apps/desktop/ui.py:1074
 #, python-brace-format
 msgid "Could not scan the output directory: {error}"
 msgstr "无法扫描输出目录：{error}"
 
-#: src/novel_downloader/apps/desktop/ui.py:767
+#: src/novel_downloader/apps/desktop/ui.py:1092
 msgid "No exported files found."
 msgstr "未找到导出文件。"
 
-#: src/novel_downloader/apps/desktop/ui.py:770
+#: src/novel_downloader/apps/desktop/ui.py:1095
 #, python-brace-format
 msgid "Found {count} exported file(s)."
 msgstr "找到 {count} 个导出文件。"
 
-#: src/novel_downloader/apps/desktop/ui.py:788
+#: src/novel_downloader/apps/desktop/ui.py:1113
 msgid "Select a file first."
 msgstr "请先选择一个文件。"
 
-#: src/novel_downloader/apps/desktop/ui.py:809
+#: src/novel_downloader/apps/desktop/ui.py:1134
 #, python-brace-format
 msgid "Could not open {path}: {error}"
 msgstr "无法打开 {path}：{error}"
 
-#: src/novel_downloader/apps/desktop/ui.py:890
+#: src/novel_downloader/apps/desktop/ui.py:1197
+msgid "Choose the music output folder"
+msgstr "选择音乐输出目录"
+
+#: src/novel_downloader/apps/desktop/ui.py:1247
+#, python-brace-format
+msgid "Could not save music settings: {error}"
+msgstr "无法保存音乐设置：{error}"
+
+#: src/novel_downloader/apps/desktop/ui.py:1282
 msgid "Enter a music keyword first."
 msgstr "请先输入音乐关键词。"
 
-#: src/novel_downloader/apps/desktop/ui.py:893
-#: src/novel_downloader/apps/desktop/ui.py:948
+#: src/novel_downloader/apps/desktop/ui.py:1285
+#: src/novel_downloader/apps/desktop/ui.py:1340
 msgid "Select a music platform first."
 msgstr "请先选择音乐平台。"
 
-#: src/novel_downloader/apps/desktop/ui.py:899
+#: src/novel_downloader/apps/desktop/ui.py:1291
 #, python-brace-format
 msgid "Searching music for '{keyword}'..."
 msgstr "正在搜索音乐“{keyword}”…"
 
-#: src/novel_downloader/apps/desktop/ui.py:922
+#: src/novel_downloader/apps/desktop/ui.py:1314
 #, python-brace-format
 msgid "Music search failed: {error}"
 msgstr "音乐搜索失败：{error}"
 
-#: src/novel_downloader/apps/desktop/ui.py:934
+#: src/novel_downloader/apps/desktop/ui.py:1326
 #, python-brace-format
 msgid "Found {count} track(s)."
 msgstr "找到 {count} 首歌曲。"
 
-#: src/novel_downloader/apps/desktop/ui.py:944
+#: src/novel_downloader/apps/desktop/ui.py:1336
 msgid "Select one or more tracks first."
 msgstr "请先选择一首或多首歌曲。"
 
-#: src/novel_downloader/apps/desktop/ui.py:974
+#: src/novel_downloader/apps/desktop/ui.py:1369
 #, python-brace-format
 msgid "Could not prepare the music download: {error}"
 msgstr "无法准备音乐下载：{error}"
 
-#: src/novel_downloader/apps/desktop/ui.py:984
+#: src/novel_downloader/apps/desktop/ui.py:1380
 #, python-brace-format
 msgid "Downloading {count} track(s) to {dir}..."
 msgstr "正在下载 {count} 首歌曲到 {dir}…"
 
-#: src/novel_downloader/apps/desktop/ui.py:988
+#: src/novel_downloader/apps/desktop/ui.py:1384
 msgid "Downloading music..."
 msgstr "正在下载音乐…"
 
-#: src/novel_downloader/apps/desktop/ui.py:1037
+#: src/novel_downloader/apps/desktop/ui.py:1433
 msgid "Stopping music download..."
 msgstr "正在停止音乐下载…"
 
-#: src/novel_downloader/apps/desktop/ui.py:1045
+#: src/novel_downloader/apps/desktop/ui.py:1441
 #, python-brace-format
 msgid "{done}/{total} track(s)"
 msgstr "{done}/{total} 首"
 
-#: src/novel_downloader/apps/desktop/ui.py:1059
+#: src/novel_downloader/apps/desktop/ui.py:1455
 msgid "OK"
 msgstr "成功"
 
-#: src/novel_downloader/apps/desktop/ui.py:1061
+#: src/novel_downloader/apps/desktop/ui.py:1457
 msgid "Skipped"
 msgstr "已跳过"
 
-#: src/novel_downloader/apps/desktop/ui.py:1082
+#: src/novel_downloader/apps/desktop/ui.py:1478
 #, python-brace-format
 msgid "Music download finished: {ok} succeeded, {skip} skipped, {fail} failed"
 msgstr "音乐下载完成：成功 {ok}，跳过 {skip}，失败 {fail}"
 
-#: src/novel_downloader/apps/desktop/ui.py:1090
+#: src/novel_downloader/apps/desktop/ui.py:1486
 #, python-brace-format
 msgid "Download stopped: {error}"
 msgstr "下载已停止：{error}"
 
-#: src/novel_downloader/apps/desktop/ui.py:1127
+#: src/novel_downloader/apps/desktop/ui.py:1523
 msgid "Closing..."
 msgstr "正在关闭…"
 
-#: src/novel_downloader/apps/login/main.py:209
+#: src/novel_downloader/apps/login/main.py:581
+msgid "Please complete the login in the opened window."
+msgstr "请在打开的窗口中完成登录。"
+
+#: src/novel_downloader/apps/login/main.py:618
+#, python-brace-format
+msgid "Login detected; session cookies saved to {path}"
+msgstr "已检测到登录，会话 Cookies 已保存至 {path}"
+
+#: src/novel_downloader/apps/login/main.py:674
 msgid ""
 "pywebview is required for the login window. Install the 'desktop' extra: "
 "pip install 'novel-downloader[desktop]'"
 msgstr "登录窗口需要 pywebview。请安装『desktop』扩展依赖：pip install 'novel-downloader[desktop]'"
 
-#: src/novel_downloader/apps/login/main.py:215
+#: src/novel_downloader/apps/login/main.py:684
 #, python-brace-format
 msgid "Opening a login window for {site}..."
 msgstr "正在为 {site} 打开登录窗口……"
 
-#: src/novel_downloader/apps/login/main.py:217
+#: src/novel_downloader/apps/login/main.py:687
 #, python-brace-format
 msgid "Log in to {site}"
 msgstr "登录 {site}"
 
-#: src/novel_downloader/apps/login/main.py:224
+#: src/novel_downloader/apps/login/main.py:696
+#: src/novel_downloader/apps/login/main.py:701
+#: src/novel_downloader/apps/login/main.py:749
 msgid "Could not open the login window."
 msgstr "无法打开登录窗口。"
 
-#: src/novel_downloader/apps/login/main.py:234
-msgid "Please complete the login in the opened window."
-msgstr "请在打开的窗口中完成登录。"
-
-#: src/novel_downloader/apps/login/main.py:243
-#, python-brace-format
-msgid "Login detected; session cookies saved to {path}"
-msgstr "已检测到登录，会话 Cookies 已保存至 {path}"
-
-#: src/novel_downloader/apps/login/main.py:263
+#: src/novel_downloader/apps/login/main.py:757
 #, python-brace-format
 msgid "Login was not completed within {timeout} seconds."
 msgstr "{timeout} 秒内未完成登录。"
 
-#: src/novel_downloader/apps/login/main.py:268
+#: src/novel_downloader/apps/login/main.py:762
 msgid "Login window closed before a session was detected."
 msgstr "在检测到会话之前登录窗口已被关闭。"
 
-#: src/novel_downloader/apps/login/main.py:283
+#: src/novel_downloader/apps/login/main.py:815
 msgid "Open a login window and save the session cookies."
 msgstr "打开登录窗口并保存会话 Cookies。"
 
-#: src/novel_downloader/apps/login/main.py:289
+#: src/novel_downloader/apps/login/main.py:821
 msgid "Site key to log in to."
 msgstr "要登录的站点标识。"
 
-#: src/novel_downloader/apps/login/main.py:295
+#: src/novel_downloader/apps/login/main.py:827
 msgid "Seconds to wait for the login to complete."
 msgstr "等待登录完成的秒数。"
 
@@ -1748,12 +2245,12 @@ msgstr "book_id 条目无效: 应为 str|int|dict, 实际为 {type}"
 msgid "Missing required field 'book_id'"
 msgstr "缺少必填字段 'book_id'"
 
-#: src/novel_downloader/infra/config/file_io.py:107
+#: src/novel_downloader/infra/config/file_io.py:109
 #, python-brace-format
 msgid "Invalid TOML in {path}: {err}"
 msgstr "{path} 中的 TOML 无效: {err}"
 
-#: src/novel_downloader/infra/config/file_io.py:111
+#: src/novel_downloader/infra/config/file_io.py:113
 #, python-brace-format
 msgid "Unsupported config file extension: {ext}"
 msgstr "不支持的配置文件扩展名: {ext}"

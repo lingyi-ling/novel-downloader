@@ -258,6 +258,43 @@ def _validate(target: str, name: str, root: Path) -> BuildResult:
     return result
 
 
+def build(target: str) -> BuildResult:
+    """
+    Build and validate one CLI/API bundle without printing the summary.
+
+    This is the single entry point used both by :func:`main` and by
+    ``build_release.py``; it performs the toolchain check, removes stale
+    output, runs PyInstaller and validates the produced bundle.
+
+    :param target: ``"cli"`` or ``"api"``.
+    :return: A :class:`BuildResult` whose ``ok`` flag reports success.
+    """
+    name, spec_rel = TARGETS[target]
+    root = _repo_root()
+    spec = root / spec_rel
+    if not spec.is_file():
+        return BuildResult(target=target, name=name, message=f"spec not found: {spec}")
+    if not _check_toolchain(target):
+        return BuildResult(
+            target=target,
+            name=name,
+            message="toolchain check failed",
+        )
+
+    dist_dir = root / "dist" / name
+    work_dir = root / "build" / spec.stem
+    _clean([work_dir, dist_dir])
+
+    code = _run_pyinstaller(spec, root)
+    if code != 0:
+        return BuildResult(
+            target=target,
+            name=name,
+            message=f"PyInstaller exited with status {code}",
+        )
+    return _validate(target, name, root)
+
+
 def _print_report(result: BuildResult) -> None:
     """Print a human-readable per-target report."""
     print()
@@ -299,49 +336,10 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[BuildResult] = []
     for target in _parse_targets(args.target):
-        name, spec_rel = TARGETS[target]
-        spec = root / spec_rel
+        name, _ = TARGETS[target]
         print()
         print(f"### Building {name}")
-        if not spec.is_file():
-            results.append(
-                BuildResult(
-                    target=target,
-                    name=name,
-                    message=f"spec not found: {spec}",
-                )
-            )
-            _print_report(results[-1])
-            continue
-
-        if not _check_toolchain(target):
-            results.append(
-                BuildResult(
-                    target=target,
-                    name=name,
-                    message="toolchain check failed",
-                )
-            )
-            _print_report(results[-1])
-            continue
-
-        dist_dir = root / "dist" / name
-        work_dir = root / "build" / spec.stem
-        _clean([work_dir, dist_dir])
-
-        code = _run_pyinstaller(spec, root)
-        if code != 0:
-            results.append(
-                BuildResult(
-                    target=target,
-                    name=name,
-                    message=f"PyInstaller exited with status {code}",
-                )
-            )
-            _print_report(results[-1])
-            continue
-
-        result = _validate(target, name, root)
+        result = build(target)
         results.append(result)
         _print_report(result)
 

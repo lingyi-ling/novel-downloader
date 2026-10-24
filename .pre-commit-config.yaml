@@ -1,6 +1,13 @@
+# Kotlin/Gradle sources under android/ are not Python: keep the generic text
+# hooks (whitespace/EOF/large files) and the Python linters from rewriting that
+# tree.  legacy/ is an archived snapshot shipped as-is; it predates the ruff /
+# mypy gates and is excluded from CI as well.
+exclude: ^(android|legacy)/
+
 repos:
-  - repo: https://github.com/charliermarsh/ruff-pre-commit
-    rev: v0.14.6
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Keep in sync with .github/workflows/ci.yml (RUFF_VERSION).
+    rev: v0.17.1
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -22,7 +29,9 @@ repos:
         args: [--fix=lf]
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.18.2
+    # Keep in sync with .github/workflows/ci.yml (MYPY_VERSION) and
+    # pyproject.toml's [tool.mypy] (strict = true).
+    rev: v2.4.0
     hooks:
       - id: mypy
         files: ^src/
@@ -33,9 +42,34 @@ repos:
           - "--install-types"
           - "--non-interactive"
         additional_dependencies:
-          - nicegui
+          # mirrors-mypy creates an isolated env, so the runtime packages that
+          # src/ imports must be installed explicitly or strict mode degrades
+          # to `Any` (untyped decorators, no-any-return).  This list mirrors
+          # the `api`, `music`, `image-utils` and `httpx` extras in
+          # pyproject.toml; `nicegui` was dropped (no longer imported).
+          - aiohttp
+          - brotli
+          - cssselect
+          - fastapi
+          - fonttools
+          - httpx[http2]
+          - lxml
+          - mutagen
+          - numpy
+          - pathvalidate
+          - pillow
+          - platformdirs
+          - pycryptodome
+          - qrcode
+          - requests
+          - rich
+          - uvicorn
+          - websocket-client
+          - types-requests
+          - types-lxml
 
   - repo: https://github.com/commitizen-tools/commitizen
+    # Commit-message convention and the [tool.commitizen] table in pyproject.
     rev: v4.10.0
     hooks:
       - id: commitizen

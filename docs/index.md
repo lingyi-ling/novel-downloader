@@ -16,7 +16,7 @@
 * 文本清洗与增强流水线 (processors)
 * 可插拔站点解析器与处理器
 * 多平台音乐下载
-* CLI (`novel-cli`) 与本地 REST API (`novel-api`) 双端点
+* CLI (`novel-cli`)、本地 REST API (`novel-api`)、桌面客户端 (`novel-desktop`) 与 Android 客户端
 * 可编程 API
 
 > 运行要求: **Python 3.11+** (开发环境: Python 3.13)
@@ -27,7 +27,7 @@
 
 ### 多站点搜索
 
-* 覆盖 57 个搜索站点, 可聚合搜索或指定单个/多个站点
+* 覆盖 57 个搜索站点与 83 个下载站点, 可聚合搜索或指定单个/多个站点
 * 结果支持排序 (质量、优先级、站点、标题、作者、字数、更新时间)
 * 支持规则书源扩展, 无需编写 Python 代码即可新增站点
 
@@ -90,7 +90,9 @@
 ### 使用方式
 
 * 命令行 (`novel-cli`)
+* 桌面客户端 (`novel-desktop`)
 * 本地 REST API (`novel-api`)
+* Android 客户端 (`android/`)
 * Python 编程接口
 
 ---
@@ -181,6 +183,14 @@ API 复用与 CLI 相同的服务层, 提供站点列表、聚合搜索、下载
 
 * 端点与鉴权说明见: [本地 REST API](guide/api.md)
 * Swagger UI: `http://127.0.0.1:8081/docs`
+
+### 桌面客户端
+
+`novel-desktop` 提供 Tkinter 图形界面, 包含搜索、下载队列、历史导出与音乐下载:
+
+```bash
+novel-desktop
+```
 
 ### 音乐下载 (CLI)
 
@@ -284,6 +294,9 @@ pip install .
 
 * **需要登录的站点**: 参考 [复制 Cookies](guide/copy-cookies.md)。
 * **导出文件位置**: 见 [文件保存](guide/file-saving.md)。
+* **环境自检**: 运行 `novel-cli doctor`。
+* **遇到报错或连接问题**: 见 [故障排查](guide/troubleshooting.md)。
+* **想了解代码结构**: 见 [架构说明](guide/architecture.md)。
 
 ---
 

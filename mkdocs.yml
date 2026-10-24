@@ -49,9 +49,12 @@ plugins:
             处理器参考: Processors Reference
             CLI 用法: CLI Usage
             本地 API 服务: Local API Service
+            Android 客户端: Android Client
             书源: Book Sources
             文件保存: File Saving
             复制 Cookies: Copy Cookies
+            架构说明: Architecture
+            故障排查: Troubleshooting
             支持站点: Supported Sites
             总览: Overview
             标签: Tags
@@ -123,6 +126,8 @@ nav:
     - 书源: guide/book-sources.md
     - 文件保存: guide/file-saving.md
     - 复制 Cookies: guide/copy-cookies.md
+    - 架构说明: guide/architecture.md
+    - 故障排查: guide/troubleshooting.md
 
   - 支持站点:
     - 总览: supported-sites/index.md

@@ -100,7 +100,7 @@ password = "your_password"
 ```toml
 [sites.<site_name>]
 login_required = true
-cookie = "完整的 Cookie 字符串"
+cookies = "完整的 Cookie 字符串"
 ```
 
 > 当前 Cookie 方式不支持自动续期; 过期后请重新复制。
@@ -118,5 +118,7 @@ novel-cli download --config path/to/settings.toml
 ```
 
 (2) **当前目录下的 `./settings.toml`**
+
+(3) **应用主目录下的 `settings.toml`** (`NOVEL_HOME` 或平台数据目录，见 [文件保存](./file-saving.md))
 
 若存在多个匹配项, 上级优先级配置会覆盖下级。

@@ -12,7 +12,7 @@ Supports resumable crawling, download queues with progress, multi-format exporti
 
 ## Features
 
-* Multi-site search: 57 search sites, with aggregate search, ranking, and filtering
+* Multi-site search: 57 search sites and 83 download sites, with aggregate search, ranking, and filtering
 * Download queue and progress: resumable crawling, queue scheduling, and live progress
 * Export to TXT, EPUB, and HTML
 * History export: re-export previously downloaded books at any time
@@ -23,7 +23,7 @@ Supports resumable crawling, download queues with progress, multi-format exporti
 * Multi-platform music download: search and download across 25 music platforms
 * Plugin system for site parsers, exporters, and processing pipelines
 * Rule-driven book sources: add a site with a JSON rule, no Python code required
-* CLI + local REST API: dual endpoints for terminal users and third-party integrations
+* CLI + local REST API + desktop client: `novel-cli`, `novel-api`, and `novel-desktop` share the same service layer
 * Android client: native Kotlin/Compose app (`android/`) that talks to the local API
 
 ---
@@ -85,6 +85,16 @@ See [Local REST API](docs/guide/api.md) for endpoints, authentication, and reque
 
 ---
 
+## Desktop Client
+
+```bash
+novel-desktop
+```
+
+A graphical interface for search, the download queue, export history, and music downloads.
+
+---
+
 ## Programmatic API
 
 ```python
@@ -140,6 +150,7 @@ PRs and issues are welcome.
 * Site structures may change. If parsing issues occur, please open an issue or submit a patch.
 * Login support depends on site policies. Cookies or manual account setup may be required.
 * Configure request intervals responsibly to avoid rate limiting or IP blocking.
+* For errors, see [Troubleshooting](docs/guide/troubleshooting.md); for the code structure, see [Architecture](docs/guide/architecture.md).
 
 ---
 

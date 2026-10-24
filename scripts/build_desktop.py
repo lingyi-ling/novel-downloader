@@ -71,6 +71,7 @@ class BuildResult:
 
     ok: bool = False
     message: str = ""
+    stage: str = "validate"
     exe: Path | None = None
     exe_size: int = 0
     total_size: int = 0
@@ -402,6 +403,47 @@ def _print_report(result: BuildResult) -> None:
     print(f"  Result : {'OK' if result.ok else 'FAIL - ' + result.message}")
 
 
+def build(
+    *,
+    clean_dist: bool = False,
+    smoke_seconds: float = 0.0,
+    skip_toolchain: bool = False,
+) -> BuildResult:
+    """
+    Build and validate the desktop bundle without printing the summary.
+
+    This is the single entry point used both by :func:`main` and by
+    ``build_release.py``.
+
+    :param clean_dist: Also remove ``dist/NovelDownloader`` before building.
+    :param smoke_seconds: Launch the executable for this many seconds after a
+        successful validation (0 disables the smoke test).
+    :param skip_toolchain: Skip the build-environment dependency check.
+    :return: A :class:`BuildResult` whose ``ok`` flag reports success.
+    """
+    root = _repo_root()
+    spec = root / SPEC_REL
+    if not spec.is_file():
+        return BuildResult(
+            stage="prepare",
+            message=f"spec not found: {spec}",
+        )
+    if not skip_toolchain and not _check_toolchain():
+        return BuildResult(stage="prepare", message="toolchain check failed")
+
+    dist_dir = root / "dist" / APP_NAME
+    work_dir = root / "build" / WORK_NAME
+    _clean([work_dir, dist_dir] if clean_dist else [work_dir])
+
+    code = _run_pyinstaller(spec, root)
+    if code != 0:
+        return BuildResult(
+            stage="pyinstaller",
+            message=f"PyInstaller exited with status {code}",
+        )
+    return _validate(root, smoke_seconds=smoke_seconds)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Build the desktop bundle and return a process exit code."""
     parser = argparse.ArgumentParser(
@@ -435,32 +477,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Python     : {sys.version.split()[0]} ({sys.executable})")
     print(f"Repository : {root}")
 
-    spec = root / SPEC_REL
-    if not spec.is_file():
-        print(f"ERROR: spec not found: {spec}", file=sys.stderr)
-        return 2
-    if not args.skip_toolchain and not _check_toolchain():
-        print("ERROR: toolchain check failed.", file=sys.stderr)
-        return 2
-
-    dist_dir = root / "dist" / APP_NAME
-    work_dir = root / "build" / WORK_NAME
-    if args.clean_dist:
-        _clean([work_dir, dist_dir])
-    else:
-        _clean([work_dir])
-
-    code = _run_pyinstaller(spec, root)
-    if code != 0:
-        print(f"ERROR: PyInstaller exited with status {code}.", file=sys.stderr)
-        return 3
-
-    result = _validate(root, smoke_seconds=args.smoke_seconds if args.smoke else 0.0)
+    result = build(
+        clean_dist=args.clean_dist,
+        smoke_seconds=args.smoke_seconds if args.smoke else 0.0,
+        skip_toolchain=args.skip_toolchain,
+    )
     _print_report(result)
     if not result.ok:
         print()
         print(f"Build FAILED for {APP_NAME}: {result.message}")
-        return 4
+        return {"prepare": 2, "pyinstaller": 3}.get(result.stage, 4)
 
     print()
     print(f"{APP_NAME} built successfully.")

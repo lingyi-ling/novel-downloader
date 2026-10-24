@@ -16,7 +16,7 @@ Core features include:
 * Text cleaning and enhancement pipeline (processors)
 * Pluggable site parsers and processors
 * Multi-platform music downloading
-* CLI (`novel-cli`) and local REST API (`novel-api`) endpoints
+* CLI (`novel-cli`), local REST API (`novel-api`), desktop client (`novel-desktop`), and Android client
 * Programmable API
 
 > Requirements: **Python 3.11+** (development environment: Python 3.13)
@@ -27,7 +27,7 @@ Core features include:
 
 ### Multi-site Search
 
-* Covers 57 search sites; aggregate searches or target one or more sites
+* Covers 57 search sites and 83 download sites; aggregate searches or target one or more sites
 * Results can be sorted by quality, priority, site, title, author, word count, or update time
 * Extensible through rule-driven book sources, adding a site without writing Python code
 
@@ -90,7 +90,9 @@ Core features include:
 ### Usage
 
 * Command line (`novel-cli`)
+* Desktop client (`novel-desktop`)
 * Local REST API (`novel-api`)
+* Android client (`android/`)
 * Python programming interface
 
 ---
@@ -181,6 +183,14 @@ The API reuses the same service layer as the CLI and exposes endpoints for site 
 
 * See [Local REST API](guide/api.md) for endpoints and authentication
 * Swagger UI: `http://127.0.0.1:8081/docs`
+
+### Desktop Client
+
+`novel-desktop` provides a Tkinter graphical interface with search, the download queue, export history, and music downloads:
+
+```bash
+novel-desktop
+```
 
 ### Music Download (CLI)
 
@@ -284,6 +294,9 @@ pip install .
 
 * **Sites that require login**: refer to [Copying Cookies](guide/copy-cookies.md).
 * **Location of exported files**: see [File Saving](guide/file-saving.md).
+* **Environment self-check**: run `novel-cli doctor`.
+* **Errors or connection problems**: see [Troubleshooting](guide/troubleshooting.md).
+* **Understanding the code structure**: see [Architecture](guide/architecture.md).
 
 ---
 
