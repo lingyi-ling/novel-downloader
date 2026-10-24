@@ -15,6 +15,8 @@ traceback when it is missing.
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from dataclasses import dataclass
@@ -23,7 +25,7 @@ from typing import Any
 from novel_downloader.apps.cli import ui
 from novel_downloader.infra.i18n import t
 
-from .base import Command, localize_help
+from .base import EXIT_FAILURE, EXIT_USAGE, Command, localize_help
 
 #: Quality levels understood by the engine (NetEase names, the common subset).
 _LEVELS = ("hires", "lossless", "exhigh", "higher", "standard")
@@ -48,6 +50,8 @@ class _MusicEngine:
     default_download_dir: Any
     settings: Any
     login_expired: type[BaseException]
+    health_check: Any
+    export_m3u: Any
 
     def labels(self) -> list[tuple[str, str]]:
         """Return ``(key, label)`` pairs for every registered platform."""
@@ -74,6 +78,7 @@ def _load_engine() -> _MusicEngine:
         from novel_downloader.apps.music.downloader import (
             DownloadOptions,
             download_many,
+            export_m3u,
         )
         from novel_downloader.apps.music.paths import default_download_dir
         from novel_downloader.apps.music.providers import (
@@ -81,6 +86,7 @@ def _load_engine() -> _MusicEngine:
             create,
             platform_note,
         )
+        from novel_downloader.apps.music.providers.health import health_check
         from novel_downloader.apps.music.weapi import LoginExpired
     except Exception as exc:  # optional dependency guard
         raise _MusicUnavailable(str(exc)) from exc
@@ -94,6 +100,8 @@ def _load_engine() -> _MusicEngine:
         default_download_dir=default_download_dir,
         settings=music_settings,
         login_expired=LoginExpired,
+        health_check=health_check,
+        export_m3u=export_m3u,
     )
 
 
@@ -341,7 +349,13 @@ class MusicCmd(Command):
             dest="action", required=True, title=t("Subcommands")
         )
 
-        for subcmd in (MusicPlatformsCmd, MusicSearchCmd, MusicDownloadCmd):
+        for subcmd in (
+            MusicPlatformsCmd,
+            MusicSearchCmd,
+            MusicDownloadCmd,
+            MusicExportM3uCmd,
+            MusicHealthCmd,
+        ):
             subcmd.register(sub)
 
     @classmethod
@@ -598,3 +612,203 @@ class MusicDownloadCmd(Command):
                 ok=ok, skip=skip, fail=fail
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# export-m3u / health helpers
+# ---------------------------------------------------------------------------
+
+#: Characters that cannot appear in a Windows/Unix file name.
+_ILLEGAL_FILENAME = re.compile(r'[<>:"/\|?*\x00-\x1f]')
+
+
+def _playlist_filename(keyword: str) -> str:
+    """Build a safe ``<keyword>.m3u8`` file name."""
+    stem = _ILLEGAL_FILENAME.sub("_", keyword).strip().rstrip(". ")
+    return f"{stem[:120] or 'playlist'}.m3u8"
+
+
+def _default_playlist_path(keyword: str, out_dir: str) -> str:
+    """Return the default playlist path inside the music output directory."""
+    return os.path.join(out_dir, _playlist_filename(keyword))
+
+
+def _split_playable(tracks: list[Any]) -> tuple[list[Any], list[Any]]:
+    """
+    Split search results into ``(tracks with a local path, skipped tracks)``.
+
+    ``export_m3u`` needs the downloaded file location, so tracks that were
+    never downloaded (no ``Track.path``) cannot be written to the playlist.
+    """
+    ready: list[Any] = []
+    skipped: list[Any] = []
+    for track in tracks:
+        path = getattr(track, "path", "")
+        if isinstance(path, str) and path.strip():
+            ready.append(track)
+        else:
+            skipped.append(track)
+    return ready, skipped
+
+
+class MusicExportM3uCmd(Command):
+    name = "export-m3u"
+    help = t("Export search results to an M3U playlist (no downloading).")
+
+    @classmethod
+    def add_arguments(cls, parser: ArgumentParser) -> None:
+        parser.add_argument(
+            "--keyword",
+            "-k",
+            required=True,
+            metavar="KEYWORD",
+            help=t("Keyword used to search for the tracks to add."),
+        )
+        parser.add_argument(
+            "--platform",
+            default="netease",
+            metavar="KEY",
+            help=t("Music platform key (default: netease)."),
+        )
+        parser.add_argument(
+            "--limit",
+            "-l",
+            type=int,
+            default=20,
+            metavar="N",
+            help=t("Maximum number of results (default: 20)."),
+        )
+        parser.add_argument(
+            "--out",
+            metavar="FILE",
+            help=t("Playlist path (default: <output directory>/<keyword>.m3u8)."),
+        )
+
+    @classmethod
+    def run(cls, args: Namespace) -> None:
+        engine = _require_engine()
+        keyword = str(args.keyword or "").strip()
+        if not keyword:
+            ui.error(t("No keyword entered."))
+            raise SystemExit(EXIT_USAGE)
+
+        platform = str(args.platform)
+        limit = max(1, int(args.limit))
+
+        provider = _create_provider(engine, platform)
+        _print_platform_note(engine, platform)
+        tracks, _total = _search(engine, provider, keyword, limit, show_status=True)
+        if not tracks:
+            ui.warn(t("No results found for '{keyword}'.").format(keyword=keyword))
+            return
+
+        ui.info(
+            t("Found {count} result(s) for '{keyword}'.").format(
+                count=len(tracks), keyword=keyword
+            )
+        )
+
+        ready, skipped = _split_playable(tracks)
+        if skipped:
+            ui.warn(
+                t(
+                    "Skipped {count} track(s) without a local file path; only "
+                    "already downloaded tracks are written to the playlist."
+                ).format(count=len(skipped))
+            )
+        if not ready:
+            ui.error(
+                t(
+                    "No matched track has a local file path; no playlist was "
+                    "written. Download the tracks first."
+                )
+            )
+            raise SystemExit(EXIT_FAILURE)
+
+        settings = engine.settings.load_settings()
+        out_dir = str(settings.get("out_dir") or engine.default_download_dir())
+        out_path = str(args.out or _default_playlist_path(keyword, out_dir))
+
+        try:
+            playlist = engine.export_m3u(ready, out_path)
+        except Exception as exc:
+            ui.error(t("Could not write playlist: {error}").format(error=exc))
+            raise SystemExit(EXIT_FAILURE) from exc
+
+        ui.success(
+            t("Exported {count} track(s) to {path}").format(
+                count=len(ready), path=playlist
+            )
+        )
+
+
+class MusicHealthCmd(Command):
+    name = "health"
+    help = t("Check whether music platforms can run a search.")
+
+    @classmethod
+    def add_arguments(cls, parser: ArgumentParser) -> None:
+        parser.add_argument(
+            "--platform",
+            metavar="KEY",
+            help=t("Music platform key to check (default: every platform)."),
+        )
+        parser.add_argument(
+            "--keyword",
+            default="test",
+            metavar="KEYWORD",
+            help=t("Keyword used for the connectivity probe (default: test)."),
+        )
+
+    @classmethod
+    def run(cls, args: Namespace) -> None:
+        engine = _require_engine()
+        keys = engine.platform_keys()
+        if not keys:
+            ui.warn(t("No music platforms are available."))
+            return
+
+        requested = str(args.platform or "").strip()
+        if requested:
+            if requested not in keys:
+                ui.error(
+                    t("Unknown music platform: {platform}. Available: {keys}").format(
+                        platform=requested,
+                        keys=", ".join(keys),
+                    )
+                )
+                raise SystemExit(EXIT_USAGE)
+            selected = [requested]
+        else:
+            selected = keys
+
+        keyword = str(args.keyword or "test").strip() or "test"
+        rows: list[list[str]] = []
+        failed = 0
+
+        for key in selected:
+            with ui.status(t("Checking {platform}...").format(platform=key)):
+                result = engine.health_check(key, keyword)
+
+            ok = bool(result.get("ok"))
+            elapsed = int(result.get("elapsed_ms") or 0)
+            error_text = str(result.get("error") or "")
+            if not ok:
+                failed += 1
+            rows.append(
+                [
+                    key,
+                    t("ok") if ok else t("FAIL"),
+                    f"{elapsed} ms",
+                    error_text or "-",
+                ]
+            )
+
+        ui.render_table(
+            t("Music platform health"),
+            [t("Platform"), t("Status"), t("Time (ms)"), t("Error")],
+            rows,
+        )
+
+        if failed:
+            raise SystemExit(EXIT_FAILURE)

@@ -86,15 +86,21 @@ X-API-Key: my-secret
 | `GET` | `/api/v1/tasks/{task_id}` | 查询单个任务；不存在返回 `404`。 |
 | `POST` | `/api/v1/tasks` | 新增下载任务。 |
 | `POST` | `/api/v1/tasks/{task_id}/cancel` | 取消待执行或运行中的任务。 |
+| `GET` | `/api/v1/watchlist` | 追更列表。 |
+| `POST` | `/api/v1/watchlist` | 追更一本书（重复添加只刷新条目）。 |
+| `DELETE` | `/api/v1/watchlist/{site}/{book_id}` | 取消追更；不存在返回 `404`。 |
+| `POST` | `/api/v1/watchlist/check` | 检查追更书籍的新章节，不启动下载。 |
 | `GET` | `/api/v1/history` | 列出导出目录中的 `txt`/`epub` 文件。 |
 | `GET` | `/api/v1/music/platforms` | 音乐平台列表与使用提示。 |
 | `POST` | `/api/v1/music/search` | 在指定音乐平台搜索歌曲。 |
 | `POST` | `/api/v1/music/download` | 同步下载一首或多首歌曲。 |
 | `POST` | `/api/v1/music/jobs` | 创建异步音乐下载任务，返回 `202 {job_id}`。 |
 | `GET` | `/api/v1/music/jobs/{job_id}` | 查询异步音乐任务状态与进度。 |
+| `POST` | `/api/v1/music/export` | 把已下载曲目导出为 M3U8 歌单。 |
+| `GET` | `/api/v1/music/health` | 平台连通性自检（单个或全部平台）。 |
 
-Swagger UI（`/docs`）按 `system`、`search`、`tasks`、`history`、`music`
-分组展示以上端点。
+Swagger UI（`/docs`）按 `system`、`search`、`tasks`、`watchlist`、
+`history`、`music` 分组展示以上端点。
 
 任务对象字段：
 
@@ -277,6 +283,81 @@ curl -s "$BASE/api/v1/tasks/<task_id>" -H "Authorization: Bearer $TOKEN"
 
 取消任务成功返回 `{"ok": true}`；任务不存在返回 `404`。
 
+## 追更
+
+追更列表与 `novel-cli follow` 共用同一份 `watchlist.json`
+（位于应用数据目录，可用 `NOVEL_HOME` 覆盖）。
+
+`GET /api/v1/watchlist`：
+
+```json
+{
+  "total": 1,
+  "books": [
+    {
+      "site": "b520",
+      "book_id": "8_8187",
+      "title": "示例小说",
+      "last_chapter": "第 120 章",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    }
+  ]
+}
+```
+
+`POST /api/v1/watchlist`：
+
+```json
+{"site": "b520", "book_id": "8_8187", "title": "示例小说"}
+```
+
+响应 `{"created": true, "entry": {...}}`。重复添加已存在的书籍返回
+`created: false`；未提供 `title` 时保留原有标题和最新章节。
+
+`DELETE /api/v1/watchlist/{site}/{book_id}` 成功返回 `{"ok": true}`，
+该书未被追更时返回 `404`：
+
+```json
+{"detail": "Book not in watchlist: b520/8_8187"}
+```
+
+`POST /api/v1/watchlist/check`：
+
+```json
+{"download": false}
+```
+
+检查会针对每本书在其来源站点做一次单站搜索（与 `novel-cli follow check`
+相同），把最新章节写回 `last_chapter`。**不会启动任何下载。** 响应：
+
+```json
+{
+  "checked": 2,
+  "updated": 1,
+  "failed": 0,
+  "download": false,
+  "needs_download": [
+    {
+      "site": "b520",
+      "book_id": "8_8187",
+      "title": "示例小说",
+      "previous_chapter": "第 119 章",
+      "last_chapter": "第 120 章",
+      "found": true,
+      "changed": true,
+      "needs_download": true,
+      "error": null
+    }
+  ],
+  "items": ["...每本书的结果..."]
+}
+```
+
+- 单个站点搜索失败只影响该条目（`error` 非空，计入 `failed`），其余照常检查。
+- `needs_download` 是需要下载的条目；`items` 包含所有条目的完整结果。
+- `download=true` 只是在这些条目上附加可直接提交给 `POST /api/v1/tasks`
+  的 `task` 对象，仍然不会在服务端排队下载。
+
 ## 导出文件
 
 ```json
@@ -423,12 +504,96 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
     与后续 `GET /music/jobs/{job_id}` 请求路由到同一进程，或改用
     `POST /music/download` 同步端点。
 
+### 导出歌单
+
+`POST /api/v1/music/export` 把已经下载到本地的曲目写成 M3U8 歌单，不做任何
+网络请求。每首曲目必须带本地 `path`（通常取自下载结果或 `music/download`
+的返回值），没有 `path` 的曲目计入 `skipped`：
+
+```json
+{
+  "platform": "netease",
+  "tracks": [
+    {
+      "id": "186016",
+      "name": "晴天",
+      "artists": "周杰伦",
+      "duration_s": 269,
+      "path": "D:/Music/周杰伦/叶惠美/晴天 - 周杰伦.mp3"
+    }
+  ],
+  "out_path": "D:/Music/playlists/favorites.m3u8"
+}
+```
+
+- `out_path` 以 `.m3u` / `.m3u8` 结尾时视为文件路径；其他值视为目录，
+  并在其中生成 `playlist-<UTC 时间戳>.m3u8`。
+- 省略 `out_path` 时写入音乐设置的 `out_dir`（`music settings out_dir`）。
+- `platform` 必须是 `/music/platforms` 返回的 key，否则返回 `400`。
+
+响应：
+
+```json
+{"path": "D:/Music/playlists/favorites.m3u8", "tracks_written": 1, "skipped": 0}
+```
+
+### 平台健康检查
+
+`GET /api/v1/music/health` 对每个平台做一次有界搜索（不解析直链、不下载）。
+省略 `platform` 时并发检查全部已注册平台；`timeout` 为单个平台的预算
+（默认 `5` 秒，范围 `1..60`）：
+
+```json
+[
+  {"platform": "netease", "ok": true, "elapsed_ms": 812, "error": ""},
+  {"platform": "qq", "ok": false, "elapsed_ms": 5003, "error": "搜索超时（>5s）"}
+]
+```
+
+指定未知平台返回 `400`。
+
 若未安装音乐可选依赖（`mutagen`、`qrcode`、`websocket-client` 等），
 音乐端点返回 `503` 并附安装提示，而不是 `500`：
 
 ```json
 {"detail": "Music support is not available: ... Install it with: pip install \"novel-downloader[music]\""}
 ```
+
+## 任务完成回调（Webhook）
+
+设置环境变量 `NOVEL_API_WEBHOOK` 后，任何下载任务进入终态
+（`completed`、`cancelled`、`failed`）时，API 会向该 URL 发送：
+
+```json
+{
+  "event": "task_finished",
+  "task": {
+    "task_id": "a1b2c3",
+    "title": "示例小说",
+    "site": "b520",
+    "book_id": "8_8187",
+    "status": "completed",
+    "chapters_done": 120,
+    "chapters_total": 120,
+    "progress": 1.0,
+    "error": null,
+    "exported_paths": {"txt": "downloads/示例小说.txt"},
+    "created_at": 1710000000.0,
+    "finished_at": 1710000100.0
+  }
+}
+```
+
+```bash
+NOVEL_API_WEBHOOK=https://example.invalid/hooks/novel novel-api
+```
+
+- 发送在后台守护线程中进行，单次超时 `5` 秒；失败（连接错误、超时、非 2xx）
+  只写日志，不影响任务执行或 API 响应。
+- 未配置（或显式传入 `create_app(webhook_url="")`）时不安装 watcher，也不做
+  任何轮询。
+- API 启动时已经结束的任务不会触发回调；每个任务只通知一次。
+- 也可在代码中配置：`create_app(webhook_url="https://...")`。
 
 ## 请求限制与超时
 
@@ -440,8 +605,11 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
 | 端点 | 请求体 | 列表长度 |
 | --- | --- | --- |
 | `POST /api/v1/search` | ≤ 1 MiB | — |
+| `POST /api/v1/watchlist` | ≤ 1 MiB | — |
+| `POST /api/v1/watchlist/check` | ≤ 1 MiB | — |
 | `POST /api/v1/music/search` | ≤ 1 MiB | — |
 | `POST /api/v1/music/download` | ≤ 1 MiB | `tracks` ≤ 200 |
+| `POST /api/v1/music/export` | ≤ 1 MiB | `tracks` ≤ 200 |
 | `POST /api/v1/music/jobs` | ≤ 1 MiB | `tracks` ≤ 200 |
 
 `tracks` 超过 `200` 首返回 `422`，`detail` 会指明数量上限。
@@ -468,9 +636,9 @@ app = create_app(timeouts={"search": 30.0, "music_download": 600.0})
 
 | 状态码 | 场景 |
 | --- | --- |
-| `400` | 未知音乐平台；音乐平台初始化失败；同步音乐下载失败。 |
+| `400` | 未知音乐平台；音乐平台初始化失败；同步音乐下载失败；歌单写入失败。 |
 | `401` | 已配置 token，但请求缺少或携带了错误的 token。 |
-| `404` | 任务 ID 不存在；音乐任务 ID 不存在；静态文件不存在。 |
+| `404` | 任务 ID 不存在；音乐任务 ID 不存在；追更条目不存在；静态文件不存在。 |
 | `413` | 请求体超过该端点的大小上限。 |
 | `422` | 请求参数校验失败（缺少必填字段、数值越界、`tracks` 过多等）。 |
 | `500` | 服务端内部错误，固定返回 `{"detail": "Internal server error"}`，不泄漏堆栈。 |
@@ -590,6 +758,34 @@ with NovelApiClient("http://127.0.0.1:8081", token="my-secret") as api:
 - `iter_tasks()` 使用 `httpx` 的流式请求解析 SSE；只产出 `snapshot` 事件
   的 `data`（已从 JSON 解码）。生成器被关闭或循环 `break` 时连接随即关闭。
   传输错误与非 2xx 响应抛出 `ApiError`。
+
+追更与音乐相关方法：
+
+```python
+with NovelApiClient("http://127.0.0.1:8081", token="my-secret") as api:
+    api.add_watch("b520", "8_8187", title="示例小说")
+    print(api.watchlist()["books"])
+
+    result = api.check_watchlist(download=True)
+    for item in result["needs_download"]:
+        # 需要时由调用方自己排队下载（check 本身不会下载）
+        api.add_task(item["site"], item["book_id"], item.get("title"))
+
+    playlist = api.music_export(
+        "netease",
+        [{"id": "186016", "name": "晴天", "path": "D:/Music/晴天.mp3"}],
+        out_path="D:/Music/favorites.m3u8",
+    )
+    print(playlist["path"], playlist["tracks_written"], playlist["skipped"])
+
+    for probe in api.music_health("netease"):
+        print(probe["platform"], probe["ok"], probe["elapsed_ms"])
+```
+
+- `watchlist()` / `add_watch()` / `remove_watch()` 对应追更 CRUD。
+- `check_watchlist(download=False)` 返回与 `POST /watchlist/check` 相同的结构。
+- `music_export()` 与 `music_health()` 分别覆盖歌单导出和平台自检；
+  `music_health()` 直接返回列表。
 
 ## 安全提示
 

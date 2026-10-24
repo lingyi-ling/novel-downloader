@@ -24,10 +24,19 @@ Additional hardening
   :class:`novel_downloader.apps.api.middleware.BodySizeLimitMiddleware`).
 * Every error response is shaped as ``{"detail": ...}`` and unexpected
   exceptions are turned into a stack-trace-free ``500``.
+
+Webhook
+-------
+When ``NOVEL_API_WEBHOOK`` (or ``create_app(webhook_url=...)``) is set, each
+download task that reaches a terminal state is announced with a background
+``POST {"event": "task_finished", "task": {...}}`` carrying a 5-second timeout.
+Delivery failures are logged only; they never block the task manager.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
@@ -46,7 +55,17 @@ from .middleware import (
     BodySizeLimitMiddleware,
     register_error_handlers,
 )
-from .routes import OPENAPI_TAGS, router
+from .routes import OPENAPI_TAGS, router, task_to_dict
+from .webhook import (
+    TaskFinishedWatcher,
+    WebhookNotifier,
+    webhook_url_from_env,
+)
+
+logger = logging.getLogger(__name__)
+
+#: Seconds between two webhook watcher snapshots.
+WEBHOOK_POLL_INTERVAL = 1.0
 
 
 def _resolve_output_dir(output_dir: str | Path | None) -> Path:
@@ -62,12 +81,43 @@ def _resolve_output_dir(output_dir: str | Path | None) -> Path:
     return Path(raw).expanduser().resolve()
 
 
+async def _watch_finished_tasks(
+    watcher: TaskFinishedWatcher,
+    *,
+    interval: float = WEBHOOK_POLL_INTERVAL,
+) -> None:
+    """
+    Poll the task manager and deliver one webhook per newly finished task.
+
+    Runs until cancelled by the lifespan shutdown. A snapshot error is logged
+    and the loop continues: webhook observation must never break the API.
+    """
+    while True:
+        try:
+            watcher.poll(manager.snapshot(), serialize=task_to_dict)
+        except Exception:  # noqa: BLE001 - observability must be best-effort
+            logger.warning("Task webhook watcher failed", exc_info=True)
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Stop background workers when the API process shuts down."""
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    """Start the optional webhook watcher and stop workers on shutdown."""
+    watcher_task: asyncio.Task[None] | None = None
+    notifier = getattr(application.state, "webhook_notifier", None)
+    if notifier is not None:
+        watcher = TaskFinishedWatcher(notifier)
+        # Tasks already finished before startup must not trigger a webhook.
+        watcher.seed(manager.snapshot())
+        watcher_task = asyncio.create_task(_watch_finished_tasks(watcher))
+
     try:
         yield
     finally:
+        if watcher_task is not None:
+            watcher_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher_task
         await manager.close()
 
 
@@ -78,6 +128,7 @@ def create_app(
     output_dir: str | Path | None = None,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     timeouts: Mapping[str, float] | None = None,
+    webhook_url: str | None = None,
 ) -> FastAPI:
     """
     Build the REST API application.
@@ -94,16 +145,23 @@ def create_app(
         back to the defaults in
         :data:`novel_downloader.apps.api.routes.BLOCKING_TIMEOUTS`. Mainly
         useful in tests.
+    :param webhook_url: Optional URL receiving ``task_finished`` events; when
+        ``None`` the :data:`NOVEL_API_WEBHOOK` environment variable is used.
+        An empty string disables the webhook explicitly.
     :return: A configured :class:`fastapi.FastAPI` instance.
     """
     resolved_token = token if token is not None else os.environ.get("NOVEL_API_TOKEN")
+    resolved_webhook = (
+        webhook_url if webhook_url is not None else webhook_url_from_env()
+    )
 
     application = FastAPI(
         title="Novel Downloader API",
         description=(
             "Local REST API for the Novel Downloader toolkit: aggregated book "
             "search (including a Server-Sent Events stream), download task "
-            "management, exported-file history and the optional music engine."
+            "management, watchlist checks, exported-file history and the "
+            "optional music engine."
         ),
         version=__version__,
         openapi_tags=OPENAPI_TAGS,
@@ -111,6 +169,10 @@ def create_app(
     )
     application.state.api_token = resolved_token or None
     application.state.api_timeouts = dict(timeouts or {})
+    application.state.webhook_url = resolved_webhook or None
+    application.state.webhook_notifier = (
+        WebhookNotifier(resolved_webhook) if resolved_webhook else None
+    )
 
     # Registered before the app is served: turns unhandled exceptions into a
     # minimal 500 body and gives validation errors a readable ``detail``.

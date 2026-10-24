@@ -10,13 +10,98 @@ validate a rule file without touching any network.
 from __future__ import annotations
 
 import json
+import re
+import tempfile
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from pathlib import Path
+from urllib import request as urllib_request
+from urllib.parse import urlsplit
 
 from novel_downloader.apps.cli import ui
 from novel_downloader.infra.i18n import t
 
-from .base import EXIT_FAILURE, Command, fail, localize_help
+from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail, localize_help
+
+#: Hard limit for a remotely fetched rule file (1 MiB).
+_MAX_RULE_BYTES = 1024 * 1024
+
+#: Timeout for the remote rule download, in seconds.
+_RULE_TIMEOUT = 15.0
+
+#: User agent sent when fetching a rule (some hosts reject the default).
+_RULE_USER_AGENT = "novel-cli/rule-downloader"
+
+_ILLEGAL_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+class _RuleDownloadError(Exception):
+    """Raised when a remote rule cannot be fetched or is too large."""
+
+
+def _validate_rule_url(url: str) -> str:
+    """
+    Validate and normalize a remote rule URL.
+
+    Only ``http`` and ``https`` are accepted; anything else (``file:``,
+    ``ftp:``, a bare path, ...) is a usage error.
+
+    :raises ValueError: When the URL is not an absolute HTTP(S) URL.
+    """
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(url)
+    return url.strip()
+
+
+def _download_rule(
+    url: str,
+    *,
+    timeout: float = _RULE_TIMEOUT,
+    max_bytes: int = _MAX_RULE_BYTES,
+) -> bytes:
+    """
+    Download a rule JSON document with a hard size bound.
+
+    :param url: Absolute HTTP(S) URL.
+    :param timeout: Socket timeout in seconds.
+    :param max_bytes: Maximum accepted response size.
+    :raises ValueError: When ``url`` is not an HTTP(S) URL.
+    :raises _RuleDownloadError: When the response is empty/too large.
+    :raises OSError: When the network request fails.
+    """
+    target = _validate_rule_url(url)
+    request = urllib_request.Request(
+        target,
+        headers={"User-Agent": _RULE_USER_AGENT},
+    )
+    with urllib_request.urlopen(request, timeout=timeout) as response:
+        data: bytes = response.read(max_bytes + 1)
+
+    if len(data) > max_bytes:
+        raise _RuleDownloadError(
+            t("The remote rule is larger than {limit} bytes.").format(limit=max_bytes)
+        )
+    if not data.strip():
+        raise _RuleDownloadError(t("The remote rule is empty."))
+    return data
+
+
+def _decode_rule(data: bytes) -> str:
+    """Decode a downloaded rule as UTF-8 (accepting a BOM)."""
+    return data.decode("utf-8-sig")
+
+
+def _rule_name(name: str | None, url: str) -> str:
+    """Pick a safe file stem for an installed remote rule."""
+    raw = (name or "").strip()
+    if not raw:
+        raw = urlsplit(url).path.rsplit("/", 1)[-1]
+        if raw.lower().endswith(".json"):
+            raw = raw[:-5]
+    if raw.lower().endswith(".json"):
+        raw = raw[:-5]
+    stem = _ILLEGAL_NAME.sub("_", raw).strip().rstrip(". ")
+    return stem[:120]
 
 
 class SourcesCmd(Command):
@@ -48,7 +133,21 @@ class SourcesCmd(Command):
         p_add = cls._add_subparser(
             sub, "add", t("Install a rule file into your user rules directory.")
         )
-        p_add.add_argument("path", help=t("Path to a rule JSON file."))
+        p_add.add_argument(
+            "path",
+            nargs="?",
+            help=t("Path to a local rule JSON file."),
+        )
+        p_add.add_argument(
+            "--url",
+            metavar="URL",
+            help=t("Download the rule JSON from this HTTP(S) URL instead."),
+        )
+        p_add.add_argument(
+            "--name",
+            metavar="NAME",
+            help=t("File name (without .json) to install a remote rule as."),
+        )
         p_add.add_argument(
             "--force", action="store_true", help=t("Overwrite an existing rule file.")
         )
@@ -77,7 +176,12 @@ class SourcesCmd(Command):
         if action == "check":
             cls._check(args.path)
         elif action == "add":
-            cls._add(args.path, force=bool(getattr(args, "force", False)))
+            cls._add(
+                args.path,
+                url=args.url,
+                name=args.name,
+                force=bool(getattr(args, "force", False)),
+            )
         elif action == "remove":
             cls._remove(args.site_key)
         else:
@@ -195,9 +299,26 @@ class SourcesCmd(Command):
 
     # ------------------------------------------------------------------ #
     @classmethod
-    def _add(cls, path_str: str, *, force: bool) -> None:
+    def _add(
+        cls,
+        path_str: str | None,
+        *,
+        url: str | None = None,
+        name: str | None = None,
+        force: bool,
+    ) -> None:
+        if bool(path_str) == bool(url):
+            fail(t("Provide exactly one of PATH or --url."), EXIT_USAGE)
+        if name and not url:
+            fail(t("--name can only be used together with --url."), EXIT_USAGE)
+
+        if url:
+            cls._add_remote(url, name=name, force=force)
+            return
+
         from novel_downloader.plugins.rule import RuleError, install_rule
 
+        assert path_str is not None  # narrowed by the check above
         path = Path(path_str)
         if not path.is_file():
             fail(t("Rule file not found: {path}").format(path=path_str))
@@ -206,6 +327,51 @@ class SourcesCmd(Command):
             target = install_rule(path, force=force)
         except RuleError as e:
             fail(t("Could not install {path}: {err}").format(path=path_str, err=e))
+
+        ui.success(t("Installed rule to {target}").format(target=target))
+
+    @classmethod
+    def _add_remote(cls, url: str, *, name: str | None, force: bool) -> None:
+        """Download, validate and install a rule hosted at ``url``."""
+        from novel_downloader.plugins.rule import RuleError, install_rule
+        from novel_downloader.plugins.rule.model import parse_rule
+
+        try:
+            raw = _download_rule(url)
+        except ValueError:
+            fail(
+                t("Unsupported rule URL: {url}").format(url=url),
+                EXIT_USAGE,
+            )
+        except _RuleDownloadError as e:
+            fail(str(e))
+        except Exception as e:
+            fail(t("Could not download {url}: {err}").format(url=url, err=e))
+
+        try:
+            text = _decode_rule(raw)
+        except UnicodeDecodeError as e:
+            fail(t("The remote rule is not valid UTF-8: {err}").format(err=e))
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as e:
+            fail(t("Invalid JSON in {path}: {err}").format(path=url, err=e))
+
+        source = _rule_name(name, url) or "remote-rule"
+        try:
+            rule = parse_rule(payload, source=source)
+        except RuleError as e:
+            fail(t("Invalid rule in {path}: {err}").format(path=url, err=e))
+
+        stem = _rule_name(name, url) or rule.site_key
+        with tempfile.TemporaryDirectory(prefix="novel-rule-") as tmp:
+            temp_path = Path(tmp) / f"{stem}.json"
+            temp_path.write_text(text, encoding="utf-8")
+            try:
+                target = install_rule(temp_path, force=force)
+            except RuleError as e:
+                fail(t("Could not install {path}: {err}").format(path=url, err=e))
 
         ui.success(t("Installed rule to {target}").format(target=target))
 

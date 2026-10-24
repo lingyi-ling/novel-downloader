@@ -9,6 +9,7 @@ CLI command definitions. Each file corresponds to a subcommand.
 __all__ = ["commands"]
 
 from .clean import CleanCmd
+from .completion import CompletionCmd
 from .config import ConfigCmd
 from .doctor import DoctorCmd
 from .download import DownloadCmd
@@ -32,4 +33,5 @@ commands = [
     DoctorCmd,
     SourcesCmd,
     MusicCmd,
+    CompletionCmd,
 ]

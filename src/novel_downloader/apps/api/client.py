@@ -202,6 +202,27 @@ class NovelApiClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _request_value(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """Perform an API request and return the decoded JSON value."""
+        url = f"{self._api_base}/{path.lstrip('/')}"
+        try:
+            response = self._client.request(method, url, json=json, params=params)
+        except httpx.HTTPError as exc:
+            raise ApiError(0, f"{type(exc).__name__}: {exc}") from exc
+
+        if not response.is_success:
+            raise _error_from_response(response)
+        if not response.content:
+            return None
+        return _response_payload(response)
+
     def _request(
         self,
         method: str,
@@ -211,15 +232,12 @@ class NovelApiClient:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Perform an API request and return the decoded JSON object."""
-        url = f"{self._api_base}/{path.lstrip('/')}"
-        try:
-            response = self._client.request(method, url, json=json, params=params)
-        except httpx.HTTPError as exc:
-            raise ApiError(0, f"{type(exc).__name__}: {exc}") from exc
-
-        if not response.is_success:
-            raise _error_from_response(response)
-        return _as_mapping(response)
+        payload = self._request_value(method, path, json=json, params=params)
+        if payload is None:
+            return {}
+        if isinstance(payload, dict):
+            return cast(dict[str, Any], payload)
+        return {"data": payload}
 
     # ------------------------------------------------------------------
     # Meta
@@ -358,6 +376,47 @@ class NovelApiClient:
         return self._request("POST", f"tasks/{quote(task_id, safe='')}/cancel")
 
     # ------------------------------------------------------------------
+    # Watchlist (追更)
+    # ------------------------------------------------------------------
+
+    def watchlist(self) -> dict[str, Any]:
+        """Return the followed books (``total`` plus a ``books`` list)."""
+        return self._request("GET", "watchlist")
+
+    def add_watch(
+        self, site: str, book_id: str, title: str | None = None
+    ) -> dict[str, Any]:
+        """
+        Follow a book.
+
+        :return: ``{"created": bool, "entry": {...}}``. ``created`` is
+            ``false`` when the book was already followed.
+        """
+        body: dict[str, Any] = {"site": site, "book_id": book_id}
+        if title is not None:
+            body["title"] = title
+        return self._request("POST", "watchlist", json=body)
+
+    def remove_watch(self, site: str, book_id: str) -> dict[str, Any]:
+        """Stop following a book (``404`` when it is not followed)."""
+        return self._request(
+            "DELETE",
+            f"watchlist/{quote(site, safe='')}/{quote(book_id, safe='')}",
+        )
+
+    def check_watchlist(self, download: bool = False) -> dict[str, Any]:
+        """
+        Search every followed book's site for new chapters.
+
+        No download is started. ``download=True`` adds a ready-to-post
+        ``task`` body to each entry that needs an update.
+
+        :return: ``checked`` / ``updated`` / ``failed`` counts, the
+            ``needs_download`` entries and every per-book ``items`` outcome.
+        """
+        return self._request("POST", "watchlist/check", json={"download": download})
+
+    # ------------------------------------------------------------------
     # Exported files
     # ------------------------------------------------------------------
 
@@ -448,3 +507,37 @@ class NovelApiClient:
         if out_dir is not None:
             body["out_dir"] = str(out_dir)
         return self._request("POST", "music/download", json=body)
+
+    def music_export(
+        self,
+        platform: str,
+        tracks: list[dict[str, Any]],
+        out_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """
+        Write an M3U8 playlist for downloaded tracks.
+
+        Each track must carry a local ``path``; tracks without one are counted
+        in ``skipped``.
+
+        :return: ``{"path", "tracks_written", "skipped"}``.
+        """
+        body: dict[str, Any] = {"platform": platform, "tracks": tracks}
+        if out_path is not None:
+            body["out_path"] = str(out_path)
+        return self._request("POST", "music/export", json=body)
+
+    def music_health(self, platform: str | None = None) -> list[dict[str, Any]]:
+        """
+        Probe one or all music platforms.
+
+        :return: One dict per platform with ``platform``, ``ok``,
+            ``elapsed_ms`` and ``error``.
+        """
+        params = {"platform": platform} if platform is not None else None
+        payload = self._request_value("GET", "music/health", params=params)
+        if not isinstance(payload, list):
+            return []
+        return [
+            cast(dict[str, Any], item) for item in payload if isinstance(item, dict)
+        ]

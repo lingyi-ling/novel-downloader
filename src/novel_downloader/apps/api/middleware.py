@@ -35,8 +35,11 @@ DEFAULT_MAX_BODY_BYTES = 1024 * 1024
 BODY_LIMIT_ENDPOINTS: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", "/api/v1/search"),
+        ("POST", "/api/v1/watchlist"),
+        ("POST", "/api/v1/watchlist/check"),
         ("POST", "/api/v1/music/search"),
         ("POST", "/api/v1/music/download"),
+        ("POST", "/api/v1/music/export"),
         ("POST", "/api/v1/music/jobs"),
     }
 )

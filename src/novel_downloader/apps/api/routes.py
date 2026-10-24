@@ -23,7 +23,8 @@ import time
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import aclosing
 from dataclasses import asdict, dataclass
-from typing import Annotated, Any, TypeVar
+from pathlib import Path
+from typing import Annotated, Any, TypeVar, cast
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -39,14 +40,20 @@ from novel_downloader.apps.constants import (
 )
 from novel_downloader.apps.core.models import DownloadTask
 from novel_downloader.apps.core.task_manager import TaskManager, manager
+from novel_downloader.apps.core.watchlist import WatchEntry, WatchlistStore
+from novel_downloader.plugins import search as search_module
+from novel_downloader.plugins.ranking import normalize_text
 from novel_downloader.plugins.search import search, search_stream
 
 from .auth import require_token
 from .schemas import (
     MusicDownloadRequest,
+    MusicExportRequest,
     MusicSearchRequest,
     SearchRequest,
     TaskCreateRequest,
+    WatchlistAddRequest,
+    WatchlistCheckRequest,
 )
 
 #: OpenAPI groups shown in ``/docs``.
@@ -54,8 +61,9 @@ OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "system", "description": "Health checks and supported-site metadata."},
     {"name": "search", "description": "Aggregated book search across sites."},
     {"name": "tasks", "description": "Download task queue management."},
+    {"name": "watchlist", "description": "Followed books and new-chapter checks."},
     {"name": "history", "description": "Exported files served under /downloads."},
-    {"name": "music", "description": "Optional music search and download."},
+    {"name": "music", "description": "Optional music search, download and export."},
 ]
 
 #: Page size used when the caller supplies only one of ``offset`` / ``limit``.
@@ -79,6 +87,15 @@ router = APIRouter(
 def get_manager() -> TaskManager:
     """FastAPI dependency returning the process-wide task manager."""
     return manager
+
+
+def get_watchlist_store() -> WatchlistStore:
+    """
+    FastAPI dependency returning the watchlist store.
+
+    Tests override it with a store backed by a temporary file.
+    """
+    return WatchlistStore()
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +144,7 @@ async def _with_timeout(awaitable: Awaitable[_T], timeout: float, label: str) ->
         ) from exc
 
 
-def _task_to_dict(task: DownloadTask) -> dict[str, Any]:
+def task_to_dict(task: DownloadTask) -> dict[str, Any]:
     """Serialise a task for the JSON API."""
     return {
         "task_id": task.task_id,
@@ -327,7 +344,7 @@ def _tasks_snapshot(mgr: TaskManager) -> dict[str, list[dict[str, Any]]]:
     """Return the full, serialised task snapshot (the ``/tasks`` shape)."""
     snapshot = mgr.snapshot()
     return {
-        name: [_task_to_dict(task) for task in snapshot[name]] for name in _TASK_GROUPS
+        name: [task_to_dict(task) for task in snapshot[name]] for name in _TASK_GROUPS
     }
 
 
@@ -348,7 +365,7 @@ async def list_tasks(
     """
     groups, total, start, applied = _paginate_tasks(mgr.snapshot(), offset, limit)
     payload: dict[str, Any] = {
-        name: [_task_to_dict(task) for task in groups[name]] for name in _TASK_GROUPS
+        name: [task_to_dict(task) for task in groups[name]] for name in _TASK_GROUPS
     }
     payload.update({"total": total, "offset": start, "limit": applied})
     return payload
@@ -415,7 +432,7 @@ async def get_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task not found: {task_id}",
         )
-    return _task_to_dict(task)
+    return task_to_dict(task)
 
 
 @router.post("/tasks", tags=["tasks"])
@@ -426,7 +443,7 @@ async def create_task(
     """Queue a download task."""
     title = (body.title or "").strip() or f"{body.site} (id = {body.book_id})"
     task = await mgr.add_task(title=title, site=body.site, book_id=body.book_id)
-    return _task_to_dict(task)
+    return task_to_dict(task)
 
 
 @router.post("/tasks/{task_id}/cancel", tags=["tasks"])
@@ -441,6 +458,189 @@ async def cancel_task(
             detail=f"Task not found: {task_id}",
         )
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Watchlist (追更)
+# ---------------------------------------------------------------------------
+
+#: Results requested per site while looking for a book's latest chapter.
+WATCHLIST_CHECK_PER_SITE_LIMIT = 10
+
+#: Per-search time budget (seconds) used by ``POST /watchlist/check``.
+WATCHLIST_CHECK_TIMEOUT = 5.0
+
+
+def _match_watch_entry(entry: WatchEntry, results: list[Any]) -> dict[str, Any] | None:
+    """
+    Pick the search result that belongs to ``entry``.
+
+    A result from the same site with the exact book id wins; otherwise a result
+    whose normalized title equals the followed title is accepted (a site may
+    expose the same book under a different id). Mirrors the CLI's ``follow
+    check`` behaviour.
+    """
+    for result in results:
+        if result.get("site") != entry.site:
+            continue
+        if str(result.get("book_id", "")) == entry.book_id:
+            return cast(dict[str, Any], result)
+
+    if not entry.title:
+        return None
+
+    wanted = normalize_text(entry.title)
+    if not wanted:
+        return None
+    for result in results:
+        if result.get("site") != entry.site:
+            continue
+        if normalize_text(result.get("title", "")) == wanted:
+            return cast(dict[str, Any], result)
+    return None
+
+
+async def _check_watch_entry(
+    entry: WatchEntry,
+    store: WatchlistStore,
+    *,
+    download: bool,
+) -> dict[str, Any]:
+    """
+    Search one site for ``entry`` and update its stored last chapter.
+
+    Search failures are reported per entry so one broken site cannot fail the
+    whole check. No download is ever started.
+    """
+    item: dict[str, Any] = {
+        "site": entry.site,
+        "book_id": entry.book_id,
+        "title": entry.title,
+        "previous_chapter": entry.last_chapter,
+        "last_chapter": entry.last_chapter,
+        "found": False,
+        "changed": False,
+        "needs_download": False,
+        "error": None,
+    }
+
+    keyword = entry.title or entry.book_id
+    try:
+        results = await search_module.search(
+            keyword=keyword,
+            sites=[entry.site],
+            limit=None,
+            per_site_limit=WATCHLIST_CHECK_PER_SITE_LIMIT,
+            timeout=WATCHLIST_CHECK_TIMEOUT,
+            sort="quality",
+        )
+    except Exception as exc:  # noqa: BLE001 - per-book failure, never fatal
+        item["error"] = f"{type(exc).__name__}: {exc}"
+        return item
+
+    matched = _match_watch_entry(entry, results)
+    if matched is None:
+        return item
+
+    latest = str(matched.get("latest_chapter") or "").strip()
+    matched_title = str(matched.get("title") or "").strip()
+    if matched_title and not item["title"]:
+        item["title"] = matched_title
+    item["found"] = bool(latest)
+    if not latest:
+        return item
+
+    item["last_chapter"] = latest
+    if latest == entry.last_chapter:
+        return item
+
+    changed = store.update_latest(
+        entry.site,
+        entry.book_id,
+        latest,
+        title=matched_title,
+    )
+    item["changed"] = changed
+    item["needs_download"] = changed
+    if changed and download:
+        item["task"] = {
+            "site": entry.site,
+            "book_id": entry.book_id,
+            "title": item["title"] or None,
+        }
+    return item
+
+
+@router.get("/watchlist", tags=["watchlist"])
+async def list_watchlist(
+    store: Annotated[WatchlistStore, Depends(get_watchlist_store)],
+) -> dict[str, Any]:
+    """Return every followed book in file order."""
+    entries = store.entries()
+    return {
+        "total": len(entries),
+        "books": [entry.to_dict() for entry in entries],
+    }
+
+
+@router.post("/watchlist", tags=["watchlist"])
+async def add_watchlist(
+    body: WatchlistAddRequest,
+    store: Annotated[WatchlistStore, Depends(get_watchlist_store)],
+) -> dict[str, Any]:
+    """
+    Follow a book, or refresh an existing entry.
+
+    Re-adding a book keeps its stored title / last chapter unless a non-empty
+    replacement is supplied; ``created`` is ``false`` in that case.
+    """
+    entry, created = store.add(body.site, body.book_id, title=body.title)
+    return {"created": created, "entry": entry.to_dict()}
+
+
+@router.delete("/watchlist/{site}/{book_id}", tags=["watchlist"])
+async def remove_watchlist(
+    site: str,
+    book_id: str,
+    store: Annotated[WatchlistStore, Depends(get_watchlist_store)],
+) -> dict[str, bool]:
+    """Stop following a book."""
+    if not store.remove(site, book_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Book not in watchlist: {site}/{book_id}",
+        )
+    return {"ok": True}
+
+
+@router.post("/watchlist/check", tags=["watchlist"])
+async def check_watchlist(
+    body: WatchlistCheckRequest,
+    store: Annotated[WatchlistStore, Depends(get_watchlist_store)],
+) -> dict[str, Any]:
+    """
+    Search each followed book's site and record newly observed chapters.
+
+    Uses :func:`novel_downloader.plugins.search.search` against a single site
+    per book (the same strategy as ``novel-cli follow check``). Downloads are
+    never started: ``needs_download`` lists the entries whose chapter changed.
+    With ``download=true`` each such entry also carries a ready-to-post
+    ``task`` body for ``POST /api/v1/tasks``.
+    """
+    entries = store.entries()
+    items: list[dict[str, Any]] = []
+    for entry in entries:
+        items.append(await _check_watch_entry(entry, store, download=body.download))
+
+    needs_download = [item for item in items if item["needs_download"]]
+    return {
+        "checked": len(entries),
+        "updated": sum(1 for item in items if item["changed"]),
+        "failed": sum(1 for item in items if item["error"]),
+        "download": body.download,
+        "needs_download": needs_download,
+        "items": items,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +700,11 @@ class _MusicComponents:
     create: Any
     platform_note: Any
     track_cls: Any
+    # Added in Round 3. Defaults keep older test doubles constructible; the
+    # loader below always populates them.
+    export_m3u: Any = None
+    health_check: Any = None
+    load_settings: Any = None
 
 
 def _load_music_components() -> _MusicComponents:
@@ -518,6 +723,7 @@ def _load_music_components() -> _MusicComponents:
         from novel_downloader.apps.music.downloader import (
             DownloadOptions,
             download_many,
+            export_m3u,
         )
         from novel_downloader.apps.music.providers import (
             available_labels,
@@ -525,6 +731,8 @@ def _load_music_components() -> _MusicComponents:
             platform_note,
         )
         from novel_downloader.apps.music.providers.base import Track
+        from novel_downloader.apps.music.providers.health import health_check
+        from novel_downloader.apps.music.settings import load_settings
     except Exception as exc:  # noqa: BLE001 - optional dependency guard
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -543,6 +751,9 @@ def _load_music_components() -> _MusicComponents:
         create=create,
         platform_note=platform_note,
         track_cls=Track,
+        export_m3u=export_m3u,
+        health_check=health_check,
+        load_settings=load_settings,
     )
 
 
@@ -575,6 +786,125 @@ async def music_platforms() -> dict[str, Any]:
         for key, label in components.available_labels()
     ]
     return {"platforms": platforms}
+
+
+#: Per-platform budget (seconds) used by ``GET /music/health``.
+DEFAULT_MUSIC_HEALTH_TIMEOUT = 5.0
+
+#: Default file name for playlists exported without an explicit ``out_path``.
+_DEFAULT_PLAYLIST_SUFFIX = ".m3u8"
+
+
+def _music_platform_keys(components: _MusicComponents) -> list[str]:
+    """Return the registered platform keys in display order."""
+    return [str(key) for key, _label in components.available_labels()]
+
+
+def _require_music_platform(components: _MusicComponents, platform: str) -> None:
+    """Raise ``400`` for a platform that is not registered."""
+    if platform not in _music_platform_keys(components):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown music platform: {platform}",
+        )
+
+
+def _default_playlist_name() -> str:
+    """Return a timestamped playlist file name."""
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    return f"playlist-{stamp}{_DEFAULT_PLAYLIST_SUFFIX}"
+
+
+def _resolve_export_target(components: _MusicComponents, out_path: str | None) -> Path:
+    """
+    Resolve the playlist destination.
+
+    An explicit ``out_path`` ending in ``.m3u`` / ``.m3u8`` is used verbatim;
+    any other value is treated as a directory. Without ``out_path`` the file
+    is written into the music settings' ``out_dir`` (falling back to the
+    platform music directory).
+    """
+    name = _default_playlist_name()
+    if out_path and out_path.strip():
+        candidate = Path(out_path.strip()).expanduser()
+        if candidate.suffix.lower() in {".m3u", ".m3u8"}:
+            return candidate
+        return candidate / name
+
+    settings = components.load_settings()
+    out_dir = settings.get("out_dir") if isinstance(settings, dict) else None
+    if out_dir:
+        base = Path(str(out_dir)).expanduser()
+    else:
+        base = Path(components.paths.default_download_dir()).expanduser()
+    return base / name
+
+
+@router.post("/music/export", tags=["music"])
+async def music_export(body: MusicExportRequest) -> dict[str, Any]:
+    """
+    Write an M3U8 playlist for already-downloaded tracks.
+
+    Every track needs a local ``path``; tracks without one are counted in
+    ``skipped`` instead of failing the request. ``out_path`` may be a file
+    (``.m3u`` / ``.m3u8``) or a directory; the default is the music settings'
+    ``out_dir``. No network access or download happens here.
+    """
+    components = _load_music_components()
+    _require_music_platform(components, body.platform)
+
+    tracks: list[Any] = []
+    skipped = 0
+    for model in body.tracks:
+        data = model.model_dump()
+        if not str(data.get("path") or "").strip():
+            skipped += 1
+            continue
+        tracks.append(components.track_cls(**data))
+
+    target = _resolve_export_target(components, body.out_path)
+    try:
+        written = await run_in_threadpool(components.export_m3u, tracks, target)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not write playlist {target}: {exc}",
+        ) from exc
+
+    return {
+        "path": str(written),
+        "tracks_written": len(tracks),
+        "skipped": skipped,
+    }
+
+
+@router.get("/music/health", tags=["music"])
+async def music_health(
+    platform: Annotated[str | None, Query()] = None,
+    timeout: Annotated[float, Query(gt=0, le=60)] = DEFAULT_MUSIC_HEALTH_TIMEOUT,
+) -> list[dict[str, Any]]:
+    """
+    Probe one or all music platforms by performing a bounded search.
+
+    ``platform`` omitted checks every registered platform. Checks run
+    concurrently; each result has ``platform``, ``ok``, ``elapsed_ms`` and
+    ``error``. An unknown explicit platform returns ``400``.
+    """
+    components = _load_music_components()
+    if platform is not None:
+        _require_music_platform(components, platform)
+        selected = [platform]
+    else:
+        selected = _music_platform_keys(components)
+
+    async def _check(key: str) -> dict[str, Any]:
+        result = await run_in_threadpool(components.health_check, key, timeout=timeout)
+        payload: dict[str, Any] = {"platform": key}
+        payload.update(dict(result))
+        return payload
+
+    results = await asyncio.gather(*(_check(key) for key in selected))
+    return list(results)
 
 
 @router.post("/music/search", tags=["music"])
@@ -850,4 +1180,10 @@ async def music_job_status(job_id: str) -> dict[str, Any]:
         }
 
 
-__all__ = ["OPENAPI_TAGS", "get_manager", "router"]
+__all__ = [
+    "OPENAPI_TAGS",
+    "get_manager",
+    "get_watchlist_store",
+    "router",
+    "task_to_dict",
+]

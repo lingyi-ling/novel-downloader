@@ -52,6 +52,26 @@ class TaskCreateRequest(BaseModel):
     book_id: str = Field(min_length=1)
 
 
+class WatchlistAddRequest(BaseModel):
+    """Body of ``POST /api/v1/watchlist``."""
+
+    site: str = Field(min_length=1)
+    book_id: str = Field(min_length=1)
+    title: str | None = None
+
+
+class WatchlistCheckRequest(BaseModel):
+    """
+    Body of ``POST /api/v1/watchlist/check``.
+
+    ``download`` never starts a download. When true, entries that need an
+    update gain a ready-to-post ``task`` body in the response, so the caller
+    can queue the download itself.
+    """
+
+    download: bool = False
+
+
 class MusicSearchRequest(BaseModel):
     """Body of ``POST /api/v1/music/search``."""
 
@@ -80,6 +100,9 @@ class MusicTrack(BaseModel):
     vip: bool = False
     download_url: str = ""
     http_headers: dict[str, str] = Field(default_factory=dict)
+    #: Local file populated by the downloader (or by the caller); used by
+    #: ``POST /api/v1/music/export``.
+    path: str = ""
     lyric: str = ""
     extra: dict[str, Any] = Field(default_factory=dict)
 
@@ -96,3 +119,16 @@ class MusicDownloadRequest(BaseModel):
     tracks: list[MusicTrack] = Field(min_length=1, max_length=MAX_MUSIC_TRACKS)
     level: str | None = None
     out_dir: str | None = None
+
+
+class MusicExportRequest(BaseModel):
+    """
+    Body of ``POST /api/v1/music/export``.
+
+    ``out_path`` may be a file name or a directory. When omitted the playlist
+    is written into the music settings' ``out_dir`` with a timestamped name.
+    """
+
+    platform: str = Field(min_length=1)
+    tracks: list[MusicTrack] = Field(min_length=1, max_length=MAX_MUSIC_TRACKS)
+    out_path: str | None = None
