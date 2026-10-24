@@ -164,14 +164,16 @@ def test_get_fetcher_config_site_overrides_general(adapter, sample_config):
     assert fetcher.user_agent == "site-UA"
 
 
-def test_get_fetcher_config_defaults_when_missing(tmp_path):
+def test_get_fetcher_config_defaults_when_missing(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("NOVEL_HOME", str(home))
     adapter = ConfigAdapter({"general": {}, "sites": {"s": {}}})
     fetcher = adapter.get_fetcher_config("s")
 
     assert fetcher.request_interval == 0.5
     assert fetcher.retry_times == 3
     assert fetcher.backoff_factor == 2.0
-    assert fetcher.cache_dir == "./novel_cache"
+    assert fetcher.cache_dir == str((home / "cache").resolve())
     assert fetcher.backend == "aiohttp"
     assert fetcher.locale_style == "simplified"
 
@@ -393,13 +395,69 @@ def test_get_log_and_data_dirs(tmp_path):
 
 def test_get_dirs_defaults_when_missing(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("NOVEL_HOME", str(home))
 
     adapter = ConfigAdapter({})
-    assert adapter.get_cache_dir().name == "novel_cache"
-    assert adapter.get_raw_data_dir().name == "raw_data"
-    assert adapter.get_output_dir().name == "downloads"
-    assert adapter.get_log_dir().name == "logs"
+    # The cache default moved to the application home directory.
+    assert adapter.get_cache_dir() == (home / "cache").resolve()
     assert adapter.get_cache_dir().is_absolute()
+    # Other defaults stay relative to the working directory.
+    assert adapter.get_raw_data_dir() == (tmp_path / "raw_data").resolve()
+    assert adapter.get_output_dir() == (tmp_path / "downloads").resolve()
+    assert adapter.get_log_dir() == (tmp_path / "logs").resolve()
+
+
+def test_explicit_relative_cache_dir_stays_cwd_relative(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path / "home"))
+
+    adapter = ConfigAdapter(
+        {"general": {"cache_dir": "./custom_cache"}, "sites": {"s": {}}}
+    )
+
+    expected = (tmp_path / "custom_cache").resolve()
+    assert adapter.get_cache_dir() == expected
+    assert adapter.get_fetcher_config("s").cache_dir == "./custom_cache"
+    assert adapter.get_parser_config("s").cache_dir == "./custom_cache"
+    assert adapter.get_client_config("s").cache_dir == "./custom_cache"
+
+
+def test_explicit_absolute_cache_dir_is_kept(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path / "home"))
+    absolute = tmp_path / "absolute-cache"
+
+    adapter = ConfigAdapter(
+        {"general": {"cache_dir": str(absolute)}, "sites": {"s": {}}}
+    )
+
+    assert adapter.get_cache_dir() == absolute.resolve()
+    assert adapter.get_fetcher_config("s").cache_dir == str(absolute)
+    assert adapter.get_parser_config("s").cache_dir == str(absolute)
+    assert adapter.get_client_config("s").cache_dir == str(absolute)
+
+
+def test_default_cache_dir_follows_novel_home(monkeypatch, tmp_path):
+    first = tmp_path / "first-home"
+    second = tmp_path / "second-home"
+
+    monkeypatch.setenv("NOVEL_HOME", str(first))
+    assert ConfigAdapter({}).get_cache_dir() == (first / "cache").resolve()
+
+    monkeypatch.setenv("NOVEL_HOME", str(second))
+    assert ConfigAdapter({}).get_cache_dir() == (second / "cache").resolve()
+
+
+def test_schema_defaults_resolve_cache_dir_lazily(monkeypatch, tmp_path):
+    """Dataclass defaults must honour a later ``NOVEL_HOME`` change."""
+    home = tmp_path / "schema-home"
+    monkeypatch.setenv("NOVEL_HOME", str(home))
+
+    expected = str((home / "cache").resolve())
+    assert FetcherConfig().cache_dir == expected
+    assert ParserConfig().cache_dir == expected
+    assert ClientConfig().cache_dir == expected
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,13 @@
 [general]
 raw_data_dir = "./raw_data"        # 书籍原始 JSON/DB/图片 数据存放目录
 output_dir = "./downloads"         # 最终输出文件存放目录
-cache_dir = "./novel_cache"        # 本地缓存目录
+
+# 本地缓存目录（站点 Cookie 也保存在这里）。
+# 未设置时使用应用数据目录下的 cache/，例如 Windows:
+#   %LOCALAPPDATA%\novel_downloader\cache
+# Linux: ~/.local/share/novel_downloader/cache
+# 相对路径按当前工作目录解析；如需旧版行为可显式取消下一行注释。
+# cache_dir = "./novel_cache"
 
 request_interval = 0.5             # 同一本书各章节请求间隔 (秒)
 workers = 4                        # 工作协程数

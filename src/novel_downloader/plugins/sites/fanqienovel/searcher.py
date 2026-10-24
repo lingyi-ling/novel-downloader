@@ -20,6 +20,7 @@ from novel_downloader.infra.cookies import CookieStore, parse_cookies
 from novel_downloader.plugins.base.searcher import BaseSearcher
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
+from novel_downloader.schemas.config import default_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +68,11 @@ class FanqienovelSearcher(BaseSearcher):
             cache_dir = Path(override)
         else:
             try:
-                configured = get_config_value(["general", "cache_dir"], "./novel_cache")
+                configured = get_config_value(
+                    ["general", "cache_dir"], str(default_cache_dir())
+                )
             except Exception:  # no config file on disk yet
-                configured = "./novel_cache"
+                configured = str(default_cache_dir())
             cache_dir = Path(str(configured))
         store = CookieStore(cache_dir / "fanqienovel")
         store.load_all()

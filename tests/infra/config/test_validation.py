@@ -6,6 +6,8 @@ import copy
 import os
 from pathlib import Path
 
+import pytest
+
 from novel_downloader.infra.config import (
     Problem,
     migrate_config,
@@ -13,6 +15,18 @@ from novel_downloader.infra.config import (
 )
 from novel_downloader.infra.config import validation as validation_module
 from novel_downloader.infra.config.file_io import load_config
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cache_defaults(monkeypatch, tmp_path):
+    """Make the legacy-cache hint independent of the host checkout.
+
+    Validation looks at the working directory and the application home, so
+    every test runs inside an empty temporary directory with its own
+    ``NOVEL_HOME``.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path / "app-home"))
 
 
 def _paths(problems: list[Problem], level: str | None = None) -> set[str]:
@@ -416,6 +430,71 @@ def test_plugins_directory_is_checked_only_when_enabled(tmp_path):
         {"plugins": {"enable_local_plugins": True, "local_plugins_path": path}}
     )
     assert _paths(problems, "error") == {"plugins.local_plugins_path"}
+
+
+# ---------------------------------------------------------------------------
+# Legacy ./novel_cache notice
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_cache_dir_notice_for_explicit_old_default(tmp_path):
+    legacy = tmp_path / "novel_cache"
+    legacy.mkdir()
+
+    problems = validate_config({"general": {"cache_dir": "./novel_cache"}})
+
+    infos = [p for p in problems if p.level == "info"]
+    assert len(infos) == 1
+    assert infos[0].path == "general.cache_dir"
+    assert str(legacy) in infos[0].message
+    assert str(tmp_path / "app-home" / "cache") in infos[0].message
+    assert "not migrated" in infos[0].fix_hint
+
+
+def test_legacy_cache_dir_notice_for_implicit_default(tmp_path):
+    (tmp_path / "novel_cache").mkdir()
+
+    problems = validate_config({"general": {}})
+
+    infos = [p for p in problems if p.level == "info"]
+    assert len(infos) == 1
+    assert infos[0].path == "general.cache_dir"
+
+
+def test_no_legacy_notice_without_old_directory(tmp_path):
+    problems = validate_config({"general": {"cache_dir": "./novel_cache"}})
+
+    assert [p for p in problems if p.level == "info"] == []
+    assert problems == []
+
+
+def test_no_legacy_notice_when_new_default_exists(tmp_path):
+    (tmp_path / "novel_cache").mkdir()
+    (tmp_path / "app-home" / "cache").mkdir(parents=True)
+
+    problems = validate_config({"general": {"cache_dir": "./novel_cache"}})
+
+    assert [p for p in problems if p.level == "info"] == []
+
+
+def test_no_legacy_notice_for_custom_or_absolute_cache_dir(tmp_path):
+    (tmp_path / "novel_cache").mkdir()
+
+    assert validate_config({"general": {"cache_dir": "./other_cache"}}) == []
+    assert validate_config({"general": {"cache_dir": str(tmp_path / "absolute")}}) == []
+
+
+def test_legacy_notice_is_side_effect_free(tmp_path):
+    legacy = tmp_path / "novel_cache"
+    legacy.mkdir()
+    cookie_file = legacy / "aiohttp.cookies"
+    cookie_file.write_text("[]", encoding="utf-8")
+
+    problems = validate_config({"general": {}})
+
+    assert any(p.level == "info" for p in problems)
+    assert cookie_file.read_text(encoding="utf-8") == "[]"
+    assert not (tmp_path / "app-home" / "cache").exists()
 
 
 # ---------------------------------------------------------------------------

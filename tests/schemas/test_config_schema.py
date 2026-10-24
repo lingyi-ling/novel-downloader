@@ -7,6 +7,7 @@ from dataclasses import FrozenInstanceError, asdict, fields
 
 import pytest
 
+from novel_downloader.infra.paths import app_home
 from novel_downloader.schemas import (
     BookConfig,
     ClientConfig,
@@ -37,7 +38,7 @@ class TestFetcherConfig:
         assert cfg.proxy_user is None
         assert cfg.proxy_pass is None
         assert cfg.trust_env is False
-        assert cfg.cache_dir == "./novel_cache"
+        assert cfg.cache_dir == str(app_home() / "cache")
         assert cfg.backend == "aiohttp"
         assert cfg.locale_style == "simplified"
 
@@ -103,7 +104,7 @@ class TestParserConfig:
     def test_defaults(self) -> None:
         cfg = ParserConfig()
 
-        assert cfg.cache_dir == "./novel_cache"
+        assert cfg.cache_dir == str(app_home() / "cache")
         assert cfg.use_truncation is True
         assert cfg.enable_ocr is False
         assert cfg.batch_size == 32
@@ -169,7 +170,7 @@ class TestClientConfig:
         assert cfg.request_interval == 0.5
         assert cfg.retry_times == 3
         assert cfg.backoff_factor == 2.0
-        assert cfg.cache_dir == "./novel_cache"
+        assert cfg.cache_dir == str(app_home() / "cache")
         assert cfg.raw_data_dir == "./raw_data"
         assert cfg.output_dir == "./downloads"
         assert cfg.workers == 4

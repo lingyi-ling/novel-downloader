@@ -49,6 +49,7 @@ from novel_downloader.infra.sessions.cookie_io import (
     resolve_cookie_path,
     write_cookie_items,
 )
+from novel_downloader.schemas.config import default_cache_dir
 
 from .sites import (
     LOGIN_SITE_CONFIGS,
@@ -208,9 +209,9 @@ def _with_detail(message: str, detail: object) -> str:
 def _configured_cache_dir() -> str:
     """Return the configured ``general.cache_dir``, tolerating a missing config."""
     try:
-        return str(get_config_value(["general", "cache_dir"], "./novel_cache"))
+        return str(get_config_value(["general", "cache_dir"], str(default_cache_dir())))
     except Exception:  # no config file on disk yet
-        return "./novel_cache"
+        return str(default_cache_dir())
 
 
 def site_cache_dir(site: str) -> Path:

@@ -154,7 +154,12 @@ def _log_validation_problems(data: dict[str, Any]) -> None:
         return
 
     for problem in problems:
-        logger.warning("Configuration problem: %s", problem)
+        if problem.level == "info":
+            # Informational notes (e.g. the legacy cache directory hint) must
+            # not look like configuration errors in the log.
+            logger.info("Configuration note: %s", problem)
+        else:
+            logger.warning("Configuration problem: %s", problem)
 
 
 def get_config_value(keys: list[str], default: Any) -> Any:

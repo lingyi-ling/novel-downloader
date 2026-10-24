@@ -17,6 +17,7 @@ from novel_downloader.schemas import (
     ParserConfig,
     ProcessorConfig,
 )
+from novel_downloader.schemas.config import default_cache_dir
 
 
 class ConfigAdapter:
@@ -53,7 +54,7 @@ class ConfigAdapter:
         cfg = {**general_cfg, **site_cfg}
 
         return FetcherConfig(
-            cache_dir=general_cfg.get("cache_dir", "./novel_cache"),
+            cache_dir=general_cfg.get("cache_dir", default_cache_dir()),
             request_interval=cfg.get("request_interval", 0.5),
             retry_times=cfg.get("retry_times", 3),
             backoff_factor=cfg.get("backoff_factor", 2.0),
@@ -88,7 +89,7 @@ class ConfigAdapter:
         parser_cfg: dict[str, Any] = {**general_parser, **site_parser}
 
         return ParserConfig(
-            cache_dir=general_cfg.get("cache_dir", "./novel_cache"),
+            cache_dir=general_cfg.get("cache_dir", default_cache_dir()),
             use_truncation=bool(parser_cfg.get("use_truncation", True)),
             enable_ocr=bool(parser_cfg.get("enable_ocr", False)),
             batch_size=int(parser_cfg.get("batch_size", 32)),
@@ -114,7 +115,7 @@ class ConfigAdapter:
 
         return ClientConfig(
             raw_data_dir=general_cfg.get("raw_data_dir", "./raw_data"),
-            cache_dir=general_cfg.get("cache_dir", "./novel_cache"),
+            cache_dir=general_cfg.get("cache_dir", default_cache_dir()),
             output_dir=general_cfg.get("output_dir", "./downloads"),
             workers=cfg.get("workers", 4),
             request_interval=cfg.get("request_interval", 0.5),
@@ -312,13 +313,16 @@ class ConfigAdapter:
     def get_cache_dir(self) -> Path:
         """Return the directory used for local resource caching.
 
-        This corresponds to ``general.cache_dir``. Defaults to
-        ``"./novel_cache"``.
+        This corresponds to ``general.cache_dir``. When the key is absent the
+        default is ``<app_home>/cache`` (the platform user-data directory plus
+        ``cache``), so cookies are no longer written into the working
+        directory. An explicitly configured relative path is still resolved
+        against the current working directory.
 
         Returns:
             An absolute Path to the cache directory.
         """
-        cache_dir = self._gen_cfg().get("cache_dir") or "./novel_cache"
+        cache_dir = self._gen_cfg().get("cache_dir") or default_cache_dir()
         return Path(cache_dir).expanduser().resolve()
 
     def get_raw_data_dir(self) -> Path:

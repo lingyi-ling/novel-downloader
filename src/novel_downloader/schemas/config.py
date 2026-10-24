@@ -10,6 +10,24 @@ major component in the novel_downloader pipeline.
 from dataclasses import dataclass, field
 from typing import Any
 
+from novel_downloader.infra.paths import app_home
+
+#: Name of the cache directory created below :func:`app_home`.
+DEFAULT_CACHE_DIRNAME = "cache"
+
+
+def default_cache_dir() -> str:
+    """Return the default cache directory as an absolute path string.
+
+    The directory lives under the application home directory (see
+    :func:`novel_downloader.infra.paths.app_home`), so caches and session
+    cookies are not written into the current working directory by default.
+    The value is resolved when a config object is created, which keeps
+    ``NOVEL_HOME`` overrides working.  Relative paths set explicitly by users
+    are untouched and keep resolving against the working directory.
+    """
+    return str(app_home() / DEFAULT_CACHE_DIRNAME)
+
 
 @dataclass
 class FetcherConfig:
@@ -28,7 +46,7 @@ class FetcherConfig:
     proxy_user: str | None = None
     proxy_pass: str | None = None
     trust_env: bool = False
-    cache_dir: str = "./novel_cache"
+    cache_dir: str = field(default_factory=default_cache_dir)
     backend: str = "aiohttp"
     locale_style: str = "simplified"
 
@@ -46,7 +64,7 @@ class OCRConfig:
 
 @dataclass
 class ParserConfig:
-    cache_dir: str = "./novel_cache"
+    cache_dir: str = field(default_factory=default_cache_dir)
     use_truncation: bool = True
     enable_ocr: bool = False
     batch_size: int = 32
@@ -69,7 +87,7 @@ class ClientConfig:
     request_interval: float = 0.5
     retry_times: int = 3
     backoff_factor: float = 2.0
-    cache_dir: str = "./novel_cache"
+    cache_dir: str = field(default_factory=default_cache_dir)
     raw_data_dir: str = "./raw_data"
     output_dir: str = "./downloads"
     workers: int = 4

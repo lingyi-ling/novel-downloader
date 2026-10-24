@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from novel_downloader.schemas.config import default_cache_dir
+
 __all__ = [
     "DEFAULT_DOWNLOAD_RETRY_TIMES",
     "Problem",
@@ -159,6 +161,10 @@ _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 _FORMATS = ("epub", "html", "txt")
 _SPLIT_MODES = ("book", "volume", "chapter")
 _BOOK_KEYS = frozenset({"book_id", "start_id", "end_id", "ignore_ids"})
+
+#: Name of the cache directory written by releases whose default
+#: ``general.cache_dir`` was the workspace-relative ``"./novel_cache"``.
+_LEGACY_CACHE_DIRNAME = "novel_cache"
 
 
 @dataclass(frozen=True)
@@ -827,6 +833,47 @@ def _validate_site(
         _validate_book_ids(site["book_ids"], _join(prefix, "book_ids"), problems)
 
 
+def _check_legacy_cache_dir(
+    general: Mapping[str, Any], problems: list[Problem]
+) -> None:
+    """Hint about a workspace-local ``./novel_cache`` left by older releases.
+
+    The default cache directory (which also holds session cookies) now lives
+    under :func:`~novel_downloader.infra.paths.app_home`.  Data is deliberately
+    *not* moved automatically: a validation pass must stay free of side
+    effects.  An informational problem is emitted only when the legacy
+    directory still exists, the new default does not, and the effective
+    configuration would still read the legacy path.
+    """
+    if "cache_dir" in general:
+        raw = general.get("cache_dir")
+        if not isinstance(raw, str) or not raw.strip():
+            # Type/length errors are reported by ``_check_directory``.
+            return
+        configured = Path(raw.strip()).expanduser()
+        if configured.is_absolute() or configured != Path(_LEGACY_CACHE_DIRNAME):
+            return
+
+    legacy = Path.cwd() / _LEGACY_CACHE_DIRNAME
+    if not legacy.is_dir():
+        return
+
+    new_default = Path(default_cache_dir())
+    if new_default.exists():
+        return
+
+    problems.append(
+        Problem(
+            "info",
+            "general.cache_dir",
+            f"legacy cache directory '{legacy}' still exists in the working "
+            f"directory; the default cache directory is now '{new_default}'.",
+            "Data was not migrated automatically. Move the old directory "
+            "contents manually if you still need the cached files or cookies.",
+        )
+    )
+
+
 def _validate_general(general: Mapping[str, Any], problems: list[Problem]) -> None:
     prefix = "general"
     _validate_unknown_keys(general, _GENERAL_KEYS, prefix, problems)
@@ -834,6 +881,7 @@ def _validate_general(general: Mapping[str, Any], problems: list[Problem]) -> No
     _check_directory(general, "raw_data_dir", prefix, problems)
     _check_directory(general, "output_dir", prefix, problems)
     _check_directory(general, "cache_dir", prefix, problems)
+    _check_legacy_cache_dir(general, problems)
 
     _check_number(general, "request_interval", prefix, problems, minimum=0.0)
     _check_int(general, "workers", prefix, problems, minimum=1)

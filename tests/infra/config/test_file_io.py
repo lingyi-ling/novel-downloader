@@ -111,6 +111,25 @@ def test_load_config_from_local_json(tmp_path, monkeypatch):
     assert result == {"x": 1}
 
 
+def test_load_config_logs_legacy_cache_notice_at_info_level(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path / "home"))
+    (tmp_path / "novel_cache").mkdir()
+    cfg = tmp_path / "settings.json"
+    cfg.write_text('{"general": {"cache_dir": "./novel_cache"}}', encoding="utf-8")
+
+    with caplog.at_level("INFO"):
+        data = load_config(None)
+
+    assert data == {"general": {"cache_dir": "./novel_cache"}}
+    notes = [r for r in caplog.records if "Configuration note" in r.message]
+    assert len(notes) == 1
+    assert notes[0].levelname == "INFO"
+    assert "legacy cache directory" in notes[0].getMessage()
+
+
 # ------------------------------------
 # get_config_value
 # ------------------------------------
