@@ -107,6 +107,44 @@ cookies = "完整的 Cookie 字符串"
 
 更多说明见: [复制 Cookies](./copy-cookies.md)
 
+---
+
+#### 3.3 旧配置迁移: `cookie` → `cookies`
+
+配置加载器只读取 `cookies`。旧版文档中出现过的 `cookie` 键仍会让文件正常加载, 但**不会被使用**, 配置校验 (`validate_config`) 会在加载时输出类似告警:
+
+```text
+Configuration problem: sites.<site>.cookie: 'cookie' is not read by the loader (supported key is 'cookies').
+```
+
+推荐直接手工改名:
+
+```toml
+[sites.<site_name>]
+login_required = true
+cookies = "完整的 Cookie 字符串"   # 旧键 cookie 已废弃
+```
+
+需要批量检查/预览迁移时, 可调用内置的校验与迁移函数 (二者都不会自行写回文件):
+
+```bash
+# 列出当前配置中的所有校验问题（含 cookie、use_truncation 等废弃写法）
+python -c "from novel_downloader.infra.config import load_config, validate_config; [print(p) for p in validate_config(load_config())]"
+
+# 预览 migrate_config 会做的改动（返回 (迁移后的 dict, 改动说明列表)）
+python -c "from novel_downloader.infra.config import load_config, migrate_config; print(migrate_config(load_config())[1])"
+```
+
+`migrate_config()` 会执行以下迁移, 且是幂等的:
+
+| 旧写法 | 新写法 |
+| --- | --- |
+| `sites.<site>.cookie` | `sites.<site>.cookies` |
+| `sites.<site>.use_truncation` | `sites.<site>.parser.use_truncation` |
+| 缺少 `general.download_retry_times` | 填入默认值 `2` |
+
+> 目前没有独立的 `config validate` / `config migrate` 子命令；校验在每次加载配置时自动进行（仅告警，不阻止加载），迁移通过上面的 Python 函数完成。迁移结果需要自行写回 `settings.toml`。
+
 ### 4. 配置文件查找顺序
 
 CLI 每次运行时会按以下优先级查找配置 (高 -> 低):

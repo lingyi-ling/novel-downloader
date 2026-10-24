@@ -48,6 +48,7 @@ plugins:
             设置项参考: Settings Reference
             处理器参考: Processors Reference
             CLI 用法: CLI Usage
+            常见任务: Common Recipes
             本地 API 服务: Local API Service
             Android 客户端: Android Client
             书源: Book Sources
@@ -121,6 +122,7 @@ nav:
     - 设置项参考: guide/settings-reference.md
     - 处理器参考: guide/processors-reference.md
     - CLI 用法: guide/cli-examples.md
+    - 常见任务: guide/recipes.md
     - 本地 API 服务: guide/api.md
     - Android 客户端: guide/android-app.md
     - 书源: guide/book-sources.md

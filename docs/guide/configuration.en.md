@@ -108,6 +108,44 @@ cookies = "complete cookie string"
 
 For more information, see: [Copy Cookies](./copy-cookies.md)
 
+---
+
+#### 3.3 Migrating old configurations: `cookie` → `cookies`
+
+The loader only reads `cookies`. The old `cookie` key still lets the file load, but it is **never used**; configuration validation (`validate_config`) logs a warning such as:
+
+```text
+Configuration problem: sites.<site>.cookie: 'cookie' is not read by the loader (supported key is 'cookies').
+```
+
+Rename it manually:
+
+```toml
+[sites.<site_name>]
+login_required = true
+cookies = "complete cookie string"   # the old key cookie is deprecated
+```
+
+To check and preview migrations in bulk, call the built-in validation and migration helpers (neither writes the file for you):
+
+```bash
+# List every validation problem (including deprecated cookie / use_truncation)
+python -c "from novel_downloader.infra.config import load_config, validate_config; [print(p) for p in validate_config(load_config())]"
+
+# Preview what migrate_config would change (returns (migrated dict, change list))
+python -c "from novel_downloader.infra.config import load_config, migrate_config; print(migrate_config(load_config())[1])"
+```
+
+`migrate_config()` performs these idempotent migrations:
+
+| Old form | New form |
+| --- | --- |
+| `sites.<site>.cookie` | `sites.<site>.cookies` |
+| `sites.<site>.use_truncation` | `sites.<site>.parser.use_truncation` |
+| Missing `general.download_retry_times` | Filled with the default `2` |
+
+> There is no separate `config validate` / `config migrate` CLI subcommand today. Validation runs automatically whenever the configuration is loaded (warnings only, never blocking), and migration is done through the Python functions above. You still need to write the migrated result back to `settings.toml` yourself.
+
 ### 4. Configuration File Lookup Order
 
 On each run, the CLI looks for the configuration in the following order (highest to lowest priority):

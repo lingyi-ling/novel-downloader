@@ -361,6 +361,15 @@ def load_searcher_site_ids(plugins_dir: Path) -> set[str]:
     return result
 
 
+def load_adapter_ids(plugins_dir: Path) -> tuple[set[str], set[str]]:
+    """Return the site ids that ship a fetcher under ``sites/`` / ``archived/``."""
+    active = {path.parent.name for path in (plugins_dir / "sites").glob("*/fetcher.py")}
+    archived = {
+        path.parent.name for path in (plugins_dir / "archived").glob("*/fetcher.py")
+    }
+    return active, archived
+
+
 def load_site_configs(path: Path) -> list[SiteConfig]:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     result: list[SiteConfig] = []
@@ -426,6 +435,79 @@ def validate_sites(
                 errors.append(f"{sid}: url example without title/url")
 
     return errors
+
+
+def build_diff_report(
+    sites: list[SiteConfig],
+    download_ids: set[str],
+    search_ids: set[str],
+    searcher_ids: set[str],
+    active_adapters: set[str],
+    archived_adapters: set[str],
+) -> list[str]:
+    """Summarise TOML/constants/adapter differences without affecting the exit code."""
+    site_ids = {site["id"] for site in sites}
+    status = {site["id"]: site.get("site_status") for site in sites}
+    registered = download_ids | search_ids
+
+    lines = [
+        "[audit] TOML vs constants",
+        f"  constants: download={len(download_ids)} search={len(search_ids)}; "
+        f"toml={len(sites)}; adapters: sites={len(active_adapters)} "
+        f"archived={len(archived_adapters)}",
+    ]
+
+    def emit(title: str, ids: list[str], detail: str = "") -> None:
+        if not ids:
+            return
+        suffix = f" ({detail})" if detail else ""
+        lines.append(f"  {title}: {len(ids)}{suffix}")
+        lines.extend(f"    - {sid}" for sid in ids)
+
+    unregistered = sorted(site_ids - download_ids)
+    if unregistered:
+        archived = [sid for sid in unregistered if status.get(sid) == "archived"]
+        active = [sid for sid in unregistered if status.get(sid) != "archived"]
+        emit("TOML entries absent from DOWNLOAD_SUPPORT_SITES", unregistered)
+        if active:
+            emit("  of which active entries", active)
+        if archived:
+            emit("  of which archived entries", archived)
+
+    orphan_adapters = sorted(active_adapters - download_ids)
+    emit("active adapters (sites/) absent from DOWNLOAD_SUPPORT_SITES", orphan_adapters)
+
+    orphan_searchers = sorted(active_adapters & searcher_ids - search_ids)
+    emit("active searcher.py absent from SEARCH_SUPPORT_SITES", orphan_searchers)
+
+    archived_registered = sorted(archived_adapters & registered)
+    emit("archived adapters still registered in constants", archived_registered)
+
+    contradictions: list[str] = []
+    for site in sites:
+        sid = site["id"]
+        value = site["supports"]["search"]
+        is_registered = sid in search_ids
+        if value == "yes" and not is_registered:
+            contradictions.append(f"{sid}: search=yes but not registered")
+        elif value == "no" and is_registered:
+            contradictions.append(f"{sid}: search=no but registered")
+    lines.append(
+        "  supports.search contradictions with SEARCH_SUPPORT_SITES: "
+        f"{len(contradictions)}"
+    )
+    lines.extend(f"    - {item}" for item in contradictions)
+
+    external_only = sorted(
+        site["id"]
+        for site in sites
+        if site["supports"]["search"] == "external" and site["id"] not in search_ids
+    )
+    lines.append(
+        "  site-native search only (search=external, not aggregated): "
+        f"{len(external_only)}"
+    )
+    return lines
 
 
 # ================================
@@ -644,6 +726,7 @@ def main() -> None:
     download, search = load_constants(args.constants)
     priorities = load_searcher_priorities(args.plugins)
     searcher_ids = load_searcher_site_ids(args.plugins)
+    active_adapters, archived_adapters = load_adapter_ids(args.plugins)
     sites = load_site_configs(args.config)
 
     errors = validate_sites(sites, set(download), set(search), searcher_ids, priorities)
@@ -656,6 +739,15 @@ def main() -> None:
         f"[constants] download={len(download)} search={len(search)} "
         f"toml={len(sites)} priorities={len(priorities)}"
     )
+    for line in build_diff_report(
+        sites,
+        set(download),
+        set(search),
+        searcher_ids,
+        active_adapters,
+        archived_adapters,
+    ):
+        print(line)
 
     builder = SupportedSiteBuilder(set(download), set(search), priorities)
     for site in sites:

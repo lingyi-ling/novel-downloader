@@ -54,11 +54,14 @@ Options:
 Commands:
   download    download a novel by book ID or URL
   search      search for books across one or more sites
+  follow      follow books and check for new chapters
   export      export downloaded novels
   login       open a login window for a site and save its session cookies
   config      manage application configuration and settings
   clean       clean application logs, cache and book data
-  sources     list, verify, install and remove rule-based site sources
+  storage     show disk usage of the application's data directories
+  doctor      check the environment and diagnose common problems
+  sources     list, verify, install and remove rule-based book sources
   music       search and download songs from music platforms
 ```
 
@@ -570,6 +573,208 @@ novel-cli music download "keyword" --pick 123456789
 ```
 
 > Progress display, tag embedding, cover and lyric saving, folder splitting, and skip-existing behavior follow the music settings (`embed_tags`, `embed_cover`, `save_lyric`, `split_folder`, `skip_existing`).
+
+---
+
+#### 8. follow Subcommand
+
+Maintain a follow list and check whether followed books have published new chapters.
+
+Follow entries live in `watchlist.json` inside the application home directory (`NOVEL_HOME`; by default `%LOCALAPPDATA%\novel_downloader\watchlist.json` on Windows). They are independent of `book_ids` in `settings.toml`.
+
+**Synopsis**
+
+```bash
+novel-cli follow [-h] {add,remove,list,check} ...
+
+novel-cli follow add [-h] [--title TEXT] site book_id
+novel-cli follow remove [-h] site book_id
+novel-cli follow list [-h] [--json]
+novel-cli follow check [-h] [--all] [--download] [--timeout SECS]
+```
+
+**add / remove**
+
+* `site`: site key (e.g. `b520`, `qidian`)
+* `book_id`: book ID
+* `--title TEXT` (add only): display title used when checking for new chapters. If omitted, `follow check` can only search by `book_id`, which is much less reliable; always provide a title.
+
+```bash
+# Add a book to the follow list
+novel-cli follow add b520 8_8187 --title "Example Novel"
+
+# Adding an existing book updates it (recorded latest chapter is preserved)
+novel-cli follow add b520 8_8187 --title "Example Novel (renamed)"
+
+# Remove
+novel-cli follow remove b520 8_8187
+```
+
+**list**
+
+```bash
+# Table output: site / book ID / title / latest chapter / updated
+novel-cli follow list
+
+# Machine-readable output (JSON array)
+novel-cli follow list --json
+```
+
+Each `--json` element contains `site`, `book_id`, `title`, `last_chapter`, and `updated_at`.
+
+**check**
+
+* `--all`: also show books that are up to date or could not be found; without it only new chapters and errors are reported.
+* `--download`: print an executable `novel-cli download ...` command for each book with new chapters.
+* `--timeout SECS`: search timeout per book, default `5.0` seconds.
+
+```bash
+# Check and report new chapters only
+novel-cli follow check
+
+# Show the status of every followed book
+novel-cli follow check --all
+
+# Also print download commands for books with new chapters
+novel-cli follow check --download
+```
+
+`check` performs searches only and **never starts a download**: downloads are long-running and the CLI has no background scheduler, so it prints the command instead, keeping the command fast, non-blocking, and predictable. To download automatically, hand the printed `novel-cli download --site <site> <book_id>` to a scheduled task (see [Common Recipes](./recipes.md)).
+
+> The first check of a book only records the current latest chapter (reported as `First chapter recorded ...`), so it is not mistaken for an update.
+>
+> If any book's check fails (network/plugin error), the command exits with code `1` even when the other books succeeded.
+
+---
+
+#### 9. storage Subcommand
+
+Report the disk usage of the four application data directories, and optionally clean them all:
+
+| Category | Directory source |
+| --- | --- |
+| Raw data | `general.raw_data_dir` |
+| Cache | `general.cache_dir` |
+| Downloads | `general.output_dir` |
+| Logs | `general.debug.log_dir` |
+
+**Synopsis**
+
+```bash
+novel-cli storage [-h] [--json] [--clean] [-y]
+```
+
+**Options**
+
+* `--json`: print the statistics as JSON on stdout and exit.
+* `--clean`: print the table, then remove the existing data directories listed above (bulk equivalent of cleaning raw/cache/downloads/logs).
+* `-y, --yes`: skip the confirmation prompt used by `--clean`.
+* `--json` and `--clean` cannot be combined (exit code `2`).
+
+**Examples**
+
+```bash
+# Show usage
+novel-cli storage
+
+# Machine-readable output
+novel-cli storage --json
+
+# Remove all data directories (asks for confirmation)
+novel-cli storage --clean
+
+# Skip confirmation (for scripts/scheduled tasks)
+novel-cli storage --clean -y
+```
+
+The `--json` shape is `{ "raw": {...}, "cache": {...}, "downloads": {...}, "logs": {...}, "total": {...} }`; each directory object has `label`, `path`, `files`, and `bytes`, while `total` has only `files` and `bytes`.
+
+---
+
+#### 10. doctor Subcommand
+
+Run a set of **offline** self-checks to diagnose environment problems quickly.
+
+**Synopsis**
+
+```bash
+novel-cli doctor [-h] [--port N]
+```
+
+**Checks**
+
+* Python version is >= 3.11
+* Installed package version
+* `settings.toml` / `settings.json` is found
+* The configuration parses as a root table
+* The output directory can be created and written (the directory is created and a temporary file is written/removed)
+* Number of registered download sites
+* Number of loadable searchers
+* Optional music dependencies (`mutagen`, `qrcode`, `websocket`) — missing ones are reported but do not fail the command
+* `127.0.0.1:<port>` can be bound (default 8081)
+
+**Options**
+
+* `--port N`: API port to check for availability, default `8081`.
+
+**Examples**
+
+```bash
+# Default checks
+novel-cli doctor
+
+# Check a custom API port
+novel-cli doctor --port 9000
+```
+
+> Exit code is `0` when every required check passes and `1` otherwise. Each failing row prints an actionable fix.
+
+---
+
+### Exit Codes and `--json` Contract
+
+#### Exit codes
+
+| Code | Meaning | Typical cases |
+| --- | --- | --- |
+| `0` | Success | The command completed; no search results or no new chapters is still success |
+| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a required `doctor` check failing, a failed `sources list --check` probe, a failed removal in `storage --clean` / `clean` |
+| `2` | Usage error | Missing/conflicting arguments (including argparse errors), `--json` with `--first`, `--json` with `--clean`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell |
+
+Pressing `Ctrl+C` prints `Aborted.` on stderr and exits with `1`.
+
+#### `--json`
+
+With `--json`:
+
+* Structured output goes **only** to stdout; logs, progress, errors, and hints go to stderr, so the output can be piped safely.
+* The command never enters an interactive selector; required arguments must be supplied explicitly.
+* A JSON summary may still be printed even when the final exit code is non-zero (for example, `download --json` when some books fail).
+
+| Command | Option | stdout shape |
+| --- | --- | --- |
+| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "exported"}]}`; `exported` is `{format: [paths...]}`, or `null` with `--no-export` |
+| `search` | `--json` | Array of results with `site`, `book_id`, `book_url`, `cover_url`, `title`, `author`, `latest_chapter`, `update_date`, `word_count`, `priority` |
+| `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
+| `sources list` | `--json` | Array with `site_key`, `name`, `search`, `hosts`, `origin`; `status` is populated only with `--check` (otherwise `null`) |
+| `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}` |
+| `follow list` | `--json` | Array with `site`, `book_id`, `title`, `last_chapter`, `updated_at` |
+| `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` |
+
+```bash
+# Typical script use: take the first book ID
+novel-cli search --site b520 --json "Three Body" | jq -r '.[0].book_id'
+
+# Count follow-list entries
+novel-cli follow list --json | jq 'length'
+
+# Read the total bytes used
+novel-cli storage --json | jq '.total.bytes'
+```
+
+> `login --list` prints a plain-text list, not JSON. `sources check`, `config`, and `clean` currently have no `--json`.
+>
+> The `jq` examples above require [jq](https://jqlang.github.io/jq/); without it, read the raw JSON output directly.
 
 ---
 

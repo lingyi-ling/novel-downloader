@@ -19,7 +19,7 @@ tags:
 * 支持分卷: :material-close: 否
 * 支持插图: :material-close: 否
 * 支持登录: :material-help-circle: 部分支持
-* 支持搜索: :material-open-in-new: 站点支持，需站内操作
+* 支持搜索: :material-check: 是
 
 ---
 

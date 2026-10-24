@@ -26,13 +26,31 @@ Usage examples::
     # Random sample of 10 sites with a custom keyword
     python scripts/check_sites_health.py --sample 10 --keyword 剑
 
+    # Compare the current run against the previous history record
+    python scripts/check_sites_health.py --diff
+
+    # CI: fail the job when any site reports ERROR
+    python scripts/check_sites_health.py --fail-on-error
+
     # Legacy URL probing
     python scripts/check_sites_health.py --mode http --report dist/http.md
 
+History
+-------
+Every search-mode run appends one JSON object per line to ``--history``
+(default ``dist/site_health_history.jsonl``)::
+
+    {"ts": "...", "keyword": "魔法",
+     "summary": {"pass": 30, "empty": 20, "error": 7},
+     "results": [{"site": "qidian", "status": "PASS",
+                  "elapsed": 0.42, "reason": ""}, ...]}
+
+Malformed lines are skipped when the file is read.
+
 Exit codes
 ----------
-0   no ``ERROR`` result (all PASS, or a mix of PASS and EMPTY)
-1   at least one ``ERROR`` result
+0   no ``ERROR`` result, or ``ERROR`` results without ``--fail-on-error``
+1   at least one ``ERROR`` result and ``--fail-on-error`` was given
 2   invalid arguments or configuration
 """
 
@@ -78,6 +96,7 @@ from novel_downloader.plugins.registry import registrar
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "data" / "site_health_config.json"
 OUTPUT_PATH = Path("dev/site_health_report.html")
+DEFAULT_HISTORY_PATH = Path("dist/site_health_history.jsonl")
 
 DEFAULT_KEYWORD = "魔法"
 DEFAULT_SEARCH_TIMEOUT = 10.0
@@ -364,6 +383,166 @@ def _classify_http_failure(status_code: int, text: str) -> str:
 
 
 # ----------------------------
+# History
+# ----------------------------
+
+STATUS_MISSING = "-"
+
+
+def build_history_record(
+    results: list[SearchHealthResult],
+    *,
+    keyword: str,
+    generated_at: datetime,
+) -> dict[str, Any]:
+    """Build one JSONL history line for a search-mode run."""
+    counts = _status_counts(results)
+    return {
+        "ts": generated_at.isoformat(timespec="seconds"),
+        "keyword": keyword,
+        "summary": {
+            "pass": counts[STATUS_PASS],
+            "empty": counts[STATUS_EMPTY],
+            "error": counts[STATUS_ERROR],
+        },
+        "results": [
+            {
+                "site": result.site,
+                "status": result.status,
+                "elapsed": round(result.elapsed, 3),
+                "reason": result.reason,
+            }
+            for result in results
+        ],
+    }
+
+
+def append_history(path: Path, record: dict[str, Any]) -> None:
+    """Append ``record`` as one line to a JSONL history file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False)
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(line)
+        handle.write("\n")
+
+
+def load_history(path: Path) -> list[dict[str, Any]]:
+    """Read a JSONL history file, silently skipping malformed lines."""
+    if not path.is_file():
+        return []
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _history_status_map(record: dict[str, Any]) -> dict[str, str]:
+    """Extract ``{site: status}`` from a history record, ignoring bad entries."""
+    statuses: dict[str, str] = {}
+    results = record.get("results")
+    if not isinstance(results, list):
+        return statuses
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        site = item.get("site")
+        status = item.get("status")
+        if isinstance(site, str) and site and isinstance(status, str):
+            statuses[site] = status
+    return statuses
+
+
+def _history_reason_map(record: dict[str, Any]) -> dict[str, str]:
+    reasons: dict[str, str] = {}
+    results = record.get("results")
+    if not isinstance(results, list):
+        return reasons
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        site = item.get("site")
+        reason = item.get("reason")
+        if isinstance(site, str) and site and isinstance(reason, str):
+            reasons[site] = reason
+    return reasons
+
+
+def compute_diff(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Return per-site status changes between two history records."""
+    previous_status = _history_status_map(previous)
+    current_status = _history_status_map(current)
+    previous_reasons = _history_reason_map(previous)
+    current_reasons = _history_reason_map(current)
+
+    changes: list[dict[str, str]] = []
+    for site in sorted(set(previous_status) | set(current_status)):
+        before = previous_status.get(site, STATUS_MISSING)
+        after = current_status.get(site, STATUS_MISSING)
+        if before == after:
+            continue
+        changes.append(
+            {
+                "site": site,
+                "before": before,
+                "after": after,
+                "reason": current_reasons.get(site) or previous_reasons.get(site, ""),
+            }
+        )
+    return changes
+
+
+def _status_style(status: str) -> str:
+    return {
+        STATUS_PASS: "green",
+        STATUS_EMPTY: "yellow",
+        STATUS_ERROR: "red",
+    }.get(status, "dim")
+
+
+def print_history_diff(
+    changes: list[dict[str, str]],
+    *,
+    baseline_ts: str | None,
+) -> None:
+    """Print status changes (or a no-change note) in text mode."""
+    baseline = baseline_ts or "no previous record"
+    if not changes:
+        console.print(f"[green]History diff:[/green] no status changes vs {baseline}")
+        return
+
+    table = Table(title=f"History Diff vs {baseline}", show_header=True)
+    table.add_column("Site")
+    table.add_column("Before", justify="center")
+    table.add_column("After", justify="center")
+    table.add_column("Reason")
+    for change in changes:
+        table.add_row(
+            change["site"],
+            Text(change["before"], style=_status_style(change["before"])),
+            Text(change["after"], style=_status_style(change["after"])),
+            change["reason"],
+        )
+    console.print(table)
+
+
+# ----------------------------
 # Searcher error capture
 # ----------------------------
 #
@@ -514,14 +693,31 @@ async def run_search_mode(args: argparse.Namespace, sites: list[str]) -> int:
     counts = _status_counts(results)
 
     generated_at = datetime.now().astimezone()
+    record = build_history_record(
+        results, keyword=args.keyword, generated_at=generated_at
+    )
+
+    previous_record: dict[str, Any] | None = None
+    if args.diff:
+        history = load_history(args.history)
+        if history:
+            previous_record = history[-1]
+    baseline_ts = (
+        str(previous_record.get("ts", "")) if previous_record is not None else None
+    )
+    changes = (
+        compute_diff(previous_record, record) if previous_record is not None else []
+    )
+
     payload = {
-        "generated_at": generated_at.isoformat(timespec="seconds"),
+        "generated_at": record["ts"],
         "mode": "search",
         "keyword": args.keyword,
         "limit": args.limit,
         "timeout": timeout,
         "concurrency": concurrency,
         "elapsed": round(elapsed, 3),
+        "history": str(args.history),
         "summary": {
             "total": len(results),
             "pass": counts[STATUS_PASS],
@@ -537,6 +733,16 @@ async def run_search_mode(args: argparse.Namespace, sites: list[str]) -> int:
         },
         "results": [result.as_dict() for result in results],
     }
+    if args.diff:
+        payload["diff"] = {"baseline": baseline_ts, "changes": changes}
+
+    try:
+        append_history(args.history, record)
+    except OSError as exc:
+        console.print(f"[red]Failed to write history {args.history}: {exc}[/red]")
+        return 2
+    if not args.json:
+        console.print(f"[dim]History appended to:[/dim] {args.history}")
 
     if args.report:
         write_search_report(
@@ -555,8 +761,10 @@ async def run_search_mode(args: argparse.Namespace, sites: list[str]) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print_search_summary(results, elapsed)
+        if args.diff:
+            print_history_diff(changes, baseline_ts=baseline_ts)
 
-    return 1 if counts[STATUS_ERROR] else 0
+    return 1 if (args.fail_on_error and counts[STATUS_ERROR]) else 0
 
 
 def print_search_summary(results: list[SearchHealthResult], elapsed: float) -> None:
@@ -1003,7 +1211,7 @@ async def run_http_mode(args: argparse.Namespace, sites: list[str]) -> int:
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
 
-    return 1 if counts[STATUS_ERROR] else 0
+    return 1 if (args.fail_on_error and counts[STATUS_ERROR]) else 0
 
 
 def _write_http_report(
@@ -1082,7 +1290,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Health check for novel site searchers (default) or URLs.",
         epilog=(
-            "Exit codes: 0 = no ERROR, 1 = at least one ERROR, "
+            "Exit codes: 0 = success (ERROR results only fail with "
+            "--fail-on-error), 1 = ERROR with --fail-on-error, "
             "2 = invalid arguments/config."
         ),
     )
@@ -1162,6 +1371,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-progress",
         action="store_true",
         help="Disable the progress bar",
+    )
+    parser.add_argument(
+        "--history",
+        type=Path,
+        default=DEFAULT_HISTORY_PATH,
+        metavar="PATH",
+        help=(
+            "Append a JSONL history record for every search-mode run "
+            f"(default: {DEFAULT_HISTORY_PATH})"
+        ),
+    )
+    parser.add_argument(
+        "--diff",
+        action="store_true",
+        help="Compare this run against the previous history record",
+    )
+    parser.add_argument(
+        "--fail-on-error",
+        action="store_true",
+        help="Exit with code 1 when any site reports ERROR (for CI)",
     )
     return parser
 

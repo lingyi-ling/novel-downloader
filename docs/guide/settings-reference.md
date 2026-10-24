@@ -25,6 +25,7 @@
 | `backend`            | `str`   | `"aiohttp"`       | 全局 HTTP 请求后端, 可选 `"aiohttp"`, `"httpx"`, `"curl_cffi"` |
 | `http2`              | `bool`  | `true`            | 仅对 `httpx` 生效, 启用 HTTP/2 支持           |
 | `impersonate`        | `str/None` | `None`         | 仅对 `curl_cffi` 生效, 启用浏览器指纹仿真模式  |
+| `browser_assisted_sites` | `list[str]` | `["fanqienovel"]` | 搜索时必须借助真实浏览器的站点键列表; 显式设为 `[]` 可禁用 |
 | `download_retry_times` | `int`  | 2                 | 下载任务遇到瞬时网络错误时的额外重试次数       |
 | `proxy`              | `str/None` | `None`         | HTTP/HTTPS 代理地址, 如 `"http://127.0.0.1:7890"` |
 | `proxy_user`         | `str/None` | `None`         | 代理用户名                                    |
@@ -58,6 +59,21 @@
 > * [`httpx`](https://github.com/encode/httpx)
 > * [`curl_cffi`](https://github.com/lexiforest/curl_cffi)
 
+**浏览器辅助搜索**
+
+少数站点的搜索请求由站点自身的 JavaScript 生成签名, 纯 HTTP 请求拿不到结果。把这些站点写入 `browser_assisted_sites` 后, 显式搜索该站点时会复用登录会话启动隐藏浏览器, 由站点自身脚本发起请求并截获结果; 聚合搜索仍会跳过它们。
+
+```toml
+[general]
+# 默认值即 ["fanqienovel"]
+browser_assisted_sites = ["fanqienovel"]
+```
+
+* 也接受逗号分隔的字符串: `browser_assisted_sites = "fanqienovel,example"`。
+* 省略该项时使用默认值 `["fanqienovel"]`。
+* 显式设为 `browser_assisted_sites = []` 会完全禁用浏览器辅助搜索, 这些站点将回退为普通 HTTP 搜索 (通常得不到结果)。
+* 使用前请先 `novel-cli login <site>` 建立登录会话, 并安装可选浏览器组件。
+
 **兼容性与 Cloudflare 行为说明**
 
 由于各 HTTP 客户端在协议实现与 TLS 指纹上的差异, 部分站点在使用默认的 `aiohttp` 后端时, 可能会触发 **Cloudflare 反爬虫或访问验证机制**, 从而导致连接被拦截或返回 `403`/`5xx` 状态码。
@@ -89,6 +105,8 @@
 | `device`           | `str/None`     | None       | 用于推理的设备, 例如: "cpu"、"gpu"、"npu"、"gpu:0"、"gpu:0,1"  |
 | `cpu_threads`      | `int`          | 10         | 在 CPU 上推理时使用的线程数量                                  |
 | `enable_hpi`       | `bool`         | false      | 是否启用高性能推理                                             |
+| `use_truncation`   | `bool`         | true       | 是否对重复/截断的章节内容做截断处理 (如起点重复段落)             |
+| `cut_mode`         | `str`          | `"none"`   | 章节内容裁剪模式                                               |
 
 功能说明:
 
@@ -229,8 +247,15 @@ book_ids = [
   "1012584111"
 ]
 login_required = true
+
+# 站点级 parser 会覆盖 [general.parser] 中的同名项
+[sites.qidian.parser]
 use_truncation = true
 ```
+
+> `use_truncation` 属于解析器选项, **必须**写在 `[sites.<site>.parser]` (或 `[general.parser]`) 下。
+> 写在 `[sites.<site>]` 顶层不会被读取; 配置校验会给出告警, 并建议迁移到 `sites.<site>.parser.use_truncation`。
+> 其它解析器选项 (`enable_ocr`、`remove_watermark`、`cut_mode` 等) 同样可以在站点级 `parser` 表中覆盖。
 
 **结构化格式**
 

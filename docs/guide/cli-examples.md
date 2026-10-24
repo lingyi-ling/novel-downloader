@@ -54,10 +54,13 @@ Options:
 Commands:
   download    通过书籍 ID 或 URL 下载小说
   search      在一个或多个站点搜索书籍
+  follow      追更书籍并检查新章节
   export      导出已下载的小说
   login       为站点打开登录窗口并保存其会话 Cookies
   config      管理应用配置和设置
   clean       清理应用日志、缓存与书籍数据
+  storage     显示应用数据目录的磁盘占用
+  doctor      检查运行环境并诊断常见问题
   sources     列出、校验、安装和移除规则书源
   music       搜索并下载来自多个音乐平台的歌曲
 ```
@@ -570,6 +573,208 @@ novel-cli music download "关键词" --pick 123456789
 ```
 
 > 下载进度、标签写入、封面与歌词保存等行为遵循音乐设置 (如 `embed_tags`、`embed_cover`、`save_lyric`、`split_folder`、`skip_existing`)。
+
+---
+
+#### 8. follow 子命令
+
+维护一份「追更列表」, 并检查已关注书籍是否发布了新章节。
+
+追更记录保存在应用主目录的 `watchlist.json` 中 (即 `NOVEL_HOME`, 默认 `%LOCALAPPDATA%\novel_downloader\watchlist.json`), 与 `settings.toml` 中的 `book_ids` 相互独立。
+
+**Synopsis**
+
+```bash
+novel-cli follow [-h] {add,remove,list,check} ...
+
+novel-cli follow add [-h] [--title TEXT] site book_id
+novel-cli follow remove [-h] site book_id
+novel-cli follow list [-h] [--json]
+novel-cli follow check [-h] [--all] [--download] [--timeout SECS]
+```
+
+**add / remove**
+
+* `site`: 站点键 (如 `b520`, `qidian`)
+* `book_id`: 书籍 ID
+* `--title TEXT` (仅 `add`): 检查新章节时用于搜索的显示标题。省略时 `follow check` 只能拿 `book_id` 当关键字搜索, 命中率较低, 建议始终提供。
+
+```bash
+# 加入追更列表
+novel-cli follow add b520 8_8187 --title "示例小说"
+
+# 重复 add 会更新已有条目 (不会清掉已记录的最新章节)
+novel-cli follow add b520 8_8187 --title "示例小说（修订名）"
+
+# 移除
+novel-cli follow remove b520 8_8187
+```
+
+**list**
+
+```bash
+# 表格输出: 站点 / 书籍 ID / 标题 / 最新章节 / 更新时间
+novel-cli follow list
+
+# 机器可读输出 (JSON 数组)
+novel-cli follow list --json
+```
+
+`--json` 的每个元素包含 `site`、`book_id`、`title`、`last_chapter`、`updated_at`。
+
+**check**
+
+* `--all`: 同时显示已是最新的书籍和未找到结果的书籍; 省略时只报告新章节和错误。
+* `--download`: 对发现新章节的书打印可直接执行的 `novel-cli download ...` 命令。
+* `--timeout SECS`: 每本书的搜索超时, 默认 `5.0` 秒。
+
+```bash
+# 只检查并报告新章节
+novel-cli follow check
+
+# 显示所有书籍的状态
+novel-cli follow check --all
+
+# 有新章节时, 额外打印下载命令
+novel-cli follow check --download
+```
+
+`check` 只做搜索, **不会直接下载**: 下载是长任务, CLI 没有后台调度器, 因此它只打印命令, 保持命令快速、非阻塞、可预测。需要自动下载时, 把打印出的 `novel-cli download --site <site> <book_id>` 交给计划任务 (见 [常见任务配方](./recipes.md))。
+
+> 首次检查某本书时, 只会记录当前最新章节 (显示为 `First chapter recorded ...`), 不会误报为更新。
+>
+> 只要有任意一本书检查失败 (网络/插件异常), 命令最终以退出码 `1` 结束, 即使其它书检查成功。
+
+---
+
+#### 9. storage 子命令
+
+统计应用四个数据目录的磁盘占用, 并可一次性清理:
+
+| 类别 | 目录来源 |
+| --- | --- |
+| Raw data | `general.raw_data_dir` |
+| Cache | `general.cache_dir` |
+| Downloads | `general.output_dir` |
+| Logs | `general.debug.log_dir` |
+
+**Synopsis**
+
+```bash
+novel-cli storage [-h] [--json] [--clean] [-y]
+```
+
+**Options**
+
+* `--json`: 以 JSON 输出统计结果到标准输出并退出。
+* `--clean`: 打印表格后删除上述已存在的数据目录 (等同于批量清理 raw/cache/downloads/logs)。
+* `-y, --yes`: 跳过 `--clean` 的确认提示。
+* `--json` 与 `--clean` 不能同时使用 (退出码 `2`)。
+
+**Examples**
+
+```bash
+# 查看占用
+novel-cli storage
+
+# 机器可读输出
+novel-cli storage --json
+
+# 清理全部数据目录 (会要求确认)
+novel-cli storage --clean
+
+# 跳过确认 (脚本/计划任务中使用)
+novel-cli storage --clean -y
+```
+
+`--json` 的结构为 `{ "raw": {...}, "cache": {...}, "downloads": {...}, "logs": {...}, "total": {...} }`; 每个目录对象包含 `label`、`path`、`files`、`bytes`, `total` 只含 `files` 与 `bytes`。
+
+---
+
+#### 10. doctor 子命令
+
+执行一组**离线**自检, 用于快速定位环境问题。
+
+**Synopsis**
+
+```bash
+novel-cli doctor [-h] [--port N]
+```
+
+**检查项**
+
+* Python 版本是否 >= 3.11
+* 已安装包版本
+* 是否找到 `settings.toml` / `settings.json`
+* 配置能否解析为根表
+* 输出目录能否创建并写入 (会创建该目录并写入/删除一个临时文件)
+* 已注册下载站点数量
+* 可加载的搜索器数量
+* 可选音乐依赖 (`mutagen`、`qrcode`、`websocket`) — 缺失只提示, 不判定失败
+* `127.0.0.1:<port>` 是否可绑定 (默认 8081)
+
+**Options**
+
+* `--port N`: 要检查可用性的 API 端口, 默认 `8081`。
+
+**Examples**
+
+```bash
+# 默认检查
+novel-cli doctor
+
+# 检查自定义 API 端口
+novel-cli doctor --port 9000
+```
+
+> 所有必需检查通过时退出码为 `0`, 任意必需检查失败为 `1`。失败项下方会打印一条可执行的修复建议。
+
+---
+
+### 退出码与 `--json` 输出契约
+
+#### 退出码
+
+| 退出码 | 含义 | 典型场景 |
+| --- | --- | --- |
+| `0` | 成功 | 命令正常完成; 搜索无结果、追更无新章节也属于成功 |
+| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、`doctor` 必需项失败、`sources list --check` 探针失败、`storage --clean`/`clean` 删除失败 |
+| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`--json` 与 `--first` 同用、`--json` 与 `--clean` 同用、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes` |
+
+按 `Ctrl+C` 中断时, CLI 在 stderr 输出 `Aborted.` 并以 `1` 退出。
+
+#### `--json`
+
+带 `--json` 时:
+
+* 结构化结果**只**写到 stdout; 日志、进度、错误和提示写到 stderr, 便于管道消费。
+* 命令不会进入交互式选择; 需要的参数必须显式提供。
+* 即使最终退出码非 `0`, 也可能已输出一份 JSON 摘要 (例如 `download --json` 在部分书籍失败时)。
+
+| 命令 | 选项 | stdout 结构 |
+| --- | --- | --- |
+| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "exported"}]}`; `exported` 为 `{格式: [路径...]}`; 指定 `--no-export` 时为 `null` |
+| `search` | `--json` | 搜索结果数组, 每项含 `site`、`book_id`、`book_url`、`cover_url`、`title`、`author`、`latest_chapter`、`update_date`、`word_count`、`priority` |
+| `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
+| `sources list` | `--json` | 数组, 每项含 `site_key`、`name`、`search`、`hosts`、`origin`; 加 `--check` 时 `status` 才有值 (否则为 `null`) |
+| `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}` |
+| `follow list` | `--json` | 数组, 每项含 `site`、`book_id`、`title`、`last_chapter`、`updated_at` |
+| `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` |
+
+```bash
+# 典型脚本用法: 取第一本书的 ID
+novel-cli search --site b520 --json "三体" | jq -r '.[0].book_id'
+
+# 检查追更列表并统计条目数
+novel-cli follow list --json | jq 'length'
+
+# 读取存储占用总字节数
+novel-cli storage --json | jq '.total.bytes'
+```
+
+> `login --list` 也输出纯文本列表, 但不是 JSON; `sources check`、`config`、`clean` 目前没有 `--json`。
+>
+> 上面的 `jq` 示例需要另行安装 [jq](https://jqlang.github.io/jq/); 不安装时可直接查看原始 JSON 输出。
 
 ---
 

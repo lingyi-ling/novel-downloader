@@ -25,6 +25,7 @@ Global runtime settings for downloads / concurrency / rate limits / directories 
 | `backend`            | `str`     | `"aiohttp"`        | Global HTTP backend; one of `"aiohttp"`, `"httpx"`, `"curl_cffi"` |
 | `http2`              | `bool`    | `true`             | Only effective for `httpx`; enables HTTP/2 |
 | `impersonate`        | `str/None`| `None`             | Only effective for `curl_cffi`; enables browser fingerprint impersonation |
+| `browser_assisted_sites` | `list[str]` | `["fanqienovel"]` | Site keys whose search needs a real browser; set to `[]` to disable |
 | `download_retry_times` | `int`   | 2                  | Extra retries for download tasks after transient network errors |
 | `proxy`              | `str/None`| `None`             | HTTP/HTTPS proxy URL, e.g. `"http://127.0.0.1:7890"` |
 | `proxy_user`         | `str/None`| `None`             | Proxy username |
@@ -58,6 +59,21 @@ The program supports pluggable HTTP backends, switchable with the `backend` para
 > * [`httpx`](https://github.com/encode/httpx)
 > * [`curl_cffi`](https://github.com/lexiforest/curl_cffi)
 
+**Browser-assisted search**
+
+A few sites sign their search requests inside their own JavaScript, so plain HTTP requests return nothing. List those sites in `browser_assisted_sites`; an explicit search for such a site then reuses the login session to open a hidden browser, lets the site's own script issue the request, and captures the result. Aggregate searches continue to skip them.
+
+```toml
+[general]
+# The default is ["fanqienovel"]
+browser_assisted_sites = ["fanqienovel"]
+```
+
+* A comma-separated string is also accepted: `browser_assisted_sites = "fanqienovel,example"`.
+* When the key is omitted, the default `["fanqienovel"]` applies.
+* Setting it explicitly to `[]` disables browser-assisted search entirely; those sites fall back to plain HTTP search (usually with no results).
+* Run `novel-cli login <site>` first to establish the login session, and install the optional browser component.
+
 **Compatibility and Cloudflare behavior**
 
 Because HTTP clients differ in protocol implementation and TLS fingerprints, some sites may trigger **Cloudflare anti-bot or access verification** when using the default `aiohttp` backend, causing connections to be blocked or `403`/`5xx` responses.
@@ -89,6 +105,8 @@ These settings handle **obfuscated font decoding** and **image-chapter OCR**, an
 | `device`           | `str/None`     | None    | Inference device, e.g. `"cpu"`, `"gpu"`, `"npu"`, `"gpu:0"`, `"gpu:0,1"` |
 | `cpu_threads`      | `int`          | 10      | Number of threads used for CPU inference |
 | `enable_hpi`       | `bool`         | false   | Whether to enable high-performance inference |
+| `use_truncation`   | `bool`         | true    | Whether to trim duplicated/truncated chapter content (e.g. qidian repeated paragraphs) |
+| `cut_mode`         | `str`          | `"none"`| Chapter content cutting mode |
 
 Behavior notes:
 
@@ -229,8 +247,15 @@ book_ids = [
   "1012584111"
 ]
 login_required = true
+
+# Site-level parser settings override the same keys in [general.parser]
+[sites.qidian.parser]
 use_truncation = true
 ```
+
+> `use_truncation` is a parser option and **must** be placed under `[sites.<site>.parser]` (or `[general.parser]`).
+> A top-level key in `[sites.<site>]` is not read; validation reports a warning and suggests moving it to `sites.<site>.parser.use_truncation`.
+> Other parser options (`enable_ocr`, `remove_watermark`, `cut_mode`, ...) can also be overridden in the site-level `parser` table.
 
 **Structured format**
 

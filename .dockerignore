@@ -1,0 +1,59 @@
+# Build context is the repository root; keep the image small and free of
+# local state and secrets.
+
+# Version control / editors / agent state
+.git
+.gitignore
+.gitattributes
+.github
+.editorconfig
+.pre-commit-config.yaml
+.trae
+.zcode
+
+# Python environments and caches
+.venv
+.venv-*
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.coverage
+.coverage.*
+htmlcov
+**/*.egg-info
+
+# Build outputs (rebuilt inside the image)
+build
+dist
+site
+*.spec
+packaging/*.ps1
+packaging/*_entry.py
+packaging/_spec_common.py
+
+# Large/unrelated source trees
+android
+legacy
+tests
+docs
+raw_data
+
+# Local data and secrets (must never be baked into the image)
+downloads
+novel_cache
+logs
+settings.toml
+settings.json
+*.log
+*.env
+
+# Repository meta files not needed for pip metadata/build
+CHANGELOG.md
+HANDOFF.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+SECURITY.md
+README.en.md
+mkdocs.yml

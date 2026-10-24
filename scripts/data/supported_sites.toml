@@ -111,7 +111,7 @@ tags = ["原创", "男性向", "女性向", "阅文"]
 volumes = "no"
 images = "no"
 login = "yes"
-search = "external"
+search = "yes"
 
 [[sites.qqbook.url_examples]]
 title = "Book URL"
@@ -170,7 +170,7 @@ tags = ["原创", "男性向", "女性向"]
 volumes = "yes"
 images = "no"
 login = "partial"
-search = "external"
+search = "yes"
 
 [[sites.n17k.url_examples]]
 title = "Book URL"
@@ -266,7 +266,7 @@ tags = ["原创", "男性向"]
 volumes = "no"
 images = "yes"
 login = "yes"
-search = "external"
+search = "yes"
 
 [[sites.faloo.url_examples]]
 title = "Book URL"
@@ -348,7 +348,7 @@ tags = ["二次元", "同人二创", "原创"]
 volumes = "yes"
 images = "yes"
 login = "yes"
-search = "external"
+search = "yes"
 
 [[sites.ciweimao.url_examples]]
 title = "Book URL"
@@ -450,7 +450,7 @@ tags = ["轻小说", "原创"]
 volumes = "yes"
 images = "yes"
 login = "yes"
-search = "external"
+search = "yes"
 
 [[sites.sfacg.url_examples]]
 title = "Book URL"
@@ -655,7 +655,7 @@ hidden = false
 title = "Book TOC URL"
 url = "https://www.wenku8.net/novel/2/2835/index.htm"
 book_id = "2835"
-hidden = false
+hidden = true
 
 [[sites.wenku8.notes]]
 title = "其它说明"
@@ -770,7 +770,7 @@ tags = ["轻小说", "转载站"]
 volumes = "yes"
 images = "yes"
 login = "partial"
-search = "external"
+search = "yes"
 
 [[sites.lnovel.url_examples]]
 title = "Book URL"
@@ -893,7 +893,7 @@ tags = ["轻小说", "二次元"]
 volumes = "yes"
 images = "yes"
 login = "partial"
-search = "external"
+search = "yes"
 
 [[sites.shaoniandream.url_examples]]
 title = "Book URL"
@@ -1022,7 +1022,7 @@ tags = ["转载站", "经典图书"]
 volumes = "yes"
 images = "no"
 login = "no"
-search = "no"
+search = "yes"
 
 [[sites.kunnu.url_examples]]
 title = "Book URL"
@@ -1053,7 +1053,7 @@ tags = ["转载站", "经典图书"]
 volumes = "no"
 images = "no"
 login = "no"
-search = "external"
+search = "yes"
 
 [[sites.westnovel.url_examples]]
 title = "Book URL"
@@ -1084,7 +1084,7 @@ tags = ["转载站", "轻小说"]
 volumes = "no"
 images = "no"
 login = "no"
-search = "external"
+search = "yes"
 
 [[sites.westnovel_sub.url_examples]]
 title = "Book URL"
@@ -2140,7 +2140,7 @@ tags = ["转载站"]
 volumes = "no"
 images = "no"
 login = "no"
-search = "yes"
+search = "no"
 
 [[sites.bixiange.url_examples]]
 title = "Book URL"
@@ -2304,6 +2304,14 @@ content = """
 * 该站点直接提供 txt 下载。
 """
 
+[[sites.bixiange.notes]]
+title = "适配器注册状态"
+content = """
+* 适配器位于 `plugins/sites/bixiange/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），但尚未在 `src/novel_downloader/apps/constants.py` 的 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
+* 因此当前 CLI / Web / API 的站点列表中不会出现该站点，也不参与聚合搜索。
+"""
+
+
 [sites.b520]
 name = "笔趣阁"
 homepage = "http://www.b520.cc"
@@ -2349,7 +2357,7 @@ tags = ["转载站", "笔趣阁"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "yes"
+search = "no"
 
 [[sites.biquge345.url_examples]]
 title = "Book URL"
@@ -2363,6 +2371,14 @@ url = "https://www.biquge345.com/chapter/321301/37740966.html"
 book_id = "321301"
 chapter_id = "37740966"
 hidden = false
+
+[[sites.biquge345.notes]]
+title = "适配器注册状态"
+content = """
+* 适配器位于 `plugins/sites/biquge345/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），但尚未在 `src/novel_downloader/apps/constants.py` 的 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
+* 因此当前 CLI / Web / API 的站点列表中不会出现该站点，也不参与聚合搜索。
+"""
+
 
 [sites.shuhaige]
 name = "书海阁小说网"
@@ -2504,7 +2520,7 @@ tags = ["转载站", "笔趣阁"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "external"
+search = "yes"
 
 [[sites.yibige.url_examples]]
 title = "Book URL"
@@ -2922,14 +2938,14 @@ hidden = false
 
 [[sites.lvsewx.url_examples]]
 title = "Chapter URL"
-url = "https://www.lvscwx.cc/books/20/20645/7237914.html"
+url = "https://www.lvsewx.cc/books/20/20645/7237914.html"
 book_id = "20645"
 chapter_id = "7237914"
 hidden = false
 
 [[sites.lvsewx.url_examples]]
 title = "Chapter URL"
-url = "https://www.lvscwx.cc/books/20/20645/558875637.html"
+url = "https://www.lvsewx.cc/books/20/20645/558875637.html"
 book_id = "20645"
 chapter_id = "558875637"
 hidden = true
@@ -2942,14 +2958,14 @@ hidden = true
 
 [[sites.lvsewx.url_examples]]
 title = "Chapter URL"
-url = "https://www.lvscwx.cc/books/2/2527/21204730.html"
+url = "https://www.lvsewx.cc/books/2/2527/21204730.html"
 book_id = "2527"
 chapter_id = "21204730"
 hidden = true
 
 [[sites.lvsewx.url_examples]]
 title = "Chapter URL"
-url = "https://www.lvscwx.cc/books/2/2527/44184579.html"
+url = "https://www.lvsewx.cc/books/2/2527/44184579.html"
 book_id = "2527"
 chapter_id = "44184579"
 hidden = true
@@ -2962,14 +2978,14 @@ hidden = true
 
 [[sites.lvsewx.url_examples]]
 title = "Chapter URL"
-url = "https://www.lvscwx.cc/books/56447/56447362/509977888.html"
+url = "https://www.lvsewx.cc/books/56447/56447362/509977888.html"
 book_id = "56447362"
 chapter_id = "509977888"
 hidden = true
 
 [[sites.lvsewx.url_examples]]
 title = "Chapter URL"
-url = "https://www.lvscwx.cc/books/56447/56447362/680168970.html"
+url = "https://www.lvsewx.cc/books/56447/56447362/680168970.html"
 book_id = "56447362"
 chapter_id = "680168970"
 hidden = true
@@ -3350,7 +3366,7 @@ tags = ["转载站", "成人向", "NSFW"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "yes"
+search = "no"
 
 [[sites.haiwaishubao.url_examples]]
 title = "Book URL"
@@ -3383,6 +3399,14 @@ url = "https://www.haiwaishubao.com/book/102659/5335635_2.html"
 book_id = "102659"
 chapter_id = "5335635"
 hidden = true
+
+[[sites.haiwaishubao.notes]]
+title = "适配器注册状态"
+content = """
+* 适配器位于 `plugins/sites/haiwaishubao/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），但尚未在 `src/novel_downloader/apps/constants.py` 的 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
+* 因此当前无法通过 CLI / Web / API 选择该站点，也不参与聚合搜索。
+"""
+
 
 [sites.hongxiuzhao]
 name = "红袖招"
@@ -3426,7 +3450,7 @@ tags = ["成人向", "NSFW"]
 volumes = "yes"
 images = "no"
 login = "yes"
-search = "external"
+search = "no"
 
 [[sites.uaa.url_examples]]
 title = "Book URL"
@@ -3439,6 +3463,13 @@ title = "Chapter URL"
 url = "https://www.uaa.com/novel/chapter?id=234639"
 chapter_id = "234639"
 hidden = false
+
+[[sites.uaa.notes]]
+title = "搜索器注册状态"
+content = """
+* 站点适配器与搜索器均已实现（`plugins/sites/uaa/`），但未在 `SEARCH_SUPPORT_SITES` 中注册，当前不参与聚合搜索。
+"""
+
 
 [sites.mjyhb]
 name = "三五中文"
@@ -3496,7 +3527,7 @@ tags = ["转载站", "成人向", "NSFW"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "yes"
+search = "no"
 
 [[sites.aaatxt.url_examples]]
 title = "Book URL"
@@ -3531,7 +3562,7 @@ tags = ["转载站", "笔趣阁"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "external"
+search = "no"
 
 [[sites.n8tsw.url_examples]]
 title = "Book URL"
@@ -3591,7 +3622,7 @@ tags = ["转载站"]
 volumes = "no"
 images = "no"
 login = "no"
-search = "yes"
+search = "no"
 
 [[sites.deqixs.url_examples]]
 title = "Book URL"
@@ -3627,7 +3658,7 @@ tags = ["转载站"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "yes"
+search = "no"
 
 [[sites.xiaoshuoge.url_examples]]
 title = "Book URL"
@@ -3656,7 +3687,7 @@ tags = ["转载站"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "yes"
+search = "no"
 
 [[sites.xs63b.url_examples]]
 title = "Book URL"
@@ -3693,7 +3724,7 @@ tags = ["转载站"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "yes"
+search = "no"
 
 [[sites.wanbengo.url_examples]]
 title = "Book URL"
@@ -3732,7 +3763,7 @@ tags = ["转载站"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "yes"
+search = "no"
 
 [[sites.n69yue.url_examples]]
 title = "Book URL"
@@ -3770,7 +3801,7 @@ tags = ["原创", "免费", "轻小说"]
 volumes = "yes"
 images = "yes"
 login = "partial"
-search = "external"
+search = "yes"
 
 [[sites.syosetu.url_examples]]
 title = "Book URL"
@@ -3803,7 +3834,7 @@ tags = ["原创", "免费", "成人向", "NSFW"]
 volumes = "yes"
 images = "yes"
 login = "partial"
-search = "external"
+search = "yes"
 
 [[sites.syosetu18.url_examples]]
 title = "Moonlight Book URL"
@@ -3878,7 +3909,7 @@ tags = ["原创", "免费", "同人二创"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "external"
+search = "yes"
 
 [[sites.akatsuki_novels.url_examples]]
 title = "Book URL"
@@ -3909,7 +3940,7 @@ tags = ["原创", "免费", "轻小说"]
 volumes = "yes"
 images = "no"
 login = "partial"
-search = "external"
+search = "yes"
 
 [[sites.alphapolis.url_examples]]
 title = "Book URL"
@@ -3940,7 +3971,7 @@ tags = ["原创", "免费", "轻小说", "成人向", "NSFW"]
 volumes = "no"
 images = "yes"
 login = "partial"
-search = "external"
+search = "yes"
 
 [[sites.novelpia.url_examples]]
 title = "Book URL"

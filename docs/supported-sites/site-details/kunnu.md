@@ -18,7 +18,7 @@ tags:
 * 支持分卷: :material-check: 是
 * 支持插图: :material-close: 否
 * 支持登录: :material-close: 否
-* 支持搜索: :material-close: 否
+* 支持搜索: :material-check: 是
 
 ---
 

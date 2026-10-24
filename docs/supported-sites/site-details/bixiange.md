@@ -17,7 +17,7 @@ tags:
 * 支持分卷: :material-close: 否
 * 支持插图: :material-close: 否
 * 支持登录: :material-close: 否
-* 支持搜索: :material-check: 是
+* 支持搜索: :material-close: 否
 
 ---
 
@@ -49,3 +49,8 @@ https://m.bixiange.me/wxxz/20921/index/1.html
 ## 其它说明
 
 * 该站点直接提供 txt 下载。
+
+## 适配器注册状态
+
+* 适配器位于 `plugins/sites/bixiange/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），但尚未在 `src/novel_downloader/apps/constants.py` 的 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
+* 因此当前 CLI / Web / API 的站点列表中不会出现该站点，也不参与聚合搜索。

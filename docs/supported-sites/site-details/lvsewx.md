@@ -39,7 +39,7 @@ https://www.lvsewx.cc/ebook/20645.html
 URL:
 
 ```
-https://www.lvscwx.cc/books/20/20645/7237914.html
+https://www.lvsewx.cc/books/20/20645/7237914.html
 ```
 
 * Book ID: `20645`

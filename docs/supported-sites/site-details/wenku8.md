@@ -58,16 +58,6 @@ https://www.wenku8.net/novel/2/2835/113354.htm
 * Book ID: `2835`
 * Chapter ID: `113354`
 
-### Book TOC URL
-
-URL:
-
-```
-https://www.wenku8.net/novel/2/2835/index.htm
-```
-
-* Book ID: `2835`
-
 ---
 
 ## 其它说明

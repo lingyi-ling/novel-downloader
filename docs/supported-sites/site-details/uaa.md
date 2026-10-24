@@ -18,7 +18,7 @@ tags:
 * 支持分卷: :material-check: 是
 * 支持插图: :material-close: 否
 * 支持登录: :material-check: 是
-* 支持搜索: :material-open-in-new: 站点支持，需站内操作
+* 支持搜索: :material-close: 否
 
 ---
 
@@ -43,3 +43,9 @@ https://www.uaa.com/novel/chapter?id=234639
 ```
 
 * Chapter ID: `234639`
+
+---
+
+## 搜索器注册状态
+
+* 站点适配器与搜索器均已实现（`plugins/sites/uaa/`），但未在 `SEARCH_SUPPORT_SITES` 中注册，当前不参与聚合搜索。
