@@ -1,7 +1,10 @@
 package com.lingyi.noveldl.ui.history
 
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import android.content.IntentFilter
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,20 +21,26 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
+import com.lingyi.noveldl.data.HistoryDownloader
 import com.lingyi.noveldl.data.HistoryFile
+import com.lingyi.noveldl.data.downloadFileName
 import com.lingyi.noveldl.ui.formatTimestamp
 import com.lingyi.noveldl.ui.humanSize
 import kotlinx.coroutines.launch
@@ -43,6 +52,49 @@ fun HistoryScreen(onMessage: (String) -> Unit) {
     var files by remember { mutableStateOf<List<HistoryFile>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
+    val pendingDownloads = remember { mutableStateMapOf<Long, String>() }
+    val latestMessage by rememberUpdatedState(onMessage)
+
+    // DownloadManager reports the final result as a broadcast. Only ids we
+    // enqueued from this screen are considered, so other apps' downloads are
+    // ignored.
+    DisposableEffect(context) {
+        val appContext = context.applicationContext
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context?, intent: Intent?) {
+                if (intent?.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
+                val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+                val fileName = pendingDownloads.remove(id) ?: return
+                val manager = appContext.getSystemService(DownloadManager::class.java) ?: return
+                val (status, reason) = queryDownload(manager, id)
+                when (status) {
+                    DownloadManager.STATUS_SUCCESSFUL ->
+                        latestMessage(
+                            appContext.getString(R.string.history_download_done, fileName),
+                        )
+                    DownloadManager.STATUS_FAILED ->
+                        latestMessage(
+                            appContext.getString(
+                                R.string.history_download_failed,
+                                fileName,
+                                appContext.getString(
+                                    R.string.history_download_failure_reason,
+                                    reason,
+                                ),
+                            ),
+                        )
+                    else -> Unit
+                }
+            }
+        }
+        ContextCompat.registerReceiver(
+            appContext,
+            receiver,
+            IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+            ContextCompat.RECEIVER_EXPORTED,
+        )
+        onDispose { runCatching { appContext.unregisterReceiver(receiver) } }
+    }
 
     fun load() {
         if (loading) return
@@ -60,14 +112,25 @@ fun HistoryScreen(onMessage: (String) -> Unit) {
 
     LaunchedEffect(Unit) { load() }
 
-    fun open(file: HistoryFile) {
-        val url = Api.baseUrl.trimEnd('/') + file.download_url
-        try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            onMessage(context.getString(R.string.history_open_failed, e.message ?: ""))
+    fun download(file: HistoryFile) {
+        val displayName = file.name.ifBlank {
+            downloadFileName(file.name, file.download_url, file.ext)
         }
+        HistoryDownloader.enqueue(context, file)
+            .onSuccess { id ->
+                pendingDownloads[id] = displayName
+                onMessage(context.getString(R.string.history_download_started, displayName))
+            }
+            .onFailure {
+                onMessage(
+                    context.getString(
+                        R.string.history_download_failed,
+                        displayName,
+                        it.message?.takeIf { message -> message.isNotBlank() }
+                            ?: context.getString(R.string.history_download_unknown_error),
+                    ),
+                )
+            }
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -116,12 +179,29 @@ fun HistoryScreen(onMessage: (String) -> Unit) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Spacer(Modifier.height(4.dp))
-                        Button(onClick = { open(file) }) {
+                        Button(onClick = { download(file) }) {
                             Text(stringResource(R.string.action_download))
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/** Reads the final status/reason of a download; -1 when it is unknown. */
+private fun queryDownload(manager: DownloadManager, id: Long): Pair<Int, Int> {
+    return try {
+        val cursor = manager.query(DownloadManager.Query().setFilterById(id))
+        cursor.use {
+            if (!it.moveToFirst()) return -1 to 0
+            val statusIndex = it.getColumnIndex(DownloadManager.COLUMN_STATUS)
+            val reasonIndex = it.getColumnIndex(DownloadManager.COLUMN_REASON)
+            val status = if (statusIndex >= 0) it.getInt(statusIndex) else -1
+            val reason = if (reasonIndex >= 0) it.getInt(reasonIndex) else 0
+            status to reason
+        }
+    } catch (_: Exception) {
+        -1 to 0
     }
 }

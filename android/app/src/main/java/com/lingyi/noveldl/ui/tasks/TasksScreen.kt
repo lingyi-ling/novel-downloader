@@ -32,6 +32,7 @@ import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.Task
 import com.lingyi.noveldl.data.TasksResponse
+import com.lingyi.noveldl.notifications.TaskNotifier
 import com.lingyi.noveldl.ui.taskStatusLabelRes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -43,12 +44,21 @@ fun TasksScreen(onMessage: (String) -> Unit) {
     var snapshot by remember { mutableStateOf(TasksResponse()) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
+    // Last polled status per task; the first observation is only a baseline.
+    val knownStatuses = remember { mutableMapOf<String, String>() }
 
     LaunchedEffect(refreshKey) {
         while (true) {
             Api.call { Api.service().tasks() }
-                .onSuccess {
-                    snapshot = it
+                .onSuccess { response ->
+                    val tasks = response.allTasks()
+                    val previous = knownStatuses.toMap()
+                    knownStatuses.clear()
+                    knownStatuses.putAll(taskStatusSnapshot(tasks))
+                    detectTerminalTaskEvents(previous, tasks).forEach { event ->
+                        TaskNotifier.notify(context, event)
+                    }
+                    snapshot = response
                     error = null
                 }
                 .onFailure { error = it.message }

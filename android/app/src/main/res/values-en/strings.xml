@@ -43,7 +43,20 @@
     <string name="tasks_empty">No tasks yet — add one from the Search tab</string>
 
     <string name="history_files">%1$d files</string>
-    <string name="history_open_failed">Could not open: %1$s</string>
+    <string name="history_download_started">Downloading %1$s</string>
+    <string name="history_download_done">Saved to Downloads: %1$s</string>
+    <string name="history_download_failed">Download failed: %1$s (%2$s)</string>
+    <string name="history_download_failure_reason">Error code %1$d</string>
+    <string name="history_download_invalid_url">Invalid download URL</string>
+    <string name="history_download_no_manager">System download service unavailable</string>
+    <string name="history_download_unknown_error">Unknown error</string>
+
+    <string name="notification_channel_tasks">Task alerts</string>
+    <string name="notification_channel_tasks_desc">Alerts when a download task completes or fails</string>
+    <string name="notification_task_completed_title">Download complete</string>
+    <string name="notification_task_completed_text">%1$s finished downloading</string>
+    <string name="notification_task_failed_title">Download failed</string>
+    <string name="notification_task_failed_text">%1$s failed to download</string>
 
     <string name="music_platform">Platform</string>
     <string name="music_keyword_hint">Song keyword</string>

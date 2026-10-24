@@ -48,7 +48,21 @@
 
     <!-- 历史 -->
     <string name="history_files">共 %1$d 个文件</string>
-    <string name="history_open_failed">无法打开：%1$s</string>
+    <string name="history_download_started">开始下载：%1$s</string>
+    <string name="history_download_done">已保存到 Downloads：%1$s</string>
+    <string name="history_download_failed">下载失败：%1$s（%2$s）</string>
+    <string name="history_download_failure_reason">错误码 %1$d</string>
+    <string name="history_download_invalid_url">下载地址无效</string>
+    <string name="history_download_no_manager">系统下载服务不可用</string>
+    <string name="history_download_unknown_error">未知错误</string>
+
+    <!-- 通知 -->
+    <string name="notification_channel_tasks">任务通知</string>
+    <string name="notification_channel_tasks_desc">下载任务完成或失败时提醒</string>
+    <string name="notification_task_completed_title">下载完成</string>
+    <string name="notification_task_completed_text">%1$s 已下载完成</string>
+    <string name="notification_task_failed_title">下载失败</string>
+    <string name="notification_task_failed_text">%1$s 下载失败</string>
 
     <!-- 音乐 -->
     <string name="music_platform">平台</string>

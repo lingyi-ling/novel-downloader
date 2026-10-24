@@ -29,6 +29,11 @@ object Api {
     var baseUrl: String = DEFAULT_BASE_URL
         private set
 
+    /** Trimmed API key of the active configuration; empty when unauthenticated. */
+    @Volatile
+    var apiKey: String = ""
+        private set
+
     /**
      * Builds the Retrofit service. [baseUrl] is trimmed and normalized to end
      * with a slash; a blank value falls back to [DEFAULT_BASE_URL].
@@ -49,6 +54,7 @@ object Api {
         }
         this.baseUrl = normalized
         val key = apiKey?.trim().orEmpty()
+        this.apiKey = key
         val client = OkHttpClient.Builder()
             .connectTimeout(connectTimeoutMillis, TimeUnit.MILLISECONDS)
             .readTimeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
