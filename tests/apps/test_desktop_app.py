@@ -658,6 +658,247 @@ def test_task_detail_text_for_no_selection() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Retry parameters
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("status", [Status.FAILED, Status.CANCELLED])
+def test_retry_params_for_failed_and_cancelled_tasks(status: Status) -> None:
+    task = DownloadTask(title="  Book  ", site=" qidian ", book_id=" 42 ")
+    task.status = status
+    assert fmt.retry_params(task) == fmt.RetryParams(
+        title="Book", site="qidian", book_id="42"
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        Status.QUEUED,
+        Status.RUNNING,
+        Status.PROCESSING,
+        Status.EXPORTING,
+        Status.COMPLETED,
+    ],
+)
+def test_retry_params_reject_tasks_that_are_not_retryable(status: Status) -> None:
+    task = _task(status)
+    assert fmt.retry_params(task) is None
+
+
+def test_retry_params_require_site_and_book_id() -> None:
+    task = DownloadTask(title="Book", site="", book_id="1")
+    task.status = Status.FAILED
+    assert fmt.retry_params(task) is None
+
+    task = DownloadTask(title="Book", site="qidian", book_id="   ")
+    task.status = Status.CANCELLED
+    assert fmt.retry_params(task) is None
+
+
+def test_retry_params_for_no_selection() -> None:
+    assert fmt.retry_params(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Exported-file choices
+# ---------------------------------------------------------------------------
+def test_task_export_choices_prefer_epub_then_txt_with_labels() -> None:
+    task = _task(
+        Status.COMPLETED,
+        {
+            "txt": Path("downloads/book.txt"),
+            "epub": Path("downloads/book.epub"),
+            "pdf": Path("downloads/book.pdf"),
+        },
+    )
+    choices = fmt.task_export_choices(task)
+    assert [choice.key for choice in choices] == ["epub", "txt", "pdf"]
+    assert [choice.path for choice in choices] == [
+        Path("downloads/book.epub"),
+        Path("downloads/book.txt"),
+        Path("downloads/book.pdf"),
+    ]
+    assert choices[0].label == "EPUB: book.epub"
+
+
+def test_task_export_choices_deduplicate_keeping_the_first_key() -> None:
+    task = _task(Status.COMPLETED)
+    task.exported_paths = {
+        "epub": Path("downloads/book.epub"),
+        "txt": Path("downloads/book.epub"),
+        "pdf": None,
+    }
+    choices = fmt.task_export_choices(task)
+    assert len(choices) == 1
+    assert choices[0].key == "epub"
+    assert choices[0].path == Path("downloads/book.epub")
+    assert fmt.task_export_paths(task) == (Path("downloads/book.epub"),)
+
+
+def test_task_export_choices_empty_without_exports() -> None:
+    assert fmt.task_export_choices(_task(Status.COMPLETED)) == ()
+    assert fmt.task_export_choices(None) == ()
+
+
+# ---------------------------------------------------------------------------
+# Context-menu availability
+# ---------------------------------------------------------------------------
+def test_task_menu_state_for_completed_task_with_multiple_files() -> None:
+    task = _task(
+        Status.COMPLETED,
+        {
+            "epub": Path("downloads/book.epub"),
+            "txt": Path("downloads/book.txt"),
+        },
+    )
+    state = fmt.task_menu_state(task)
+    assert state.can_open_file is True
+    assert state.can_open_folder is True
+    assert state.can_copy_path is True
+    assert state.can_show_details is True
+    assert state.can_retry is False
+    assert state.can_copy_error is False
+    assert [choice.key for choice in state.choices] == ["epub", "txt"]
+
+
+def test_task_menu_state_offers_retry_and_error_copy_for_failed_task() -> None:
+    task = _task(Status.FAILED, error=" network down ")
+    state = fmt.task_menu_state(task)
+    assert state.can_retry is True
+    assert state.can_copy_error is True
+    assert state.can_show_details is True
+    assert state.can_copy_path is False
+
+
+def test_task_menu_state_respects_retry_blocked() -> None:
+    task = _task(Status.FAILED, error="boom")
+    assert fmt.task_menu_state(task).can_retry is True
+    assert fmt.task_menu_state(task, retry_blocked=True).can_retry is False
+
+
+def test_task_menu_state_for_cancelled_task_is_retryable() -> None:
+    assert fmt.task_menu_state(_task(Status.CANCELLED)).can_retry is True
+
+
+def test_task_menu_state_for_running_task_disables_output_actions() -> None:
+    task = _task(Status.RUNNING, {"epub": Path("downloads/book.epub")})
+    state = fmt.task_menu_state(task)
+    assert state.can_open_file is False
+    assert state.can_open_folder is False
+    assert state.can_copy_path is True  # the path can still be copied
+    assert state.can_retry is False
+
+
+def test_task_menu_state_for_no_selection() -> None:
+    state = fmt.task_menu_state(None)
+    assert state == fmt.TaskMenuState(
+        can_retry=False,
+        can_open_file=False,
+        can_open_folder=False,
+        can_copy_path=False,
+        can_copy_error=False,
+        can_show_details=False,
+        choices=(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Status / keyword filtering
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (Status.QUEUED, fmt.FILTER_ACTIVE),
+        (Status.RUNNING, fmt.FILTER_ACTIVE),
+        (Status.PROCESSING, fmt.FILTER_ACTIVE),
+        (Status.EXPORTING, fmt.FILTER_ACTIVE),
+        (Status.COMPLETED, fmt.FILTER_COMPLETED),
+        (Status.FAILED, fmt.FILTER_FAILED),
+        # Cancelled tasks stay reachable from the failed filter.
+        (Status.CANCELLED, fmt.FILTER_FAILED),
+        ("running", fmt.FILTER_ACTIVE),
+        ("unknown", "other"),
+        (None, "other"),
+    ],
+)
+def test_task_status_group(status: object, expected: str) -> None:
+    assert fmt.task_status_group(status) == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "filter_code", "expected"),
+    [
+        (Status.RUNNING, fmt.FILTER_ALL, True),
+        (Status.RUNNING, fmt.FILTER_ACTIVE, True),
+        (Status.RUNNING, fmt.FILTER_COMPLETED, False),
+        (Status.RUNNING, fmt.FILTER_FAILED, False),
+        (Status.COMPLETED, fmt.FILTER_COMPLETED, True),
+        (Status.COMPLETED, fmt.FILTER_ACTIVE, False),
+        (Status.FAILED, fmt.FILTER_FAILED, True),
+        (Status.CANCELLED, fmt.FILTER_FAILED, True),
+        (Status.CANCELLED, fmt.FILTER_COMPLETED, False),
+    ],
+)
+def test_task_matches_filter_by_status(
+    status: Status, filter_code: str, expected: bool
+) -> None:
+    task = _task(status)
+    assert fmt.task_matches_filter(task, status=filter_code) is expected
+
+
+def test_task_matches_filter_by_title_is_case_insensitive() -> None:
+    task = DownloadTask(title="The Great Novel", site="qidian", book_id="1")
+    assert fmt.task_matches_filter(task, keyword="great") is True
+    assert fmt.task_matches_filter(task, keyword="  GREAT  ") is True
+    assert fmt.task_matches_filter(task, keyword="novel") is True
+    assert fmt.task_matches_filter(task, keyword="") is True
+    assert fmt.task_matches_filter(task, keyword="   ") is True
+    # Only the title is searched, not the site or book id.
+    assert fmt.task_matches_filter(task, keyword="qidian") is False
+    assert fmt.task_matches_filter(task, keyword="missing") is False
+
+
+def test_filter_tasks_combines_filters_and_preserves_order() -> None:
+    running = DownloadTask(title="Alpha", site="qidian", book_id="1")
+    running.status = Status.RUNNING
+    failed_match = DownloadTask(title="Alpha Failure", site="qidian", book_id="2")
+    failed_match.status = Status.FAILED
+    failed_other = DownloadTask(title="Beta Failure", site="qidian", book_id="3")
+    failed_other.status = Status.CANCELLED
+    completed = DownloadTask(title="Alpha Done", site="qidian", book_id="4")
+    completed.status = Status.COMPLETED
+    tasks = [running, failed_match, failed_other, completed]
+
+    assert fmt.filter_tasks(tasks, status=fmt.FILTER_FAILED, keyword="alpha") == [
+        failed_match
+    ]
+    assert fmt.filter_tasks(tasks, keyword="ALPHA") == [
+        running,
+        failed_match,
+        completed,
+    ]
+    assert fmt.filter_tasks(tasks, status=fmt.FILTER_ACTIVE) == [running]
+    assert fmt.filter_tasks(tasks, status=fmt.FILTER_ALL) == tasks
+
+
+def test_task_filter_labels_and_codes_round_trip() -> None:
+    for code in fmt.TASK_FILTER_CODES:
+        label = fmt.task_filter_label(code)
+        assert label
+        assert fmt.task_filter_code(label) == code
+        assert fmt.task_filter_code(code) == code
+        assert fmt.task_filter_code(code.upper()) == code
+    assert fmt.task_filter_code("bogus") == fmt.FILTER_ALL
+    assert fmt.task_filter_code(None) == fmt.FILTER_ALL
+
+
+def test_task_filter_labels_use_translations() -> None:
+    assert fmt.task_filter_label(fmt.FILTER_ALL) == t("All")
+    assert fmt.task_filter_label(fmt.FILTER_ACTIVE) == t("Active")
+    assert fmt.task_filter_label(fmt.FILTER_COMPLETED) == t("Completed")
+    assert fmt.task_filter_label(fmt.FILTER_FAILED) == t("Failed")
+
+
+# ---------------------------------------------------------------------------
 # Window smoke test (guarded: needs a display)
 # ---------------------------------------------------------------------------
 def test_desktop_window_builds_all_tabs(
@@ -686,15 +927,22 @@ def test_desktop_window_builds_all_tabs(
         assert app.history_tree is not None
         assert app.search_button is not None
         assert app.search_last_button is not None
+        assert app.retry_button is not None
         assert app.open_file_button is not None
         assert app.open_folder_button is not None
+        assert app.task_filter_combo is not None
+        assert app.task_keyword_entry is not None
+        assert app._task_file_menu is not None
         assert str(app._status_var.get())  # status bar shows something
         assert root.title() == f"{t('Novel Downloader')} v{__version__}"
         assert str(app._env_var.get())  # API/data-directory information
         assert app.task_detail_var.get() == t("Select a task to view its details.")
+        assert "disabled" in app.retry_button.state()
         assert "disabled" in app.open_file_button.state()
         assert "disabled" in app.open_folder_button.state()
         assert "disabled" in app.search_last_button.state()
+        assert app.task_filter_combo.get() == t("All")
+        assert app.task_keyword_var.get() == ""
     finally:
         if app is not None:
             app._closing = True

@@ -17,9 +17,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -45,6 +47,7 @@ import com.lingyi.noveldl.ui.formatTimestamp
 import com.lingyi.noveldl.ui.humanSize
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HistoryScreen(onMessage: (String) -> Unit) {
     val context = LocalContext.current
@@ -133,54 +136,63 @@ fun HistoryScreen(onMessage: (String) -> Unit) {
             }
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                stringResource(R.string.history_files, files.size),
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Button(onClick = { load() }, enabled = !loading) {
-                Text(stringResource(R.string.action_refresh))
+    PullToRefreshBox(
+        isRefreshing = loading,
+        onRefresh = { load() },
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    stringResource(R.string.history_files, files.size),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Button(onClick = { load() }, enabled = !loading) {
+                    Text(stringResource(R.string.action_refresh))
+                }
             }
-        }
-        error?.let {
+            error?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    stringResource(R.string.state_error, it),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { load() }) {
+                    Text(stringResource(R.string.action_retry))
+                }
+            }
             Spacer(Modifier.height(8.dp))
-            Text(
-                stringResource(R.string.state_error, it),
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            TextButton(onClick = { load() }) {
-                Text(stringResource(R.string.action_retry))
+            if (files.isEmpty() && !loading && error == null) {
+                Text(
+                    stringResource(R.string.state_empty),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-        }
-        Spacer(Modifier.height(8.dp))
-        if (files.isEmpty() && !loading && error == null) {
-            Text(
-                stringResource(R.string.state_empty),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(files) { file ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp)) {
-                        Text(file.name, style = MaterialTheme.typography.titleSmall)
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "${formatTimestamp(file.mtime)} · " +
-                                humanSize(file.size) + " · ${file.ext}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Button(onClick = { download(file) }) {
-                            Text(stringResource(R.string.action_download))
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(files) { file ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(file.name, style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "${formatTimestamp(file.mtime)} · " +
+                                    humanSize(file.size) + " · ${file.ext}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Button(onClick = { download(file) }) {
+                                Text(stringResource(R.string.action_download))
+                            }
                         }
                     }
                 }

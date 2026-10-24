@@ -65,6 +65,27 @@ class ApiClientTest {
     }
 
     @Test
+    fun sitesEndpointUsesGetAndParsesSearchAndDownloadMaps() = runBlocking {
+        server.enqueue(
+            json(
+                """{"search":{"qidian":"起点","biquge5":"笔趣阁"},""" +
+                    """"download":{"qidian":"起点"}}""",
+            ),
+        )
+        Api.configure(baseUrl(), null)
+
+        val result = Api.call { Api.service().sites() }
+
+        assertTrue(result.isSuccess)
+        assertEquals("起点", result.getOrNull()?.search?.get("qidian"))
+        assertEquals("笔趣阁", result.getOrNull()?.search?.get("biquge5"))
+        assertEquals("起点", result.getOrNull()?.download?.get("qidian"))
+        val request = server.takeRequest()
+        assertEquals("GET", request.method)
+        assertEquals("/api/v1/sites", request.path)
+    }
+
+    @Test
     fun searchUsesPostWithJsonBody() = runBlocking {
         server.enqueue(json("""{"total":0,"results":[]}"""))
         Api.configure(baseUrl(), null)

@@ -1,25 +1,39 @@
 package com.lingyi.noveldl.ui.search
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -29,24 +43,60 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.AddTaskRequest
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.SearchRequest
 import com.lingyi.noveldl.data.SearchResult
+import com.lingyi.noveldl.data.SelectionStore
+import com.lingyi.noveldl.data.decodeSelectedSites
+import com.lingyi.noveldl.data.encodeSelectedSites
+import com.lingyi.noveldl.data.selectedSitesParam
+import com.lingyi.noveldl.data.siteSummary
+import com.lingyi.noveldl.data.toggleSiteSelection
 import kotlinx.coroutines.launch
 
 @Composable
 fun SearchScreen(onMessage: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val selectionStore = remember(context) { SelectionStore(context) }
     var keyword by rememberSaveable { mutableStateOf("") }
-    var sitesText by rememberSaveable { mutableStateOf("") }
+    // Stored as the comma-separated format shared with SelectionStore.
+    var selectedSitesEncoded by rememberSaveable {
+        mutableStateOf(encodeSelectedSites(selectionStore.selectedSites()))
+    }
+    val selectedSites = remember(selectedSitesEncoded) {
+        decodeSelectedSites(selectedSitesEncoded)
+    }
+    var siteLabels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var sitesLoading by remember { mutableStateOf(true) }
+    var sitesError by remember { mutableStateOf<String?>(null) }
+    var siteReloadKey by rememberSaveable { mutableIntStateOf(0) }
+    var showSiteDialog by rememberSaveable { mutableStateOf(false) }
     var loading by remember { mutableStateOf(false) }
     var total by remember { mutableStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     var results by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
+
+    LaunchedEffect(siteReloadKey) {
+        sitesLoading = true
+        Api.call { Api.service().sites() }
+            .onSuccess {
+                siteLabels = it.search
+                sitesError = null
+            }
+            .onFailure { sitesError = it.message }
+        sitesLoading = false
+    }
+
+    fun updateSelection(site: String) {
+        val next = toggleSiteSelection(selectedSites, site)
+        selectedSitesEncoded = encodeSelectedSites(next)
+        selectionStore.saveSelectedSites(next)
+    }
 
     fun runSearch() {
         val query = keyword.trim()
@@ -54,12 +104,11 @@ fun SearchScreen(onMessage: (String) -> Unit) {
         loading = true
         error = null
         scope.launch {
-            val sites = sitesText.split(',').map { it.trim() }.filter { it.isNotEmpty() }
             val outcome = Api.call {
                 Api.service().search(
                     SearchRequest(
                         keyword = query,
-                        sites = sites.ifEmpty { null },
+                        sites = selectedSitesParam(selectedSites),
                     ),
                 )
             }
@@ -91,6 +140,22 @@ fun SearchScreen(onMessage: (String) -> Unit) {
         }
     }
 
+    if (showSiteDialog) {
+        SiteSelectionDialog(
+            labels = siteLabels,
+            selected = selectedSites,
+            loading = sitesLoading,
+            error = sitesError,
+            onToggle = ::updateSelection,
+            onClear = {
+                selectedSitesEncoded = ""
+                selectionStore.saveSelectedSites(emptyList())
+            },
+            onRetry = { siteReloadKey++ },
+            onDismiss = { showSiteDialog = false },
+        )
+    }
+
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         OutlinedTextField(
             value = keyword,
@@ -100,13 +165,33 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = sitesText,
-            onValueChange = { sitesText = it },
-            label = { Text(stringResource(R.string.search_sites_hint)) },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        Box {
+            OutlinedTextField(
+                value = if (selectedSites.isEmpty()) {
+                    stringResource(R.string.search_sites_all)
+                } else {
+                    siteSummary(selectedSites, siteLabels)
+                },
+                onValueChange = {},
+                readOnly = true,
+                label = { Text(stringResource(R.string.search_sites_hint)) },
+                trailingIcon = {
+                    Icon(
+                        Icons.Outlined.ArrowDropDown,
+                        contentDescription = stringResource(R.string.search_sites_dialog_title),
+                    )
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            // The text field is read-only; a transparent overlay makes the whole
+            // field open the multi-select dialog instead of the keyboard.
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .clickable { showSiteDialog = true },
+            )
+        }
         Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -191,5 +276,114 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 }
             }
         }
+    }
+}
+
+/**
+ * Multi-select dialog backed by `GET /api/v1/sites`. Leaving every checkbox
+ * unchecked means "all sites" and is sent as an omitted `sites` field.
+ */
+@Composable
+private fun SiteSelectionDialog(
+    labels: Map<String, String>,
+    selected: List<String>,
+    loading: Boolean,
+    error: String?,
+    onToggle: (String) -> Unit,
+    onClear: () -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.search_sites_dialog_title)) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                Text(
+                    stringResource(R.string.search_sites_dialog_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                when {
+                    loading && labels.isEmpty() -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.height(20.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                stringResource(R.string.state_loading),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                    error != null && labels.isEmpty() -> {
+                        Text(
+                            stringResource(R.string.search_sites_load_failed, error),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        TextButton(onClick = onRetry) {
+                            Text(stringResource(R.string.action_retry))
+                        }
+                    }
+                    labels.isEmpty() -> {
+                        Text(
+                            stringResource(R.string.state_empty),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    else -> {
+                        labels.entries
+                            .sortedBy { it.value }
+                            .forEach { (key, label) -> SiteCheckboxRow(key, label, selected, onToggle) }
+                        // Keep persisted keys that the server no longer reports
+                        // visible so the user can clear them.
+                        selected
+                            .filterNot { it in labels }
+                            .forEach { key -> SiteCheckboxRow(key, key, selected, onToggle) }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.action_close))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onClear) {
+                Text(stringResource(R.string.search_sites_clear))
+            }
+        },
+    )
+}
+
+@Composable
+private fun SiteCheckboxRow(
+    key: String,
+    label: String,
+    selected: List<String>,
+    onToggle: (String) -> Unit,
+) {
+    val checked = key in selected
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(
+                value = checked,
+                role = Role.Checkbox,
+                onValueChange = { onToggle(key) },
+            )
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = null)
+        Spacer(Modifier.width(8.dp))
+        Text(label, style = MaterialTheme.typography.bodyMedium)
     }
 }

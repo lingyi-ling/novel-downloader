@@ -29,6 +29,7 @@ import time
 import tkinter as tk
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
+from functools import partial
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -51,12 +52,22 @@ from novel_downloader.schemas import SearchResult
 
 from .engine import AsyncEngine
 from .formatting import (
+    FILTER_ALL,
+    TASK_FILTER_CODES,
+    ExportChoice,
+    TaskMenuState,
+    filter_tasks,
     format_error,
     history_row,
     music_row,
     parse_sites,
+    retry_params,
     search_row,
     task_detail_text,
+    task_export_choices,
+    task_filter_code,
+    task_filter_label,
+    task_menu_state,
     task_output_actions,
     task_row,
 )
@@ -121,13 +132,25 @@ class DesktopApp:
 
         # Download widgets.
         self.task_tree: ttk.Treeview | None = None
-        self.open_file_button: ttk.Button | None = None
+        self.retry_button: ttk.Button | None = None
+        self.open_file_button: ttk.Menubutton | None = None
         self.open_folder_button: ttk.Button | None = None
         self.task_detail_var = tk.StringVar(
             value=t("Select a task to view its details.")
         )
         self._tasks_by_id: dict[str, DownloadTask] = {}
         self._task_menu: tk.Menu | None = None
+        self._task_file_menu: tk.Menu | None = None
+        self._file_menu_choices: tuple[ExportChoice, ...] | None = None
+        self._last_tasks_snapshot: dict[str, list[DownloadTask]] = {}
+        # Retry bookkeeping: ids currently queued for a retry and ids whose
+        # retry already succeeded (the source row then stays disabled).
+        self._retry_pending: set[str] = set()
+        self._retried_ids: set[str] = set()
+        self.task_filter_var = tk.StringVar(value=task_filter_label(FILTER_ALL))
+        self.task_keyword_var = tk.StringVar()
+        self.task_filter_combo: ttk.Combobox | None = None
+        self.task_keyword_entry: ttk.Entry | None = None
 
         # Status bar.
         self._env_var = tk.StringVar(value="")
@@ -278,6 +301,33 @@ class DesktopApp:
         ).pack(side="left", padx=(6, 0))
 
     def _build_download_tab(self) -> None:
+        filters = ttk.Frame(self.download_tab)
+        filters.pack(fill="x", pady=(0, 6))
+        ttk.Label(filters, text=t("Status")).pack(side="left")
+        self.task_filter_combo = ttk.Combobox(
+            filters,
+            textvariable=self.task_filter_var,
+            values=[task_filter_label(code) for code in TASK_FILTER_CODES],
+            state="readonly",
+            width=12,
+        )
+        self.task_filter_combo.pack(side="left", padx=(6, 12))
+        self.task_filter_combo.bind(
+            "<<ComboboxSelected>>", self._on_task_filter_changed
+        )
+
+        ttk.Label(filters, text=t("Keyword")).pack(side="left")
+        self.task_keyword_entry = ttk.Entry(
+            filters, textvariable=self.task_keyword_var, width=30
+        )
+        self.task_keyword_entry.pack(side="left", padx=(6, 0))
+        self.task_keyword_var.trace_add("write", self._on_task_keyword_changed)
+        ttk.Label(
+            filters,
+            text=t("Filters are applied locally."),
+            foreground="#666666",
+        ).pack(side="left", padx=8)
+
         actions = ttk.Frame(self.download_tab)
         actions.pack(fill="x", pady=(0, 6))
         ttk.Button(
@@ -285,12 +335,21 @@ class DesktopApp:
             text=t("Cancel selected task"),
             command=self._cancel_selected_task,
         ).pack(side="left")
-        self.open_file_button = ttk.Button(
+        self.retry_button = ttk.Button(
             actions,
-            text=t("Open file"),
-            command=self._open_selected_task_file,
+            text=t("Retry"),
+            command=self._retry_selected_task,
             state="disabled",
         )
+        self.retry_button.pack(side="left", padx=(6, 0))
+        self.open_file_button = ttk.Menubutton(
+            actions,
+            text=t("Open file"),
+            state="disabled",
+        )
+        file_menu = tk.Menu(self.open_file_button, tearoff=0)
+        self.open_file_button.configure(menu=file_menu)
+        self._task_file_menu = file_menu
         self.open_file_button.pack(side="left", padx=(6, 0))
         self.open_folder_button = ttk.Button(
             actions,
@@ -632,6 +691,8 @@ class DesktopApp:
             self._render_search_results(payload)
         elif kind == "search_error":
             self._search_failed(str(payload))
+        elif kind == "retry_done":
+            self._retry_finished(payload)
         elif kind == "music_search_error":
             self._music_search_failed(str(payload))
         elif kind == "music_results":
@@ -833,7 +894,12 @@ class DesktopApp:
         if tree is None:
             return
 
+        self._last_tasks_snapshot = snapshot
         selected = self._selected_task_id()
+        status_filter = task_filter_code(self.task_filter_var.get())
+        keyword = self.task_keyword_var.get()
+        filter_active = status_filter != FILTER_ALL or bool(keyword.strip())
+
         tree.delete(*tree.get_children())
         self._tasks_by_id = {}
         sections = (
@@ -842,15 +908,18 @@ class DesktopApp:
             ("completed", t("Completed"), snapshot.get("completed", [])),
         )
         for key, label, tasks in sections:
+            visible = filter_tasks(tasks, status=status_filter, keyword=keyword)
+            if filter_active and not visible:
+                continue
             parent = tree.insert(
                 "",
                 "end",
                 iid=f"group:{key}",
-                text=f"{label} ({len(tasks)})",
+                text=f"{label} ({len(visible)})",
                 open=True,
                 tags=("group",),
             )
-            for task in tasks:
+            for task in visible:
                 status_value = str(getattr(task.status, "value", task.status))
                 tags: tuple[str, ...] = ()
                 if status_value == "failed":
@@ -867,11 +936,16 @@ class DesktopApp:
                 self._tasks_by_id[task.task_id] = task
 
         if not self._tasks_by_id:
+            message = (
+                t("No tasks match the filter.")
+                if filter_active
+                else t("No tasks yet. Search for a book and add it to the queue.")
+            )
             tree.insert(
                 "",
                 "end",
                 iid="empty",
-                text=t("No tasks yet. Search for a book and add it to the queue."),
+                text=message,
                 tags=("empty",),
             )
 
@@ -881,6 +955,12 @@ class DesktopApp:
 
         self._update_task_controls()
 
+    def _on_task_filter_changed(self, _event: object | None = None) -> None:
+        self._render_tasks(self._last_tasks_snapshot)
+
+    def _on_task_keyword_changed(self, *_args: str) -> None:
+        self._render_tasks(self._last_tasks_snapshot)
+
     def _selected_task(self) -> DownloadTask | None:
         task_id = self._selected_task_id()
         if task_id is None:
@@ -888,17 +968,51 @@ class DesktopApp:
         return self._tasks_by_id.get(task_id)
 
     @staticmethod
-    def _set_button_enabled(button: ttk.Button | None, enabled: bool) -> None:
+    def _set_button_enabled(
+        button: ttk.Button | ttk.Menubutton | None, enabled: bool
+    ) -> None:
         if button is None:
             return
         button.state(["!disabled"] if enabled else ["disabled"])
 
+    def _retry_blocked(self, task: DownloadTask | None) -> bool:
+        """Whether a retry was already requested for this task row."""
+        if task is None:
+            return False
+        return task.task_id in self._retry_pending or task.task_id in self._retried_ids
+
     def _update_task_controls(self) -> None:
         task = self._selected_task()
         actions = task_output_actions(task)
+        self._set_button_enabled(
+            self.retry_button,
+            retry_params(task) is not None and not self._retry_blocked(task),
+        )
         self._set_button_enabled(self.open_file_button, actions.can_open_file)
         self._set_button_enabled(self.open_folder_button, actions.can_open_folder)
+        self._rebuild_task_file_menu(task_export_choices(task))
         self.task_detail_var.set(task_detail_text(task))
+
+    def _rebuild_task_file_menu(self, choices: tuple[ExportChoice, ...]) -> None:
+        """List every exported file of the selected task in the open menu."""
+        menu = self._task_file_menu
+        if menu is None:
+            return
+        if choices == self._file_menu_choices:
+            # Avoid mutating an open menu on every 500 ms snapshot refresh.
+            return
+        self._file_menu_choices = choices
+        menu.delete(0, "end")
+        for choice in choices:
+            menu.add_command(
+                label=choice.label,
+                command=partial(self._open_path, choice.path),
+            )
+        if not choices:
+            menu.add_command(
+                label=t("No exported file for the selected task."),
+                state="disabled",
+            )
 
     def _on_task_selection(self, _event: object | None = None) -> None:
         self._update_task_controls()
@@ -932,32 +1046,60 @@ class DesktopApp:
         task = self._selected_task()
         if task is None:
             return
-        actions = task_output_actions(task)
-        error = (task.error or "").strip()
+        state: TaskMenuState = task_menu_state(
+            task, retry_blocked=self._retry_blocked(task)
+        )
 
         menu = self._task_menu
         if menu is None:
             menu = tk.Menu(self.root, tearoff=0)
-            menu.add_command(
-                label=t("Open file"), command=self._open_selected_task_file
-            )
-            menu.add_command(
-                label=t("Open folder"), command=self._open_selected_task_folder
-            )
-            menu.add_separator()
-            menu.add_command(
-                label=t("Copy error"), command=self._copy_selected_task_error
-            )
-            menu.add_command(
-                label=t("Show details"), command=self._show_selected_task_details
-            )
             self._task_menu = menu
+        menu.delete(0, "end")
 
-        menu.entryconfigure(0, state="normal" if actions.can_open_file else "disabled")
-        menu.entryconfigure(
-            1, state="normal" if actions.can_open_folder else "disabled"
+        menu.add_command(
+            label=t("Retry"),
+            command=self._retry_selected_task,
+            state="normal" if state.can_retry else "disabled",
         )
-        menu.entryconfigure(3, state="normal" if error else "disabled")
+        if len(state.choices) > 1:
+            submenu = tk.Menu(menu, tearoff=0)
+            for choice in state.choices:
+                submenu.add_command(
+                    label=choice.label,
+                    command=partial(self._open_path, choice.path),
+                )
+            menu.add_cascade(
+                label=t("Open file"),
+                menu=submenu,
+                state="normal" if state.can_open_file else "disabled",
+            )
+        else:
+            menu.add_command(
+                label=t("Open file"),
+                command=self._open_selected_task_file,
+                state="normal" if state.can_open_file else "disabled",
+            )
+        menu.add_command(
+            label=t("Open folder"),
+            command=self._open_selected_task_folder,
+            state="normal" if state.can_open_folder else "disabled",
+        )
+        menu.add_separator()
+        menu.add_command(
+            label=t("Copy path"),
+            command=self._copy_selected_task_path,
+            state="normal" if state.can_copy_path else "disabled",
+        )
+        menu.add_command(
+            label=t("Copy error"),
+            command=self._copy_selected_task_error,
+            state="normal" if state.can_copy_error else "disabled",
+        )
+        menu.add_command(
+            label=t("Show details"),
+            command=self._show_selected_task_details,
+            state="normal" if state.can_show_details else "disabled",
+        )
         try:
             menu.tk_popup(x_root, y_root)
         finally:
@@ -969,6 +1111,13 @@ class DesktopApp:
             self._set_status(t("No exported file for the selected task."))
             return
         self._open_path(actions.file_path)
+
+    def _copy_selected_task_path(self) -> None:
+        choices = task_export_choices(self._selected_task())
+        if not choices:
+            self._set_status(t("No exported file for the selected task."))
+            return
+        self._copy_text(str(choices[0].path))
 
     def _open_selected_task_folder(self) -> None:
         actions = task_output_actions(self._selected_task())
@@ -1054,6 +1203,56 @@ class DesktopApp:
                 else t("Task {task} could not be cancelled").format(task=short_id)
             ),
         )
+
+    def _retry_selected_task(self) -> None:
+        """Re-queue a failed or cancelled task with its original identifiers."""
+        task = self._selected_task()
+        params = retry_params(task)
+        if task is None or params is None:
+            self._set_status(t("Select a failed or cancelled task first."))
+            return
+        if self._retry_blocked(task):
+            return
+
+        source_id = task.task_id
+        title = params.title or params.book_id
+        self._retry_pending.add(source_id)
+        self._update_task_controls()
+        self._set_status(t("Retrying '{title}'...").format(title=title))
+
+        try:
+            coro = manager.add_task(
+                title=params.title, site=params.site, book_id=params.book_id
+            )
+            future = self.engine.submit(coro)
+        except Exception as exc:  # noqa: BLE001 - loop startup failure
+            coro.close()
+            self._retry_pending.discard(source_id)
+            self._update_task_controls()
+            self._show_error(format_error(exc))
+            return
+
+        def on_done(done: Future[DownloadTask]) -> None:
+            try:
+                done.result()
+            except Exception as exc:  # noqa: BLE001 - reported in the UI thread
+                self.events.put(("retry_done", (source_id, format_error(exc), title)))
+            else:
+                self.events.put(("retry_done", (source_id, None, title)))
+
+        future.add_done_callback(on_done)
+
+    def _retry_finished(self, payload: tuple[str, str | None, str]) -> None:
+        source_id, error, title = payload
+        self._retry_pending.discard(source_id)
+        if error is None:
+            # Keep the source row disabled so a second click cannot enqueue the
+            # same book twice; the new task has its own row.
+            self._retried_ids.add(source_id)
+            self._set_status(t("Task added: {title}").format(title=title))
+        else:
+            self._show_error(error)
+        self._update_task_controls()
 
     # ------------------------------------------------------------------
     # History

@@ -1,8 +1,35 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// Release signing is opt-in. Create android/keystore.properties (git-ignored)
+// with:
+//   storeFile=release.jks        # absolute, or relative to the android/ dir
+//   storePassword=...
+//   keyAlias=...
+//   keyPassword=...
+// When the file is absent or incomplete, release builds fall back to the debug
+// key so the module still assembles without real signing material.
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.isFile) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
+}
+val hasReleaseSigning = keystorePropertiesFile.isFile &&
+    listOf("storeFile", "storePassword", "keyAlias", "keyPassword").all { key ->
+        !keystoreProperties.getProperty(key).isNullOrBlank()
+    }
+if (!hasReleaseSigning) {
+    logger.warn(
+        "keystore.properties is missing or incomplete; " +
+            "release builds will fall back to the debug signing config.",
+    )
 }
 
 android {
@@ -17,8 +44,24 @@ android {
         versionName = "1.0.0"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

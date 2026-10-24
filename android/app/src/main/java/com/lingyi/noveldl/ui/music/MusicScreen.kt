@@ -28,6 +28,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,6 +42,7 @@ import com.lingyi.noveldl.data.MusicJobRequest
 import com.lingyi.noveldl.data.MusicPlatform
 import com.lingyi.noveldl.data.MusicSearchRequest
 import com.lingyi.noveldl.data.MusicTrack
+import com.lingyi.noveldl.data.SelectionStore
 import com.lingyi.noveldl.ui.progressFraction
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -49,8 +51,12 @@ import kotlinx.coroutines.launch
 fun MusicScreen(onMessage: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val selectionStore = remember(context) { SelectionStore(context) }
     var platforms by remember { mutableStateOf<List<MusicPlatform>>(emptyList()) }
-    var selectedPlatform by remember { mutableStateOf("") }
+    // Restored from the last session; the API list refreshes it if needed.
+    var selectedPlatform by rememberSaveable {
+        mutableStateOf(selectionStore.selectedPlatform())
+    }
     var menuExpanded by remember { mutableStateOf(false) }
     var keyword by remember { mutableStateOf("") }
     var tracks by remember { mutableStateOf<List<MusicTrack>>(emptyList()) }
@@ -66,8 +72,10 @@ fun MusicScreen(onMessage: (String) -> Unit) {
             .onSuccess {
                 platforms = it.platforms
                 error = null
-                if (selectedPlatform.isEmpty()) {
+                val keys = it.platforms.map { platform -> platform.key }
+                if (selectedPlatform.isEmpty() || selectedPlatform !in keys) {
                     selectedPlatform = it.platforms.firstOrNull()?.key.orEmpty()
+                    selectionStore.saveSelectedPlatform(selectedPlatform)
                 }
             }
             .onFailure { error = it.message }
@@ -158,6 +166,7 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                         text = { Text(platform.label) },
                         onClick = {
                             selectedPlatform = platform.key
+                            selectionStore.saveSelectedPlatform(platform.key)
                             menuExpanded = false
                         },
                     )

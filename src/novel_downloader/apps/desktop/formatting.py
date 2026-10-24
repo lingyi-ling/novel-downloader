@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from novel_downloader.apps.common.history_files import FileItem, _format_size
 from novel_downloader.apps.core.models import DownloadTask
@@ -24,7 +24,16 @@ from novel_downloader.infra.i18n import t
 from novel_downloader.schemas import SearchResult
 
 __all__ = [
+    "FILTER_ACTIVE",
+    "FILTER_ALL",
+    "FILTER_COMPLETED",
+    "FILTER_FAILED",
+    "TASK_FILTER_CODES",
+    "ExportChoice",
+    "RetryParams",
+    "TaskMenuState",
     "TaskOutputActions",
+    "filter_tasks",
     "format_duration",
     "format_error",
     "format_mtime",
@@ -33,15 +42,24 @@ __all__ = [
     "history_row",
     "music_row",
     "parse_sites",
+    "retry_params",
     "search_row",
     "status_label",
     "task_detail_text",
+    "task_export_choices",
     "task_export_paths",
+    "task_filter_code",
+    "task_filter_label",
+    "task_matches_filter",
+    "task_menu_state",
     "task_output_actions",
     "task_row",
+    "task_status_group",
 ]
 
 _SITE_SEPARATORS = re.compile(r"[,，;；\s]+")
+
+_T = TypeVar("_T")
 
 #: Status key -> lazily translated label.  The lambdas keep the literal msgids
 #: visible to the ``t()`` extraction pass while avoiding import-time catalogs.
@@ -109,6 +127,44 @@ _EXPORT_PRIORITY = ("epub", "txt")
 #: Task states whose exported files may be opened from the UI.
 _OPENABLE_STATES = frozenset({"completed", "failed"})
 
+#: Task states that may be re-queued from the UI.
+_RETRYABLE_STATES = frozenset({"failed", "cancelled"})
+
+
+@dataclass(frozen=True)
+class ExportChoice:
+    """One exported file of a task, labelled for the open-file menu."""
+
+    key: str
+    path: Path
+
+    @property
+    def label(self) -> str:
+        """Human-readable menu label such as ``"EPUB: book.epub"``."""
+        return f"{self.key.upper()}: {self.path.name}"
+
+
+@dataclass(frozen=True)
+class RetryParams:
+    """The arguments needed to queue a task again."""
+
+    title: str
+    site: str
+    book_id: str
+
+
+@dataclass(frozen=True)
+class TaskMenuState:
+    """Which context-menu entries are available for the selected task."""
+
+    can_retry: bool
+    can_open_file: bool
+    can_open_folder: bool
+    can_copy_path: bool
+    can_copy_error: bool
+    can_show_details: bool
+    choices: tuple[ExportChoice, ...]
+
 
 @dataclass(frozen=True)
 class TaskOutputActions:
@@ -128,16 +184,17 @@ class TaskOutputActions:
         return self.folder_path is not None
 
 
-def task_export_paths(task: object) -> tuple[Path, ...]:
+def task_export_choices(task: object) -> tuple[ExportChoice, ...]:
     """
-    Return the exported file paths of a task in display order.
+    Return every exported file of a task, in display order.
 
-    ``epub`` and ``txt`` are preferred because those are the formats the
-    history page lists; any other exported format follows in sorted order.
-    Duplicate paths are dropped so the details line does not repeat itself.
+    ``epub`` and ``txt`` come first because those are the formats the history
+    page lists; any other format follows in sorted order.  Duplicate paths are
+    dropped (keeping the first, highest-priority key) so the menu never lists
+    the same file twice.
 
     :param task: Task snapshot (duck-typed so tests can pass stand-ins).
-    :return: An ordered tuple of paths (empty when nothing was exported).
+    :return: An ordered tuple of choices (empty when nothing was exported).
     """
     exported = getattr(task, "exported_paths", None)
     if not isinstance(exported, Mapping) or not exported:
@@ -148,7 +205,7 @@ def task_export_paths(task: object) -> tuple[Path, ...]:
         sorted((key for key in exported if key not in _EXPORT_PRIORITY), key=str)
     )
 
-    paths: list[Path] = []
+    choices: list[ExportChoice] = []
     seen: set[str] = set()
     for key in keys:
         value = exported.get(key)
@@ -159,8 +216,84 @@ def task_export_paths(task: object) -> tuple[Path, ...]:
         if marker in seen:
             continue
         seen.add(marker)
-        paths.append(path)
-    return tuple(paths)
+        choices.append(ExportChoice(key=str(key), path=path))
+    return tuple(choices)
+
+
+def task_export_paths(task: object) -> tuple[Path, ...]:
+    """
+    Return the exported file paths of a task in display order.
+
+    :param task: Task snapshot (duck-typed so tests can pass stand-ins).
+    :return: An ordered tuple of paths (empty when nothing was exported).
+    """
+    return tuple(choice.path for choice in task_export_choices(task))
+
+
+def retry_params(task: object | None) -> RetryParams | None:
+    """
+    Build the arguments for re-queuing a failed or cancelled task.
+
+    A task is only retryable when it has stopped with ``failed`` or
+    ``cancelled`` and still carries the site and book id needed by
+    ``TaskManager.add_task``.
+
+    :param task: Task snapshot, or ``None`` when no row is selected.
+    :return: The original identifying fields, or ``None`` when not retryable.
+    """
+    if task is None:
+        return None
+
+    status_value = getattr(task, "status", None)
+    status = str(getattr(status_value, "value", status_value))
+    if status not in _RETRYABLE_STATES:
+        return None
+
+    site = str(getattr(task, "site", "") or "").strip()
+    book_id = str(getattr(task, "book_id", "") or "").strip()
+    if not site or not book_id:
+        return None
+    title = str(getattr(task, "title", "") or "").strip()
+    return RetryParams(title=title, site=site, book_id=book_id)
+
+
+def task_menu_state(
+    task: object | None, *, retry_blocked: bool = False
+) -> TaskMenuState:
+    """
+    Decide which actions the task context menu should offer.
+
+    ``retry_blocked`` lets the UI suppress the retry entry while a retry is in
+    flight or after the same row was already re-queued, which prevents
+    duplicate submissions from repeated clicks.
+
+    :param task: Task snapshot, or ``None`` when no row is selected.
+    :param retry_blocked: Whether retry was already requested for this row.
+    :return: The available menu entries and exported-file choices.
+    """
+    if task is None:
+        return TaskMenuState(
+            can_retry=False,
+            can_open_file=False,
+            can_open_folder=False,
+            can_copy_path=False,
+            can_copy_error=False,
+            can_show_details=False,
+            choices=(),
+        )
+
+    actions = task_output_actions(task)
+    choices = task_export_choices(task)
+    error = str(getattr(task, "error", "") or "").strip()
+    return TaskMenuState(
+        can_retry=retry_params(task) is not None and not retry_blocked,
+        can_open_file=actions.can_open_file,
+        can_open_folder=actions.can_open_folder,
+        can_copy_path=bool(choices),
+        can_copy_error=bool(error),
+        can_show_details=True,
+        choices=choices,
+    )
 
 
 def task_output_actions(task: object | None) -> TaskOutputActions:
@@ -185,6 +318,130 @@ def task_output_actions(task: object | None) -> TaskOutputActions:
     if not paths:
         return TaskOutputActions()
     return TaskOutputActions(file_path=paths[0], folder_path=paths[0].parent)
+
+
+# ---------------------------------------------------------------------------
+# Task filtering (pure, local-only)
+# ---------------------------------------------------------------------------
+FILTER_ALL = "all"
+FILTER_ACTIVE = "active"
+FILTER_COMPLETED = "completed"
+FILTER_FAILED = "failed"
+
+#: Selectable filters, in combobox order.
+TASK_FILTER_CODES: tuple[str, ...] = (
+    FILTER_ALL,
+    FILTER_ACTIVE,
+    FILTER_COMPLETED,
+    FILTER_FAILED,
+)
+
+_FILTER_LABELS: dict[str, Callable[[], str]] = {
+    FILTER_ALL: lambda: t("All"),
+    FILTER_ACTIVE: lambda: t("Active"),
+    FILTER_COMPLETED: lambda: t("Completed"),
+    FILTER_FAILED: lambda: t("Failed"),
+}
+
+_ACTIVE_STATUSES = frozenset({"queued", "running", "processing", "exporting"})
+_COMPLETED_STATUSES = frozenset({"completed"})
+_FAILED_STATUSES = frozenset({"failed", "cancelled"})
+
+
+def task_status_group(status: object) -> str:
+    """
+    Map a task status to the coarse filter group it belongs to.
+
+    :param status: A :class:`Status` member or its string value.
+    :return: ``"active"``, ``"completed"``, ``"failed"`` or ``"other"``.
+    """
+    raw = getattr(status, "value", status)
+    value = str(raw)
+    if value in _ACTIVE_STATUSES:
+        return FILTER_ACTIVE
+    if value in _COMPLETED_STATUSES:
+        return FILTER_COMPLETED
+    if value in _FAILED_STATUSES:
+        return FILTER_FAILED
+    return "other"
+
+
+def task_filter_label(code: str) -> str:
+    """
+    Return the localized combobox label for a filter code.
+
+    :param code: One of :data:`TASK_FILTER_CODES`.
+    :return: The display label.
+    """
+    label = _FILTER_LABELS.get(code)
+    return label() if label is not None else _FILTER_LABELS[FILTER_ALL]()
+
+
+def task_filter_code(value: object) -> str:
+    """
+    Map a combobox label (or a raw code) back to a filter code.
+
+    :param value: Text selected in the combobox, or a raw code.
+    :return: One of :data:`TASK_FILTER_CODES`.
+    """
+    raw = str(value or "").strip()
+    lowered = raw.lower()
+    if lowered in _FILTER_LABELS:
+        return lowered
+    for code in TASK_FILTER_CODES:
+        if lowered == code.lower() or raw == task_filter_label(code):
+            return code
+    return FILTER_ALL
+
+
+def task_matches_filter(
+    task: object,
+    *,
+    status: str = FILTER_ALL,
+    keyword: str = "",
+) -> bool:
+    """
+    Return whether a task passes the local status and keyword filters.
+
+    The keyword is matched case-insensitively against the title only; an empty
+    keyword matches every title.  ``cancelled`` tasks count as ``failed`` so
+    they stay reachable from the failed filter.
+
+    :param task: Task snapshot (duck-typed so tests can pass stand-ins).
+    :param status: Filter code from :data:`TASK_FILTER_CODES`.
+    :param keyword: Case-insensitive title substring.
+    :return: ``True`` when the task should be shown.
+    """
+    code = task_filter_code(status)
+    if code != FILTER_ALL and task_status_group(getattr(task, "status", None)) != code:
+        return False
+
+    needle = str(keyword or "").strip().casefold()
+    if not needle:
+        return True
+    title = str(getattr(task, "title", "") or "").casefold()
+    return needle in title
+
+
+def filter_tasks(
+    tasks: Iterable[_T],
+    *,
+    status: str = FILTER_ALL,
+    keyword: str = "",
+) -> list[_T]:
+    """
+    Filter a task sequence while preserving its order.
+
+    :param tasks: Tasks from a manager snapshot.
+    :param status: Filter code from :data:`TASK_FILTER_CODES`.
+    :param keyword: Case-insensitive title substring.
+    :return: The tasks that match both filters.
+    """
+    return [
+        task
+        for task in tasks
+        if task_matches_filter(task, status=status, keyword=keyword)
+    ]
 
 
 def task_detail_text(task: object | None) -> str:

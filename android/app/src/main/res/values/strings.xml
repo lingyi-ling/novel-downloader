@@ -13,6 +13,7 @@
     <string name="action_refresh">刷新</string>
     <string name="action_retry">重试</string>
     <string name="action_cancel">取消</string>
+    <string name="action_close">关闭</string>
     <string name="action_save">保存</string>
     <string name="action_download">下载</string>
     <string name="action_add_to_queue">加入下载队列</string>
@@ -23,7 +24,12 @@
 
     <!-- 搜索 -->
     <string name="search_hint">输入关键字</string>
-    <string name="search_sites_hint">站点（逗号分隔，留空搜索全部）</string>
+    <string name="search_sites_hint">搜索站点（留空为全部）</string>
+    <string name="search_sites_all">全部站点</string>
+    <string name="search_sites_dialog_title">选择搜索站点</string>
+    <string name="search_sites_dialog_hint">不勾选任何站点时，搜索全部启用站点。</string>
+    <string name="search_sites_clear">清空</string>
+    <string name="search_sites_load_failed">站点列表加载失败：%1$s</string>
     <string name="search_button">搜索</string>
     <string name="search_searching">搜索中…</string>
     <string name="search_results">共 %1$d 条结果</string>

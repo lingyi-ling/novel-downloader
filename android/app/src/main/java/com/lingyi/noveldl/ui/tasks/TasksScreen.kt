@@ -11,10 +11,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,6 +39,7 @@ import com.lingyi.noveldl.ui.taskStatusLabelRes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TasksScreen(onMessage: (String) -> Unit) {
     val context = LocalContext.current
@@ -44,6 +47,8 @@ fun TasksScreen(onMessage: (String) -> Unit) {
     var snapshot by remember { mutableStateOf(TasksResponse()) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
+    // Distinguishes a user-initiated refresh from the silent 2s polling loop.
+    var refreshing by remember { mutableStateOf(false) }
     // Last polled status per task; the first observation is only a baseline.
     val knownStatuses = remember { mutableMapOf<String, String>() }
 
@@ -62,8 +67,15 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                     error = null
                 }
                 .onFailure { error = it.message }
+            refreshing = false
             delay(2000)
         }
+    }
+
+    fun refreshNow() {
+        if (refreshing) return
+        refreshing = true
+        refreshKey++
     }
 
     fun cancel(task: Task) {
@@ -74,45 +86,62 @@ fun TasksScreen(onMessage: (String) -> Unit) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(onClick = { refreshKey++ }) {
-                Text(stringResource(R.string.action_refresh))
+    PullToRefreshBox(
+        isRefreshing = refreshing,
+        onRefresh = { refreshNow() },
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = { refreshNow() }) {
+                    Text(stringResource(R.string.action_refresh))
+                }
             }
-        }
-        error?.let {
-            Text(
-                stringResource(R.string.state_error, it),
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            TextButton(onClick = { refreshKey++ }) {
-                Text(stringResource(R.string.action_retry))
+            error?.let {
+                Text(
+                    stringResource(R.string.state_error, it),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { refreshNow() }) {
+                    Text(stringResource(R.string.action_retry))
+                }
+                Spacer(Modifier.height(8.dp))
             }
-            Spacer(Modifier.height(8.dp))
-        }
-        val isEmpty = snapshot.running.isEmpty() &&
-            snapshot.pending.isEmpty() &&
-            snapshot.completed.isEmpty()
-        if (isEmpty && error == null) {
-            Text(
-                stringResource(R.string.tasks_empty),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(8.dp))
-        }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            item { SectionHeader(stringResource(R.string.tasks_running), snapshot.running.size) }
-            items(snapshot.running) { task -> TaskCard(task, cancellable = true, onCancel = ::cancel) }
-            item { SectionHeader(stringResource(R.string.tasks_pending), snapshot.pending.size) }
-            items(snapshot.pending) { task -> TaskCard(task, cancellable = true, onCancel = ::cancel) }
-            item { SectionHeader(stringResource(R.string.tasks_completed), snapshot.completed.size) }
-            items(snapshot.completed) { task -> TaskCard(task, cancellable = false, onCancel = ::cancel) }
+            val isEmpty = snapshot.running.isEmpty() &&
+                snapshot.pending.isEmpty() &&
+                snapshot.completed.isEmpty()
+            if (isEmpty && error == null) {
+                Text(
+                    stringResource(R.string.tasks_empty),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                item { SectionHeader(stringResource(R.string.tasks_running), snapshot.running.size) }
+                items(snapshot.running) { task ->
+                    TaskCard(task, cancellable = true, onCancel = ::cancel)
+                }
+                item { SectionHeader(stringResource(R.string.tasks_pending), snapshot.pending.size) }
+                items(snapshot.pending) { task ->
+                    TaskCard(task, cancellable = true, onCancel = ::cancel)
+                }
+                item {
+                    SectionHeader(stringResource(R.string.tasks_completed), snapshot.completed.size)
+                }
+                items(snapshot.completed) { task ->
+                    TaskCard(task, cancellable = false, onCancel = ::cancel)
+                }
+            }
         }
     }
 }

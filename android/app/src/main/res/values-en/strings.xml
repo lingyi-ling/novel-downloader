@@ -11,6 +11,7 @@
     <string name="action_refresh">Refresh</string>
     <string name="action_retry">Retry</string>
     <string name="action_cancel">Cancel</string>
+    <string name="action_close">Close</string>
     <string name="action_save">Save</string>
     <string name="action_download">Download</string>
     <string name="action_add_to_queue">Add to download queue</string>
@@ -20,7 +21,12 @@
     <string name="state_ready">Ready</string>
 
     <string name="search_hint">Enter a keyword</string>
-    <string name="search_sites_hint">Sites (comma separated, empty = all)</string>
+    <string name="search_sites_hint">Search sites (empty = all)</string>
+    <string name="search_sites_all">All sites</string>
+    <string name="search_sites_dialog_title">Select search sites</string>
+    <string name="search_sites_dialog_hint">Leave every site unchecked to search all enabled sites.</string>
+    <string name="search_sites_clear">Clear</string>
+    <string name="search_sites_load_failed">Failed to load sites: %1$s</string>
     <string name="search_button">Search</string>
     <string name="search_searching">Searching…</string>
     <string name="search_results">%1$d results</string>
