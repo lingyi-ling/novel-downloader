@@ -2127,8 +2127,8 @@ hidden = true
 [sites.bixiange]
 name = "笔仙阁"
 homepage = "https://m.bixiange.me/"
-alt_domains = []
-site_status = "active"
+alt_domains = ["https://m.bixiange.top/", "https://www.bixiange.top/"]
+site_status = "unstable"
 description = """
 笔仙阁提供免费的手机小说,小说在线阅读,txt小说下载,不放任何弹窗。
 """
@@ -2307,8 +2307,9 @@ content = """
 [[sites.bixiange.notes]]
 title = "适配器注册状态"
 content = """
-* 适配器位于 `plugins/sites/bixiange/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），但尚未在 `src/novel_downloader/apps/constants.py` 的 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
-* 因此当前 CLI / Web / API 的站点列表中不会出现该站点，也不参与聚合搜索。
+* 适配器位于 `plugins/sites/bixiange/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），并在 `DOWNLOAD_SUPPORT_SITES` 中注册。
+* **旧域名 `m.bixiange.me` 已无 DNS 解析（NXDOMAIN）**，现有适配器无法连接，因此未注册搜索。
+* 站点已迁移至 `m.bixiange.top`（备用 `www.bixiange.xyz`），实测详情页与章节页仍可被现有解析器解析；待适配器更新域名后再验证搜索。
 """
 
 
@@ -2357,7 +2358,7 @@ tags = ["转载站", "笔趣阁"]
 volumes = "no"
 images = "no"
 login = "partial"
-search = "no"
+search = "yes"
 
 [[sites.biquge345.url_examples]]
 title = "Book URL"
@@ -2375,8 +2376,8 @@ hidden = false
 [[sites.biquge345.notes]]
 title = "适配器注册状态"
 content = """
-* 适配器位于 `plugins/sites/biquge345/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），但尚未在 `src/novel_downloader/apps/constants.py` 的 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
-* 因此当前 CLI / Web / API 的站点列表中不会出现该站点，也不参与聚合搜索。
+* 站点适配器与搜索器均已实现（`plugins/sites/biquge345/`），并已在 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
+* 实测（2026-10-24）：搜索 `灵境行者`、`斗罗大陆` 均返回结果；详情页与章节页抓取、解析正常。
 """
 
 
@@ -3355,7 +3356,7 @@ hidden = false
 [sites.haiwaishubao]
 name = "海外书包"
 homepage = "https://www.haiwaishubao.com/"
-alt_domains = []
+alt_domains = ["https://www.haiwaishubao1.com/"]
 site_status = "active"
 description = ""
 
@@ -3403,8 +3404,9 @@ hidden = true
 [[sites.haiwaishubao.notes]]
 title = "适配器注册状态"
 content = """
-* 适配器位于 `plugins/sites/haiwaishubao/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），但尚未在 `src/novel_downloader/apps/constants.py` 的 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
-* 因此当前无法通过 CLI / Web / API 选择该站点，也不参与聚合搜索。
+* 站点适配器位于 `plugins/sites/haiwaishubao/`，已注册下载；实测详情页、目录分页、章节分页均可抓取并解析。
+* 站点主域名 `www.haiwaishubao.com` 当前 301 跳转至 `www.haiwaishubao1.com`，抓取时会自动跟随跳转。
+* 搜索未注册：搜索请求为 POST，旧域名 301 跳转后 `aiohttp` 会改为 GET 并丢失表单，返回空结果；新域名直连搜索也受 30 秒限流且未返回可用结果。
 """
 
 
@@ -3440,7 +3442,7 @@ hidden = false
 name = "有爱爱"
 homepage = "https://www.uaa.com/"
 alt_domains = []
-site_status = "active"
+site_status = "unstable"
 description = ""
 
 languages = ["zh-CN"]
@@ -3465,9 +3467,11 @@ chapter_id = "234639"
 hidden = false
 
 [[sites.uaa.notes]]
-title = "搜索器注册状态"
+title = "适配器注册状态"
 content = """
-* 站点适配器与搜索器均已实现（`plugins/sites/uaa/`），但未在 `SEARCH_SUPPORT_SITES` 中注册，当前不参与聚合搜索。
+* 站点适配器与搜索器均已实现（`plugins/sites/uaa/`）；下载仍在 `DOWNLOAD_SUPPORT_SITES` 中保留，但未注册 `SEARCH_SUPPORT_SITES`。
+* 实测（2026-10-24）：站点由 Cloudflare 托管，详情页、章节页与搜索接口均返回 `403` 和 `Just a moment...` 人机验证页，`aiohttp` / `httpx` / `curl_cffi` 均无法直接抓取。
+* 因此搜索不可用；下载适配器当前也无法在无浏览器 Cookie 的环境中工作，建议在获得有效 Cookie 后重新验证，或由维护者评估是否从下载列表移除。
 """
 
 

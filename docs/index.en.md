@@ -118,7 +118,7 @@ pip install "novel-downloader[api]"      # local REST API
 pip install "novel-downloader[music]"    # music downloads
 ```
 
-For more installation options, see: [Installation Guide](guide/installation.md).
+For more installation options, see: [Installation Guide](guide/installation.md). For standalone Windows builds, see [Windows Install Scripts](guide/install-scripts.md).
 
 ---
 
@@ -297,6 +297,7 @@ pip install .
 * **Environment self-check**: run `novel-cli doctor`.
 * **Errors or connection problems**: see [Troubleshooting](guide/troubleshooting.md).
 * **Understanding the code structure**: see [Architecture](guide/architecture.md).
+* **Security hardening and vulnerability reporting**: see [Security](guide/security.md).
 
 ---
 

@@ -4,7 +4,7 @@
 
 Asynchronous, modular, and extensible toolkit for downloading and processing online novels, with built-in multi-platform music downloading.
 
-Supports resumable crawling, download queues with progress, multi-format exporting, and a text processing pipeline, exposed through two endpoints: the CLI (`novel-cli`) and a local REST API (`novel-api`).
+Supports resumable crawling, download queues with progress, multi-format exporting, and a text processing pipeline, exposed through the CLI (`novel-cli`), a local REST API (`novel-api`), a desktop client (`novel-desktop`), and an Android client.
 
 **Requirements**: Python 3.11+ (development tested on Python 3.13)
 

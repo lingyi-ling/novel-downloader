@@ -4,7 +4,7 @@
 
 异步、可扩展的小说下载与处理工具包, 同时内置多平台音乐下载。
 
-支持断点续爬、下载队列与进度、多格式导出、文本处理流水线, 提供 CLI (`novel-cli`) 与本地 REST API (`novel-api`) 双端点。
+支持断点续爬、下载队列与进度、多格式导出、文本处理流水线, 提供 CLI (`novel-cli`)、本地 REST API (`novel-api`)、桌面客户端 (`novel-desktop`) 与 Android 客户端四种使用方式。
 
 **运行要求**: Python 3.11+ (开发环境: Python 3.13)
 

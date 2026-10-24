@@ -44,6 +44,7 @@ plugins:
             首页: Home
             使用指南: Guide
             安装: Install
+            Windows 安装脚本: Windows Install Scripts
             配置: Configuration
             设置项参考: Settings Reference
             处理器参考: Processors Reference
@@ -56,6 +57,7 @@ plugins:
             复制 Cookies: Copy Cookies
             架构说明: Architecture
             故障排查: Troubleshooting
+            安全说明: Security
             支持站点: Supported Sites
             总览: Overview
             标签: Tags
@@ -72,6 +74,7 @@ plugins:
             起点 Web 笔记: Qidian Web Notes
             西瓜书屋笔记: Xiguashuwu Notes
             其他: Misc
+            待办: To-do
   - search
   - tags
   - privacy:
@@ -118,6 +121,7 @@ nav:
   - 首页: index.md
   - 使用指南:
     - 安装: guide/installation.md
+    - Windows 安装脚本: guide/install-scripts.md
     - 配置: guide/configuration.md
     - 设置项参考: guide/settings-reference.md
     - 处理器参考: guide/processors-reference.md
@@ -130,6 +134,7 @@ nav:
     - 复制 Cookies: guide/copy-cookies.md
     - 架构说明: guide/architecture.md
     - 故障排查: guide/troubleshooting.md
+    - 安全说明: guide/security.md
 
   - 支持站点:
     - 总览: supported-sites/index.md
@@ -150,7 +155,7 @@ nav:
     - 西瓜书屋笔记: notes/xiguashuwu.md
 
   - 其他:
-    - TODO: misc/todo.md
+    - 待办: misc/todo.md
 
 not_in_nav: |
   supported-sites/site-details/*

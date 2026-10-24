@@ -122,7 +122,7 @@ novel-cli search "斗破苍穹" --first
 | `url` | string | — | 正文页地址模板, 必填 |
 | `content` | field | `{"selector": "body"}` | 正文提取规则 |
 | `title` | field | 空 | 章节标题提取规则 |
-| `replace` | [string, string][] | `[]` | 逐条替换, 按顺序执行 |
+| `replace` | `[string, string][]` | `[]` | 逐条替换, 按顺序执行 |
 | `drop` | string[] | `[]` | 命中任一正则的行会被整行删除 |
 | `pages` | object \| string | 空 | 正文分页规则 |
 | `format` | string | 继承 | 本节响应格式, 覆盖顶层 `format` |
@@ -157,7 +157,7 @@ novel-cli search "斗破苍穹" --first
 | `regex` | string | 空 | 对取到的值再做一次正则提取 (跨行匹配) |
 | `group` | int | `0` | 正则捕获组; 组号越界时回退到整段匹配 |
 | `multi` | bool | `false` | 是否收集全部匹配项 (返回数组) |
-| `replace` | [string, string][] | `[]` | 逐条替换 |
+| `replace` | `[string, string][]` | `[]` | 逐条替换 |
 | `default` | string | 空 | 未匹配到任何节点时的兜底值 |
 
 `selector` 的语法取决于所在段的 `format`:

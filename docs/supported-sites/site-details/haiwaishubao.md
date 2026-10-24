@@ -14,6 +14,8 @@ tags:
 
 * 标识符: `haiwaishubao`
 * 主页: https://www.haiwaishubao.com/
+* 备用域名:
+    * https://www.haiwaishubao1.com/
 * 语言: 简体中文
 * 站点状态: :green_circle: Active
 * 支持分卷: :material-close: 否
@@ -60,5 +62,6 @@ https://www.haiwaishubao.com/book/102659/5335635.html
 
 ## 适配器注册状态
 
-* 适配器位于 `plugins/sites/haiwaishubao/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），但尚未在 `src/novel_downloader/apps/constants.py` 的 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
-* 因此当前无法通过 CLI / Web / API 选择该站点，也不参与聚合搜索。
+* 站点适配器位于 `plugins/sites/haiwaishubao/`，已注册下载；实测详情页、目录分页、章节分页均可抓取并解析。
+* 站点主域名 `www.haiwaishubao.com` 当前 301 跳转至 `www.haiwaishubao1.com`，抓取时会自动跟随跳转。
+* 搜索未注册：搜索请求为 POST，旧域名 301 跳转后 `aiohttp` 会改为 GET 并丢失表单，返回空结果；新域名直连搜索也受 30 秒限流且未返回可用结果。

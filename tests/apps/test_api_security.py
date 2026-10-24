@@ -144,6 +144,123 @@ async def test_auth_rejects_unknown_scheme(make_app: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Auth: /downloads static files
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_downloads_require_token_when_configured(
+    tmp_path: Path, make_app: Any
+) -> None:
+    """With a token set, the static mount is protected like ``/api/v1``."""
+    _prepare_downloads(tmp_path)
+    app = make_app(token="secret-token")
+
+    async with _client(app) as client:
+        missing = await client.get("/downloads/visible.txt")
+        missing_head = await client.head("/downloads/visible.txt")
+        wrong = await client.get(
+            "/downloads/visible.txt",
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        wrong_key = await client.get(
+            "/downloads/visible.txt", headers={"X-API-Key": "wrong-token"}
+        )
+        bearer = await client.get(
+            "/downloads/visible.txt",
+            headers={"Authorization": "Bearer secret-token"},
+        )
+        api_key = await client.get(
+            "/downloads/visible.txt", headers={"X-API-Key": "secret-token"}
+        )
+
+    for denied in (missing, missing_head, wrong, wrong_key):
+        assert denied.status_code == 401, denied.text
+        assert denied.headers["www-authenticate"] == "Bearer"
+        assert "public" not in denied.text
+
+    assert missing.json() == {"detail": "Invalid or missing API token"}
+    assert bearer.status_code == 200
+    assert bearer.text == "public"
+    assert api_key.status_code == 200
+    assert api_key.text == "public"
+
+
+@pytest.mark.asyncio
+async def test_downloads_are_open_when_no_token_configured(
+    tmp_path: Path, make_app: Any
+) -> None:
+    """The localhost-only default (no token) keeps serving files unauthenticated."""
+    _prepare_downloads(tmp_path)
+    app = make_app()
+
+    async with _client(app) as client:
+        response = await client.get("/downloads/visible.txt")
+        head = await client.head("/downloads/visible.txt")
+
+    assert response.status_code == 200
+    assert response.text == "public"
+    assert head.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_downloads_token_guard_does_not_match_lookalike_prefix(
+    tmp_path: Path, make_app: Any
+) -> None:
+    """A path such as ``/downloadsfoo`` must not be treated as the mount."""
+    app = make_app(token="secret-token")
+
+    async with _client(app) as client:
+        response = await client.get("/downloadsfoo")
+        health = await client.get("/api/v1/health")
+
+    assert response.status_code == 404
+    assert health.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_downloads_traversal_still_rejected_with_valid_token(
+    tmp_path: Path, make_app: Any
+) -> None:
+    """Authentication must not weaken Starlette's traversal protection."""
+    _prepare_downloads(tmp_path)
+    app = make_app(token="secret-token")
+    headers = {"Authorization": "Bearer secret-token"}
+
+    async with _client(app) as client:
+        for path in (
+            "/downloads/../secret.toml",
+            "/downloads/%2e%2e/secret.toml",
+            "/downloads/..%2fsecret.toml",
+            "/downloads/%2e%2e%2fsecret.toml",
+            "/downloads/..%2f..%2fsecret.toml",
+        ):
+            response = await client.get(path, headers=headers)
+            assert response.status_code in (400, 403, 404), (path, response.text)
+            assert "SECRET_MARKER" not in response.text, path
+
+        served = await client.get("/downloads/visible.txt", headers=headers)
+
+    assert served.status_code == 200
+    assert served.text == "public"
+
+
+@pytest.mark.asyncio
+async def test_downloads_401_keeps_cors_headers(tmp_path: Path, make_app: Any) -> None:
+    """The 401 from the static guard must pass back through CORS."""
+    _prepare_downloads(tmp_path)
+    app = make_app(token="secret-token", cors=True)
+
+    async with _client(app) as client:
+        response = await client.get(
+            "/downloads/visible.txt", headers={"Origin": "http://example.test"}
+        )
+
+    assert response.status_code == 401
+    assert response.headers["access-control-allow-origin"] == "*"
+
+
+# ---------------------------------------------------------------------------
 # Static files: no directory traversal
 # ---------------------------------------------------------------------------
 

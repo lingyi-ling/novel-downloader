@@ -122,7 +122,7 @@ Available keys in `fields`: `title` / `url` / `cover` / `author` / `latest` / `u
 | `url` | string | — | Chapter page URL template, required |
 | `content` | field | `{"selector": "body"}` | Body extraction rule |
 | `title` | field | empty | Chapter title extraction rule |
-| `replace` | [string, string][] | `[]` | Replacements applied in order |
+| `replace` | `[string, string][]` | `[]` | Replacements applied in order |
 | `drop` | string[] | `[]` | Any line matching one of these regexes is removed entirely |
 | `pages` | object \| string | empty | Chapter pagination rules |
 | `format` | string | inherited | Response format for this section, overriding the top-level `format` |
@@ -157,7 +157,7 @@ A `field` can be a string (equivalent to `{"selector": "..."}`) or an object:
 | `regex` | string | empty | Applies one more regex extraction to the extracted value (multiline matching) |
 | `group` | int | `0` | Regex capture group; falls back to the whole match when the index is out of range |
 | `multi` | bool | `false` | Whether to collect every match (returns an array) |
-| `replace` | [string, string][] | `[]` | Replacements applied in order |
+| `replace` | `[string, string][]` | `[]` | Replacements applied in order |
 | `default` | string | empty | Fallback value when no node matches |
 
 The `selector` syntax depends on the section's `format`:

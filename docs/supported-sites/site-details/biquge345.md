@@ -18,7 +18,7 @@ tags:
 * 支持分卷: :material-close: 否
 * 支持插图: :material-close: 否
 * 支持登录: :material-help-circle: 部分支持
-* 支持搜索: :material-close: 否
+* 支持搜索: :material-check: 是
 
 ---
 
@@ -49,5 +49,5 @@ https://www.biquge345.com/chapter/321301/37740966.html
 
 ## 适配器注册状态
 
-* 适配器位于 `plugins/sites/biquge345/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），但尚未在 `src/novel_downloader/apps/constants.py` 的 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
-* 因此当前 CLI / Web / API 的站点列表中不会出现该站点，也不参与聚合搜索。
+* 站点适配器与搜索器均已实现（`plugins/sites/biquge345/`），并已在 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
+* 实测（2026-10-24）：搜索 `灵境行者`、`斗罗大陆` 均返回结果；详情页与章节页抓取、解析正常。

@@ -118,7 +118,7 @@ pip install "novel-downloader[api]"      # 本地 REST API
 pip install "novel-downloader[music]"    # 音乐下载
 ```
 
-更多安装方式见: [安装指南](guide/installation.md)。
+更多安装方式见: [安装指南](guide/installation.md)，Windows 独立版可参考 [Windows 安装脚本](guide/install-scripts.md)。
 
 ---
 
@@ -297,6 +297,7 @@ pip install .
 * **环境自检**: 运行 `novel-cli doctor`。
 * **遇到报错或连接问题**: 见 [故障排查](guide/troubleshooting.md)。
 * **想了解代码结构**: 见 [架构说明](guide/architecture.md)。
+* **安全加固与漏洞报告**: 见 [安全说明](guide/security.md)。
 
 ---
 

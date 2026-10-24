@@ -12,8 +12,8 @@
 | 指标 | 数量 |
 | ---- | ---- |
 | 站点条目总数 (`supported_sites.toml`) | 92 |
-| 支持下载 (`DOWNLOAD_SUPPORT_SITES`) | 83 |
-| 支持搜索 (`SEARCH_SUPPORT_SITES`) | 57 |
+| 支持下载 (`DOWNLOAD_SUPPORT_SITES`) | 84 |
+| 支持搜索 (`SEARCH_SUPPORT_SITES`) | 58 |
 | 仅支持下载 (不参与搜索) | 26 |
 | 已归档 (archived) | 8 |
 
@@ -50,11 +50,11 @@
 | [爱丽丝书屋](./site-details/alicesw.md) | `alicesw` | :green_circle: | :material-check: | :material-check: | 500 | :material-close: | :material-close: | :material-help-circle: |
 | [アルファポリス](./site-details/alphapolis.md) | `alphapolis` | :green_circle: | :material-check: | :material-check: | 100 | :material-check: | :material-close: | :material-help-circle: |
 | [笔趣阁](./site-details/b520.md) | `b520` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-help-circle: |
-| [笔趣阁](./site-details/biquge345.md) | `biquge345` | :green_circle: | :material-check: | :material-close: | — | :material-close: | :material-close: | :material-help-circle: |
+| [笔趣阁](./site-details/biquge345.md) | `biquge345` | :green_circle: | :material-check: | :material-check: | 50 | :material-close: | :material-close: | :material-help-circle: |
 | [笔趣阁](./site-details/biquge5.md) | `biquge5` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-help-circle: |
 | [笔趣阁小说网](./site-details/biquguo.md) | `biquguo` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-help-circle: |
 | [精彩小说](./site-details/biquyuedu.md) | `biquyuedu` | :red_circle: | :material-close: | :material-close: | — | :material-close: | :material-close: | :material-help-circle: |
-| [笔仙阁](./site-details/bixiange.md) | `bixiange` | :green_circle: | :material-check: | :material-close: | — | :material-close: | :material-close: | :material-close: |
+| [笔仙阁](./site-details/bixiange.md) | `bixiange` | :orange_circle: | :material-check: | :material-close: | — | :material-close: | :material-close: | :material-close: |
 | [笔趣读](./site-details/blqudu.md) | `blqudu` | :green_circle: | :material-check: | :material-close: | — | :material-close: | :material-close: | :material-help-circle: |
 | [笔下文学网](./site-details/bxwx9.md) | `bxwx9` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-help-circle: |
 | [思路客](./site-details/ciluke.md) | `ciluke` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-help-circle: |
@@ -69,7 +69,7 @@
 | [番茄小说网](./site-details/fanqienovel.md) | `fanqienovel` | :green_circle: | :material-check: | :material-check: | 5 | :material-check: | :material-close: | :material-help-circle: |
 | [笔趣阁](./site-details/fsshu.md) | `fsshu` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-help-circle: |
 | [名著阅读](./site-details/guidaye.md) | `guidaye` | :green_circle: | :material-check: | :material-close: | — | :material-close: | :material-close: | :material-close: |
-| [海外书包](./site-details/haiwaishubao.md) | `haiwaishubao` | :green_circle: | :material-close: | :material-close: | — | :material-close: | :material-close: | :material-help-circle: |
+| [海外书包](./site-details/haiwaishubao.md) | `haiwaishubao` | :green_circle: | :material-check: | :material-close: | — | :material-close: | :material-close: | :material-help-circle: |
 | [和图书](./site-details/hetushu.md) | `hetushu` | :green_circle: | :material-check: | :material-check: | 5 | :material-check: | :material-close: | :material-close: |
 | [红袖招](./site-details/hongxiuzhao.md) | `hongxiuzhao` | :green_circle: | :material-check: | :material-close: | — | :material-close: | :material-close: | :material-help-circle: |
 | [25中文网](./site-details/i25zw.md) | `i25zw` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-close: |
@@ -123,7 +123,7 @@
 | [同人小说网](./site-details/trxs.md) | `trxs` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-close: |
 | [天天看小说](./site-details/ttkan.md) | `ttkan` | :green_circle: | :material-check: | :material-check: | 100 | :material-close: | :material-close: | :material-close: |
 | [台灣小說網](./site-details/twkan.md) | `twkan` | :green_circle: | :material-check: | :material-close: | — | :material-close: | :material-close: | :material-help-circle: |
-| [有爱爱](./site-details/uaa.md) | `uaa` | :green_circle: | :material-check: | :material-close: | — | :material-check: | :material-close: | :material-check: |
+| [有爱爱](./site-details/uaa.md) | `uaa` | :orange_circle: | :material-check: | :material-close: | — | :material-check: | :material-close: | :material-check: |
 | [完本神站](./site-details/wanbengo.md) | `wanbengo` | :red_circle: | :material-close: | :material-close: | — | :material-close: | :material-close: | :material-help-circle: |
 | [轻小说文库](./site-details/wenku8.md) | `wenku8` | :green_circle: | :material-check: | :material-close: | — | :material-check: | :material-check: | :material-check: |
 | [西方奇幻小说网](./site-details/westnovel.md) | `westnovel` | :green_circle: | :material-check: | :material-check: | 100 | :material-close: | :material-close: | :material-close: |

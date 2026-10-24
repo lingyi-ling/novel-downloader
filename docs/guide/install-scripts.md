@@ -61,7 +61,7 @@ Unblock-File .\packaging\*.ps1
 `SHA256SUMS.txt` 以及其中列出的所有文件：
 
 ```powershell
-cd C:\Path\To\novel-downloader-1.0.0-windows-x64
+cd C:\Path\To\novel-downloader-1.1.0-windows-x64
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\Path\To\repo\packaging\verify.ps1
 ```
 
@@ -69,7 +69,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Path\To\repo\packaging\ve
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\verify.ps1 `
-    -ReleaseDir .\dist\release\novel-downloader-1.0.0-windows-x64
+    -ReleaseDir .\dist\release\novel-downloader-1.1.0-windows-x64
 ```
 
 参数：
@@ -96,7 +96,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\verify.ps1 `
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\install-cli.ps1 `
-    -Zip "$HOME\Downloads\novel-cli-1.0.0-windows-x64.zip"
+    -Zip "$HOME\Downloads\novel-cli-1.1.0-windows-x64.zip"
 ```
 
 从本地构建目录安装：
@@ -153,7 +153,7 @@ $env:Path += ";$env:LOCALAPPDATA\Programs\novel-downloader\novel-cli"
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\install-api.ps1 `
-    -Zip "$HOME\Downloads\novel-api-1.0.0-windows-x64.zip"
+    -Zip "$HOME\Downloads\novel-api-1.1.0-windows-x64.zip"
 ```
 
 或：

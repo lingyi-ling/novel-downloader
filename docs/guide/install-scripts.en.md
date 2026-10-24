@@ -65,7 +65,7 @@ scripts read `SHA256SUMS.txt` from the current directory and check every file it
 lists:
 
 ```powershell
-cd C:\Path\To\novel-downloader-1.0.0-windows-x64
+cd C:\Path\To\novel-downloader-1.1.0-windows-x64
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\Path\To\repo\packaging\verify.ps1
 ```
 
@@ -73,7 +73,7 @@ Verify the output of a local build:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\verify.ps1 `
-    -ReleaseDir .\dist\release\novel-downloader-1.0.0-windows-x64
+    -ReleaseDir .\dist\release\novel-downloader-1.1.0-windows-x64
 ```
 
 Parameters:
@@ -102,7 +102,7 @@ From a release zip:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\install-cli.ps1 `
-    -Zip "$HOME\Downloads\novel-cli-1.0.0-windows-x64.zip"
+    -Zip "$HOME\Downloads\novel-cli-1.1.0-windows-x64.zip"
 ```
 
 From a local build directory:
@@ -165,7 +165,7 @@ The basic installation matches the CLI:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\install-api.ps1 `
-    -Zip "$HOME\Downloads\novel-api-1.0.0-windows-x64.zip"
+    -Zip "$HOME\Downloads\novel-api-1.1.0-windows-x64.zip"
 ```
 
 Or:
