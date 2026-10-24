@@ -100,6 +100,23 @@ class DownloadPlanningTest {
     }
 
     @Test
+    fun downloadWithoutTokenSendsNoAuthHeader() {
+        assertTrue(downloadRequestHeaders(null).isEmpty())
+        assertTrue(downloadRequestHeaders("").isEmpty())
+        assertTrue(downloadRequestHeaders("   ").isEmpty())
+    }
+
+    @Test
+    fun downloadWithTokenSendsTheXApiKeyHeader() {
+        assertEquals(
+            mapOf("X-API-Key" to "secret-key"),
+            downloadRequestHeaders("  secret-key  "),
+        )
+        assertEquals("X-API-Key", DOWNLOAD_API_KEY_HEADER)
+        assertEquals(HistoryDownloader.API_KEY_HEADER, DOWNLOAD_API_KEY_HEADER)
+    }
+
+    @Test
     fun knownExtensionsMapToMimeTypes() {
         assertEquals("text/plain", mimeTypeForExtension("txt"))
         assertEquals("text/plain", mimeTypeForExtension("TXT"))

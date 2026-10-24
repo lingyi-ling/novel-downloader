@@ -9,6 +9,12 @@ import java.net.URLDecoder
  * MIME lookup) can be exercised by JVM unit tests.
  */
 
+/**
+ * Header used by the local API to authenticate requests. The server accepts
+ * either this header or `Authorization: Bearer <token>`.
+ */
+const val DOWNLOAD_API_KEY_HEADER = "X-API-Key"
+
 /** Characters that are not allowed in a file name on any supported file system. */
 private val ILLEGAL_FILE_NAME_CHARS = setOf('/', '\\', ':', '*', '?', '"', '<', '>', '|')
 
@@ -73,6 +79,20 @@ fun downloadFileName(name: String, downloadUrl: String, fallbackExt: String): St
         .ifEmpty { "txt" }
     return "download.$ext"
 }
+
+/**
+ * Request headers attached to a DownloadManager download.
+ *
+ * Authentication is optional: the local API runs without a token unless one was
+ * configured, so a null/blank key yields no headers and the download still
+ * works. A configured key is trimmed (matching [Api.configure]) and sent as
+ * `X-API-Key`, the header alias accepted by the server alongside
+ * `Authorization: Bearer`.
+ */
+fun downloadRequestHeaders(apiKey: String?): Map<String, String> =
+    apiKey?.trim()?.takeIf { it.isNotEmpty() }
+        ?.let { mapOf(DOWNLOAD_API_KEY_HEADER to it) }
+        ?: emptyMap()
 
 /** MIME type for the file extensions exposed by the history endpoint. */
 fun mimeTypeForExtension(ext: String): String? = when (ext.trim().lowercase()) {

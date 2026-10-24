@@ -3,6 +3,8 @@
 原生 Android 客户端（Kotlin + Jetpack Compose），通过本机的 **本地 REST API**（`novel-api`）工作：
 搜索、下载任务队列、历史文件、多平台音乐下载。
 
+当前版本：**1.1.0**（`versionCode 2`，与主项目 `novel_downloader.__version__` 一致）。
+
 ## 环境要求
 
 - Android Studio（Koala 或更新）或 JDK 17 + Android SDK（Platform 35、Build-Tools 35）
@@ -23,15 +25,46 @@
    - 如果 API 设置了 token，在「API 密钥」填入同一个值。
 3. 回到「搜索」页即可使用。
 
-## 构建
+## 构建与测试
+
+需要 JDK 17（示例）：
 
 ```bash
+export JAVA_HOME="C:/Android/jdk/msjdk/jdk-17.0.20.1+1"
+export PATH="$JAVA_HOME/bin:$PATH"
 cd android
-./gradlew assembleDebug        # 产物：app/build/outputs/apk/debug/app-debug.apk
-./gradlew installDebug         # 安装到已连接的设备/模拟器
+
+./gradlew testDebugUnitTest assembleDebug   # 单元测试 + Debug APK
+./gradlew installDebug                      # 安装到已连接的设备/模拟器
 ```
 
-`adb install app/build/outputs/apk/debug/app-debug.apk` 也可以手动安装。
+构建产物：
+
+| 构建 | 命令 | 产物 |
+| --- | --- | --- |
+| Debug | `./gradlew assembleDebug` | `app/build/outputs/apk/debug/app-debug.apk` |
+| Release | `./gradlew assembleRelease` | `app/build/outputs/apk/release/app-release.apk` |
+
+手动安装：`adb install app/build/outputs/apk/debug/app-debug.apk`。
+
+### 发布签名
+
+Release 签名通过 `android/keystore.properties`（已在 `.gitignore` 中排除）配置，不要提交密钥：
+
+```properties
+storeFile=release.jks        # 绝对路径，或相对 android/ 的路径
+storePassword=你的仓库密码
+keyAlias=你的别名
+keyPassword=你的密钥密码
+```
+
+文件缺失或不完整时，`assembleRelease` 会**回退到 debug 签名**继续构建（仅用于本地验证，不要这样分发）。
+生成密钥示例：
+
+```bash
+keytool -genkeypair -v -keystore android/release.jks -alias noveldl \
+  -keyalg RSA -keysize 2048 -validity 10000
+```
 
 ## 页面
 
@@ -39,7 +72,7 @@ cd android
 | --- | --- |
 | 搜索 | 关键字 + 站点过滤（逗号分隔，留空=全部 57 个站点），结果一键入队 |
 | 任务 | 进行中 / 排队 / 完成分区，进度条与章节数，2 秒自动刷新，可取消 |
-| 历史 | 导出文件列表（名称/大小/时间），点击用系统浏览器下载 |
+| 历史 | 导出文件列表（名称/大小/时间），点击经系统 DownloadManager 下载到公共 Downloads 目录；设置了 API 密钥时自动附加 `X-API-Key` 请求头 |
 | 音乐 | 25 个平台，搜索、多选、创建下载任务并轮询进度 |
 | 设置 | API 地址与密钥（DataStore 持久化） |
 

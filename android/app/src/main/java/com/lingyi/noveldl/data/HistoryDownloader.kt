@@ -15,7 +15,7 @@ import com.lingyi.noveldl.R
  */
 object HistoryDownloader {
 
-    const val API_KEY_HEADER = "X-API-Key"
+    const val API_KEY_HEADER = DOWNLOAD_API_KEY_HEADER
 
     /** Starts the download and returns the DownloadManager id, or a failure. */
     fun enqueue(context: Context, file: HistoryFile): Result<Long> = try {
@@ -36,8 +36,10 @@ object HistoryDownloader {
             .setAllowedOverMetered(true)
             .setAllowedOverRoaming(false)
         mimeTypeForExtension(file.ext)?.let(request::setMimeType)
-        Api.apiKey.takeIf { it.isNotEmpty() }?.let {
-            request.addRequestHeader(API_KEY_HEADER, it)
+        // No key configured -> empty map -> the download is sent unauthenticated,
+        // which is what an API started without --token expects.
+        downloadRequestHeaders(Api.apiKey).forEach { (name, value) ->
+            request.addRequestHeader(name, value)
         }
         Result.success(manager.enqueue(request))
     } catch (e: Exception) {
