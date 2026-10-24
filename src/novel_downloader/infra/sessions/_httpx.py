@@ -11,9 +11,12 @@ from typing import Any, Unpack
 import httpx
 
 from .base import (
+    DEFAULT_ALLOW_REDIRECTS,
     BaseSession,
     GetRequestKwargs,
     PostRequestKwargs,
+    as_connection_error,
+    as_timeout_error,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -75,15 +78,22 @@ class HttpxSession(BaseSession):
         encoding: str = "utf-8",
         **kwargs: Unpack[GetRequestKwargs],
     ) -> BaseResponse:
-        if allow_redirects is not None:
-            kwargs.setdefault("follow_redirects", allow_redirects)  # type: ignore[typeddict-item]
+        redirect = (
+            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
+        )
+        kwargs.setdefault("follow_redirects", redirect)  # type: ignore[typeddict-item]
 
-        r = await self.session.get(url, **kwargs)
+        try:
+            r = await self.session.get(url, **kwargs)
+        except httpx.TimeoutException as exc:
+            raise as_timeout_error(exc) from exc
+        except (httpx.NetworkError, httpx.ProxyError, httpx.RemoteProtocolError) as exc:
+            raise as_connection_error(exc) from exc
         return BaseResponse(
             content=r.content,
             headers=r.headers,
             status=r.status_code,
-            encoding=r.encoding or encoding,
+            encoding=r.charset_encoding or encoding,
         )
 
     async def post(
@@ -95,15 +105,22 @@ class HttpxSession(BaseSession):
         encoding: str = "utf-8",
         **kwargs: Unpack[PostRequestKwargs],
     ) -> BaseResponse:
-        if allow_redirects is not None:
-            kwargs.setdefault("follow_redirects", allow_redirects)  # type: ignore[typeddict-item]
+        redirect = (
+            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
+        )
+        kwargs.setdefault("follow_redirects", redirect)  # type: ignore[typeddict-item]
 
-        r = await self.session.post(url, **kwargs)
+        try:
+            r = await self.session.post(url, **kwargs)
+        except httpx.TimeoutException as exc:
+            raise as_timeout_error(exc) from exc
+        except (httpx.NetworkError, httpx.ProxyError, httpx.RemoteProtocolError) as exc:
+            raise as_connection_error(exc) from exc
         return BaseResponse(
             content=r.content,
             headers=r.headers,
             status=r.status_code,
-            encoding=r.encoding or encoding,
+            encoding=r.charset_encoding or encoding,
         )
 
     def load_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:
@@ -164,13 +181,17 @@ class HttpxSession(BaseSession):
         if self._session is None:
             return None
 
-        value: str | None = self._session.cookies.get(key)
-        if isinstance(value, bytes):
-            try:
+        # The same name can exist for several domains.  Return the first jar
+        # entry instead of letting ``Cookies.get`` raise ``CookieConflict``,
+        # which keeps this getter consistent with the other backends.
+        for cookie in self._session.cookies.jar:
+            if cookie.name != key:
+                continue
+            value = cookie.value
+            if isinstance(value, bytes):
                 return value.decode("utf-8", errors="ignore")
-            except Exception:
-                return None
-        return value
+            return str(value) if value is not None else None
+        return None
 
     def clear_cookie(self, name: str) -> None:
         if self._session is None:

@@ -5,11 +5,18 @@ novel_downloader.plugins.common.parser.biquge4
 """
 
 import re
+from html import unescape
 from typing import Any
 
-from lxml import html
+from lxml import etree, html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    dedupe_chapters,
+    resolve_url,
+    strip_page_marker,
+)
 from novel_downloader.schemas import (
     BookInfoDict,
     ChapterDict,
@@ -28,7 +35,7 @@ class Biquge4Parser(BaseParser):
         "内容未完，下一页继续阅读",
         "本章阅读完毕，更多请搜索",
     }
-    BASE_URL: str
+    BASE_URL: str = ""
 
     NOVELCONTENT_RE = re.compile(
         r'<div[^>]*id=["\']novelcontent["\'][^>]*>(.*?)</div>',
@@ -58,7 +65,7 @@ class Biquge4Parser(BaseParser):
         )
         if not book_name:
             book_name = self._first_str(
-                tree.xpath('//div[contains(@class,"catalog1")]/h1/text()')
+                tree.xpath('//div[contains(@class,"catalog1")]//h1//text()')
             )
 
         author = self._first_str(
@@ -66,7 +73,9 @@ class Biquge4Parser(BaseParser):
         )
         if not author:
             author = self._first_str(
-                tree.xpath('//p[contains(@class,"p1")]/text()'),
+                tree.xpath(
+                    '//div[contains(@class,"catalog1")]//p[contains(@class,"p1")]//text()'
+                ),
                 replaces=[("作者：", "")],
             )
 
@@ -75,10 +84,11 @@ class Biquge4Parser(BaseParser):
             cover_url = self._first_str(
                 tree.xpath('//div[contains(@class,"tu")]/img/@src')
             )
-        if cover_url.startswith("//"):
-            cover_url = "https:" + cover_url
-        elif cover_url.startswith("/"):
-            cover_url = self.BASE_URL + cover_url
+        cover_url = resolve_url(
+            tree,
+            cover_url,
+            fallback_base=self.BASE_URL,
+        )
 
         update_time = self._first_str(
             tree.xpath('//meta[@property="og:novel:update_time"]/@content')
@@ -86,7 +96,8 @@ class Biquge4Parser(BaseParser):
         if not update_time:
             update_time = self._first_str(
                 tree.xpath(
-                    '//p[contains(@class,"p2") and contains(text(),"更新")]/text()'
+                    '//div[contains(@class,"catalog1")]'
+                    '//p[contains(@class,"p2") and contains(text(),"更新")]//text()'
                 ),
                 replaces=[("更新：", "")],
             )
@@ -115,39 +126,19 @@ class Biquge4Parser(BaseParser):
         for elem in tree.xpath('//div[contains(@class,"info_chapters")]/*'):
             tag = (elem.tag or "").lower()
             e_cls = (elem.get("class") or "").lower()
-            if tag == "ul" and "p2" in e_cls:
-                # After "全部章节" block
-                if "全部章节" not in elem.getprevious().text_content():
-                    continue
-                for a in elem.xpath(".//a"):
-                    href = (a.get("href") or "").strip()
-                    if not href:
-                        continue
-                    chap_title = (a.text_content() or "").strip()
-                    chap_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
-                    chapters.append(
-                        {
-                            "title": chap_title,
-                            "url": href,
-                            "chapterId": chap_id,
-                        }
-                    )
+            if tag != "ul" or "p2" not in e_cls:
+                continue
+            previous = elem.getprevious()
+            if previous is None or "全部章节" not in (previous.text_content() or ""):
+                continue
+            chapters.extend(self._chapters_from_element(elem))
 
         if not chapters:
             # fallback: take all <a> in info_chapters
-            for a in tree.xpath('//div[contains(@class,"info_chapters")]//a'):
-                href = (a.get("href") or "").strip()
-                if not href:
-                    continue
-                chap_title = (a.text_content() or "").strip()
-                chap_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
-                chapters.append(
-                    {
-                        "title": chap_title,
-                        "url": href,
-                        "chapterId": chap_id,
-                    }
-                )
+            for elem in tree.xpath('//div[contains(@class,"info_chapters")]'):
+                chapters.extend(self._chapters_from_element(elem))
+
+        chapters = dedupe_chapters(chapters)
 
         if not chapters:
             return None
@@ -166,6 +157,25 @@ class Biquge4Parser(BaseParser):
             "extra": {},
         }
 
+    def _chapters_from_element(self, elem: Any) -> list[ChapterInfoDict]:
+        """Build chapter entries from every link inside ``elem``."""
+        chapters: list[ChapterInfoDict] = []
+        for a in elem.xpath(".//a[@href]"):
+            href = (a.get("href") or "").strip()
+            if not href or href.lower().startswith(("javascript:", "#")):
+                continue
+            title = (a.text_content() or "").strip()
+            if not title:
+                title = (a.get("title") or "").strip()
+            chapters.append(
+                {
+                    "title": title,
+                    "url": href,
+                    "chapterId": chapter_id_from_href(href),
+                }
+            )
+        return chapters
+
     def parse_chapter_content(
         self,
         raw_pages: list[str],
@@ -173,10 +183,14 @@ class Biquge4Parser(BaseParser):
         **kwargs: Any,
     ) -> ChapterDict | None:
         """
-        章节正文所在的 `<div id="novelcontent">` 内含有大量未闭合或嵌套错误的标签
-        (如 `<tr>`, `<table>`, `<td>` 等)
+        Extract the content of ``<div id="novelcontent">``.
 
-        导致使用 `lxml` 时结构混乱, 因此这里采用正则表达式来截取该 DIV 内容并手动清理
+        The markup inside that block is frequently malformed (unclosed
+        ``<tr>``/``<td>``/``<table>`` tags).  ``lxml`` still recovers the text
+        reliably, so it is tried first: unlike a non-greedy ``</div>`` regex it
+        keeps the paragraphs that follow a nested advertisement block.  The
+        regex implementation remains as a fallback for pages that ``lxml``
+        cannot parse at all.
         """
         raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
@@ -187,25 +201,9 @@ class Biquge4Parser(BaseParser):
 
         for curr_html in raw_pages:
             if not title:
-                m_titles = self.TITLE_RE.findall(curr_html)
-                if m_titles:
-                    title = self.TAG_RE.sub("", m_titles[-1])
-                    title = title.rsplit("(", 1)[0].strip()
+                title = self._extract_title(curr_html)
 
-            m = self.NOVELCONTENT_RE.search(curr_html)
-            if not m:
-                continue
-            raw_html = m.group(1)
-
-            text = raw_html.replace("&nbsp;", " ")
-            text = self.P_BR_RE.sub("\n", text)  # p/br -> newline
-            text = self.TAG_RE.sub("", text)  # strip other tags
-
-            for line in text.splitlines():
-                line = line.strip()
-                if not line or self._is_ad_line(line):
-                    continue
-                paragraphs.append(line)
+            paragraphs.extend(self._extract_paragraphs(curr_html))
 
         if not paragraphs:
             return None
@@ -218,3 +216,51 @@ class Biquge4Parser(BaseParser):
             "content": content,
             "extra": {"site": self.site_name},
         }
+
+    def _extract_title(self, raw_html: str) -> str:
+        titles = self.TITLE_RE.findall(raw_html)
+        if not titles:
+            return ""
+        raw_title = unescape(self.TAG_RE.sub("", titles[-1]))
+        return strip_page_marker(raw_title).strip()
+
+    def _extract_paragraphs(self, raw_html: str) -> list[str]:
+        try:
+            tree = html.fromstring(raw_html)
+        except (ValueError, etree.ParserError):
+            return self._extract_paragraphs_regex(raw_html)
+
+        nodes = tree.xpath('//div[@id="novelcontent"]')
+        if not nodes:
+            return self._extract_paragraphs_regex(raw_html)
+
+        elem = nodes[0]
+        etree.strip_elements(elem, "script", "style", with_tail=False)
+        for node in elem.iter():
+            tag = node.tag.lower() if isinstance(node.tag, str) else ""
+            if tag not in {"br", "p", "div", "tr", "li", "h1", "h2", "h3"}:
+                continue
+            if node.tail:
+                node.tail = "\n" + node.tail
+            if tag != "br":
+                node.text = "\n" + (node.text or "")
+
+        return self._lines_to_paragraphs(elem.text_content())
+
+    def _extract_paragraphs_regex(self, raw_html: str) -> list[str]:
+        match = self.NOVELCONTENT_RE.search(raw_html)
+        if not match:
+            return []
+        text = match.group(1).replace("&nbsp;", " ")
+        text = self.P_BR_RE.sub("\n", text)  # p/br -> newline
+        text = self.TAG_RE.sub("", text)  # strip other tags
+        return self._lines_to_paragraphs(unescape(text))
+
+    def _lines_to_paragraphs(self, text: str) -> list[str]:
+        paragraphs: list[str] = []
+        for line in text.splitlines():
+            line = line.replace("\xa0", " ").strip()
+            if not line or self._is_ad_line(line):
+                continue
+            paragraphs.append(line)
+        return paragraphs

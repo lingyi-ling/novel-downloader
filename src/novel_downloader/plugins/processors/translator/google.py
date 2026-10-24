@@ -17,6 +17,8 @@ from novel_downloader.infra.http_defaults import DEFAULT_USER_AGENT
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import BookInfoDict, ChapterDict
 
+from .cache import build_cache
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +41,16 @@ class GoogleTranslaterProcessor:
             "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": DEFAULT_USER_AGENT,
         }
+        self._cache = build_cache("google", self._source, self._target, config)
+
+    @property
+    def cache_stats(self) -> dict[str, Any]:
+        """Live cache counters (hits/misses/size/...), useful for tests."""
+        return self._cache.stats
+
+    def clear_cache(self) -> None:
+        """Drop every cached translation and reset the counters."""
+        self._cache.clear()
 
     def process_book_info(self, book_info: BookInfoDict) -> BookInfoDict:
         """
@@ -81,9 +93,30 @@ class GoogleTranslaterProcessor:
 
     def _translate(self, text: str) -> str:
         """Send text to the unofficial Google Translate endpoint."""
-        if not text.strip():
-            return text
+        return self._translate_with_status(text)[0]
 
+    def _translate_with_status(self, text: str) -> tuple[str, bool]:
+        """
+        Translate ``text``, returning ``(result, succeeded)``.
+
+        ``succeeded`` is only true for a 2xx response with a parsable payload;
+        callers use it to make sure failures are never cached.
+        """
+        if not text.strip():
+            return text, False
+
+        key = self._cache.make_key(text)
+        if key is None:  # caching disabled or a paragraph is over the limit
+            return self._request_translation(text, key=None)
+
+        with self._cache.single_flight(key):
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached, True
+            return self._request_translation(text, key)
+
+    def _request_translation(self, text: str, key: str | None) -> tuple[str, bool]:
+        """Perform one HTTP request; cache the result only on success."""
         data = {
             "client": "gtx",
             "sl": self._source,
@@ -93,6 +126,7 @@ class GoogleTranslaterProcessor:
             "q": text,
         }
         trans: str = text
+        ok = False
 
         try:
             r = requests.post(
@@ -101,6 +135,7 @@ class GoogleTranslaterProcessor:
             if r.status_code == 200:
                 resp = r.json()
                 trans = "".join(s["trans"] for s in resp["sentences"])
+                ok = True
             else:
                 logger.warning(
                     "HTTP %d while translating text: %s",
@@ -113,4 +148,7 @@ class GoogleTranslaterProcessor:
         # Respectful delay between requests
         time.sleep(self._sleep)
 
-        return trans
+        if ok and key is not None:
+            self._cache.put(key, trans)
+
+        return trans, ok

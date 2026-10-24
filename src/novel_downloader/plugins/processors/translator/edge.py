@@ -18,6 +18,8 @@ import requests
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import BookInfoDict, ChapterDict
 
+from .cache import build_cache, dedupe_settings, translate_chunks
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +40,17 @@ class EdgeTranslaterProcessor:
         )
         self._auth_url: str = "https://edge.microsoft.com/translate/auth"
         self._token_cache: dict[str, Any] | None = None
+        self._cache = build_cache("edge", self._source, self._target, config)
+        self._dedupe, self._dedupe_max_length = dedupe_settings(config)
+
+    @property
+    def cache_stats(self) -> dict[str, Any]:
+        """Live cache counters (hits/misses/size/...), useful for tests."""
+        return self._cache.stats
+
+    def clear_cache(self) -> None:
+        """Drop every cached translation and reset the counters."""
+        self._cache.clear()
 
     def process_book_info(self, book_info: BookInfoDict) -> BookInfoDict:
         """
@@ -71,7 +84,12 @@ class EdgeTranslaterProcessor:
         content = ch.get("content", "")
         if isinstance(content, str):
             paragraphs = self._split_text(content)
-            translated = [self._translate(p) for p in paragraphs]
+            translated = translate_chunks(
+                self._translate_with_status,
+                paragraphs,
+                dedupe=self._dedupe,
+                max_length=self._dedupe_max_length,
+            )
             ch["content"] = "\n".join(translated)
 
         return ch
@@ -152,9 +170,30 @@ class EdgeTranslaterProcessor:
         """
         Translate text using Edge Translator API.
         """
-        if not text.strip():
-            return text
+        return self._translate_with_status(text)[0]
 
+    def _translate_with_status(self, text: str) -> tuple[str, bool]:
+        """
+        Translate ``text``, returning ``(result, succeeded)``.
+
+        ``succeeded`` is false for blank input, auth failures, non-200
+        responses and malformed payloads, so failures are never cached.
+        """
+        if not text.strip():
+            return text, False
+
+        key = self._cache.make_key(text)
+        if key is None:  # caching disabled or a paragraph is over the limit
+            return self._request_translation(text, key=None)
+
+        with self._cache.single_flight(key):
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached, True
+            return self._request_translation(text, key)
+
+    def _request_translation(self, text: str, key: str | None) -> tuple[str, bool]:
+        """Perform one HTTP request; cache the result only on success."""
         params = {
             "to": self._target,
             "api-version": "3.0",
@@ -174,7 +213,7 @@ class EdgeTranslaterProcessor:
             logger.error(
                 "Edge authentication failed; returning original text. Error: %s", e
             )
-            return text
+            return text, False
 
         headers = {
             "Content-Type": "application/json",
@@ -182,20 +221,26 @@ class EdgeTranslaterProcessor:
         }
         body = json.dumps([{"text": text.strip()}])
 
+        result = text
+        ok = False
         try:
             r = requests.post(endpoint, headers=headers, data=body, timeout=20)
             if r.status_code == 200:
                 data = r.json()
-                return data[0]["translations"][0]["text"]  # type: ignore[no-any-return]
+                result = data[0]["translations"][0]["text"]
+                ok = True
             else:
                 logger.warning(
                     "HTTP %d during Edge translation: %s",
                     r.status_code,
                     r.text[:120],
                 )
-                return text
         except Exception as e:
             logger.error("Edge translation failed: %s", e)
-            return text
         finally:
             time.sleep(self._sleep)
+
+        if ok and key is not None:
+            self._cache.put(key, result)
+
+        return result, ok

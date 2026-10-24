@@ -10,6 +10,12 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    dedupe_chapters,
+    resolve_url,
+    strip_page_marker,
+)
 from novel_downloader.schemas import (
     BookInfoDict,
     ChapterDict,
@@ -24,8 +30,11 @@ class Biquge1Parser(BaseParser):
     """
 
     ADS = {r"^第\(\d+/\d+\)页$"}
+    BASE_URL: str = ""
     _NESTED_HTML_RE = re.compile(r"<!DOCTYPE.*?>", re.I | re.S)
     _HEAD_RE = re.compile(r"<head>.*?</head>", re.I | re.S)
+    _CHAPTER_SUFFIX_RE = re.compile(r"\s*[-—－]\s*《[^》]*》\s*$")
+    _BOOK_PREFIX_RE = re.compile(r"^\s*《[^》]*》\s*")
 
     def parse_book_info(
         self,
@@ -44,9 +53,11 @@ class Biquge1Parser(BaseParser):
         author = self._first_str(
             tree.xpath('//meta[@property="og:novel:author"]/@content')
         )
-        cover_url = self._first_str(tree.xpath('//meta[@property="og:image"]/@content'))
-        if cover_url and not cover_url.startswith("http"):
-            cover_url = "https:" + cover_url
+        cover_url = resolve_url(
+            tree,
+            self._first_str(tree.xpath('//meta[@property="og:image"]/@content')),
+            fallback_base=self.BASE_URL,
+        )
         update_time = self._first_str(
             tree.xpath('//meta[@property="og:novel:update_time"]/@content')
         )
@@ -69,25 +80,11 @@ class Biquge1Parser(BaseParser):
             )
 
         # --- Volumes & Chapters ---
-        chapters: list[ChapterInfoDict] = [
-            {
-                "title": (a.text or "").strip(),
-                "url": (href := (a.get("href") or "").strip()),
-                "chapterId": href.split("/")[-1].split(".")[0],
-            }
-            for a in tree.xpath('//div[contains(@class,"book_list2")]//a[@href]')
-        ]
-        for curr_html in raw_pages[1:]:
+        chapters: list[ChapterInfoDict] = []
+        for curr_html in raw_pages:
             t = html.fromstring(curr_html)
-            more: list[ChapterInfoDict] = [
-                {
-                    "title": (a.text or "").strip(),
-                    "url": (href := (a.get("href") or "").strip()),
-                    "chapterId": href.split("/")[-1].split(".")[0],
-                }
-                for a in t.xpath('//div[contains(@class,"book_list2")]//a[@href]')
-            ]
-            chapters.extend(more)
+            chapters.extend(self._chapters_from_tree(t))
+        chapters = dedupe_chapters(chapters)
 
         if not chapters:
             return None
@@ -123,14 +120,16 @@ class Biquge1Parser(BaseParser):
             curr_html = self._strip_nested_html(curr_html)
             tree = html.fromstring(curr_html)
             if not title:
-                raw_title = self._first_str(tree.xpath("//h1/text()"))
-                if raw_title:
-                    if "《" in raw_title:
-                        raw_title = raw_title.split("《", 1)[0]
-                    title = raw_title.rstrip(" —-").strip()
+                title = self._clean_title(self._first_str(tree.xpath("//h1//text()")))
 
             for article in tree.xpath("//article"):
-                texts = [t.strip() for t in article.itertext() if t.strip()]
+                texts = [
+                    t.strip()
+                    for t in article.xpath(
+                        ".//text()[not(ancestor::script) and not(ancestor::style)]"
+                    )
+                    if t.strip()
+                ]
                 texts = [t for t in texts if not self._is_ad_line(t)]
                 if texts:
                     paragraphs.append("\n".join(texts))
@@ -146,6 +145,32 @@ class Biquge1Parser(BaseParser):
             "content": content,
             "extra": {"site": self.site_name},
         }
+
+    def _chapters_from_tree(self, tree: Any) -> list[ChapterInfoDict]:
+        """Extract chapter links from one catalogue page."""
+        chapters: list[ChapterInfoDict] = []
+        for a in tree.xpath('//div[contains(@class,"book_list2")]//a[@href]'):
+            href = (a.get("href") or "").strip()
+            if not href or href.lower().startswith(("javascript:", "#")):
+                continue
+            title = (a.text_content() or "").strip()
+            if not title:
+                title = (a.get("title") or "").strip()
+            chapters.append(
+                {
+                    "title": title,
+                    "url": href,
+                    "chapterId": chapter_id_from_href(href),
+                }
+            )
+        return chapters
+
+    @classmethod
+    def _clean_title(cls, raw_title: str) -> str:
+        """Drop the book-name suffix/prefix that this template appends to <h1>."""
+        title = cls._BOOK_PREFIX_RE.sub("", raw_title.strip())
+        title = cls._CHAPTER_SUFFIX_RE.sub("", title)
+        return strip_page_marker(title).strip(" —-")
 
     @classmethod
     def _strip_nested_html(cls, s: str) -> str:

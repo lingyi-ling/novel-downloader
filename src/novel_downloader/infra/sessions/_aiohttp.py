@@ -11,9 +11,11 @@ from typing import Any, Unpack
 import aiohttp
 
 from .base import (
+    DEFAULT_ALLOW_REDIRECTS,
     BaseSession,
     GetRequestKwargs,
     PostRequestKwargs,
+    as_connection_error,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -83,17 +85,26 @@ class AiohttpSession(BaseSession):
     ) -> BaseResponse:
         if verify is not None:
             kwargs.setdefault("ssl", verify)  # type: ignore[typeddict-item]
-        if allow_redirects is not None:
-            kwargs.setdefault("allow_redirects", allow_redirects)  # type: ignore[typeddict-item]
+        redirect = (
+            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
+        )
+        kwargs.setdefault("allow_redirects", redirect)  # type: ignore[typeddict-item]
 
-        async with self.session.get(url, **kwargs) as r:
-            content = await r.read()
-            return BaseResponse(
-                content=content,
-                headers=r.headers,
-                status=r.status,
-                encoding=r.charset or encoding,
-            )
+        try:
+            async with self.session.get(url, **kwargs) as r:
+                content = await r.read()
+                return BaseResponse(
+                    content=content,
+                    headers=r.headers,
+                    status=r.status,
+                    encoding=r.charset or encoding,
+                )
+        except TimeoutError:
+            # ServerTimeoutError is also a ClientConnectionError; keep the
+            # timeout classification instead of rewriting it.
+            raise
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
+            raise as_connection_error(exc) from exc
 
     async def post(
         self,
@@ -106,17 +117,26 @@ class AiohttpSession(BaseSession):
     ) -> BaseResponse:
         if verify is not None:
             kwargs.setdefault("ssl", verify)  # type: ignore[typeddict-item]
-        if allow_redirects is not None:
-            kwargs.setdefault("allow_redirects", allow_redirects)  # type: ignore[typeddict-item]
+        redirect = (
+            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
+        )
+        kwargs.setdefault("allow_redirects", redirect)  # type: ignore[typeddict-item]
 
-        async with self.session.post(url, **kwargs) as r:
-            content = await r.read()
-            return BaseResponse(
-                content=content,
-                headers=r.headers,
-                status=r.status,
-                encoding=r.charset or encoding,
-            )
+        try:
+            async with self.session.post(url, **kwargs) as r:
+                content = await r.read()
+                return BaseResponse(
+                    content=content,
+                    headers=r.headers,
+                    status=r.status,
+                    encoding=r.charset or encoding,
+                )
+        except TimeoutError:
+            # ServerTimeoutError is also a ClientConnectionError; keep the
+            # timeout classification instead of rewriting it.
+            raise
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
+            raise as_connection_error(exc) from exc
 
     def load_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:
         if self._session is None:

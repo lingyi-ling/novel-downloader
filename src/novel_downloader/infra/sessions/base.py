@@ -17,6 +17,35 @@ from novel_downloader.schemas import FetcherConfig
 
 from .response import BaseResponse
 
+#: Unified redirect policy for every backend.  aiohttp and curl_cffi follow
+#: redirects by default while httpx does not; the session facade exposes one
+#: contract instead of leaking that difference to callers.
+DEFAULT_ALLOW_REDIRECTS = True
+
+#: Timeout and connection failures are re-raised as the builtin
+#: :class:`TimeoutError` / :class:`ConnectionError`, so callers (and the retry
+#: policy) see the same type regardless of the selected backend.
+
+
+def as_timeout_error(exc: BaseException) -> TimeoutError:
+    """
+    Translate a backend-specific timeout into the unified builtin type.
+
+    :param exc: Original backend exception.
+    :return: A builtin :class:`TimeoutError` carrying the original message.
+    """
+    return TimeoutError(str(exc) or type(exc).__name__)
+
+
+def as_connection_error(exc: BaseException) -> ConnectionError:
+    """
+    Translate a backend-specific transport failure into the unified type.
+
+    :param exc: Original backend exception.
+    :return: A builtin :class:`ConnectionError` carrying the original message.
+    """
+    return ConnectionError(str(exc) or type(exc).__name__)
+
 
 class BaseRequestKwargs(TypedDict, total=False):
     headers: Mapping[str, str] | Sequence[tuple[str, str]]
@@ -98,8 +127,13 @@ class BaseSession(ABC):
         Create an HTTP GET request context manager.
 
         :param url: The target URL.
+        :param allow_redirects: Whether redirects are followed.  ``None``
+            (the default) follows redirects on every backend.
         :param kwargs: Additional args passed to session.get().
         :raises RuntimeError: If the session is not initialized.
+        :raises TimeoutError: If the request times out.
+        :raises ConnectionError: If the connection cannot be established or
+            is interrupted.
         """
         ...
 
@@ -117,8 +151,13 @@ class BaseSession(ABC):
         Create an HTTP POST request context manager.
 
         :param url: The target URL.
+        :param allow_redirects: Whether redirects are followed.  ``None``
+            (the default) follows redirects on every backend.
         :param kwargs: Additional args passed to session.post().
         :raises RuntimeError: If the session is not initialized.
+        :raises TimeoutError: If the request times out.
+        :raises ConnectionError: If the connection cannot be established or
+            is interrupted.
         """
         ...
 

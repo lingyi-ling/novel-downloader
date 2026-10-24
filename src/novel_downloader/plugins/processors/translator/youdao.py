@@ -20,6 +20,8 @@ from novel_downloader.infra.http_defaults import DEFAULT_USER_AGENT
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import BookInfoDict, ChapterDict
 
+from .cache import build_cache, dedupe_settings, translate_chunks
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +36,17 @@ class YoudaoTranslaterProcessor:
         self._target: str = config.get("target") or "zh-CHS"
         self._sleep: float = max(0.0, float(config.get("sleep", 1.0)))
         self._client = _YoudaoWebFanyi()
+        self._cache = build_cache("youdao", self._source, self._target, config)
+        self._dedupe, self._dedupe_max_length = dedupe_settings(config)
+
+    @property
+    def cache_stats(self) -> dict[str, Any]:
+        """Live cache counters (hits/misses/size/...), useful for tests."""
+        return self._cache.stats
+
+    def clear_cache(self) -> None:
+        """Drop every cached translation and reset the counters."""
+        self._cache.clear()
 
     def process_book_info(self, book_info: BookInfoDict) -> BookInfoDict:
         """
@@ -67,7 +80,12 @@ class YoudaoTranslaterProcessor:
         content = ch.get("content", "")
         if isinstance(content, str):
             paragraphs = self._split_text(content)
-            translated = [self._translate(p) for p in paragraphs]
+            translated = translate_chunks(
+                self._translate_with_status,
+                paragraphs,
+                dedupe=self._dedupe,
+                max_length=self._dedupe_max_length,
+            )
             ch["content"] = "\n".join(translated)
 
         return ch
@@ -112,18 +130,43 @@ class YoudaoTranslaterProcessor:
         """
         Translate text using Youdao Translator API.
         """
+        return self._translate_with_status(text)[0]
+
+    def _translate_with_status(self, text: str) -> tuple[str, bool]:
+        """
+        Translate ``text``, returning ``(result, succeeded)``.
+
+        A client exception means the original text is returned with
+        ``succeeded=False``; such a result is never cached or deduplicated.
+        """
         if not text:
-            return ""
+            return "", False
+
+        key = self._cache.make_key(text)
+        if key is None:  # caching disabled or a paragraph is over the limit
+            return self._request_translation(text, key=None)
+
+        with self._cache.single_flight(key):
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached, True
+            return self._request_translation(text, key)
+
+    def _request_translation(self, text: str, key: str | None) -> tuple[str, bool]:
+        """Perform one translation; cache the result only on success."""
         try:
             out = self._client.translate(text, self._source, self._target)
             if self._sleep > 0:
                 time.sleep(self._sleep)
-            return out
         except Exception as e:
             logger.warning(
                 "Youdao translate failed; returning original text. Error: %s", e
             )
-            return text
+            return text, False
+
+        if key is not None:
+            self._cache.put(key, out)
+        return out, True
 
 
 class _YoudaoWebFanyi:

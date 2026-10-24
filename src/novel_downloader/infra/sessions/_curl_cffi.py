@@ -11,11 +11,26 @@ from pathlib import Path
 from typing import Any, Unpack
 
 from curl_cffi.requests import AsyncSession
+from curl_cffi.requests.exceptions import (
+    ConnectionError as CurlConnectionError,
+)
+from curl_cffi.requests.exceptions import (
+    IncompleteRead as CurlIncompleteRead,
+)
+from curl_cffi.requests.exceptions import (
+    ProxyError as CurlProxyError,
+)
+from curl_cffi.requests.exceptions import (
+    Timeout as CurlTimeout,
+)
 
 from .base import (
+    DEFAULT_ALLOW_REDIRECTS,
     BaseSession,
     GetRequestKwargs,
     PostRequestKwargs,
+    as_connection_error,
+    as_timeout_error,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -75,15 +90,22 @@ class CurlCffiSession(BaseSession):
     ) -> BaseResponse:
         if verify is not None:
             kwargs.setdefault("verify", verify)  # type: ignore[typeddict-item]
-        if allow_redirects is not None:
-            kwargs.setdefault("allow_redirects", allow_redirects)  # type: ignore[typeddict-item]
+        redirect = (
+            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
+        )
+        kwargs.setdefault("allow_redirects", redirect)  # type: ignore[typeddict-item]
 
-        r = await self.session.get(url, **kwargs)
+        try:
+            r = await self.session.get(url, **kwargs)
+        except CurlTimeout as exc:
+            raise as_timeout_error(exc) from exc
+        except (CurlConnectionError, CurlProxyError, CurlIncompleteRead) as exc:
+            raise as_connection_error(exc) from exc
         return BaseResponse(
             content=r.content,
             headers=r.headers,
             status=r.status_code,
-            encoding=r.encoding or encoding,
+            encoding=r.charset_encoding or encoding,
         )
 
     async def post(
@@ -97,15 +119,22 @@ class CurlCffiSession(BaseSession):
     ) -> BaseResponse:
         if verify is not None:
             kwargs.setdefault("verify", verify)  # type: ignore[typeddict-item]
-        if allow_redirects is not None:
-            kwargs.setdefault("allow_redirects", allow_redirects)  # type: ignore[typeddict-item]
+        redirect = (
+            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
+        )
+        kwargs.setdefault("allow_redirects", redirect)  # type: ignore[typeddict-item]
 
-        r = await self.session.post(url, **kwargs)
+        try:
+            r = await self.session.post(url, **kwargs)
+        except CurlTimeout as exc:
+            raise as_timeout_error(exc) from exc
+        except (CurlConnectionError, CurlProxyError, CurlIncompleteRead) as exc:
+            raise as_connection_error(exc) from exc
         return BaseResponse(
             content=r.content,
             headers=r.headers,
             status=r.status_code,
-            encoding=r.encoding or encoding,
+            encoding=r.charset_encoding or encoding,
         )
 
     def load_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:
@@ -159,13 +188,17 @@ class CurlCffiSession(BaseSession):
         if self._session is None:
             return None
 
-        value: str | None = self._session.cookies.get(key)
-        if isinstance(value, bytes):
-            try:
+        # The same name can exist for several domains.  Return the first jar
+        # entry so duplicate names resolve deterministically (and like the
+        # other backends) instead of relying on ``Cookies.get``.
+        for cookie in self._session.cookies.jar:
+            if cookie.name != key:
+                continue
+            value = cookie.value
+            if isinstance(value, bytes):
                 return value.decode("utf-8", errors="ignore")
-            except Exception:
-                return None
-        return value
+            return str(value) if value is not None else None
+        return None
 
     def clear_cookie(self, name: str) -> None:
         if self._session is None:
