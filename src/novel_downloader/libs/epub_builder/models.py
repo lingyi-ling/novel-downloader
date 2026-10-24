@@ -8,6 +8,7 @@ Defines the core EPUB data models and resource classes used by the builder.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,9 +29,19 @@ from .constants import (
     XHTML_TEMPLATE,
 )
 
+# Characters that are not legal anywhere in an XML 1.0 document. They cannot
+# be expressed as character references either, so they must be dropped.
+_ILLEGAL_XML_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+def _clean_xml_text(text: str) -> str:
+    """Remove characters that would make the generated XML invalid."""
+    return _ILLEGAL_XML_CHARS.sub("", text)
+
 
 def escape_label(text: str) -> str:
     """Escape &, <, > for labels."""
+    text = _clean_xml_text(text)
     text = text.replace("&", "&amp;")
     text = text.replace("<", "&lt;")
     text = text.replace(">", "&gt;")
@@ -39,6 +50,7 @@ def escape_label(text: str) -> str:
 
 def escape_text(text: str) -> str:
     """Escape &, <, >, " and '."""
+    text = _clean_xml_text(text)
     text = text.replace("&", "&amp;")
     text = text.replace("<", "&lt;")
     text = text.replace(">", "&gt;")
@@ -157,7 +169,7 @@ class EpubXhtmlContent(EpubXhtmlFile):
             lang=lang,
             title=escape_text(self.title),
             font_styles=self._build_font_styles(),
-            content=self.content,
+            content=_clean_xml_text(self.content),
         )
 
     def _collect_selectors(self) -> dict[str, list[str]]:
@@ -315,14 +327,17 @@ class EpubChapter(EpubXhtmlContent):
             lang=lang,
             title=escape_text(self.title),
             font_styles=self._build_font_styles(),
-            content=self.content,
+            content=_clean_xml_text(self.content),
             extra_block=self._build_extra_block(),
         )
 
     def _build_extra_block(self) -> str:
         if not self.extra_content:
             return ""
-        return f'<br />\n<div class="extra-block">\n{self.extra_content}\n</div>'
+        return (
+            '<br />\n<div class="extra-block">\n'
+            f"{_clean_xml_text(self.extra_content)}\n</div>"
+        )
 
 
 @dataclass(slots=True)
@@ -352,7 +367,7 @@ class NavDocument(EpubResource):
         :param src: The href target for the chapter's XHTML file.
         """
         label = escape_label(label)
-        self.lines.append(f'<li><a href="{src}">{label}</a></li>')
+        self.lines.append(f'<li><a href="{escape_text(src)}">{label}</a></li>')
 
     def add_volume(
         self,
@@ -371,11 +386,11 @@ class NavDocument(EpubResource):
         """
         label = escape_label(label)
 
-        self.lines.append(f'<li><a href="{src}">{label}</a>\n<ol>')
+        self.lines.append(f'<li><a href="{escape_text(src)}">{label}</a>\n<ol>')
 
         for _, clabel, csrc in chapters:
             clabel = escape_label(clabel)
-            self.lines.append(f'<li><a href="{csrc}">{clabel}</a></li>')
+            self.lines.append(f'<li><a href="{escape_text(csrc)}">{clabel}</a></li>')
 
         self.lines.append("</ol>\n</li>")
 
@@ -419,9 +434,9 @@ class NCXDocument(EpubResource):
         self._order += 1
 
         self.lines.append(
-            f'<navPoint id="{id}" playOrder="{order}">'
+            f'<navPoint id="{escape_text(id)}" playOrder="{order}">'
             f"<navLabel><text>{label}</text></navLabel>"
-            f'<content src="{src}"/>'
+            f'<content src="{escape_text(src)}"/>'
         )
         nav = self._nav
         for cid, clabel, csrc in chapters:
@@ -438,9 +453,9 @@ class NCXDocument(EpubResource):
         depth = 2  # always 1 level or 2 levels
 
         return NCX_TEMPLATE.format(
-            uid=self.uid,
+            uid=escape_text(self.uid),
             depth=depth,
-            title=self.title,
+            title=escape_label(self.title),
             navpoints=navpoints,
         )
 
@@ -449,9 +464,9 @@ class NCXDocument(EpubResource):
         order = self._order
         self._order += 1
         return (
-            f'<navPoint id="{id}" playOrder="{order}">'
+            f'<navPoint id="{escape_text(id)}" playOrder="{order}">'
             f"<navLabel><text>{label}</text></navLabel>"
-            f'<content src="{src}"/>'
+            f'<content src="{escape_text(src)}"/>'
             f"</navPoint>"
         )
 
@@ -485,9 +500,10 @@ class OpfDocument(EpubResource):
         media_type: str,
         properties: str | None = None,
     ) -> None:
-        prop_attr = f' properties="{properties}"' if properties else ""
+        prop_attr = f' properties="{escape_text(properties)}"' if properties else ""
         self.manifest_lines.append(
-            f'<item id="{id}" href="{href}" media-type="{media_type}"{prop_attr}/>'
+            f'<item id="{escape_text(id)}" href="{escape_text(href)}" '
+            f'media-type="{escape_text(media_type)}"{prop_attr}/>'
         )
 
         if properties == "cover-image":
@@ -500,8 +516,8 @@ class OpfDocument(EpubResource):
         idref: str,
         properties: str | None = None,
     ) -> None:
-        prop_attr = f' properties="{properties}"' if properties else ""
-        self.spine_lines.append(f'<itemref idref="{idref}"{prop_attr}/>')
+        prop_attr = f' properties="{escape_text(properties)}"' if properties else ""
+        self.spine_lines.append(f'<itemref idref="{escape_text(idref)}"{prop_attr}/>')
 
     def to_xml(self) -> str:
         """
@@ -521,9 +537,9 @@ class OpfDocument(EpubResource):
         # ---------- metadata ----------
         meta = []
         meta.append(f'<meta property="dcterms:modified">{now_iso}</meta>')
-        meta.append(f'<dc:identifier id="id">{self.uid}</dc:identifier>')
+        meta.append(f'<dc:identifier id="id">{escape_text(self.uid)}</dc:identifier>')
         meta.append(f"<dc:title>{escape_text(self.title)}</dc:title>")
-        meta.append(f"<dc:language>{self.language}</dc:language>")
+        meta.append(f"<dc:language>{escape_text(self.language)}</dc:language>")
 
         if self.author:
             meta.append(
@@ -544,7 +560,9 @@ class OpfDocument(EpubResource):
             )
 
         if self._cover_item_id:
-            meta.append(f'<meta name="cover" content="{self._cover_item_id}"/>')
+            meta.append(
+                f'<meta name="cover" content="{escape_text(self._cover_item_id)}"/>'
+            )
 
         metadata = "\n".join(meta)
 
@@ -552,7 +570,9 @@ class OpfDocument(EpubResource):
         manifest_items = "\n".join(self.manifest_lines)
 
         # ---------- spine ----------
-        toc_attr = f' toc="{self._toc_item_id}"' if self._toc_item_id else ""
+        toc_attr = (
+            f' toc="{escape_text(self._toc_item_id)}"' if self._toc_item_id else ""
+        )
         spine_items = "\n".join(self.spine_lines)
 
         return OPF_TEMPLATE.format(

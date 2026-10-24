@@ -13,6 +13,7 @@ from novel_downloader.plugins.registry import registrar
 from novel_downloader.plugins.search import search, search_stream
 from novel_downloader.plugins.search_cache import (
     CacheKey,
+    CacheStats,
     SearchCache,
     build_key,
 )
@@ -238,6 +239,81 @@ def test_clear() -> None:
     cache.clear()
     assert cache.get(ka) is None
     assert cache.get(kb) is None
+
+
+# --------------------------------------------------------------------------- #
+# stats
+# --------------------------------------------------------------------------- #
+def test_stats_start_at_zero() -> None:
+    cache = SearchCache(now=_Clock())
+    assert cache.stats() == CacheStats(hits=0, misses=0, evictions=0)
+
+
+def test_stats_counts_hits_and_misses() -> None:
+    cache = SearchCache(now=_Clock())
+    key = _key()
+    cache.put(key, [_result("1")])
+
+    assert cache.get(key) is not None  # hit
+    assert cache.get(key) is not None  # hit
+    assert cache.get(_key("absent")) is None  # miss
+
+    stats = cache.stats()
+    assert stats.hits == 2
+    assert stats.misses == 1
+    assert stats.evictions == 0
+
+
+def test_stats_counts_expired_lookup_as_miss() -> None:
+    clock = _Clock()
+    cache = SearchCache(ttl=10.0, now=clock)
+    key = _key()
+    cache.put(key, [_result("1")])
+    assert cache.get(key) is not None  # hit while fresh
+    clock.advance(10.0)
+    assert cache.get(key) is None  # expired => miss, not eviction
+
+    stats = cache.stats()
+    assert stats.hits == 1
+    assert stats.misses == 1
+    assert stats.evictions == 0
+
+
+def test_stats_counts_lru_evictions() -> None:
+    cache = SearchCache(max_entries=2, now=_Clock())
+    cache.put(_key("a"), [_result("a")])
+    cache.put(_key("b"), [_result("b")])
+    cache.put(_key("c"), [_result("c")])  # evicts "a"
+    cache.put(_key("d"), [_result("d")])  # evicts "b"
+
+    stats = cache.stats()
+    assert stats.evictions == 2
+    assert stats.hits == 0
+    assert stats.misses == 0
+
+
+def test_stats_are_cumulative_and_clear_keeps_them() -> None:
+    cache = SearchCache(max_entries=1, now=_Clock())
+    cache.put(_key("a"), [_result("a")])
+    assert cache.get(_key("a")) is not None  # hit
+    assert cache.get(_key("missing")) is None  # miss
+    cache.put(_key("b"), [_result("b")])  # evicts "a"
+
+    before = cache.stats()
+    cache.clear()
+    assert cache.stats() == before
+
+
+def test_stats_returns_a_frozen_snapshot() -> None:
+    cache = SearchCache(now=_Clock())
+    cache.put(_key(), [_result("1")])
+    snapshot = cache.stats()
+    cache.get(_key())
+
+    assert snapshot.hits == 0  # not retroactively updated
+    assert cache.stats().hits == 1
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        snapshot.hits = 10  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------------- #

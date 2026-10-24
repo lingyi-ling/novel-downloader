@@ -47,15 +47,23 @@ def sanitize_filename(filename: str, max_length: int | None = 255) -> str:
     if dot == "":  # no dot found
         stem, ext = name, ""
         dot = ""
-    if os.name == "nt" and stem.upper() in _WIN_RESERVED_NAMES:
+    # Windows reserves the portion before the *first* dot, so "NUL.tar.gz" is
+    # reserved just like "NUL.txt". Trailing spaces before the dot are ignored
+    # by Windows too ("CON .txt"), so normalise before checking.
+    device_name = name.split(".", 1)[0].strip(" .")
+    if os.name == "nt" and device_name.upper() in _WIN_RESERVED_NAMES:
         stem = f"_{stem}"
     cleaned = f"{stem}{dot}{ext}" if ext else stem
 
-    if max_length and len(cleaned) > max_length:
+    if max_length is not None and max_length > 0 and len(cleaned) > max_length:
         if ext:
             keep = max_length - len(ext) - 1
-            cleaned = f"{cleaned[:keep]}.{ext}"
+            # If the extension alone does not fit, fall back to a plain
+            # truncation; otherwise the result could exceed max_length.
+            cleaned = f"{cleaned[:keep]}.{ext}" if keep > 0 else cleaned[:max_length]
         else:
             cleaned = cleaned[:max_length]
+        # Truncation may expose trailing spaces/dots (invalid on Windows).
+        cleaned = cleaned.rstrip(" .") or "_untitled"
 
     return cleaned or "_untitled"

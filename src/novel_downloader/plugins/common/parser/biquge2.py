@@ -32,6 +32,7 @@ class Biquge2Parser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
@@ -100,6 +101,7 @@ class Biquge2Parser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 

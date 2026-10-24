@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
+
+import pytest
 
 from novel_downloader.plugins.ranking import (
     SORT_KEYS,
@@ -186,3 +189,248 @@ def test_sort_results_desc_reverses_primary_key() -> None:
 
     sort_results(results, by="words", order="asc", now=NOW)
     assert [r["book_id"] for r in results] == ["a", "b"]
+
+
+# --------------------------------------------------------------------------- #
+# ranking sanity (quality regression)
+# --------------------------------------------------------------------------- #
+def test_exact_title_beats_derivative_even_if_derivative_is_fresher() -> None:
+    exact = _result(
+        title="斗破苍穹",
+        author="天蚕土豆",
+        update_date="2020-01-01",  # 4+ years old
+        word_count="10万字",
+    )
+    derivative = _result(
+        title="斗破苍穹外传",
+        author="天蚕土豆",
+        update_date="2024-06-14",  # updated yesterday
+        word_count="10万字",  # same as the exact match
+    )
+
+    assert rank_score(exact, "斗破苍穹", now=NOW) > rank_score(
+        derivative, "斗破苍穹", now=NOW
+    )
+
+    results = [derivative, exact]
+    sort_results(results, keyword="斗破苍穹", now=NOW)
+    assert [r["title"] for r in results] == ["斗破苍穹", "斗破苍穹外传"]
+
+
+def test_same_title_multiple_sites_sorted_by_quality() -> None:
+    keyword = "三体"
+    poor = _result(
+        site="alpha",
+        book_id="a",
+        title=keyword,
+        word_count="10万字",
+        cover_url="",
+        latest_chapter="",
+        update_date="2019-01-01",
+    )
+    rich = _result(
+        site="beta",
+        book_id="b",
+        title=keyword,
+        word_count="300万字",
+        cover_url="https://example.com/cover.jpg",
+        latest_chapter="第300章",
+        update_date="2024-06-14",
+    )
+    medium = _result(
+        site="gamma",
+        book_id="c",
+        title=keyword,
+        word_count="100万字",
+        cover_url="https://example.com/cover.jpg",
+        latest_chapter="",
+        update_date="2024-05-01",
+    )
+
+    results = [poor, rich, medium]
+    sort_results(results, keyword=keyword, now=NOW)
+
+    assert [r["book_id"] for r in results] == ["b", "c", "a"]
+
+
+def test_missing_and_malformed_fields_do_not_crash() -> None:
+    sparse = _result()
+    del sparse["update_date"]
+    del sparse["word_count"]
+    del sparse["priority"]
+
+    garbage: SearchResult = {
+        "site": "x",
+        "book_id": "y",
+        "book_url": "",
+        "cover_url": None,  # type: ignore[typeddict-item]
+        "title": None,  # type: ignore[typeddict-item]
+        "author": None,  # type: ignore[typeddict-item]
+        "latest_chapter": 42,  # type: ignore[typeddict-item]
+        "update_date": object(),  # type: ignore[typeddict-item]
+        "word_count": object(),  # type: ignore[typeddict-item]
+        "priority": "not-a-number",  # type: ignore[typeddict-item]
+    }  # type: ignore[typeddict-item]
+
+    for item in (sparse, garbage):
+        score = rank_score(item, "斗破苍穹", now=NOW)
+        assert 0.0 <= score <= 1.0
+
+    results = [garbage, sparse]
+    sort_results(results, keyword="斗破苍穹", now=NOW)
+    assert len(results) == 2
+
+
+# --------------------------------------------------------------------------- #
+# snapshots (lock behaviour while optimising internals)
+# --------------------------------------------------------------------------- #
+def test_rank_score_snapshot() -> None:
+    strong = _result(
+        title="斗破苍穹",
+        author="天蚕土豆",
+        word_count="300万字",
+        update_date="2024-06-15",
+        cover_url="https://example.com/c.jpg",
+        latest_chapter="第100章",
+        priority=5,
+    )
+    weak = _result(
+        site="beta",
+        title="斗破苍穹外传",
+        author="别人",
+        word_count="未知",
+        update_date="3天前",
+        priority=500,
+    )
+
+    assert rank_score(strong, "斗破苍穹", now=NOW) == pytest.approx(
+        0.9887954554582784, abs=1e-9
+    )
+    assert rank_score(weak, "斗破苍穹", now=NOW) == pytest.approx(
+        0.6411000000000001, abs=1e-9
+    )
+
+
+def test_sort_results_snapshot() -> None:
+    results = [
+        _result(site="gamma", book_id="g1", title="斗破苍穹外传", word_count="50万字"),
+        _result(site="alpha", book_id="a1", title="斗破苍穹", word_count="10万字"),
+        _result(site="beta", book_id="b1", title="斗破苍穹", word_count="300万字"),
+        _result(site="alpha", book_id="a2", title="斗破苍穹", word_count="20万字"),
+    ]
+    sort_results(results, keyword="斗破苍穹", now=NOW)
+    assert [r["book_id"] for r in results] == ["b1", "a2", "a1", "g1"]
+
+
+# --------------------------------------------------------------------------- #
+# parse_update_date equivalence with the original try-everything order
+# --------------------------------------------------------------------------- #
+_REFERENCE_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+    "%Y.%m.%d",
+    "%Y年%m月%d日 %H:%M:%S",
+    "%Y年%m月%d日 %H:%M",
+    "%Y年%m月%d日",
+)
+
+_REFERENCE_NULL_TOKENS = frozenset({"", "-", "--", "—", "未知", "暂无", "none", "n/a"})
+_REFERENCE_AGO = re.compile(
+    r"(\d+)\s*(秒钟|秒|分钟|分|个小时|小时|天|日|周|星期|个月|月|年)\s*前"
+)
+
+
+def _reference_parse_update_date(value: object, now: datetime) -> datetime | None:
+    text = str(value if value is not None else "").strip()
+    if text.casefold() in _REFERENCE_NULL_TOKENS:
+        return None
+    for fmt in _REFERENCE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        pass
+
+    lowered = text.casefold()
+    if lowered in {"刚刚", "刚才", "just now", "justnow"}:
+        return now
+    if lowered in {"今天", "today"}:
+        return now
+    if lowered in {"昨天", "yesterday"}:
+        return now - timedelta(days=1)
+    if lowered == "前天":
+        return now - timedelta(days=2)
+
+    match = _REFERENCE_AGO.search(text)
+    if match is not None:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        deltas = {
+            "秒": timedelta(seconds=amount),
+            "秒钟": timedelta(seconds=amount),
+            "分": timedelta(minutes=amount),
+            "分钟": timedelta(minutes=amount),
+            "小时": timedelta(hours=amount),
+            "个小时": timedelta(hours=amount),
+            "天": timedelta(days=amount),
+            "日": timedelta(days=amount),
+            "周": timedelta(weeks=amount),
+            "星期": timedelta(weeks=amount),
+            "月": timedelta(days=30 * amount),
+            "个月": timedelta(days=30 * amount),
+            "年": timedelta(days=365 * amount),
+        }
+        return now - deltas[unit]
+    return None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "-",
+        "未知",
+        "刚刚",
+        "今天",
+        "昨天",
+        "前天",
+        "3天前",
+        "2个月前",
+        "1年前",
+        "2024-05-01",
+        "2024-5-1",
+        "2024-05-01 10:00",
+        "2024-05-01 10:00:00",
+        "2024-05-01T10:00:00",
+        "2024-05-01 12:00:00+08:00",
+        "20240501",
+        "999-01-01",
+        "02024-01-01",
+        "2024/5/1",
+        "2024/05/01",
+        "2024/5/1 3:4",
+        "2024/5/1 3:4:5",
+        "2024/13/01",
+        "2024.5.1",
+        "2024.05.01",
+        "2024.13.1",
+        "2024年5月1日",
+        "2024年5月1日 3:4",
+        "2024年5月1日 3:4:5",
+        "2024年13月1日",
+        "3天前后",
+        "2024-05-01前",
+        "not a date",
+        " 2024-05-01 ",
+        "２０２４年５月１日",
+    ],
+)
+def test_parse_update_date_matches_reference(value: str) -> None:
+    assert parse_update_date(value, now=NOW) == _reference_parse_update_date(value, NOW)

@@ -4,7 +4,7 @@ novel_downloader.infra.sessions._aiohttp
 ----------------------------------------
 """
 
-import json
+from http.cookies import CookieError, Morsel
 from pathlib import Path
 from typing import Any, Unpack
 
@@ -15,7 +15,18 @@ from .base import (
     GetRequestKwargs,
     PostRequestKwargs,
 )
+from .cookie_io import (
+    load_cookie_items,
+    resolve_cookie_path,
+    write_cookie_items,
+)
 from .response import BaseResponse
+
+
+def _is_ip_address(host: str) -> bool:
+    """Call aiohttp's IP check, going through the module so patches apply."""
+    checker: Any = getattr(aiohttp.cookiejar, "is_ip_address", None)
+    return bool(checker and checker(host))
 
 
 class AiohttpSession(BaseSession):
@@ -53,10 +64,13 @@ class AiohttpSession(BaseSession):
     async def close(self) -> None:
         """
         Shutdown and clean up any resources.
+
+        Safe to call repeatedly and concurrently: the backend reference is
+        detached before awaiting so a second caller becomes a no-op.
         """
-        if self._session and not self._session.closed:
-            await self._session.close()
-        self._session = None
+        session, self._session = self._session, None
+        if session is not None and not session.closed:
+            await session.close()
 
     async def get(
         self,
@@ -108,39 +122,51 @@ class AiohttpSession(BaseSession):
         if self._session is None:
             return False
 
-        filename = filename or "aiohttp.cookies"
-        path = cookies_dir / filename
-        if not path.exists():
+        path = resolve_cookie_path(cookies_dir, filename or "aiohttp.cookies")
+        items = load_cookie_items(path)
+        if items is None:
             return False
 
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            cookies = {c["name"]: c["value"] for c in data}
-        except Exception:
-            return False
-
-        self._session.cookie_jar.update_cookies(cookies)
+        jar = self._session.cookie_jar
+        for item in items:
+            try:
+                domain = item.get("domain")
+                if domain:
+                    morsel: Morsel[str] = Morsel()
+                    morsel.set(item["name"], item["value"], item["value"])
+                    morsel["domain"] = domain
+                    morsel["path"] = item.get("path", "/")
+                    jar.update_cookies({item["name"]: morsel})
+                else:
+                    jar.update_cookies({item["name"]: item["value"]})
+            except (CookieError, ValueError):
+                continue
         return True
 
     def save_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:
         if self._session is None or self._session.cookie_jar is None:
             return False
 
-        filename = filename or "aiohttp.cookies"
-        cookies_dir.mkdir(parents=True, exist_ok=True)
+        path = resolve_cookie_path(cookies_dir, filename or "aiohttp.cookies")
 
-        cookies: list[dict[str, str | None]] = []
+        cookies: list[dict[str, str]] = []
         for cookie in self._session.cookie_jar:
-            cookies.append(
-                {
-                    "name": cookie.key,
-                    "value": cookie.value,
-                }
-            )
+            domain = cookie["domain"]
+            # aiohttp only sends domain-scoped cookies to IP hosts when the
+            # jar is "unsafe"; keep legacy shared behaviour for IP cookies.
+            if domain and _is_ip_address(domain):
+                domain = ""
+            item = {"name": cookie.key, "value": cookie.value}
+            if domain:
+                item["domain"] = domain
+            if cookie["path"]:
+                item["path"] = cookie["path"]
+            cookies.append(item)
 
-        (cookies_dir / filename).write_text(
-            json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        try:
+            write_cookie_items(path, cookies)
+        except OSError:
+            return False
         return True
 
     def update_cookies(self, cookies: dict[str, str]) -> None:

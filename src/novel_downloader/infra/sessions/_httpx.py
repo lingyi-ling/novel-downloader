@@ -4,7 +4,7 @@ novel_downloader.infra.sessions._httpx
 --------------------------------------
 """
 
-import json
+from http.cookies import CookieError
 from pathlib import Path
 from typing import Any, Unpack
 
@@ -14,6 +14,11 @@ from .base import (
     BaseSession,
     GetRequestKwargs,
     PostRequestKwargs,
+)
+from .cookie_io import (
+    load_cookie_items,
+    resolve_cookie_path,
+    write_cookie_items,
 )
 from .response import BaseResponse
 
@@ -53,12 +58,13 @@ class HttpxSession(BaseSession):
     async def close(self) -> None:
         """
         Shutdown and clean up any resources.
+
+        Safe to call repeatedly and concurrently: the backend reference is
+        detached before awaiting so a second caller becomes a no-op.
         """
-        if self._session is None:
-            return
-        if not self._session.is_closed:
-            await self._session.aclose()
-        self._session = None
+        session, self._session = self._session, None
+        if session is not None and not session.is_closed:
+            await session.aclose()
 
     async def get(
         self,
@@ -104,45 +110,43 @@ class HttpxSession(BaseSession):
         if self._session is None:
             return False
 
-        filename = filename or "httpx.cookies"
-        path = cookies_dir / filename
-        if not path.exists():
+        path = resolve_cookie_path(cookies_dir, filename or "httpx.cookies")
+        items = load_cookie_items(path)
+        if items is None:
             return False
 
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-
-        for item in data:
-            name = item.get("name")
-            value = item.get("value")
-            domain = item.get("domain", "")
-            path_ = item.get("path", "/")
-            if name and value:
-                self._session.cookies.set(name, value, domain=domain, path=path_)
+        for item in items:
+            try:
+                self._session.cookies.set(
+                    item["name"],
+                    item["value"],
+                    domain=item.get("domain", ""),
+                    path=item.get("path", "/"),
+                )
+            except (CookieError, ValueError):
+                continue
         return True
 
     def save_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:
         if self._session is None:
             return False
 
-        filename = filename or "httpx.cookies"
-        cookies_dir.mkdir(parents=True, exist_ok=True)
+        path = resolve_cookie_path(cookies_dir, filename or "httpx.cookies")
 
-        cookies: list[dict[str, str | None]] = []
+        cookies: list[dict[str, str]] = []
         for cookie in self.session.cookies.jar:
             cookies.append(
                 {
                     "name": cookie.name,
-                    "value": cookie.value,
-                    "domain": cookie.domain,
-                    "path": cookie.path,
+                    "value": cookie.value or "",
+                    "domain": cookie.domain or "",
+                    "path": cookie.path or "/",
                 }
             )
-        (cookies_dir / filename).write_text(
-            json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        try:
+            write_cookie_items(path, cookies)
+        except OSError:
+            return False
         return True
 
     def update_cookies(self, cookies: dict[str, str]) -> None:
@@ -173,9 +177,13 @@ class HttpxSession(BaseSession):
             return
 
         jar = self._session.cookies.jar
-        for cookie in jar:
-            if cookie.name == name:
-                jar.clear(cookie.domain, cookie.path, cookie.name)
+        matches = [
+            (cookie.domain, cookie.path, cookie.name)
+            for cookie in jar
+            if cookie.name == name
+        ]
+        for domain, path, cookie_name in matches:
+            jar.clear(domain, path, cookie_name)
 
     def clear_cookies(self) -> None:
         """

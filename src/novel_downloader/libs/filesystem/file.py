@@ -52,7 +52,9 @@ def write_file(
             tmp.write(content)
         tmp_path.replace(filepath)
         return filepath
-    except Exception:
+    except BaseException:
+        # Also clean up on KeyboardInterrupt/SystemExit so an interrupted
+        # write cannot leave a stray temporary file behind.
         if tmp_path and tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
         raise

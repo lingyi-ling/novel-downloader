@@ -46,6 +46,7 @@ class Biquge4Parser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
@@ -177,6 +178,7 @@ class Biquge4Parser(BaseParser):
 
         导致使用 `lxml` 时结构混乱, 因此这里采用正则表达式来截取该 DIV 内容并手动清理
         """
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 

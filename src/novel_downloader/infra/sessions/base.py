@@ -58,7 +58,9 @@ class BaseSession(ABC):
         self._proxy_user = config.proxy_user
         self._proxy_pass = config.proxy_pass
         self._trust_env = config.trust_env
-        self._cookies = cookies or {}
+        # Copy the mapping: callers commonly reuse a shared cookie dict for
+        # several sessions and later mutate it for another account.
+        self._cookies = dict(cookies) if cookies else {}
         self._session: Any = None
 
         self._headers = (

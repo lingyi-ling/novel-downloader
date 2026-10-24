@@ -16,6 +16,8 @@ from typing import Any
 from novel_downloader.infra.i18n import t
 from novel_downloader.infra.paths import DEFAULT_CONFIG_FILE, app_home
 
+from .validation import validate_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,7 +133,28 @@ def load_config(
         raise FileNotFoundError("No valid config file found.")
 
     logger.debug("Loading configuration from: %s", path)
-    return _load_by_extension(path)
+    data = _load_by_extension(path)
+    _log_validation_problems(data)
+    return data
+
+
+def _log_validation_problems(data: dict[str, Any]) -> None:
+    """
+    Validate ``data`` and log findings without aborting the load.
+
+    Validation is advisory for backward compatibility: old configuration
+    files must keep loading even when they contain unknown or deprecated
+    keys.  Any unexpected validator error is therefore swallowed and only
+    reported at debug level.
+    """
+    try:
+        problems = validate_config(data)
+    except Exception:  # pragma: no cover - defensive: never break loading
+        logger.debug("Configuration validation failed", exc_info=True)
+        return
+
+    for problem in problems:
+        logger.warning("Configuration problem: %s", problem)
 
 
 def get_config_value(keys: list[str], default: Any) -> Any:

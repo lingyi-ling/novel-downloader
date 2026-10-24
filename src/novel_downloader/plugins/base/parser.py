@@ -152,6 +152,21 @@ class BaseParser(abc.ABC):
             value = value.replace(old, new)
         return value.strip()
 
+    @staticmethod
+    def _usable_pages(raw_pages: list[str]) -> list[str]:
+        """
+        Drop missing or blank pages.
+
+        A 200 response with an empty body is fetched as ``""``; passing that to
+        an HTML parser raises instead of yielding the "no content" result the
+        parsers already return for an empty page list.  Filtering here keeps
+        both failure shapes consistent (``None``, never an exception).
+
+        :param raw_pages: Raw page payloads from the fetcher.
+        :return: Pages that contain non-whitespace content.
+        """
+        return [page for page in raw_pages if page and page.strip()]
+
     def _extract_text_from_image(
         self,
         images: "list[NDArray[np.uint8]]",

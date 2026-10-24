@@ -4,12 +4,46 @@ novel_downloader.libs.image_utils
 ---------------------------------
 """
 
+from __future__ import annotations
+
 import io
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-import numpy as np
-from numpy.typing import NDArray
-from PIL import Image
+# ``numpy`` and Pillow live in the optional ``image-utils`` extra. Import the
+# module without them must still succeed so unrelated commands keep working;
+# the public helpers below raise a clear error only when actually called.
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import numpy as np
+    from numpy.typing import NDArray
+    from PIL import Image
+else:
+    try:
+        import numpy as np
+        from numpy.typing import NDArray
+    except ImportError:  # pragma: no cover - depends on environment
+        np = None  # type: ignore[assignment]
+        NDArray = Any  # type: ignore[misc,assignment]
+
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - depends on environment
+        Image = None  # type: ignore[assignment]
+
+
+def _require_image_deps() -> None:
+    """Raise an actionable error when the optional image dependencies are absent."""
+    missing: list[str] = []
+    if np is None:
+        missing.append("numpy")
+    if Image is None:
+        missing.append("Pillow")
+    if missing:
+        raise RuntimeError(
+            "novel_downloader.libs.image_utils requires the optional "
+            f"dependencies: {', '.join(missing)}. "
+            'Install them with: pip install "novel-downloader[image-utils]"'
+        )
 
 
 def load_image_array_bytes(data: bytes, white_bg: bool = False) -> NDArray[np.uint8]:
@@ -25,6 +59,7 @@ def load_image_array_bytes(data: bytes, white_bg: bool = False) -> NDArray[np.ui
     :return: NumPy array of shape (H, W, 3), dtype=uint8, in RGB order.
     :raises PIL.UnidentifiedImageError, OSError: If input bytes cannot be decoded.
     """
+    _require_image_deps()
     with Image.open(io.BytesIO(data)) as img:
         return _pil_to_rgb_array(img, white_bg)
 
@@ -37,6 +72,7 @@ def load_image_array_path(path: Path, white_bg: bool = False) -> NDArray[np.uint
     :param white_bg: If True, flatten images with transparency onto white.
     :return: Numpy array representing the image (H, W, 3)
     """
+    _require_image_deps()
     with Image.open(path) as img:
         return _pil_to_rgb_array(img, white_bg)
 
@@ -50,6 +86,7 @@ def filter_orange_watermark(img: NDArray[np.uint8]) -> NDArray[np.uint8]:
     :param img: Input image as numpy array (H, W, 3)
     :return: Filtered numpy array (H, W, 3)
     """
+    _require_image_deps()
     pil_img = Image.fromarray(img).convert("HSV")
     hsv_arr = np.array(pil_img)
 
@@ -79,6 +116,7 @@ def filter_gray_watermark(
     :param img: Input image as numpy array (H, W, 3)
     :return: Filtered numpy array (H, W, 3)
     """
+    _require_image_deps()
     img16 = img.astype(np.uint16, copy=False)
     sum_rgb = img16[..., 0] + img16[..., 1]
     sum_rgb += img16[..., 2]
@@ -105,6 +143,7 @@ def split_by_height(
     :param per_chunk_top_ignore: Number of pixels to skip from the top of each chunk
     :return: List of numpy arrays, each a sub-image of the original
     """
+    _require_image_deps()
     h, w, _ = img.shape
     chunks = []
     effective_height = h - top_offset - bottom_offset
@@ -130,6 +169,7 @@ def split_by_white_lines(
     :param padding: Number of white pixels to pad on the top and bottom.
     :return: List of sliced blocks as numpy arrays.
     """
+    _require_image_deps()
     h, w, _ = img_arr.shape
 
     # vectorized detection: row is white if min(pixel) == 255
@@ -185,6 +225,7 @@ def crop_chars_region(
     :param char_width: Width of one character (in pixels)
     :return: Cropped image as (H, W', 3)
     """
+    _require_image_deps()
     h, w, _ = img.shape
     end_col = min(left_margin + char_width * num_chars, w)
     return img[:, :end_col, :]
@@ -197,6 +238,7 @@ def is_empty_image(img: NDArray[np.uint8]) -> bool:
     :param img: Input image as (H, W, 3) numpy array
     :return: True if all pixels are white, False otherwise
     """
+    _require_image_deps()
     return bool(np.all(img == 255))
 
 
@@ -214,6 +256,7 @@ def is_new_paragraph(
     :param paragraph_threshold: Left margin (in px) to classify as new paragraph.
     :return: True if this line starts a new paragraph.
     """
+    _require_image_deps()
     h, w, _ = img.shape
     max_scan = min(w, paragraph_threshold)
     # Integer RGB sum: avoids float mean
@@ -233,6 +276,7 @@ def encode_image_array(
     :param format: Output format ("JPEG" or "PNG").
     :return: Encoded image bytes.
     """
+    _require_image_deps()
     pil_img = Image.fromarray(img)
 
     buf = io.BytesIO()
@@ -256,6 +300,7 @@ def concat_image_slices_vertical(
     :return: Encoded image bytes.
     :raises ValueError: If slices is empty.
     """
+    _require_image_deps()
     if not slices:
         raise ValueError("No slices provided.")
     combined = np.concatenate(slices, axis=0)
@@ -271,6 +316,7 @@ def concat_image_slices_vertical(
 
 def _pil_to_rgb_array(img: Image.Image, white_bg: bool) -> NDArray[np.uint8]:
     """Convert PIL image to RGB numpy array, optionally flattening alpha."""
+    _require_image_deps()
     if img.mode == "P":
         img = img.convert("RGBA")
 

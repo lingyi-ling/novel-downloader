@@ -6,6 +6,7 @@ novel_downloader.libs.html_builder.models
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .constants import (
@@ -19,9 +20,20 @@ from .constants import (
     MEDIA_DIR,
 )
 
+# C0 control characters (other than tab/LF/CR) and lone surrogates are not
+# valid in HTML/XML output and cannot be represented as references.
+_ILLEGAL_MARKUP_CHARS = re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]"
+)
+
+
+def _clean_markup_text(text: str) -> str:
+    return _ILLEGAL_MARKUP_CHARS.sub("", text)
+
 
 def escape(text: str) -> str:
     """Escape &, <, > for text-node HTML."""
+    text = _clean_markup_text(text)
     text = text.replace("&", "&amp;")
     text = text.replace("<", "&lt;")
     text = text.replace(">", "&gt;")
@@ -83,9 +95,9 @@ class HtmlChapter:
         return CHAPTER_TEMPLATE.format(
             lang=lang,
             title=escape(self.title),
-            prev_link=prev_link,
-            next_link=next_link,
-            content=self.content,
+            prev_link=escape(prev_link),
+            next_link=escape(next_link),
+            content=_clean_markup_text(self.content),
             extra_block=self._build_extra_block(),
             font_styles=self._build_font_styles(),
         )
@@ -126,7 +138,10 @@ class HtmlChapter:
     def _build_extra_block(self) -> str:
         if not self.extra_content:
             return ""
-        return f'<div class="extra-block">\n{self.extra_content}\n</div>'
+        return (
+            '<div class="extra-block">\n'
+            f"{_clean_markup_text(self.extra_content)}\n</div>"
+        )
 
 
 @dataclass
@@ -165,7 +180,7 @@ class IndexDocument:
         if volume.chapters:
             parts.append("  <ul>")
             for chap in volume.chapters:
-                href = f"{CHAPTER_DIR}/{chap.filename}"
+                href = escape(f"{CHAPTER_DIR}/{chap.filename}")
                 parts.append(f'    <li><a href="{href}">{escape(chap.title)}</a></li>')
             parts.append("  </ul>")
 
@@ -179,7 +194,7 @@ class IndexDocument:
         We reuse the same .volume + <ul> structure so existing CSS continues
         to work; each standalone chapter is rendered as its own small section.
         """
-        href = f"{CHAPTER_DIR}/{chap.filename}"
+        href = escape(f"{CHAPTER_DIR}/{chap.filename}")
         title = escape(chap.title)
 
         block = (
@@ -205,7 +220,7 @@ class IndexDocument:
         # Cover (if any)
         if self.cover_filename:
             header_parts.append(
-                f'<img src="{MEDIA_DIR}/{self.cover_filename}" '
+                f'<img src="{escape(f"{MEDIA_DIR}/{self.cover_filename}")}" '
                 f'alt="封面" class="cover">'
             )
 

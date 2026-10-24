@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from novel_downloader.plugins.ranking import normalize_text
 from novel_downloader.schemas import SearchResult
 
-__all__ = ["CacheKey", "SearchCache", "build_key"]
+__all__ = ["CacheKey", "CacheStats", "SearchCache", "build_key"]
 
 
 @dataclass(frozen=True)
@@ -64,6 +64,15 @@ def build_key(
     )
 
 
+@dataclass(frozen=True)
+class CacheStats:
+    """Cumulative counters describing a :class:`SearchCache`'s usage."""
+
+    hits: int
+    misses: int
+    evictions: int
+
+
 #: A stored entry: the time it was written plus its result snapshot.
 _Entry = tuple[float, list[SearchResult]]
 
@@ -93,21 +102,28 @@ class SearchCache:
         self._now = now
         # Ordered oldest (least recently used) first.
         self._entries: OrderedDict[CacheKey, _Entry] = OrderedDict()
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
 
     def get(self, key: CacheKey) -> list[SearchResult] | None:
         """
         Return a copy of the cached results for ``key``, or ``None``.
 
         An entry whose age has reached ``ttl`` is treated as missing and
-        removed. A successful lookup marks the entry as most recently used.
+        removed. A successful lookup marks the entry as most recently used
+        and counts as a hit; a missing or expired entry counts as a miss.
         """
         entry = self._entries.get(key)
         if entry is None:
+            self._misses += 1
             return None
         stored_at, results = entry
         if self._now() - stored_at >= self._ttl:
             del self._entries[key]
+            self._misses += 1
             return None
+        self._hits += 1
         self._entries.move_to_end(key)
         return list(results)
 
@@ -123,7 +139,21 @@ class SearchCache:
         self._entries.move_to_end(key)
         while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)
+            self._evictions += 1
 
     def clear(self) -> None:
-        """Drop every entry."""
+        """Drop every entry.
+
+        The usage counters are cumulative for the cache's lifetime and are
+        deliberately left untouched, so a caller can clear entries without
+        losing its hit/miss/eviction history.
+        """
         self._entries.clear()
+
+    def stats(self) -> CacheStats:
+        """Return a snapshot of the cumulative usage counters."""
+        return CacheStats(
+            hits=self._hits,
+            misses=self._misses,
+            evictions=self._evictions,
+        )

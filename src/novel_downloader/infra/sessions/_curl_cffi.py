@@ -6,7 +6,7 @@ novel_downloader.infra.sessions._curl_cffi
 
 # mypy: disable-error-code=unused-ignore
 
-import json
+from http.cookies import CookieError
 from pathlib import Path
 from typing import Any, Unpack
 
@@ -16,6 +16,11 @@ from .base import (
     BaseSession,
     GetRequestKwargs,
     PostRequestKwargs,
+)
+from .cookie_io import (
+    load_cookie_items,
+    resolve_cookie_path,
+    write_cookie_items,
 )
 from .response import BaseResponse
 
@@ -50,10 +55,14 @@ class CurlCffiSession(BaseSession):
     async def close(self) -> None:
         """
         Shutdown and clean up any resources.
+
+        Safe to call repeatedly and concurrently: the backend reference is
+        detached before awaiting so a second caller becomes a no-op.  This
+        matters for curl_cffi, whose ``AsyncSession.close`` cannot run twice.
         """
-        if self._session is not None:
-            await self._session.close()
-        self._session = None
+        session, self._session = self._session, None
+        if session is not None:
+            await session.close()
 
     async def get(
         self,
@@ -103,38 +112,42 @@ class CurlCffiSession(BaseSession):
         if self._session is None:
             return False
 
-        filename = filename or "curl_cffi.cookies"
-        path = cookies_dir / filename
-        if not path.exists():
+        path = resolve_cookie_path(cookies_dir, filename or "curl_cffi.cookies")
+        items = load_cookie_items(path)
+        if items is None:
             return False
 
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-
-        cookies = {
-            item["name"]: item["value"]
-            for item in data
-            if "name" in item and "value" in item
-        }
-        self._session.cookies.update(cookies)
+        for item in items:
+            try:
+                self._session.cookies.set(
+                    item["name"],
+                    item["value"],
+                    domain=item.get("domain", ""),
+                    path=item.get("path", "/"),
+                )
+            except (CookieError, ValueError):
+                continue
         return True
 
     def save_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:
         if self._session is None:
             return False
 
-        filename = filename or "curl_cffi.cookies"
-        cookies_dir.mkdir(parents=True, exist_ok=True)
+        path = resolve_cookie_path(cookies_dir, filename or "curl_cffi.cookies")
 
         cookies: list[dict[str, str]] = []
-        for name, value in self._session.cookies.items():
-            cookies.append({"name": name, "value": value})
+        for cookie in self._session.cookies.jar:
+            item = {"name": cookie.name, "value": cookie.value or ""}
+            if cookie.domain:
+                item["domain"] = cookie.domain
+            if cookie.path:
+                item["path"] = cookie.path
+            cookies.append(item)
 
-        (cookies_dir / filename).write_text(
-            json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        try:
+            write_cookie_items(path, cookies)
+        except OSError:
+            return False
         return True
 
     def update_cookies(self, cookies: dict[str, str]) -> None:

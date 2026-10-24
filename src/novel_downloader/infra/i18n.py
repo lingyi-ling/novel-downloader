@@ -192,7 +192,10 @@ def _load_catalog(code: str) -> gettext.NullTranslations:
         )
         with mo_path.open("rb") as f:
             return gettext.GNUTranslations(f)
-    except (FileNotFoundError, OSError):
+    except (ModuleNotFoundError, OSError):
+        # ``OSError`` covers a missing/unreadable ``.mo``; ``ModuleNotFoundError``
+        # covers builds that ship without the ``locales`` package entirely.
+        # Both must degrade to the English source text instead of raising.
         if code not in _missing_catalogs_warned:
             _missing_catalogs_warned.add(code)
             logger.warning(

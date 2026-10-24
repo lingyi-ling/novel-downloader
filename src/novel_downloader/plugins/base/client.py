@@ -7,13 +7,14 @@ Abstract base class providing common
 """
 
 import abc
+import contextlib
 import json
 import logging
 import types
 from pathlib import Path
 from typing import Any, Self, cast
 
-from novel_downloader.libs.filesystem import image_filename
+from novel_downloader.libs.filesystem import image_filename, write_file
 from novel_downloader.plugins.protocols import FetcherProtocol, ParserProtocol
 from novel_downloader.plugins.protocols.ui import (
     DownloadUI,
@@ -81,18 +82,41 @@ class AbstractClient(abc.ABC):
     async def init(self, fetcher_cfg: FetcherConfig, parser_cfg: ParserConfig) -> None:
         if self._fetcher or self._parser:
             await self.close()
-        self._fetcher = registrar.get_fetcher(self._site, fetcher_cfg)
-        self._parser = registrar.get_parser(self._site, parser_cfg)
 
-        await self._fetcher.init()
+        fetcher = registrar.get_fetcher(self._site, fetcher_cfg)
+        try:
+            parser = registrar.get_parser(self._site, parser_cfg)
+        except Exception:
+            # A fetcher owns a network session. If the parser cannot be built,
+            # release that session instead of leaking it on a failed init().
+            with contextlib.suppress(Exception):
+                await fetcher.close()
+            raise
+
+        try:
+            await fetcher.init()
+        except Exception:
+            with contextlib.suppress(Exception):
+                await fetcher.close()
+            raise
+
+        # Publish the pair only once both are usable.
+        self._fetcher = fetcher
+        self._parser = parser
 
     async def close(self) -> None:
-        if self._fetcher:
-            if self._fetcher.is_logged_in:
-                await self._fetcher.save_state()
-            await self._fetcher.close()
-            self._fetcher = None
+        # Detach first so a failed save/close cannot leave a half-closed client
+        # behind or cause a double close on a later attempt.
+        fetcher, self._fetcher = self._fetcher, None
         self._parser = None
+        if fetcher is None:
+            return
+
+        try:
+            if fetcher.is_logged_in:
+                await fetcher.save_state()
+        finally:
+            await fetcher.close()
 
     @abc.abstractmethod
     async def login(
@@ -283,7 +307,7 @@ class AbstractClient(abc.ABC):
         :raises RuntimeError: If the parser is uninitialized.
         """
         if self._parser is None:
-            raise RuntimeError("Fetcher is not initialized.")
+            raise RuntimeError("Parser is not initialized.")
         return self._parser
 
     @property
@@ -321,11 +345,10 @@ class BaseClient(AbstractClient, abc.ABC):
         :param book_info: dict containing metadata about the book
         """
         base = self._book_dir(book_id)
-        base.mkdir(parents=True, exist_ok=True)
-        (base / f"book_info.{stage}.json").write_text(
-            json.dumps(book_info, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        payload = json.dumps(book_info, ensure_ascii=False, indent=2)
+        # ``write_file`` writes to a temporary file and atomically replaces the
+        # target, so a failed write never leaves a truncated metadata file.
+        write_file(content=payload, filepath=base / f"book_info.{stage}.json")
 
     def _load_book_info(self, book_id: str, stage: str = "raw") -> BookInfoDict:
         """
@@ -333,7 +356,8 @@ class BaseClient(AbstractClient, abc.ABC):
 
         :param book_id: Book identifier.
         :raises FileNotFoundError: if the metadata file does not exist.
-        :raises ValueError: if the JSON is invalid or has an unexpected structure.
+        :raises ValueError: if the file is not valid UTF-8, the JSON is invalid,
+            or it has an unexpected structure.
         :return: Parsed BookInfoDict.
         """
         base = self._book_dir(book_id)
@@ -343,7 +367,12 @@ class BaseClient(AbstractClient, abc.ABC):
             raise FileNotFoundError(f"Missing metadata file: {info_path}")
 
         try:
-            data = json.loads(info_path.read_text(encoding="utf-8"))
+            raw_text = info_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as e:
+            raise ValueError(f"Cannot decode {info_path} as UTF-8: {e}") from e
+
+        try:
+            data = json.loads(raw_text)
         except json.JSONDecodeError as e:
             raise ValueError(f"Corrupt JSON in {info_path}: {e}") from e
 
@@ -401,11 +430,8 @@ class BaseClient(AbstractClient, abc.ABC):
         :param meta: Pipeline metadata containing ``pipeline`` and ``executed`` records.
         """
         base = self._book_dir(book_id)
-        base.mkdir(parents=True, exist_ok=True)
-        (base / "pipeline.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        payload = json.dumps(meta, ensure_ascii=False, indent=2)
+        write_file(content=payload, filepath=base / "pipeline.json")
 
     def _save_raw_pages(
         self,

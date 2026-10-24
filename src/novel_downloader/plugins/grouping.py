@@ -79,18 +79,6 @@ def _norm_author(result: SearchResult) -> str:
     return normalize_text(result.get("author"))
 
 
-def _compatible(author_key: str, cluster: _Cluster) -> bool:
-    """
-    Can an entry with normalized ``author_key`` join ``cluster``?
-
-    An empty (unknown) author is compatible with anything; a known author
-    joins clusters that either have no known author yet or the same one.
-    """
-    if not author_key or not cluster.author:
-        return True
-    return cluster.author == author_key
-
-
 def group_results(
     results: Sequence[SearchResult],
     keyword: str = "",
@@ -125,18 +113,46 @@ def group_results(
     """
     current = datetime.now()
     by_title: dict[str, list[_Cluster]] = {}
+    # title -> (normalized author -> cluster); built incrementally so each
+    # entry is dispatched in O(1) instead of scanning the title's clusters.
+    by_author: dict[str, dict[str, _Cluster]] = {}
+    # title -> the single cluster that still has no known author.  It can only
+    # ever be the first cluster of its title: an entry without an author always
+    # joins the first cluster, and the first known author to show up adopts it.
+    unknown: dict[str, _Cluster] = {}
 
     for index, result in enumerate(results):
         title_key = normalize_text(result.get("title"))
         author_key = _norm_author(result)
-        clusters = by_title.setdefault(title_key, [])
-        target = next((c for c in clusters if _compatible(author_key, c)), None)
-        if target is None:
+        clusters = by_title.get(title_key)
+        if clusters is None:
+            clusters = []
+            by_title[title_key] = clusters
+
+        if author_key:
+            title_authors = by_author.get(title_key)
+            if title_authors is None:
+                title_authors = {}
+                by_author[title_key] = title_authors
+            target = title_authors.get(author_key)
+            if target is None:
+                # First entry of this author: adopt the still-anonymous first
+                # cluster when there is one (mirrors "first compatible"), else
+                # start a new group.
+                target = unknown.pop(title_key, None)
+                if target is None:
+                    target = _Cluster()
+                    clusters.append(target)
+                target.author = author_key
+                title_authors[author_key] = target
+        elif clusters:
+            target = clusters[0]
+        else:
             target = _Cluster()
             clusters.append(target)
+            unknown[title_key] = target
+
         target.entries.append((index, result))
-        if author_key:
-            target.author = author_key
 
     groups: list[tuple[int, ResultGroup]] = []
     for clusters in by_title.values():

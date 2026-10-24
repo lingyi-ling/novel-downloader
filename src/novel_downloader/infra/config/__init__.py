@@ -10,7 +10,10 @@ __all__ = [
     "copy_default_config",
     "get_config_value",
     "load_config",
+    "migrate_config",
+    "validate_config",
     "ConfigAdapter",
+    "Problem",
 ]
 
 from .adapter import ConfigAdapter
@@ -19,3 +22,4 @@ from .file_io import (
     get_config_value,
     load_config,
 )
+from .validation import Problem, migrate_config, validate_config

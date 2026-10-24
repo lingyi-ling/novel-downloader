@@ -82,6 +82,18 @@ class EsjzoneSearcher(BaseSearcher):
             )
             cover_url = cover_data[0].strip() if cover_data else ""
 
+            # The list card shows the work's size next to a file icon.
+            word_count = (
+                self._first_str(
+                    card.xpath(
+                        ".//div[contains(@class,'card-other')]"
+                        "[.//i[contains(@class,'icon-file-text')]]"
+                        "//div[contains(@class,'column')]/text()"
+                    )
+                )
+                or "-"
+            )
+
             # Compute priority incrementally
             prio = self.priority + idx
             results.append(
@@ -94,7 +106,7 @@ class EsjzoneSearcher(BaseSearcher):
                     author=author,
                     latest_chapter=latest_chapter,
                     update_date="-",
-                    word_count="-",
+                    word_count=word_count,
                     priority=prio,
                 )
             )

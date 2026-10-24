@@ -437,6 +437,9 @@ class EpubBuilder:
             filename=f"cover.{ext}",
         )
         self.images.append(cover_img)
+        # Register the cover hash so adding the same image later (e.g. as a
+        # volume cover) reuses the cover asset instead of duplicating it.
+        self._img_map.setdefault(hash_bytes(data), cover_img.filename)
         self.opf.add_manifest_item(
             cover_img.id,
             f"{IMAGE_DIR}/{cover_img.filename}",

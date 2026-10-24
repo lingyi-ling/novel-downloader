@@ -63,15 +63,23 @@ def setup_logging(
     logger.setLevel(logging.DEBUG)
     logger.propagate = False  # otherwise may affected by PaddleOCR
 
-    # Clear existing handlers to avoid duplicate logs
-    if logger.hasHandlers():
-        logger.handlers.clear()
+    # Replace handlers from a previous call. Close them first: a file handler
+    # keeps the descriptor (and a lock on Windows) until closed, so merely
+    # clearing the list would leak handles on repeated initialization.
+    for handler in logger.handlers[:]:
+        close_handler = getattr(handler, "close", None)
+        if close_handler is not None:
+            close_handler()
+    logger.handlers.clear()
 
     # File handler (rotates daily)
     if file:
         file_level = _normalize_level(file_level)
 
-        base_dir = Path(log_dir)
+        # ``~`` is commonly used in ``debug.log_dir``; strip surrounding
+        # whitespace and resolve it here so the public helper behaves like the
+        # config loader (which expands too).
+        base_dir = Path(str(log_dir).strip()).expanduser()
         base_dir.mkdir(parents=True, exist_ok=True)
         base_name = log_filename or PACKAGE_NAME
         log_path = base_dir / f"{base_name}.log"

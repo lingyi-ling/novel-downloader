@@ -185,8 +185,6 @@ class BaseFetcher(abc.ABC):
         if not resources:
             return
 
-        media_dir.mkdir(parents=True, exist_ok=True)
-
         img_urls: list[str] = []
         font_urls: list[str] = []
 
@@ -234,7 +232,6 @@ class BaseFetcher(abc.ABC):
         :param on_exist: What to do when file exists.
         :return: Path of saved image, or None if failed/skipped.
         """
-        img_dir.mkdir(parents=True, exist_ok=True)
         return await self._fetch_one_image(url, img_dir, name=name, on_exist=on_exist)
 
     async def fetch_images(
@@ -258,8 +255,6 @@ class BaseFetcher(abc.ABC):
         if not urls:
             return
 
-        img_dir.mkdir(parents=True, exist_ok=True)
-
         batch_size = max(1, concurrent)
         for i in range(0, len(urls), batch_size):
             batch = urls[i : i + batch_size]
@@ -282,8 +277,6 @@ class BaseFetcher(abc.ABC):
         """Download fonts to `font_dir` in batches."""
         if not urls:
             return
-
-        font_dir.mkdir(parents=True, exist_ok=True)
 
         batch_size = max(1, concurrent)
         for i in range(0, len(urls), batch_size):

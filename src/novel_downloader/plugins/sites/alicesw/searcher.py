@@ -5,6 +5,7 @@ novel_downloader.plugins.sites.alicesw.searcher
 """
 
 import logging
+import re
 
 from lxml import html
 
@@ -13,6 +14,8 @@ from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
 logger = logging.getLogger(__name__)
+
+_WORD_COUNT_RE = re.compile(r"字数[：:]\s*([^\s\u3000]+)")
 
 
 @registrar.register_searcher()
@@ -67,6 +70,13 @@ class AliceswSearcher(BaseSearcher):
                 )
             )
             update_date = update_date.split("更新时间：", 1)[-1]
+            meta_text = self._join_strs(
+                row.xpath(
+                    ".//p[contains(@class,'text-muted')][contains(., '字数')]/text()"
+                )
+            )
+            wc_match = _WORD_COUNT_RE.search(meta_text)
+            word_count = wc_match.group(1) if wc_match else "-"
 
             results.append(
                 SearchResult(
@@ -78,7 +88,7 @@ class AliceswSearcher(BaseSearcher):
                     author=author,
                     latest_chapter="-",
                     update_date=update_date,
-                    word_count="-",
+                    word_count=word_count,
                     priority=self.priority + idx,
                 )
             )

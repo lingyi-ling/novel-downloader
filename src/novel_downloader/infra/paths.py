@@ -25,7 +25,10 @@ def app_home() -> Path:
 
     :return: Absolute path to the application home directory.
     """
-    override = os.environ.get("NOVEL_HOME")
+    # ``strip`` keeps a blank/whitespace-only override (common in shell
+    # scripts) from turning into a directory literally named " " or " ~ "
+    # instead of falling back to the platform data directory.
+    override = os.environ.get("NOVEL_HOME", "").strip()
     if override:
         return Path(override).expanduser().resolve()
     return user_data_path(PACKAGE_NAME, appauthor=False)

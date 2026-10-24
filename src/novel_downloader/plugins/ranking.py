@@ -30,6 +30,7 @@ import math
 import re
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
+from functools import lru_cache
 from typing import Any
 
 from novel_downloader.schemas import SearchResult
@@ -78,19 +79,77 @@ _REL_AGO_RE = re.compile(
     r"(\d+)\s*(秒钟|秒|分钟|分|个小时|小时|天|日|周|星期|个月|月|年)\s*前"
 )
 
-#: Absolute date formats, tried before the relative keywords/patterns.
-_ABS_FORMATS = (
+#: Absolute formats grouped by the separator they require.  A string can only
+#: match a format whose literal separator it contains, so trying just that
+#: group yields the same result as trying every format in order.
+_DASH_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
     "%Y-%m-%d",
+)
+_SLASH_FORMATS = (
     "%Y/%m/%d %H:%M:%S",
     "%Y/%m/%d %H:%M",
     "%Y/%m/%d",
-    "%Y.%m.%d",
+)
+_DOT_FORMATS = ("%Y.%m.%d",)
+_CJK_FORMATS = (
     "%Y年%m月%d日 %H:%M:%S",
     "%Y年%m月%d日 %H:%M",
     "%Y年%m月%d日",
 )
+
+
+#: Fast-path shapes for the slash and CJK formats.  ``strptime`` accepts
+#: 1-2 digit month/day/hour/minute/second fields and exactly four year digits;
+#: these patterns mirror that, so a successful match builds the same datetime.
+_SLASH_DATE_RE = re.compile(
+    r"(\d{4})/(\d{1,2})/(\d{1,2})(?: (\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?",
+    re.ASCII,
+)
+_CJK_DATE_RE = re.compile(
+    r"(\d{4})年(\d{1,2})月(\d{1,2})日(?: (\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?",
+    re.ASCII,
+)
+_DOT_DATE_RE = re.compile(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", re.ASCII)
+
+
+def _formats_for(text: str) -> tuple[str, ...]:
+    """Return the absolute formats that can possibly match ``text``."""
+    if "年" in text:
+        return _CJK_FORMATS
+    if "-" in text:
+        return _DASH_FORMATS
+    if "/" in text:
+        return _SLASH_FORMATS
+    if "." in text:
+        return _DOT_FORMATS
+    return ()
+
+
+def _fast_parse_date(text: str) -> datetime | None:
+    """Parse the slash/dot/CJK shapes without going through ``strptime``."""
+    if "年" in text:
+        match = _CJK_DATE_RE.fullmatch(text)
+    elif "/" in text:
+        match = _SLASH_DATE_RE.fullmatch(text)
+    elif "." in text:
+        match = _DOT_DATE_RE.fullmatch(text)
+    else:
+        return None
+    if match is None:
+        return None
+    parts = [int(part) if part else 0 for part in match.groups()]
+    if len(parts) == 3:  # date-only ".", slash and CJK patterns
+        year, month, day = parts
+        hour = minute = second = 0
+    else:
+        year, month, day, hour, minute, second = parts
+    try:
+        return datetime(year, month, day, hour, minute, second)
+    except ValueError:
+        return None
+
 
 #: Multipliers for the magnitude characters found in ``_WORD_COUNT_RE``.
 _UNIT_SCALE = {
@@ -104,9 +163,14 @@ _UNIT_SCALE = {
 }
 
 
+@lru_cache(maxsize=8192)
+def _normalize_cached(text: str) -> str:
+    return _NON_WORD_RE.sub("", text.casefold())
+
+
 def normalize_text(value: object) -> str:
     """Casefold ``value`` and strip everything but letters, digits and CJK."""
-    return _NON_WORD_RE.sub("", str(value if value is not None else "").casefold())
+    return _normalize_cached(str(value if value is not None else ""))
 
 
 def parse_word_count(value: object) -> float | None:
@@ -153,9 +217,10 @@ def parse_update_date(value: object, *, now: datetime | None = None) -> datetime
     """
     Parse a raw update-date string into a ``datetime``, or ``None``.
 
-    Absolute formats (``2024-05-01``, ``2024/5/1``, ``2024年5月1日``, ISO)
-    are tried first, then the relative keywords (``刚刚``/``昨天``/``前天``)
-    and durations such as ``"3天前"`` / ``"2个月前"``.
+    Both absolute formats (``2024-05-01``, ``2024/5/1``, ``2024年5月1日``,
+    ISO) and the relative keywords (``刚刚``/``昨天``/``前天``) / durations
+    such as ``"3天前"`` / ``"2个月前"`` are recognised; the two sets are
+    disjoint, so their internal evaluation order does not affect the result.
     """
     text = str(value if value is not None else "").strip()
     if text.casefold() in _NULL_TOKENS:
@@ -163,16 +228,10 @@ def parse_update_date(value: object, *, now: datetime | None = None) -> datetime
 
     current = now or datetime.now()
 
-    for fmt in _ABS_FORMATS:
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    try:
-        return datetime.fromisoformat(text)
-    except ValueError:
-        pass
-
+    # Relative forms are checked first: none of them can match an absolute
+    # format (those never accept a trailing "前" or the keyword words), so the
+    # result is identical while sparing ten failing ``strptime`` calls for
+    # every "3天前"-style value seen on real sites.
     lowered = text.casefold()
     if lowered in {"刚刚", "刚才", "just now", "justnow"}:
         return current
@@ -186,13 +245,36 @@ def parse_update_date(value: object, *, now: datetime | None = None) -> datetime
     match = _REL_AGO_RE.search(text)
     if match is not None:
         return current - _relative_delta(int(match.group(1)), match.group(2))
-    return None
+
+    formats = _formats_for(text)
+    if "年" in text or "/" in text or "." in text:
+        parsed = _fast_parse_date(text)
+        if parsed is not None:
+            return parsed
+    # ISO parsing is implemented in C and covers the common dash-separated
+    # forms; the strptime formats stay as a fallback for inputs such as
+    # non-padded dates that ``fromisoformat`` rejects.
+    elif "-" in text:
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            pass
+    for fmt in formats:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def _coverage(needle: str, haystack: str) -> float:
     if not needle:
         return 0.0
-    hits = sum(1 for ch in needle if ch in haystack)
+    haystack_chars = set(haystack)
+    hits = sum(1 for ch in needle if ch in haystack_chars)
     return hits / len(needle)
 
 

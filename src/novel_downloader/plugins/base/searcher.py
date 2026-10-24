@@ -90,10 +90,16 @@ class BaseSearcher(abc.ABC):
         for enc in encodings_list:
             try:
                 return data.decode(enc)
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, LookupError):
+                # ``LookupError`` covers unknown/unsupported codec names; fall
+                # through to the next candidate instead of failing the search.
                 continue
-        encoding = encoding or "utf-8"
-        return data.decode(encoding, errors="ignore")
+        for enc in (encoding or "utf-8", "utf-8"):
+            try:
+                return data.decode(enc, errors="ignore")
+            except LookupError:
+                continue
+        return data.decode("utf-8", errors="ignore")
 
     @staticmethod
     def _first_str(xs: list[str], replaces: list[tuple[str, str]] | None = None) -> str:
