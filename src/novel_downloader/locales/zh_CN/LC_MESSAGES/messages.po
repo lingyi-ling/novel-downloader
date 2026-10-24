@@ -2404,17 +2404,17 @@ msgstr "没有配置文件, 无法继续执行"
 msgid "Failed to load configuration: {err}"
 msgstr "加载配置失败: {err}"
 
-#: src/novel_downloader/infra/config/adapter.py:269
+#: src/novel_downloader/infra/config/adapter.py:270
 #, python-brace-format
 msgid "book_ids must be a list or string, got {type}"
 msgstr "book_ids 必须为列表或字符串, 实际为 {type}"
 
-#: src/novel_downloader/infra/config/adapter.py:283
+#: src/novel_downloader/infra/config/adapter.py:284
 #, python-brace-format
 msgid "Invalid book_id entry: expected str|int|dict, got {type}"
 msgstr "book_id 条目无效: 应为 str|int|dict, 实际为 {type}"
 
-#: src/novel_downloader/infra/config/adapter.py:387
+#: src/novel_downloader/infra/config/adapter.py:391
 msgid "Missing required field 'book_id'"
 msgstr "缺少必填字段 'book_id'"
 
