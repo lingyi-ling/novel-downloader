@@ -8,6 +8,9 @@ Request-hardening helpers shared by the REST API application.
 * :class:`BodySizeLimitMiddleware` rejects oversized JSON bodies with ``413``
   *before* FastAPI parses them, so a huge payload cannot be turned into a
   memory/CPU burden by the JSON decoder.
+* :class:`DownloadsAuthMiddleware` applies the same token check as
+  ``/api/v1`` to the ``/downloads`` static mount, which is not covered by the
+  router-level dependency.
 * :func:`register_error_handlers` guarantees that every error response has the
   same ``{"detail": ...}`` shape and that unexpected exceptions never leak a
   stack trace to the client.
@@ -24,10 +27,17 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.datastructures import Headers
+from starlette.status import HTTP_401_UNAUTHORIZED
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from .auth import AUTH_ERROR_DETAIL, is_authorized
 
 #: Default request-body ceiling for JSON endpoints: 1 MiB.
 DEFAULT_MAX_BODY_BYTES = 1024 * 1024
+
+#: Path prefix whose static files require the API token when one is configured.
+DOWNLOADS_PREFIX = "/downloads"
 
 #: Endpoints whose request bodies are bounded by :class:`BodySizeLimitMiddleware`.
 #: Only bodies that are fully buffered by FastAPI need a cap; the streaming
@@ -145,6 +155,58 @@ class BodySizeLimitMiddleware:
         await response(scope, receive, send)
 
 
+class DownloadsAuthMiddleware:
+    """
+    Require the configured API token for requests under ``/downloads``.
+
+    Static files are served by a ``Mount`` rather than a route, so the
+    router-level :func:`novel_downloader.apps.api.auth.require_token` dependency
+    never runs for them. This middleware closes that gap: when
+    ``app.state.api_token`` is set, ``Authorization: Bearer <token>`` or
+    ``X-API-Key: <token>`` is mandatory and a missing/mismatched token yields
+    ``401 {"detail": ...}``. When no token is configured the request passes
+    through unchanged, preserving the localhost-only default.
+
+    :param app: The wrapped ASGI application.
+    :param prefix: Path prefix to guard; defaults to ``/downloads``.
+    """
+
+    def __init__(self, app: ASGIApp, *, prefix: str = DOWNLOADS_PREFIX) -> None:
+        self.app = app
+        self.prefix = "/" + prefix.strip("/")
+
+    def _guards(self, path: str) -> bool:
+        """Whether ``path`` belongs to the guarded mount (not a look-alike)."""
+        return path == self.prefix or path.startswith(self.prefix + "/")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http" or not self._guards(str(scope.get("path", ""))):
+            await self.app(scope, receive, send)
+            return
+
+        state = getattr(scope.get("app"), "state", None)
+        expected = getattr(state, "api_token", None)
+        if not expected:
+            await self.app(scope, receive, send)
+            return
+
+        headers = Headers(scope=scope)
+        if is_authorized(
+            expected,
+            headers.get("authorization"),
+            headers.get("x-api-key"),
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        response = JSONResponse(
+            status_code=HTTP_401_UNAUTHORIZED,
+            content={"detail": AUTH_ERROR_DETAIL},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        await response(scope, receive, send)
+
+
 def _validation_detail(exc: RequestValidationError) -> str:
     """Render a validation failure as one readable sentence."""
     parts: list[str] = []
@@ -212,8 +274,11 @@ def register_error_handlers(app: FastAPI) -> None:
 
 
 __all__ = [
+    "AUTH_ERROR_DETAIL",
     "BODY_LIMIT_ENDPOINTS",
     "DEFAULT_MAX_BODY_BYTES",
+    "DOWNLOADS_PREFIX",
     "BodySizeLimitMiddleware",
+    "DownloadsAuthMiddleware",
     "register_error_handlers",
 ]

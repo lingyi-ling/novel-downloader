@@ -27,7 +27,7 @@ novel-api
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | 监听地址。除非配置 token，否则不要改成 `0.0.0.0`。 |
 | `--port` | `8081` | 监听端口。 |
-| `--token` | 环境变量 `NOVEL_API_TOKEN` | 设置后所有 `/api/v1/*` 请求都要鉴权。 |
+| `--token` | 环境变量 `NOVEL_API_TOKEN` | 设置后所有 `/api/v1/*` 与 `/downloads/*` 请求都要鉴权。 |
 | `--cors` | 关闭 | 允许任意来源跨域调用（`Access-Control-Allow-Origin: *`）。 |
 
 ```bash
@@ -52,7 +52,8 @@ NOVEL_API_TOKEN=my-secret novel-api
 
 未设置 token 时不校验，适用于仅绑定 localhost 的场景。
 
-设置 token 后，每个 `/api/v1/*` 请求必须携带以下任意一种请求头：
+设置 token 后，每个 `/api/v1/*` 请求以及 `/downloads/*` 静态文件请求都必须
+携带以下任意一种请求头：
 
 ```http
 Authorization: Bearer my-secret
@@ -684,9 +685,13 @@ curl -s -X POST "$BASE/api/v1/tasks" \
 curl -s "$BASE/api/v1/tasks" -H "Authorization: Bearer $TOKEN"
 curl -s "$BASE/api/v1/tasks/<task_id>" -H "Authorization: Bearer $TOKEN"
 
-# 4. 查看并下载导出文件
+# 4. 查看并下载导出文件（/downloads 同样受 token 保护）
 curl -s "$BASE/api/v1/history" -H "Authorization: Bearer $TOKEN"
-curl -s -OJ "$BASE/downloads/%E6%96%97%E7%A0%B4%E8%8B%8D%E7%A9%B9.txt"
+curl -s -OJ "$BASE/downloads/%E6%96%97%E7%A0%B4%E8%8B%8D%E7%A9%B9.txt" \
+  -H "Authorization: Bearer $TOKEN"
+# 也可以使用 X-API-Key
+curl -s -OJ "$BASE/downloads/%E6%96%97%E7%A0%B4%E8%8B%8D%E7%A9%B9.txt" \
+  -H "X-API-Key: $TOKEN"
 
 # 5. 异步音乐下载与轮询
 JOB=$(curl -s -X POST "$BASE/api/v1/music/jobs" \
@@ -697,8 +702,10 @@ JOB=$(curl -s -X POST "$BASE/api/v1/music/jobs" \
 curl -s "$BASE/api/v1/music/jobs/$JOB" -H "Authorization: Bearer $TOKEN"
 ```
 
-`/downloads/*` 不受 token 保护（它是静态文件挂载），因此在公网暴露 API 时，
-请自行限制对导出目录的访问。
+配置 token 后，`/downloads/*` 与 `/api/v1/*` 一样要求鉴权：缺少或错误的 token
+返回 `401`，不会泄露导出文件是否存在。未配置 token 时（仅建议用于 localhost）
+静态文件保持免鉴权。Android 客户端的历史文件下载通过 Android `DownloadManager`
+发送 `X-API-Key` 请求头，因此无需额外配置。
 
 ## 在程序内直接使用
 
@@ -793,8 +800,9 @@ with NovelApiClient("http://127.0.0.1:8081", token="my-secret") as api:
 - 通过非回环地址提供服务时，**务必设置 token**，并建议放在反向代理/防火墙之后。
 - `--cors` 会允许任意网页跨域调用本 API。仅在本机使用时开启；切勿与公网监听、
   无 token 的组合一起使用。
-- `/downloads` 是静态目录挂载，不带鉴权，暴露的只是导出文件本身；目录穿越
-  路径（如 `..`、`%2e%2e`）会被拒绝并返回 `404`。
+- `/downloads` 是静态目录挂载，配置 token 后同样要求 `Authorization: Bearer`
+  或 `X-API-Key`；未配置 token 时免鉴权（仅建议用于 localhost）。目录穿越
+  路径（如 `..`、`%2e%2e`）会被拒绝并返回 `4xx`。
 - API 具备添加下载任务的能力，等同于本机上的下载器权限，请像保护本地账号一样
   保护 token。
 - 请求体大小、曲目数量与阻塞端点耗时都有上限（见「请求限制与超时」），

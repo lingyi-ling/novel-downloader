@@ -8,7 +8,7 @@
 
 !!! warning "先记住三条"
     1. 默认只把 API 绑定在 `127.0.0.1`，不要在没有额外防护时改成 `0.0.0.0`。
-    2. `--token` 只保护 `/api/v1/*` 接口，**不保护** `/downloads` 静态文件。
+    2. 设置 `--token` 后，`/api/v1/*` 与 `/downloads/*` 都需要鉴权；未设置 token 时两者均对可达网络开放。
     3. Cookie、平台凭据和 `settings.toml` 都是明文；不要提交、同步或分享。
 
 ---
@@ -31,7 +31,7 @@
 | 入口 | 风险 |
 | --- | --- |
 | 本地 REST API | 绑定到 `0.0.0.0` 时，同局域网（甚至公网，取决于防火墙）可访问；无 token 时可控制下载 |
-| `/downloads` 静态目录 | FastAPI `StaticFiles` 直接挂载，**不经过 token 校验**；只靠端口可达性保护 |
+| `/downloads` 静态目录 | 设置 token 时受同一鉴权保护；未设置 token 时只靠端口可达性保护 |
 | `--cors` | 开启后任意网站都能从浏览器调用本机 API |
 | 目标站点返回内容 | HTML、JS、字体、图片均来自第三方；解析器和插件按不可信输入处理 |
 | 本地插件 | `[plugins] enable_local_plugins = true` 时会加载并执行本地插件代码 |
@@ -81,12 +81,10 @@ X-API-Key: <token>
 `--host 0.0.0.0` 会监听所有网卡。启动时如果未设置 token，程序会向 stderr
 打印警告。更重要的是：
 
-- `/api/v1/*` 受 token 保护；
-- `/downloads/<文件名>` 由 `StaticFiles` 提供，**不受 token 保护**；
-- `/docs`、`/openapi.json` 也不经过 token 依赖。
+- `/api/v1/*` 与 `/downloads/<文件名>` 都受 token 保护；
+- `/docs`、`/openapi.json` 不经过 token 依赖（仅暴露接口说明）。
 
-因此，即使设置了 token，只要端口对局域网开放，其他人仍然可以枚举并下载
-`general.output_dir` 中的文件。若确实需要跨设备访问，建议：
+因此，真正需要跨设备访问时，请在设置 token 的前提下开放端口，并配合防火墙限制来源网段。建议：
 
 1. 设置高强度 token；
 2. 用防火墙只允许可信网段访问端口；
@@ -226,7 +224,7 @@ python scripts/security_audit.py --scan-tests
 3. 受影响的版本 / 提交；
 4. 建议的缓解或修复方式。
 
-备用联系方式：`<security@example.com>`（占位，维护者确认后替换）。
+备用联系方式：可通过上述 GitHub 私有安全公告与维护者联系。
 
 我们会在确认问题后评估影响并尽快发布修复；在修复发布前，请不要公开细节。
 

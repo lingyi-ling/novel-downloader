@@ -631,6 +631,10 @@ class Auditor:
         for path in self._tracked_files():
             if path.suffix.lower() != ".py" or not self._should_scan(path):
                 continue
+            # The scanner's own detection patterns contain the literal
+            # ``verify=False``; scanning it would always self-report.
+            if path.name == "security_audit.py":
+                continue
             text = self._read_text(path)
             if text is None:
                 continue
@@ -736,8 +740,9 @@ class Auditor:
                 text = self._read_text(path)
                 if text and "StaticFiles" in text and '"/downloads"' in text:
                     self.notes.append(
-                        "API 的 /downloads 由 StaticFiles 挂载，token 仅保护 "
-                        "/api/v1/*；绑定 0.0.0.0 时导出文件仍可被直接访问。"
+                        "API 的 /downloads 由 StaticFiles 挂载；设置 token 时"
+                        "由 DownloadsAuthMiddleware 保护，未设置 token 时"
+                        "仅靠端口可达性保护。"
                     )
                     break
 

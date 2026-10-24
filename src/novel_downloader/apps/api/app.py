@@ -9,7 +9,8 @@ Security model
 --------------
 The API is meant to run on the same machine as the downloader. By default it
 binds to ``127.0.0.1`` and performs no authentication. If a token is supplied
-(``--token`` or ``NOVEL_API_TOKEN``) every ``/api/v1/*`` request must carry
+(``--token`` or ``NOVEL_API_TOKEN``) every ``/api/v1/*`` request and every
+``/downloads/*`` static-file request must carry
 ``Authorization: Bearer <token>`` or ``X-API-Key: <token>``.
 
 The optional ``--cors`` flag enables ``Access-Control-Allow-Origin: *`` so
@@ -53,6 +54,7 @@ from novel_downloader.infra.config import get_config_value
 from .middleware import (
     DEFAULT_MAX_BODY_BYTES,
     BodySizeLimitMiddleware,
+    DownloadsAuthMiddleware,
     register_error_handlers,
 )
 from .routes import OPENAPI_TAGS, router, task_to_dict
@@ -134,7 +136,8 @@ def create_app(
     Build the REST API application.
 
     :param token: API token; when ``None`` ``NOVEL_API_TOKEN`` is used. An empty
-        value disables authentication (suitable for localhost-only use).
+        value disables authentication (suitable for localhost-only use). When
+        set, the token protects both ``/api/v1/*`` and ``/downloads/*``.
     :param cors: Add a permissive CORS middleware (see module docstring).
     :param output_dir: Override ``general.output_dir`` for ``/downloads``;
         mainly useful in tests.
@@ -182,6 +185,11 @@ def create_app(
     # before FastAPI buffers the body, while its 413 response still passes back
     # out through CORSMiddleware and therefore keeps the CORS headers.
     application.add_middleware(BodySizeLimitMiddleware, max_bytes=max_body_bytes)
+
+    # Static files live outside the router, so their token check needs an ASGI
+    # middleware. It reads ``app.state.api_token`` at request time, which keeps
+    # it in sync with the router dependency and a no-op when no token is set.
+    application.add_middleware(DownloadsAuthMiddleware)
 
     if cors:
         application.add_middleware(

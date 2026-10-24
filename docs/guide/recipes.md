@@ -342,7 +342,7 @@ curl -s -X POST "$BASE/api/v1/watchlist/check" \
 * `/watchlist/check` 只检查、不下载；`needs_download` 中的条目带有 `task` 字段，由调用方自行提交。
 * 需要实时进度时可用 SSE：`GET /api/v1/tasks/stream`；搜索流为 `GET /api/v1/search/stream`。SSE 需要自定义请求头，请用支持设置请求头的客户端。
 
-`/downloads/*` 是静态文件路径，不受 token 保护；对外暴露 API 时请自行限制该目录的访问。
+`/downloads/*` 与 `/api/v1/*` 一样受 token 保护（设置 token 时需带同样的请求头）；对外暴露 API 时仍建议配合防火墙限制来源。
 
 ---
 
