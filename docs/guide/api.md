@@ -70,7 +70,8 @@ X-API-Key: my-secret
 
 ## 端点一览
 
-所有业务端点前缀为 `/api/v1`，请求与响应通常为 JSON（流式搜索端点除外）。
+所有业务端点前缀为 `/api/v1`，请求与响应通常为 JSON（`search/stream` 与
+`tasks/stream` 两个 SSE 端点除外）。
 下文示例中的 `$BASE` 指 API 根地址（如 `http://127.0.0.1:8081`），
 `$TOKEN` 指启动时配置的 token。
 
@@ -80,7 +81,8 @@ X-API-Key: my-secret
 | `GET` | `/api/v1/sites` | 搜索/下载支持的站点，返回 `{search: {...}, download: {...}}`。 |
 | `POST` | `/api/v1/search` | 聚合搜索多个站点。 |
 | `GET` | `/api/v1/search/stream` | 以 SSE 流式返回各站点搜索结果。 |
-| `GET` | `/api/v1/tasks` | 任务快照：`{pending, running, completed}`。 |
+| `GET` | `/api/v1/tasks` | 任务快照：`{pending, running, completed}`，支持分页。 |
+| `GET` | `/api/v1/tasks/stream` | 以 SSE 每秒推送一次任务快照。 |
 | `GET` | `/api/v1/tasks/{task_id}` | 查询单个任务；不存在返回 `404`。 |
 | `POST` | `/api/v1/tasks` | 新增下载任务。 |
 | `POST` | `/api/v1/tasks/{task_id}/cancel` | 取消待执行或运行中的任务。 |
@@ -206,6 +208,65 @@ curl -N "http://127.0.0.1:8081/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&s
 
 `title` 可省略，此时自动生成 `<site> (id = <book_id>)`。
 
+### 分页
+
+`GET /api/v1/tasks` 支持 `offset` / `limit` 查询参数：
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `offset` | int | `0` | 跳过的任务数，必须 `>= 0`。 |
+| `limit` | int | `50` | 返回的任务数，范围 `1..200`；超过 `200` 返回 `422`。 |
+
+分页作用于 `pending + running + completed` 的拼接顺序（各组内部顺序不变），
+响应仍是按组划分的三个数组：
+
+```json
+{
+  "pending": [{"task_id": "a", "...": "..."}],
+  "running": [],
+  "completed": [{"task_id": "b", "...": "..."}],
+  "total": 6,
+  "offset": 1,
+  "limit": 3
+}
+```
+
+- `total` 是分页前的任务总数，`offset` / `limit` 回显实际生效的值。
+- **兼容旧客户端**：`offset` 和 `limit` 都不传时不做分页，返回全部任务
+  （此时响应中的 `limit` 等于 `total`），三个数组字段与旧版本完全一致。
+- 只传其中一个时，另一个取默认值（`offset=0`、`limit=50`）。
+- `offset` 超出总数时返回空的三个数组，`total` 仍为真实总数。
+
+```bash
+# 第 2 页（每页 20 条）
+curl -s "$BASE/api/v1/tasks?offset=20&limit=20" -H "Authorization: Bearer $TOKEN"
+```
+
+### 任务事件流（SSE）
+
+`GET /api/v1/tasks/stream` 立即推送一次任务快照，之后每秒推送一次：
+
+```bash
+curl -N "$BASE/api/v1/tasks/stream" -H "Authorization: Bearer $TOKEN"
+```
+
+```
+event: snapshot
+data: {"pending":[],"running":[{"task_id":"a","status":"running", ...}],"completed":[]}
+
+event: snapshot
+data: {"pending":[],"running":[],"completed":[{"task_id":"a","status":"completed", ...}]}
+```
+
+- 每个事件的 `data` 与 `GET /api/v1/tasks` 同结构（`pending` / `running` /
+  `completed`），是**全量快照**而不是增量补丁，客户端可直接替换本地状态。
+- 该流不分页；需要分页时请轮询 `GET /api/v1/tasks`。
+- Stream 的生命周期与请求一致：客户端断开后服务端立即停止轮询并释放资源，
+  不会留下后台任务。因此没有 `Last-Event-ID` 重放，也不跨请求共享状态。
+- 响应头包含 `Cache-Control: no-cache` 与 `X-Accel-Buffering: no`。
+- 鉴权方式与搜索流相同：通过 `Authorization: Bearer` 或 `X-API-Key`
+  请求头传递，因此浏览器端需使用 `fetch` 读取流，不能直接用 `EventSource`。
+
 查询单个任务：
 
 ```bash
@@ -235,6 +296,23 @@ curl -s "$BASE/api/v1/tasks/<task_id>" -H "Authorization: Bearer $TOKEN"
 
 `download_url` 是相对于 API 根地址的路径，直接拼接
 `http://127.0.0.1:8081` 即可下载。
+
+`GET /api/v1/history` 同样支持 `offset` / `limit`（默认 `0` / `50`，上限
+`200`），排序（按修改时间倒序）在分页之前完成：
+
+```json
+{
+  "total": 120,
+  "offset": 20,
+  "limit": 20,
+  "files": [{"name": "...", "ext": "txt", "size": 1, "mtime": 1.0, "download_url": "/downloads/..."}]
+}
+```
+
+- `total` 始终是分页前的文件总数。
+- 两个参数都不传时返回全部文件（兼容旧行为，此时 `limit == total`）。
+- 只传一个时另一个取默认值：`offset=0`、`limit=50`。
+- `limit` 超过 `200` 或小于 `1`、`offset` 为负数时返回 `422`。
 
 ## 音乐
 
@@ -481,6 +559,37 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+## Python SDK
+
+`novel_downloader.apps.api.client.NovelApiClient` 是同步客户端，覆盖全部端点。
+分页与任务流相关的方法：
+
+```python
+from novel_downloader.apps.api.client import NovelApiClient
+
+with NovelApiClient("http://127.0.0.1:8081", token="my-secret") as api:
+    # 分页（默认 offset=0、limit=50，服务端上限 200）
+    first = api.tasks_page(offset=0, limit=20)
+    print(first["total"], len(first["completed"]))
+
+    files = api.history_page(offset=0, limit=20)
+    print(files["total"], [item["name"] for item in files["files"]])
+
+    # 逐事件消费任务流：每个快照都是 /tasks 的结构
+    for snapshot in api.iter_tasks():
+        print(len(snapshot["pending"]), len(snapshot["running"]))
+        if not snapshot["pending"] and not snapshot["running"]:
+            break          # 退出循环即断开连接
+```
+
+- 既有的 `tasks()` / `history()` 保持不变，仍然返回完整列表。
+- `tasks_page()` / `history_page()` 直接把 `offset` / `limit` 作为查询参数发送，
+  越界（负数、`limit=0`、`limit>200`）由服务端返回 `422`，客户端抛出
+  `ApiError`。
+- `iter_tasks()` 使用 `httpx` 的流式请求解析 SSE；只产出 `snapshot` 事件
+  的 `data`（已从 JSON 解码）。生成器被关闭或循环 `break` 时连接随即关闭。
+  传输错误与非 2xx 响应抛出 `ApiError`。
 
 ## 安全提示
 

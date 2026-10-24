@@ -28,10 +28,12 @@ from typing import Any
 
 import pytest
 
+from novel_downloader import __version__
 from novel_downloader.apps.common.history_files import FileItem
 from novel_downloader.apps.core.models import DownloadTask, Status
 from novel_downloader.apps.desktop import formatting as fmt
 from novel_downloader.apps.desktop import main as desktop_main
+from novel_downloader.apps.desktop import preferences as prefs
 from novel_downloader.apps.desktop.engine import AsyncEngine
 from novel_downloader.infra.i18n import t
 from novel_downloader.schemas import SearchResult
@@ -403,6 +405,259 @@ def test_prepare_home_seeds_config_and_switches_directory(
 
 
 # ---------------------------------------------------------------------------
+# Music settings / preference helpers
+# ---------------------------------------------------------------------------
+def _task(
+    status: Status,
+    exported: dict[str, Path] | None = None,
+    *,
+    error: str | None = None,
+) -> DownloadTask:
+    """Build a finished task snapshot with optional exported paths."""
+    task = DownloadTask(title="Book", site="qidian", book_id="1")
+    task.status = status
+    task.error = error
+    if exported:
+        task.exported_paths = dict(exported)
+    return task
+
+
+def test_music_settings_defaults_fill_missing_values(tmp_path: Path) -> None:
+    settings = prefs.music_settings_from_mapping(None, tmp_path)
+    assert settings.out_dir == str(tmp_path)
+    assert settings.level == prefs.DEFAULT_MUSIC_LEVEL
+    assert settings.embed_tags is True
+    assert settings.embed_cover is True
+    assert settings.save_lyric is True
+    assert settings.split_folder is True
+    assert settings.skip_existing is True
+
+
+def test_music_settings_blank_output_dir_uses_default(tmp_path: Path) -> None:
+    settings = prefs.music_settings_from_mapping({"out_dir": "   "}, tmp_path)
+    assert settings.out_dir == str(tmp_path)
+
+
+def test_music_settings_keep_explicit_output_dir(tmp_path: Path) -> None:
+    settings = prefs.music_settings_from_mapping(
+        {"out_dir": "  D:/Music/Novel  "}, tmp_path
+    )
+    assert settings.out_dir == "D:/Music/Novel"
+
+
+@pytest.mark.parametrize("level", ["hires", "lossless", "exhigh", "higher", "standard"])
+def test_music_settings_accept_supported_levels(level: str, tmp_path: Path) -> None:
+    settings = prefs.music_settings_from_mapping({"level": level}, tmp_path)
+    assert settings.level == level
+
+
+@pytest.mark.parametrize("level", ["", "   ", "bogus", "unknown"])
+def test_music_settings_normalize_unknown_levels(level: str, tmp_path: Path) -> None:
+    settings = prefs.music_settings_from_mapping({"level": level}, tmp_path)
+    assert settings.level == prefs.DEFAULT_MUSIC_LEVEL
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (False, False),
+        (True, True),
+        ("false", False),
+        ("FALSE", False),
+        ("0", False),
+        ("no", False),
+        ("off", False),
+        ("true", True),
+        ("yes", True),
+        ("1", True),
+        ("", True),
+        (None, True),
+        (0, False),
+        (1, True),
+    ],
+)
+def test_music_settings_coerce_boolean_flags(
+    raw: object, expected: bool, tmp_path: Path
+) -> None:
+    settings = prefs.music_settings_from_mapping(
+        {"embed_cover": raw, "save_lyric": raw}, tmp_path
+    )
+    assert settings.embed_cover is expected
+    assert settings.save_lyric is expected
+
+
+def test_music_settings_round_trip_mapping(tmp_path: Path) -> None:
+    original = prefs.music_settings_from_mapping(
+        {
+            "out_dir": str(tmp_path / "music"),
+            "level": "lossless",
+            "embed_tags": False,
+            "embed_cover": False,
+            "save_lyric": False,
+            "split_folder": False,
+            "skip_existing": False,
+        },
+        tmp_path,
+    )
+    mapped = prefs.music_settings_to_mapping(original)
+    restored = prefs.music_settings_from_mapping(mapped, tmp_path)
+    assert restored == original
+    # Only the keys the desktop UI owns are written back.
+    assert set(mapped) == {
+        "out_dir",
+        "level",
+        "embed_tags",
+        "embed_cover",
+        "save_lyric",
+        "split_folder",
+        "skip_existing",
+    }
+
+
+def test_level_display_and_code_round_trip() -> None:
+    for level in prefs.MUSIC_LEVELS:
+        assert prefs.level_code(prefs.level_display(level)) == level
+        # Raw codes are accepted too (e.g. pasted from the CLI).
+        assert prefs.level_code(level) == level
+
+
+def test_level_code_falls_back_to_default() -> None:
+    assert prefs.level_code("unknown") == prefs.DEFAULT_MUSIC_LEVEL
+    assert prefs.level_code("") == prefs.DEFAULT_MUSIC_LEVEL
+
+
+def test_resolve_output_dir_expands_user_home() -> None:
+    resolved = prefs.resolve_output_dir("~", "/fallback")
+    assert resolved != "~"
+    assert resolved.startswith(os.path.expanduser("~"))
+
+
+def test_resolve_output_dir_expands_environment_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DESKTOP_TEST_DIR", str(tmp_path))
+    resolved = prefs.resolve_output_dir(
+        "${DESKTOP_TEST_DIR}/out" if os.name != "nt" else "%DESKTOP_TEST_DIR%/out",
+        "/fallback",
+    )
+    assert Path(resolved) == tmp_path / "out"
+
+
+def test_environment_summary_includes_api_and_data_dir(tmp_path: Path) -> None:
+    summary = prefs.environment_summary("http://127.0.0.1:8081", tmp_path)
+    assert "http://127.0.0.1:8081" in summary
+    assert str(tmp_path) in summary
+
+
+def test_remember_search_trims_both_fields() -> None:
+    state = prefs.remember_search("  dune  ", "  qidian, b520  ")
+    assert state.keyword == "dune"
+    assert state.sites == "qidian, b520"
+    assert state.has_previous is True
+
+
+@pytest.mark.parametrize("keyword", ["", "   ", "\t"])
+def test_remember_search_rejects_blank_keywords(keyword: str) -> None:
+    assert prefs.remember_search(keyword, "qidian").has_previous is False
+
+
+# ---------------------------------------------------------------------------
+# Task output actions / detail text
+# ---------------------------------------------------------------------------
+def test_task_export_paths_prefers_epub_then_txt() -> None:
+    task = _task(
+        Status.COMPLETED,
+        {
+            "txt": Path("downloads/book.txt"),
+            "epub": Path("downloads/book.epub"),
+            "pdf": Path("downloads/book.pdf"),
+        },
+    )
+    assert fmt.task_export_paths(task) == (
+        Path("downloads/book.epub"),
+        Path("downloads/book.txt"),
+        Path("downloads/book.pdf"),
+    )
+
+
+def test_task_export_paths_deduplicates_and_skips_none() -> None:
+    task = _task(Status.COMPLETED)
+    task.exported_paths = {
+        "epub": Path("downloads/book.epub"),
+        "txt": Path("downloads/book.epub"),
+        "pdf": None,
+    }
+    assert fmt.task_export_paths(task) == (Path("downloads/book.epub"),)
+
+
+@pytest.mark.parametrize("status", [Status.COMPLETED, Status.FAILED])
+def test_task_output_actions_enabled_for_finished_tasks(status: Status) -> None:
+    task = _task(status, {"epub": Path("downloads/book.epub")})
+    actions = fmt.task_output_actions(task)
+    assert actions.can_open_file is True
+    assert actions.can_open_folder is True
+    assert actions.file_path == Path("downloads/book.epub")
+    assert actions.folder_path == Path("downloads")
+
+
+@pytest.mark.parametrize(
+    "status",
+    [Status.QUEUED, Status.RUNNING, Status.PROCESSING, Status.EXPORTING],
+)
+def test_task_output_actions_disabled_before_completion(status: Status) -> None:
+    task = _task(status, {"epub": Path("downloads/book.epub")})
+    actions = fmt.task_output_actions(task)
+    assert actions.can_open_file is False
+    assert actions.can_open_folder is False
+    assert actions.file_path is None
+    assert actions.folder_path is None
+
+
+def test_task_output_actions_disabled_without_exported_paths() -> None:
+    task = _task(Status.COMPLETED)
+    actions = fmt.task_output_actions(task)
+    assert actions.can_open_file is False
+    assert actions.can_open_folder is False
+
+
+def test_task_output_actions_handle_missing_selection() -> None:
+    actions = fmt.task_output_actions(None)
+    assert actions.can_open_file is False
+    assert actions.can_open_folder is False
+
+
+def test_task_output_actions_handle_duck_typed_task() -> None:
+    task = SimpleNamespace(
+        status=SimpleNamespace(value="completed"),
+        exported_paths={"txt": Path("downloads/other.txt")},
+    )
+    actions = fmt.task_output_actions(task)
+    assert actions.file_path == Path("downloads/other.txt")
+    assert actions.folder_path == Path("downloads")
+
+
+def test_task_detail_text_includes_full_error() -> None:
+    long_error = " | ".join(["HTTP 500: upstream refused the request"] * 8)
+    task = _task(Status.FAILED, error=long_error)
+    detail = fmt.task_detail_text(task)
+    assert long_error in detail
+    assert t("Error") in detail
+    assert t("Status") in detail
+    assert t("Failed") in detail
+
+
+def test_task_detail_text_lists_exported_files() -> None:
+    task = _task(Status.COMPLETED, {"epub": Path("downloads/a.epub")})
+    detail = fmt.task_detail_text(task)
+    assert t("Exported files") in detail
+    assert "downloads" in detail
+
+
+def test_task_detail_text_for_no_selection() -> None:
+    assert fmt.task_detail_text(None) == t("Select a task to view its details.")
+
+
+# ---------------------------------------------------------------------------
 # Window smoke test (guarded: needs a display)
 # ---------------------------------------------------------------------------
 def test_desktop_window_builds_all_tabs(
@@ -430,8 +685,16 @@ def test_desktop_window_builds_all_tabs(
         assert app.task_tree is not None
         assert app.history_tree is not None
         assert app.search_button is not None
+        assert app.search_last_button is not None
+        assert app.open_file_button is not None
+        assert app.open_folder_button is not None
         assert str(app._status_var.get())  # status bar shows something
-        assert root.title() == t("Novel Downloader")
+        assert root.title() == f"{t('Novel Downloader')} v{__version__}"
+        assert str(app._env_var.get())  # API/data-directory information
+        assert app.task_detail_var.get() == t("Select a task to view its details.")
+        assert "disabled" in app.open_file_button.state()
+        assert "disabled" in app.open_folder_button.state()
+        assert "disabled" in app.search_last_button.state()
     finally:
         if app is not None:
             app._closing = True

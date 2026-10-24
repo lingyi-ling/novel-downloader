@@ -26,6 +26,7 @@ class Track:
     # 以下字段在 provider.resolve() 后填充
     download_url: str = ""
     http_headers: dict = field(default_factory=dict)  # 下载该直链所需的额外请求头
+    path: str = ""  # 本地落盘位置（下载成功后由 downloader 回填）
     lyric: str = ""  # 已获取的歌词（可空）
     # provider 私有数据（如网易云原始 dict），仅供该 provider 自己使用
     extra: dict = field(default_factory=dict)

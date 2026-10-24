@@ -58,6 +58,18 @@ OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "music", "description": "Optional music search and download."},
 ]
 
+#: Page size used when the caller supplies only one of ``offset`` / ``limit``.
+DEFAULT_PAGE_LIMIT = 50
+
+#: Hard upper bound for ``limit`` on the paginated list endpoints.
+MAX_PAGE_LIMIT = 200
+
+#: Seconds between two ``snapshot`` events on ``GET /tasks/stream``.
+TASK_STREAM_INTERVAL = 1.0
+
+#: Queue groups in the order they are concatenated when paginating ``/tasks``.
+_TASK_GROUPS = ("pending", "running", "completed")
+
 router = APIRouter(
     prefix="/api/v1",
     dependencies=[Depends(require_token)],
@@ -257,17 +269,128 @@ async def stream_search(
 # ---------------------------------------------------------------------------
 
 
+def _page_bounds(
+    total: int,
+    offset: int | None,
+    limit: int | None,
+) -> tuple[int, int, int]:
+    """
+    Resolve ``offset`` / ``limit`` into a half-open slice and the applied limit.
+
+    Omitting both parameters means "no pagination": the whole collection is
+    returned (the pre-pagination behaviour) and the reported ``limit`` equals
+    ``total``. Supplying only one of them fills the other from its default
+    (``offset=0``, ``limit=50``). ``limit`` is already bounded by FastAPI's
+    query validation; this helper only computes the slice.
+
+    :return: ``(start, stop, applied_limit)``.
+    """
+    if offset is None and limit is None:
+        return 0, total, total
+    start = 0 if offset is None else offset
+    applied = DEFAULT_PAGE_LIMIT if limit is None else limit
+    return start, start + applied, applied
+
+
+def _paginate_tasks(
+    snapshot: dict[str, list[DownloadTask]],
+    offset: int | None,
+    limit: int | None,
+) -> tuple[dict[str, list[DownloadTask]], int, int, int]:
+    """
+    Paginate the concatenation of ``pending``, ``running`` and ``completed``.
+
+    The three lists keep their individual ordering; a page simply spans that
+    combined sequence. Grouping is restored afterwards, so the response shape
+    never changes.
+
+    :return: ``(groups, total, start, applied_limit)``.
+    """
+    total = sum(len(snapshot[name]) for name in _TASK_GROUPS)
+    start, stop, applied = _page_bounds(total, offset, limit)
+
+    groups: dict[str, list[DownloadTask]] = {name: [] for name in _TASK_GROUPS}
+    cursor = 0
+    for name in _TASK_GROUPS:
+        items = snapshot[name]
+        end = cursor + len(items)
+        low = max(start, cursor)
+        high = min(stop, end)
+        if low < high:
+            groups[name] = items[low - cursor : high - cursor]
+        cursor = end
+
+    return groups, total, start, applied
+
+
+def _tasks_snapshot(mgr: TaskManager) -> dict[str, list[dict[str, Any]]]:
+    """Return the full, serialised task snapshot (the ``/tasks`` shape)."""
+    snapshot = mgr.snapshot()
+    return {
+        name: [_task_to_dict(task) for task in snapshot[name]] for name in _TASK_GROUPS
+    }
+
+
 @router.get("/tasks", tags=["tasks"])
 async def list_tasks(
     mgr: Annotated[TaskManager, Depends(get_manager)],
-) -> dict[str, list[dict[str, Any]]]:
-    """Return pending, running and recently completed tasks."""
-    snapshot = mgr.snapshot()
-    return {
-        "pending": [_task_to_dict(task) for task in snapshot["pending"]],
-        "running": [_task_to_dict(task) for task in snapshot["running"]],
-        "completed": [_task_to_dict(task) for task in snapshot["completed"]],
+    offset: Annotated[int | None, Query(ge=0)] = None,
+    limit: Annotated[int | None, Query(ge=1, le=MAX_PAGE_LIMIT)] = None,
+) -> dict[str, Any]:
+    """
+    Return pending, running and recently completed tasks.
+
+    ``offset`` / ``limit`` paginate the combined sequence
+    ``pending + running + completed``. With neither parameter the full
+    snapshot is returned, exactly as before pagination existed (the response
+    still carries ``total``, ``offset`` and ``limit`` alongside the three
+    lists). Supplying one parameter defaults the other to ``0`` / ``50``.
+    """
+    groups, total, start, applied = _paginate_tasks(mgr.snapshot(), offset, limit)
+    payload: dict[str, Any] = {
+        name: [_task_to_dict(task) for task in groups[name]] for name in _TASK_GROUPS
     }
+    payload.update({"total": total, "offset": start, "limit": applied})
+    return payload
+
+
+async def _task_event_stream(
+    mgr: TaskManager,
+    interval: float,
+) -> AsyncIterator[str]:
+    """
+    Emit one ``snapshot`` SSE frame every ``interval`` seconds.
+
+    The loop lives for exactly as long as the request: when the client
+    disconnects Starlette closes this generator, the pending ``sleep`` is
+    cancelled and no further snapshots are produced. There is deliberately no
+    process-wide broadcaster.
+    """
+    while True:
+        yield _sse_frame("snapshot", _tasks_snapshot(mgr))
+        await asyncio.sleep(interval)
+
+
+@router.get("/tasks/stream", tags=["tasks"])
+async def stream_tasks(
+    mgr: Annotated[TaskManager, Depends(get_manager)],
+) -> StreamingResponse:
+    """
+    Stream the current task snapshot as Server-Sent Events.
+
+    A ``snapshot`` event is emitted immediately and then once per second; its
+    ``data`` is a JSON object with the same ``pending`` / ``running`` /
+    ``completed`` structure as ``GET /api/v1/tasks``. The stream ends when the
+    client disconnects.
+    """
+    return StreamingResponse(
+        _task_event_stream(mgr, TASK_STREAM_INTERVAL),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _find_task(mgr: TaskManager, task_id: str) -> DownloadTask | None:
@@ -326,14 +449,23 @@ async def cancel_task(
 
 
 @router.get("/history", tags=["history"])
-async def history() -> dict[str, Any]:
+async def history(
+    offset: Annotated[int | None, Query(ge=0)] = None,
+    limit: Annotated[int | None, Query(ge=1, le=MAX_PAGE_LIMIT)] = None,
+) -> dict[str, Any]:
     """
     List exported ``txt`` / ``epub`` files in the configured output dir.
+
+    Files are sorted newest-first before ``offset`` / ``limit`` are applied;
+    ``total`` always reports the number of matching files before slicing.
+    Omitting both parameters returns every file (the pre-pagination behaviour).
 
     ``download_url`` percent-encodes the file name (``safe=""``), so names with
     spaces, ``#``, ``?`` or non-ASCII characters produce a directly usable URL.
     """
     items = _apply_sort(_scan_files(), "mtime", "desc")
+    total = len(items)
+    start, stop, applied = _page_bounds(total, offset, limit)
     files = [
         {
             "name": item.name,
@@ -342,9 +474,14 @@ async def history() -> dict[str, Any]:
             "mtime": item.mtime,
             "download_url": f"/downloads/{quote(item.name, safe='')}",
         }
-        for item in items
+        for item in items[start:stop]
     ]
-    return {"total": len(files), "files": files}
+    return {
+        "total": total,
+        "offset": start,
+        "limit": applied,
+        "files": files,
+    }
 
 
 # ---------------------------------------------------------------------------

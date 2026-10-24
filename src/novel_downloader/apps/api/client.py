@@ -19,6 +19,8 @@ response payload.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
 from pathlib import Path
 from types import TracebackType
 from typing import Any, cast
@@ -83,6 +85,53 @@ def _as_mapping(response: httpx.Response) -> dict[str, Any]:
     if isinstance(payload, dict):
         return cast(dict[str, Any], payload)
     return {"data": payload}
+
+
+def _decode_sse_data(raw: str) -> Any:
+    """Decode an SSE ``data`` payload, falling back to the raw string."""
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
+def _iter_sse_events(response: httpx.Response) -> Iterator[tuple[str, Any]]:
+    """
+    Yield ``(event, data)`` pairs from a streaming SSE response.
+
+    Implements the subset of the SSE grammar the API emits: ``event:`` and
+    ``data:`` fields, comment lines beginning with ``:`` and blank-line event
+    separators. Multiple ``data:`` lines are joined with ``\\n`` before JSON
+    decoding. The response must be opened in streaming mode.
+    """
+    event = "message"
+    data_lines: list[str] = []
+
+    for line in response.iter_lines():
+        if line == "":
+            if data_lines:
+                yield event, _decode_sse_data("\n".join(data_lines))
+            event = "message"
+            data_lines = []
+            continue
+
+        if line.startswith(":"):
+            continue
+
+        field, separator, value = line.partition(":")
+        if not separator:
+            continue
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "event":
+            event = value
+        elif field == "data":
+            data_lines.append(value)
+
+    # A well-behaved server terminates every event with a blank line, but be
+    # forgiving when the connection closes right after the final data line.
+    if data_lines:
+        yield event, _decode_sse_data("\n".join(data_lines))
 
 
 class NovelApiClient:
@@ -234,6 +283,53 @@ class NovelApiClient:
         """Return ``pending``, ``running`` and ``completed`` task lists."""
         return self._request("GET", "tasks")
 
+    def tasks_page(self, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+        """
+        Return one page of the task snapshot.
+
+        The page spans ``pending + running + completed`` and the payload
+        carries ``total``, ``offset`` and ``limit`` in addition to the three
+        lists. ``limit`` is capped at 200 by the server.
+
+        :param offset: Number of tasks to skip (``>= 0``).
+        :param limit: Maximum number of tasks to return (``1..200``).
+        """
+        return self._request(
+            "GET",
+            "tasks",
+            params={"offset": offset, "limit": limit},
+        )
+
+    def iter_tasks(self) -> Iterator[dict[str, Any]]:
+        """
+        Yield task snapshots from ``GET /api/v1/tasks/stream``.
+
+        The server sends a ``snapshot`` event immediately and then once per
+        second. Each yielded value is the event's decoded ``data`` object, with
+        the same ``pending`` / ``running`` / ``completed`` shape as
+        :meth:`tasks`. Iteration ends when the server closes the stream; break
+        out of the loop (or close the generator) to disconnect::
+
+            for snapshot in api.iter_tasks():
+                print(len(snapshot["running"]))
+                if done:
+                    break
+
+        Transport failures and non-2xx responses raise :class:`ApiError`.
+        """
+        url = f"{self._api_base}/tasks/stream"
+        try:
+            with self._client.stream("GET", url) as response:
+                if not response.is_success:
+                    response.read()
+                    raise _error_from_response(response)
+                for event, payload in _iter_sse_events(response):
+                    if event != "snapshot" or not isinstance(payload, dict):
+                        continue
+                    yield cast(dict[str, Any], payload)
+        except httpx.HTTPError as exc:
+            raise ApiError(0, f"{type(exc).__name__}: {exc}") from exc
+
     def task(self, task_id: str) -> dict[str, Any]:
         """
         Return a single task.
@@ -268,6 +364,23 @@ class NovelApiClient:
     def history(self) -> dict[str, Any]:
         """Return the exported ``txt`` / ``epub`` files."""
         return self._request("GET", "history")
+
+    def history_page(self, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+        """
+        Return one page of exported files, newest first.
+
+        The payload carries ``total`` (the full match count before slicing),
+        ``offset``, ``limit`` and the ``files`` list. ``limit`` is capped at
+        200 by the server.
+
+        :param offset: Number of files to skip (``>= 0``).
+        :param limit: Maximum number of files to return (``1..200``).
+        """
+        return self._request(
+            "GET",
+            "history",
+            params={"offset": offset, "limit": limit},
+        )
 
     def download_file(self, name: str, dest_dir: str | Path) -> Path:
         """

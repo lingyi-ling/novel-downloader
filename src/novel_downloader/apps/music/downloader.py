@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -20,6 +21,7 @@ from .weapi import UA, LoginExpired
 
 _CHUNK = 64 * 1024
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 
 
 @dataclass
@@ -162,11 +164,24 @@ def _cleanup_part(dest):
             os.remove(p)
 
 
+def _remember_path(track, path):
+    """记录本地落盘位置，便于之后导出歌单（Track.path）。"""
+    with contextlib.suppress(Exception):
+        track.path = path
+
+
 def _write_tags(path, track, cover_bytes=None):
-    """写 ID3/Vorbis 标签，按需内嵌封面。"""
-    from mutagen import File as MutaFile
-    from mutagen.flac import FLAC, Picture
-    from mutagen.id3 import APIC, ID3
+    """写 ID3/Vorbis 标签，按需内嵌封面。
+
+    标签与封面都是「锦上添花」：任一环节失败（缺依赖、格式不支持、
+    图片字节损坏）都只跳过该环节，绝不让已下载的音频变成失败。
+    """
+    try:
+        from mutagen import File as MutaFile
+        from mutagen.flac import FLAC, Picture
+        from mutagen.id3 import APIC, ID3
+    except Exception:
+        return
 
     try:
         audio = MutaFile(path, easy=True)
@@ -175,13 +190,17 @@ def _write_tags(path, track, cover_bytes=None):
     if audio is None:
         return
 
-    audio["title"] = track.name
-    audio["artist"] = track.artists
-    audio["album"] = track.album
-    no = track.track_no
-    if no:
-        audio["tracknumber"] = str(no)
-    audio.save()
+    try:
+        audio["title"] = track.name
+        audio["artist"] = track.artists
+        audio["album"] = track.album
+        no = track.track_no
+        if no:
+            audio["tracknumber"] = str(no)
+        audio.save()
+    except Exception:
+        # 某些容器不支持 easy 标签；音频本身仍然可用
+        pass
 
     if not cover_bytes:
         return
@@ -246,6 +265,7 @@ def download_track(
             dest = os.path.join(folder, f"{stem} [{track.id}].{ext}")
 
     if opts.skip_existing and os.path.exists(dest) and os.path.getsize(dest) > 10240:
+        _remember_path(track, dest)
         return TrackResult("skip", "已存在", path=dest, bytes_=os.path.getsize(dest))
 
     os.makedirs(folder, exist_ok=True)
@@ -280,6 +300,8 @@ def download_track(
             retryable=True,
         )
 
+    _remember_path(track, dest)
+
     if opts.embed_tags or opts.embed_cover:
         cover = None
         if opts.embed_cover:
@@ -296,15 +318,9 @@ def download_track(
     if opts.save_lyric:
         try:
             lrc, tlrc = provider.lyric(track)
-            text = lrc or ""
-            if tlrc:
-                text += "\n" + tlrc
-            if text.strip():
-                with open(
-                    os.path.join(folder, f"{stem}.lrc"), "w", encoding="utf-8"
-                ) as f:
-                    f.write(text)
+            save_lyric(dest, lrc, tlrc)
         except Exception:
+            # 歌词获取/落盘失败同样不影响音频
             pass
 
     return TrackResult(
@@ -411,3 +427,144 @@ def human(size):
             return f"{size:.1f}{unit}"
         size /= 1024
     return f"{size:.1f}TB"
+
+
+# ---------------------------------------------------------------------------
+# 歌词落盘
+# ---------------------------------------------------------------------------
+
+
+def lyric_paths(audio_path):
+    """返回某音频对应的 (原文 LRC 路径, 翻译 LRC 路径)。"""
+    stem = os.path.splitext(str(audio_path))[0]
+    return stem + ".lrc", stem + ".zh.lrc"
+
+
+def _write_text(path, text):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text.rstrip() + "\n")
+
+
+def save_lyric(audio_path, lyric, translated=""):
+    """把歌词写到音频旁，返回实际写入的文件列表。
+
+    落盘策略（固定为独立文件，便于播放器/工具各取所需）：
+
+    - 有原文：``<stem>.lrc`` 写原文；若另有译文，``<stem>.zh.lrc`` 写译文
+    - 只有译文：把译文写进 ``<stem>.lrc``，避免播放器完全看不到歌词
+    - 两者都为空：不创建任何文件
+
+    空白文本会被忽略；换行统一为 ``\\n``，文件编码 UTF-8。
+    """
+    original_path, translation_path = lyric_paths(audio_path)
+    text = (lyric or "").strip()
+    translation = (translated or "").strip()
+    written = []
+    if text:
+        _write_text(original_path, text)
+        written.append(original_path)
+        if translation:
+            _write_text(translation_path, translation)
+            written.append(translation_path)
+    elif translation:
+        _write_text(original_path, translation)
+        written.append(original_path)
+    return written
+
+
+# ---------------------------------------------------------------------------
+# 歌单导出（M3U8）
+# ---------------------------------------------------------------------------
+
+
+def _playlist_field(track, *names, default=""):
+    """从 Track / dict 里取第一个非空字段。"""
+    for name in names:
+        if isinstance(track, Mapping):
+            value = track.get(name)
+        else:
+            value = getattr(track, name, None)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _playlist_entry(item):
+    """把支持的输入形态归一成 (元数据对象, 本地文件路径)。
+
+    支持 ``Track``（读 ``.path``）、``(track, path)`` 元组，以及带
+    ``path``/``file`` 键的 dict。
+    """
+    if isinstance(item, (tuple, list)) and len(item) == 2:
+        track, file_path = item
+    elif isinstance(item, Mapping) and "track" in item:
+        track = item["track"]
+        file_path = item.get("path") or item.get("file")
+        if not file_path:
+            file_path = _playlist_field(track, "path", "file_path")
+    else:
+        track = item
+        file_path = _playlist_field(item, "path", "file_path")
+    if not file_path:
+        raise ValueError(
+            "导出歌单需要每首歌的本地路径：使用 Track.path 或 (track, path) 元组"
+        )
+    return track, str(file_path)
+
+
+def _playlist_location(file_path, playlist_dir, absolute):
+    """生成写入 M3U 的路径：默认相对歌单所在目录，统一用正斜杠。"""
+    if absolute:
+        location = os.path.abspath(file_path)
+    else:
+        try:
+            location = os.path.relpath(os.path.abspath(file_path), playlist_dir)
+        except ValueError:
+            # Windows 跨盘符没有相对路径，退回绝对路径
+            location = os.path.abspath(file_path)
+    location = _CONTROL.sub(" ", location.replace("\\", "/")).strip()
+    # 「#」开头的行会被 M3U 当作注释/指令，相对路径前加 ./ 规避
+    if not absolute and location.startswith("#"):
+        location = "./" + location
+    return location
+
+
+def export_m3u(tracks, path, *, absolute=False):
+    """把曲目列表导出为 M3U8 歌单，返回歌单文件路径。
+
+    ``tracks`` 中每项可以是 ``Track``（需已由下载流程回填 ``.path``）、
+    ``(track, file_path)`` 元组，或包含 ``path``/``file`` 的 dict。
+    ``absolute=False``（默认）写入相对歌单目录的路径，便于整个目录搬家。
+    列表为空时也会写入只有 ``#EXTM3U`` 头的合法歌单。
+    """
+    playlist_path = str(path)
+    playlist_dir = os.path.dirname(os.path.abspath(playlist_path))
+    entries = []
+    for item in tracks or ():
+        track, file_path = _playlist_entry(item)
+        name = _CONTROL.sub(" ", str(_playlist_field(track, "name", "title")))
+        artists = _CONTROL.sub(
+            " ", str(_playlist_field(track, "artists", "artist", default="未知歌手"))
+        )
+        duration = _playlist_field(track, "duration_s", "duration", default=0)
+        try:
+            duration = int(float(duration or 0))
+        except (TypeError, ValueError):
+            duration = 0
+        if duration <= 0:
+            duration = -1  # M3U 用 -1 表示时长未知
+        location = _playlist_location(file_path, playlist_dir, absolute)
+        entries.append(
+            f"#EXTINF:{duration},{artists.strip()} - {name.strip()}\n{location}"
+        )
+
+    if playlist_dir:
+        os.makedirs(playlist_dir, exist_ok=True)
+    with open(playlist_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("#EXTM3U\n")
+        for entry in entries:
+            f.write(entry + "\n")
+    return playlist_path

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from novel_downloader.apps.common.history_files import FileItem, _format_size
@@ -22,6 +24,7 @@ from novel_downloader.infra.i18n import t
 from novel_downloader.schemas import SearchResult
 
 __all__ = [
+    "TaskOutputActions",
     "format_duration",
     "format_error",
     "format_mtime",
@@ -32,6 +35,9 @@ __all__ = [
     "parse_sites",
     "search_row",
     "status_label",
+    "task_detail_text",
+    "task_export_paths",
+    "task_output_actions",
     "task_row",
 ]
 
@@ -95,6 +101,122 @@ def task_row(task: DownloadTask) -> tuple[str, str, str, str, str]:
         format_task_progress(task.chapters_done, task.chapters_total),
         task.error or "",
     )
+
+
+#: Export formats are opened in this order; the first available one is used.
+_EXPORT_PRIORITY = ("epub", "txt")
+
+#: Task states whose exported files may be opened from the UI.
+_OPENABLE_STATES = frozenset({"completed", "failed"})
+
+
+@dataclass(frozen=True)
+class TaskOutputActions:
+    """Paths a finished task can open, and whether each action is available."""
+
+    file_path: Path | None = None
+    folder_path: Path | None = None
+
+    @property
+    def can_open_file(self) -> bool:
+        """Whether the "open file" button should be enabled."""
+        return self.file_path is not None
+
+    @property
+    def can_open_folder(self) -> bool:
+        """Whether the "open folder" button should be enabled."""
+        return self.folder_path is not None
+
+
+def task_export_paths(task: object) -> tuple[Path, ...]:
+    """
+    Return the exported file paths of a task in display order.
+
+    ``epub`` and ``txt`` are preferred because those are the formats the
+    history page lists; any other exported format follows in sorted order.
+    Duplicate paths are dropped so the details line does not repeat itself.
+
+    :param task: Task snapshot (duck-typed so tests can pass stand-ins).
+    :return: An ordered tuple of paths (empty when nothing was exported).
+    """
+    exported = getattr(task, "exported_paths", None)
+    if not isinstance(exported, Mapping) or not exported:
+        return ()
+
+    keys: list[Any] = [key for key in _EXPORT_PRIORITY if key in exported]
+    keys.extend(
+        sorted((key for key in exported if key not in _EXPORT_PRIORITY), key=str)
+    )
+
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for key in keys:
+        value = exported.get(key)
+        if value is None:
+            continue
+        path = Path(value)
+        marker = str(path)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        paths.append(path)
+    return tuple(paths)
+
+
+def task_output_actions(task: object | None) -> TaskOutputActions:
+    """
+    Decide which output-opening actions a task supports.
+
+    Only completed or failed tasks with at least one exported file may open a
+    file or its containing folder; everything else leaves the buttons disabled.
+
+    :param task: Task snapshot, or ``None`` when no row is selected.
+    :return: The available paths.
+    """
+    if task is None:
+        return TaskOutputActions()
+
+    status_value = getattr(task, "status", None)
+    status = str(getattr(status_value, "value", status_value))
+    if status not in _OPENABLE_STATES:
+        return TaskOutputActions()
+
+    paths = task_export_paths(task)
+    if not paths:
+        return TaskOutputActions()
+    return TaskOutputActions(file_path=paths[0], folder_path=paths[0].parent)
+
+
+def task_detail_text(task: object | None) -> str:
+    """
+    Render the detail pane for the selected task.
+
+    The full error and every exported path are included; the Treeview itself
+    only has room for a truncated error column.
+
+    :param task: Task snapshot, or ``None`` when no row is selected.
+    :return: Multi-line text for the detail label / popup.
+    """
+    if task is None:
+        return t("Select a task to view its details.")
+
+    lines: list[str] = []
+    title = str(getattr(task, "title", "") or "")
+    site = str(getattr(task, "site", "") or "")
+    if title:
+        lines.append(f"{title} ({site})" if site else title)
+    lines.append(f"{t('Status')}: {status_label(getattr(task, 'status', None))}")
+
+    error = str(getattr(task, "error", "") or "").strip()
+    if error:
+        lines.append(f"{t('Error')}: {error}")
+
+    paths = task_export_paths(task)
+    if paths:
+        rendered = ", ".join(str(path) for path in paths)
+        lines.append(f"{t('Exported files')}: {rendered}")
+
+    return "\n".join(lines)
 
 
 def parse_sites(text: str) -> list[str] | None:

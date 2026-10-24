@@ -30,10 +30,11 @@ import tkinter as tk
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any, TypeVar
 
+from novel_downloader import __version__
 from novel_downloader.apps.common.history_files import (
     FileItem,
     _apply_sort,
@@ -44,6 +45,7 @@ from novel_downloader.apps.constants import SEARCH_SUPPORT_SITES
 from novel_downloader.apps.core.models import DownloadTask
 from novel_downloader.apps.core.task_manager import manager
 from novel_downloader.infra.i18n import t
+from novel_downloader.infra.paths import app_home
 from novel_downloader.plugins.search import search
 from novel_downloader.schemas import SearchResult
 
@@ -54,7 +56,22 @@ from .formatting import (
     music_row,
     parse_sites,
     search_row,
+    task_detail_text,
+    task_output_actions,
     task_row,
+)
+from .preferences import (
+    DEFAULT_API_BASE,
+    MUSIC_LEVELS,
+    MusicSettings,
+    SearchState,
+    environment_summary,
+    level_code,
+    level_display,
+    music_settings_from_mapping,
+    music_settings_to_mapping,
+    remember_search,
+    resolve_output_dir,
 )
 
 __all__ = ["DesktopApp", "run_app"]
@@ -98,10 +115,22 @@ class DesktopApp:
         self.sites_var = tk.StringVar()
         self.search_entry: ttk.Entry | None = None
         self.search_button: ttk.Button | None = None
+        self.search_last_button: ttk.Button | None = None
         self.search_tree: ttk.Treeview | None = None
+        self._last_search: SearchState | None = None
 
         # Download widgets.
         self.task_tree: ttk.Treeview | None = None
+        self.open_file_button: ttk.Button | None = None
+        self.open_folder_button: ttk.Button | None = None
+        self.task_detail_var = tk.StringVar(
+            value=t("Select a task to view its details.")
+        )
+        self._tasks_by_id: dict[str, DownloadTask] = {}
+        self._task_menu: tk.Menu | None = None
+
+        # Status bar.
+        self._env_var = tk.StringVar(value="")
 
         # History widgets.
         self.history_tree: ttk.Treeview | None = None
@@ -121,6 +150,13 @@ class DesktopApp:
         self.music_query_var = tk.StringVar()
         self.music_note_var = tk.StringVar(value="")
         self.music_summary_var = tk.StringVar(value="")
+        self.music_out_dir_var: tk.StringVar | None = None
+        self.music_level_var: tk.StringVar | None = None
+        self.music_embed_tags_var: tk.BooleanVar | None = None
+        self.music_embed_cover_var: tk.BooleanVar | None = None
+        self.music_save_lyric_var: tk.BooleanVar | None = None
+        self.music_split_folder_var: tk.BooleanVar | None = None
+        self.music_skip_existing_var: tk.BooleanVar | None = None
         self.music_platform_combo: ttk.Combobox | None = None
         self.music_search_button: ttk.Button | None = None
         self.music_download_button: ttk.Button | None = None
@@ -138,18 +174,24 @@ class DesktopApp:
     # Layout
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
-        self.root.title(t("Novel Downloader"))
+        self.root.title(f"{t('Novel Downloader')} v{__version__}")
         self.root.geometry("1100x720")
         self.root.minsize(760, 480)
 
-        status_bar = ttk.Label(
-            self.root,
+        status_bar = ttk.Frame(self.root, relief="sunken", padding=(6, 3))
+        status_bar.pack(side="bottom", fill="x")
+        ttk.Label(
+            status_bar,
             textvariable=self._status_var,
             anchor="w",
-            relief="sunken",
-            padding=(6, 3),
-        )
-        status_bar.pack(side="bottom", fill="x")
+        ).pack(side="left", fill="x", expand=True)
+        self._env_var.set(environment_summary(DEFAULT_API_BASE, app_home()))
+        ttk.Label(
+            status_bar,
+            textvariable=self._env_var,
+            anchor="e",
+            foreground="#555555",
+        ).pack(side="right")
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
@@ -222,11 +264,18 @@ class DesktopApp:
 
         actions = ttk.Frame(self.search_tab)
         actions.pack(fill="x")
+        self.search_last_button = ttk.Button(
+            actions,
+            text=t("Restore last search"),
+            command=self._restore_last_search,
+            state="disabled",
+        )
+        self.search_last_button.pack(side="left")
         ttk.Button(
             actions,
             text=t("Add to download queue"),
             command=self._add_selected_results,
-        ).pack(side="left")
+        ).pack(side="left", padx=(6, 0))
 
     def _build_download_tab(self) -> None:
         actions = ttk.Frame(self.download_tab)
@@ -236,6 +285,20 @@ class DesktopApp:
             text=t("Cancel selected task"),
             command=self._cancel_selected_task,
         ).pack(side="left")
+        self.open_file_button = ttk.Button(
+            actions,
+            text=t("Open file"),
+            command=self._open_selected_task_file,
+            state="disabled",
+        )
+        self.open_file_button.pack(side="left", padx=(6, 0))
+        self.open_folder_button = ttk.Button(
+            actions,
+            text=t("Open folder"),
+            command=self._open_selected_task_folder,
+            state="disabled",
+        )
+        self.open_folder_button.pack(side="left", padx=(6, 0))
         ttk.Label(
             actions,
             text=t("Progress refreshes automatically."),
@@ -265,13 +328,33 @@ class DesktopApp:
             tree.heading(column, text=label)
             tree.column(column, width=width, anchor="w")
         tree.tag_configure("group", background="#e9e9e9")
+        tree.tag_configure("empty", foreground="#666666")
         tree.tag_configure("failed", foreground="#b00020")
         tree.tag_configure("completed", foreground="#1b6e1b")
         scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scroll.set)
         tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+        tree.bind("<<TreeviewSelect>>", self._on_task_selection)
+        tree.bind("<Double-1>", self._on_task_double_click)
+        tree.bind("<Button-3>", self._on_task_right_click)
+        tree.bind("<Button-2>", self._on_task_right_click)
         self.task_tree = tree
+
+        detail = ttk.Label(
+            self.download_tab,
+            textvariable=self.task_detail_var,
+            foreground="#555555",
+            wraplength=980,
+            justify="left",
+            anchor="w",
+        )
+        detail.pack(fill="x", pady=(6, 0))
+        detail.bind("<Button-3>", self._on_task_detail_right_click)
+        detail.bind(
+            "<Configure>",
+            lambda event: detail.configure(wraplength=max(200, event.width - 16)),
+        )
 
     def _build_history_tab(self) -> None:
         actions = ttk.Frame(self.history_tab)
@@ -393,6 +476,66 @@ class DesktopApp:
             form, text=t("Search"), command=self._start_music_search
         )
         self.music_search_button.grid(row=0, column=5, padx=(6, 0), pady=2)
+
+        # Download settings, persisted through ``apps.music.settings``.
+        default_dir = str(engine["default_download_dir"]())
+        current = music_settings_from_mapping(engine["load_settings"](), default_dir)
+        self.music_out_dir_var = tk.StringVar(value=current.out_dir)
+        self.music_level_var = tk.StringVar(value=level_display(current.level))
+        self.music_embed_tags_var = tk.BooleanVar(value=current.embed_tags)
+        self.music_embed_cover_var = tk.BooleanVar(value=current.embed_cover)
+        self.music_save_lyric_var = tk.BooleanVar(value=current.save_lyric)
+        self.music_split_folder_var = tk.BooleanVar(value=current.split_folder)
+        self.music_skip_existing_var = tk.BooleanVar(value=current.skip_existing)
+
+        settings_frame = ttk.LabelFrame(
+            self.music_tab, text=t("Download settings"), padding=8
+        )
+        settings_frame.pack(fill="x", pady=(6, 2))
+        settings_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(settings_frame, text=t("Output folder")).grid(
+            row=0, column=0, sticky="w", padx=(0, 6), pady=2
+        )
+        out_entry = ttk.Entry(settings_frame, textvariable=self.music_out_dir_var)
+        out_entry.grid(row=0, column=1, sticky="ew", pady=2)
+        out_entry.bind("<FocusOut>", lambda _event: self._save_music_settings())
+        out_entry.bind("<Return>", lambda _event: self._save_music_settings())
+        ttk.Button(
+            settings_frame,
+            text=t("Browse..."),
+            command=self._browse_music_dir,
+        ).grid(row=0, column=2, padx=(6, 0), pady=2)
+
+        ttk.Label(settings_frame, text=t("Audio quality")).grid(
+            row=1, column=0, sticky="w", padx=(0, 6), pady=2
+        )
+        level_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.music_level_var,
+            values=[level_display(level) for level in MUSIC_LEVELS],
+            state="readonly",
+            width=18,
+        )
+        level_combo.grid(row=1, column=1, sticky="w", pady=2)
+        level_combo.bind("<<ComboboxSelected>>", self._on_music_level_selected)
+
+        checks = ttk.Frame(settings_frame)
+        checks.grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        check_options = (
+            (t("Save lyrics"), self.music_save_lyric_var),
+            (t("Save cover"), self.music_embed_cover_var),
+            (t("Embed tags"), self.music_embed_tags_var),
+            (t("Split into folders"), self.music_split_folder_var),
+            (t("Skip existing"), self.music_skip_existing_var),
+        )
+        for label, variable in check_options:
+            ttk.Checkbutton(
+                checks,
+                text=label,
+                variable=variable,
+                command=self._save_music_settings,
+            ).pack(side="left", padx=(0, 12))
 
         ttk.Label(
             self.music_tab,
@@ -545,6 +688,9 @@ class DesktopApp:
             self._set_status(t("Enter a keyword to search."))
             return
 
+        self._last_search = remember_search(keyword, self.sites_var.get())
+        self._update_search_memory_control()
+
         sites = parse_sites(self.sites_var.get())
         if sites is not None:
             sites = [site for site in sites if site in SEARCH_SUPPORT_SITES]
@@ -561,6 +707,25 @@ class DesktopApp:
             name="desktop-search",
             daemon=True,
         ).start()
+
+    def _restore_last_search(self) -> None:
+        state = self._last_search
+        if state is None or not state.has_previous:
+            self._set_status(t("No previous search to restore."))
+            return
+        self.search_var.set(state.keyword)
+        self.sites_var.set(state.sites)
+        if self.search_entry is not None:
+            self.search_entry.focus_set()
+        self._set_status(t("Restored the last search."))
+
+    def _update_search_memory_control(self) -> None:
+        button = self.search_last_button
+        if button is None:
+            return
+        state = self._last_search
+        enabled = state is not None and state.has_previous
+        button.state(["!disabled"] if enabled else ["disabled"])
 
     def _search_worker(self, keyword: str, sites: list[str] | None) -> None:
         try:
@@ -670,6 +835,7 @@ class DesktopApp:
 
         selected = self._selected_task_id()
         tree.delete(*tree.get_children())
+        self._tasks_by_id = {}
         sections = (
             ("running", t("Running"), snapshot.get("running", [])),
             ("pending", t("Queued"), snapshot.get("pending", [])),
@@ -698,10 +864,169 @@ class DesktopApp:
                     values=task_row(task),
                     tags=tags,
                 )
+                self._tasks_by_id[task.task_id] = task
+
+        if not self._tasks_by_id:
+            tree.insert(
+                "",
+                "end",
+                iid="empty",
+                text=t("No tasks yet. Search for a book and add it to the queue."),
+                tags=("empty",),
+            )
 
         if selected is not None and tree.exists(selected):
             tree.selection_set(selected)
             tree.see(selected)
+
+        self._update_task_controls()
+
+    def _selected_task(self) -> DownloadTask | None:
+        task_id = self._selected_task_id()
+        if task_id is None:
+            return None
+        return self._tasks_by_id.get(task_id)
+
+    @staticmethod
+    def _set_button_enabled(button: ttk.Button | None, enabled: bool) -> None:
+        if button is None:
+            return
+        button.state(["!disabled"] if enabled else ["disabled"])
+
+    def _update_task_controls(self) -> None:
+        task = self._selected_task()
+        actions = task_output_actions(task)
+        self._set_button_enabled(self.open_file_button, actions.can_open_file)
+        self._set_button_enabled(self.open_folder_button, actions.can_open_folder)
+        self.task_detail_var.set(task_detail_text(task))
+
+    def _on_task_selection(self, _event: object | None = None) -> None:
+        self._update_task_controls()
+
+    def _on_task_double_click(self, event: tk.Event[tk.Misc]) -> None:
+        tree = self.task_tree
+        if tree is None:
+            return
+        iid = tree.identify_row(event.y)
+        if iid:
+            tree.selection_set(iid)
+        task = self._selected_task()
+        if task is not None:
+            self._show_task_details(task)
+
+    def _on_task_right_click(self, event: tk.Event[tk.Misc]) -> None:
+        tree = self.task_tree
+        if tree is None:
+            return
+        iid = tree.identify_row(event.y)
+        if iid:
+            tree.selection_set(iid)
+        if self._selected_task() is not None:
+            self._show_task_menu(event.x_root, event.y_root)
+
+    def _on_task_detail_right_click(self, event: tk.Event[tk.Misc]) -> None:
+        if self._selected_task() is not None:
+            self._show_task_menu(event.x_root, event.y_root)
+
+    def _show_task_menu(self, x_root: int, y_root: int) -> None:
+        task = self._selected_task()
+        if task is None:
+            return
+        actions = task_output_actions(task)
+        error = (task.error or "").strip()
+
+        menu = self._task_menu
+        if menu is None:
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(
+                label=t("Open file"), command=self._open_selected_task_file
+            )
+            menu.add_command(
+                label=t("Open folder"), command=self._open_selected_task_folder
+            )
+            menu.add_separator()
+            menu.add_command(
+                label=t("Copy error"), command=self._copy_selected_task_error
+            )
+            menu.add_command(
+                label=t("Show details"), command=self._show_selected_task_details
+            )
+            self._task_menu = menu
+
+        menu.entryconfigure(0, state="normal" if actions.can_open_file else "disabled")
+        menu.entryconfigure(
+            1, state="normal" if actions.can_open_folder else "disabled"
+        )
+        menu.entryconfigure(3, state="normal" if error else "disabled")
+        try:
+            menu.tk_popup(x_root, y_root)
+        finally:
+            menu.grab_release()
+
+    def _open_selected_task_file(self) -> None:
+        actions = task_output_actions(self._selected_task())
+        if actions.file_path is None:
+            self._set_status(t("No exported file for the selected task."))
+            return
+        self._open_path(actions.file_path)
+
+    def _open_selected_task_folder(self) -> None:
+        actions = task_output_actions(self._selected_task())
+        if actions.folder_path is None:
+            self._set_status(t("No exported folder for the selected task."))
+            return
+        self._open_path(actions.folder_path)
+
+    def _copy_selected_task_error(self) -> None:
+        task = self._selected_task()
+        error = (task.error or "").strip() if task is not None else ""
+        if not error:
+            self._set_status(t("The selected task has no error message."))
+            return
+        self._copy_text(error)
+
+    def _copy_text(self, text: str) -> None:
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        except tk.TclError as exc:
+            self._show_error(
+                t("Could not copy to the clipboard: {error}").format(error=exc)
+            )
+            return
+        self._set_status(t("Copied to the clipboard."))
+
+    def _show_selected_task_details(self) -> None:
+        task = self._selected_task()
+        if task is not None:
+            self._show_task_details(task)
+
+    def _show_task_details(self, task: DownloadTask) -> None:
+        top = tk.Toplevel(self.root)
+        top.title(t("Task details"))
+        top.transient(self.root)
+        top.geometry("700x360")
+        top.bind("<Escape>", lambda _event: top.destroy())
+
+        frame = ttk.Frame(top, padding=8)
+        frame.pack(fill="both", expand=True)
+        text = tk.Text(frame, wrap="word", height=12)
+        text.insert("1.0", task_detail_text(task))
+        text.configure(state="disabled")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        buttons = ttk.Frame(top, padding=(8, 0, 8, 8))
+        buttons.pack(fill="x")
+        detail = task_detail_text(task)
+        ttk.Button(
+            buttons,
+            text=t("Copy"),
+            command=lambda: self._copy_text(detail),
+        ).pack(side="left")
+        ttk.Button(buttons, text=t("Close"), command=top.destroy).pack(side="right")
 
     def _selected_task_id(self) -> str | None:
         tree = self.task_tree
@@ -845,6 +1170,7 @@ class DesktopApp:
                 "download_many": download_many,
                 "human": human,
                 "load_settings": music_settings.load_settings,
+                "save_settings": music_settings.save_settings,
                 "default_download_dir": music_paths.default_download_dir,
             }
         except Exception as exc:  # noqa: BLE001 - optional dependency guard
@@ -856,6 +1182,72 @@ class DesktopApp:
     def _music_selected_key(self) -> str | None:
         display = self.music_platform_var.get()
         return self._music_display_to_key.get(display)
+
+    def _on_music_level_selected(self, _event: object | None = None) -> None:
+        self._save_music_settings()
+
+    def _browse_music_dir(self) -> None:
+        engine = self._music_engine
+        var = self.music_out_dir_var
+        if engine is None or var is None:
+            return
+        initial = resolve_output_dir(var.get(), engine["default_download_dir"]())
+        chosen = filedialog.askdirectory(
+            parent=self.root,
+            title=t("Choose the music output folder"),
+            initialdir=initial,
+            mustexist=False,
+        )
+        if chosen:
+            var.set(chosen)
+            self._save_music_settings()
+
+    def _current_music_settings(self) -> MusicSettings | None:
+        engine = self._music_engine
+        if engine is None:
+            return None
+        default_dir = str(engine["default_download_dir"]())
+        return music_settings_from_mapping(
+            {
+                "out_dir": self.music_out_dir_var.get()
+                if self.music_out_dir_var is not None
+                else "",
+                "level": level_code(self.music_level_var.get())
+                if self.music_level_var is not None
+                else "",
+                "embed_tags": self.music_embed_tags_var.get()
+                if self.music_embed_tags_var is not None
+                else True,
+                "embed_cover": self.music_embed_cover_var.get()
+                if self.music_embed_cover_var is not None
+                else True,
+                "save_lyric": self.music_save_lyric_var.get()
+                if self.music_save_lyric_var is not None
+                else True,
+                "split_folder": self.music_split_folder_var.get()
+                if self.music_split_folder_var is not None
+                else True,
+                "skip_existing": self.music_skip_existing_var.get()
+                if self.music_skip_existing_var is not None
+                else True,
+            },
+            default_dir,
+        )
+
+    def _save_music_settings(self, settings: MusicSettings | None = None) -> None:
+        engine = self._music_engine
+        current = settings or self._current_music_settings()
+        if engine is None or current is None:
+            return
+        try:
+            engine["save_settings"](music_settings_to_mapping(current))
+        except Exception as exc:  # noqa: BLE001 - settings IO is best effort
+            logger.exception("Failed to save the music settings")
+            self._set_status(
+                t("Could not save music settings: {error}").format(
+                    error=format_error(exc)
+                )
+            )
 
     def _refresh_music_note(self, _event: object | None = None) -> None:
         engine = self._music_engine
@@ -957,17 +1349,20 @@ class DesktopApp:
         if not tracks:
             return
 
+        settings = self._current_music_settings()
+        if settings is None:
+            return
+        self._save_music_settings(settings)
+
         try:
-            config: dict[str, Any] = dict(engine["load_settings"]())
-            out_dir = str(config.get("out_dir") or engine["default_download_dir"]())
             options = engine["DownloadOptions"](
-                out_dir=out_dir,
-                level=str(config.get("level") or "exhigh"),
-                embed_tags=bool(config.get("embed_tags", True)),
-                embed_cover=bool(config.get("embed_cover", True)),
-                save_lyric=bool(config.get("save_lyric", True)),
-                split_folder=bool(config.get("split_folder", True)),
-                skip_existing=bool(config.get("skip_existing", True)),
+                out_dir=settings.out_dir,
+                level=settings.level,
+                embed_tags=settings.embed_tags,
+                embed_cover=settings.embed_cover,
+                save_lyric=settings.save_lyric,
+                split_folder=settings.split_folder,
+                skip_existing=settings.skip_existing,
             )
         except Exception as exc:  # noqa: BLE001 - settings/engine failure
             self._show_error(
@@ -976,6 +1371,7 @@ class DesktopApp:
                 )
             )
             return
+        out_dir = settings.out_dir
 
         self._music_stop.clear()
         if self.music_progress is not None:

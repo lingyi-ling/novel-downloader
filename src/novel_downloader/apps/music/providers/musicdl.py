@@ -248,8 +248,10 @@ class MusicdlProvider(MusicProvider):
     def search(self, keyword, limit=None, offset=0):
         if offset:
             return [], 0  # musicdl 不支持分页偏移
-        client = self._get_client()
         try:
+            # 客户端构造/平台模块导入也纳入异常归纳：某个平台的依赖
+            # （如 pathvalidate）缺失时只影响该平台，且给出可读原因。
+            client = self._get_client()
             infos = client.search(
                 keyword=keyword,
                 num_threadings=5,
@@ -259,6 +261,12 @@ class MusicdlProvider(MusicProvider):
                 main_process_context=_NullProgress(),
                 main_progress_id=None,
             )
+        except ModuleNotFoundError as e:
+            # 平台模块的可选依赖（如 pathvalidate）缺失：点名平台，别让
+            # 整个引擎看起来都不可用
+            raise RuntimeError(
+                f"{self.display_name} 缺少可选依赖：{e.name or e}"
+            ) from e
         except Exception as e:
             # 平台接口不可达/变更时，把底层晦涩异常包成可读信息，界面直接可见
             raise RuntimeError(

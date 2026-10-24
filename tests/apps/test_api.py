@@ -499,6 +499,324 @@ async def test_tasks_validation_requires_site_and_book_id(
 
 
 # ---------------------------------------------------------------------------
+# Tasks: pagination
+# ---------------------------------------------------------------------------
+
+
+def _seed_tasks(manager: FakeManager, count: int) -> list[DownloadTask]:
+    """Put ``count`` distinguishable tasks into the fake manager."""
+    tasks = [
+        DownloadTask(title=f"t{index}", site="demo", book_id=str(index))
+        for index in range(count)
+    ]
+    manager.pending = tasks
+    return tasks
+
+
+@pytest.mark.asyncio
+async def test_tasks_without_params_returns_full_snapshot(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    tasks = _seed_tasks(fake_manager, 60)
+
+    response = await client.get("/api/v1/tasks")
+
+    assert response.status_code == 200
+    payload = response.json()
+    # No parameters means "no pagination": every task is still returned,
+    # matching the pre-pagination behaviour.
+    assert payload["total"] == 60
+    assert payload["offset"] == 0
+    assert payload["limit"] == 60
+    assert [item["task_id"] for item in payload["pending"]] == [
+        task.task_id for task in tasks
+    ]
+    assert payload["running"] == []
+    assert payload["completed"] == []
+
+
+@pytest.mark.asyncio
+async def test_tasks_pagination_spans_all_groups(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    tasks = [
+        DownloadTask(title=f"t{index}", site="demo", book_id=str(index))
+        for index in range(6)
+    ]
+    fake_manager.pending = tasks[0:2]
+    fake_manager.running = tasks[2:3]
+    fake_manager.completed = tasks[3:6]
+
+    response = await client.get("/api/v1/tasks", params={"offset": 1, "limit": 3})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 6
+    assert payload["offset"] == 1
+    assert payload["limit"] == 3
+    assert [item["task_id"] for item in payload["pending"]] == [tasks[1].task_id]
+    assert [item["task_id"] for item in payload["running"]] == [tasks[2].task_id]
+    assert [item["task_id"] for item in payload["completed"]] == [tasks[3].task_id]
+
+
+@pytest.mark.asyncio
+async def test_tasks_pagination_offset_only_uses_default_limit(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    _seed_tasks(fake_manager, 60)
+
+    response = await client.get("/api/v1/tasks", params={"offset": 10})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 60
+    assert payload["offset"] == 10
+    assert payload["limit"] == 50
+    assert len(payload["pending"]) == 50
+    assert payload["pending"][0]["title"] == "t10"
+
+
+@pytest.mark.asyncio
+async def test_tasks_pagination_limit_only_starts_at_zero(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    _seed_tasks(fake_manager, 5)
+
+    response = await client.get("/api/v1/tasks", params={"limit": 2})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["offset"] == 0
+    assert payload["limit"] == 2
+    assert [item["title"] for item in payload["pending"]] == ["t0", "t1"]
+
+
+@pytest.mark.asyncio
+async def test_tasks_pagination_offset_past_end_is_empty(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    _seed_tasks(fake_manager, 3)
+
+    response = await client.get("/api/v1/tasks", params={"offset": 100})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 3
+    assert payload["offset"] == 100
+    assert payload["pending"] == []
+    assert payload["running"] == []
+    assert payload["completed"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"offset": -1},
+        {"limit": 0},
+        {"limit": 201},
+    ],
+)
+async def test_tasks_pagination_rejects_out_of_range(
+    client: httpx.AsyncClient,
+    params: dict[str, int],
+) -> None:
+    response = await client.get("/api/v1/tasks", params=params)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_tasks_pagination_accepts_max_limit(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    _seed_tasks(fake_manager, 5)
+
+    response = await client.get("/api/v1/tasks", params={"offset": 0, "limit": 200})
+
+    assert response.status_code == 200
+    assert response.json()["limit"] == 200
+
+
+# ---------------------------------------------------------------------------
+# Tasks: SSE stream
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tasks_stream_emits_snapshot_events(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The endpoint wraps the snapshot generator in an SSE response.
+
+    ``httpx.ASGITransport`` buffers a response until the ASGI app returns, so
+    an endless stream cannot be consumed through it. The real (infinite) loop
+    is exercised directly in
+    :func:`test_task_event_stream_repeats_snapshot`; here a finite stand-in
+    verifies the HTTP envelope.
+    """
+    payload = {
+        "pending": [{"task_id": "t1"}],
+        "running": [],
+        "completed": [],
+    }
+    calls: dict[str, Any] = {}
+
+    async def fake_stream(mgr: Any, interval: float) -> Any:
+        calls["manager"] = mgr
+        calls["interval"] = interval
+        yield api_routes._sse_frame("snapshot", payload)
+        yield api_routes._sse_frame("snapshot", payload)
+
+    monkeypatch.setattr(api_routes, "_task_event_stream", fake_stream)
+
+    async with client.stream("GET", "/api/v1/tasks/stream") as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert response.headers["cache-control"] == "no-cache"
+        assert response.headers["x-accel-buffering"] == "no"
+        raw = "".join([chunk async for chunk in response.aiter_text()])
+
+    events = _parse_sse(raw)
+    assert [event for event, _ in events] == ["snapshot", "snapshot"]
+    assert events[0][1] == payload
+    assert calls["manager"] is fake_manager
+    assert calls["interval"] == api_routes.TASK_STREAM_INTERVAL
+
+
+@pytest.mark.asyncio
+async def test_task_event_stream_repeats_snapshot(
+    fake_manager: FakeManager,
+) -> None:
+    task = DownloadTask(title="streamed", site="demo", book_id="1")
+    fake_manager.pending = [task]
+
+    stream = api_routes._task_event_stream(fake_manager, 0.01)
+    first = _parse_sse(await anext(stream))
+
+    # The next iteration reflects the manager state at that moment.
+    fake_manager.pending = []
+    fake_manager.completed = [task]
+    second = _parse_sse(await anext(stream))
+    await stream.aclose()
+
+    assert len(first) == 1 and len(second) == 1
+    assert first[0][0] == "snapshot"
+    assert first[0][1]["pending"][0]["task_id"] == task.task_id
+    assert first[0][1]["running"] == []
+    assert second[0][1]["pending"] == []
+    assert second[0][1]["completed"][0]["task_id"] == task.task_id
+
+
+@pytest.mark.asyncio
+async def test_tasks_stream_stops_polling_when_closed(
+    fake_manager: FakeManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    original_snapshot = fake_manager.snapshot
+
+    def counting_snapshot() -> dict[str, list[DownloadTask]]:
+        nonlocal calls
+        calls += 1
+        return original_snapshot()
+
+    monkeypatch.setattr(fake_manager, "snapshot", counting_snapshot)
+
+    stream = api_routes._task_event_stream(fake_manager, 0.01)
+    first = await anext(stream)
+    assert first.startswith("event: snapshot")
+
+    # Simulates the client disconnecting: Starlette closes the response
+    # generator, so no further snapshots are produced.
+    await stream.aclose()
+    calls_at_close = calls
+    await asyncio.sleep(0.05)
+
+    assert calls == calls_at_close == 1
+
+
+# ---------------------------------------------------------------------------
+# History: pagination
+# ---------------------------------------------------------------------------
+
+
+def _write_history_files(tmp_path: Path) -> Path:
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    for index in range(5):
+        path = output_dir / f"book{index}.txt"
+        path.write_text("x" * (index + 1), encoding="utf-8")
+        os.utime(path, (100.0 + index, 100.0 + index))
+    return output_dir
+
+
+@pytest.mark.asyncio
+async def test_history_pagination(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = _write_history_files(tmp_path)
+    monkeypatch.setattr(history_files, "_output_dir", lambda: output_dir)
+
+    response = await client.get("/api/v1/history", params={"offset": 1, "limit": 2})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 5
+    assert payload["offset"] == 1
+    assert payload["limit"] == 2
+    # Newest first: book4, book3, book2, book1, book0.
+    assert [item["name"] for item in payload["files"]] == ["book3.txt", "book2.txt"]
+
+
+@pytest.mark.asyncio
+async def test_history_without_params_keeps_full_listing(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = _write_history_files(tmp_path)
+    monkeypatch.setattr(history_files, "_output_dir", lambda: output_dir)
+
+    response = await client.get("/api/v1/history")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 5
+    assert payload["offset"] == 0
+    assert payload["limit"] == 5
+    assert len(payload["files"]) == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"offset": -1},
+        {"limit": 0},
+        {"limit": 201},
+    ],
+)
+async def test_history_pagination_rejects_out_of_range(
+    client: httpx.AsyncClient,
+    params: dict[str, int],
+) -> None:
+    response = await client.get("/api/v1/history", params=params)
+
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
 

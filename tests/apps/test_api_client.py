@@ -159,6 +159,84 @@ def test_tasks() -> None:
     assert recorder.requests[0].url.path == "/api/v1/tasks"
 
 
+def test_tasks_page_sends_pagination_params() -> None:
+    payload = {
+        "pending": [],
+        "running": [],
+        "completed": [],
+        "total": 12,
+        "offset": 3,
+        "limit": 7,
+    }
+    recorder = Recorder(lambda _request: httpx.Response(200, json=payload))
+
+    with make_client(recorder) as client:
+        assert client.tasks_page(offset=3, limit=7) == payload
+
+    request = recorder.requests[0]
+    assert request.url.path == "/api/v1/tasks"
+    assert dict(request.url.params) == {"offset": "3", "limit": "7"}
+
+
+def test_tasks_page_defaults() -> None:
+    recorder = Recorder(lambda _request: httpx.Response(200, json={}))
+
+    with make_client(recorder) as client:
+        client.tasks_page()
+
+    assert dict(recorder.requests[0].url.params) == {"offset": "0", "limit": "50"}
+
+
+def test_iter_tasks_parses_sse_stream() -> None:
+    body = (
+        "event: snapshot\n"
+        'data: {"pending":[],"running":[],"completed":[]}\n'
+        "\n"
+        ": keepalive\n"
+        "\n"
+        "event: snapshot\n"
+        'data: {"pending":[{"task_id":"t1","title":"书"}],'
+        '"running":[],"completed":[]}\n'
+        "\n"
+        "event: something-else\n"
+        'data: {"ignored":true}\n'
+        "\n"
+    )
+    recorder = Recorder(
+        lambda _request: httpx.Response(
+            200,
+            content=body.encode("utf-8"),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    with make_client(recorder) as client:
+        snapshots = list(client.iter_tasks())
+
+    assert snapshots == [
+        {"pending": [], "running": [], "completed": []},
+        {
+            "pending": [{"task_id": "t1", "title": "书"}],
+            "running": [],
+            "completed": [],
+        },
+    ]
+    assert recorder.requests[0].method == "GET"
+    assert recorder.requests[0].url.path == "/api/v1/tasks/stream"
+
+
+def test_iter_tasks_raises_api_error_for_error_response() -> None:
+    recorder = Recorder(
+        lambda _request: httpx.Response(401, json={"detail": "Invalid token"})
+    )
+
+    with make_client(recorder) as client, pytest.raises(ApiError) as info:
+        list(client.iter_tasks())
+
+    assert info.value.status_code == 401
+    assert info.value.detail == "Invalid token"
+
+
 def test_task_uses_dedicated_endpoint() -> None:
     payload = {"task_id": "t1", "status": "running"}
     recorder = Recorder(lambda _request: httpx.Response(200, json=payload))
@@ -245,6 +323,27 @@ def test_history() -> None:
         assert client.history() == payload
 
     assert recorder.requests[0].url.path == "/api/v1/history"
+
+
+def test_history_page_sends_pagination_params() -> None:
+    payload = {"total": 9, "offset": 2, "limit": 3, "files": []}
+    recorder = Recorder(lambda _request: httpx.Response(200, json=payload))
+
+    with make_client(recorder) as client:
+        assert client.history_page(offset=2, limit=3) == payload
+
+    request = recorder.requests[0]
+    assert request.url.path == "/api/v1/history"
+    assert dict(request.url.params) == {"offset": "2", "limit": "3"}
+
+
+def test_history_page_defaults() -> None:
+    recorder = Recorder(lambda _request: httpx.Response(200, json={}))
+
+    with make_client(recorder) as client:
+        client.history_page()
+
+    assert dict(recorder.requests[0].url.params) == {"offset": "0", "limit": "50"}
 
 
 def test_download_file_writes_bytes_and_encodes_name(tmp_path: Path) -> None:
