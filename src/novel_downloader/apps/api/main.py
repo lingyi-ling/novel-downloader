@@ -10,6 +10,10 @@ The token can be passed with ``--token`` or supplied through the
 authentication, which is only safe because it binds to localhost by default:
 binding to a non-local address (or enabling ``--cors`` there) prints a
 prominent warning to stderr before the server starts.
+
+A per-IP sliding-window rate limit (120 requests per minute by default,
+``--rate-limit 0`` to disable) protects the server from runaway integration
+clients; ``/api/v1/health`` stays exempt for uptime monitors.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from collections.abc import Sequence
 import uvicorn
 
 from .app import create_app
+from .middleware import DEFAULT_RATE_LIMIT, DEFAULT_RATE_LIMIT_WINDOW
 
 #: Bind addresses that count as "loopback only".
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
@@ -97,6 +102,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "Only for local use; do not combine with a public bind."
         ),
     )
+    parser.add_argument(
+        "--rate-limit",
+        type=int,
+        default=DEFAULT_RATE_LIMIT,
+        help=(
+            "Max requests accepted per client IP per sliding window "
+            "(429 + Retry-After above it). 0 disables rate limiting."
+        ),
+    )
+    parser.add_argument(
+        "--rate-limit-window",
+        type=float,
+        default=DEFAULT_RATE_LIMIT_WINDOW,
+        help="Length of the --rate-limit sliding window in seconds.",
+    )
     return parser
 
 
@@ -107,7 +127,12 @@ def api_main(argv: Sequence[str] | None = None) -> None:
     token = args.token if args.token is not None else os.environ.get(TOKEN_ENV_VAR)
     warn_if_insecure_bind(args.host, token, args.cors)
 
-    application = create_app(token=token, cors=args.cors)
+    application = create_app(
+        token=token,
+        cors=args.cors,
+        rate_limit=args.rate_limit,
+        rate_limit_window=args.rate_limit_window,
+    )
     uvicorn.run(application, host=args.host, port=args.port)
 
 

@@ -23,6 +23,13 @@ Additional hardening
 --------------------
 * Request bodies of the JSON endpoints are capped (see
   :class:`novel_downloader.apps.api.middleware.BodySizeLimitMiddleware`).
+* Requests are rate limited per client IP with a sliding window (default 120
+  per 60 seconds, ``--rate-limit 0`` disables it — see
+  :class:`novel_downloader.apps.api.middleware.RateLimitMiddleware`): a buggy
+  integration client stuck in a loop gets ``429`` + ``Retry-After`` instead of
+  being able to hammer the local server indefinitely. The limit runs *before*
+  the token check (throttling brute-force attempts) and *inside* the CORS
+  layer (the ``429`` keeps the CORS headers); ``/api/v1/health`` is exempt.
 * Every request is logged as a single ``method path status duration`` line
   (:class:`novel_downloader.apps.api.middleware.RequestLoggingMiddleware`,
   ``WARNING`` once it exceeds one second); query strings and response bodies
@@ -63,9 +70,12 @@ from novel_downloader.infra.config import get_config_value
 
 from .middleware import (
     DEFAULT_MAX_BODY_BYTES,
+    DEFAULT_RATE_LIMIT,
+    DEFAULT_RATE_LIMIT_WINDOW,
     BodySizeLimitMiddleware,
     CacheControlMiddleware,
     DownloadsAuthMiddleware,
+    RateLimitMiddleware,
     RequestLoggingMiddleware,
     register_error_handlers,
 )
@@ -141,6 +151,8 @@ def create_app(
     cors: bool = False,
     output_dir: str | Path | None = None,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+    rate_limit: int = DEFAULT_RATE_LIMIT,
+    rate_limit_window: float = DEFAULT_RATE_LIMIT_WINDOW,
     timeouts: Mapping[str, float] | None = None,
     webhook_url: str | None = None,
 ) -> FastAPI:
@@ -155,6 +167,11 @@ def create_app(
         mainly useful in tests.
     :param max_body_bytes: Request-body ceiling for the JSON endpoints
         (``413`` above it). Defaults to 1 MiB.
+    :param rate_limit: Requests admitted per client IP per sliding window
+        (``429`` + ``Retry-After`` above it). ``0`` disables rate limiting
+        entirely. Defaults to 120 per minute; ``/api/v1/health`` is exempt.
+    :param rate_limit_window: Length of the rate-limit sliding window in
+        seconds. Defaults to 60.
     :param timeouts: Per-endpoint wall-clock budgets in seconds, keyed by
         ``search``, ``music_search`` and ``music_download``; unset keys fall
         back to the defaults in
@@ -202,6 +219,18 @@ def create_app(
     # middleware. It reads ``app.state.api_token`` at request time, which keeps
     # it in sync with the router dependency and a no-op when no token is set.
     application.add_middleware(DownloadsAuthMiddleware)
+
+    # Rate limiting wraps the auth layer: a runaway integration client or a
+    # token brute-force is throttled before it can reach the token check. It
+    # stays *inside* the CORS layer (its 429 keeps the CORS headers) and
+    # inside the cache/logging layers (the 429 is stamped ``no-store`` and
+    # logged like every other response). ``rate_limit <= 0`` adds nothing.
+    if rate_limit > 0:
+        application.add_middleware(
+            RateLimitMiddleware,
+            limit=rate_limit,
+            window=rate_limit_window,
+        )
 
     # Cache policy sits *outside* the auth and body-limit layers so their
     # direct 401/413 responses carry the same Cache-Control as every other

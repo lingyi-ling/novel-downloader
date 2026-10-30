@@ -111,6 +111,15 @@ from .preferences import (
     remember_search,
     resolve_output_dir,
 )
+from .window_state import (
+    MIN_WINDOW_HEIGHT,
+    MIN_WINDOW_WIDTH,
+    load_window_geometry,
+    parse_geometry,
+    save_window_geometry,
+    serialize_geometry,
+    window_state_file,
+)
 
 __all__ = ["DesktopApp", "run_app"]
 
@@ -124,6 +133,9 @@ _SEARCH_PER_SITE = 5
 _SEARCH_TIMEOUT = 10.0
 _MUSIC_SEARCH_LIMIT = 30
 _MUSIC_WORKERS = 3
+
+#: Geometry used when no valid window state was stored yet.
+_DEFAULT_GEOMETRY = "1100x720"
 
 #: How long the status bar keeps a task-notification highlight (ms).
 _NOTIFY_STATUS_MS = 5000
@@ -270,7 +282,11 @@ class DesktopApp:
         self.follow_check_button: ttk.Button | None = None
         self.follow_download_button: ttk.Button | None = None
 
+        # Tab container, kept for the Ctrl+1..5 shortcuts.
+        self._notebook: ttk.Notebook | None = None
+
         self._build_ui()
+        self._register_shortcuts()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         root.after(_POLL_MS, self._poll)
         self._refresh_history(initial=True)
@@ -281,8 +297,9 @@ class DesktopApp:
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         self.root.title(f"{t('Novel Downloader')} v{__version__}")
-        self.root.geometry("1100x720")
+        self._restore_window_geometry()
         self.root.minsize(760, 480)
+        self._build_menubar()
 
         status_bar = ttk.Frame(self.root, relief="sunken", padding=(6, 3))
         status_bar.pack(side="bottom", fill="x")
@@ -303,6 +320,7 @@ class DesktopApp:
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
+        self._notebook = notebook
 
         self.search_tab = ttk.Frame(notebook, padding=8)
         self.download_tab = ttk.Frame(notebook, padding=8)
@@ -314,6 +332,13 @@ class DesktopApp:
         notebook.add(self.history_tab, text=t("History"))
         notebook.add(self.music_tab, text=t("Music"))
         notebook.add(self.follow_tab, text=t("Follow"))
+        self._tab_widgets: tuple[ttk.Frame, ...] = (
+            self.search_tab,
+            self.download_tab,
+            self.history_tab,
+            self.music_tab,
+            self.follow_tab,
+        )
 
         self._build_search_tab()
         self._build_download_tab()
@@ -854,6 +879,85 @@ class DesktopApp:
         tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         self.follow_tree = tree
+
+    def _build_menubar(self) -> None:
+        """Build the menu bar with the Help > Keyboard shortcuts entry."""
+        menubar = tk.Menu(self.root)
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(
+            label=t("Keyboard shortcuts"), command=self._show_keyboard_shortcuts
+        )
+        menubar.add_cascade(label=t("Help"), menu=help_menu)
+        self.root.configure(menu=menubar)
+
+    def _show_keyboard_shortcuts(self) -> None:
+        """Show the keyboard shortcut list in a dialog."""
+        lines = [
+            "Ctrl+1..5  " + t("Switch to tab {number}").format(number="1..5"),
+            f"Ctrl+F  {t('Search')}",
+            f"Ctrl+D  {t('Add to download queue')}",
+        ]
+        messagebox.showinfo(t("Keyboard shortcuts"), "\n".join(lines), parent=self.root)
+
+    # ------------------------------------------------------------------
+    # Window state (geometry) persistence
+    # ------------------------------------------------------------------
+    def _restore_window_geometry(self) -> None:
+        """Apply the stored window geometry, falling back to the default."""
+        geometry = load_window_geometry(window_state_file())
+        self.root.geometry(
+            serialize_geometry(geometry) if geometry is not None else _DEFAULT_GEOMETRY
+        )
+
+    def _save_window_state(self) -> None:
+        """Persist the current window geometry for the next launch."""
+        geometry = parse_geometry(self.root.geometry())
+        if geometry is None:
+            return
+        # A degenerate query result (e.g. a window that was never mapped)
+        # must not overwrite the good geometry from a previous session.
+        if geometry.width < MIN_WINDOW_WIDTH or geometry.height < MIN_WINDOW_HEIGHT:
+            return
+        save_window_geometry(window_state_file(), geometry)
+
+    # ------------------------------------------------------------------
+    # Keyboard shortcuts
+    # ------------------------------------------------------------------
+    def _register_shortcuts(self) -> None:
+        """
+        Bind the global keyboard shortcuts (see Help > Keyboard shortcuts).
+
+        ``bind_all`` makes the bindings work with focus on any widget; both
+        letter cases are bound so Ctrl+Shift+F/Ctrl+Shift+D behave the same.
+        """
+        for index in range(1, len(self._tab_widgets) + 1):
+            self.root.bind_all(
+                f"<Control-{index}>", partial(self._on_tab_shortcut, index)
+            )
+        for keysym in ("f", "F"):
+            self.root.bind_all(f"<Control-{keysym}>", self._on_focus_search_shortcut)
+        for keysym in ("d", "D"):
+            self.root.bind_all(f"<Control-{keysym}>", self._on_add_to_queue_shortcut)
+
+    def _on_tab_shortcut(self, index: int, _event: object) -> None:
+        """Switch to the ``index``-th notebook tab (1-based; ignore others)."""
+        notebook = self._notebook
+        if notebook is None or not 1 <= index <= len(self._tab_widgets):
+            return
+        # ``select`` is untyped in the tkinter stubs; calling it through the
+        # typed alias keeps the strict no-untyped-call check quiet.
+        select: Callable[[object], object] = notebook.select
+        select(self._tab_widgets[index - 1])
+
+    def _on_focus_search_shortcut(self, _event: object) -> None:
+        """Move the keyboard focus to the search-tab keyword entry."""
+        entry = self.search_entry
+        if entry is not None:
+            entry.focus_set()
+
+    def _on_add_to_queue_shortcut(self, _event: object) -> None:
+        """Queue the search-tab selection, like the toolbar button."""
+        self._add_selected_results()
 
     # ------------------------------------------------------------------
     # Follow list ("追更")
@@ -2631,6 +2735,9 @@ class DesktopApp:
         self._set_status(t("Closing..."))
         with contextlib.suppress(tk.TclError):
             self.root.update_idletasks()
+        # Saved after ``update_idletasks`` so the geometry query reflects the
+        # final laid-out size even for a window that was never mapped.
+        self._save_window_state()
         try:
             self.engine.shutdown()
         finally:

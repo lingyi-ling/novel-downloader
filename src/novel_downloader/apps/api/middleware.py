@@ -11,6 +11,12 @@ Request-hardening helpers shared by the REST API application.
 * :class:`DownloadsAuthMiddleware` applies the same token check as
   ``/api/v1`` to the ``/downloads`` static mount, which is not covered by the
   router-level dependency.
+* :class:`RateLimitMiddleware` keeps a sliding-window request counter per
+  client IP (in memory; default 120 requests per 60 seconds). A client over
+  the limit — e.g. an integration script stuck in an infinite retry loop — is
+  answered with ``429`` + ``Retry-After`` instead of being able to hammer the
+  local server indefinitely. ``/api/v1/health`` is exempt and stale per-IP
+  entries are dropped periodically so the counter cannot grow without bound.
 * :class:`RequestLoggingMiddleware` emits exactly one access-log line per
   request (``method path status duration``). The query string is never logged
   (it may carry tokens) and response bodies are never read for logging, so
@@ -31,7 +37,9 @@ through ``httpx.ASGITransport`` without starting a server.
 from __future__ import annotations
 
 import logging
+import math
 import time
+from collections import deque
 from collections.abc import Iterable
 from typing import Any
 
@@ -66,6 +74,24 @@ BODY_LIMIT_ENDPOINTS: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/music/jobs"),
     }
 )
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+#: Default requests admitted per client IP per window: 120 req/min.
+DEFAULT_RATE_LIMIT = 120
+
+#: Default sliding-window length in seconds.
+DEFAULT_RATE_LIMIT_WINDOW = 60.0
+
+#: Paths never rate limited. Uptime monitors and orchestrators must keep
+#: working even while a misbehaving client is locked out.
+RATE_LIMIT_EXEMPT_PATHS: frozenset[str] = frozenset({"/api/v1/health"})
+
+#: Clock used by :class:`RateLimitMiddleware`. A module-level hook so tests
+#: can freeze or advance time deterministically instead of sleeping.
+_monotonic = time.monotonic
 
 # ---------------------------------------------------------------------------
 # Cache-Control policy
@@ -249,6 +275,135 @@ class DownloadsAuthMiddleware:
             headers={"WWW-Authenticate": "Bearer"},
         )
         await response(scope, receive, send)
+
+
+class RateLimitMiddleware:
+    """
+    Limit each client IP to ``limit`` requests per sliding ``window`` seconds.
+
+    A true sliding window: every admitted request is timestamped and the
+    counter keeps one ``deque`` of timestamps per client IP. A request is
+    admitted while fewer than ``limit`` timestamps fall inside
+    ``(now - window, now]``; once the IP is over the limit it receives::
+
+        429 {"detail": "Rate limit exceeded. Try again in <seconds>s."}
+
+    with a ``Retry-After`` header naming how long it takes until the oldest
+    admitted request slides out of the window. Rejected requests are *not*
+    counted, so a client that stops hammering recovers as soon as its window
+    drains.
+
+    Design notes:
+
+    * Purpose: a buggy integration client stuck in a request loop must not be
+      able to hammer the local server indefinitely. Counting happens *before*
+      authentication, so a token brute-force is throttled too.
+    * ``limit <= 0`` disables the middleware entirely (pass-through), matching
+      ``--rate-limit 0``.
+    * Paths in :data:`RATE_LIMIT_EXEMPT_PATHS` (``/api/v1/health``) are never
+      limited: uptime monitors must keep working even while a client is
+      locked out.
+    * State is a plain in-memory ``dict`` updated without an ``await`` between
+      read and write, i.e. race-free under uvicorn's single event loop and
+      free of locking. It is per-process by design: this is a local API, not a
+      distributed one. The client IP is taken from the ASGI scope (the TCP
+      peer); ``X-Forwarded-For`` is deliberately not honoured on a localhost
+      service.
+    * Stale per-IP entries are dropped at most once per window
+      (:meth:`_maybe_cleanup`), keeping memory bounded even with many
+      short-lived client IPs.
+
+    :param app: The wrapped ASGI application.
+    :param limit: Requests admitted per client IP per window; ``<= 0`` disables.
+    :param window: Sliding-window length in seconds.
+    :param exempt_paths: Paths never limited; defaults to
+        :data:`RATE_LIMIT_EXEMPT_PATHS`.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        limit: int = DEFAULT_RATE_LIMIT,
+        window: float = DEFAULT_RATE_LIMIT_WINDOW,
+        exempt_paths: Iterable[str] | None = None,
+    ) -> None:
+        self.app = app
+        self.limit = int(limit)
+        self.window = float(window)
+        self.exempt_paths = frozenset(
+            RATE_LIMIT_EXEMPT_PATHS if exempt_paths is None else exempt_paths
+        )
+        self._hits: dict[str, deque[float]] = {}
+        self._last_cleanup = 0.0
+
+    @staticmethod
+    def _client_ip(scope: Scope) -> str:
+        """Best-effort client identity for the counter (the TCP peer)."""
+        client = scope.get("client")
+        host = client[0] if client else None
+        return str(host) if host else "unknown"
+
+    def _is_exempt(self, path: str) -> bool:
+        """Whether ``path`` is never limited (trailing slash normalised)."""
+        cleaned = path.rstrip("/") or "/"
+        return cleaned in self.exempt_paths
+
+    def _register_hit(self, key: str, now: float) -> int | None:
+        """
+        Count one request for ``key`` at ``now``.
+
+        :return: ``None`` when the request is admitted (its timestamp was
+            recorded), otherwise the ``Retry-After`` seconds until a slot
+            frees up.
+        """
+        timestamps = self._hits.setdefault(key, deque())
+        cutoff = now - self.window
+        while timestamps and timestamps[0] <= cutoff:
+            timestamps.popleft()
+        if self.limit > 0 and len(timestamps) >= self.limit:
+            return max(math.ceil(timestamps[0] + self.window - now), 1)
+        timestamps.append(now)
+        self._maybe_cleanup(now)
+        return None
+
+    def _maybe_cleanup(self, now: float) -> None:
+        """Drop per-IP state that has fully slid out of the window."""
+        if now - self._last_cleanup < self.window:
+            return
+        cutoff = now - self.window
+        stale = {
+            key
+            for key, timestamps in self._hits.items()
+            if not timestamps or timestamps[-1] <= cutoff
+        }
+        for key in stale:
+            del self._hits[key]
+        self._last_cleanup = now
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path", ""))
+        if self.limit <= 0 or self._is_exempt(path):
+            await self.app(scope, receive, send)
+            return
+
+        retry_after = self._register_hit(self._client_ip(scope), _monotonic())
+        if retry_after is not None:
+            response = JSONResponse(
+                status_code=429,
+                content={
+                    "detail": f"Rate limit exceeded. Try again in {retry_after}s."
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 class CacheControlMiddleware:
@@ -467,11 +622,15 @@ __all__ = [
     "CACHE_CONTROL_RULES",
     "CACHE_POLICY_PREFIXES",
     "DEFAULT_MAX_BODY_BYTES",
+    "DEFAULT_RATE_LIMIT",
+    "DEFAULT_RATE_LIMIT_WINDOW",
     "DOWNLOADS_PREFIX",
+    "RATE_LIMIT_EXEMPT_PATHS",
     "SLOW_REQUEST_SECONDS",
     "BodySizeLimitMiddleware",
     "CacheControlMiddleware",
     "DownloadsAuthMiddleware",
+    "RateLimitMiddleware",
     "RequestLoggingMiddleware",
     "register_error_handlers",
 ]

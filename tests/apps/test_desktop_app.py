@@ -41,6 +41,7 @@ from novel_downloader.apps.desktop import formatting as fmt
 from novel_downloader.apps.desktop import main as desktop_main
 from novel_downloader.apps.desktop import notifications as notif
 from novel_downloader.apps.desktop import preferences as prefs
+from novel_downloader.apps.desktop import window_state as wstate
 from novel_downloader.apps.desktop.engine import AsyncEngine
 from novel_downloader.infra.i18n import t
 from novel_downloader.plugins import search as search_module
@@ -1489,6 +1490,234 @@ def test_search_menu_state_any_valid_row_enables_an_entry() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Window state: geometry parsing / serialization (pure)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1100x720", wstate.WindowGeometry(width=1100, height=720)),
+        ("1100x720+50+30", wstate.WindowGeometry(1100, 720, 50, 30)),
+        # Negative offsets keep their Tk meaning (right/bottom screen edge).
+        ("900x600-40-20", wstate.WindowGeometry(900, 600, -40, -20)),
+        ("900x600+40-20", wstate.WindowGeometry(900, 600, 40, -20)),
+        ("900x600-40+20", wstate.WindowGeometry(900, 600, -40, 20)),
+        ("0x0", wstate.WindowGeometry(0, 0)),
+        # A leading "=" and surrounding whitespace are tolerated.
+        ("=1100x720+1+2", wstate.WindowGeometry(1100, 720, 1, 2)),
+        ("  1100x720+1+2  ", wstate.WindowGeometry(1100, 720, 1, 2)),
+    ],
+)
+def test_parse_geometry_accepts_tk_geometry_strings(
+    raw: str, expected: wstate.WindowGeometry
+) -> None:
+    assert wstate.parse_geometry(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "abc",
+        "1100",
+        "x720",
+        "1100xx720",
+        "1100 x 720",
+        "1100x720+",
+        "1100x720++1+1",
+        "1100x720+1",
+        "1100x720+1+2+3",
+    ],
+)
+def test_parse_geometry_rejects_invalid_strings(raw: str) -> None:
+    assert wstate.parse_geometry(raw) is None
+    assert wstate.parse_geometry(None) is None  # type: ignore[arg-type]
+
+
+def test_serialize_geometry_matches_the_tk_format() -> None:
+    assert wstate.serialize_geometry(wstate.WindowGeometry(1100, 720)) == "1100x720"
+    assert (
+        wstate.serialize_geometry(wstate.WindowGeometry(1100, 720, 50, 30))
+        == "1100x720+50+30"
+    )
+    assert (
+        wstate.serialize_geometry(wstate.WindowGeometry(900, 600, -40, -20))
+        == "900x600-40-20"
+    )
+
+
+@pytest.mark.parametrize(
+    "geometry",
+    [
+        wstate.WindowGeometry(1100, 720),
+        wstate.WindowGeometry(1100, 720, 50, 30),
+        wstate.WindowGeometry(900, 600, -40, -20),
+        wstate.WindowGeometry(1, 1, 0, 0),
+    ],
+)
+def test_geometry_parse_serialize_round_trip(geometry: wstate.WindowGeometry) -> None:
+    assert wstate.parse_geometry(wstate.serialize_geometry(geometry)) == geometry
+
+
+def test_clamp_geometry_enforces_the_minimum_size() -> None:
+    clamped = wstate.clamp_geometry(wstate.WindowGeometry(200, 100, 7, 8))
+    assert clamped == wstate.WindowGeometry(
+        wstate.MIN_WINDOW_WIDTH, wstate.MIN_WINDOW_HEIGHT, 7, 8
+    )
+
+
+def test_clamp_geometry_keeps_usable_sizes_and_position() -> None:
+    geometry = wstate.WindowGeometry(1100, 720, -40, 30)
+    assert wstate.clamp_geometry(geometry) == geometry
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected"),
+    [
+        (
+            {"width": 1100, "height": 720, "x": 50, "y": 30},
+            wstate.WindowGeometry(1100, 720, 50, 30),
+        ),
+        # Negative positions are valid (right/bottom screen edge anchoring).
+        (
+            {"width": 900, "height": 600, "x": -40, "y": -20},
+            wstate.WindowGeometry(900, 600, -40, -20),
+        ),
+        # Missing or null positions mean "let the window manager decide".
+        ({"width": 800, "height": 500}, wstate.WindowGeometry(800, 500)),
+        (
+            {"width": 800, "height": 500, "x": None, "y": None},
+            wstate.WindowGeometry(800, 500),
+        ),
+        # A half-pair is dropped: the position is kept only when both match.
+        ({"width": 800, "height": 500, "x": 10}, wstate.WindowGeometry(800, 500)),
+    ],
+)
+def test_window_geometry_from_mapping_accepts_valid_mappings(
+    mapping: dict[str, Any], expected: wstate.WindowGeometry
+) -> None:
+    assert wstate.window_geometry_from_mapping(mapping) == expected
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        None,
+        "geometry",
+        42,
+        [],
+        {},
+        {"height": 720},
+        {"width": 1100},
+        {"width": "1100", "height": 720},  # string size
+        {"width": 1100.0, "height": 720},  # float size
+        {"width": True, "height": 720},  # bool is not an int here
+        {"width": 0, "height": 720},
+        {"width": -5, "height": 720},
+        {"width": 1100, "height": 0},
+    ],
+)
+def test_window_geometry_from_mapping_rejects_invalid_mappings(
+    mapping: object,
+) -> None:
+    assert wstate.window_geometry_from_mapping(mapping) is None
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected"),
+    [
+        # A wrongly-typed position is dropped, not fatal: the usable size is
+        # still recovered from a half-corrupted file.
+        (
+            {"width": 1100, "height": 720, "x": "50", "y": 30},
+            wstate.WindowGeometry(1100, 720),
+        ),
+        (
+            {"width": 1100, "height": 720, "x": 50.0, "y": 30},
+            wstate.WindowGeometry(1100, 720),
+        ),
+        (
+            {"width": 1100, "height": 720, "x": 50, "y": None},
+            wstate.WindowGeometry(1100, 720),
+        ),
+    ],
+)
+def test_window_geometry_from_mapping_drops_invalid_positions(
+    mapping: dict[str, Any], expected: wstate.WindowGeometry
+) -> None:
+    assert wstate.window_geometry_from_mapping(mapping) == expected
+
+
+def test_window_geometry_mapping_round_trip() -> None:
+    for geometry in (
+        wstate.WindowGeometry(1100, 720),
+        wstate.WindowGeometry(1100, 720, 50, 30),
+        wstate.WindowGeometry(900, 600, -40, -20),
+    ):
+        mapping = wstate.window_geometry_to_mapping(geometry)
+        assert wstate.window_geometry_from_mapping(mapping) == geometry
+
+
+# ---------------------------------------------------------------------------
+# Window state: file loading / saving (tmp_path, no Tk)
+# ---------------------------------------------------------------------------
+def test_load_window_geometry_returns_none_for_a_missing_file(tmp_path: Path) -> None:
+    assert wstate.load_window_geometry(tmp_path / "absent.json") is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not json at all",
+        "",
+        "[]",  # valid JSON, wrong shape
+        '"a string"',
+        '{"width": "900", "height": 600}',  # wrong value types
+        '{"width": 900}',  # missing height
+        "{'width': 900, 'height': 600}",  # not JSON (single quotes)
+    ],
+)
+def test_load_window_geometry_tolerates_corrupted_files(
+    tmp_path: Path, content: str
+) -> None:
+    state_file = tmp_path / "window_state.json"
+    state_file.write_text(content, encoding="utf-8")
+    assert wstate.load_window_geometry(state_file) is None
+
+
+def test_load_window_geometry_clamps_small_sizes(tmp_path: Path) -> None:
+    state_file = tmp_path / "window_state.json"
+    assert wstate.save_window_geometry(
+        state_file, wstate.WindowGeometry(200, 100, 5, 6)
+    )
+    assert wstate.load_window_geometry(state_file) == wstate.WindowGeometry(
+        wstate.MIN_WINDOW_WIDTH, wstate.MIN_WINDOW_HEIGHT, 5, 6
+    )
+
+
+def test_save_and_load_round_trip(tmp_path: Path) -> None:
+    state_file = tmp_path / "nested" / "window_state.json"
+    geometry = wstate.WindowGeometry(980, 640, 15, 25)
+    assert wstate.save_window_geometry(state_file, geometry) is True
+    # The parent directory was created on demand.
+    assert state_file.is_file()
+    assert wstate.load_window_geometry(state_file) == geometry
+
+
+def test_save_window_geometry_reports_write_failures(tmp_path: Path) -> None:
+    # Writing over a directory raises OSError, which is reported as False
+    # instead of propagating into the window teardown path.
+    assert wstate.save_window_geometry(tmp_path, wstate.WindowGeometry(1, 1)) is False
+
+
+def test_window_state_file_lives_in_the_music_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path / "music"))
+    assert wstate.window_state_file() == tmp_path / "music" / "window_state.json"
+
+
+# ---------------------------------------------------------------------------
 # Window smoke test (guarded: needs a display)
 # ---------------------------------------------------------------------------
 def test_desktop_window_builds_all_tabs(
@@ -1496,6 +1725,8 @@ def test_desktop_window_builds_all_tabs(
 ) -> None:
     tk = pytest.importorskip("tkinter")
     monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    # Keep the window-state file on the private data directory as well.
+    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path / "music"))
 
     try:
         root = tk.Tk()
@@ -1612,6 +1843,8 @@ def _open_desktop_app(
     import novel_downloader.apps.desktop.ui as ui_mod
 
     monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    # Keep the window-state file on the private data directory as well.
+    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path / "music"))
     try:
         root = tk.Tk()
     except tk.TclError as exc:  # pragma: no cover - headless environments
@@ -2315,4 +2548,217 @@ def test_task_notification_gates_the_beep_by_window_state(
         with contextlib.suppress(Exception):
             app.engine.shutdown()
         with contextlib.suppress(Exception):
+            root.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Window state persistence (window, guarded: needs a display)
+# ---------------------------------------------------------------------------
+def _open_desktop_app_with_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, Any, Path]:
+    """
+    Build a hidden window whose window-state file lives in ``tmp_path``.
+
+    Returns the app, the root and the state file path; skips when Tk cannot
+    open a display.
+    """
+    tk = pytest.importorskip("tkinter")
+    import novel_downloader.apps.desktop.ui as ui_mod
+
+    state_dir = tmp_path / "music"
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(state_dir))
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:  # pragma: no cover - headless environments
+        pytest.skip(f"Tk display unavailable: {exc}")
+    root.withdraw()
+    return ui_mod.DesktopApp(root), root, state_dir / "window_state.json"
+
+
+def test_desktop_window_restores_stored_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tk = pytest.importorskip("tkinter")
+    app, root, state_file = _open_desktop_app_with_state(tmp_path, monkeypatch)
+    try:
+        # Record the geometry strings the restore path applies.  The query
+        # side stays live: a fully specified geometry (with position) takes
+        # effect, while Tk propagation may still force a size-only request
+        # up to the packed content's required size.
+        applied: list[str] = []
+        set_geometry = root.geometry
+
+        def geometry_spy(value: str | None = None) -> str:
+            if value is None:
+                return set_geometry()
+            applied.append(value)
+            return set_geometry(value)
+
+        monkeypatch.setattr(root, "geometry", geometry_spy)
+
+        # A stored geometry is applied verbatim on launch and takes effect.
+        assert wstate.save_window_geometry(
+            state_file, wstate.WindowGeometry(900, 600, 22, 33)
+        )
+        app._restore_window_geometry()
+        assert applied == ["900x600+22+33"]
+        root.update_idletasks()
+        current = wstate.parse_geometry(set_geometry())
+        assert current is not None
+        assert (current.x, current.y) == (22, 33)
+        assert current.width >= 900 and current.height >= 600
+
+        # A stored size below the minimum is clamped to 400x300 before it
+        # reaches the window (the content may still demand a larger one).
+        assert wstate.save_window_geometry(
+            state_file, wstate.WindowGeometry(200, 100, 0, 0)
+        )
+        app._restore_window_geometry()
+        assert applied[-1] == "400x300+0+0"
+        root.update_idletasks()
+        current = wstate.parse_geometry(set_geometry())
+        assert current is not None
+        assert (current.x, current.y) == (0, 0)
+        assert current.width >= wstate.MIN_WINDOW_WIDTH
+        assert current.height >= wstate.MIN_WINDOW_HEIGHT
+
+        # A corrupted file falls back to the default geometry string.
+        state_file.write_text("not json", encoding="utf-8")
+        app._restore_window_geometry()
+        assert applied[-1] == "1100x720"
+
+        # A missing file falls back to the default geometry string too.
+        state_file.unlink()
+        app._restore_window_geometry()
+        assert applied[-1] == "1100x720"
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(tk.TclError):
+            root.destroy()
+
+
+def test_desktop_window_saves_geometry_on_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("tkinter")
+    app, root, state_file = _open_desktop_app_with_state(tmp_path, monkeypatch)
+    try:
+        root.geometry("980x640+15+25")
+        root.update_idletasks()
+        assert not state_file.exists()
+
+        # Closing the window persists the geometry it had.
+        app._on_close()
+        assert app._closing is True
+    except Exception:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            root.destroy()
+        raise
+    assert state_file.is_file()
+    assert wstate.load_window_geometry(state_file) == wstate.WindowGeometry(
+        980, 640, 15, 25
+    )
+
+
+def test_desktop_window_keeps_previous_state_for_degenerate_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, root, state_file = _open_desktop_app_with_state(tmp_path, monkeypatch)
+    try:
+        assert wstate.save_window_geometry(
+            state_file, wstate.WindowGeometry(980, 640, 15, 25)
+        )
+        # A degenerate geometry query (e.g. a window that was never mapped)
+        # must not overwrite the good stored geometry.
+        monkeypatch.setattr(root, "geometry", lambda value=None: "1x1+0+0")
+        app._save_window_state()
+        assert wstate.load_window_geometry(state_file) == wstate.WindowGeometry(
+            980, 640, 15, 25
+        )
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(Exception):
+            root.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Keyboard shortcuts (window, guarded: needs a display)
+# ---------------------------------------------------------------------------
+def test_keyboard_shortcuts_are_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tk = pytest.importorskip("tkinter")
+    import novel_downloader.apps.desktop.ui as ui_mod
+
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path / "music"))
+
+    # Spy on ``bind_all`` while keeping the real binding alive.
+    registered: dict[str, Any] = {}
+    original = tk.Tk.bind_all
+
+    def spy(
+        self: Any,
+        sequence: str | None = None,
+        func: Any = None,
+        add: Any = None,
+    ) -> str:
+        if sequence:
+            registered[sequence] = func
+        return original(self, sequence, func, add)
+
+    monkeypatch.setattr(tk.Tk, "bind_all", spy)
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:  # pragma: no cover - headless environments
+        pytest.skip(f"Tk display unavailable: {exc}")
+    root.withdraw()
+    app = ui_mod.DesktopApp(root)
+    try:
+        expected = {f"<Control-{index}>" for index in range(1, 6)} | {
+            "<Control-f>",
+            "<Control-F>",
+            "<Control-d>",
+            "<Control-D>",
+        }
+        assert expected <= set(registered)
+        assert all(callable(registered[sequence]) for sequence in expected)
+
+        notebook = app.history_tab.master
+
+        # Ctrl+N raises the Nth tab (Search=1 ... Follow=5).
+        registered["<Control-1>"](SimpleNamespace())
+        assert notebook.select() == str(app.search_tab)
+        registered["<Control-3>"](SimpleNamespace())
+        assert notebook.select() == str(app.history_tab)
+        registered["<Control-5>"](SimpleNamespace())
+        assert notebook.select() == str(app.follow_tab)
+
+        # Ctrl+F focuses the search keyword entry.
+        assert app.search_entry is not None
+        focused: list[int] = []
+        monkeypatch.setattr(app.search_entry, "focus_set", lambda: focused.append(1))
+        registered["<Control-f>"](SimpleNamespace())
+        registered["<Control-F>"](SimpleNamespace())
+        assert focused == [1, 1]
+
+        # Ctrl+D queues the search selection, like the toolbar button.
+        queued: list[int] = []
+        monkeypatch.setattr(app, "_add_selected_results", lambda: queued.append(1))
+        registered["<Control-d>"](SimpleNamespace())
+        registered["<Control-D>"](SimpleNamespace())
+        assert queued == [1, 1]
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(tk.TclError):
             root.destroy()
