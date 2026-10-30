@@ -106,22 +106,41 @@ class WebExportUI:
 
     A fresh instance is created per export run, so the flags always describe
     exactly that run.
+
+    Progress is reported at *format* granularity (the client fires
+    ``on_start`` once per requested format):
+
+    * :attr:`export_stage` -- the format currently being written; mirrored
+      onto :attr:`DownloadTask.export_stage` so a consumer rendering the
+      task snapshot can show e.g. ``Exporting (txt) ...`` while the status
+      is ``EXPORTING``;
+    * :attr:`exported_count` -- how many files have been written in this
+      run so far (one format may produce several files, e.g. per volume).
     """
 
     def __init__(self, task: DownloadTask) -> None:
         self.task = task
         self.task.exported_paths = {}
+        # A fresh run starts with no stage, even if a previous run left one.
+        self.task.export_stage = None
         #: Whether at least one requested export format produced a file.
         self.exported_any: bool = False
         #: Whether any requested export format was reported unsupported.
         self.unsupported_any: bool = False
+        #: Number of files successfully written so far in this run.
+        self.exported_count: int = 0
+        #: Format currently being exported (``None`` until one starts).
+        self.export_stage: str | None = None
 
     def on_start(self, book: BookConfig, fmt: str | None = None) -> None:
         self.task.status = Status.EXPORTING
+        self.export_stage = fmt
+        self.task.export_stage = fmt
 
     def on_success(self, book: BookConfig, fmt: str, path: Path) -> None:
         self.task.exported_paths[fmt] = path
         self.exported_any = True
+        self.exported_count += 1
 
     def on_error(self, book: BookConfig, fmt: str | None, error: Exception) -> None:
         self.task.status = Status.FAILED

@@ -171,6 +171,7 @@ def task_to_dict(task: DownloadTask) -> dict[str, Any]:
         "exported_paths": {key: str(path) for key, path in task.exported_paths.items()},
         "created_at": task.created_at,
         "finished_at": task.finished_at,
+        "export_stage": task.export_stage,
     }
 
 

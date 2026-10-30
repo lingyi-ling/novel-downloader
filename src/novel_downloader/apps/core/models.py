@@ -85,6 +85,11 @@ class DownloadTask:
     #: Number of extra attempts already spent on transient failures (0 means the
     #: task succeeded or failed on its first attempt).
     retry_count: int = 0
+    #: Export format currently being written (``"txt"``, ``"epub"``, ...), or
+    #: ``None`` while no export format has started. Updated by the export UI
+    #: adapter's ``on_start``; informational only -- a consumer may render it
+    #: (e.g. ``Exporting (txt) ...``) while the status is ``EXPORTING``.
+    export_stage: str | None = None
     exported_paths: dict[str, Path] = field(default_factory=dict)
 
     # lifecycle (wall-clock times)
