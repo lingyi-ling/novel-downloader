@@ -28,6 +28,7 @@ from novel_downloader.apps.cli.commands.follow import (
     FollowRemoveCmd,
 )
 from novel_downloader.apps.cli.commands.storage import StorageCmd
+from novel_downloader.apps.core.models import Status
 from novel_downloader.apps.core.watchlist import WatchlistStore
 
 
@@ -296,6 +297,247 @@ def test_follow_check_empty_list(
 
     assert called is False
     assert any("No followed books to check." in message for message in messages)
+
+
+# ---------------------------------------------------------------------------
+# follow check --download --wait
+# ---------------------------------------------------------------------------
+
+_TERMINAL = {Status.COMPLETED, Status.CANCELLED, Status.FAILED}
+
+
+class _FakeTask:
+    def __init__(self, task_id: str, site: str, book_id: str) -> None:
+        self.task_id = task_id
+        self.site = site
+        self.book_id = book_id
+        self.status = Status.QUEUED
+        self.error: str | None = None
+
+
+class _FakeManager:
+    """
+    Offline stand-in for ``TaskManager``.
+
+    Each added task walks a scripted status sequence (keyed by ``book_id``)
+    that advances by one step on every ``snapshot()`` call; the last entry
+    repeats, so a script without a terminal status keeps the task running
+    forever (used for the timeout path).
+    """
+
+    def __init__(
+        self,
+        script: dict[str, list[Status]] | None = None,
+        errors: dict[str, str] | None = None,
+    ) -> None:
+        self.script = script or {}
+        self.errors = errors or {}
+        self.added: list[tuple[str, str]] = []
+        self.cancelled: list[str] = []
+        self.close_calls = 0
+        self._tasks: list[_FakeTask] = []
+        self._steps: dict[str, int] = {}
+        self._seq = 0
+
+    async def add_task(self, *, title: str, site: str, book_id: str) -> _FakeTask:
+        self.added.append((site, book_id))
+        self._seq += 1
+        task = _FakeTask(task_id=f"task-{self._seq}", site=site, book_id=book_id)
+        self._tasks.append(task)
+        self._steps[task.task_id] = 0
+        return task
+
+    def snapshot(self) -> dict[str, list[_FakeTask]]:
+        running: list[_FakeTask] = []
+        completed: list[_FakeTask] = []
+        for task in self._tasks:
+            sequence = self.script.get(task.book_id) or [Status.COMPLETED]
+            step = self._steps[task.task_id]
+            self._steps[task.task_id] = min(step + 1, len(sequence) - 1)
+            task.status = sequence[step]
+            if task.status is Status.FAILED:
+                task.error = self.errors.get(task.book_id, "download failed")
+            (completed if task.status in _TERMINAL else running).append(task)
+        return {"running": running, "pending": [], "completed": completed}
+
+    async def cancel_task(self, task_id: str) -> bool:
+        self.cancelled.append(task_id)
+        return True
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+def _patch_manager(monkeypatch: pytest.MonkeyPatch, manager: _FakeManager) -> None:
+    monkeypatch.setattr(follow, "_get_manager", lambda: manager)
+
+
+def _two_books_with_updates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    store = WatchlistStore()
+    store.add("b520", "1", title="Book A", last_chapter="Chapter 1")
+    store.add("qidian", "2", title="Book B", last_chapter="Chapter 1")
+    monkeypatch.setattr(
+        follow.search_module,
+        "search",
+        _fake_search(
+            {
+                "Book A": [_result("b520", "1", "Book A", "Chapter 2")],
+                "Book B": [_result("qidian", "2", "Book B", "Chapter 2")],
+            }
+        ),
+    )
+
+
+def test_follow_check_wait_downloads_sequentially(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _two_books_with_updates(monkeypatch, tmp_path)
+    manager = _FakeManager(
+        script={
+            "1": [Status.RUNNING, Status.COMPLETED],
+            "2": [Status.RUNNING, Status.COMPLETED],
+        }
+    )
+    _patch_manager(monkeypatch, manager)
+    monkeypatch.setattr(follow, "_WAIT_POLL_INTERVAL", 0.0)
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check", "--download", "--wait", "--wait-timeout", "10"])
+    args.func(args)  # all completed: no SystemExit
+
+    assert manager.added == [("b520", "1"), ("qidian", "2")]
+    assert manager.cancelled == []
+    assert manager.close_calls == 1
+
+    joined = "\n".join(messages)
+    assert "Download completed: b520/1" in joined
+    assert "Download completed: qidian/2" in joined
+    assert "2 completed, 0 cancelled, 0 failed" in joined
+    # The "prints commands only" note must not appear when downloads run.
+    assert not any("does not start downloads" in message for message in messages)
+
+
+def test_follow_check_without_wait_keeps_old_behavior(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _two_books_with_updates(monkeypatch, tmp_path)
+    manager = _FakeManager()
+    _patch_manager(monkeypatch, manager)
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check", "--download"])
+    args.func(args)  # no SystemExit
+
+    assert manager.added == []
+    assert manager.close_calls == 0
+
+    joined = "\n".join(messages)
+    assert "novel-cli download --site b520 1" in joined
+    assert "novel-cli download --site qidian 2" in joined
+    assert "'follow check' does not start downloads" in joined
+    assert not any("Download completed" in message for message in messages)
+
+
+def test_follow_check_wait_requires_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    manager = _FakeManager()
+    _patch_manager(monkeypatch, manager)
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check", "--wait"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 2
+    assert any("--wait requires --download" in message for message in messages)
+    assert manager.close_calls == 0
+
+
+def test_follow_check_wait_timeout_cancels_and_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _two_books_with_updates(monkeypatch, tmp_path)
+    # Book 1 never finishes; book 2 completes on the first poll.
+    manager = _FakeManager(script={"1": [Status.RUNNING], "2": [Status.COMPLETED]})
+    _patch_manager(monkeypatch, manager)
+    monkeypatch.setattr(follow, "_WAIT_POLL_INTERVAL", 0.01)
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check", "--download", "--wait", "--wait-timeout", "0.1"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    assert manager.added == [("b520", "1"), ("qidian", "2")]
+    assert manager.cancelled == ["task-1"]
+    assert manager.close_calls == 1
+
+    joined = "\n".join(messages)
+    assert "Timed out waiting for b520/1 after 0.1 seconds." in joined
+    assert "Download completed: qidian/2" in joined
+    assert "1 completed, 1 cancelled, 0 failed" in joined
+
+
+def test_follow_check_wait_failure_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _two_books_with_updates(monkeypatch, tmp_path)
+    manager = _FakeManager(
+        script={
+            "1": [Status.RUNNING, Status.FAILED],
+            "2": [Status.RUNNING, Status.COMPLETED],
+        },
+        errors={"1": "boom"},
+    )
+    _patch_manager(monkeypatch, manager)
+    monkeypatch.setattr(follow, "_WAIT_POLL_INTERVAL", 0.0)
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check", "--download", "--wait", "--wait-timeout", "5"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    # The failed book does not stop the remaining books.
+    assert manager.added == [("b520", "1"), ("qidian", "2")]
+    assert manager.close_calls == 1
+
+    joined = "\n".join(messages)
+    assert "Download failed for b520/1: boom" in joined
+    assert "Download completed: qidian/2" in joined
+    assert "1 completed, 0 cancelled, 1 failed" in joined
+
+
+def test_follow_check_wait_no_changes_skips_manager(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    store = WatchlistStore()
+    store.add("b520", "1", title="Book A", last_chapter="Chapter 1")
+    monkeypatch.setattr(
+        follow.search_module,
+        "search",
+        _fake_search({"Book A": [_result("b520", "1", "Book A", "Chapter 1")]}),
+    )
+    manager = _FakeManager()
+    _patch_manager(monkeypatch, manager)
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check", "--download", "--wait"])
+    args.func(args)  # nothing to download: no SystemExit
+
+    assert manager.added == []
+    assert manager.close_calls == 0
+    assert any("No new chapters found." in message for message in messages)
 
 
 # ---------------------------------------------------------------------------

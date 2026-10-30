@@ -20,8 +20,13 @@ logger = logging.getLogger(__name__)
 class XiguashuwuSearcher(BaseSearcher):
     site_name = "xiguashuwu"
     priority = 500
-    BASE_URL = "https://www.xiguashuwu.com"
-    SEARCH_URL = "https://www.xiguashuwu.com/search/{query}"
+    BASE_URL = "https://www.xiguashuwu.net"
+    SEARCH_URL = "https://www.xiguashuwu.net/search/{query}"
+
+    #: The site's WAF interstitial ("安全验证") is a trivial math captcha whose
+    #: verify() handler simply sets this constant cookie and reloads, so sending
+    #: it up front skips the challenge entirely.
+    WAF_COOKIE = {"nginx_waf_passed": "1"}
 
     @property
     def nsfw(self) -> bool:
@@ -31,10 +36,12 @@ class XiguashuwuSearcher(BaseSearcher):
         url = self.SEARCH_URL.format(query=self._quote(keyword))
         headers = {
             **self.session.headers,
-            "Referer": "https://www.xiguashuwu.com/search/",
+            "Referer": "https://www.xiguashuwu.net/search/",
         }
         try:
-            async with self.session.get(url, headers=headers) as resp:
+            async with self.session.get(
+                url, headers=headers, cookies=self.WAF_COOKIE
+            ) as resp:
                 resp.raise_for_status()
                 return await self._response_to_str(resp)
         except Exception:
