@@ -71,8 +71,8 @@ X-API-Key: my-secret
 
 ## 端点一览
 
-所有业务端点前缀为 `/api/v1`，请求与响应通常为 JSON（`search/stream` 与
-`tasks/stream` 两个 SSE 端点除外）。
+所有业务端点前缀为 `/api/v1`，请求与响应通常为 JSON（`search/stream`、
+`tasks/stream`、`login/requests/stream` 三个 SSE 端点除外）。
 下文示例中的 `$BASE` 指 API 根地址（如 `http://127.0.0.1:8081`），
 `$TOKEN` 指启动时配置的 token。
 
@@ -87,6 +87,9 @@ X-API-Key: my-secret
 | `GET` | `/api/v1/tasks/{task_id}` | 查询单个任务；不存在返回 `404`。 |
 | `POST` | `/api/v1/tasks` | 新增下载任务。 |
 | `POST` | `/api/v1/tasks/{task_id}/cancel` | 取消待执行或运行中的任务。 |
+| `GET` | `/api/v1/login/requests` | 待处理的登录凭据请求列表。 |
+| `GET` | `/api/v1/login/requests/stream` | 以 SSE 推送待处理的登录凭据请求。 |
+| `POST` | `/api/v1/login/requests/{req_id}` | 提交凭据，完成一个登录请求。 |
 | `GET` | `/api/v1/watchlist` | 追更列表。 |
 | `POST` | `/api/v1/watchlist` | 追更一本书（重复添加只刷新条目）。 |
 | `DELETE` | `/api/v1/watchlist/{site}/{book_id}` | 取消追更；不存在返回 `404`。 |
@@ -100,7 +103,7 @@ X-API-Key: my-secret
 | `POST` | `/api/v1/music/export` | 把已下载曲目导出为 M3U8 歌单。 |
 | `GET` | `/api/v1/music/health` | 平台连通性自检（单个或全部平台）。 |
 
-Swagger UI（`/docs`）按 `system`、`search`、`tasks`、`watchlist`、
+Swagger UI（`/docs`）按 `system`、`search`、`tasks`、`login`、`watchlist`、
 `history`、`music` 分组展示以上端点。
 
 任务对象字段：
@@ -283,6 +286,107 @@ curl -s "$BASE/api/v1/tasks/<task_id>" -H "Authorization: Bearer $TOKEN"
 返回与任务列表中相同的任务对象；任务不存在返回 `404`。
 
 取消任务成功返回 `{"ok": true}`；任务不存在返回 `404`。
+
+## 登录凭据请求
+
+部分站点需要登录（账号密码或 Cookie）才能下载。当任务运行到站点登录步骤、
+又没有可用的已保存 Cookie 时，会创建一条「登录凭据请求」并等待人工输入。
+Web UI 移除后，这些请求通过本组端点暴露给外部客户端——**任务卡在
+`running`、长时间无进度时，轮询此端点提交凭据**：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/login/requests` | 当前待处理的凭据请求列表。 |
+| `GET` | `/api/v1/login/requests/stream` | SSE：有待处理请求时推送。 |
+| `POST` | `/api/v1/login/requests/{req_id}` | 提交凭据，完成该请求。 |
+
+### 何时产生
+
+`POST /tasks` 排队的任务启动后（状态 `running`），如果站点要求登录且没有
+有效 Cookie，就会创建凭据请求。**任务最多等待 120 秒**：
+
+- 期间通过 `GET /login/requests` 找到对应请求、用
+  `POST /login/requests/{req_id}` 提交凭据，任务立刻继续；
+- 超过 120 秒无人提交，任务回退使用 `prefill` 预填值继续登录
+  （通常随后登录失败，任务转为 `failed`）。
+
+### 请求结构
+
+```json
+{
+  "total": 1,
+  "requests": [
+    {
+      "req_id": "b1e04f2c9d8e4f7c8b6a5d4e3c2b1a09",
+      "task_id": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "title": "斗破苍穹",
+      "fields": [
+        {
+          "name": "username",
+          "label": "login.username.label",
+          "type": "text",
+          "required": true,
+          "default": "",
+          "placeholder": "",
+          "description": ""
+        },
+        {
+          "name": "password",
+          "label": "login.password.label",
+          "type": "password",
+          "required": true,
+          "default": "",
+          "placeholder": "",
+          "description": ""
+        }
+      ],
+      "prefill": {"username": "someone"},
+      "done": false
+    }
+  ]
+}
+```
+
+- `fields[].type` 取值 `text` / `password` / `cookie`。`cookie` 字段提交
+  原始 Cookie 字符串（如 `"key=value; other=value"`，也支持换行、逗号分隔），
+  服务端会像原来的 Web UI 一样解析成键值对。
+- `label` / `placeholder` / `description` 由站点插件提供，服务端**不做翻译
+  也不做渲染**，按原样返回（可能是翻译键）；如何展示由客户端决定。
+- `prefill` 是来自配置或上一次登录的预填值；提交的 `values` 按字段名覆盖它。
+
+### 轮询-提交流程
+
+```bash
+# 任务卡住时，轮询待处理请求
+curl -s "$BASE/api/v1/login/requests" -H "Authorization: Bearer $TOKEN"
+
+# 提交凭据（req_id 取自上一步；未提交的字段沿用 prefill）
+curl -s -X POST "$BASE/api/v1/login/requests/<req_id>" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"values": {"username": "me", "password": "secret", "cookies": "token=abc; uid=42"}}'
+# → {"ok": true}
+```
+
+提交成功后请求立即从列表消失，等待中的任务马上恢复执行。错误码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| `404` | `req_id` 不存在（提交成功后任务会取走结果并移除请求，重复提交也是 `404`）。 |
+| `409` | 请求已完成但任务尚未取走结果时再次提交。 |
+| `422` | `values` 不是 `{"字段名": "字符串"}` 形式的对象。 |
+
+!!! note "只列待处理请求"
+    `GET /login/requests` 只返回尚未完成的请求。不想轮询时可以订阅 SSE 流：
+
+    ```bash
+    curl -N "$BASE/api/v1/login/requests/stream" -H "Authorization: Bearer $TOKEN"
+    ```
+
+    服务端每秒轮询一次凭据队列：有待处理请求时推送 `requests` 事件
+    （`data` 与 `GET /login/requests` 的 `requests` 数组同构）；队列清空时
+    推送最后一个空数组事件，之后静默，直到出现新请求。客户端断开即停止。
+    鉴权方式与其他 SSE 端点相同（`Authorization` / `X-API-Key` 请求头）。
 
 ## 追更
 
@@ -606,6 +710,7 @@ NOVEL_API_WEBHOOK=https://example.invalid/hooks/novel novel-api
 | 端点 | 请求体 | 列表长度 |
 | --- | --- | --- |
 | `POST /api/v1/search` | ≤ 1 MiB | — |
+| `POST /api/v1/login/requests/{req_id}` | ≤ 1 MiB | — |
 | `POST /api/v1/watchlist` | ≤ 1 MiB | — |
 | `POST /api/v1/watchlist/check` | ≤ 1 MiB | — |
 | `POST /api/v1/music/search` | ≤ 1 MiB | — |
@@ -639,7 +744,8 @@ app = create_app(timeouts={"search": 30.0, "music_download": 600.0})
 | --- | --- |
 | `400` | 未知音乐平台；音乐平台初始化失败；同步音乐下载失败；歌单写入失败。 |
 | `401` | 已配置 token，但请求缺少或携带了错误的 token。 |
-| `404` | 任务 ID 不存在；音乐任务 ID 不存在；追更条目不存在；静态文件不存在。 |
+| `404` | 任务 ID 不存在；登录凭据请求 ID 不存在；音乐任务 ID 不存在；追更条目不存在；静态文件不存在。 |
+| `409` | 登录凭据请求已完成、尚未被任务取走时再次提交。 |
 | `413` | 请求体超过该端点的大小上限。 |
 | `422` | 请求参数校验失败（缺少必填字段、数值越界、`tracks` 过多等）。 |
 | `500` | 服务端内部错误，固定返回 `{"detail": "Internal server error"}`，不泄漏堆栈。 |
@@ -684,6 +790,13 @@ curl -s -X POST "$BASE/api/v1/tasks" \
 # 3. 查询进度（列表或单个任务）
 curl -s "$BASE/api/v1/tasks" -H "Authorization: Bearer $TOKEN"
 curl -s "$BASE/api/v1/tasks/<task_id>" -H "Authorization: Bearer $TOKEN"
+
+# 3b. 任务需要登录时：轮询凭据请求并提交（见「登录凭据请求」章节）
+curl -s "$BASE/api/v1/login/requests" -H "Authorization: Bearer $TOKEN"
+curl -s -X POST "$BASE/api/v1/login/requests/<req_id>" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"values": {"username": "me", "password": "secret"}}'
 
 # 4. 查看并下载导出文件（/downloads 同样受 token 保护）
 curl -s "$BASE/api/v1/history" -H "Authorization: Bearer $TOKEN"
@@ -765,6 +878,29 @@ with NovelApiClient("http://127.0.0.1:8081", token="my-secret") as api:
 - `iter_tasks()` 使用 `httpx` 的流式请求解析 SSE；只产出 `snapshot` 事件
   的 `data`（已从 JSON 解码）。生成器被关闭或循环 `break` 时连接随即关闭。
   传输错误与非 2xx 响应抛出 `ApiError`。
+
+登录凭据请求相关方法（任务需要登录时配合 `tasks()` 轮询使用）：
+
+```python
+import time
+
+with NovelApiClient("http://127.0.0.1:8081", token="my-secret") as api:
+    # 任务卡住时轮询待处理的凭据请求（120 秒内提交）
+    pending = api.login_requests()
+    while not pending["total"]:
+        time.sleep(1)
+        pending = api.login_requests()
+
+    req = pending["requests"][0]
+    values = {f["name"]: input(f"{f['label']}: ") for f in req["fields"]}
+    api.submit_login(req["req_id"], values)   # → {"ok": True}
+```
+
+- `login_requests()` 返回 `GET /login/requests` 的完整结构（`total` 与
+  `requests` 列表）。
+- `submit_login(req_id, values)` 提交凭据并唤醒等待中的任务；`values`
+  可省略（等价于空对象，所有字段沿用 `prefill`）。未知 `req_id` 抛出
+  `ApiError`（HTTP 404），请求已完成时抛出 409。
 
 追更与音乐相关方法：
 

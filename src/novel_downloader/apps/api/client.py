@@ -376,6 +376,43 @@ class NovelApiClient:
         return self._request("POST", f"tasks/{quote(task_id, safe='')}/cancel")
 
     # ------------------------------------------------------------------
+    # Login credential requests
+    # ------------------------------------------------------------------
+
+    def login_requests(self) -> dict[str, Any]:
+        """
+        Return the pending login credential requests.
+
+        :return: A payload with ``total`` and a ``requests`` list. Each entry
+            has ``req_id``, ``task_id``, ``title``, ``fields`` (name / label /
+            type / required / default / placeholder / description) and
+            ``prefill``. Poll this while a task is stuck waiting for login
+            credentials, then call :meth:`submit_login`.
+        """
+        return self._request("GET", "login/requests")
+
+    def submit_login(
+        self, req_id: str, values: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """
+        Complete a pending login credential request.
+
+        :param req_id: Request id as returned by :meth:`login_requests`.
+        :param values: Field values keyed by field name; ``type=cookie``
+            fields take the raw cookie string. Omitted values fall back to the
+            request's ``prefill``.
+        :return: ``{"ok": true}`` on success. Unknown ``req_id`` raises
+            :class:`ApiError` with status 404; an already-completed request
+            raises 409.
+        """
+        body: dict[str, Any] = {"values": dict(values or {})}
+        return self._request(
+            "POST",
+            f"login/requests/{quote(req_id, safe='')}",
+            json=body,
+        )
+
+    # ------------------------------------------------------------------
     # Watchlist (追更)
     # ------------------------------------------------------------------
 

@@ -38,7 +38,12 @@ from novel_downloader.apps.constants import (
     DOWNLOAD_SUPPORT_SITES,
     SEARCH_SUPPORT_SITES,
 )
-from novel_downloader.apps.core.models import DownloadTask
+from novel_downloader.apps.core import cred_broker
+from novel_downloader.apps.core.cred_broker import (
+    complete_request,
+    get_req_state,
+)
+from novel_downloader.apps.core.models import CredRequest, DownloadTask
 from novel_downloader.apps.core.task_manager import TaskManager, manager
 from novel_downloader.apps.core.watchlist import WatchEntry, WatchlistStore
 from novel_downloader.plugins import search as search_module
@@ -47,6 +52,7 @@ from novel_downloader.plugins.search import search, search_stream
 
 from .auth import require_token
 from .schemas import (
+    LoginSubmitRequest,
     MusicDownloadRequest,
     MusicExportRequest,
     MusicSearchRequest,
@@ -61,6 +67,7 @@ OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "system", "description": "Health checks and supported-site metadata."},
     {"name": "search", "description": "Aggregated book search across sites."},
     {"name": "tasks", "description": "Download task queue management."},
+    {"name": "login", "description": "Interactive login credential requests."},
     {"name": "watchlist", "description": "Followed books and new-chapter checks."},
     {"name": "history", "description": "Exported files served under /downloads."},
     {"name": "music", "description": "Optional music search, download and export."},
@@ -74,6 +81,10 @@ MAX_PAGE_LIMIT = 200
 
 #: Seconds between two ``snapshot`` events on ``GET /tasks/stream``.
 TASK_STREAM_INTERVAL = 1.0
+
+#: Seconds between two polls of the credential broker on
+#: ``GET /login/requests/stream``.
+LOGIN_STREAM_INTERVAL = 1.0
 
 #: Queue groups in the order they are concatenated when paginating ``/tasks``.
 _TASK_GROUPS = ("pending", "running", "completed")
@@ -457,6 +468,142 @@ async def cancel_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task not found: {task_id}",
         )
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Login credential requests
+# ---------------------------------------------------------------------------
+
+
+def cred_request_to_dict(req: CredRequest) -> dict[str, Any]:
+    """
+    Serialise a credential request for the JSON API.
+
+    ``label`` / ``placeholder`` / ``description`` are passed through verbatim:
+    they come from the site plugins and the server does not translate them
+    (there is no server-side rendering any more); clients decide how to
+    display them.
+    """
+    return {
+        "req_id": req.req_id,
+        "task_id": req.task_id,
+        "title": req.title,
+        "fields": [
+            {
+                "name": field.name,
+                "label": field.label,
+                "type": field.type,
+                "required": field.required,
+                "default": field.default,
+                "placeholder": field.placeholder,
+                "description": field.description,
+            }
+            for field in req.fields
+        ],
+        "prefill": dict(req.prefill),
+        "done": req.done,
+    }
+
+
+async def _pending_login_requests() -> list[dict[str, Any]]:
+    """
+    Snapshot the broker's pending (not yet completed) credential requests.
+
+    The broker has no public listing function yet, so this reads its
+    module-level store under the broker's own lock; the claim state is left
+    untouched.
+    """
+    async with cred_broker._CRED_LOCK:
+        pending = [r for r in cred_broker._CRED_REQS.values() if not r.done]
+    return [cred_request_to_dict(r) for r in pending]
+
+
+@router.get("/login/requests", tags=["login"])
+async def list_login_requests() -> dict[str, Any]:
+    """
+    List the login credential requests that are currently pending.
+
+    A request is created when a download task on a login-required site calls
+    into the login UI (``WebLoginUI.prompt``) and no valid cookie is cached.
+    The originating task then sits in ``running`` while it waits for the
+    credentials; poll this endpoint and complete the request via
+    ``POST /login/requests/{req_id}`` before it times out.
+    """
+    requests = await _pending_login_requests()
+    return {"total": len(requests), "requests": requests}
+
+
+async def _login_request_event_stream(interval: float) -> AsyncIterator[str]:
+    """
+    Poll the credential broker and push ``requests`` SSE frames.
+
+    A frame is emitted whenever at least one request is pending; when the
+    queue drains, one final empty frame lets clients clear their state (after
+    which the stream stays silent until something new shows up). The loop
+    lives for exactly as long as the request, like ``/tasks/stream``.
+    """
+    had_pending = False
+    while True:
+        pending = await _pending_login_requests()
+        if pending:
+            had_pending = True
+            yield _sse_frame("requests", pending)
+        elif had_pending:
+            had_pending = False
+            yield _sse_frame("requests", [])
+        await asyncio.sleep(interval)
+
+
+@router.get("/login/requests/stream", tags=["login"])
+async def stream_login_requests() -> StreamingResponse:
+    """
+    Stream pending login credential requests as Server-Sent Events.
+
+    The broker is polled once per second. Every non-empty poll emits a
+    ``requests`` event whose ``data`` is the same list as
+    ``GET /api/v1/login/requests``; a non-empty -> empty transition emits one
+    last ``requests`` event with an empty list. The stream ends when the
+    client disconnects.
+    """
+    return StreamingResponse(
+        _login_request_event_stream(LOGIN_STREAM_INTERVAL),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/login/requests/{req_id}", tags=["login"])
+async def submit_login_request(
+    req_id: str,
+    body: LoginSubmitRequest,
+) -> dict[str, bool]:
+    """
+    Complete a pending login credential request with field values.
+
+    ``values`` maps field names to the raw input strings; ``type=cookie``
+    fields carry the unparsed cookie string and are parsed server-side. The
+    waiting task wakes up immediately and continues with the merged values.
+
+    Unknown ``req_id`` returns ``404`` (the request may already have been
+    consumed by the task after a successful submit); a request that is done
+    but not yet reaped returns ``409``.
+    """
+    exists, done = await get_req_state(req_id)
+    if not exists:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Login request not found: {req_id}",
+        )
+    if done:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Login request already completed: {req_id}",
+        )
+    await complete_request(req_id, dict(body.values))
     return {"ok": True}
 
 
@@ -1182,6 +1329,7 @@ async def music_job_status(job_id: str) -> dict[str, Any]:
 
 __all__ = [
     "OPENAPI_TAGS",
+    "cred_request_to_dict",
     "get_manager",
     "get_watchlist_store",
     "router",

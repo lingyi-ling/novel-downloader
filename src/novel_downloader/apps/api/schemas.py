@@ -52,6 +52,18 @@ class TaskCreateRequest(BaseModel):
     book_id: str = Field(min_length=1)
 
 
+class LoginSubmitRequest(BaseModel):
+    """
+    Body of ``POST /api/v1/login/requests/{req_id}``.
+
+    ``values`` maps login-field names to the raw strings a user would type.
+    ``type=cookie`` fields carry the unpasted cookie string (e.g.
+    ``"key=value; other=value"``); the server parses it like the Web UI did.
+    """
+
+    values: dict[str, str] = Field(default_factory=dict)
+
+
 class WatchlistAddRequest(BaseModel):
     """Body of ``POST /api/v1/watchlist``."""
 
