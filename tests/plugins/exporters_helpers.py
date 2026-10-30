@@ -51,14 +51,6 @@ class HarnessClient(CommonClient):
     ) -> None:
         return None
 
-    async def download_chapter(
-        self,
-        book_id: str,
-        chapter_id: str,
-        **kwargs: Any,
-    ) -> None:
-        return None
-
     def process_book(
         self,
         book: BookConfig,

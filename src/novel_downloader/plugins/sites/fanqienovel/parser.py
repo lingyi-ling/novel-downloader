@@ -12,6 +12,7 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.infra.paths import FANQIENOVEL_MAP_PATH
+from novel_downloader.libs.mini_js import MiniJS
 from novel_downloader.plugins.base.parser import BaseParser
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
@@ -33,10 +34,6 @@ class FanqienovelParser(BaseParser):
     site_name: str = "fanqienovel"
 
     _FONT_MAP: dict[str, str] = {}
-    _RE_INT = re.compile(r"[+-]?\d+")
-    _RE_FLOAT = re.compile(
-        r"^[+-]?(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?$|^[+-]?\d+[eE][+-]?\d+$"
-    )
     _RE_INITIAL_STATE = re.compile(r"window\.__INITIAL_STATE__\s*=\s*({.*});", re.S)
 
     def parse_book_info(
@@ -191,197 +188,14 @@ class FanqienovelParser(BaseParser):
             cls._FONT_MAP = json.loads(FANQIENOVEL_MAP_PATH.read_text(encoding="utf-8"))
         return "".join(cls._FONT_MAP.get(ch, ch) for ch in text)
 
-    @staticmethod
-    def _parse_js_string(s: str) -> str:
-        """
-        Parse a JavaScript string literal (with escape sequences).
-
-        :param s: The quoted JS string literal.
-        :return: The unescaped Python string.
-        :raises ValueError: If the string is not a valid JS literal.
-        """
-        if not (s and s[0] == s[-1] and s[0] in ("'", '"')):
-            raise ValueError(f"Invalid JS string literal: {s!r}")
-
-        body = s[1:-1]
-        if "\\" not in body:
-            return body
-
-        out = []
-        it = iter(body)
-        for ch in it:
-            if ch != "\\":
-                out.append(ch)
-                continue
-
-            try:
-                esc = next(it)
-            except StopIteration:
-                break
-
-            if esc in "'\"\\":
-                out.append(esc)
-            elif esc == "n":
-                out.append("\n")
-            elif esc == "r":
-                out.append("\r")
-            elif esc == "t":
-                out.append("\t")
-            elif esc == "b":
-                out.append("\b")
-            elif esc == "f":
-                out.append("\f")
-            elif esc == "v":
-                out.append("\v")
-            elif esc == "0":
-                out.append("\0")
-            elif esc == "x":
-                hex2 = "".join(next(it) for _ in range(2))
-                out.append(chr(int(hex2, 16)))
-            elif esc == "u":
-                hex4 = "".join(next(it) for _ in range(4))
-                out.append(chr(int(hex4, 16)))
-            else:
-                out.append(esc)  # tolerate unknown escapes
-
-        return "".join(out)
-
-    @classmethod
-    def _parse_js_token(cls, tok: str) -> Any:
-        """
-        Parse a single JavaScript token into its Python equivalent.
-
-        :param tok: The token string.
-        :return: The parsed Python value.
-        """
-        tok = tok.strip()
-        match tok:
-            case "null" | "undefined":
-                return None
-            case "true":
-                return True
-            case "false":
-                return False
-            case _ if cls._RE_INT.fullmatch(tok):
-                return int(tok)
-            case _ if cls._RE_FLOAT.fullmatch(tok):
-                return float(tok)
-            case _ if tok.startswith("'") and tok.endswith("'"):
-                return cls._parse_js_string(tok)
-            case _ if tok.startswith('"') and tok.endswith('"'):
-                return cls._parse_js_string(tok)
-            case _:
-                return tok  # identifier or unknown symbol
-
-    @staticmethod
-    def _tokenize_object(src: str) -> list[str]:
-        """
-        Tokenize a JavaScript object/array literal string.
-
-        :param src: The JS source snippet.
-        :return: A list of token strings.
-        """
-        toks = []
-        i, n = 0, len(src)
-        while i < n:
-            ch = src[i]
-
-            # Skip whitespace
-            if ch in " \t\r\n":
-                i += 1
-                continue
-
-            # String literal
-            if ch in ("'", '"'):
-                quote = ch
-                j = i + 1
-                esc = False
-                while j < n:
-                    c = src[j]
-                    if esc:
-                        esc = False
-                    elif c == "\\":
-                        esc = True
-                    elif c == quote:
-                        j += 1
-                        break
-                    j += 1
-                toks.append(src[i:j])
-                i = j
-                continue
-
-            # Comment
-            if ch == "/" and i + 1 < n and src[i + 1] in "/*":
-                if src[i + 1] == "/":  # single line
-                    i += 2
-                    while i < n and src[i] not in "\r\n":
-                        i += 1
-                else:  # block comment
-                    i += 2
-                    while i + 1 < n and not (src[i] == "*" and src[i + 1] == "/"):
-                        i += 1
-                    i += 2
-                continue
-
-            # Punctuation
-            if ch in "{}[]:,":
-                toks.append(ch)
-                i += 1
-                continue
-
-            # Identifier or number
-            j = i
-            while j < n and src[j] not in " \t\r\n{}[]:,":
-                j += 1
-            toks.append(src[i:j])
-            i = j
-
-        return toks
-
-    @classmethod
-    def _parse_js_value(cls, tokens: list[str], idx: int) -> tuple[Any, int]:
-        """
-        Recursively parse a JavaScript value from token list.
-
-        :param tokens: The token list.
-        :param idx: The starting index.
-        :return: (parsed_value, next_index)
-        """
-        tok = tokens[idx]
-
-        if tok == "{":
-            obj = {}
-            idx += 1
-            while tokens[idx] != "}":
-                key = tokens[idx]
-                if key[0] in ('"', "'"):
-                    key = cls._parse_js_string(key)
-                idx += 1
-                if tokens[idx] != ":":
-                    raise ValueError(f"Expected :, got {tokens[idx]}")
-                idx += 1
-                val, idx = cls._parse_js_value(tokens, idx)
-                obj[key] = val
-                if tokens[idx] == ",":
-                    idx += 1
-            return obj, idx + 1
-
-        if tok == "[":
-            arr = []
-            idx += 1
-            while tokens[idx] != "]":
-                val, idx = cls._parse_js_value(tokens, idx)
-                arr.append(val)
-                if tokens[idx] == ",":
-                    idx += 1
-            return arr, idx + 1
-
-        return cls._parse_js_token(tok), idx + 1
-
     @classmethod
     def _extract_initial_state(cls, html_str: str) -> dict[str, Any]:
         """
         Extract and parse the JavaScript object assigned to `__INITIAL_STATE__`
+
+        The payload is serialized data (JSON-style object literal), so it is
+        evaluated with the shared :class:`MiniJS` interpreter from
+        :mod:`novel_downloader.libs.mini_js`.
 
         :param html_str: The HTML source containing the assignment.
         :return: A Python dictionary parsed from the JS object.
@@ -392,14 +206,12 @@ class FanqienovelParser(BaseParser):
             raise ValueError("Could not find 'window.__INITIAL_STATE__' in the HTML.")
 
         try:
-            obj_str = match.group(1)
-            tokens = cls._tokenize_object(obj_str)
-            result, _ = cls._parse_js_value(tokens, 0)
-            if not isinstance(result, dict):
-                raise ValueError("Parsed value is not an object.")
-            return result
+            result = MiniJS().eval(match.group(1))
         except Exception as e:
             raise ValueError(f"Failed to parse JS object: {e}") from e
+        if not isinstance(result, dict):
+            raise ValueError("Parsed value is not an object.")
+        return result
 
     @staticmethod
     def _extract_chapter_data(data: dict[str, Any]) -> dict[str, Any]:

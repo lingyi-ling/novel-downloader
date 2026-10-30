@@ -17,6 +17,7 @@
     <string name="action_close">关闭</string>
     <string name="action_save">保存</string>
     <string name="action_download">下载</string>
+    <string name="action_copy">复制</string>
     <string name="action_add_to_queue">加入下载队列</string>
     <string name="state_loading">加载中…</string>
     <string name="state_empty">暂无数据</string>
@@ -56,6 +57,14 @@
     <string name="tasks_status_cancelled">已取消</string>
     <string name="tasks_status_failed">失败</string>
     <string name="tasks_empty">暂无任务，去「搜索」页加入下载队列吧</string>
+    <string name="tasks_detail_site">站点</string>
+    <string name="tasks_detail_book_id">书籍 ID</string>
+    <string name="tasks_detail_error">错误信息</string>
+    <string name="tasks_detail_files">导出文件</string>
+    <string name="tasks_detail_no_files">暂无导出文件</string>
+    <string name="tasks_error_copied">已复制错误信息</string>
+    <string name="tasks_retry_queued">已重新加入下载队列：%1$s</string>
+    <string name="tasks_retry_failed">重新入队失败：%1$s</string>
 
     <!-- 历史 -->
     <string name="history_files">共 %1$d 个文件</string>

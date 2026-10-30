@@ -817,31 +817,6 @@ async def test_download_book_persists_metadata_and_chapters(
 
 
 @pytest.mark.asyncio
-async def test_download_chapter_failure_leaves_no_database(
-    tmp_path: Path, harness: SimpleNamespace
-) -> None:
-    client, fetcher, _ = await _initialised(tmp_path, harness)
-    fetcher.chapter_errors.extend(RuntimeError("down") for _ in range(3))
-
-    await client.download_chapter("b1", "c1")
-
-    # Same as above: an empty book directory may remain, but no DB is created.
-    assert not (_book_dir(tmp_path) / "chapter.raw.sqlite").exists()
-
-
-@pytest.mark.asyncio
-async def test_download_chapter_success_writes_database(
-    tmp_path: Path, harness: SimpleNamespace
-) -> None:
-    client, _, _ = await _initialised(tmp_path, harness)
-
-    await client.download_chapter("b1", "c1")
-
-    with ChapterStorage(_book_dir(tmp_path), "chapter.raw.sqlite") as storage:
-        assert storage.exists("c1")
-
-
-@pytest.mark.asyncio
 async def test_save_html_failure_does_not_affect_raw_data(
     tmp_path: Path, harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

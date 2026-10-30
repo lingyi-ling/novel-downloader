@@ -148,20 +148,6 @@ class ClientProtocol(Protocol):
         """
         ...
 
-    async def download_chapter(
-        self,
-        book_id: str,
-        chapter_id: str,
-        **kwargs: Any,
-    ) -> None:
-        """
-        Download a specific chapter by its identifier.
-
-        :param book_id: Identifier of the book to download.
-        :param chapter_id: Identifier of the chapter to download.
-        """
-        ...
-
     def process_book(
         self,
         book: BookConfig,

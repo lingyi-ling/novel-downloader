@@ -94,6 +94,28 @@ fun downloadRequestHeaders(apiKey: String?): Map<String, String> =
         ?.let { mapOf(DOWNLOAD_API_KEY_HEADER to it) }
         ?: emptyMap()
 
+/**
+ * Percent-encodes [raw] as a single URL path segment.
+ *
+ * Matches the API's `quote(name, safe='')`: UTF-8 bytes outside the RFC 3986
+ * unreserved set (`A-Z a-z 0-9 - . _ ~`) are emitted as uppercase `%XX` —
+ * including `/`, spaces, `#`, `?` and non-ASCII characters — so the result can
+ * be appended to `/downloads/` verbatim.
+ */
+fun encodeDownloadPathSegment(raw: String): String {
+    val out = StringBuilder(raw.length)
+    for (byte in raw.toByteArray(Charsets.UTF_8)) {
+        val value = byte.toInt() and 0xFF
+        val char = value.toChar()
+        if (char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' || char in "-._~") {
+            out.append(char)
+        } else {
+            out.append('%').append(value.toString(16).padStart(2, '0').uppercase())
+        }
+    }
+    return out.toString()
+}
+
 /** MIME type for the file extensions exposed by the history endpoint. */
 fun mimeTypeForExtension(ext: String): String? = when (ext.trim().lowercase()) {
     "txt" -> "text/plain"

@@ -124,4 +124,22 @@ class DownloadPlanningTest {
         assertNull(mimeTypeForExtension("pdf"))
         assertNull(mimeTypeForExtension(""))
     }
+
+    @Test
+    fun pathSegmentEncodingMatchesTheApiQuoteBehaviour() {
+        // Unreserved characters pass through untouched.
+        assertEquals(
+            "Book-title_1.0~aB9.txt",
+            encodeDownloadPathSegment("Book-title_1.0~aB9.txt"),
+        )
+        // Everything else (including / space # ?) becomes uppercase %XX.
+        assertEquals("a%20b%2Fc", encodeDownloadPathSegment("a b/c"))
+        assertEquals("x%23y%3Fz", encodeDownloadPathSegment("x#y?z"))
+        // Non-ASCII names encode as uppercase UTF-8 bytes.
+        assertEquals(
+            "%E6%96%97%E7%A0%B4%E8%8B%8D%E7%A9%B9.txt",
+            encodeDownloadPathSegment("斗破苍穹.txt"),
+        )
+        assertEquals("", encodeDownloadPathSegment(""))
+    }
 }

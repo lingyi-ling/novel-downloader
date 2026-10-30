@@ -15,6 +15,7 @@
     <string name="action_close">Close</string>
     <string name="action_save">Save</string>
     <string name="action_download">Download</string>
+    <string name="action_copy">Copy</string>
     <string name="action_add_to_queue">Add to download queue</string>
     <string name="state_loading">Loading…</string>
     <string name="state_empty">Nothing here yet</string>
@@ -52,6 +53,14 @@
     <string name="tasks_status_cancelled">Cancelled</string>
     <string name="tasks_status_failed">Failed</string>
     <string name="tasks_empty">No tasks yet — add one from the Search tab</string>
+    <string name="tasks_detail_site">Site</string>
+    <string name="tasks_detail_book_id">Book ID</string>
+    <string name="tasks_detail_error">Error</string>
+    <string name="tasks_detail_files">Exported files</string>
+    <string name="tasks_detail_no_files">No exported files</string>
+    <string name="tasks_error_copied">Error message copied</string>
+    <string name="tasks_retry_queued">Re-added to the download queue: %1$s</string>
+    <string name="tasks_retry_failed">Re-queue failed: %1$s</string>
 
     <string name="history_files">%1$d files</string>
     <string name="history_download_started">Downloading %1$s</string>
