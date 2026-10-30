@@ -1,5 +1,7 @@
 package com.lingyi.noveldl.data
 
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -114,11 +116,21 @@ data class MusicTrack(
     val vip: Boolean = false,
 )
 
+/**
+ * Body of `POST /api/v1/music/search`.
+ *
+ * `limit`/`offset` use [EncodeDefault] with [EncodeDefault.Mode.ALWAYS] so the
+ * pagination parameters stay on the wire even when they equal their defaults
+ * (`Api`'s serializer skips plain defaults), and so the server can page as
+ * soon as it wires `offset` through to the provider layer.
+ */
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class MusicSearchRequest(
     val platform: String,
     val keyword: String,
-    val limit: Int = 20,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val limit: Int = 20,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val offset: Int = 0,
 )
 
 @Serializable

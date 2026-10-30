@@ -90,6 +90,7 @@ class MusicSearchRequest(BaseModel):
     platform: str = Field(min_length=1)
     keyword: str = Field(min_length=1)
     limit: int = Field(default=20, ge=1)
+    offset: int = Field(default=0, ge=0)
 
 
 class MusicTrack(BaseModel):

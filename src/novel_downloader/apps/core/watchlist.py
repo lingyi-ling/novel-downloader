@@ -26,11 +26,17 @@ version intact.
 Concurrency
 -----------
 
-The store performs a read-modify-write cycle without locking. It is designed
-for a single process at a time (the CLI and each desktop/API process). Two
-processes writing simultaneously are serialized by the filesystem only at the
-``os.replace`` step, so the last writer wins; neither can corrupt the file.
-This is the same trade-off used by
+Every read-modify-write mutation (``add``, ``remove``, ``update_latest``) holds
+a per-store :class:`threading.Lock`, so several threads may share one store
+instance — the desktop calls it from worker threads (follow add/remove and the
+follow check). Writes themselves stay atomic: the new document is written to a
+temporary file in the same directory, flushed and then moved into place with
+:func:`os.replace`, so a reader never observes a half-written file.
+
+Threads within one process are therefore safe. Two *processes* writing
+simultaneously are serialized by the filesystem only at the ``os.replace``
+step, so the last writer wins; neither can corrupt the file. This is the same
+trade-off used by
 :class:`novel_downloader.infra.persistence.state.StateManager`, but with an
 atomic write added.
 """
@@ -38,22 +44,34 @@ atomic write added.
 from __future__ import annotations
 
 __all__ = [
+    "DEFAULT_CHECK_CONCURRENCY",
+    "DEFAULT_CHECK_TIMEOUT",
+    "PER_SITE_LIMIT",
+    "CheckResult",
     "WatchEntry",
     "WatchlistStore",
+    "check_all",
+    "check_entry",
     "default_watchlist_path",
 ]
 
+import asyncio
 import contextlib
 import json
 import logging
 import os
 import tempfile
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from novel_downloader.infra.paths import app_home
+from novel_downloader.plugins.ranking import normalize_text
+from novel_downloader.schemas import SearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +80,17 @@ WATCHLIST_FILENAME = "watchlist.json"
 
 #: Schema version written to the JSON document.
 _SCHEMA_VERSION = 1
+
+#: Results requested per site while looking for a followed book's latest
+#: chapter; shared by the CLI ``follow check`` and the desktop follow check.
+PER_SITE_LIMIT = 10
+
+#: Default per-search timeout (seconds) for the follow check; matches the
+#: ``search`` command.
+DEFAULT_CHECK_TIMEOUT = 5.0
+
+#: Default number of followed books checked at the same time.
+DEFAULT_CHECK_CONCURRENCY = 4
 
 
 def default_watchlist_path() -> Path:
@@ -131,14 +160,37 @@ class WatchEntry:
         )
 
 
+@dataclass(frozen=True)
+class CheckResult:
+    """Outcome of checking one followed book for a new chapter."""
+
+    #: The entry as it was when the check started.
+    entry: WatchEntry
+    #: Newest chapter observed on the site (``""`` when nothing matched).
+    latest: str = ""
+    #: Title of the search result the chapter came from.
+    matched_title: str = ""
+    #: Error message when the search itself failed.
+    error: str | None = None
+    #: Whether :meth:`WatchlistStore.update_latest` persisted ``latest``.
+    changed: bool = False
+
+    @property
+    def found(self) -> bool:
+        """Whether a latest chapter was found (failed checks never do)."""
+        return self.error is None and bool(self.latest)
+
+
 class WatchlistStore:
     """
     File-backed CRUD store for followed books.
 
-    Every public operation reads the current file, applies the change and
-    atomically writes the result back. A corrupt or unreadable file is treated
-    as an empty list (and logged), so a broken file never prevents the CLI from
-    running; the first successful write replaces it.
+    Every public mutation reads the current file, applies the change and
+    atomically writes the result back while holding a per-store
+    :class:`threading.Lock`, so one store instance may be shared by several
+    threads (the desktop does) without losing updates. A corrupt or unreadable
+    file is treated as an empty list (and logged), so a broken file never
+    prevents the CLI from running; the first successful write replaces it.
 
     :param path: Watchlist file to use; defaults to
         :func:`default_watchlist_path`.
@@ -146,6 +198,8 @@ class WatchlistStore:
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = Path(path) if path is not None else default_watchlist_path()
+        #: Serializes read-modify-write cycles across threads.
+        self._lock = threading.Lock()
 
     @property
     def path(self) -> Path:
@@ -195,37 +249,38 @@ class WatchlistStore:
         if not norm_site or not norm_id:
             raise ValueError("site and book_id must not be empty")
 
-        entries = self._read()
-        for index, entry in enumerate(entries):
-            if entry.key != (norm_site, norm_id):
-                continue
+        with self._lock:
+            entries = self._read()
+            for index, entry in enumerate(entries):
+                if entry.key != (norm_site, norm_id):
+                    continue
 
-            new_title = title.strip() if title and title.strip() else entry.title
-            new_chapter = (
-                last_chapter.strip()
-                if last_chapter and last_chapter.strip()
-                else entry.last_chapter
-            )
-            updated = replace(
-                entry,
-                title=new_title,
-                last_chapter=new_chapter,
+                new_title = title.strip() if title and title.strip() else entry.title
+                new_chapter = (
+                    last_chapter.strip()
+                    if last_chapter and last_chapter.strip()
+                    else entry.last_chapter
+                )
+                updated = replace(
+                    entry,
+                    title=new_title,
+                    last_chapter=new_chapter,
+                    updated_at=_now_iso(),
+                )
+                entries[index] = updated
+                self._write(entries)
+                return updated, False
+
+            created = WatchEntry(
+                site=norm_site,
+                book_id=norm_id,
+                title=title.strip() if title else "",
+                last_chapter=last_chapter.strip() if last_chapter else "",
                 updated_at=_now_iso(),
             )
-            entries[index] = updated
+            entries.append(created)
             self._write(entries)
-            return updated, False
-
-        created = WatchEntry(
-            site=norm_site,
-            book_id=norm_id,
-            title=title.strip() if title else "",
-            last_chapter=last_chapter.strip() if last_chapter else "",
-            updated_at=_now_iso(),
-        )
-        entries.append(created)
-        self._write(entries)
-        return created, True
+            return created, True
 
     def remove(self, site: str, book_id: str) -> bool:
         """
@@ -235,12 +290,13 @@ class WatchlistStore:
             followed (idempotent).
         """
         key = (site.strip(), str(book_id).strip())
-        entries = self._read()
-        kept = [entry for entry in entries if entry.key != key]
-        if len(kept) == len(entries):
-            return False
-        self._write(kept)
-        return True
+        with self._lock:
+            entries = self._read()
+            kept = [entry for entry in entries if entry.key != key]
+            if len(kept) == len(entries):
+                return False
+            self._write(kept)
+            return True
 
     def update_latest(
         self,
@@ -254,7 +310,8 @@ class WatchlistStore:
         Record a newly observed last chapter.
 
         The entry is only rewritten (and ``updated_at`` refreshed) when the
-        chapter actually changed; a missing entry is a no-op.
+        chapter actually changed; a missing entry is a no-op. Safe to call from
+        several threads sharing this store.
 
         :param site: Source site key.
         :param book_id: Site-specific book id.
@@ -264,25 +321,26 @@ class WatchlistStore:
         """
         key = (site.strip(), str(book_id).strip())
         chapter = last_chapter.strip()
-        entries = self._read()
-        for index, entry in enumerate(entries):
-            if entry.key != key:
-                continue
-            if not chapter or chapter == entry.last_chapter:
-                return False
+        with self._lock:
+            entries = self._read()
+            for index, entry in enumerate(entries):
+                if entry.key != key:
+                    continue
+                if not chapter or chapter == entry.last_chapter:
+                    return False
 
-            new_title = entry.title
-            if not new_title and title and title.strip():
-                new_title = title.strip()
-            entries[index] = replace(
-                entry,
-                last_chapter=chapter,
-                title=new_title,
-                updated_at=_now_iso(),
-            )
-            self._write(entries)
-            return True
-        return False
+                new_title = entry.title
+                if not new_title and title and title.strip():
+                    new_title = title.strip()
+                entries[index] = replace(
+                    entry,
+                    last_chapter=chapter,
+                    title=new_title,
+                    updated_at=_now_iso(),
+                )
+                self._write(entries)
+                return True
+            return False
 
     # ---------- persistence ----------
 
@@ -354,3 +412,152 @@ class WatchlistStore:
             with contextlib.suppress(OSError):
                 tmp_path.unlink()
             raise
+
+
+# ---------------------------------------------------------------------------
+# Update check ("追更检查"), shared by the CLI and the desktop client
+# ---------------------------------------------------------------------------
+
+
+def _get_search_module() -> ModuleType:
+    """
+    Return the search module (patch point for tests).
+
+    Imported lazily so importing this module (and everything that imports it,
+    like the API routes) does not pull in the aiohttp/plugin stack.
+    """
+    from novel_downloader.plugins import search as search_module
+
+    return search_module
+
+
+def _match_result(
+    entry: WatchEntry, results: list[SearchResult]
+) -> SearchResult | None:
+    """
+    Pick the search result that belongs to ``entry``.
+
+    A result from the same site with the exact same book id wins; otherwise a
+    result whose normalized title equals the followed title is accepted (a site
+    may expose the same book under a different id).
+    """
+    for result in results:
+        if result.get("site") != entry.site:
+            continue
+        if str(result.get("book_id", "")) == entry.book_id:
+            return result
+
+    if not entry.title:
+        return None
+
+    wanted = normalize_text(entry.title)
+    if not wanted:
+        return None
+    for result in results:
+        if result.get("site") != entry.site:
+            continue
+        if normalize_text(result.get("title", "")) == wanted:
+            return result
+    return None
+
+
+async def check_entry(
+    entry: WatchEntry, timeout: float = DEFAULT_CHECK_TIMEOUT
+) -> CheckResult:
+    """
+    Search one site and return the newest chapter for ``entry``.
+
+    Network and plugin failures are reported as
+    :attr:`CheckResult.error` instead of raising, so one broken book never
+    interrupts a whole sweep.
+    """
+    search_module = _get_search_module()
+    keyword = entry.title or entry.book_id
+    try:
+        results = await search_module.search(
+            keyword=keyword,
+            sites=[entry.site],
+            limit=None,
+            per_site_limit=PER_SITE_LIMIT,
+            timeout=timeout,
+            sort="quality",
+        )
+    except Exception as exc:  # network/plugin failures are per-book, not fatal
+        # Keep the type name next to the message: some network errors (bare
+        # ``TimeoutError`` et al.) stringify to an empty string.
+        return CheckResult(entry=entry, error=f"{type(exc).__name__}: {exc}")
+
+    matched = _match_result(entry, results)
+    if matched is None:
+        return CheckResult(entry=entry)
+    return CheckResult(
+        entry=entry,
+        latest=str(matched.get("latest_chapter") or "").strip(),
+        matched_title=str(matched.get("title") or "").strip(),
+    )
+
+
+def _record_latest(
+    store: WatchlistStore, entry: WatchEntry, result: CheckResult
+) -> CheckResult:
+    """
+    Persist a found chapter, turning a storage failure into an error result.
+
+    Unchanged chapters and not-found results pass through untouched.
+    """
+    if not result.found or result.latest == entry.last_chapter:
+        return result
+    try:
+        changed = store.update_latest(
+            entry.site, entry.book_id, result.latest, title=result.matched_title
+        )
+    except Exception as exc:  # disk failures are per-book, not fatal
+        logger.warning("Could not update %s/%s: %s", entry.site, entry.book_id, exc)
+        return CheckResult(entry=entry, error=f"{type(exc).__name__}: {exc}")
+    return replace(result, changed=changed)
+
+
+async def check_all(
+    store: WatchlistStore,
+    timeout: float = DEFAULT_CHECK_TIMEOUT,
+    max_concurrency: int = DEFAULT_CHECK_CONCURRENCY,
+    progress_cb: Callable[[CheckResult], None] | None = None,
+) -> list[CheckResult]:
+    """
+    Check every followed book in ``store`` for a new chapter.
+
+    Each book is searched independently with at most ``max_concurrency``
+    searches in flight (an :class:`asyncio.Semaphore` bounds them); a failing
+    or slow book never affects the others. Every new chapter found is
+    persisted immediately through the thread-safe store, so the results and
+    the file agree even when the sweep is interrupted.
+
+    :param store: Watchlist to read the entries from and persist updates into.
+    :param timeout: Per-book search timeout in seconds.
+    :param max_concurrency: Maximum number of books searched at the same time
+        (values below 1 are treated as 1).
+    :param progress_cb: Optional observer called once per finished check, in
+        completion order (not list order), on the event loop thread. A raising
+        callback is logged and ignored so it cannot abort the sweep.
+    :return: One :class:`CheckResult` per entry, in the store's entry order
+        regardless of the order the checks completed in.
+    """
+    entries = store.entries()
+    semaphore = asyncio.Semaphore(max(1, int(max_concurrency)))
+    slots: list[CheckResult | None] = [None] * len(entries)
+
+    async def worker(index: int, entry: WatchEntry) -> None:
+        async with semaphore:
+            result = await check_entry(entry, timeout)
+        # Persist (and report) outside the semaphore: storage must not
+        # withhold a search slot from the remaining books.
+        result = _record_latest(store, entry, result)
+        slots[index] = result
+        if progress_cb is not None:
+            try:
+                progress_cb(result)
+            except Exception:  # a broken observer must not abort the sweep
+                logger.exception("follow-check progress callback failed")
+
+    await asyncio.gather(*(worker(index, entry) for index, entry in enumerate(entries)))
+    return [slot for slot in slots if slot is not None]

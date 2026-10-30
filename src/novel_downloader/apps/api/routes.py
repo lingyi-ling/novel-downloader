@@ -1044,7 +1044,9 @@ async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, 
     provider = _create_provider(components, body.platform)
 
     def _run() -> tuple[int, list[dict[str, Any]]]:
-        tracks, total = provider.search(body.keyword, limit=body.limit)
+        tracks, total = provider.search(
+            body.keyword, limit=body.limit, offset=body.offset
+        )
         payload = [asdict(track) for track in tracks]
         return int(total or len(payload)), payload
 

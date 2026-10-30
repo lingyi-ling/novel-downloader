@@ -73,6 +73,8 @@
     <string name="music_keyword_hint">Song keyword</string>
     <string name="music_search_button">Search songs</string>
     <string name="music_tracks">%1$d songs</string>
+    <string name="music_search_progress">Loaded %1$d / %2$d songs</string>
+    <string name="music_loading_more">Loading more…</string>
     <string name="music_download_selected">Download selected</string>
     <string name="music_job_progress">Downloading %1$d/%2$d</string>
     <string name="music_job_done">Done: %1$d succeeded, %2$d skipped, %3$d failed</string>

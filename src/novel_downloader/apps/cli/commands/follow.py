@@ -18,6 +18,11 @@ prints the exact ``novel-cli download`` command instead of starting a download.
 A download is long-running, and the CLI has no background scheduler, so
 returning the command keeps the command fast, non-blocking and predictable.
 
+The per-book searches run with bounded concurrency (see
+:func:`novel_downloader.apps.core.watchlist.check_all`), each book succeeds or
+fails on its own, and the report is printed in follow-list order no matter in
+which order the searches finished.
+
 Passing ``--download --wait`` opts in to actually download: the books with new
 chapters are queued in the shared task manager and awaited one by one inside a
 single ``asyncio.run`` (all waiting and ``manager.close()`` happen there, so no
@@ -34,22 +39,19 @@ from typing import TYPE_CHECKING
 
 from novel_downloader.apps.cli import ui
 from novel_downloader.apps.core.models import DownloadTask, Status
-from novel_downloader.apps.core.watchlist import WatchEntry, WatchlistStore
+from novel_downloader.apps.core.watchlist import (
+    DEFAULT_CHECK_TIMEOUT,
+    CheckResult,
+    WatchEntry,
+    WatchlistStore,
+    check_all,
+)
 from novel_downloader.infra.i18n import t
-from novel_downloader.plugins import search as search_module
-from novel_downloader.plugins.ranking import normalize_text
-from novel_downloader.schemas import SearchResult
 
 from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail, localize_help
 
 if TYPE_CHECKING:
     from novel_downloader.apps.core.task_manager import TaskManager
-
-#: Results requested per site while looking for the latest chapter.
-_PER_SITE_LIMIT = 10
-
-#: Default per-search timeout (seconds), matching the ``search`` command.
-_DEFAULT_TIMEOUT = 5.0
 
 #: Default max time (seconds) to wait for one download with ``--wait``.
 _DEFAULT_WAIT_TIMEOUT = 30 * 60
@@ -63,86 +65,9 @@ _TERMINAL_STATUSES: frozenset[Status] = frozenset(
 )
 
 
-@dataclass
-class _CheckOutcome:
-    """Result of checking one followed book."""
-
-    entry: WatchEntry
-    latest: str = ""
-    matched_title: str = ""
-    error: str | None = None
-
-    @property
-    def found(self) -> bool:
-        return self.error is None and bool(self.latest)
-
-
 def _make_store() -> WatchlistStore:
     """Create the store for a command run (patch point for tests)."""
     return WatchlistStore()
-
-
-def _match_result(
-    entry: WatchEntry, results: list[SearchResult]
-) -> SearchResult | None:
-    """
-    Pick the search result that belongs to ``entry``.
-
-    A result from the same site with the exact same book id wins; otherwise a
-    result whose normalized title equals the followed title is accepted (a site
-    may expose the same book under a different id).
-    """
-    for result in results:
-        if result.get("site") != entry.site:
-            continue
-        if str(result.get("book_id", "")) == entry.book_id:
-            return result
-
-    if not entry.title:
-        return None
-
-    wanted = normalize_text(entry.title)
-    if not wanted:
-        return None
-    for result in results:
-        if result.get("site") != entry.site:
-            continue
-        if normalize_text(result.get("title", "")) == wanted:
-            return result
-    return None
-
-
-async def _check_entry(entry: WatchEntry, timeout: float) -> _CheckOutcome:
-    """Search one site and return the newest chapter for ``entry``."""
-    keyword = entry.title or entry.book_id
-    try:
-        results = await search_module.search(
-            keyword=keyword,
-            sites=[entry.site],
-            limit=None,
-            per_site_limit=_PER_SITE_LIMIT,
-            timeout=timeout,
-            sort="quality",
-        )
-    except Exception as exc:  # network/plugin failures are per-book, not fatal
-        return _CheckOutcome(entry=entry, error=str(exc))
-
-    matched = _match_result(entry, results)
-    if matched is None:
-        return _CheckOutcome(entry=entry)
-    return _CheckOutcome(
-        entry=entry,
-        latest=str(matched.get("latest_chapter") or "").strip(),
-        matched_title=str(matched.get("title") or "").strip(),
-    )
-
-
-async def _check_all(entries: list[WatchEntry], timeout: float) -> list[_CheckOutcome]:
-    """Check every entry sequentially (one site is usually queried per book)."""
-    outcomes: list[_CheckOutcome] = []
-    for entry in entries:
-        outcomes.append(await _check_entry(entry, timeout))
-    return outcomes
 
 
 @dataclass
@@ -460,7 +385,7 @@ class FollowCheckCmd(Command):
         parser.add_argument(
             "--timeout",
             type=float,
-            default=_DEFAULT_TIMEOUT,
+            default=DEFAULT_CHECK_TIMEOUT,
             metavar="SECS",
             help=t("Search timeout per book in seconds (default: 5.0)."),
         )
@@ -478,7 +403,9 @@ class FollowCheckCmd(Command):
             return
 
         timeout = max(0.1, float(args.timeout))
-        outcomes = asyncio.run(_check_all(entries, timeout))
+        # check_all searches the books with bounded concurrency, persists every
+        # new chapter it finds and returns the results in follow-list order.
+        outcomes: list[CheckResult] = asyncio.run(check_all(store, timeout))
 
         show_all = bool(args.all)
         changed = 0
@@ -504,7 +431,7 @@ class FollowCheckCmd(Command):
                     ui.info(t("No result found for {book}.").format(book=label))
                 continue
 
-            if outcome.latest == entry.last_chapter:
+            if not outcome.changed:
                 if show_all:
                     ui.info(
                         t("Up to date: {book} ({latest})").format(
@@ -514,12 +441,6 @@ class FollowCheckCmd(Command):
                 continue
 
             was_known = bool(entry.last_chapter)
-            store.update_latest(
-                entry.site,
-                entry.book_id,
-                outcome.latest,
-                title=outcome.matched_title,
-            )
             changed += 1
             message = (
                 t("New chapter for {book}: {latest}")

@@ -85,8 +85,17 @@ fun MusicScreen(onMessage: (String) -> Unit) {
     var menuExpanded by remember { mutableStateOf(false) }
     var keyword by remember { mutableStateOf("") }
     var tracks by remember { mutableStateOf<List<MusicTrack>>(emptyList()) }
+    // Paged search state: platform-reported hit total, whether the end of the
+    // result list was reached, and whether the last "load more" attempt failed.
+    var totalHits by remember { mutableIntStateOf(0) }
+    var endReached by remember { mutableStateOf(false) }
+    var loadingMore by remember { mutableStateOf(false) }
+    var loadMoreFailed by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
     var searching by remember { mutableStateOf(false) }
+    // Bumped on every new search / platform switch so responses of stale
+    // requests cannot merge into a freshly reset list.
+    var searchGeneration by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     var jobRunning by remember { mutableStateOf(false) }
     var jobProgress by remember { mutableStateOf(MusicJobProgress()) }
@@ -140,23 +149,95 @@ fun MusicScreen(onMessage: (String) -> Unit) {
             .onFailure { error = it.message }
     }
 
+    /** Drops the current result page: new searches and platform switches start over. */
+    fun resetSearchResults() {
+        searchGeneration++
+        tracks = emptyList()
+        totalHits = 0
+        endReached = false
+        loadingMore = false
+        loadMoreFailed = false
+        selected = emptySet()
+    }
+
     fun search() {
         val query = keyword.trim()
         if (query.isEmpty() || selectedPlatform.isEmpty() || searching) return
         searching = true
         error = null
+        resetSearchResults()
+        val generation = searchGeneration
+        val platform = selectedPlatform
         scope.launch {
             Api.call {
                 Api.service().musicSearch(
-                    MusicSearchRequest(platform = selectedPlatform, keyword = query),
+                    MusicSearchRequest(
+                        platform = platform,
+                        keyword = query,
+                        limit = MUSIC_PAGE_SIZE,
+                        offset = 0,
+                    ),
                 )
             }
                 .onSuccess {
-                    tracks = it.tracks
-                    selected = emptySet()
+                    if (generation != searchGeneration) return@onSuccess
+                    tracks = MusicPaging.merge(emptyList(), it.tracks)
+                    totalHits = it.total
+                    endReached =
+                        !MusicPaging.hasMore(tracks.size, it.total, it.tracks.size, 0, MUSIC_PAGE_SIZE)
                 }
-                .onFailure { error = it.message }
+                .onFailure {
+                    if (generation == searchGeneration) error = it.message
+                }
             searching = false
+        }
+    }
+
+    /**
+     * Loads the next page with `offset = 当前结果数` and appends it (deduped by
+     * track id). Guarded so a page is only ever requested when the previous
+     * search finished, no fetch is in flight and the end was not reached.
+     */
+    fun loadMore() {
+        val query = keyword.trim()
+        if (query.isEmpty() || selectedPlatform.isEmpty()) return
+        if (searching || loadingMore || endReached) return
+        loadingMore = true
+        loadMoreFailed = false
+        val generation = searchGeneration
+        val platform = selectedPlatform
+        val offset = tracks.size
+        scope.launch {
+            Api.call {
+                Api.service().musicSearch(
+                    MusicSearchRequest(
+                        platform = platform,
+                        keyword = query,
+                        limit = MUSIC_PAGE_SIZE,
+                        offset = offset,
+                    ),
+                )
+            }
+                .onSuccess { page ->
+                    if (generation != searchGeneration) return@onSuccess
+                    val previous = tracks.size
+                    tracks = MusicPaging.merge(tracks, page.tracks)
+                    totalHits = page.total
+                    endReached = !MusicPaging.hasMore(
+                        tracks.size,
+                        page.total,
+                        page.tracks.size,
+                        previous,
+                        MUSIC_PAGE_SIZE,
+                    )
+                }
+                .onFailure {
+                    if (generation == searchGeneration) {
+                        loadMoreFailed = true
+                        error = it.message
+                    }
+                }
+            if (generation == searchGeneration) loadingMore = false
         }
     }
 
@@ -225,9 +306,13 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                         DropdownMenuItem(
                             text = { Text(platform.label) },
                             onClick = {
-                                selectedPlatform = platform.key
-                                selectionStore.saveSelectedPlatform(platform.key)
                                 menuExpanded = false
+                                if (platform.key != selectedPlatform) {
+                                    selectedPlatform = platform.key
+                                    selectionStore.saveSelectedPlatform(platform.key)
+                                    // Paged results belong to the old platform.
+                                    resetSearchResults()
+                                }
                             },
                         )
                     }
@@ -294,7 +379,11 @@ fun MusicScreen(onMessage: (String) -> Unit) {
         if (tracks.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
             Text(
-                stringResource(R.string.music_tracks, tracks.size),
+                if (totalHits > 0) {
+                    stringResource(R.string.music_search_progress, tracks.size, totalHits)
+                } else {
+                    stringResource(R.string.music_tracks, tracks.size)
+                },
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -333,6 +422,60 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                         }
                     }
                 }
+            }
+            // "Load more" footer: once it scrolls into view the next page is
+            // fetched automatically; it disappears entirely when the end of
+            // the result list was reached.
+            if (tracks.isNotEmpty() && !endReached) {
+                item(key = "music-load-more") {
+                    MusicLoadMoreFooter(
+                        loadingMore = loadingMore,
+                        failed = loadMoreFailed,
+                        onLoadMore = { loadMore() },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Auto-trigger + status row for paged music search: fires [onLoadMore] once
+ * it is composed (i.e. the user reached the bottom), shows a spinner while
+ * the page is in flight and a retry button when the fetch failed. The
+ * "X / Y" progress lives in the count line above the list.
+ */
+@Composable
+private fun MusicLoadMoreFooter(
+    loadingMore: Boolean,
+    failed: Boolean,
+    onLoadMore: () -> Unit,
+) {
+    LaunchedEffect(loadingMore, failed) {
+        if (!loadingMore && !failed) onLoadMore()
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (loadingMore) {
+            val desc = stringResource(R.string.music_loading_more)
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .size(16.dp)
+                    .semantics { contentDescription = desc },
+                strokeWidth = 2.dp,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                desc,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else if (failed) {
+            TextButton(onClick = onLoadMore) {
+                Text(stringResource(R.string.action_retry))
             }
         }
     }

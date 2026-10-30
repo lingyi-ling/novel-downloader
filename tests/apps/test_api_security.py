@@ -553,7 +553,7 @@ async def test_search_timeout_returns_504(
 async def test_music_search_timeout_returns_504(
     make_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    def slow_search(keyword: str, limit: int) -> tuple[list[Any], int]:
+    def slow_search(keyword: str, limit: int, offset: int = 0) -> tuple[list[Any], int]:
         time.sleep(1.0)
         return [], 0
 

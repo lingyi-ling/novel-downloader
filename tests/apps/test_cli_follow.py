@@ -13,6 +13,7 @@ monkeypatched, so the real user data is never touched.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from novel_downloader.apps.cli.commands.follow import (
 from novel_downloader.apps.cli.commands.storage import StorageCmd
 from novel_downloader.apps.core.models import Status
 from novel_downloader.apps.core.watchlist import WatchlistStore
+from novel_downloader.plugins import search as search_module
 
 
 def _parser(*commands: type) -> argparse.ArgumentParser:
@@ -172,7 +174,7 @@ def test_follow_check_updates_chapters_and_prints_download_hint(
     store.add("b520", "3", title="No Result", last_chapter="Unknown")
 
     monkeypatch.setattr(
-        follow.search_module,
+        search_module,
         "search",
         _fake_search(
             {
@@ -207,7 +209,7 @@ def test_follow_check_prefers_exact_book_id(
     store.add("b520", "old", title="Same Title", last_chapter="Chapter 1")
 
     monkeypatch.setattr(
-        follow.search_module,
+        search_module,
         "search",
         _fake_search(
             {
@@ -235,7 +237,7 @@ def test_follow_check_all_shows_unchanged(
     store.add("b520", "1", title="Book A", last_chapter="Chapter 1")
 
     monkeypatch.setattr(
-        follow.search_module,
+        search_module,
         "search",
         _fake_search({"Book A": [_result("b520", "1", "Book A", "Chapter 1")]}),
     )
@@ -261,7 +263,7 @@ def test_follow_check_failure_exits_nonzero(
     store.add("b520", "1", title="Book A")
 
     monkeypatch.setattr(
-        follow.search_module,
+        search_module,
         "search",
         _fake_search({}, errors={"Book A": RuntimeError("site down")}),
     )
@@ -288,7 +290,7 @@ def test_follow_check_empty_list(
         called = True
         return []
 
-    monkeypatch.setattr(follow.search_module, "search", search)
+    monkeypatch.setattr(search_module, "search", search)
     messages = _capture_ui(monkeypatch, follow)
     parser = _parser(FollowCheckCmd)
 
@@ -297,6 +299,34 @@ def test_follow_check_empty_list(
 
     assert called is False
     assert any("No followed books to check." in message for message in messages)
+
+
+def test_follow_check_reports_in_list_order_not_completion_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The later book answers first, yet is reported second."""
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    store = WatchlistStore()
+    store.add("b520", "1", title="Slow Book", last_chapter="Chapter 1")
+    store.add("qidian", "2", title="Fast Book", last_chapter="Chapter 1")
+
+    async def fake_search(keyword: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        await asyncio.sleep(0.05 if keyword == "Slow Book" else 0.0)
+        if keyword == "Slow Book":
+            return [_result("b520", "1", "Slow Book", "Chapter 2")]
+        return [_result("qidian", "2", "Fast Book", "Chapter 2")]
+
+    monkeypatch.setattr(search_module, "search", fake_search)
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check"])
+    args.func(args)
+
+    updates = [message for message in messages if "New chapter for" in message]
+    assert len(updates) == 2
+    assert "b520/1" in updates[0]
+    assert "qidian/2" in updates[1]
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +408,7 @@ def _two_books_with_updates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     store.add("b520", "1", title="Book A", last_chapter="Chapter 1")
     store.add("qidian", "2", title="Book B", last_chapter="Chapter 1")
     monkeypatch.setattr(
-        follow.search_module,
+        search_module,
         "search",
         _fake_search(
             {
@@ -523,7 +553,7 @@ def test_follow_check_wait_no_changes_skips_manager(
     store = WatchlistStore()
     store.add("b520", "1", title="Book A", last_chapter="Chapter 1")
     monkeypatch.setattr(
-        follow.search_module,
+        search_module,
         "search",
         _fake_search({"Book A": [_result("b520", "1", "Book A", "Chapter 1")]}),
     )

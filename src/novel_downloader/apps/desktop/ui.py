@@ -45,7 +45,13 @@ from novel_downloader.apps.common.history_files import (
 from novel_downloader.apps.constants import SEARCH_SUPPORT_SITES
 from novel_downloader.apps.core.models import DownloadTask
 from novel_downloader.apps.core.task_manager import manager
-from novel_downloader.apps.core.watchlist import WatchEntry, WatchlistStore
+from novel_downloader.apps.core.watchlist import (
+    DEFAULT_CHECK_TIMEOUT,
+    CheckResult,
+    WatchEntry,
+    WatchlistStore,
+    check_all,
+)
 from novel_downloader.infra.i18n import t
 from novel_downloader.infra.paths import app_home
 from novel_downloader.plugins.search import search
@@ -68,7 +74,6 @@ from .formatting import (
     health_rows,
     health_summary,
     history_row,
-    match_watch_result,
     music_row,
     parse_sites,
     retry_params,
@@ -111,11 +116,6 @@ _MUSIC_WORKERS = 3
 #: Per-platform budget for the health check; each platform gets one bounded
 #: search (see ``apps.music.providers.health_check``).
 _MUSIC_HEALTH_TIMEOUT = 15.0
-
-#: Results requested per site while looking for a followed book's latest
-#: chapter; matches the ``follow check`` CLI defaults.
-_FOLLOW_PER_SITE = 10
-_FOLLOW_TIMEOUT = 5.0
 
 #: Outcome kinds posted by the follow-check worker for each book.
 _FOLLOW_ITEM_KINDS = ("first", "updated", "up_to_date", "not_found", "error")
@@ -1039,24 +1039,29 @@ class DesktopApp:
         )
         threading.Thread(
             target=self._follow_check_worker,
-            args=(entries,),
             name="desktop-follow-check",
             daemon=True,
         ).start()
 
-    def _follow_check_worker(self, entries: list[WatchEntry]) -> None:
-        """Check every book serially; one failure never stops the rest."""
+    def _follow_check_worker(self) -> None:
+        """
+        Check the followed books with bounded concurrency.
+
+        The shared :func:`check_all` sweep searches several books at once,
+        persists every new chapter through the thread-safe store and reports
+        each result as it completes; one failing book never stops the rest.
+        """
         try:
-            for entry in entries:
-                try:
-                    self._follow_check_one(entry)
-                except Exception as exc:  # noqa: BLE001 - per-book, not fatal
-                    self.events.put(
-                        (
-                            "follow_item",
-                            (entry.site, entry.book_id, "error", format_error(exc)),
-                        )
-                    )
+            asyncio.run(
+                check_all(
+                    store=self._watch_store,
+                    timeout=DEFAULT_CHECK_TIMEOUT,
+                    progress_cb=self._follow_report_result,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - delivered to the UI thread
+            logger.exception("Failed to run the follow check")
+            self.events.put(("error", format_error(exc)))
         finally:
             try:
                 refreshed = self._watch_store.entries()
@@ -1066,41 +1071,31 @@ class DesktopApp:
                 self.events.put(("follow_entries", list(refreshed)))
             self.events.put(("follow_check_done", None))
 
-    def _follow_check_one(self, entry: WatchEntry) -> None:
-        """Search one site, match the book and record its latest chapter."""
-        results = asyncio.run(
-            search(
-                entry.title or entry.book_id,
-                sites=[entry.site],
-                per_site_limit=_FOLLOW_PER_SITE,
-                timeout=_FOLLOW_TIMEOUT,
+    def _follow_report_result(self, result: CheckResult) -> None:
+        """Post one finished check to the UI thread (in completion order)."""
+        entry = result.entry
+        if result.error is not None:
+            self.events.put(
+                ("follow_item", (entry.site, entry.book_id, "error", result.error))
             )
-        )
-        matched = match_watch_result(entry.site, entry.book_id, entry.title, results)
-        if matched is None:
+            return
+        if not result.latest:
             self.events.put(
                 ("follow_item", (entry.site, entry.book_id, "not_found", ""))
             )
             return
-        latest = str(matched.get("latest_chapter") or "").strip()
-        if not latest:
+        if not result.changed:
             self.events.put(
-                ("follow_item", (entry.site, entry.book_id, "not_found", ""))
-            )
-            return
-
-        matched_title = str(matched.get("title") or "").strip()
-        with self._watch_lock:
-            changed = self._watch_store.update_latest(
-                entry.site, entry.book_id, latest, title=matched_title
-            )
-        if not changed:
-            self.events.put(
-                ("follow_item", (entry.site, entry.book_id, "up_to_date", latest))
+                (
+                    "follow_item",
+                    (entry.site, entry.book_id, "up_to_date", result.latest),
+                )
             )
             return
         kind = "first" if not entry.last_chapter else "updated"
-        self.events.put(("follow_item", (entry.site, entry.book_id, kind, latest)))
+        self.events.put(
+            ("follow_item", (entry.site, entry.book_id, kind, result.latest))
+        )
 
     def _on_follow_item(self, payload: tuple[str, str, str, str]) -> None:
         """Report one book's check outcome and count it for the summary."""

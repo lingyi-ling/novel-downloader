@@ -19,6 +19,7 @@ poll callbacks) and destroyed again.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import queue
@@ -40,6 +41,7 @@ from novel_downloader.apps.desktop import main as desktop_main
 from novel_downloader.apps.desktop import preferences as prefs
 from novel_downloader.apps.desktop.engine import AsyncEngine
 from novel_downloader.infra.i18n import t
+from novel_downloader.plugins import search as search_module
 from novel_downloader.schemas import SearchResult
 
 
@@ -1368,8 +1370,6 @@ def _drain_and_dispatch(
 def test_follow_check_updates_entries_and_reenables_buttons(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import novel_downloader.apps.desktop.ui as ui_mod
-
     app, root = _open_desktop_app(tmp_path, monkeypatch)
     try:
         root.update_idletasks()
@@ -1382,6 +1382,12 @@ def test_follow_check_updates_entries_and_reenables_buttons(
         async def fake_search(
             keyword: str, sites: list[str] | None = None, **_kwargs: Any
         ) -> list[SearchResult]:
+            # Staggered delays make the completion order deterministic while
+            # the books are still searched concurrently: each result is posted
+            # as soon as its search finishes.
+            delay = {"site-a": 0.0, "site-b": 0.02, "site-c": 0.04, "site-d": 0.06}
+            if sites and sites[0] in delay:
+                await asyncio.sleep(delay[sites[0]])
             if sites == ["site-a"]:
                 # Different id on purpose: only the normalized title matches.
                 return [
@@ -1405,7 +1411,9 @@ def test_follow_check_updates_entries_and_reenables_buttons(
                 raise ValueError("network down")
             return []
 
-        monkeypatch.setattr(ui_mod, "search", fake_search)
+        # The shared sweep resolves the search lazily through the plugin
+        # module, so the patch point is the module attribute itself.
+        monkeypatch.setattr(search_module, "search", fake_search)
         app._follow_entries = store.entries()
         app._start_follow_check()
 
