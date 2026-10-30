@@ -474,7 +474,22 @@ class TaskManager:
                 self._process_waiting.task_done()
 
     async def _export_worker(self) -> None:
-        """Dedicated worker for synchronous export tasks."""
+        """
+        Dedicated worker for synchronous export tasks.
+
+        A client reports per-format outcomes through the export UI callbacks
+        and returns normally even when every format failed, so the final
+        status is decided here from those outcomes instead of being
+        unconditionally set to COMPLETED:
+
+        * at least one format produced a file -> COMPLETED; failures of the
+          other formats were already recorded on ``task.error`` and stay
+          visible (partial success);
+        * nothing was produced and some format failed or was reported
+          unsupported -> FAILED (kept or set, never masked);
+        * nothing was produced and no per-format callback fired at all (a
+          no-op export) -> COMPLETED, the historical outcome for that case.
+        """
         while True:
             current_task = await self._export_waiting.get()
             if _is_cancelled(current_task):
@@ -483,15 +498,27 @@ class TaskManager:
                 continue
             try:
                 client = self._get_client(current_task.site)
+                export_ui = WebExportUI(current_task)
                 await asyncio.to_thread(
                     client.export_book,
                     BookConfig(book_id=current_task.book_id),
                     cfg=self.adapter.get_exporter_config(current_task.site),
-                    ui=WebExportUI(current_task),
+                    ui=export_ui,
                 )
                 if not _is_cancelled(current_task):
-                    current_task.status = Status.COMPLETED
                     current_task.finished_at = time.time()
+                    if export_ui.exported_any:
+                        current_task.status = Status.COMPLETED
+                    elif (
+                        current_task.status is Status.FAILED
+                        or export_ui.unsupported_any
+                    ):
+                        # Not a single format produced a file while at least
+                        # one failed or was unsupported: keep the task FAILED
+                        # instead of masking the failure as COMPLETED.
+                        current_task.status = Status.FAILED
+                    else:
+                        current_task.status = Status.COMPLETED
             except asyncio.CancelledError:
                 current_task.status = Status.CANCELLED
                 current_task.finished_at = time.time()

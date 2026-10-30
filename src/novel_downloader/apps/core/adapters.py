@@ -94,21 +94,41 @@ class WebDownloadUI:
 
 
 class WebExportUI:
+    """
+    Export callbacks for one export run of a single task.
+
+    Besides mutating the task, the adapter records two run-level outcome
+    flags so the export worker can decide the final status:
+
+    * :attr:`exported_any` -- at least one requested format produced a file;
+    * :attr:`unsupported_any` -- at least one requested format was reported
+      as unsupported (which never touches the status on its own).
+
+    A fresh instance is created per export run, so the flags always describe
+    exactly that run.
+    """
+
     def __init__(self, task: DownloadTask) -> None:
         self.task = task
         self.task.exported_paths = {}
+        #: Whether at least one requested export format produced a file.
+        self.exported_any: bool = False
+        #: Whether any requested export format was reported unsupported.
+        self.unsupported_any: bool = False
 
     def on_start(self, book: BookConfig, fmt: str | None = None) -> None:
         self.task.status = Status.EXPORTING
 
     def on_success(self, book: BookConfig, fmt: str, path: Path) -> None:
         self.task.exported_paths[fmt] = path
+        self.exported_any = True
 
     def on_error(self, book: BookConfig, fmt: str | None, error: Exception) -> None:
         self.task.status = Status.FAILED
         self.task.error = str(error)
 
     def on_unsupported(self, book: BookConfig, fmt: str) -> None:
+        self.unsupported_any = True
         self.task.error = f"Export format '{fmt}' is not supported."
 
 
