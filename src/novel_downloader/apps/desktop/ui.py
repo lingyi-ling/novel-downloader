@@ -86,6 +86,15 @@ from .formatting import (
     task_output_actions,
     task_row,
 )
+from .notifications import (
+    TaskNotification,
+    TaskOutcome,
+    detect_task_notifications,
+    flatten_task_snapshot,
+    play_notification_sound,
+    snapshot_task_states,
+    task_event_status_message,
+)
 from .preferences import (
     DEFAULT_API_BASE,
     MUSIC_LEVELS,
@@ -113,6 +122,14 @@ _SEARCH_TIMEOUT = 10.0
 _MUSIC_SEARCH_LIMIT = 30
 _MUSIC_WORKERS = 3
 
+#: How long the status bar keeps a task-notification highlight (ms).
+_NOTIFY_STATUS_MS = 5000
+
+#: Status-bar highlight colors; shared with the task tree's row colors.
+_STATUS_HIGHLIGHT_COMPLETED = "#1b6e1b"
+_STATUS_HIGHLIGHT_FAILED = "#b00020"
+_STATUS_DEFAULT_FG = "black"
+
 #: Per-platform budget for the health check; each platform gets one bounded
 #: search (see ``apps.music.providers.health_check``).
 _MUSIC_HEALTH_TIMEOUT = 15.0
@@ -138,6 +155,12 @@ class DesktopApp:
         self._closing = False
 
         self._status_var = tk.StringVar(value=t("Ready"))
+        # Task-completion notifications (the Android TaskEvents pattern): the
+        # ``task_id -> status`` baseline of the previous snapshot, plus the
+        # status-bar highlight bookkeeping.
+        self._previous_task_states: dict[str, str] = {}
+        self._status_label: ttk.Label | None = None
+        self._status_highlight_after: str | None = None
         self._search_results: list[SearchResult] = []
         self._history_items: list[FileItem] = []
         self._snapshot_future: Future[dict[str, list[DownloadTask]]] | None = None
@@ -257,11 +280,13 @@ class DesktopApp:
 
         status_bar = ttk.Frame(self.root, relief="sunken", padding=(6, 3))
         status_bar.pack(side="bottom", fill="x")
-        ttk.Label(
+        status_label = ttk.Label(
             status_bar,
             textvariable=self._status_var,
             anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+        )
+        status_label.pack(side="left", fill="x", expand=True)
+        self._status_label = status_label
         self._env_var.set(environment_summary(DEFAULT_API_BASE, app_home()))
         ttk.Label(
             status_bar,
@@ -1261,7 +1286,77 @@ class DesktopApp:
             logger.debug("Ignoring unknown desktop event: %s", kind)
 
     def _set_status(self, message: str) -> None:
+        # Any new status message ends a pending notification highlight.
+        self._reset_status_highlight()
         self._status_var.set(message)
+
+    def _reset_status_highlight(self) -> None:
+        """Drop a pending status-bar highlight (no-op when none is active)."""
+        after_id = self._status_highlight_after
+        if after_id is None:
+            return
+        self._status_highlight_after = None
+        with contextlib.suppress(tk.TclError):
+            self.root.after_cancel(after_id)
+        label = self._status_label
+        if label is not None:
+            with contextlib.suppress(tk.TclError):
+                label.configure(foreground=_STATUS_DEFAULT_FG)
+
+    def _highlight_status(self, message: str, color: str) -> None:
+        """Show ``message`` with a colored status bar for a few seconds."""
+        self._set_status(message)
+        label = self._status_label
+        if label is None:
+            return
+        with contextlib.suppress(tk.TclError):
+            label.configure(foreground=color)
+        self._status_highlight_after = self.root.after(
+            _NOTIFY_STATUS_MS, self._reset_status_highlight
+        )
+
+    # ------------------------------------------------------------------
+    # Task-completion notifications
+    # ------------------------------------------------------------------
+    def _notify_task_transitions(self, snapshot: dict[str, list[DownloadTask]]) -> None:
+        """
+        Notify about tasks that reached ``completed``/``failed`` since the
+        previous snapshot.
+
+        The first snapshot only builds the baseline (the Android TaskEvents
+        pattern), so tasks that were already finished when the window opened
+        never notify, and re-rendering the same snapshot cannot notify twice.
+        """
+        tasks = flatten_task_snapshot(snapshot)
+        events = detect_task_notifications(self._previous_task_states, tasks)
+        self._previous_task_states = snapshot_task_states(tasks)
+        if not events:
+            return
+        self._announce_task_events(events)
+
+    def _announce_task_events(self, events: list[TaskNotification]) -> None:
+        """Raise one notification: a beep when hidden, then a highlighted line."""
+        if self._window_in_background():
+            play_notification_sound()
+        color = (
+            _STATUS_HIGHLIGHT_FAILED
+            if any(event.outcome is TaskOutcome.FAILED for event in events)
+            else _STATUS_HIGHLIGHT_COMPLETED
+        )
+        self._highlight_status(task_event_status_message(events), color=color)
+
+    def _window_in_background(self) -> bool:
+        """
+        Whether the window is not in the foreground right now.
+
+        Only the Tk ``state()`` is consulted: anything other than ``normal``
+        (minimized, withdrawn, ...) counts as background.  A destroyed window
+        counts as foreground so shutdown never beeps.
+        """
+        try:
+            return self.root.state() != "normal"
+        except tk.TclError:
+            return False
 
     def _show_error(self, message: str) -> None:
         logger.error("%s", message)
@@ -1615,6 +1710,7 @@ class DesktopApp:
             tree.see(selected)
 
         self._update_task_controls()
+        self._notify_task_transitions(snapshot)
 
     def _on_task_filter_changed(self, _event: object | None = None) -> None:
         self._render_tasks(self._last_tasks_snapshot)

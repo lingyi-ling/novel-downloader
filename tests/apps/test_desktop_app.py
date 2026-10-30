@@ -23,8 +23,9 @@ import asyncio
 import contextlib
 import os
 import queue
+import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ from novel_downloader.apps.core.models import DownloadTask, Status
 from novel_downloader.apps.core.watchlist import WatchEntry, WatchlistStore
 from novel_downloader.apps.desktop import formatting as fmt
 from novel_downloader.apps.desktop import main as desktop_main
+from novel_downloader.apps.desktop import notifications as notif
 from novel_downloader.apps.desktop import preferences as prefs
 from novel_downloader.apps.desktop.engine import AsyncEngine
 from novel_downloader.infra.i18n import t
@@ -997,6 +999,241 @@ def test_task_filter_labels_use_translations() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Task notifications: pure transition rules (the Android TaskEvents pattern)
+# ---------------------------------------------------------------------------
+def _status_task(
+    status: Status,
+    task_id: str = "task-1",
+    title: str = "Alpha",
+    error: str | None = None,
+) -> DownloadTask:
+    """Build a task snapshot with a fixed id and status."""
+    task = DownloadTask(title=title, site="qidian", book_id="1", task_id=task_id)
+    task.status = status
+    task.error = error
+    return task
+
+
+def _task_snapshot(
+    running: Iterable[DownloadTask] = (),
+    pending: Iterable[DownloadTask] = (),
+    completed: Iterable[DownloadTask] = (),
+) -> dict[str, list[DownloadTask]]:
+    """Build a manager-shaped snapshot."""
+    return {
+        "running": list(running),
+        "pending": list(pending),
+        "completed": list(completed),
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (Status.QUEUED, False),
+        (Status.RUNNING, False),
+        (Status.PROCESSING, False),
+        (Status.EXPORTING, False),
+        (Status.COMPLETED, True),
+        (Status.CANCELLED, True),
+        (Status.FAILED, True),
+        # Raw strings are accepted, with trimming and case folding.
+        ("completed", True),
+        ("  FAILED  ", True),
+        ("Cancelled", True),
+        ("running", False),
+        ("bogus", False),
+        (None, False),
+    ],
+)
+def test_is_terminal_status(status: object, expected: bool) -> None:
+    assert notif.is_terminal_status(status) is expected
+
+
+def test_first_observation_is_only_a_baseline() -> None:
+    """Tasks seen for the first time never notify (their history is unknown)."""
+    tasks = [
+        _status_task(Status.COMPLETED, task_id="done"),
+        _status_task(Status.FAILED, task_id="broken", error="boom"),
+    ]
+    assert notif.detect_task_notifications({}, tasks) == []
+
+
+def test_running_to_completed_produces_completed_event() -> None:
+    task = _status_task(Status.COMPLETED)
+    events = notif.detect_task_notifications({task.task_id: "running"}, [task])
+    assert events == [
+        notif.TaskNotification(
+            task_id="task-1",
+            title="Alpha",
+            outcome=notif.TaskOutcome.COMPLETED,
+            error="",
+        )
+    ]
+
+
+def test_running_to_failed_produces_failed_event_with_error() -> None:
+    task = _status_task(Status.FAILED, task_id="task-2", error="HTTPError: 500")
+    events = notif.detect_task_notifications({"task-2": "running"}, [task])
+    assert events == [
+        notif.TaskNotification(
+            task_id="task-2",
+            title="Alpha",
+            outcome=notif.TaskOutcome.FAILED,
+            error="HTTPError: 500",
+        )
+    ]
+
+
+def test_cancellation_is_terminal_but_never_notifies() -> None:
+    task = _status_task(Status.CANCELLED, error="Cancelled by user")
+    assert notif.detect_task_notifications({"task-1": "running"}, [task]) == []
+    # ...and a cancelled task is terminal, so a later poll cannot notify either.
+    assert notif.detect_task_notifications({"task-1": "cancelled"}, [task]) == []
+
+
+@pytest.mark.parametrize("before", ["completed", "failed", "cancelled"])
+def test_terminal_to_terminal_does_not_notify_twice(before: str) -> None:
+    completed = _status_task(Status.COMPLETED)
+    failed = _status_task(Status.FAILED, task_id="task-2", error="boom")
+    previous = {"task-1": before, "task-2": before}
+    assert notif.detect_task_notifications(previous, [completed, failed]) == []
+
+
+@pytest.mark.parametrize("before", ["queued", "running", "processing", "exporting"])
+def test_every_non_terminal_baseline_notifies_on_completion(before: str) -> None:
+    task = _status_task(Status.COMPLETED)
+    assert len(notif.detect_task_notifications({"task-1": before}, [task])) == 1
+
+
+def test_unknown_previous_status_still_notifies_on_completion() -> None:
+    """Only a *missing* entry is a baseline; an unknown value is non-terminal."""
+    task = _status_task(Status.COMPLETED)
+    assert len(notif.detect_task_notifications({"task-1": "mystery"}, [task])) == 1
+
+
+def test_active_statuses_never_notify() -> None:
+    previous = {"task-1": "running"}
+    tasks = [
+        _status_task(Status.QUEUED),
+        _status_task(Status.RUNNING, task_id="task-2"),
+        _status_task(Status.PROCESSING, task_id="task-3"),
+        _status_task(Status.EXPORTING, task_id="task-4"),
+    ]
+    assert notif.detect_task_notifications(previous, tasks) == []
+
+
+def test_poll_cycle_notifies_once_per_transition() -> None:
+    """The full loop: baseline -> transition -> one event -> silence."""
+    task = _status_task(Status.RUNNING)
+
+    # Poll 1: the first sight of the task only builds the baseline.
+    previous = notif.snapshot_task_states([task])
+    assert previous == {"task-1": "running"}
+    assert notif.detect_task_notifications(previous, [task]) == []
+
+    # Poll 2: the task finished -> exactly one notification.
+    task.status = Status.COMPLETED
+    events = notif.detect_task_notifications(previous, [task])
+    assert len(events) == 1
+
+    # Poll 3+: the baseline caught up; the same snapshot is silent forever.
+    previous = notif.snapshot_task_states([task])
+    assert notif.detect_task_notifications(previous, [task]) == []
+
+
+def test_snapshot_deduplicates_tasks_by_id_keeping_the_first() -> None:
+    first = _status_task(Status.COMPLETED, title="First")
+    same_id = _status_task(Status.COMPLETED, title="Second")
+    flattened = notif.flatten_task_snapshot(_task_snapshot(completed=[first, same_id]))
+    assert flattened == [first]
+
+    # Detection sees one task, so one transition cannot double-notify.
+    events = notif.detect_task_notifications({"task-1": "queued"}, flattened)
+    assert len(events) == 1
+    assert events[0].title == "First"
+
+
+def test_flatten_task_snapshot_covers_all_sections_in_order() -> None:
+    running = _status_task(Status.RUNNING)
+    pending = _status_task(Status.QUEUED, task_id="task-2")
+    completed = _status_task(Status.COMPLETED, task_id="task-3")
+    flattened = notif.flatten_task_snapshot(
+        _task_snapshot(running=[running], pending=[pending], completed=[completed])
+    )
+    assert flattened == [running, pending, completed]
+
+
+def test_snapshot_task_states_uses_raw_status_values() -> None:
+    tasks = [_status_task(Status.RUNNING), _status_task(Status.FAILED, task_id="t2")]
+    assert notif.snapshot_task_states(tasks) == {"task-1": "running", "t2": "failed"}
+
+
+def test_task_event_status_message_for_a_completed_task() -> None:
+    event = notif.TaskNotification(
+        task_id="1", title="Alpha", outcome=notif.TaskOutcome.COMPLETED
+    )
+    assert notif.task_event_status_message([event]) == t(
+        "Download completed: {book}"
+    ).format(book="Alpha")
+
+
+def test_task_event_status_message_for_a_failed_task() -> None:
+    event = notif.TaskNotification(
+        task_id="1", title="Alpha", outcome=notif.TaskOutcome.FAILED, error="boom"
+    )
+    assert notif.task_event_status_message([event]) == t(
+        "Download failed for {book}: {error}"
+    ).format(book="Alpha", error="boom")
+
+    # A missing error falls back to the localized status label.
+    blank = notif.TaskNotification(
+        task_id="1", title="Alpha", outcome=notif.TaskOutcome.FAILED, error="  "
+    )
+    assert notif.task_event_status_message([blank]) == t(
+        "Download failed for {book}: {error}"
+    ).format(book="Alpha", error=t("Failed"))
+
+
+def test_task_event_status_message_joins_a_batch() -> None:
+    events = [
+        notif.TaskNotification(
+            task_id="1", title="Alpha", outcome=notif.TaskOutcome.COMPLETED
+        ),
+        notif.TaskNotification(
+            task_id="2", title="Beta", outcome=notif.TaskOutcome.FAILED, error="boom"
+        ),
+    ]
+    assert notif.task_event_status_message(events) == " | ".join(
+        [
+            t("Download completed: {book}").format(book="Alpha"),
+            t("Download failed for {book}: {error}").format(book="Beta", error="boom"),
+        ]
+    )
+    assert notif.task_event_status_message([]) == ""
+
+
+def test_play_notification_sound_uses_the_system_beep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+    fake = SimpleNamespace(MessageBeep=lambda *args: calls.append(args))
+    monkeypatch.setitem(sys.modules, "winsound", fake)
+    notif.play_notification_sound()
+    assert calls == [()]
+
+
+def test_play_notification_sound_swallows_audio_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom() -> None:
+        raise RuntimeError("no audio device")
+
+    monkeypatch.setitem(sys.modules, "winsound", SimpleNamespace(MessageBeep=boom))
+    notif.play_notification_sound()  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # Follow list ("追更"): title normalization
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
@@ -1252,6 +1489,10 @@ def test_desktop_window_builds_all_tabs(
         assert "disabled" in app.search_last_button.state()
         assert app.task_filter_combo.get() == t("All")
         assert app.task_keyword_var.get() == ""
+        # Task-completion notification bookkeeping starts empty.
+        assert app._status_label is not None
+        assert app._previous_task_states == {}
+        assert app._status_highlight_after is None
 
         # Follow ("追更") tab: widgets exist and the tab can be raised.
         assert app.follow_tree is not None
@@ -1807,6 +2048,120 @@ def test_music_health_check_checks_every_platform_serially_and_reenables_button(
         assert app._status_var.get() == summary
         assert "disabled" not in button.state()
         assert app._music_health_running is False
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(Exception):
+            root.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Task notifications (window, guarded: needs a display)
+# ---------------------------------------------------------------------------
+def test_task_notification_beeps_and_highlights_when_window_is_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import novel_downloader.apps.desktop.ui as ui_mod
+
+    app, root = _open_desktop_app(tmp_path, monkeypatch)
+    try:
+        root.update_idletasks()
+        played: list[int] = []
+        monkeypatch.setattr(ui_mod, "play_notification_sound", lambda: played.append(1))
+
+        task = DownloadTask(title="Alpha", site="qidian", book_id="1", task_id="task-1")
+        task.status = Status.RUNNING
+
+        # First snapshot: baseline only, no notification of any kind.
+        app._render_tasks(_task_snapshot(running=[task]))
+        assert played == []
+        assert app._previous_task_states == {"task-1": "running"}
+        assert app._status_highlight_after is None
+
+        # The fixture withdraws the window, so the app counts as background.
+        assert app._window_in_background() is True
+
+        # running -> completed while hidden: a beep and a highlighted line.
+        task.status = Status.COMPLETED
+        app._render_tasks(_task_snapshot(completed=[task]))
+        assert played == [1]
+        assert app._status_var.get() == t("Download completed: {book}").format(
+            book="Alpha"
+        )
+        label = app._status_label
+        assert label is not None
+        assert str(label.cget("foreground")) == ui_mod._STATUS_HIGHLIGHT_COMPLETED
+        assert app._status_highlight_after is not None
+
+        # Re-rendering the same snapshot cannot notify twice.
+        app._render_tasks(_task_snapshot(completed=[task]))
+        assert played == [1]
+
+        # Any new status message ends the highlight and restores the color.
+        app._set_status(t("Ready"))
+        assert str(label.cget("foreground")) == "black"
+        assert app._status_highlight_after is None
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(Exception):
+            root.destroy()
+
+
+def test_task_notification_gates_the_beep_by_window_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import novel_downloader.apps.desktop.ui as ui_mod
+
+    app, root = _open_desktop_app(tmp_path, monkeypatch)
+    try:
+        root.update_idletasks()
+        played: list[int] = []
+        monkeypatch.setattr(ui_mod, "play_notification_sound", lambda: played.append(1))
+
+        failed = DownloadTask(title="Beta", site="b520", book_id="2", task_id="task-2")
+        failed.status = Status.RUNNING
+        done = DownloadTask(title="Gamma", site="qidian", book_id="3", task_id="task-3")
+        done.status = Status.RUNNING
+
+        # Baseline for both tasks.
+        app._render_tasks(_task_snapshot(running=[failed, done]))
+
+        # Foreground window: the transitions update the status bar but the
+        # app never beeps while the user is looking at it.
+        original = app._window_in_background
+        app._window_in_background = lambda: False
+        try:
+            failed.status = Status.FAILED
+            failed.error = "HTTPError: 500"
+            done.status = Status.COMPLETED
+            app._render_tasks(_task_snapshot(completed=[failed, done]))
+        finally:
+            app._window_in_background = original
+
+        assert played == []
+        assert app._status_var.get() == " | ".join(
+            [
+                t("Download failed for {book}: {error}").format(
+                    book="Beta", error="HTTPError: 500"
+                ),
+                t("Download completed: {book}").format(book="Gamma"),
+            ]
+        )
+        # A mixed batch highlights in the failure color.
+        label = app._status_label
+        assert label is not None
+        assert str(label.cget("foreground")) == ui_mod._STATUS_HIGHLIGHT_FAILED
+        assert app._previous_task_states == {
+            "task-2": "failed",
+            "task-3": "completed",
+        }
+
+        # The next poll is silent: the baseline caught up.
+        app._render_tasks(_task_snapshot(completed=[failed, done]))
+        assert played == []
     finally:
         app._closing = True
         with contextlib.suppress(Exception):
