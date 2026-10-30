@@ -7,6 +7,7 @@
     <string name="nav_tasks">任务</string>
     <string name="nav_history">历史</string>
     <string name="nav_music">音乐</string>
+    <string name="nav_follow">追更</string>
     <string name="nav_settings">设置</string>
 
     <!-- 通用 -->
@@ -82,6 +83,23 @@
     <string name="music_no_selection">请先选择歌曲</string>
     <string name="music_vip">VIP</string>
     <string name="music_unknown_artist">未知歌手</string>
+
+    <!-- 追更 -->
+    <string name="follow_add">添加</string>
+    <string name="follow_add_dialog_title">添加追更</string>
+    <string name="follow_site_hint">站点（如 b520）</string>
+    <string name="follow_book_id_hint">书籍 ID</string>
+    <string name="follow_title_hint">标题（可选）</string>
+    <string name="follow_check_updates">检查更新</string>
+    <string name="follow_check_done">已更新 %1$d 本 / 失败 %2$d 本</string>
+    <string name="follow_remove">移除</string>
+    <string name="follow_remove_done">已移除追更</string>
+    <string name="follow_queue_done">已加入下载队列：%1$s</string>
+    <string name="follow_needs_download">有新章节，可加入下载队列</string>
+    <string name="follow_books">共 %1$d 本追更</string>
+    <string name="follow_last_chapter">最新章节：%1$s</string>
+    <string name="follow_updated_at">更新时间：%1$s</string>
+    <string name="follow_empty">暂无追更，点「添加」开始追更吧</string>
 
     <!-- 设置 -->
     <string name="settings_base_url">API 地址</string>

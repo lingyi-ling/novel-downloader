@@ -159,3 +159,66 @@ data class MusicJob(
     val results: List<MusicJobResult> = emptyList(),
     val error: String? = null,
 )
+
+@Serializable
+data class WatchEntry(
+    val site: String = "",
+    val book_id: String = "",
+    val title: String = "",
+    val last_chapter: String = "",
+    val updated_at: String = "",
+)
+
+@Serializable
+data class WatchlistResponse(
+    val total: Int = 0,
+    val books: List<WatchEntry> = emptyList(),
+)
+
+@Serializable
+data class WatchlistAddRequest(
+    val site: String,
+    val book_id: String,
+    val title: String? = null,
+)
+
+@Serializable
+data class WatchlistAddResponse(
+    val created: Boolean = false,
+    val entry: WatchEntry = WatchEntry(),
+)
+
+@Serializable
+data class WatchlistCheckRequest(val download: Boolean = false)
+
+/** Ready-to-post body for ``POST /api/v1/tasks`` attached by ``download=true`` checks. */
+@Serializable
+data class WatchTaskBody(
+    val site: String = "",
+    val book_id: String = "",
+    val title: String? = null,
+)
+
+@Serializable
+data class WatchCheckItem(
+    val site: String = "",
+    val book_id: String = "",
+    val title: String = "",
+    val previous_chapter: String = "",
+    val last_chapter: String = "",
+    val found: Boolean = false,
+    val changed: Boolean = false,
+    val needs_download: Boolean = false,
+    val error: String? = null,
+    val task: WatchTaskBody? = null,
+)
+
+@Serializable
+data class WatchlistCheckResponse(
+    val checked: Int = 0,
+    val updated: Int = 0,
+    val failed: Int = 0,
+    val download: Boolean = false,
+    val needs_download: List<WatchCheckItem> = emptyList(),
+    val items: List<WatchCheckItem> = emptyList(),
+)

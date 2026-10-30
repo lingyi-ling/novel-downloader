@@ -6,6 +6,7 @@
     <string name="nav_tasks">Tasks</string>
     <string name="nav_history">History</string>
     <string name="nav_music">Music</string>
+    <string name="nav_follow">Follow</string>
     <string name="nav_settings">Settings</string>
 
     <string name="action_refresh">Refresh</string>
@@ -75,6 +76,22 @@
     <string name="music_no_selection">Select songs first</string>
     <string name="music_vip">VIP</string>
     <string name="music_unknown_artist">Unknown artist</string>
+
+    <string name="follow_add">Add</string>
+    <string name="follow_add_dialog_title">Follow a book</string>
+    <string name="follow_site_hint">Site (e.g. b520)</string>
+    <string name="follow_book_id_hint">Book ID</string>
+    <string name="follow_title_hint">Title (optional)</string>
+    <string name="follow_check_updates">Check updates</string>
+    <string name="follow_check_done">Updated %1$d, failed %2$d</string>
+    <string name="follow_remove">Remove</string>
+    <string name="follow_remove_done">Unfollowed</string>
+    <string name="follow_queue_done">Added to the download queue: %1$s</string>
+    <string name="follow_needs_download">New chapters available — add to the download queue</string>
+    <string name="follow_books">%1$d followed books</string>
+    <string name="follow_last_chapter">Latest chapter: %1$s</string>
+    <string name="follow_updated_at">Updated: %1$s</string>
+    <string name="follow_empty">Nothing followed yet — tap Add to follow a book</string>
 
     <string name="settings_base_url">API base URL</string>
     <string name="settings_api_key">API key (optional)</string>

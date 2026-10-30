@@ -8,6 +8,7 @@ import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.LibraryMusic
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -32,6 +33,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.SettingsStore
+import com.lingyi.noveldl.ui.follow.FollowScreen
 import com.lingyi.noveldl.ui.history.HistoryScreen
 import com.lingyi.noveldl.ui.music.MusicScreen
 import com.lingyi.noveldl.ui.search.SearchScreen
@@ -39,17 +41,19 @@ import com.lingyi.noveldl.ui.settings.SettingsScreenView
 import com.lingyi.noveldl.ui.tasks.TasksScreen
 import kotlinx.coroutines.launch
 
-private data class NavItem(
+// internal so the JVM navigation test can inspect the bottom bar entries.
+internal data class NavItem(
     val route: String,
     @StringRes val label: Int,
     val icon: ImageVector,
 )
 
-private val navItems = listOf(
+internal val navItems = listOf(
     NavItem("search", R.string.nav_search, Icons.Outlined.Search),
     NavItem("tasks", R.string.nav_tasks, Icons.Outlined.Download),
     NavItem("history", R.string.nav_history, Icons.Outlined.History),
     NavItem("music", R.string.nav_music, Icons.Outlined.LibraryMusic),
+    NavItem("follow", R.string.nav_follow, Icons.Outlined.Visibility),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,6 +73,7 @@ fun NovelApp(store: SettingsStore) {
         "tasks" -> R.string.nav_tasks
         "history" -> R.string.nav_history
         "music" -> R.string.nav_music
+        "follow" -> R.string.nav_follow
         "settings" -> R.string.nav_settings
         else -> R.string.nav_search
     }
@@ -118,6 +123,7 @@ fun NovelApp(store: SettingsStore) {
             composable("tasks") { TasksScreen(onMessage = notify) }
             composable("history") { HistoryScreen(onMessage = notify) }
             composable("music") { MusicScreen(onMessage = notify) }
+            composable("follow") { FollowScreen(onMessage = notify) }
             composable("settings") { SettingsScreenView(store = store, onMessage = notify) }
         }
     }

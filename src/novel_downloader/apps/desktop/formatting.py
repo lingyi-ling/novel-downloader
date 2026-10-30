@@ -15,12 +15,14 @@ import re
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
 from novel_downloader.apps.common.history_files import FileItem, _format_size
 from novel_downloader.apps.core.models import DownloadTask
 from novel_downloader.infra.i18n import t
+from novel_downloader.plugins.ranking import normalize_text
 from novel_downloader.schemas import SearchResult
 
 __all__ = [
@@ -34,13 +36,17 @@ __all__ = [
     "TaskMenuState",
     "TaskOutputActions",
     "filter_tasks",
+    "follow_row",
     "format_duration",
     "format_error",
+    "format_follow_updated",
     "format_mtime",
     "format_size",
     "format_task_progress",
     "history_row",
+    "match_watch_result",
     "music_row",
+    "normalize_title",
     "parse_sites",
     "retry_params",
     "search_row",
@@ -583,4 +589,104 @@ def music_row(track: Any) -> tuple[str, str, str, str]:
         str(getattr(track, "artists", "") or ""),
         str(getattr(track, "album", "") or ""),
         format_duration(int(getattr(track, "duration_s", 0) or 0)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Follow list ("追更") helpers
+# ---------------------------------------------------------------------------
+
+
+def normalize_title(value: object) -> str:
+    """
+    Normalize a book title for comparison.
+
+    Case and punctuation/spacing differences are folded away so ``"Hello, "
+    "World!"`` matches ``"hello world"``; CJK characters and digits are kept.
+    Delegates to :func:`novel_downloader.plugins.ranking.normalize_text` so the
+    desktop behaves exactly like ``follow check`` on the CLI.
+
+    :param value: Raw title from the watchlist or a search result.
+    :return: The comparison key (``""`` when there is nothing to compare).
+    """
+    return normalize_text(value)
+
+
+def match_watch_result(
+    site: str,
+    book_id: str,
+    title: str,
+    results: Iterable[SearchResult],
+) -> SearchResult | None:
+    """
+    Pick the search result that belongs to one followed book.
+
+    A result from the same site with the exact book id wins; otherwise the
+    first same-site result whose normalized title equals the followed title is
+    accepted (a site may expose the same book under a different id). An empty
+    title disables the fallback, so a nameless entry is never mis-matched, and
+    an empty result list always yields ``None``.
+
+    :param site: Source site key of the followed book.
+    :param book_id: Site-specific book id of the followed book.
+    :param title: Display title of the followed book (may be empty).
+    :param results: Results returned by a same-site search.
+    :return: The matching result, or ``None`` when nothing matches.
+    """
+    wanted_site = str(site or "").strip()
+    wanted_id = str(book_id or "").strip()
+
+    for result in results:
+        if (
+            str(result.get("site", "")) == wanted_site
+            and str(result.get("book_id", "")) == wanted_id
+        ):
+            return result
+
+    wanted_title = normalize_title(title)
+    if not wanted_title:
+        return None
+    for result in results:
+        if str(result.get("site", "")) != wanted_site:
+            continue
+        if normalize_title(result.get("title", "")) == wanted_title:
+            return result
+    return None
+
+
+def format_follow_updated(raw: str) -> str:
+    """
+    Render a watchlist ``updated_at`` timestamp as local wall-clock time.
+
+    The store writes UTC ISO-8601 strings; naive timestamps are assumed UTC.
+    Unparsable input is shown as-is so hand-edited files stay visible.
+
+    :param raw: Stored timestamp such as ``"2026-01-01T00:00:00+00:00"``.
+    :return: ``YYYY-MM-DD HH:MM:SS`` in the local time zone, or the raw text.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    if moment.tzinfo is None:
+        return moment.strftime("%Y-%m-%d %H:%M:%S")
+    return moment.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def follow_row(entry: object) -> tuple[str, str, str, str, str]:
+    """
+    Build the Treeview values for one followed book.
+
+    :param entry: A ``WatchEntry`` (duck-typed so tests can pass stand-ins).
+    :return: ``(site, book_id, title, last_chapter, updated)``.
+    """
+    return (
+        str(getattr(entry, "site", "") or ""),
+        str(getattr(entry, "book_id", "") or ""),
+        str(getattr(entry, "title", "") or ""),
+        str(getattr(entry, "last_chapter", "") or ""),
+        format_follow_updated(str(getattr(entry, "updated_at", "") or "")),
     )

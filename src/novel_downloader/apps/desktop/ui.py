@@ -45,6 +45,7 @@ from novel_downloader.apps.common.history_files import (
 from novel_downloader.apps.constants import SEARCH_SUPPORT_SITES
 from novel_downloader.apps.core.models import DownloadTask
 from novel_downloader.apps.core.task_manager import manager
+from novel_downloader.apps.core.watchlist import WatchEntry, WatchlistStore
 from novel_downloader.infra.i18n import t
 from novel_downloader.infra.paths import app_home
 from novel_downloader.plugins.search import search
@@ -57,8 +58,10 @@ from .formatting import (
     ExportChoice,
     TaskMenuState,
     filter_tasks,
+    follow_row,
     format_error,
     history_row,
+    match_watch_result,
     music_row,
     parse_sites,
     retry_params,
@@ -97,6 +100,14 @@ _SEARCH_PER_SITE = 5
 _SEARCH_TIMEOUT = 10.0
 _MUSIC_SEARCH_LIMIT = 30
 _MUSIC_WORKERS = 3
+
+#: Results requested per site while looking for a followed book's latest
+#: chapter; matches the ``follow check`` CLI defaults.
+_FOLLOW_PER_SITE = 10
+_FOLLOW_TIMEOUT = 5.0
+
+#: Outcome kinds posted by the follow-check worker for each book.
+_FOLLOW_ITEM_KINDS = ("first", "updated", "up_to_date", "not_found", "error")
 
 Event = tuple[str, Any]
 
@@ -188,10 +199,26 @@ class DesktopApp:
         self.music_progress: ttk.Progressbar | None = None
         self.music_log: ScrolledText | None = None
 
+        # Follow ("追更") widgets / state.  The store only resolves the file
+        # path; every read/write happens on a worker thread, never on Tk.
+        # The lock serializes this process's read-modify-write cycles (the
+        # store itself is lock-free and atomic only at the os.replace step).
+        self._watch_store = WatchlistStore()
+        self._watch_lock = threading.Lock()
+        self._follow_entries: list[WatchEntry] = []
+        self._follow_checking = False
+        self._follow_counts: dict[str, int] = {}
+        self.follow_tree: ttk.Treeview | None = None
+        self.follow_add_button: ttk.Button | None = None
+        self.follow_remove_button: ttk.Button | None = None
+        self.follow_check_button: ttk.Button | None = None
+        self.follow_download_button: ttk.Button | None = None
+
         self._build_ui()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         root.after(_POLL_MS, self._poll)
         self._refresh_history(initial=True)
+        self._reload_follow_async()
 
     # ------------------------------------------------------------------
     # Layout
@@ -223,15 +250,18 @@ class DesktopApp:
         self.download_tab = ttk.Frame(notebook, padding=8)
         self.history_tab = ttk.Frame(notebook, padding=8)
         self.music_tab = ttk.Frame(notebook, padding=8)
+        self.follow_tab = ttk.Frame(notebook, padding=8)
         notebook.add(self.search_tab, text=t("Search"))
         notebook.add(self.download_tab, text=t("Download"))
         notebook.add(self.history_tab, text=t("History"))
         notebook.add(self.music_tab, text=t("Music"))
+        notebook.add(self.follow_tab, text=t("Follow"))
 
         self._build_search_tab()
         self._build_download_tab()
         self._build_history_tab()
         self._build_music_tab()
+        self._build_follow_tab()
 
     def _build_search_tab(self) -> None:
         form = ttk.Frame(self.search_tab)
@@ -655,6 +685,418 @@ class DesktopApp:
 
         self._refresh_music_note()
 
+    def _build_follow_tab(self) -> None:
+        actions = ttk.Frame(self.follow_tab)
+        actions.pack(fill="x", pady=(0, 6))
+        self.follow_add_button = ttk.Button(
+            actions, text=t("Add"), command=self._open_follow_add_dialog
+        )
+        self.follow_add_button.pack(side="left")
+        self.follow_remove_button = ttk.Button(
+            actions, text=t("Remove"), command=self._remove_follow_selected
+        )
+        self.follow_remove_button.pack(side="left", padx=(6, 0))
+        self.follow_check_button = ttk.Button(
+            actions, text=t("Check updates"), command=self._start_follow_check
+        )
+        self.follow_check_button.pack(side="left", padx=(6, 0))
+        self.follow_download_button = ttk.Button(
+            actions,
+            text=t("Download selected"),
+            command=self._download_follow_selection,
+        )
+        self.follow_download_button.pack(side="left", padx=(6, 0))
+        ttk.Label(
+            actions,
+            text=t("Nothing selected downloads every followed book."),
+            foreground="#666666",
+        ).pack(side="left", padx=8)
+
+        tree_frame = ttk.Frame(self.follow_tab)
+        tree_frame.pack(fill="both", expand=True)
+
+        columns = ("site", "book_id", "title", "last_chapter", "updated")
+        tree = ttk.Treeview(
+            tree_frame, columns=columns, show="headings", selectmode="extended"
+        )
+        headings = (
+            ("site", t("Site"), 110),
+            ("book_id", t("Book ID"), 120),
+            ("title", t("Title"), 320),
+            ("last_chapter", t("Latest chapter"), 260),
+            ("updated", t("Updated"), 160),
+        )
+        for column, label, width in headings:
+            tree.heading(column, text=label)
+            tree.column(column, width=width, anchor="w")
+        scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.follow_tree = tree
+
+    # ------------------------------------------------------------------
+    # Follow list ("追更")
+    # ------------------------------------------------------------------
+    def _reload_follow_async(self) -> None:
+        """Read the watchlist file on a worker thread and post the result."""
+        threading.Thread(
+            target=self._follow_load_worker,
+            name="desktop-follow-load",
+            daemon=True,
+        ).start()
+
+    def _follow_load_worker(self) -> None:
+        try:
+            entries = self._watch_store.entries()
+        except Exception as exc:  # noqa: BLE001 - delivered to the UI thread
+            logger.exception("Failed to read the watchlist")
+            self.events.put(("follow_load_error", format_error(exc)))
+            return
+        self.events.put(("follow_entries", list(entries)))
+
+    def _render_follow_entries(self, entries: list[WatchEntry]) -> None:
+        self._follow_entries = list(entries)
+        tree = self.follow_tree
+        if tree is None:
+            return
+        tree.delete(*tree.get_children())
+        for index, entry in enumerate(self._follow_entries):
+            tree.insert("", "end", iid=str(index), values=follow_row(entry))
+        if self._follow_entries:
+            self._set_status(
+                t("Found {count} followed book(s).").format(
+                    count=len(self._follow_entries)
+                )
+            )
+        else:
+            self._set_status(t("No followed books."))
+
+    def _follow_selected(self) -> list[WatchEntry]:
+        """Return the entries behind the selected rows (empty when none)."""
+        tree = self.follow_tree
+        if tree is None:
+            return []
+        chosen: list[WatchEntry] = []
+        for iid in tree.selection():
+            try:
+                chosen.append(self._follow_entries[int(iid)])
+            except (ValueError, IndexError):
+                continue
+        return chosen
+
+    def _set_follow_buttons(self, enabled: bool) -> None:
+        for button in (
+            self.follow_add_button,
+            self.follow_remove_button,
+            self.follow_check_button,
+            self.follow_download_button,
+        ):
+            self._set_button_enabled(button, enabled)
+
+    def _open_follow_add_dialog(self) -> None:
+        """Show the modal add form and queue the entry on confirmation."""
+        top = tk.Toplevel(self.root)
+        top.title(t("Add a book to the follow list."))
+        top.transient(self.root)
+        top.resizable(False, False)
+        top.bind("<Escape>", lambda _event: top.destroy())
+
+        form = ttk.Frame(top, padding=8)
+        form.pack(fill="both", expand=True)
+        form.columnconfigure(1, weight=1)
+
+        site_var = tk.StringVar()
+        book_var = tk.StringVar()
+        title_var = tk.StringVar()
+
+        ttk.Label(form, text=t("Site")).grid(
+            row=0, column=0, sticky="w", padx=(0, 6), pady=2
+        )
+        site_entry = ttk.Entry(form, textvariable=site_var)
+        site_entry.grid(row=0, column=1, sticky="ew", pady=2)
+
+        ttk.Label(form, text=t("Book ID")).grid(
+            row=1, column=0, sticky="w", padx=(0, 6), pady=2
+        )
+        ttk.Entry(form, textvariable=book_var).grid(
+            row=1, column=1, sticky="ew", pady=2
+        )
+
+        ttk.Label(form, text=t("Title")).grid(
+            row=2, column=0, sticky="w", padx=(0, 6), pady=2
+        )
+        title_entry = ttk.Entry(form, textvariable=title_var)
+        title_entry.grid(row=2, column=1, sticky="ew", pady=2)
+
+        ttk.Label(
+            form,
+            text=t("Display title used when checking for new chapters."),
+            foreground="#666666",
+            wraplength=280,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        confirmed: list[tuple[str, str, str]] = []
+
+        def confirm() -> None:
+            site = site_var.get().strip()
+            book_id = book_var.get().strip()
+            title = title_var.get().strip()
+            if not site or not book_id:
+                self._set_status(t("Site and Book ID are required."))
+                return
+            if not title and not messagebox.askokcancel(
+                t("Confirm"),
+                t(
+                    "Without a title the update check cannot find this book "
+                    "by name. Add it anyway?"
+                ),
+                parent=top,
+            ):
+                return
+            confirmed.append((site, book_id, title))
+            top.destroy()
+
+        buttons = ttk.Frame(top, padding=(8, 0, 8, 8))
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text=t("Add"), command=confirm).pack(side="right")
+        ttk.Button(buttons, text=t("Cancel"), command=top.destroy).pack(
+            side="right", padx=(0, 6)
+        )
+
+        top.grab_set()
+        site_entry.focus_set()
+        top.wait_window()
+
+        if confirmed:
+            self._follow_add(*confirmed[0])
+
+    def _follow_add(self, site: str, book_id: str, title: str) -> None:
+        threading.Thread(
+            target=self._follow_add_worker,
+            args=(site, book_id, title),
+            name="desktop-follow-add",
+            daemon=True,
+        ).start()
+
+    def _follow_add_worker(self, site: str, book_id: str, title: str) -> None:
+        try:
+            with self._watch_lock:
+                self._watch_store.add(site, book_id, title=title or None)
+        except Exception as exc:  # noqa: BLE001 - delivered to the UI thread
+            self.events.put(("error", format_error(exc)))
+            return
+        self.events.put(
+            (
+                "status",
+                t("Added to the follow list: {site}/{book_id}").format(
+                    site=site, book_id=book_id
+                ),
+            )
+        )
+        self._reload_follow_async()
+
+    def _remove_follow_selected(self) -> None:
+        targets = self._follow_selected()
+        if not targets:
+            self._set_status(t("Select one or more followed books first."))
+            return
+        threading.Thread(
+            target=self._follow_remove_worker,
+            args=(targets,),
+            name="desktop-follow-remove",
+            daemon=True,
+        ).start()
+
+    def _follow_remove_worker(self, targets: list[WatchEntry]) -> None:
+        removed = 0
+        for entry in targets:
+            try:
+                with self._watch_lock:
+                    if not self._watch_store.remove(entry.site, entry.book_id):
+                        continue
+            except Exception as exc:  # noqa: BLE001 - delivered to the UI thread
+                self.events.put(("error", format_error(exc)))
+                continue
+            removed += 1
+            self.events.put(
+                (
+                    "status",
+                    t("Removed from the follow list: {site}/{book_id}").format(
+                        site=entry.site, book_id=entry.book_id
+                    ),
+                )
+            )
+        if removed:
+            self._reload_follow_async()
+
+    def _start_follow_check(self) -> None:
+        if self._follow_checking:
+            return
+        entries = list(self._follow_entries)
+        if not entries:
+            self._set_status(t("No followed books to check."))
+            return
+        self._follow_checking = True
+        self._follow_counts = {}
+        self._set_follow_buttons(enabled=False)
+        self._set_status(
+            t("Checking {count} followed book(s)...").format(count=len(entries))
+        )
+        threading.Thread(
+            target=self._follow_check_worker,
+            args=(entries,),
+            name="desktop-follow-check",
+            daemon=True,
+        ).start()
+
+    def _follow_check_worker(self, entries: list[WatchEntry]) -> None:
+        """Check every book serially; one failure never stops the rest."""
+        try:
+            for entry in entries:
+                try:
+                    self._follow_check_one(entry)
+                except Exception as exc:  # noqa: BLE001 - per-book, not fatal
+                    self.events.put(
+                        (
+                            "follow_item",
+                            (entry.site, entry.book_id, "error", format_error(exc)),
+                        )
+                    )
+        finally:
+            try:
+                refreshed = self._watch_store.entries()
+            except Exception:  # noqa: BLE001 - refresh is best effort
+                logger.exception("Failed to reload the watchlist after the check")
+            else:
+                self.events.put(("follow_entries", list(refreshed)))
+            self.events.put(("follow_check_done", None))
+
+    def _follow_check_one(self, entry: WatchEntry) -> None:
+        """Search one site, match the book and record its latest chapter."""
+        results = asyncio.run(
+            search(
+                entry.title or entry.book_id,
+                sites=[entry.site],
+                per_site_limit=_FOLLOW_PER_SITE,
+                timeout=_FOLLOW_TIMEOUT,
+            )
+        )
+        matched = match_watch_result(entry.site, entry.book_id, entry.title, results)
+        if matched is None:
+            self.events.put(
+                ("follow_item", (entry.site, entry.book_id, "not_found", ""))
+            )
+            return
+        latest = str(matched.get("latest_chapter") or "").strip()
+        if not latest:
+            self.events.put(
+                ("follow_item", (entry.site, entry.book_id, "not_found", ""))
+            )
+            return
+
+        matched_title = str(matched.get("title") or "").strip()
+        with self._watch_lock:
+            changed = self._watch_store.update_latest(
+                entry.site, entry.book_id, latest, title=matched_title
+            )
+        if not changed:
+            self.events.put(
+                ("follow_item", (entry.site, entry.book_id, "up_to_date", latest))
+            )
+            return
+        kind = "first" if not entry.last_chapter else "updated"
+        self.events.put(("follow_item", (entry.site, entry.book_id, kind, latest)))
+
+    def _on_follow_item(self, payload: tuple[str, str, str, str]) -> None:
+        """Report one book's check outcome and count it for the summary."""
+        site, book_id, kind, detail = payload
+        if kind not in _FOLLOW_ITEM_KINDS:
+            return
+        self._follow_counts[kind] = self._follow_counts.get(kind, 0) + 1
+        label = f"{site}/{book_id}"
+        if kind == "updated":
+            message = t("New chapter for {book}: {latest}").format(
+                book=label, latest=detail
+            )
+        elif kind == "first":
+            message = t("First chapter recorded for {book}: {latest}").format(
+                book=label, latest=detail
+            )
+        elif kind == "up_to_date":
+            message = t("Up to date: {book} ({latest})").format(
+                book=label, latest=detail
+            )
+        elif kind == "not_found":
+            message = t("No result found for {book}.").format(book=label)
+        else:
+            message = t("Check failed for {book}: {error}").format(
+                book=label, error=detail
+            )
+        self._set_status(message)
+
+    def _follow_check_finished(self, _payload: object) -> None:
+        self._follow_checking = False
+        self._set_follow_buttons(enabled=True)
+        counts = self._follow_counts
+        self._set_status(
+            t(
+                "Follow check finished: {updated} updated, {uptodate} up to date, "
+                "{missing} not found, {failed} failed."
+            ).format(
+                updated=counts.get("updated", 0) + counts.get("first", 0),
+                uptodate=counts.get("up_to_date", 0),
+                missing=counts.get("not_found", 0),
+                failed=counts.get("error", 0),
+            )
+        )
+
+    def _download_follow_selection(self) -> None:
+        """Queue the selected books (or the whole list) for download."""
+        entries = self._follow_selected() or list(self._follow_entries)
+        if not entries:
+            self._set_status(t("Select one or more followed books first."))
+            return
+
+        self._set_status(
+            t("Queueing {count} followed book(s)...").format(count=len(entries))
+        )
+        for entry in entries:
+            title = entry.title or entry.book_id
+            coro = manager.add_task(
+                title=entry.title, site=entry.site, book_id=entry.book_id
+            )
+            try:
+                future = self.engine.submit(coro)
+            except Exception as exc:  # noqa: BLE001 - loop startup failure
+                coro.close()
+                self.events.put(
+                    (
+                        "error",
+                        t("Could not queue '{title}': {error}").format(
+                            title=title, error=format_error(exc)
+                        ),
+                    )
+                )
+                continue
+            future.add_done_callback(partial(self._follow_download_finished, title))
+
+    def _follow_download_finished(self, title: str, done: Future[DownloadTask]) -> None:
+        try:
+            task = done.result()
+        except Exception as exc:  # noqa: BLE001 - reported in the UI thread
+            self.events.put(
+                (
+                    "error",
+                    t("Could not queue '{title}': {error}").format(
+                        title=title, error=format_error(exc)
+                    ),
+                )
+            )
+            return
+        self.events.put(("status", t("Task added: {title}").format(title=task.title)))
+
     # ------------------------------------------------------------------
     # Polling and events
     # ------------------------------------------------------------------
@@ -705,6 +1147,17 @@ class DesktopApp:
             self._music_download_finished(payload)
         elif kind == "music_download_error":
             self._music_download_failed(str(payload))
+        elif kind == "follow_entries":
+            self._render_follow_entries(payload)
+        elif kind == "follow_load_error":
+            logger.error("Watchlist load failed: %s", payload)
+            self._set_status(
+                t("Could not load the follow list: {error}").format(error=payload)
+            )
+        elif kind == "follow_item":
+            self._on_follow_item(payload)
+        elif kind == "follow_check_done":
+            self._follow_check_finished(payload)
         else:
             logger.debug("Ignoring unknown desktop event: %s", kind)
 

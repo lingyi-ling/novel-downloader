@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import queue
 import time
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +34,7 @@ import pytest
 from novel_downloader import __version__
 from novel_downloader.apps.common.history_files import FileItem
 from novel_downloader.apps.core.models import DownloadTask, Status
+from novel_downloader.apps.core.watchlist import WatchEntry, WatchlistStore
 from novel_downloader.apps.desktop import formatting as fmt
 from novel_downloader.apps.desktop import main as desktop_main
 from novel_downloader.apps.desktop import preferences as prefs
@@ -899,6 +903,144 @@ def test_task_filter_labels_use_translations() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Follow list ("追更"): title normalization
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Hello, World!", "helloworld"),
+        ("  spaced  out  ", "spacedout"),
+        # Case and punctuation differences collapse to the same key.
+        ("Hello,  WORLD!", "helloworld"),
+        ("斗破苍穹：第二卷", "斗破苍穹第二卷"),
+        ("O'Neill—凡人修仙传（精校）", "oneill凡人修仙传精校"),
+        ("ABC", "abc"),
+        ("", ""),
+    ],
+)
+def test_normalize_title(raw: object, expected: str) -> None:
+    assert fmt.normalize_title(raw) == expected
+
+
+def test_normalize_title_handles_none() -> None:
+    assert fmt.normalize_title(None) == ""
+
+
+def test_normalize_title_matches_punctuation_and_case_variants() -> None:
+    assert fmt.normalize_title("Dune Messiah（精校版）") == fmt.normalize_title(
+        "dune messiah 精校版"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Follow list: matching a search result to a followed book
+# ---------------------------------------------------------------------------
+def test_match_watch_result_prefers_exact_site_and_book_id() -> None:
+    result = _search_result(site="b520", book_id="9", title="Other Name")
+    # The title differs, but the site/book id identity wins.
+    assert fmt.match_watch_result("b520", "9", "Wanted Title", [result]) is result
+
+
+def test_match_watch_result_falls_back_to_normalized_title() -> None:
+    # Different id, same site: only the normalized title can identify the book.
+    result = _search_result(site="b520", book_id="777", title="  Hello,  WORLD! ")
+    assert fmt.match_watch_result("b520", "1", "hello world", [result]) is result
+
+
+def test_match_watch_result_title_fallback_ignores_other_sites() -> None:
+    result = _search_result(site="qidian", book_id="1", title="Same Title")
+    assert fmt.match_watch_result("b520", "1", "Same Title", [result]) is None
+
+
+@pytest.mark.parametrize("title", ["", "   "])
+def test_match_watch_result_empty_title_disables_fallback(title: str) -> None:
+    result = _search_result(site="b520", book_id="777", title="Whatever")
+    assert fmt.match_watch_result("b520", "1", title, [result]) is None
+
+
+def test_match_watch_result_without_any_results() -> None:
+    assert fmt.match_watch_result("b520", "1", "Title", []) is None
+
+
+def test_match_watch_result_without_a_match() -> None:
+    result = _search_result(site="b520", book_id="9", title="Different")
+    assert fmt.match_watch_result("b520", "1", "Title", [result]) is None
+
+
+def test_match_watch_result_returns_first_of_duplicate_titles() -> None:
+    first = _search_result(site="b520", book_id="7", title="Same")
+    second = _search_result(site="b520", book_id="8", title="Same")
+    assert fmt.match_watch_result("b520", "1", "Same", [first, second]) is first
+
+
+def test_match_watch_result_tolerates_empty_identity() -> None:
+    result = _search_result(site="b520", book_id="777", title="Same")
+    assert fmt.match_watch_result("", "", "Same", [result]) is None
+
+
+# ---------------------------------------------------------------------------
+# Follow list: row formatting
+# ---------------------------------------------------------------------------
+def test_follow_row_renders_all_columns() -> None:
+    entry = WatchEntry(
+        site="b520",
+        book_id="8_8187",
+        title="凡人修仙传",
+        last_chapter="第10章",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    site, book_id, title, last_chapter, updated = fmt.follow_row(entry)
+    assert (site, book_id, title, last_chapter) == (
+        "b520",
+        "8_8187",
+        "凡人修仙传",
+        "第10章",
+    )
+    expected = (
+        datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+        .astimezone()
+        .strftime("%Y-%m-%d %H:%M:%S")
+    )
+    assert updated == expected
+
+
+def test_follow_row_tolerates_missing_fields() -> None:
+    assert fmt.follow_row(SimpleNamespace()) == ("", "", "", "", "")
+
+
+def test_follow_row_keeps_unparsable_timestamps_visible() -> None:
+    entry = SimpleNamespace(
+        site="s", book_id="1", title="t", last_chapter="c", updated_at="yesterday"
+    )
+    assert fmt.follow_row(entry)[4] == "yesterday"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", ""),
+        ("   ", ""),
+        # Naive timestamps are shown as written (no zone conversion).
+        ("2024-01-02T03:04:05", "2024-01-02 03:04:05"),
+        ("not-a-date", "not-a-date"),
+    ],
+)
+def test_format_follow_updated(raw: str, expected: str) -> None:
+    assert fmt.format_follow_updated(raw) == expected
+
+
+def test_format_follow_updated_converts_utc_to_local_time() -> None:
+    rendered = fmt.format_follow_updated("2024-01-02T03:04:05+00:00")
+    expected = (
+        datetime.fromisoformat("2024-01-02T03:04:05+00:00")
+        .astimezone()
+        .strftime("%Y-%m-%d %H:%M:%S")
+    )
+    assert rendered == expected
+    assert len(rendered) == 19
+
+
+# ---------------------------------------------------------------------------
 # Window smoke test (guarded: needs a display)
 # ---------------------------------------------------------------------------
 def test_desktop_window_builds_all_tabs(
@@ -943,8 +1085,307 @@ def test_desktop_window_builds_all_tabs(
         assert "disabled" in app.search_last_button.state()
         assert app.task_filter_combo.get() == t("All")
         assert app.task_keyword_var.get() == ""
+
+        # Follow ("追更") tab: widgets exist and the tab can be raised.
+        assert app.follow_tree is not None
+        assert app.follow_add_button is not None
+        assert app.follow_remove_button is not None
+        assert app.follow_check_button is not None
+        assert app.follow_download_button is not None
+        for button in (
+            app.follow_add_button,
+            app.follow_remove_button,
+            app.follow_check_button,
+            app.follow_download_button,
+        ):
+            assert button.instate(["!disabled"])
+        notebook = app.follow_tab.master
+        notebook.select(app.follow_tab)
+        root.update_idletasks()
+        assert notebook.tab(app.follow_tab, "text") == t("Follow")
     finally:
         if app is not None:
             app._closing = True
         with contextlib.suppress(tk.TclError):
+            root.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Follow tab (window, guarded: needs a display)
+# ---------------------------------------------------------------------------
+def _open_desktop_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, Any]:
+    """Build a hidden window on a private data directory, or skip."""
+    tk = pytest.importorskip("tkinter")
+    import novel_downloader.apps.desktop.ui as ui_mod
+
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:  # pragma: no cover - headless environments
+        pytest.skip(f"Tk display unavailable: {exc}")
+    root.withdraw()
+    return ui_mod.DesktopApp(root), root
+
+
+def _drain_and_dispatch(
+    app: Any,
+    stop: Callable[[list[tuple[str, Any]]], bool],
+    timeout: float = 10.0,
+) -> list[tuple[str, Any]]:
+    """
+    Drain the event queue like ``_poll`` does and handle the safe kinds.
+
+    ``error`` events are recorded but not dispatched: their handler opens a
+    modal message box that would block the test.
+    """
+    events: list[tuple[str, Any]] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            kind, payload = app.events.get_nowait()
+        except queue.Empty:
+            if stop(events):
+                break
+            time.sleep(0.02)
+            continue
+        events.append((kind, payload))
+        if kind in {"status", "follow_entries", "follow_item", "follow_check_done"}:
+            app._handle_event(kind, payload)
+    return events
+
+
+def test_follow_check_updates_entries_and_reenables_buttons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import novel_downloader.apps.desktop.ui as ui_mod
+
+    app, root = _open_desktop_app(tmp_path, monkeypatch)
+    try:
+        root.update_idletasks()
+        store = WatchlistStore()
+        store.add("site-a", "1", title="Alpha Book", last_chapter="Chapter 8")
+        store.add("site-b", "2", title="Beta")
+        store.add("site-c", "3", title="Gamma", last_chapter="Chapter 5")
+        store.add("site-d", "4", title="Delta")
+
+        async def fake_search(
+            keyword: str, sites: list[str] | None = None, **_kwargs: Any
+        ) -> list[SearchResult]:
+            if sites == ["site-a"]:
+                # Different id on purpose: only the normalized title matches.
+                return [
+                    _search_result(
+                        site="site-a",
+                        book_id="999",
+                        title="Alpha  BOOK!",
+                        latest_chapter="Chapter 9",
+                    )
+                ]
+            if sites == ["site-c"]:
+                return [
+                    _search_result(
+                        site="site-c",
+                        book_id="3",
+                        title="Gamma",
+                        latest_chapter="Chapter 5",
+                    )
+                ]
+            if sites == ["site-d"]:
+                raise ValueError("network down")
+            return []
+
+        monkeypatch.setattr(ui_mod, "search", fake_search)
+        app._follow_entries = store.entries()
+        app._start_follow_check()
+
+        assert "disabled" in app.follow_check_button.state()  # type: ignore[union-attr]
+        events = _drain_and_dispatch(
+            app,
+            stop=lambda found: any(kind == "follow_check_done" for kind, _ in found),
+        )
+
+        items = [payload for kind, payload in events if kind == "follow_item"]
+        assert [item[2] for item in items] == [
+            "updated",
+            "not_found",
+            "up_to_date",
+            "error",
+        ]
+        assert items[0] == ("site-a", "1", "updated", "Chapter 9")
+        assert items[3][3] == "ValueError: network down"
+
+        # The new chapter was persisted and the list reloaded from disk.
+        assert store.get("site-a", "1") is not None
+        assert store.get("site-a", "1").last_chapter == "Chapter 9"  # type: ignore[union-attr]
+        assert store.get("site-c", "3").last_chapter == "Chapter 5"  # type: ignore[union-attr]
+        refreshed = [payload for kind, payload in events if kind == "follow_entries"]
+        assert refreshed and len(refreshed[-1]) == 4
+        assert any(
+            entry.last_chapter == "Chapter 9" and entry.site == "site-a"
+            for entry in refreshed[-1]
+        )
+
+        assert app._follow_counts == {
+            "updated": 1,
+            "not_found": 1,
+            "up_to_date": 1,
+            "error": 1,
+        }
+        # The check finished: the action buttons are usable again.
+        assert app.follow_check_button is not None
+        assert "disabled" not in app.follow_check_button.state()
+        assert app._follow_checking is False
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(Exception):
+            root.destroy()
+
+
+def test_follow_download_queues_selected_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import novel_downloader.apps.desktop.ui as ui_mod
+
+    class _StubManager:
+        """Stands in for the real task manager; 'site-b' always fails."""
+
+        def __init__(self) -> None:
+            self.added: list[tuple[str, str, str]] = []
+
+        async def add_task(
+            self, *, title: str, site: str, book_id: str
+        ) -> DownloadTask:
+            self.added.append((title, site, book_id))
+            if site == "site-b":
+                raise RuntimeError("boom")
+            return DownloadTask(title=title, site=site, book_id=book_id)
+
+    stub = _StubManager()
+    monkeypatch.setattr(ui_mod, "manager", stub)
+
+    app, root = _open_desktop_app(tmp_path, monkeypatch)
+    try:
+        root.update_idletasks()
+        # Let the initial watchlist load finish so its render cannot clobber
+        # the fixture state below.
+        _drain_and_dispatch(
+            app,
+            stop=lambda found: any(kind == "follow_entries" for kind, _ in found),
+        )
+        entries = [
+            WatchEntry(site="site-a", book_id="1", title="Book One"),
+            WatchEntry(site="site-b", book_id="2", title="Book Two"),
+        ]
+        app._follow_entries = entries
+        app._render_follow_entries(entries)
+        assert app.follow_tree is not None
+
+        # Only the selected row is queued, and only its success is reported.
+        app.follow_tree.selection_set("0")
+        app._download_follow_selection()
+        events = _drain_and_dispatch(
+            app, stop=lambda found: sum(1 for kind, _ in found if kind == "status") >= 1
+        )
+        assert stub.added == [("Book One", "site-a", "1")]
+
+        # Nothing selected: the whole list is queued; failures are reported.
+        stub.added.clear()
+        app.follow_tree.selection_set([])
+        app._download_follow_selection()
+        events = _drain_and_dispatch(
+            app,
+            stop=lambda found: (
+                sum(1 for kind, _ in found if kind in {"status", "error"}) >= 2
+            ),
+        )
+
+        assert sorted(stub.added) == [
+            ("Book One", "site-a", "1"),
+            ("Book Two", "site-b", "2"),
+        ]
+        statuses = [payload for kind, payload in events if kind == "status"]
+        errors = [payload for kind, payload in events if kind == "error"]
+        assert any("Book One" in message for message in statuses)
+        assert any(
+            "Book Two" in message and "RuntimeError: boom" in message
+            for message in errors
+        )
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(Exception):
+            root.destroy()
+
+
+def test_follow_add_and_remove_workers_persist_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, root = _open_desktop_app(tmp_path, monkeypatch)
+    try:
+        root.update_idletasks()
+        # Let the initial watchlist load finish before driving the workers.
+        _drain_and_dispatch(
+            app,
+            stop=lambda found: any(kind == "follow_entries" for kind, _ in found),
+        )
+        store = WatchlistStore()
+
+        # Adding (with a title) persists the entry and refreshes the list.
+        app._follow_add("site-a", "1", "Alpha Book")
+        _drain_and_dispatch(
+            app,
+            stop=lambda found: (
+                any(kind == "follow_entries" for kind, _ in found)
+                and len(store.entries()) == 1
+            ),
+        )
+        entry = store.get("site-a", "1")
+        assert entry is not None
+        assert entry.title == "Alpha Book"
+
+        # An empty title is stored as such (check then relies on the book id).
+        app._follow_add("site-b", "2", "")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and len(store.entries()) < 2:
+            time.sleep(0.02)
+        second = store.get("site-b", "2")
+        assert second is not None
+        assert second.title == ""
+
+        # The rendered list mirrors the file (one row per entry).
+        _drain_and_dispatch(
+            app,
+            stop=lambda found: (
+                any(kind == "follow_entries" for kind, _ in found)
+                and app.follow_tree is not None
+                and len(app.follow_tree.get_children()) == 2
+            ),
+        )
+        assert app.follow_tree is not None
+        assert len(app.follow_tree.get_children()) == 2
+
+        # Removing the selected first row (site-a) deletes only that entry.
+        app.follow_tree.selection_set("0")
+        app._remove_follow_selected()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and any(
+            entry.key == ("site-a", "1") for entry in store.entries()
+        ):
+            time.sleep(0.02)
+        assert [entry.key for entry in store.entries()] == [("site-b", "2")]
+
+        # Removing with nothing selected only hints at the status bar.
+        app.follow_tree.selection_set([])
+        app._remove_follow_selected()
+        assert [entry.key for entry in store.entries()] == [("site-b", "2")]
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(Exception):
             root.destroy()

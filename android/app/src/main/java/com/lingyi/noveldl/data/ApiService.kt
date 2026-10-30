@@ -1,6 +1,7 @@
 package com.lingyi.noveldl.data
 
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Path
@@ -38,4 +39,19 @@ interface ApiService {
 
     @GET("api/v1/music/jobs/{job_id}")
     suspend fun musicJob(@Path("job_id") jobId: String): MusicJob
+
+    @GET("api/v1/watchlist")
+    suspend fun watchlist(): WatchlistResponse
+
+    @POST("api/v1/watchlist")
+    suspend fun addWatch(@Body body: WatchlistAddRequest): WatchlistAddResponse
+
+    @DELETE("api/v1/watchlist/{site}/{book_id}")
+    suspend fun removeWatch(
+        @Path("site") site: String,
+        @Path("book_id") bookId: String,
+    ): CancelResponse
+
+    @POST("api/v1/watchlist/check")
+    suspend fun checkWatchlist(@Body body: WatchlistCheckRequest): WatchlistCheckResponse
 }
