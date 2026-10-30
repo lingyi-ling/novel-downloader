@@ -33,6 +33,7 @@ from starlette.types import Message, Receive, Scope, Send
 
 from novel_downloader.apps.api import create_app
 from novel_downloader.apps.api import routes as api_routes
+from novel_downloader.apps.api.auth import AUTH_ERROR_DETAIL
 from novel_downloader.apps.api.middleware import (
     DEFAULT_MAX_BODY_BYTES,
     BodySizeLimitMiddleware,
@@ -635,7 +636,7 @@ async def test_authenticated_small_body_reaches_the_route(
         json={"keyword": "ok"},
     )
     assert denied.status_code == 401
-    assert denied.json()["detail"] == "Invalid or missing API token"
+    assert denied.json()["detail"] == AUTH_ERROR_DETAIL
 
     allowed = await auth_limited_client.post(
         "/api/v1/search",
@@ -677,7 +678,7 @@ async def test_downloads_static_mount_respects_token(
         lookalike = await http_client.get("/downloads-extra/visible.txt")
 
     assert missing_token.status_code == 401
-    assert missing_token.json() == {"detail": "Invalid or missing API token"}
+    assert missing_token.json() == {"detail": AUTH_ERROR_DETAIL}
     assert missing_token.headers["www-authenticate"] == "Bearer"
     assert wrong_token.status_code == 401
 

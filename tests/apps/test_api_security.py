@@ -30,6 +30,7 @@ from fastapi import FastAPI
 from novel_downloader.apps.api import create_app
 from novel_downloader.apps.api import middleware as api_middleware
 from novel_downloader.apps.api import routes as api_routes
+from novel_downloader.apps.api.auth import AUTH_ERROR_DETAIL
 from novel_downloader.apps.common import history_files
 
 # ---------------------------------------------------------------------------
@@ -179,7 +180,7 @@ async def test_downloads_require_token_when_configured(
         assert denied.headers["www-authenticate"] == "Bearer"
         assert "public" not in denied.text
 
-    assert missing.json() == {"detail": "Invalid or missing API token"}
+    assert missing.json() == {"detail": AUTH_ERROR_DETAIL}
     assert bearer.status_code == 200
     assert bearer.text == "public"
     assert api_key.status_code == 200

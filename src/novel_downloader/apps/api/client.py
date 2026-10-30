@@ -28,6 +28,8 @@ from urllib.parse import quote
 
 import httpx
 
+from .constants import MSG_TASK_NOT_FOUND
+
 __all__ = ["ApiError", "NovelApiClient"]
 
 
@@ -359,7 +361,7 @@ class NovelApiClient:
             for item in items:
                 if isinstance(item, dict) and item.get("task_id") == task_id:
                     return cast(dict[str, Any], item)
-        raise ApiError(404, f"Task not found: {task_id}")
+        raise ApiError(404, MSG_TASK_NOT_FOUND.format(task_id=task_id))
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         """Cancel a pending or running task."""
@@ -489,11 +491,7 @@ class NovelApiClient:
         try:
             with self._client.stream("GET", url) as response:
                 if not response.is_success:
-                    payload = _response_payload(response)
-                    detail = _detail_from_payload(payload)
-                    if detail is None or detail == "":
-                        detail = f"HTTP {response.status_code}"
-                    raise ApiError(response.status_code, detail, payload)
+                    raise _error_from_response(response)
                 with target.open("wb") as handle:
                     for chunk in response.iter_bytes():
                         handle.write(chunk)

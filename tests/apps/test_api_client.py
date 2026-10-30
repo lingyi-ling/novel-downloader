@@ -5,12 +5,14 @@ tests.apps.test_api_client
 
 Unit tests for :mod:`novel_downloader.apps.api.client`.
 
-Every request goes through ``httpx.MockTransport``: no server is started and
-no network access happens.
+Most requests go through ``httpx.MockTransport``: no server is started and no
+network access happens. The end-to-end section bridges the same client into
+the real ``create_app()`` ASGI application to pin the SDK / API contract.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -18,8 +20,15 @@ from typing import Any
 
 import httpx
 import pytest
+from starlette.types import ASGIApp
 
+from novel_downloader import __version__
+from novel_downloader.apps.api import create_app
+from novel_downloader.apps.api import routes as api_routes
 from novel_downloader.apps.api.client import ApiError, NovelApiClient
+from novel_downloader.apps.api.constants import MSG_TASK_NOT_FOUND
+from novel_downloader.apps.api.routes import get_manager
+from novel_downloader.apps.core.models import DownloadTask
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -286,7 +295,7 @@ def test_task_not_found_raises_api_error() -> None:
         client.task("missing")
 
     assert info.value.status_code == 404
-    assert "missing" in str(info.value)
+    assert info.value.detail == MSG_TASK_NOT_FOUND.format(task_id="missing")
 
 
 def test_cancel_task() -> None:
@@ -539,3 +548,136 @@ def test_base_url_with_api_prefix(tmp_path: Path) -> None:
 
     assert str(recorder.requests[0].url) == "http://api.test/api/v1/health"
     assert str(recorder.requests[1].url) == "http://api.test/downloads/book.txt"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end against the real ASGI app (SDK / API contract)
+# ---------------------------------------------------------------------------
+
+
+class _SyncASGITransport(httpx.BaseTransport):
+    """
+    Bridge synchronous ``httpx`` requests into an ASGI application.
+
+    :class:`NovelApiClient` is synchronous while ``httpx.ASGITransport`` only
+    serves async clients; this adapter runs the async round-trip on a private
+    event loop and re-wraps the buffered response in a plain byte stream. No
+    sockets are opened.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._transport = httpx.ASGITransport(app=app)
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        async def _call() -> httpx.Response:
+            response = await self._transport.handle_async_request(request)
+            await response.aread()
+            return response
+
+        response = asyncio.run(_call())
+        # Re-wrap with an in-memory stream so the sync client can read it.
+        return httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            content=response.content,
+            extensions=response.extensions,
+        )
+
+
+class _E2EManager:
+    """Minimal task-manager stand-in for the end-to-end contract test."""
+
+    def __init__(self) -> None:
+        self.pending: list[DownloadTask] = []
+        self.running: list[DownloadTask] = []
+        self.completed: list[DownloadTask] = []
+
+    async def add_task(self, *, title: str, site: str, book_id: str) -> DownloadTask:
+        task = DownloadTask(title=title, site=site, book_id=book_id)
+        self.pending.append(task)
+        return task
+
+    async def cancel_task(self, task_id: str) -> bool:
+        for index, task in enumerate(self.pending):
+            if task.task_id == task_id:
+                self.pending.pop(index)
+                self.completed.append(task)
+                return True
+        return False
+
+    def snapshot(self) -> dict[str, list[DownloadTask]]:
+        return {
+            "pending": list(self.pending),
+            "running": list(self.running),
+            "completed": list(self.completed),
+        }
+
+    async def close(self) -> None:
+        return None
+
+
+def test_novel_api_client_end_to_end_against_create_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Run the documented SDK methods against the real ``create_app()`` app.
+
+    This pins the contract between the client and the server: every call goes
+    through the actual FastAPI routing, token auth and serialisation, with the
+    task manager replaced by a fake and the site search stubbed to return no
+    results. Requests are bridged into the ASGI app in-process; no network is
+    used.
+    """
+    monkeypatch.delenv("NOVEL_API_WEBHOOK", raising=False)
+    manager = _E2EManager()
+    application = create_app(token="secret-token", output_dir=tmp_path / "downloads")
+    application.dependency_overrides[get_manager] = lambda: manager
+
+    async def fake_search(keyword: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        assert keyword
+        return []
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    with NovelApiClient(
+        base_url="http://testserver",
+        token="secret-token",
+        transport=_SyncASGITransport(application),
+    ) as api:
+        # 1) health: the SDK reaches the liveness probe through real routing.
+        health = api.health()
+        assert health["status"] == "ok"
+        assert health["version"] == __version__
+
+        # 2) sites: the supported-site metadata comes from the same module the
+        #    server serves.
+        sites = api.sites()
+        assert "qidian" in sites["search"]
+        assert "qidian" in sites["download"]
+
+        # 3) search: an empty result set round-trips through validation.
+        assert api.search("斗破", sites=["demo"]) == {"total": 0, "results": []}
+
+        # 4) add_task: the created task is serialised by the server's own
+        #    ``task_to_dict``.
+        created = api.add_task("demo", "9", title="My Book")
+        assert created["site"] == "demo"
+        assert created["book_id"] == "9"
+        assert created["title"] == "My Book"
+        assert created["status"] == "queued"
+        assert created["task_id"]
+        assert len(manager.pending) == 1
+
+        # 5) The 404 ``detail`` the server puts on the wire is the shared
+        #    contract constant, surfaced verbatim by the client...
+        with pytest.raises(ApiError) as info:
+            api.cancel_task("missing")
+        assert info.value.status_code == 404
+        assert info.value.detail == MSG_TASK_NOT_FOUND.format(task_id="missing")
+
+        # ...and the client's own fallback error (``task()`` against a server
+        # without the per-task endpoint) reuses the same constant.
+        with pytest.raises(ApiError) as info:
+            api.task("missing")
+        assert info.value.status_code == 404
+        assert info.value.detail == MSG_TASK_NOT_FOUND.format(task_id="missing")

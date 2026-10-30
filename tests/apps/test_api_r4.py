@@ -36,7 +36,12 @@ from fastapi import FastAPI
 
 from novel_downloader.apps.api import create_app
 from novel_downloader.apps.api import routes as api_routes
+from novel_downloader.apps.api.auth import AUTH_ERROR_DETAIL
 from novel_downloader.apps.api.client import ApiError, NovelApiClient
+from novel_downloader.apps.api.constants import (
+    MSG_LOGIN_REQUEST_ALREADY_COMPLETED,
+    MSG_LOGIN_REQUEST_NOT_FOUND,
+)
 from novel_downloader.apps.api.routes import get_manager, get_watchlist_store
 from novel_downloader.apps.core import cred_broker
 from novel_downloader.apps.core.adapters import WebLoginUI
@@ -286,7 +291,9 @@ async def test_submit_login_unknown_request_404(app: FastAPI) -> None:
         )
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "Login request not found: deadbeef"}
+    assert response.json() == {
+        "detail": MSG_LOGIN_REQUEST_NOT_FOUND.format(req_id="deadbeef")
+    }
 
 
 @pytest.mark.asyncio
@@ -306,7 +313,9 @@ async def test_submit_login_twice_returns_409(app: FastAPI) -> None:
 
     assert first.status_code == 200
     assert second.status_code == 409
-    assert second.json() == {"detail": f"Login request already completed: {req.req_id}"}
+    assert second.json() == {
+        "detail": MSG_LOGIN_REQUEST_ALREADY_COMPLETED.format(req_id=req.req_id)
+    }
     assert await get_req_state(req.req_id) == (True, True)
 
 
@@ -452,10 +461,10 @@ async def test_login_endpoints_require_token(tmp_path: Path) -> None:
         )
 
     assert missing.status_code == 401
-    assert missing.json() == {"detail": "Invalid or missing API token"}
+    assert missing.json() == {"detail": AUTH_ERROR_DETAIL}
     assert wrong.status_code == 401
     assert stream.status_code == 401
-    assert json.loads(stream_body)["detail"] == "Invalid or missing API token"
+    assert json.loads(stream_body)["detail"] == AUTH_ERROR_DETAIL
     assert allowed.status_code == 200
 
 
@@ -514,7 +523,9 @@ def test_client_submit_login_defaults_to_empty_values() -> None:
 
 def test_client_submit_login_error_shapes() -> None:
     def handler_404(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, json={"detail": "Login request not found: r1"})
+        return httpx.Response(
+            404, json={"detail": MSG_LOGIN_REQUEST_NOT_FOUND.format(req_id="r1")}
+        )
 
     with _make_client(handler_404) as client, pytest.raises(ApiError) as not_found:
         client.submit_login("r1", {})
@@ -522,7 +533,8 @@ def test_client_submit_login_error_shapes() -> None:
 
     def handler_409(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            409, json={"detail": "Login request already completed: r1"}
+            409,
+            json={"detail": MSG_LOGIN_REQUEST_ALREADY_COMPLETED.format(req_id="r1")},
         )
 
     with _make_client(handler_409) as client, pytest.raises(ApiError) as conflict:

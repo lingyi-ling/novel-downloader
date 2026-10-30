@@ -30,7 +30,12 @@ from fastapi import FastAPI
 from novel_downloader.apps.api import create_app
 from novel_downloader.apps.api import routes as api_routes
 from novel_downloader.apps.api import webhook as api_webhook
+from novel_downloader.apps.api.auth import AUTH_ERROR_DETAIL
 from novel_downloader.apps.api.client import NovelApiClient
+from novel_downloader.apps.api.constants import (
+    MSG_BOOK_NOT_IN_WATCHLIST,
+    MSG_UNKNOWN_MUSIC_PLATFORM,
+)
 from novel_downloader.apps.api.routes import get_manager, get_watchlist_store
 from novel_downloader.apps.api.webhook import (
     TaskFinishedWatcher,
@@ -149,7 +154,9 @@ async def test_watchlist_crud_roundtrip(app: FastAPI) -> None:
 
         missing = await client.delete("/api/v1/watchlist/demo/42")
         assert missing.status_code == 404
-        assert missing.json() == {"detail": "Book not in watchlist: demo/42"}
+        assert missing.json() == {
+            "detail": MSG_BOOK_NOT_IN_WATCHLIST.format(site="demo", book_id="42")
+        }
 
 
 @pytest.mark.asyncio
@@ -437,7 +444,9 @@ async def test_music_export_rejects_unknown_platform(
         )
 
     assert response.status_code == 400
-    assert response.json() == {"detail": "Unknown music platform: nope"}
+    assert response.json() == {
+        "detail": MSG_UNKNOWN_MUSIC_PLATFORM.format(platform="nope")
+    }
 
 
 @pytest.mark.asyncio
@@ -478,7 +487,9 @@ async def test_music_health_single_and_all_platforms(
     assert [item["platform"] for item in all_platforms.json()] == ["demo", "bad"]
     assert all_platforms.json()[1]["ok"] is False
     assert unknown.status_code == 400
-    assert unknown.json() == {"detail": "Unknown music platform: nope"}
+    assert unknown.json() == {
+        "detail": MSG_UNKNOWN_MUSIC_PLATFORM.format(platform="nope")
+    }
     assert calls == [("demo", 5.0), ("demo", 1.5), ("bad", 1.5)]
 
 
@@ -666,11 +677,11 @@ async def test_new_endpoints_require_token(
         )
 
     assert missing.status_code == 401
-    assert missing.json() == {"detail": "Invalid or missing API token"}
+    assert missing.json() == {"detail": AUTH_ERROR_DETAIL}
     assert wrong.status_code == 401
     assert allowed.status_code == 200
     assert music_export.status_code == 401
-    assert music_export.json() == {"detail": "Invalid or missing API token"}
+    assert music_export.json() == {"detail": AUTH_ERROR_DETAIL}
 
 
 @pytest.mark.asyncio

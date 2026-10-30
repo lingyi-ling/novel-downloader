@@ -52,6 +52,20 @@ from novel_downloader.plugins.ranking import normalize_text
 from novel_downloader.plugins.search import search, search_stream
 
 from .auth import require_token
+from .constants import (
+    LABEL_MUSIC_DOWNLOAD,
+    MSG_BOOK_NOT_IN_WATCHLIST,
+    MSG_LOGIN_REQUEST_ALREADY_COMPLETED,
+    MSG_LOGIN_REQUEST_NOT_FOUND,
+    MSG_MUSIC_DOWNLOAD_FAILED,
+    MSG_MUSIC_JOB_NOT_FOUND,
+    MSG_MUSIC_PLATFORM_INIT_FAILED,
+    MSG_MUSIC_UNAVAILABLE,
+    MSG_PLAYLIST_WRITE_FAILED,
+    MSG_TASK_NOT_FOUND,
+    MSG_TIMED_OUT,
+    MSG_UNKNOWN_MUSIC_PLATFORM,
+)
 from .schemas import (
     LoginSubmitRequest,
     MusicDownloadRequest,
@@ -152,7 +166,7 @@ async def _with_timeout(awaitable: Awaitable[_T], timeout: float, label: str) ->
     except TimeoutError as exc:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail=f"{label} timed out after {timeout:g}s",
+            detail=MSG_TIMED_OUT.format(label=label, timeout=timeout),
         ) from exc
 
 
@@ -443,7 +457,7 @@ async def get_task(
     if task is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Task not found: {task_id}",
+            detail=MSG_TASK_NOT_FOUND.format(task_id=task_id),
         )
     return task_to_dict(task)
 
@@ -468,7 +482,7 @@ async def cancel_task(
     if not await mgr.cancel_task(task_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Task not found: {task_id}",
+            detail=MSG_TASK_NOT_FOUND.format(task_id=task_id),
         )
     return {"ok": True}
 
@@ -576,12 +590,12 @@ async def submit_login_request(
     if not exists:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Login request not found: {req_id}",
+            detail=MSG_LOGIN_REQUEST_NOT_FOUND.format(req_id=req_id),
         )
     if done:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Login request already completed: {req_id}",
+            detail=MSG_LOGIN_REQUEST_ALREADY_COMPLETED.format(req_id=req_id),
         )
     await complete_request(req_id, dict(body.values))
     return {"ok": True}
@@ -735,7 +749,7 @@ async def remove_watchlist(
     if not store.remove(site, book_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Book not in watchlist: {site}/{book_id}",
+            detail=MSG_BOOK_NOT_IN_WATCHLIST.format(site=site, book_id=book_id),
         )
     return {"ok": True}
 
@@ -863,11 +877,7 @@ def _load_music_components() -> _MusicComponents:
     except Exception as exc:  # noqa: BLE001 - optional dependency guard
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Music support is not available: "
-                f"{type(exc).__name__}: {exc}. "
-                'Install it with: pip install "novel-downloader[music]"'
-            ),
+            detail=MSG_MUSIC_UNAVAILABLE.format(error=f"{type(exc).__name__}: {exc}"),
         ) from exc
 
     return _MusicComponents(
@@ -891,12 +901,12 @@ def _create_provider(components: _MusicComponents, platform: str) -> Any:
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown music platform: {platform}",
+            detail=MSG_UNKNOWN_MUSIC_PLATFORM.format(platform=platform),
         ) from exc
     except Exception as exc:  # noqa: BLE001 - provider construction
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Could not initialise music platform {platform!r}: {exc}",
+            detail=MSG_MUSIC_PLATFORM_INIT_FAILED.format(platform=platform, error=exc),
         ) from exc
 
 
@@ -932,7 +942,7 @@ def _require_music_platform(components: _MusicComponents, platform: str) -> None
     if platform not in _music_platform_keys(components):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown music platform: {platform}",
+            detail=MSG_UNKNOWN_MUSIC_PLATFORM.format(platform=platform),
         )
 
 
@@ -995,7 +1005,7 @@ async def music_export(body: MusicExportRequest) -> dict[str, Any]:
     except OSError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Could not write playlist {target}: {exc}",
+            detail=MSG_PLAYLIST_WRITE_FAILED.format(target=target, error=exc),
         ) from exc
 
     return {
@@ -1101,14 +1111,14 @@ async def music_download(
                 on_result=on_result,
             ),
             _blocking_timeout(request, "music_download"),
-            "Music download",
+            LABEL_MUSIC_DOWNLOAD,
         )
     except Exception as exc:  # noqa: BLE001 - download engine errors
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Music download failed: {exc}",
+            detail=MSG_MUSIC_DOWNLOAD_FAILED.format(error=exc),
         ) from exc
 
     ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
@@ -1223,7 +1233,9 @@ async def _run_music_job(
             timeout=timeout,
         )
     except TimeoutError:
-        _finish_failed(f"Music download timed out after {timeout:g}s")
+        _finish_failed(
+            MSG_TIMED_OUT.format(label=LABEL_MUSIC_DOWNLOAD, timeout=timeout)
+        )
         return
     except Exception as exc:  # noqa: BLE001 - download engine errors
         _finish_failed(f"{type(exc).__name__}: {exc}")
@@ -1296,7 +1308,7 @@ async def music_job_status(job_id: str) -> dict[str, Any]:
         if job is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Music job not found: {job_id}",
+                detail=MSG_MUSIC_JOB_NOT_FOUND.format(job_id=job_id),
             )
         return {
             "job_id": job["job_id"],
