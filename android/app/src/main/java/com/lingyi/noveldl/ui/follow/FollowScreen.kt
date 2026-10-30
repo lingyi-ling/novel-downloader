@@ -53,8 +53,15 @@ fun FollowScreen(onMessage: (String) -> Unit) {
     var adding by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     // Check results whose chapter changed and that carry a ready-to-post task
-    // body; the server already produced them, so queueing is confirm-only.
+    // body. The server only *attaches* the body; the client must still submit
+    // it via POST /api/v1/tasks (see [queue]).
     var queueable by remember { mutableStateOf<List<WatchCheckItem>>(emptyList()) }
+    // Entries whose task body has been submitted to the download queue.
+    // Screen-level state, so the disabled button survives pull-to-refresh
+    // and further check runs within this visit.
+    var queuedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // Entries with a submission currently in flight.
+    var queueingKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     LaunchedEffect(refreshKey) {
         Api.call { Api.service().watchlist() }
@@ -96,6 +103,11 @@ fun FollowScreen(onMessage: (String) -> Unit) {
                     queueable = queueable.filterNot {
                         it.site == entry.site && it.book_id == entry.book_id
                     }
+                    // Drop the local queue memory too, so re-following the
+                    // same book can be queued again if it changes later.
+                    val key = watchItemKey(entry.site, entry.book_id)
+                    queuedKeys = queuedKeys - key
+                    queueingKeys = queueingKeys - key
                     onMessage(context.getString(R.string.follow_remove_done))
                     refreshNow()
                 }
@@ -122,10 +134,28 @@ fun FollowScreen(onMessage: (String) -> Unit) {
     }
 
     fun queue(entry: WatchCheckItem) {
-        // The server returned the task body; per the API contract the client
-        // only confirms here and must not submit the download again.
-        val task = entry.task ?: return
-        onMessage(context.getString(R.string.follow_queue_done, task.title ?: entry.title))
+        // Only submit entries the server gave a concrete task body for.
+        val target = queueTarget(entry) ?: return
+        val key = entry.key()
+        if (key in queuedKeys || key in queueingKeys) return
+        queueingKeys = queueingKeys + key
+        scope.launch {
+            val outcome = Api.call { Api.service().addTask(target) }
+            queueingKeys = queueingKeys - key
+            outcome
+                .onSuccess {
+                    queuedKeys = queuedKeys + key
+                    onMessage(
+                        context.getString(
+                            R.string.follow_queue_done,
+                            entry.task?.title ?: entry.title,
+                        ),
+                    )
+                }
+                .onFailure {
+                    onMessage(context.getString(R.string.state_error, it.message ?: ""))
+                }
+        }
     }
 
     PullToRefreshBox(
@@ -179,11 +209,14 @@ fun FollowScreen(onMessage: (String) -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(books) { entry ->
+                    val key = watchItemKey(entry.site, entry.book_id)
                     WatchCard(
                         entry = entry,
                         queueable = queueable.any {
                             it.site == entry.site && it.book_id == entry.book_id
                         },
+                        queued = key in queuedKeys,
+                        queueing = key in queueingKeys,
                         onRemove = { remove(entry) },
                         onQueue = { queueable.firstOrNull {
                             it.site == entry.site && it.book_id == entry.book_id
@@ -206,6 +239,8 @@ fun FollowScreen(onMessage: (String) -> Unit) {
 private fun WatchCard(
     entry: WatchEntry,
     queueable: Boolean,
+    queued: Boolean,
+    queueing: Boolean,
     onRemove: () -> Unit,
     onQueue: () -> Unit,
 ) {
@@ -250,8 +285,19 @@ private fun WatchCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (queueable) {
-                    Button(onClick = onQueue) {
-                        Text(stringResource(R.string.action_add_to_queue))
+                    // Disabled once submitted (queued) or while the request is
+                    // in flight, so an entry can never be queued twice.
+                    Button(
+                        onClick = onQueue,
+                        enabled = !queued && !queueing,
+                    ) {
+                        Text(
+                            when {
+                                queueing -> stringResource(R.string.follow_queue_in_progress)
+                                queued -> stringResource(R.string.follow_queued)
+                                else -> stringResource(R.string.action_add_to_queue)
+                            },
+                        )
                     }
                 }
                 TextButton(onClick = onRemove) {

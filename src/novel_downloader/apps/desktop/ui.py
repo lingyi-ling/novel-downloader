@@ -60,6 +60,8 @@ from .formatting import (
     filter_tasks,
     follow_row,
     format_error,
+    health_rows,
+    health_summary,
     history_row,
     match_watch_result,
     music_row,
@@ -100,6 +102,10 @@ _SEARCH_PER_SITE = 5
 _SEARCH_TIMEOUT = 10.0
 _MUSIC_SEARCH_LIMIT = 30
 _MUSIC_WORKERS = 3
+
+#: Per-platform budget for the health check; each platform gets one bounded
+#: search (see ``apps.music.providers.health_check``).
+_MUSIC_HEALTH_TIMEOUT = 15.0
 
 #: Results requested per site while looking for a followed book's latest
 #: chapter; matches the ``follow check`` CLI defaults.
@@ -198,6 +204,12 @@ class DesktopApp:
         self.music_tree: ttk.Treeview | None = None
         self.music_progress: ttk.Progressbar | None = None
         self.music_log: ScrolledText | None = None
+        # Platform health check ("检查平台") widgets / state.
+        self.music_health_button: ttk.Button | None = None
+        self.music_health_tree: ttk.Treeview | None = None
+        self.music_health_summary_var = tk.StringVar(value="")
+        self._music_health_running = False
+        self._music_health_results: dict[str, dict[str, Any]] = {}
 
         # Follow ("追更") widgets / state.  The store only resolves the file
         # path; every read/write happens on a worker thread, never on Tk.
@@ -555,6 +567,16 @@ class DesktopApp:
         )
         self.music_platform_combo.bind("<<ComboboxSelected>>", self._refresh_music_note)
 
+        # The selected platform's note (credentials / network requirements)
+        # sits right below the dropdown so it is seen before searching.
+        ttk.Label(
+            form,
+            textvariable=self.music_note_var,
+            foreground="#666666",
+            wraplength=420,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 2))
+
         ttk.Label(form, text=t("Keyword")).grid(
             row=0, column=2, sticky="w", padx=(0, 6), pady=2
         )
@@ -626,12 +648,6 @@ class DesktopApp:
                 command=self._save_music_settings,
             ).pack(side="left", padx=(0, 12))
 
-        ttk.Label(
-            self.music_tab,
-            textvariable=self.music_note_var,
-            foreground="#666666",
-        ).pack(anchor="w", pady=(2, 4))
-
         tree_frame = ttk.Frame(self.music_tab)
         tree_frame.pack(fill="both", expand=True, pady=(4, 6))
 
@@ -682,6 +698,54 @@ class DesktopApp:
             self.music_tab, height=7, state="disabled", wrap="word"
         )
         self.music_log.pack(fill="both", expand=False)
+
+        # Platform health check ("检查平台"): one bounded search per platform,
+        # run serially on a worker thread, results listed as they arrive.
+        health_frame = ttk.LabelFrame(
+            self.music_tab, text=t("Platform health"), padding=8
+        )
+        health_frame.pack(fill="x", pady=(6, 0))
+
+        health_actions = ttk.Frame(health_frame)
+        health_actions.pack(fill="x")
+        self.music_health_button = ttk.Button(
+            health_actions,
+            text=t("Check platforms"),
+            command=self._start_music_health_check,
+        )
+        self.music_health_button.pack(side="left")
+        ttk.Label(
+            health_actions,
+            textvariable=self.music_health_summary_var,
+            foreground="#666666",
+        ).pack(side="left", padx=8)
+
+        health_tree_frame = ttk.Frame(health_frame)
+        health_tree_frame.pack(fill="x", pady=(4, 0))
+        health_columns = ("platform", "ok", "elapsed", "error")
+        health_tree = ttk.Treeview(
+            health_tree_frame,
+            columns=health_columns,
+            show="headings",
+            selectmode="browse",
+            height=5,
+        )
+        health_headings = (
+            ("platform", t("Platform"), 170),
+            ("ok", t("OK"), 80),
+            ("elapsed", t("Elapsed (ms)"), 110),
+            ("error", t("Error"), 430),
+        )
+        for column, label, width in health_headings:
+            health_tree.heading(column, text=label)
+            health_tree.column(column, width=width, anchor="w")
+        health_scroll = ttk.Scrollbar(
+            health_tree_frame, orient="vertical", command=health_tree.yview
+        )
+        health_tree.configure(yscrollcommand=health_scroll.set)
+        health_tree.pack(side="left", fill="both", expand=True)
+        health_scroll.pack(side="right", fill="y")
+        self.music_health_tree = health_tree
 
         self._refresh_music_note()
 
@@ -1147,6 +1211,10 @@ class DesktopApp:
             self._music_download_finished(payload)
         elif kind == "music_download_error":
             self._music_download_failed(str(payload))
+        elif kind == "music_health_item":
+            self._on_music_health_item(payload)
+        elif kind == "music_health_done":
+            self._music_health_finished(payload)
         elif kind == "follow_entries":
             self._render_follow_entries(payload)
         elif kind == "follow_load_error":
@@ -1811,12 +1879,14 @@ class DesktopApp:
             from novel_downloader.apps.music.providers import (
                 available_labels,
                 create,
+                health_check,
                 platform_note,
             )
 
             self._music_engine = {
                 "available_labels": available_labels,
                 "create": create,
+                "health_check": health_check,
                 "platform_note": platform_note,
                 "DownloadOptions": DownloadOptions,
                 "download_many": download_many,
@@ -1912,6 +1982,85 @@ class DesktopApp:
         except Exception:  # noqa: BLE001 - notes are advisory only
             note = ""
         self.music_note_var.set(note)
+
+    # ------------------------------------------------------------------
+    # Music platform health check ("检查平台")
+    # ------------------------------------------------------------------
+    def _start_music_health_check(self) -> None:
+        """Check every registered platform once, serially, off the Tk thread."""
+        engine = self._music_engine
+        if not self._music_ready or engine is None:
+            return
+        if self._music_health_running:
+            return
+        try:
+            platforms = [key for key, _ in engine["available_labels"]()]
+        except Exception as exc:  # noqa: BLE001 - registry failure is not fatal
+            self._show_error(
+                t("Could not load music platforms: {error}").format(
+                    error=format_error(exc)
+                )
+            )
+            return
+        if not platforms:
+            self._set_status(t("No music platforms are available."))
+            return
+
+        keyword = self.music_query_var.get().strip() or "test"
+        self._music_health_running = True
+        self._music_health_results = {}
+        tree = self.music_health_tree
+        if tree is not None:
+            tree.delete(*tree.get_children())
+        self.music_health_summary_var.set("")
+        if self.music_health_button is not None:
+            self.music_health_button.state(["disabled"])
+        self._set_status(
+            t("Checking {count} platform(s)...").format(count=len(platforms))
+        )
+        threading.Thread(
+            target=self._music_health_worker,
+            args=(platforms, keyword),
+            name="desktop-music-health",
+            daemon=True,
+        ).start()
+
+    def _music_health_worker(self, platforms: list[str], keyword: str) -> None:
+        """Run one bounded ``health_check`` per platform, then report done."""
+        engine = self._music_engine
+        if engine is None:
+            return
+        check = engine["health_check"]
+        for platform in platforms:
+            try:
+                result = dict(check(platform, keyword, timeout=_MUSIC_HEALTH_TIMEOUT))
+            except Exception as exc:  # noqa: BLE001 - per-platform, not fatal
+                result = {"ok": False, "elapsed_ms": 0, "error": format_error(exc)}
+            self.events.put(("music_health_item", (platform, result)))
+        self.events.put(("music_health_done", None))
+
+    def _on_music_health_item(self, payload: tuple[str, dict[str, Any]]) -> None:
+        """Record one platform's result and re-render the sorted table."""
+        platform, result = payload
+        self._music_health_results[platform] = dict(result)
+        self._render_music_health_rows()
+
+    def _render_music_health_rows(self) -> None:
+        tree = self.music_health_tree
+        if tree is None:
+            return
+        tree.delete(*tree.get_children())
+        for index, row in enumerate(health_rows(self._music_health_results)):
+            tree.insert("", "end", iid=str(index), values=row)
+
+    def _music_health_finished(self, _payload: object) -> None:
+        self._music_health_running = False
+        self._render_music_health_rows()
+        summary = health_summary(self._music_health_results)
+        self.music_health_summary_var.set(summary)
+        self._set_status(summary)
+        if self.music_health_button is not None:
+            self.music_health_button.state(["!disabled"])
 
     def _music_provider(self, key: str) -> Any:
         with self._music_provider_lock:

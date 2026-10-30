@@ -43,6 +43,10 @@ __all__ = [
     "format_mtime",
     "format_size",
     "format_task_progress",
+    "health_counts",
+    "health_row",
+    "health_rows",
+    "health_summary",
     "history_row",
     "match_watch_result",
     "music_row",
@@ -50,6 +54,7 @@ __all__ = [
     "parse_sites",
     "retry_params",
     "search_row",
+    "sort_health_results",
     "status_label",
     "task_detail_text",
     "task_export_choices",
@@ -61,6 +66,7 @@ __all__ = [
     "task_output_actions",
     "task_row",
     "task_status_group",
+    "truncate_error",
 ]
 
 _SITE_SEPARATORS = re.compile(r"[,，;；\s]+")
@@ -589,6 +595,140 @@ def music_row(track: Any) -> tuple[str, str, str, str]:
         str(getattr(track, "artists", "") or ""),
         str(getattr(track, "album", "") or ""),
         format_duration(int(getattr(track, "duration_s", 0) or 0)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Music platform health checks
+# ---------------------------------------------------------------------------
+
+#: Maximum characters shown in the health-check error column.  The underlying
+#: result keeps the full text; only the table cell is shortened.
+_HEALTH_ERROR_LIMIT = 80
+
+
+def truncate_error(text: object, limit: int = _HEALTH_ERROR_LIMIT) -> str:
+    """
+    Collapse an error message onto one line, cut to ``limit`` characters.
+
+    Newlines and repeated whitespace are folded away so a multi-line traceback
+    stays readable inside a table cell.  Overlong messages lose their tail and
+    end with an ellipsis; ``None`` and empty input render as an empty string.
+
+    :param text: Raw error text (anything stringifiable).
+    :param limit: Maximum length of the rendered summary.
+    :return: A single-line error summary.
+    """
+    single = " ".join(str(text or "").split())
+    if limit <= 0 or len(single) <= limit:
+        return single
+    return single[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _health_elapsed(result: Mapping[str, Any]) -> int:
+    """Read ``elapsed_ms`` from a health-check result, defaulting to 0."""
+    try:
+        return int(result.get("elapsed_ms", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def sort_health_results(
+    results: Iterable[tuple[str, Mapping[str, Any]]],
+) -> list[tuple[str, Mapping[str, Any]]]:
+    """
+    Order health-check results for display.
+
+    Healthy platforms come first, ordered by response time (fastest first);
+    failures follow, also by elapsed time.  Ties keep alphabetical platform
+    order so the rendering is stable across re-renders.
+
+    :param results: ``(platform, result)`` pairs, each result a
+        ``{"ok", "elapsed_ms", "error"}`` mapping.
+    :return: The sorted pairs.
+    """
+
+    def order(item: tuple[str, Mapping[str, Any]]) -> tuple[int, int, str]:
+        platform, result = item
+        return (
+            0 if bool(result.get("ok")) else 1,
+            _health_elapsed(result),
+            str(platform),
+        )
+
+    return sorted(results, key=order)
+
+
+def health_row(platform: str, result: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    """
+    Build the Treeview values for one platform health check.
+
+    :param platform: Registry key of the checked platform.
+    :param result: ``{"ok", "elapsed_ms", "error"}`` from ``health_check``.
+    :return: ``(platform, ok_label, elapsed_ms, error)``.
+    """
+    ok = bool(result.get("ok"))
+    return (
+        str(platform),
+        t("OK") if ok else t("Failed"),
+        str(_health_elapsed(result)),
+        truncate_error(result.get("error", "")),
+    )
+
+
+def _health_items(
+    results: Mapping[str, Mapping[str, Any]] | Iterable[tuple[str, Mapping[str, Any]]],
+) -> list[tuple[str, Mapping[str, Any]]]:
+    """Accept either a ``platform -> result`` mapping or an iterable of pairs."""
+    if isinstance(results, Mapping):
+        return list(results.items())
+    return list(results)
+
+
+def health_rows(
+    results: Mapping[str, Mapping[str, Any]] | Iterable[tuple[str, Mapping[str, Any]]],
+) -> list[tuple[str, str, str, str]]:
+    """
+    Format and sort health-check results for the results table.
+
+    :param results: A ``platform -> result`` mapping or ``(platform, result)``
+        pairs, as produced by :func:`apps.music.providers.health_check`.
+    :return: Rows sorted healthy-first by elapsed time.
+    """
+    return [
+        health_row(platform, result)
+        for platform, result in sort_health_results(_health_items(results))
+    ]
+
+
+def health_counts(
+    results: Mapping[str, Mapping[str, Any]] | Iterable[tuple[str, Mapping[str, Any]]],
+) -> tuple[int, int]:
+    """
+    Count healthy vs failed platforms.
+
+    :param results: A ``platform -> result`` mapping or ``(platform, result)``
+        pairs.
+    :return: ``(ok, failed)`` counts.
+    """
+    items = _health_items(results)
+    ok = sum(1 for _, result in items if result.get("ok"))
+    return ok, len(items) - ok
+
+
+def health_summary(
+    results: Mapping[str, Mapping[str, Any]] | Iterable[tuple[str, Mapping[str, Any]]],
+) -> str:
+    """
+    Render the ``N ok / M failed`` summary line for a finished check.
+
+    :param results: A ``platform -> result`` mapping or ``(platform, result)``
+        pairs.
+    :return: A localized one-line summary.
+    """
+    ok, failed = health_counts(results)
+    return t("Health check finished: {ok} ok, {failed} failed.").format(
+        ok=ok, failed=failed
     )
 
 

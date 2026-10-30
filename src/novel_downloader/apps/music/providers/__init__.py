@@ -8,7 +8,7 @@ v2.0 关键决策：
 
 from . import creds  # noqa: F401
 from .base import MusicProvider, ResolveResult, Track  # noqa: F401
-from .health import health_check  # noqa: F401
+from .health import health_check as health_check
 from .musicdl import (  # noqa: F401
     GROUP_ORDER,
     PLATFORM_NOTES,

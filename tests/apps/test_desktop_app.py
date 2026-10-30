@@ -250,6 +250,98 @@ def test_music_row_tolerates_missing_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Music platform health check: pure formatting / summary / ordering
+# ---------------------------------------------------------------------------
+def test_truncate_error_collapses_whitespace_and_keeps_short_text() -> None:
+    assert (
+        fmt.truncate_error("  HTTP 500:\n upstream \t refused ")
+        == "HTTP 500: upstream refused"
+    )
+    assert fmt.truncate_error("") == ""
+    assert fmt.truncate_error(None) == ""
+
+
+def test_truncate_error_cuts_long_text_with_ellipsis() -> None:
+    out = fmt.truncate_error("x" * 200, limit=80)
+    assert len(out) == 80
+    assert out.endswith("…")
+    assert out.startswith("x" * 79)
+    # Short messages are never cut.
+    assert fmt.truncate_error("short", limit=80) == "short"
+
+
+def test_sort_health_results_puts_ok_first_then_fastest() -> None:
+    results = [
+        ("slow-ok", {"ok": True, "elapsed_ms": 900}),
+        ("failed", {"ok": False, "elapsed_ms": 50}),
+        ("fast-ok", {"ok": True, "elapsed_ms": 120}),
+    ]
+    assert [platform for platform, _ in fmt.sort_health_results(results)] == [
+        "fast-ok",
+        "slow-ok",
+        "failed",
+    ]
+
+
+def test_sort_health_results_tolerates_missing_fields() -> None:
+    # A missing elapsed_ms counts as 0 and missing ok counts as failed;
+    # ties keep alphabetical platform order.
+    results = [("b", {"ok": True}), ("a", {"ok": False, "elapsed_ms": 10})]
+    assert [platform for platform, _ in fmt.sort_health_results(results)] == [
+        "b",
+        "a",
+    ]
+
+
+def test_health_rows_format_and_sort() -> None:
+    rows = fmt.health_rows(
+        {
+            "netease": {"ok": True, "elapsed_ms": 1234, "error": ""},
+            "kugou": {"ok": False, "elapsed_ms": 15, "error": "a\nb"},
+        }
+    )
+    assert rows == [
+        ("netease", t("OK"), "1234", ""),
+        ("kugou", t("Failed"), "15", "a b"),
+    ]
+
+
+def test_health_rows_empty_results() -> None:
+    assert fmt.health_rows({}) == []
+    assert fmt.health_rows([]) == []
+    assert fmt.health_summary({}) == (
+        t("Health check finished: {ok} ok, {failed} failed.").format(ok=0, failed=0)
+    )
+
+
+def test_health_summary_all_failed_and_error_truncation() -> None:
+    results = {
+        "a": {"ok": False, "elapsed_ms": 1, "error": "x" * 300},
+        "b": {"ok": False, "elapsed_ms": 2, "error": "boom"},
+    }
+    rows = fmt.health_rows(results)
+    assert all(row[1] == t("Failed") for row in rows)
+    # The overlong error is truncated for the table cell only.
+    assert len(rows[0][3]) == 80
+    assert rows[1][3] == "boom"
+    assert fmt.health_summary(results) == (
+        t("Health check finished: {ok} ok, {failed} failed.").format(ok=0, failed=2)
+    )
+
+
+def test_health_summary_counts_mixed_results() -> None:
+    results = {
+        "ok-fast": {"ok": True, "elapsed_ms": 10, "error": ""},
+        "ok-slow": {"ok": True, "elapsed_ms": 400, "error": ""},
+        "bad": {"ok": False, "elapsed_ms": 5, "error": "down"},
+    }
+    assert fmt.health_summary(results) == (
+        t("Health check finished: {ok} ok, {failed} failed.").format(ok=2, failed=1)
+    )
+    assert fmt.health_counts(results) == (2, 1)
+
+
+# ---------------------------------------------------------------------------
 # Site parsing
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
@@ -1103,6 +1195,41 @@ def test_desktop_window_builds_all_tabs(
         notebook.select(app.follow_tab)
         root.update_idletasks()
         assert notebook.tab(app.follow_tab, "text") == t("Follow")
+
+        # Music tab: it can be raised, and the health-check widgets exist
+        # whenever the optional music engine is installed.
+        notebook.select(app.music_tab)
+        root.update_idletasks()
+        assert notebook.tab(app.music_tab, "text") == t("Music")
+        if app._music_ready:
+            engine = app._music_engine
+            assert engine is not None
+            assert callable(engine["health_check"])
+            assert app.music_platform_combo is not None
+            assert app.music_search_button is not None
+            assert app.music_health_button is not None
+            assert app.music_health_tree is not None
+            assert "disabled" not in app.music_health_button.state()
+            assert app.music_health_tree.heading("ok", "text") == t("OK")
+            assert app.music_health_tree.heading("elapsed", "text") == t("Elapsed (ms)")
+            assert app.music_health_tree.heading("error", "text") == t("Error")
+
+            # The note label follows the selected platform.
+            noted = [
+                key
+                for key in app._music_display_to_key.values()
+                if engine["platform_note"](key)
+            ]
+            if noted:  # the registry ships notes for some platforms
+                key = noted[0]
+                display = next(
+                    text
+                    for text, candidate in app._music_display_to_key.items()
+                    if candidate == key
+                )
+                app.music_platform_var.set(display)
+                app._refresh_music_note()
+                assert app.music_note_var.get() == engine["platform_note"](key)
     finally:
         if app is not None:
             app._closing = True
@@ -1151,7 +1278,14 @@ def _drain_and_dispatch(
             time.sleep(0.02)
             continue
         events.append((kind, payload))
-        if kind in {"status", "follow_entries", "follow_item", "follow_check_done"}:
+        if kind in {
+            "status",
+            "follow_entries",
+            "follow_item",
+            "follow_check_done",
+            "music_health_item",
+            "music_health_done",
+        }:
             app._handle_event(kind, payload)
     return events
 
@@ -1383,6 +1517,95 @@ def test_follow_add_and_remove_workers_persist_entries(
         app.follow_tree.selection_set([])
         app._remove_follow_selected()
         assert [entry.key for entry in store.entries()] == [("site-b", "2")]
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(Exception):
+            root.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Music tab (window, guarded): platform health check
+# ---------------------------------------------------------------------------
+def test_music_health_check_checks_every_platform_serially_and_reenables_button(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, root = _open_desktop_app(tmp_path, monkeypatch)
+    try:
+        root.update_idletasks()
+        if app._music_engine is None or not app._music_ready:
+            pytest.skip("the music extras are not installed")
+
+        labels = list(app._music_engine["available_labels"]())
+        assert labels
+        first_key, last_key = labels[0][0], labels[-1][0]
+        seen: list[tuple[str, str]] = []
+
+        def fake_health(
+            platform: str,
+            keyword: str = "test",
+            *,
+            timeout: float = 15.0,
+            limit: int = 1,
+        ) -> dict[str, Any]:
+            # The worker is a single thread, so appends prove serial execution.
+            seen.append((platform, keyword))
+            if platform == first_key:
+                raise RuntimeError("worker blew up")
+            if platform == last_key:
+                return {"ok": False, "elapsed_ms": 5, "error": "down\nnow"}
+            return {"ok": True, "elapsed_ms": 10, "error": ""}
+
+        app._music_engine = dict(app._music_engine, health_check=fake_health)
+
+        # A check already in progress blocks a second start.
+        app._music_health_running = True
+        app._start_music_health_check()
+        assert seen == []
+        app._music_health_running = False
+
+        app.music_query_var.set("  周杰伦  ")
+        app._start_music_health_check()
+        button = app.music_health_button
+        assert button is not None
+        assert "disabled" in button.state()  # disabled while the check runs
+        events = _drain_and_dispatch(
+            app,
+            stop=lambda found: any(kind == "music_health_done" for kind, _ in found),
+            timeout=60.0,
+        )
+
+        # Every registered platform was checked exactly once, with the query
+        # keyword (trimmed) passed through to ``health_check``.
+        assert sorted(platform for platform, _ in seen) == sorted(
+            key for key, _ in labels
+        )
+        assert {keyword for _, keyword in seen} == {"周杰伦"}
+        items = [payload for kind, payload in events if kind == "music_health_item"]
+        assert len(items) == len(labels)
+
+        # The table renders healthy-first; the failing platforms show a
+        # one-line error summary.
+        tree = app.music_health_tree
+        assert tree is not None
+        rows = [tuple(tree.item(iid, "values")) for iid in tree.get_children()]
+        assert len(rows) == len(labels)
+        failed_rows = [row for row in rows if row[1] == t("Failed")]
+        assert [row[0] for row in failed_rows] == [first_key, last_key]
+        assert failed_rows[0][2] == "0"
+        assert failed_rows[0][3] == "RuntimeError: worker blew up"
+        assert failed_rows[1][3] == "down now"
+        assert all(
+            row[1] == t("OK") for row in rows if row[0] not in {first_key, last_key}
+        )
+
+        # Summary and status; the button is usable again.
+        summary = fmt.health_summary(app._music_health_results)
+        assert app.music_health_summary_var.get() == summary
+        assert app._status_var.get() == summary
+        assert "disabled" not in button.state()
+        assert app._music_health_running is False
     finally:
         app._closing = True
         with contextlib.suppress(Exception):

@@ -87,6 +87,8 @@
     <string name="follow_remove">Remove</string>
     <string name="follow_remove_done">Unfollowed</string>
     <string name="follow_queue_done">Added to the download queue: %1$s</string>
+    <string name="follow_queue_in_progress">Adding to the download queue…</string>
+    <string name="follow_queued">Added to the download queue</string>
     <string name="follow_needs_download">New chapters available — add to the download queue</string>
     <string name="follow_books">%1$d followed books</string>
     <string name="follow_last_chapter">Latest chapter: %1$s</string>

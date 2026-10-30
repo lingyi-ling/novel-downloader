@@ -95,6 +95,8 @@
     <string name="follow_remove">移除</string>
     <string name="follow_remove_done">已移除追更</string>
     <string name="follow_queue_done">已加入下载队列：%1$s</string>
+    <string name="follow_queue_in_progress">正在加入下载队列…</string>
+    <string name="follow_queued">已加入下载队列</string>
     <string name="follow_needs_download">有新章节，可加入下载队列</string>
     <string name="follow_books">共 %1$d 本追更</string>
     <string name="follow_last_chapter">最新章节：%1$s</string>
