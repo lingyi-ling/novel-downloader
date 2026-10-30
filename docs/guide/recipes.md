@@ -140,14 +140,17 @@ echo [%DATE% %TIME%] follow check >> "%LOG%"
 rem 可选：断点续传式更新指定书籍，只抓取缺失/新章节
 "%CLI%" download --site b520 8_8187 >> "%LOG%" 2>&1
 
+rem 或者：让 CLI 自动逐本下载有新章节的书并等待完成
+rem "%CLI%" follow check --download --wait --wait-timeout 1800 >> "%LOG%" 2>&1
+
 exit /b %ERRORLEVEL%
 ```
 
 注意：
 
 * `cd /d "C:\novel"` 让 `settings.toml`、`downloads`、`raw_data`、`logs` 都解析到预期位置。
-* `follow check --download` 只会**打印**下载命令，不会自行下载；需要自动更新时，像上面那样显式写 `download` 命令。
-* `follow check` 只要有任意一本书检查失败就以退出码 `1` 结束，但脚本会继续执行后面的下载命令；最终退出码可在 `follow.log` 中看到。
+* `follow check --download` 默认只**打印**下载命令，不会自行下载。需要自动更新时，可以像上面那样显式写 `download` 命令，也可以在计划任务里改用 `follow check --download --wait`：CLI 会把有新章节的书逐本排队下载并等待完成。`--wait-timeout`（默认 1800 秒）限定每本的等待上限，超时的任务会被取消并在汇总中计为「已取消」，不影响后续书籍。
+* `follow check` 只要有任意一本书检查失败就以退出码 `1` 结束，但脚本会继续执行后面的下载命令；使用 `--wait` 时，只要有下载未成功完成（失败/取消/超时），退出码同样是 `1`。最终退出码可在 `follow.log` 中看到。
 
 #### 第三步：注册计划任务
 

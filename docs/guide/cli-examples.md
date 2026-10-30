@@ -63,6 +63,7 @@ Commands:
   doctor      检查运行环境并诊断常见问题
   sources     列出、校验、安装和移除规则书源
   music       搜索并下载来自多个音乐平台的歌曲
+  completion  输出 novel-cli 的 shell 补全脚本
 ```
 
 ---
@@ -590,7 +591,8 @@ novel-cli follow [-h] {add,remove,list,check} ...
 novel-cli follow add [-h] [--title TEXT] site book_id
 novel-cli follow remove [-h] site book_id
 novel-cli follow list [-h] [--json]
-novel-cli follow check [-h] [--all] [--download] [--timeout SECS]
+novel-cli follow check [-h] [--all] [--download] [--wait]
+                       [--wait-timeout SECS] [--timeout SECS]
 ```
 
 **add / remove**
@@ -626,6 +628,8 @@ novel-cli follow list --json
 
 * `--all`: 同时显示已是最新的书籍和未找到结果的书籍; 省略时只报告新章节和错误。
 * `--download`: 对发现新章节的书打印可直接执行的 `novel-cli download ...` 命令。
+* `--wait`: 配合 `--download` 使用, 实际执行下载: 把有新章节的书在任务管理器中逐本排队下载, 并等待每本结束后再处理下一本。
+* `--wait-timeout SECS`: 每本下载的等待上限 (秒), 默认 `1800`; 仅在 `--wait` 下生效。
 * `--timeout SECS`: 每本书的搜索超时, 默认 `5.0` 秒。
 
 ```bash
@@ -637,9 +641,23 @@ novel-cli follow check --all
 
 # 有新章节时, 额外打印下载命令
 novel-cli follow check --download
+
+# 有新章节时自动逐本下载并等待完成 (每本最多等默认的 1800 秒)
+novel-cli follow check --download --wait
+
+# 自定义每本下载的等待上限 (例如 1 小时)
+novel-cli follow check --download --wait --wait-timeout 3600
 ```
 
-`check` 只做搜索, **不会直接下载**: 下载是长任务, CLI 没有后台调度器, 因此它只打印命令, 保持命令快速、非阻塞、可预测。需要自动下载时, 把打印出的 `novel-cli download --site <site> <book_id>` 交给计划任务 (见 [常见任务配方](./recipes.md))。
+`check` 默认只做搜索, **不会直接下载**: 下载是长任务, CLI 没有后台调度器, 因此它只打印命令, 保持命令快速、非阻塞、可预测。需要自动下载时有两种方式: 把打印出的 `novel-cli download --site <site> <book_id>` 交给计划任务 (见 [常见任务配方](./recipes.md)), 或改用 `follow check --download --wait`, 让 CLI 自己逐本下载并等待完成。
+
+`--wait` 的语义:
+
+* **逐本下载**: 有新章节的书按顺序逐本排队下载, 一本结束 (完成/失败/取消) 后才开始下一本, 不会并发施压站点。
+* **超时计为取消**: `--wait-timeout` 限定单本的等待时间; 超时的任务会被取消, 在汇总中计为「已取消」, 其余书籍仍有各自完整的等待时间。
+* **汇总输出**: 全部结束后打印 `Download summary: X completed, Y cancelled, Z failed.` 样式的汇总。
+* **退出码**: 只有没有检查失败且所有下载都成功完成时才返回 `0`; 任意检查失败, 或任意一本下载失败/取消/超时, 都以 `1` 结束。
+* `--wait` 必须与 `--download` 同用, 否则属于用法错误 (退出码 `2`)。
 
 > 首次检查某本书时, 只会记录当前最新章节 (显示为 `First chapter recorded ...`), 不会误报为更新。
 >
@@ -731,6 +749,40 @@ novel-cli doctor --port 9000
 
 ---
 
+#### 11. completion 子命令
+
+输出 `novel-cli` 的 shell 补全脚本。补全内容由命令树自动生成, 是一份扁平词表 (子命令名 + 选项名, 不含选项值), 因此新增子命令后无需手动维护脚本。
+
+**Synopsis**
+
+```bash
+novel-cli completion [-h] [--shell {bash,zsh,powershell}]
+```
+
+**Options**
+
+* `--shell {bash,zsh,powershell}`: 生成补全脚本的目标 shell; 省略时自动检测: `$SHELL` 指向 bash/zsh 时跟随, 否则 Windows 默认 `powershell`, 其它平台默认 `bash`。
+
+**Examples**
+
+```bash
+# Bash: 当前会话立即生效; 写入 ~/.bashrc 可持久化
+source <(novel-cli completion --shell bash)
+
+# Zsh: 脚本自带 #compdef 声明, 在已启用补全的交互会话中 source 即可
+source <(novel-cli completion --shell zsh)
+
+# Zsh (持久化): 放入 fpath 中的目录, 文件名必须为 _novel-cli
+novel-cli completion --shell zsh > "${fpath[1]}/_novel-cli"
+```
+
+```powershell
+# PowerShell: 追加到 $PROFILE, 每次启动自动注册补全
+novel-cli completion --shell powershell >> $PROFILE
+```
+
+---
+
 ### 退出码与 `--json` 输出契约
 
 #### 退出码
@@ -738,7 +790,7 @@ novel-cli doctor --port 9000
 | 退出码 | 含义 | 典型场景 |
 | --- | --- | --- |
 | `0` | 成功 | 命令正常完成; 搜索无结果、追更无新章节也属于成功 |
-| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、`doctor` 必需项失败、`sources list --check` 探针失败、`storage --clean`/`clean` 删除失败 |
+| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 探针失败、`storage --clean`/`clean` 删除失败 |
 | `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`--json` 与 `--first` 同用、`--json` 与 `--clean` 同用、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes` |
 
 按 `Ctrl+C` 中断时, CLI 在 stderr 输出 `Aborted.` 并以 `1` 退出。

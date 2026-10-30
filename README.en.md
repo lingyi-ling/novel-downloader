@@ -16,6 +16,7 @@ Supports resumable crawling, download queues with progress, multi-format exporti
 * Download queue and progress: resumable crawling, queue scheduling, and live progress
 * Export to TXT, EPUB, and HTML
 * History export: re-export previously downloaded books at any time
+* Follow updates and self-checks: a built-in follow list that checks for new chapters (optional automatic download), plus `doctor` environment diagnostics and `storage` disk-usage reporting
 * Asynchronous and high-performance crawling
 * Pluggable HTTP backends: `aiohttp`, `httpx`, `curl_cffi`
 * Text processing pipeline: ad removal, zh conversion, translation, etc.

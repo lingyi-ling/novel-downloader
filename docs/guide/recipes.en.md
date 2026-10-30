@@ -140,14 +140,17 @@ echo [%DATE% %TIME%] follow check >> "%LOG%"
 rem Optional: resumable update of specific books (fetches only missing/new chapters)
 "%CLI%" download --site b520 8_8187 >> "%LOG%" 2>&1
 
+rem Or: let the CLI download books with new chapters itself, one at a time
+rem "%CLI%" follow check --download --wait --wait-timeout 1800 >> "%LOG%" 2>&1
+
 exit /b %ERRORLEVEL%
 ```
 
 Notes:
 
 * `cd /d "C:\novel"` makes `settings.toml`, `downloads`, `raw_data`, and `logs` resolve to the expected locations.
-* `follow check --download` only **prints** download commands; it never downloads. For automatic updates, add explicit `download` commands like the one above.
-* `follow check` exits with `1` if any book's check fails, but the script continues to the download command; the final code is visible in `follow.log`.
+* `follow check --download` only **prints** download commands by default; it never downloads. For automatic updates, either add explicit `download` commands like the one above, or switch the scheduled task to `follow check --download --wait`: the CLI queues each updated book and waits for it to finish, one book at a time. `--wait-timeout` (default 1800 seconds) bounds the wait per book; a task that exceeds it is cancelled and counted as "cancelled" in the summary, without affecting the remaining books.
+* `follow check` exits with `1` if any book's check fails, but the script continues to the download command; with `--wait`, the exit code is also `1` when any download did not succeed (failed/cancelled/timed out). The final code is visible in `follow.log`.
 
 #### Step 3: Register the scheduled task
 
@@ -342,7 +345,7 @@ curl -s -X POST "$BASE/api/v1/watchlist/check" \
 * `/watchlist/check` only checks and never downloads; entries in `needs_download` carry a `task` field that the caller submits itself.
 * For live progress use SSE: `GET /api/v1/tasks/stream`; the search stream is `GET /api/v1/search/stream`. SSE requires custom request headers, so use a client that can set them.
 
-`/downloads/*` is a static path and is not protected by the token; restrict access to that directory when exposing the API.
+`/downloads/*` is protected by the same token as `/api/v1/*` (send the same header when a token is set); still restrict sources with a firewall when exposing the API.
 
 ---
 

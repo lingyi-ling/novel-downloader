@@ -63,6 +63,7 @@ Commands:
   doctor      check the environment and diagnose common problems
   sources     list, verify, install and remove rule-based book sources
   music       search and download songs from music platforms
+  completion  print a shell completion script for novel-cli
 ```
 
 ---
@@ -590,7 +591,8 @@ novel-cli follow [-h] {add,remove,list,check} ...
 novel-cli follow add [-h] [--title TEXT] site book_id
 novel-cli follow remove [-h] site book_id
 novel-cli follow list [-h] [--json]
-novel-cli follow check [-h] [--all] [--download] [--timeout SECS]
+novel-cli follow check [-h] [--all] [--download] [--wait]
+                       [--wait-timeout SECS] [--timeout SECS]
 ```
 
 **add / remove**
@@ -626,6 +628,8 @@ Each `--json` element contains `site`, `book_id`, `title`, `last_chapter`, and `
 
 * `--all`: also show books that are up to date or could not be found; without it only new chapters and errors are reported.
 * `--download`: print an executable `novel-cli download ...` command for each book with new chapters.
+* `--wait`: used with `--download`, actually download: queue each new-chapter book in the task manager and wait for it to finish before starting the next one.
+* `--wait-timeout SECS`: max seconds to wait for each download, default `1800`; only effective with `--wait`.
 * `--timeout SECS`: search timeout per book, default `5.0` seconds.
 
 ```bash
@@ -637,9 +641,24 @@ novel-cli follow check --all
 
 # Also print download commands for books with new chapters
 novel-cli follow check --download
+
+# Automatically download books with new chapters, one at a time
+# (each book waits up to the default 1800 seconds)
+novel-cli follow check --download --wait
+
+# Custom per-download wait limit (e.g. one hour)
+novel-cli follow check --download --wait --wait-timeout 3600
 ```
 
-`check` performs searches only and **never starts a download**: downloads are long-running and the CLI has no background scheduler, so it prints the command instead, keeping the command fast, non-blocking, and predictable. To download automatically, hand the printed `novel-cli download --site <site> <book_id>` to a scheduled task (see [Common Recipes](./recipes.md)).
+By default `check` performs searches only and **never starts a download**: downloads are long-running and the CLI has no background scheduler, so it prints the command instead, keeping the command fast, non-blocking, and predictable. To download automatically you have two options: hand the printed `novel-cli download --site <site> <book_id>` to a scheduled task (see [Common Recipes](./recipes.md)), or use `follow check --download --wait` and let the CLI download the books itself, one by one.
+
+Semantics of `--wait`:
+
+* **One book at a time**: books with new chapters are queued and downloaded sequentially; the next book starts only after the current one finishes (completed/failed/cancelled), so no site is hit with concurrent pressure.
+* **Timeout counts as cancelled**: `--wait-timeout` bounds the wait for a single book; a task whose budget expires is cancelled and reported as "cancelled" in the summary, while the remaining books still get their own full wait budget.
+* **Summary output**: after everything finishes, a summary like `Download summary: X completed, Y cancelled, Z failed.` is printed.
+* **Exit code**: `0` is returned only when no check failed and every download completed; any failed check, or any download that failed/was cancelled/timed out, ends the command with `1`.
+* `--wait` requires `--download`; on its own it is a usage error (exit code `2`).
 
 > The first check of a book only records the current latest chapter (reported as `First chapter recorded ...`), so it is not mistaken for an update.
 >
@@ -731,6 +750,41 @@ novel-cli doctor --port 9000
 
 ---
 
+#### 11. completion Subcommand
+
+Print a shell completion script for `novel-cli`. The completion is generated from the command tree as a flat word list (subcommand and option names, no option values), so new subcommands appear automatically without maintaining the script by hand.
+
+**Synopsis**
+
+```bash
+novel-cli completion [-h] [--shell {bash,zsh,powershell}]
+```
+
+**Options**
+
+* `--shell {bash,zsh,powershell}`: shell to generate the script for; when omitted it is auto-detected: `$SHELL` pointing to bash/zsh is honored, otherwise Windows defaults to `powershell` and other platforms to `bash`.
+
+**Examples**
+
+```bash
+# Bash: takes effect in the current session; persist by adding it to ~/.bashrc
+source <(novel-cli completion --shell bash)
+
+# Zsh: the script carries its own #compdef declaration, so source it in an
+# interactive session that has completion enabled
+source <(novel-cli completion --shell zsh)
+
+# Zsh (persistent): drop it into a directory on $fpath, the file must be named _novel-cli
+novel-cli completion --shell zsh > "${fpath[1]}/_novel-cli"
+```
+
+```powershell
+# PowerShell: append to $PROFILE to register the completer at every startup
+novel-cli completion --shell powershell >> $PROFILE
+```
+
+---
+
 ### Exit Codes and `--json` Contract
 
 #### Exit codes
@@ -738,7 +792,7 @@ novel-cli doctor --port 9000
 | Code | Meaning | Typical cases |
 | --- | --- | --- |
 | `0` | Success | The command completed; no search results or no new chapters is still success |
-| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a required `doctor` check failing, a failed `sources list --check` probe, a failed removal in `storage --clean` / `clean` |
+| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed `sources list --check` probe, a failed removal in `storage --clean` / `clean` |
 | `2` | Usage error | Missing/conflicting arguments (including argparse errors), `--json` with `--first`, `--json` with `--clean`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell |
 
 Pressing `Ctrl+C` prints `Aborted.` on stderr and exits with `1`.
