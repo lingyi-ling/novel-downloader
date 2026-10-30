@@ -10,7 +10,7 @@
 | -------------------- | ------- | ----------------- | ------------------------------------------ |
 | `raw_data_dir`       | `str`   | `"./raw_data"`    | 书籍数据存放目录                             |
 | `output_dir`         | `str`   | `"./downloads"`   | 最终导出文件目录                             |
-| `cache_dir`          | `str`   | `"./novel_cache"` | 本地缓存目录 (字体 / 图片等)                  |
+| `cache_dir`          | `str`   | `<用户数据目录>/cache` | 本地缓存目录 (字体 / 图片等); 相对路径按当前工作目录解析 |
 | `request_interval`   | `float` | 0.5               | **同一本书**章节请求的间隔 (秒)               |
 | `workers`            | `int`   | 4                 | 下载任务协程数量                             |
 | `max_connections`    | `int`   | 10                | 最大并发连接数                               |
@@ -32,6 +32,10 @@
 | `proxy_pass`         | `str/None` | `None`         | 代理密码                                      |
 | `trust_env`          | `bool`  | `false`           | 是否读取系统代理等环境变量                     |
 | `verify_ssl`         | `bool`  | `true`            | 是否校验 TLS 证书 (排查代理问题时才考虑关闭)   |
+
+**缓存目录**
+
+`cache_dir` 未设置时, 缓存 (含站点 Cookie) 保存在应用数据目录下的 `cache/` 子目录: Windows 为 `%LOCALAPPDATA%\novel_downloader\cache`, Linux 为 `~/.local/share/novel_downloader/cache`; 应用数据目录可通过环境变量 `NOVEL_HOME` 覆盖。显式设置的相对路径仍按当前工作目录解析, 如需旧版行为可设置 `cache_dir = "./novel_cache"`。
 
 **站点压力与 503**
 
@@ -162,7 +166,8 @@ max_rps = 1.0
 request_interval = 0.5
 raw_data_dir = "./raw_data"
 output_dir = "./downloads"
-cache_dir = "./novel_cache"
+# cache_dir 默认位于应用数据目录下的 cache/, 如需自定义 (相对路径按当前工作目录解析):
+# cache_dir = "./novel_cache"
 workers = 4
 cache_book_info = true
 cache_chapter = true
@@ -315,4 +320,37 @@ enable_local_plugins = false
 override_builtins = false
 # 本地插件路径 (可选)
 local_plugins_path = "./novel_plugins"
+```
+
+---
+
+### 配置校验与迁移
+
+`novel_downloader.infra.config` 包导出了两个配置工具函数, 可在加载 `settings.toml` 后自行检查或迁移旧键:
+
+| 函数             | 签名                                        | 说明                                                                                     |
+| ---------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `validate_config` | `(path_or_dict) -> list[Problem]`           | 校验配置映射或 `.toml`/`.json` 配置文件路径, 返回问题列表 (空列表表示配置合法); 解析错误与文件不存在以 `error` 问题返回而不会抛出异常, 也不访问网络 |
+| `migrate_config` | `(data) -> tuple[dict, list[str]]`          | 将旧键迁移到当前布局, 返回 `(迁移后的配置, 变更说明列表)`                                   |
+
+`Problem` 对象包含 `level` (`error` / `warning` / `info`)、`path` (配置内的点号路径)、`message` (描述) 与 `fix_hint` (修复建议) 字段。
+
+`migrate_config` 目前执行的迁移:
+
+* `sites.<site>.cookie` -> `sites.<site>.cookies`
+* `sites.<site>.use_truncation` -> `sites.<site>.parser.use_truncation`
+* `[general]` 表存在但未设置 `download_retry_times` 时填充默认值 `2`
+
+该函数幂等: 对同一配置重复调用, 第二次会得到相同数据与空的变更列表; 输入映射不会被修改。
+
+```python
+from novel_downloader.infra.config import migrate_config, validate_config
+
+problems = validate_config("settings.toml")
+for p in problems:
+    print(p)  # [level] path: message Hint: fix_hint
+
+cfg, notes = migrate_config(cfg)
+for note in notes:
+    print(note)
 ```

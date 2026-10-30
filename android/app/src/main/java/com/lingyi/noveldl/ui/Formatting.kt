@@ -49,3 +49,21 @@ private const val TIME_PATTERN = "yyyy-MM-dd HH:mm"
 /** Formats a unix timestamp (seconds) as local "yyyy-MM-dd HH:mm". */
 fun formatTimestamp(seconds: Double, locale: Locale = Locale.getDefault()): String =
     SimpleDateFormat(TIME_PATTERN, locale).format(Date((seconds * 1000).toLong()))
+
+/**
+ * Joins the health endpoint's `status` and `version` into one label for the
+ * persistent connection row on the settings screen, e.g. `ok · 1.2.0`.
+ *
+ * Either side may be missing (older servers omit `version`); two blanks mean
+ * the fields never arrived, which reads as "unknown".
+ */
+fun healthSummary(status: String, version: String): String {
+    val trimmedStatus = status.trim()
+    val trimmedVersion = version.trim()
+    return when {
+        trimmedStatus.isEmpty() && trimmedVersion.isEmpty() -> "unknown"
+        trimmedStatus.isEmpty() -> trimmedVersion
+        trimmedVersion.isEmpty() -> trimmedStatus
+        else -> "$trimmedStatus · $trimmedVersion"
+    }
+}

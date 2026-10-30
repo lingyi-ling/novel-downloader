@@ -50,6 +50,8 @@ music = [
     "qrcode",
     "websocket-client",
 ]
+# Kept for the legacy desktop GUI (legacy/music_desktop/gui.py), which lives
+# outside the package and needs customtkinter to run.
 music-desktop = [
     "customtkinter",
     "mutagen",

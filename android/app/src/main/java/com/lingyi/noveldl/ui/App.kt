@@ -121,7 +121,7 @@ fun NovelApp(store: SettingsStore) {
         ) {
             composable("search") { SearchScreen(onMessage = notify) }
             composable("tasks") { TasksScreen(onMessage = notify) }
-            composable("history") { HistoryScreen(onMessage = notify) }
+            composable("history") { HistoryScreen(store = store, onMessage = notify) }
             composable("music") { MusicScreen(onMessage = notify) }
             composable("follow") { FollowScreen(onMessage = notify) }
             composable("settings") { SettingsScreenView(store = store, onMessage = notify) }

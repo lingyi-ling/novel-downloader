@@ -10,7 +10,7 @@ Global runtime settings for downloads / concurrency / rate limits / directories 
 | -------------------- | --------- | ------------------ | ----------- |
 | `raw_data_dir`       | `str`     | `"./raw_data"`     | Directory for book data |
 | `output_dir`         | `str`     | `"./downloads"`    | Directory for final exported files |
-| `cache_dir`          | `str`     | `"./novel_cache"`  | Local cache directory (fonts / images, etc.) |
+| `cache_dir`          | `str`     | `<user data dir>/cache` | Local cache directory (fonts / images, etc.); relative paths resolve against the working directory |
 | `request_interval`   | `float`   | 0.5                | Interval (seconds) between chapter requests for **the same book** |
 | `workers`            | `int`     | 4                  | Number of download task coroutines |
 | `max_connections`    | `int`     | 10                 | Maximum number of concurrent connections |
@@ -32,6 +32,10 @@ Global runtime settings for downloads / concurrency / rate limits / directories 
 | `proxy_pass`         | `str/None`| `None`             | Proxy password |
 | `trust_env`          | `bool`    | `false`            | Whether to read system proxy and other environment variables |
 | `verify_ssl`         | `bool`    | `true`             | Whether to verify TLS certificates (disable only when diagnosing proxy issues) |
+
+**Cache directory**
+
+When `cache_dir` is not set, caches (including site cookies) live in the `cache/` subdirectory of the application data directory: `%LOCALAPPDATA%\novel_downloader\cache` on Windows and `~/.local/share/novel_downloader/cache` on Linux. The application data directory can be overridden with the `NOVEL_HOME` environment variable. Relative paths set explicitly still resolve against the current working directory; set `cache_dir = "./novel_cache"` to restore the legacy behavior.
 
 **Site pressure and 503**
 
@@ -162,7 +166,9 @@ max_rps = 1.0
 request_interval = 0.5
 raw_data_dir = "./raw_data"
 output_dir = "./downloads"
-cache_dir = "./novel_cache"
+# cache_dir defaults to cache/ inside the application data directory;
+# to customize it (relative paths resolve against the working directory):
+# cache_dir = "./novel_cache"
 workers = 4
 cache_book_info = true
 cache_chapter = true
@@ -315,4 +321,37 @@ enable_local_plugins = false
 override_builtins = false
 # Local plugin path (optional)
 local_plugins_path = "./novel_plugins"
+```
+
+---
+
+### Config validation and migration
+
+The `novel_downloader.infra.config` package exports two helper functions for checking or migrating a loaded `settings.toml`:
+
+| Function         | Signature                            | Description |
+| ---------------- | ------------------------------------ | ----------- |
+| `validate_config` | `(path_or_dict) -> list[Problem]`    | Validates a configuration mapping or a `.toml`/`.json` config file path and returns a list of problems (an empty list means the configuration is valid); parse errors and missing files are returned as `error` problems instead of raising, and no network access is performed |
+| `migrate_config` | `(data) -> tuple[dict, list[str]]`   | Migrates old keys to the current layout and returns `(migrated config, list of change notes)` |
+
+Each `Problem` object has `level` (`error` / `warning` / `info`), `path` (dotted location inside the configuration), `message`, and `fix_hint` fields.
+
+`migrate_config` currently performs these migrations:
+
+* `sites.<site>.cookie` -> `sites.<site>.cookies`
+* `sites.<site>.use_truncation` -> `sites.<site>.parser.use_truncation`
+* Fills `download_retry_times` with the default `2` when a `[general]` table exists but the key is unset
+
+The function is idempotent: calling it twice on the same configuration yields the same data and an empty change list on the second call; the input mapping is not mutated.
+
+```python
+from novel_downloader.infra.config import migrate_config, validate_config
+
+problems = validate_config("settings.toml")
+for p in problems:
+    print(p)  # [level] path: message Hint: fix_hint
+
+cfg, notes = migrate_config(cfg)
+for note in notes:
+    print(note)
 ```

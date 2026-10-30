@@ -70,6 +70,7 @@
     <string name="history_download_invalid_url">Invalid download URL</string>
     <string name="history_download_no_manager">System download service unavailable</string>
     <string name="history_download_unknown_error">Unknown error</string>
+    <string name="history_download_custom_done">Saved to %1$s: %2$s</string>
 
     <string name="notification_channel_tasks">Task alerts</string>
     <string name="notification_channel_tasks_desc">Alerts when a download task completes or fails</string>
@@ -120,4 +121,23 @@
     <string name="settings_test_connection">Test connection</string>
     <string name="settings_test_ok">Connected: %1$s %2$s</string>
     <string name="settings_hint">Emulators reach the host at http://10.0.2.2:8081/; devices need the PC LAN IP (start with novel-api --host 0.0.0.0).</string>
+    <string name="settings_section_connection">Connection</string>
+    <string name="settings_connection_status">Connection status: %1$s</string>
+    <string name="settings_connection_untested">Connection not tested yet</string>
+    <string name="settings_section_sites">Sites overview</string>
+    <string name="settings_sites_search_count">Search sites: %1$d</string>
+    <string name="settings_sites_download_count">Download sites: %1$d</string>
+    <string name="settings_sites_loading">Loading sites…</string>
+    <string name="settings_sites_failed">Failed to load sites: %1$s</string>
+    <string name="settings_sites_empty">No sites enabled on the server</string>
+    <string name="settings_section_download">Download</string>
+    <string name="settings_download_target_default">Download directory: system Downloads</string>
+    <string name="settings_download_target_custom">Download directory: %1$s (NovelDL subfolder)</string>
+    <string name="settings_download_pick_directory">Choose directory</string>
+    <string name="settings_download_reset_directory">Use system Downloads</string>
+    <string name="settings_download_dir_saved">Custom download directory set</string>
+    <string name="settings_download_dir_reset">Reverted to the system Downloads directory</string>
+    <string name="settings_download_dir_unavailable">The custom download directory is unavailable — pick it again in Settings</string>
+    <string name="settings_download_dir_create_failed">Could not create a file in the custom download directory</string>
+    <string name="settings_download_hint">Once a SAF directory is chosen, exported files are saved into its NovelDL subfolder; otherwise they go to the system Downloads directory.</string>
 </resources>

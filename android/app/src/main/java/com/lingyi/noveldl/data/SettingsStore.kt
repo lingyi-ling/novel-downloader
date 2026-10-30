@@ -12,16 +12,23 @@ private val Context.settingsDataStore by preferencesDataStore(name = "novel_dl_s
 data class ApiSettings(
     val baseUrl: String = Api.DEFAULT_BASE_URL,
     val apiKey: String = "",
+    /**
+     * Persisted SAF tree URI (`ACTION_OPEN_DOCUMENT_TREE`) of the custom
+     * download directory, or blank for the system Downloads directory.
+     */
+    val downloadTreeUri: String = "",
 )
 
 class SettingsStore(private val context: Context) {
     private val baseUrlKey = stringPreferencesKey("base_url")
     private val apiKeyKey = stringPreferencesKey("api_key")
+    private val downloadTreeUriKey = stringPreferencesKey("download_tree_uri")
 
     val settings: Flow<ApiSettings> = context.settingsDataStore.data.map { prefs ->
         ApiSettings(
             baseUrl = prefs[baseUrlKey] ?: Api.DEFAULT_BASE_URL,
             apiKey = prefs[apiKeyKey].orEmpty(),
+            downloadTreeUri = prefs[downloadTreeUriKey].orEmpty(),
         )
     }
 
@@ -29,6 +36,21 @@ class SettingsStore(private val context: Context) {
         context.settingsDataStore.edit { prefs ->
             prefs[baseUrlKey] = baseUrl.trim()
             prefs[apiKeyKey] = apiKey.trim()
+        }
+    }
+
+    /**
+     * Stores or clears the custom download directory. A null/blank [uri]
+     * removes the key so the app falls back to the system Downloads directory.
+     */
+    suspend fun saveDownloadDirectory(uri: String?) {
+        context.settingsDataStore.edit { prefs ->
+            val trimmed = uri?.trim().orEmpty()
+            if (trimmed.isEmpty()) {
+                prefs.remove(downloadTreeUriKey)
+            } else {
+                prefs[downloadTreeUriKey] = trimmed
+            }
         }
     }
 }

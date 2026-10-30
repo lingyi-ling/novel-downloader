@@ -1,5 +1,9 @@
 package com.lingyi.noveldl.ui.settings
 
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,11 +12,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,7 +35,13 @@ import androidx.compose.ui.unit.dp
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiSettings
+import com.lingyi.noveldl.data.DownloadTarget
 import com.lingyi.noveldl.data.SettingsStore
+import com.lingyi.noveldl.data.SitesSummary
+import com.lingyi.noveldl.data.resolveDownloadTarget
+import com.lingyi.noveldl.data.toSitesSummary
+import com.lingyi.noveldl.data.treeUriDisplayName
+import com.lingyi.noveldl.ui.healthSummary
 import kotlinx.coroutines.launch
 
 @Composable
@@ -34,9 +49,17 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings by store.settings.collectAsState(initial = ApiSettings())
-    var baseUrl by remember(settings) { mutableStateOf(settings.baseUrl) }
-    var apiKey by remember(settings) { mutableStateOf(settings.apiKey) }
+    // Keyed on the saved URL/key only: picking a download directory re-emits
+    // `settings` and must not wipe unsaved text-field edits.
+    var baseUrl by remember(settings.baseUrl, settings.apiKey) { mutableStateOf(settings.baseUrl) }
+    var apiKey by remember(settings.baseUrl, settings.apiKey) { mutableStateOf(settings.apiKey) }
     var testing by remember { mutableStateOf(false) }
+    // Persistent "status · version" line from the latest successful health call.
+    var health by remember { mutableStateOf<String?>(null) }
+
+    var sitesSummary by remember { mutableStateOf<SitesSummary?>(null) }
+    var sitesLoading by remember { mutableStateOf(false) }
+    var sitesError by remember { mutableStateOf<String?>(null) }
 
     fun save() {
         scope.launch {
@@ -57,6 +80,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             Api.configure(baseUrl, apiKey)
             Api.call { Api.service().health() }
                 .onSuccess {
+                    health = healthSummary(it.status, it.version)
                     onMessage(context.getString(R.string.settings_test_ok, it.status, it.version))
                 }
                 .onFailure {
@@ -66,7 +90,69 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+    fun loadSites() {
+        if (sitesLoading) return
+        sitesLoading = true
+        scope.launch {
+            Api.call { Api.service().sites() }
+                .onSuccess {
+                    sitesSummary = it.toSitesSummary()
+                    sitesError = null
+                }
+                .onFailure { sitesError = it.message }
+            sitesLoading = false
+        }
+    }
+
+    LaunchedEffect(Unit) { loadSites() }
+
+    val treePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            // Persist the grant so the permission survives reboots; if the
+            // provider refuses, the download falls back to a clear error
+            // instead of writing somewhere the user did not choose.
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
+            store.saveDownloadDirectory(uri.toString())
+            onMessage(context.getString(R.string.settings_download_dir_saved))
+        }
+    }
+
+    fun resetDownloadDirectory() {
+        scope.launch {
+            val previous = settings.downloadTreeUri
+            store.saveDownloadDirectory(null)
+            runCatching {
+                context.contentResolver.releasePersistableUriPermission(
+                    Uri.parse(previous),
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
+            onMessage(context.getString(R.string.settings_download_dir_reset))
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+    ) {
+        // ----- Connection -----
+        Text(
+            stringResource(R.string.settings_section_connection),
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = baseUrl,
             onValueChange = { baseUrl = it },
@@ -91,9 +177,113 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
                 Text(stringResource(R.string.settings_test_connection))
             }
         }
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(8.dp))
+        Text(
+            health
+                ?.let { stringResource(R.string.settings_connection_status, it) }
+                ?: stringResource(R.string.settings_connection_untested),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
         Text(
             stringResource(R.string.settings_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        // ----- Sites overview (counts only, no site names) -----
+        Text(
+            stringResource(R.string.settings_section_sites),
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        when {
+            sitesError != null -> {
+                Text(
+                    stringResource(R.string.settings_sites_failed, sitesError.orEmpty()),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { loadSites() }) {
+                    Text(stringResource(R.string.action_retry))
+                }
+            }
+            sitesLoading -> {
+                Text(
+                    stringResource(R.string.settings_sites_loading),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            else -> {
+                val summary = sitesSummary
+                if (summary == null || summary.isEmpty) {
+                    Text(
+                        stringResource(R.string.settings_sites_empty),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    Text(
+                        stringResource(R.string.settings_sites_search_count, summary.searchCount),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        stringResource(
+                            R.string.settings_sites_download_count,
+                            summary.downloadCount,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        // ----- Download directory -----
+        Text(
+            stringResource(R.string.settings_section_download),
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        val target = resolveDownloadTarget(settings.downloadTreeUri)
+        val targetLabel = when (target) {
+            is DownloadTarget.CustomTree -> stringResource(
+                R.string.settings_download_target_custom,
+                treeUriDisplayName(target.treeUri),
+            )
+            DownloadTarget.SystemDownloads -> stringResource(
+                R.string.settings_download_target_default,
+            )
+        }
+        Text(
+            targetLabel,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { treePicker.launch(null) }) {
+                Text(stringResource(R.string.settings_download_pick_directory))
+            }
+            Button(
+                onClick = { resetDownloadDirectory() },
+                enabled = target is DownloadTarget.CustomTree,
+            ) {
+                Text(stringResource(R.string.settings_download_reset_directory))
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            stringResource(R.string.settings_download_hint),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

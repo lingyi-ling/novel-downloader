@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,6 +26,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -40,18 +42,24 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
+import com.lingyi.noveldl.data.ApiSettings
+import com.lingyi.noveldl.data.DownloadTarget
 import com.lingyi.noveldl.data.HistoryDownloader
 import com.lingyi.noveldl.data.HistoryFile
+import com.lingyi.noveldl.data.SettingsStore
+import com.lingyi.noveldl.data.customDownloadDirLabel
 import com.lingyi.noveldl.data.downloadFileName
+import com.lingyi.noveldl.data.resolveDownloadTarget
 import com.lingyi.noveldl.ui.formatTimestamp
 import com.lingyi.noveldl.ui.humanSize
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HistoryScreen(onMessage: (String) -> Unit) {
+fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val settings by store.settings.collectAsState(initial = ApiSettings())
     var files by remember { mutableStateOf<List<HistoryFile>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
@@ -119,21 +127,41 @@ fun HistoryScreen(onMessage: (String) -> Unit) {
         val displayName = file.name.ifBlank {
             downloadFileName(file.name, file.download_url, file.ext)
         }
-        HistoryDownloader.enqueue(context, file)
-            .onSuccess { id ->
-                pendingDownloads[id] = displayName
-                onMessage(context.getString(R.string.history_download_started, displayName))
-            }
-            .onFailure {
-                onMessage(
-                    context.getString(
-                        R.string.history_download_failed,
-                        displayName,
-                        it.message?.takeIf { message -> message.isNotBlank() }
-                            ?: context.getString(R.string.history_download_unknown_error),
-                    ),
+        val failureMessage: (String) -> String = { reason ->
+            context.getString(
+                R.string.history_download_failed,
+                displayName,
+                reason.ifBlank { context.getString(R.string.history_download_unknown_error) },
+            )
+        }
+        when (val target = resolveDownloadTarget(settings.downloadTreeUri)) {
+            is DownloadTarget.CustomTree -> scope.launch {
+                // DownloadManager cannot write to SAF tree URIs, so the custom
+                // directory path streams the file itself; the result is known
+                // as soon as the call returns.
+                HistoryDownloader.downloadToDirectory(
+                    context,
+                    file,
+                    Uri.parse(target.treeUri),
                 )
+                    .onSuccess {
+                        onMessage(
+                            context.getString(
+                                R.string.history_download_custom_done,
+                                customDownloadDirLabel(target.treeUri),
+                                displayName,
+                            ),
+                        )
+                    }
+                    .onFailure { onMessage(failureMessage(it.message.orEmpty())) }
             }
+            DownloadTarget.SystemDownloads -> HistoryDownloader.enqueue(context, file)
+                .onSuccess { id ->
+                    pendingDownloads[id] = displayName
+                    onMessage(context.getString(R.string.history_download_started, displayName))
+                }
+                .onFailure { onMessage(failureMessage(it.message.orEmpty())) }
+        }
     }
 
     PullToRefreshBox(

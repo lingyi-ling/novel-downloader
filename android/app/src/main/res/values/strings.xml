@@ -75,6 +75,7 @@
     <string name="history_download_invalid_url">下载地址无效</string>
     <string name="history_download_no_manager">系统下载服务不可用</string>
     <string name="history_download_unknown_error">未知错误</string>
+    <string name="history_download_custom_done">已保存到 %1$s：%2$s</string>
 
     <!-- 通知 -->
     <string name="notification_channel_tasks">任务通知</string>
@@ -129,4 +130,23 @@
     <string name="settings_test_connection">测试连接</string>
     <string name="settings_test_ok">连接成功：%1$s %2$s</string>
     <string name="settings_hint">模拟器访问电脑用 http://10.0.2.2:8081/；真机用电脑局域网 IP（电脑需以 novel-api --host 0.0.0.0 启动）。</string>
+    <string name="settings_section_connection">连接</string>
+    <string name="settings_connection_status">连接状态：%1$s</string>
+    <string name="settings_connection_untested">尚未测试连接</string>
+    <string name="settings_section_sites">站点概览</string>
+    <string name="settings_sites_search_count">搜索站点：%1$d 个</string>
+    <string name="settings_sites_download_count">下载站点：%1$d 个</string>
+    <string name="settings_sites_loading">站点加载中…</string>
+    <string name="settings_sites_failed">站点加载失败：%1$s</string>
+    <string name="settings_sites_empty">服务器未启用任何站点</string>
+    <string name="settings_section_download">下载</string>
+    <string name="settings_download_target_default">下载目录：系统 Downloads</string>
+    <string name="settings_download_target_custom">下载目录：%1$s（NovelDL 子目录）</string>
+    <string name="settings_download_pick_directory">选择目录</string>
+    <string name="settings_download_reset_directory">恢复默认</string>
+    <string name="settings_download_dir_saved">已设置自定义下载目录</string>
+    <string name="settings_download_dir_reset">已恢复默认下载目录</string>
+    <string name="settings_download_dir_unavailable">自定义下载目录不可用，请在设置中重新选择</string>
+    <string name="settings_download_dir_create_failed">无法在自定义下载目录中创建文件</string>
+    <string name="settings_download_hint">选择 SAF 目录后，导出文件会保存到该目录的 NovelDL 子文件夹；未选择时保存到系统 Downloads。</string>
 </resources>
