@@ -22,7 +22,6 @@ import pytest
 from novel_downloader.apps.login import main as login_main_module
 from novel_downloader.apps.login.main import (
     COOKIE_FILENAME,
-    _looks_logged_in,
     login_main,
     run_login,
     save_cookies,
@@ -71,12 +70,6 @@ def test_save_cookies_writes_aiohttp_format(
         {"name": "sessionid", "value": "abc"},
         {"name": "t", "value": "1"},
     ]
-
-
-def test_looks_logged_in_without_probe() -> None:
-    # A site without a probe endpoint trusts any non-empty cookie jar.
-    assert _looks_logged_in("unknown-site", {"a": "1"}) is True
-    assert _looks_logged_in("unknown-site", {}) is False
 
 
 def test_run_login_rejects_unsupported_site() -> None:

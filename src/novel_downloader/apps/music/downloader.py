@@ -17,10 +17,11 @@ from dataclasses import dataclass
 
 import requests
 
+from novel_downloader.libs.filesystem import sanitize_filename
+
 from .weapi import UA, LoginExpired
 
 _CHUNK = 64 * 1024
-_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 
 
@@ -48,10 +49,13 @@ class TrackResult:
 
 
 def sanitize(name, fallback="未命名"):
-    """清掉 Windows 非法字符和结尾的点/空格。"""
-    name = _ILLEGAL.sub("_", str(name or "")).strip().rstrip(". ")
-    name = re.sub(r"\s+", " ", name)
-    return name[:120] or fallback
+    """清掉 Windows 非法字符和结尾的点/空格（统一复用 libs 的清洗实现）。"""
+    return sanitize_filename(
+        str(name or ""),
+        max_length=120,
+        collapse_whitespace=True,
+        fallback=fallback,
+    )
 
 
 def build_dir(opts: DownloadOptions, track):
@@ -154,14 +158,6 @@ def _download_file(
 
     os.replace(tmp, dest)
     return done, start
-
-
-def _cleanup_part(dest):
-    """清掉中断留下的 .part 临时文件。"""
-    p = dest + ".part"
-    if os.path.exists(p):
-        with contextlib.suppress(OSError):
-            os.remove(p)
 
 
 def _remember_path(track, path):

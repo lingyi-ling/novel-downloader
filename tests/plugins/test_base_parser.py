@@ -77,7 +77,7 @@ def test_usable_pages_drops_missing_or_blank_payloads() -> None:
 # --------------------------------------------------------------------------- #
 # ad filtering
 # --------------------------------------------------------------------------- #
-def test_ads_filter_removes_matching_lines() -> None:
+def test_is_ad_line_flags_ad_lines() -> None:
     parser = _Parser(_config())
     parser.ADS = {"广告", r"\bAD\b"}
     parser._ad_pattern = parser._compile_ads_pattern()
@@ -85,18 +85,6 @@ def test_ads_filter_removes_matching_lines() -> None:
     assert parser._is_ad_line("这里是广告内容")
     assert parser._is_ad_line("visit AD now")
     assert not parser._is_ad_line("正常正文")
-
-    assert parser._filter_ads(["正常", "广告时间", "AD", "内容"]) == ["正常", "内容"]
-
-
-def test_without_ads_filter_returns_a_fresh_list() -> None:
-    parser = _Parser(_config())
-    source = ["a", "b"]
-
-    result = parser._filter_ads(source)
-
-    assert result == source
-    assert result is not source
 
 
 def test_invalid_ad_pattern_fails_at_construction() -> None:

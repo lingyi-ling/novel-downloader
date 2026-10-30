@@ -16,7 +16,6 @@ from novel_downloader.apps.utils import load_or_init_config
 from novel_downloader.infra.config import ConfigAdapter
 from novel_downloader.infra.i18n import t
 from novel_downloader.plugins import registrar
-from novel_downloader.schemas import BookConfig
 
 from ..ui_adapters import CLIExportUI
 from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail, parse_book_args
@@ -143,7 +142,7 @@ class ExportCmd(Command):
             )
 
         formats = formats or adapter.get_export_fmt(site)
-        books = cls._parse_book_args(book_ids, args.start, args.end)
+        books = parse_book_args(book_ids, args.start, args.end)
 
         client = registrar.get_client(site, adapter.get_client_config(site))
 
@@ -186,14 +185,3 @@ class ExportCmd(Command):
 
         if export_failed:
             raise SystemExit(EXIT_FAILURE)
-
-    @staticmethod
-    def _parse_book_args(
-        book_ids: list[str],
-        start_id: str | None,
-        end_id: str | None,
-    ) -> list[BookConfig]:
-        """
-        Convert CLI arguments into a list of `BookConfig`.
-        """
-        return parse_book_args(book_ids, start_id, end_id)

@@ -78,19 +78,6 @@ def _scan_files() -> list[FileItem]:
     return items
 
 
-def _apply_filter(
-    items: list[FileItem], type_filter: TypeFilter, name_query: str = ""
-) -> list[FileItem]:
-    """Filter by extension and case-insensitive name substring."""
-    result = items
-    if type_filter != "All":
-        result = [it for it in result if it.ext == type_filter]
-    query = name_query.strip().lower()
-    if query:
-        result = [it for it in result if query in it.name.lower()]
-    return result
-
-
 def _apply_sort(
     items: list[FileItem], sort_by: SortKey, order: SortOrder
 ) -> list[FileItem]:

@@ -558,11 +558,6 @@ def test_is_logged_in_without_probe_accepts_cookies() -> None:
     assert login.is_logged_in(no_probe, {}) is False
 
 
-def test_looks_logged_in_unknown_site_keeps_legacy_behaviour() -> None:
-    assert login._looks_logged_in("unknown-site", {"a": "1"}) is True
-    assert login._looks_logged_in("unknown-site", {}) is False
-
-
 # ---------------------------------------------------------------------------
 # run_login_result: window lifecycle and error mapping
 # ---------------------------------------------------------------------------

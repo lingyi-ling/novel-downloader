@@ -252,15 +252,6 @@ class ClientProtocol(Protocol):
         """
         ...
 
-    def cleanup_cache(
-        self,
-        **kwargs: Any,
-    ) -> None:
-        """
-        Remove local cache directory for site.
-        """
-        ...
-
     def export(
         self,
         book: BookConfig,

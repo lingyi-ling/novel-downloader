@@ -46,13 +46,6 @@ def creds_file() -> Path:
     return music_data_dir() / "platform_creds.json"
 
 
-def browser_profile_dir() -> Path:
-    """Dedicated Chromium profile used by the browser-assisted login."""
-    path = music_data_dir() / "browser_profile"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def default_download_dir() -> Path:
     """Default output directory when the user has not picked one yet."""
     return Path(user_music_dir()) / "novel_downloader"

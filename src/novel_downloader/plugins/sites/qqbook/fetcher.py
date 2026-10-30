@@ -74,15 +74,6 @@ class QqbookFetcher(BaseFetcher):
         return [await self.fetch(self.BOOKCASE_URL, **kwargs)]
 
     @classmethod
-    def homepage_url(cls) -> str:
-        """
-        Construct the URL for the site home page.
-
-        :return: Fully qualified URL of the home page.
-        """
-        return cls.HOMEPAGE_URL
-
-    @classmethod
     def book_info_url(cls, book_id: str) -> str:
         """
         Construct the URL for fetching a book's info page.

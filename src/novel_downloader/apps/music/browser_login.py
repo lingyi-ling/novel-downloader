@@ -249,11 +249,6 @@ class BrowserLogin:
                 )
 
 
-def to_cookie_string(cookies):
-    """把 cookie 字典拼成 login_by_cookie 能解析的字符串。"""
-    return "; ".join(f"{k}={v}" for k, v in cookies.items())
-
-
 if __name__ == "__main__":
     bl = BrowserLogin(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "_standalone_profile")

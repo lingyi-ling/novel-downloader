@@ -91,19 +91,6 @@ _STATUS_LABELS: dict[str, Callable[[], str]] = {
 }
 
 
-def task_status_label(task: object) -> str:
-    """Status label for a task, enriched with the export format when relevant."""
-    status = getattr(task, "status", None)
-    base = status_label(status)
-    if (
-        status is not None
-        and str(status) == "exporting"
-        and getattr(task, "export_stage", None)
-    ):
-        return f"{base} ({getattr(task, 'export_stage', '')})"
-    return base
-
-
 def status_label(status: object) -> str:
     """
     Return a translated label for a task status.

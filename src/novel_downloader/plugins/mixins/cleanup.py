@@ -138,18 +138,3 @@ class CleanupMixin:
             shutil.rmtree(media_dir, ignore_errors=True)
         else:
             logger.debug("No media directory for book %s", book_id)
-
-    def cleanup_cache(
-        self: "_ClientContext",
-        **kwargs: Any,
-    ) -> None:
-        """
-        Remove local cache directory for site.
-        """
-        cache_dir = self._cache_dir
-
-        if cache_dir.exists():
-            logger.info("Removing cache directory: %s", cache_dir)
-            shutil.rmtree(cache_dir, ignore_errors=True)
-        else:
-            logger.debug("No cache directory for site %s", self._site)

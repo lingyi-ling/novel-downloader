@@ -216,8 +216,17 @@ disable_error_code = ["call-overload"]
 
 # The music engine was merged from a standalone tool written without type
 # annotations; it is relaxed here while annotations are added incrementally.
+# Only the still-untyped modules are relaxed. mypy matches per-module patterns
+# with fnmatch globs (no regex alternation), so each module is listed, and the
+# bare "providers" entry keeps the untyped providers/__init__.py relaxed too.
 [[tool.mypy.overrides]]
-module = "novel_downloader.apps.music.*"
+module = [
+    "novel_downloader.apps.music.weapi",
+    "novel_downloader.apps.music.downloader",
+    "novel_downloader.apps.music.browser_login",
+    "novel_downloader.apps.music.providers",
+    "novel_downloader.apps.music.providers.*",
+]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 disallow_untyped_calls = false
@@ -228,6 +237,29 @@ disable_error_code = ["var-annotated", "type-arg"]
 module = "novel_downloader.apps.music.providers._vendor.*"
 ignore_errors = true
 
+# Fully annotated music modules are checked at full strictness. This later
+# section re-enables the options the relaxed music rules above turn off.
+[[tool.mypy.overrides]]
+module = [
+    "novel_downloader.apps.music",
+    "novel_downloader.apps.music.paths",
+    "novel_downloader.apps.music.settings",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+enable_error_code = ["var-annotated", "type-arg"]
+
+# providers/health.py is fully annotated too, but it calls ``create()`` from
+# the still-untyped providers registry, so ``disallow_untyped_calls`` stays
+# off for it until that module gains annotations.
+[[tool.mypy.overrides]]
+module = "novel_downloader.apps.music.providers.health"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = false
+enable_error_code = ["var-annotated", "type-arg"]
+
 [tool.pytest.ini_options]
 minversion = "7.1"
 addopts = "--strict-markers"
@@ -237,7 +269,6 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 omit = [
-  "src/novel_downloader/apps/*",
   "src/novel_downloader/plugins/sites/*",
   "src/novel_downloader/plugins/archived/*",
   "src/novel_downloader/__main__.py",

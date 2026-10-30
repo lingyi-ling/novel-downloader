@@ -8,7 +8,6 @@ Abstract base class providing common behavior for site-specific parsers.
 
 import abc
 import re
-from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -114,17 +113,6 @@ class BaseParser(abc.ABC):
         :return: True if line matches ad pattern, else False.
         """
         return bool(self._ad_pattern and self._ad_pattern.search(line))
-
-    def _filter_ads(self, lines: Iterable[str]) -> list[str]:
-        """
-        Filter out lines containing any ad text defined in ADS.
-
-        :param lines: Iterable of text lines (e.g. chapter content).
-        :return: List of lines with ads removed.
-        """
-        if not self._ad_pattern:
-            return list(lines)
-        return [line for line in lines if not self._ad_pattern.search(line)]
 
     @classmethod
     def _norm_space(cls, s: str, c: str = " ") -> str:

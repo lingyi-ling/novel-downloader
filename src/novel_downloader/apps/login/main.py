@@ -350,26 +350,6 @@ def is_logged_in(
     return _decode_probe(config, payload)
 
 
-def _looks_logged_in(
-    site: str, cookies: Mapping[str, str], *, timeout: float = PROBE_TIMEOUT
-) -> bool:
-    """
-    Backwards-compatible wrapper around :func:`is_logged_in`.
-
-    Unknown sites keep the historical behaviour: any non-empty cookie jar is
-    accepted (there is no probe rule to apply).
-
-    :param site: Site key.
-    :param cookies: Cookie name/value pairs.
-    :param timeout: Per-request timeout in seconds.
-    :return: True when the site reports a logged-in session.
-    """
-    config = _site_config(site)
-    if config is None:
-        return bool(cookies)
-    return is_logged_in(config, cookies, timeout=timeout)
-
-
 def _cookie_pairs(item: Any) -> dict[str, str]:
     """
     Extract ``name -> value`` pairs from one pywebview cookie item.

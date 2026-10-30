@@ -77,16 +77,6 @@ def _error_from_response(response: httpx.Response) -> ApiError:
     return ApiError(response.status_code, detail, payload)
 
 
-def _as_mapping(response: httpx.Response) -> dict[str, Any]:
-    """Decode a JSON object response, wrapping non-object JSON under ``data``."""
-    if not response.content:
-        return {}
-    payload = _response_payload(response)
-    if isinstance(payload, dict):
-        return cast(dict[str, Any], payload)
-    return {"data": payload}
-
-
 def _decode_sse_data(raw: str) -> Any:
     """Decode an SSE ``data`` payload, falling back to the raw string."""
     try:

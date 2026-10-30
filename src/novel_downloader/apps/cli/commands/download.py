@@ -77,7 +77,7 @@ class DownloadCmd(Command):
 
         # book_ids
         if site:  # SITE MODE
-            books = cls._parse_book_args(args.book_ids, args.start, args.end)
+            books = parse_book_args(args.book_ids, args.start, args.end)
         else:  # URL MODE
             if not args.book_ids:
                 fail(
@@ -270,14 +270,3 @@ class DownloadCmd(Command):
             raise SystemExit(EXIT_FAILURE)
         if export_failed:
             raise SystemExit(EXIT_FAILURE)
-
-    @staticmethod
-    def _parse_book_args(
-        book_ids: list[str],
-        start_id: str | None,
-        end_id: str | None,
-    ) -> list[BookConfig]:
-        """
-        Convert CLI arguments into a list of `BookConfig`.
-        """
-        return parse_book_args(book_ids, start_id, end_id)

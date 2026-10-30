@@ -23,9 +23,16 @@ _WIN_RESERVED_NAMES = {
 
 _SANITIZE_PATTERN_WIN = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
 _SANITIZE_PATTERN_POSIX = re.compile(r"[/\x00]")
+_WHITESPACE_RUN = re.compile(r"\s+")
 
 
-def sanitize_filename(filename: str, max_length: int | None = 255) -> str:
+def sanitize_filename(
+    filename: str,
+    max_length: int | None = 255,
+    *,
+    collapse_whitespace: bool = False,
+    fallback: str = "_untitled",
+) -> str:
     """
     Sanitize the given filename by replacing characters
     that are invalid in file paths with '_'.
@@ -37,11 +44,18 @@ def sanitize_filename(filename: str, max_length: int | None = 255) -> str:
 
     :param filename: The input filename to sanitize.
     :param max_length: Optional maximum length of the output filename. Defaults to 255.
+    :param collapse_whitespace: When true, collapse runs of whitespace (spaces,
+        tabs, newlines and other Unicode whitespace) into a single space after
+        the invalid-character replacement.
+    :param fallback: Returned when the sanitized result would be empty.
     :return: The sanitized filename as a string.
     """
     pattern = _SANITIZE_PATTERN_WIN if os.name == "nt" else _SANITIZE_PATTERN_POSIX
 
-    name = pattern.sub("_", filename).strip(" .")
+    name = pattern.sub("_", filename)
+    if collapse_whitespace:
+        name = _WHITESPACE_RUN.sub(" ", name)
+    name = name.strip(" .")
 
     stem, dot, ext = name.rpartition(".")
     if dot == "":  # no dot found
@@ -64,6 +78,6 @@ def sanitize_filename(filename: str, max_length: int | None = 255) -> str:
         else:
             cleaned = cleaned[:max_length]
         # Truncation may expose trailing spaces/dots (invalid on Windows).
-        cleaned = cleaned.rstrip(" .") or "_untitled"
+        cleaned = cleaned.rstrip(" .") or fallback
 
-    return cleaned or "_untitled"
+    return cleaned or fallback

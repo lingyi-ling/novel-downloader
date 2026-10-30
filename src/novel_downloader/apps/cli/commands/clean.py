@@ -15,7 +15,6 @@ from novel_downloader.infra.config import ConfigAdapter
 from novel_downloader.infra.i18n import t
 from novel_downloader.infra.paths import PACKAGE_NAME, STATE_PATH
 from novel_downloader.plugins import registrar
-from novel_downloader.schemas import BookConfig
 
 from .base import (
     EXIT_FAILURE,
@@ -348,7 +347,7 @@ class CleanBookCmd(Command):
 
     @classmethod
     def _remove_book(cls, args: Namespace) -> None:
-        books = cls._parse_book_args(args.book_ids, args.start, args.end)
+        books = parse_book_args(args.book_ids, args.start, args.end)
 
         if not books:
             fail(t("No book IDs provided. Exiting."), EXIT_USAGE)
@@ -463,14 +462,3 @@ class CleanBookCmd(Command):
         ui.success(t("Finished cleaning all requested books."))
         if cleanup_failed:
             raise SystemExit(EXIT_FAILURE)
-
-    @staticmethod
-    def _parse_book_args(
-        book_ids: list[str],
-        start_id: str | None,
-        end_id: str | None,
-    ) -> list[BookConfig]:
-        """
-        Convert CLI arguments into a list of `BookConfig`.
-        """
-        return parse_book_args(book_ids, start_id, end_id)
