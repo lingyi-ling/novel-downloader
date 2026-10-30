@@ -36,6 +36,7 @@ __all__ = [
     "TASK_FILTER_CODES",
     "ExportChoice",
     "RetryParams",
+    "SearchMenuState",
     "TaskMenuState",
     "TaskOutputActions",
     "can_follow_search_result",
@@ -58,6 +59,7 @@ __all__ = [
     "normalize_title",
     "parse_sites",
     "retry_params",
+    "search_menu_state",
     "search_row",
     "sort_health_results",
     "status_label",
@@ -903,3 +905,54 @@ def follow_feedback_message(
             title=_follow_label(site, book_id, title)
         )
     return t("Cannot follow: site, book id and title are required.")
+
+
+# ---------------------------------------------------------------------------
+# Search results context menu (right click on a result row)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SearchMenuState:
+    """Which context-menu entries are available for the selected search rows."""
+
+    can_add_to_queue: bool
+    can_follow: bool
+    can_open_url: bool
+
+
+def search_menu_state(results: Iterable[SearchResult]) -> SearchMenuState:
+    """
+    Decide which actions the search-results context menu should offer.
+
+    The menu acts on every selected row at once, so an entry stays available
+    while *any* selected row could use it; the commands themselves skip the
+    rows that fail their own check, applying exactly the rules the toolbar
+    buttons use (:meth:`can_follow_search_result` and the ``site``/``book_id``
+    requirement of ``TaskManager.add_task``).
+
+    :param results: The results behind the selected rows (empty when none).
+    :return: The available menu entries; every entry is disabled without a
+        selection.
+    """
+    chosen = list(results)
+    if not chosen:
+        return SearchMenuState(
+            can_add_to_queue=False, can_follow=False, can_open_url=False
+        )
+    return SearchMenuState(
+        can_add_to_queue=any(
+            str(result.get("site", "")).strip()
+            and str(result.get("book_id", "")).strip()
+            for result in chosen
+        ),
+        can_follow=any(
+            can_follow_search_result(
+                result.get("site", ""),
+                result.get("book_id", ""),
+                result.get("title", ""),
+            )
+            for result in chosen
+        ),
+        can_open_url=any(str(result.get("book_url", "")).strip() for result in chosen),
+    )

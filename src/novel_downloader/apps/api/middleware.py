@@ -11,27 +11,40 @@ Request-hardening helpers shared by the REST API application.
 * :class:`DownloadsAuthMiddleware` applies the same token check as
   ``/api/v1`` to the ``/downloads`` static mount, which is not covered by the
   router-level dependency.
+* :class:`RequestLoggingMiddleware` emits exactly one access-log line per
+  request (``method path status duration``). The query string is never logged
+  (it may carry tokens) and response bodies are never read for logging, so
+  the file content streamed from ``/downloads`` stays out of the log.
+* :class:`CacheControlMiddleware` stamps every ``/api/v1`` and ``/downloads``
+  response with the right ``Cache-Control``: short client-side caching for
+  slowly changing reference data, ``no-store`` for live data and for every
+  error response, long-lived public caching for exported files. A header set
+  by a route (the SSE streams' ``no-cache``) is never overridden.
 * :func:`register_error_handlers` guarantees that every error response has the
   same ``{"detail": ...}`` shape and that unexpected exceptions never leak a
   stack trace to the client.
 
-Both are deliberately framework-light so they can be unit-tested through
-``httpx.ASGITransport`` without starting a server.
+All of them are deliberately framework-light so they can be unit-tested
+through ``httpx.ASGITransport`` without starting a server.
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Iterable
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from starlette.datastructures import Headers
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.status import HTTP_401_UNAUTHORIZED
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import AUTH_ERROR_DETAIL, is_authorized
+
+logger = logging.getLogger(__name__)
 
 #: Default request-body ceiling for JSON endpoints: 1 MiB.
 DEFAULT_MAX_BODY_BYTES = 1024 * 1024
@@ -53,6 +66,37 @@ BODY_LIMIT_ENDPOINTS: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/music/jobs"),
     }
 )
+
+# ---------------------------------------------------------------------------
+# Cache-Control policy
+# ---------------------------------------------------------------------------
+
+#: Requests slower than this many seconds are logged at ``WARNING``.
+SLOW_REQUEST_SECONDS = 1.0
+
+#: ``Cache-Control`` for reference data the client may reuse briefly.
+CACHE_CONTROL_PRIVATE = "private, max-age=60"
+
+#: ``Cache-Control`` for exported files: written once and never rewritten.
+CACHE_CONTROL_PUBLIC = "public, max-age=3600"
+
+#: ``Cache-Control`` for live data and for every error response.
+CACHE_CONTROL_NO_STORE = "no-store"
+
+#: ``path prefix`` -> ``Cache-Control`` for successful responses. Matching is
+#: boundary-aware: ``/api/v1/tasks`` also covers ``/api/v1/tasks/{task_id}``
+#: and the SSE stream, but not a look-alike such as ``/api/v1/tasks-extra``.
+CACHE_CONTROL_RULES: tuple[tuple[str, str], ...] = (
+    ("/api/v1/sites", CACHE_CONTROL_PRIVATE),
+    ("/api/v1/history", CACHE_CONTROL_PRIVATE),
+    ("/api/v1/music/platforms", CACHE_CONTROL_PRIVATE),
+    ("/api/v1/tasks", CACHE_CONTROL_NO_STORE),
+    (DOWNLOADS_PREFIX, CACHE_CONTROL_PUBLIC),
+)
+
+#: Path prefixes the cache policy governs. Requests outside them (``/docs``,
+#: ``/openapi.json``, ...) pass through without any header being added.
+CACHE_POLICY_PREFIXES: tuple[str, ...] = ("/api/v1", DOWNLOADS_PREFIX)
 
 
 def _content_length(scope: Scope) -> int | None:
@@ -207,6 +251,147 @@ class DownloadsAuthMiddleware:
         await response(scope, receive, send)
 
 
+class CacheControlMiddleware:
+    """
+    Stamp every API response with the ``Cache-Control`` it should carry.
+
+    Successful responses get the value of the first boundary-aware prefix rule
+    in :data:`CACHE_CONTROL_RULES`:
+
+    * ``/api/v1/sites``, ``/api/v1/history`` and ``/api/v1/music/platforms``:
+      ``private, max-age=60`` — reference data the client may reuse briefly.
+    * ``/api/v1/tasks...``: ``no-store`` — live task state must be refetched.
+    * ``/downloads...``: ``public, max-age=3600`` — exported files are
+      write-once, so exported-file URLs never change their content.
+
+    Every other ``/api/v1`` path and every ``4xx``/``5xx`` response (413 body
+    limit, 401 auth, 404, 422, 500, ...) gets ``no-store``: errors must never
+    be cached. Responses outside the governed prefixes pass through without a
+    header, and a ``Cache-Control`` already set by a route — the SSE streams'
+    ``no-cache`` — is never overridden. The middleware only rewrites the
+    response head; bodies are streamed through untouched.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    @staticmethod
+    def _matches(cleaned: str, prefix: str) -> bool:
+        """Whether ``cleaned`` is ``prefix`` itself or below it."""
+        return cleaned == prefix or cleaned.startswith(prefix + "/")
+
+    def _governs(self, cleaned: str) -> bool:
+        """Whether the policy applies to this path at all."""
+        return any(self._matches(cleaned, prefix) for prefix in CACHE_POLICY_PREFIXES)
+
+    def _rule_for(self, cleaned: str) -> str | None:
+        """Return the configured ``Cache-Control`` for the path, if any."""
+        for prefix, value in CACHE_CONTROL_RULES:
+            if self._matches(cleaned, prefix):
+                return value
+        return None
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        cleaned = str(scope.get("path", "")).rstrip("/") or "/"
+        if not self._governs(cleaned):
+            await self.app(scope, receive, send)
+            return
+
+        rule = self._rule_for(cleaned)
+
+        async def send_with_cache(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                if "cache-control" not in headers:
+                    if message["status"] >= 400 or rule is None:
+                        headers["cache-control"] = CACHE_CONTROL_NO_STORE
+                    else:
+                        headers["cache-control"] = rule
+            await send(message)
+
+        await self.app(scope, receive, send_with_cache)
+
+
+class RequestLoggingMiddleware:
+    """
+    Emit exactly one access-log line per HTTP request.
+
+    The line has a single fixed shape for every outcome::
+
+        GET /api/v1/sites 200 1.8ms
+
+    i.e. ``method path status duration_ms``. Fast requests are logged at
+    ``INFO``; requests that took longer than ``slow_seconds`` (default
+    :data:`SLOW_REQUEST_SECONDS`) are logged at ``WARNING`` instead, with the
+    same line format.
+
+    Privacy guarantees:
+
+    * The query string is never logged — only the plain path — because query
+      parameters may carry tokens or other credentials.
+    * Response bodies are never read or logged; in particular the file
+      content streamed from ``/downloads`` never reaches the log.
+
+    The middleware wraps ``send`` only: request bodies pass through untouched
+    and nothing is buffered. A request that ends without any response (the
+    client disconnected, or an error propagated above the router to the outer
+    ``ServerErrorMiddleware``) is still logged once, reported as ``500``.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        slow_seconds: float = SLOW_REQUEST_SECONDS,
+    ) -> None:
+        self.app = app
+        self.slow_seconds = float(slow_seconds)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = str(scope.get("method", "-"))
+        # Deliberately the path only: the query string may carry secrets.
+        path = str(scope.get("path", "-"))
+        started = time.perf_counter()
+        logged = False
+
+        async def send_and_log(message: Message) -> None:
+            nonlocal logged
+            if message["type"] == "http.response.start" and not logged:
+                logged = True
+                self._log(
+                    method,
+                    path,
+                    int(message["status"]),
+                    time.perf_counter() - started,
+                )
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_and_log)
+        finally:
+            if not logged:
+                # No response head ever went out (client disconnect or an
+                # error raised past the router): still record the request,
+                # reported as the failure it was.
+                self._log(method, path, 500, time.perf_counter() - started)
+
+    def _log(self, method: str, path: str, status: int, elapsed: float) -> None:
+        """Emit the single access-log line: INFO, or WARNING when slow."""
+        line = f"{method} {path} {status} {elapsed * 1000:.1f}ms"
+        if elapsed > self.slow_seconds:
+            logger.warning("%s", line)
+        else:
+            logger.info("%s", line)
+
+
 def _validation_detail(exc: RequestValidationError) -> str:
     """Render a validation failure as one readable sentence."""
     parts: list[str] = []
@@ -276,9 +461,17 @@ def register_error_handlers(app: FastAPI) -> None:
 __all__ = [
     "AUTH_ERROR_DETAIL",
     "BODY_LIMIT_ENDPOINTS",
+    "CACHE_CONTROL_NO_STORE",
+    "CACHE_CONTROL_PRIVATE",
+    "CACHE_CONTROL_PUBLIC",
+    "CACHE_CONTROL_RULES",
+    "CACHE_POLICY_PREFIXES",
     "DEFAULT_MAX_BODY_BYTES",
     "DOWNLOADS_PREFIX",
+    "SLOW_REQUEST_SECONDS",
     "BodySizeLimitMiddleware",
+    "CacheControlMiddleware",
     "DownloadsAuthMiddleware",
+    "RequestLoggingMiddleware",
     "register_error_handlers",
 ]

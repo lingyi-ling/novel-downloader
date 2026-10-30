@@ -1441,6 +1441,54 @@ def test_follow_feedback_message_falls_back_to_site_and_book_id() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Search results context menu (pure availability logic)
+# ---------------------------------------------------------------------------
+def test_search_menu_state_without_selection() -> None:
+    # No selected rows: nothing may be done at all.
+    assert fmt.search_menu_state([]) == fmt.SearchMenuState(
+        can_add_to_queue=False, can_follow=False, can_open_url=False
+    )
+
+
+def test_search_menu_state_for_a_complete_selection() -> None:
+    assert fmt.search_menu_state([_search_result()]) == fmt.SearchMenuState(
+        can_add_to_queue=True, can_follow=True, can_open_url=True
+    )
+
+
+def test_search_menu_state_tracks_each_entry_independently() -> None:
+    # Missing site and book id: cannot queue and cannot follow, but the
+    # book page can still be opened in a browser.
+    row = _search_result(site="", book_id="", title="", book_url="https://a/b")
+    state = fmt.search_menu_state([row])
+    assert state == fmt.SearchMenuState(
+        can_add_to_queue=False, can_follow=False, can_open_url=True
+    )
+
+    # A blank-but-present book_url behaves exactly like a missing one, while
+    # the identity fields still allow queueing and following.
+    row = _search_result(site="b520", book_id="1", title="T", book_url="   ")
+    state = fmt.search_menu_state([row])
+    assert state == fmt.SearchMenuState(
+        can_add_to_queue=True, can_follow=True, can_open_url=False
+    )
+
+
+def test_search_menu_state_any_valid_row_enables_an_entry() -> None:
+    # The menu acts on the whole selection: an entry stays available while
+    # any selected row could use it, and each entry is judged separately.
+    results = [
+        _search_result(site="", book_id="", title="", book_url=""),
+        _search_result(site="b520", book_id="7", title="No Url", book_url=""),
+        _search_result(site="b520", book_id="8", title="", book_url="https://a/b"),
+    ]
+    state = fmt.search_menu_state(results)
+    assert state == fmt.SearchMenuState(
+        can_add_to_queue=True, can_follow=True, can_open_url=True
+    )
+
+
+# ---------------------------------------------------------------------------
 # Window smoke test (guarded: needs a display)
 # ---------------------------------------------------------------------------
 def test_desktop_window_builds_all_tabs(
@@ -1959,6 +2007,106 @@ def test_search_follow_button_adds_selection_to_the_watchlist(
             t("Already in the follow list: {title}").format(title="Alpha Book")
             + f" ({t('Follow')})"
         )
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(Exception):
+            root.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Search tab context menu (window, guarded: needs a display)
+# ---------------------------------------------------------------------------
+def test_search_context_menu_offers_row_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Right-clicking a search result pops queue/follow/browser actions."""
+    import tkinter as tk_mod
+
+    app, root = _open_desktop_app(tmp_path, monkeypatch)
+    try:
+        root.update_idletasks()
+        # ``tk_popup`` would block until a menu entry is picked; record the
+        # popup request instead and drive the entries via ``invoke`` below.
+        popups: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            tk_mod.Menu,
+            "tk_popup",
+            lambda menu, x_root, y_root, entry="": popups.append((x_root, y_root)),
+        )
+        opened: list[str] = []
+        monkeypatch.setattr(
+            "webbrowser.open", lambda url, *args, **kwargs: opened.append(url) or True
+        )
+
+        store = WatchlistStore()
+        results = [
+            _search_result(site="site-a", book_id="1", title="Alpha Book"),
+            _search_result(
+                site="site-b",
+                book_id="2",
+                title="Beta Book",
+                book_url="https://example.invalid/book/2",
+            ),
+            # Missing book_id and book_url: this row is dead weight.
+            _search_result(site="site-c", book_id="", title="No Id", book_url=""),
+        ]
+        app._search_results = results
+        assert app.search_tree is not None
+        tree = app.search_tree
+        tree.delete(*tree.get_children())
+        for index, result in enumerate(results):
+            tree.insert("", "end", iid=str(index), values=fmt.search_row(result))
+
+        # Right-clicking a row pops the menu with the three batch actions.
+        tree.selection_set("0", "1")
+        app._on_search_right_click(
+            SimpleNamespace(x=10, y=-1, x_root=123, y_root=45)  # type: ignore[arg-type]
+        )
+        assert popups == [(123, 45)]
+        menu = app._search_menu
+        assert menu is not None
+        assert menu.index("end") == 3  # add, follow, separator, open in browser
+        assert menu.entrycget(0, "label") == t("Add to download queue")
+        assert menu.entrycget(1, "label") == t("Follow")
+        assert menu.type(2) == "separator"
+        assert menu.entrycget(3, "label") == t("Open in browser")
+        for index in (0, 1, 3):
+            assert menu.entrycget(index, "state") == "normal"
+
+        # Selecting only the dead row disables every entry.
+        tree.selection_set("2")
+        app._on_search_right_click(
+            SimpleNamespace(x=10, y=-1, x_root=1, y_root=1)  # type: ignore[arg-type]
+        )
+        assert app._search_menu is menu  # the lazy menu is reused
+        for index in (0, 1, 3):
+            assert app._search_menu.entrycget(index, "state") == "disabled"
+        assert popups == [(123, 45), (1, 1)]
+
+        # "Follow" feeds the shared watchlist store, like the toolbar button.
+        tree.selection_set("1")
+        app._on_search_right_click(
+            SimpleNamespace(x=10, y=-1, x_root=2, y_root=2)  # type: ignore[arg-type]
+        )
+        assert app._search_menu.entrycget(1, "state") == "normal"
+        app._search_menu.invoke(1)
+        _drain_and_dispatch(
+            app,
+            stop=lambda found: (
+                any(kind == "search_follow_finished" for kind, _ in found)
+                and any(kind == "follow_entries" for kind, _ in found)
+            ),
+        )
+        added = store.get("site-b", "2")
+        assert added is not None
+        assert added.title == "Beta Book"
+        assert app._search_follow_pending == set()
+
+        # "Open in browser" opens the book page of the selected rows.
+        app._search_menu.invoke(3)
+        assert opened == ["https://example.invalid/book/2"]
     finally:
         app._closing = True
         with contextlib.suppress(Exception):

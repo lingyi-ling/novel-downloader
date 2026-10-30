@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from functools import partial
@@ -65,6 +66,7 @@ from .formatting import (
     FOLLOW_INVALID,
     TASK_FILTER_CODES,
     ExportChoice,
+    SearchMenuState,
     TaskMenuState,
     can_follow_search_result,
     filter_tasks,
@@ -77,6 +79,7 @@ from .formatting import (
     music_row,
     parse_sites,
     retry_params,
+    search_menu_state,
     search_row,
     task_detail_text,
     task_export_choices,
@@ -179,6 +182,9 @@ class DesktopApp:
         # worker thread; re-triggering those rows is a no-op until the worker
         # reports back, so a double click cannot queue the same book twice.
         self._search_follow_pending: set[tuple[str, str]] = set()
+        # Right-click context menu for the search-result rows; built lazily
+        # like the task menu and refilled for every popup.
+        self._search_menu: tk.Menu | None = None
         self._last_search: SearchState | None = None
 
         # Download widgets.
@@ -365,6 +371,8 @@ class DesktopApp:
         tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         tree.bind("<Double-1>", self._on_search_double_click)
+        tree.bind("<Button-3>", self._on_search_right_click)
+        tree.bind("<Button-2>", self._on_search_right_click)
         tree.bind("<<TreeviewSelect>>", self._on_search_selection)
         self.search_tree = tree
 
@@ -1503,6 +1511,69 @@ class DesktopApp:
 
         if queued:
             self._set_status(t("Queued {count} task(s).").format(count=queued))
+
+    # ------------------------------------------------------------------
+    # Search results context menu (right click)
+    # ------------------------------------------------------------------
+    def _on_search_right_click(self, event: tk.Event[tk.Misc]) -> None:
+        """Pop the row context menu, acting on the selected search results."""
+        tree = self.search_tree
+        if tree is None:
+            return
+        iid = tree.identify_row(event.y)
+        if iid and iid not in tree.selection():
+            # A click on a row outside the selection selects just that row;
+            # clicking inside the selection keeps the multi-selection intact.
+            tree.selection_set(iid)
+        if tree.selection():
+            self._show_search_menu(event.x_root, event.y_root)
+
+    def _show_search_menu(self, x_root: int, y_root: int) -> None:
+        state: SearchMenuState = search_menu_state(self._selected_search_results())
+
+        menu = self._search_menu
+        if menu is None:
+            menu = tk.Menu(self.root, tearoff=0)
+            self._search_menu = menu
+        self._rebuild_search_menu(menu, state)
+        try:
+            menu.tk_popup(x_root, y_root)
+        finally:
+            menu.grab_release()
+
+    def _rebuild_search_menu(self, menu: tk.Menu, state: SearchMenuState) -> tk.Menu:
+        """(Re)fill the search context menu to match ``state``."""
+        menu.delete(0, "end")
+        menu.add_command(
+            label=t("Add to download queue"),
+            command=self._add_selected_results,
+            state="normal" if state.can_add_to_queue else "disabled",
+        )
+        menu.add_command(
+            label=t("Follow"),
+            command=self._follow_selected_results,
+            state="normal" if state.can_follow else "disabled",
+        )
+        menu.add_separator()
+        menu.add_command(
+            label=t("Open in browser"),
+            command=self._open_selected_result_urls,
+            state="normal" if state.can_open_url else "disabled",
+        )
+        return menu
+
+    def _open_selected_result_urls(self) -> None:
+        """Open the book page of every selected search result in a browser."""
+        urls: list[str] = []
+        for result in self._selected_search_results():
+            url = str(result.get("book_url", "")).strip()
+            if url:
+                urls.append(url)
+        if not urls:
+            self._set_status(t("Select one or more search results first."))
+            return
+        for url in urls:
+            webbrowser.open(url)
 
     # ------------------------------------------------------------------
     # Follow ("追更") from the search tab

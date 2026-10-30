@@ -23,6 +23,16 @@ Additional hardening
 --------------------
 * Request bodies of the JSON endpoints are capped (see
   :class:`novel_downloader.apps.api.middleware.BodySizeLimitMiddleware`).
+* Every request is logged as a single ``method path status duration`` line
+  (:class:`novel_downloader.apps.api.middleware.RequestLoggingMiddleware`,
+  ``WARNING`` once it exceeds one second); query strings and response bodies
+  are never logged.
+* Every ``/api/v1`` and ``/downloads`` response carries the ``Cache-Control``
+  its data allows (:class:`novel_downloader.apps.api.middleware.
+  CacheControlMiddleware`): ``private, max-age=60`` for the reference
+  endpoints (``/sites``, ``/history``, ``/music/platforms``), ``no-store``
+  for live task data and for every error response, and
+  ``public, max-age=3600`` for the write-once exported files.
 * Every error response is shaped as ``{"detail": ...}`` and unexpected
   exceptions are turned into a stack-trace-free ``500``.
 
@@ -54,7 +64,9 @@ from novel_downloader.infra.config import get_config_value
 from .middleware import (
     DEFAULT_MAX_BODY_BYTES,
     BodySizeLimitMiddleware,
+    CacheControlMiddleware,
     DownloadsAuthMiddleware,
+    RequestLoggingMiddleware,
     register_error_handlers,
 )
 from .routes import OPENAPI_TAGS, router, task_to_dict
@@ -190,6 +202,15 @@ def create_app(
     # middleware. It reads ``app.state.api_token`` at request time, which keeps
     # it in sync with the router dependency and a no-op when no token is set.
     application.add_middleware(DownloadsAuthMiddleware)
+
+    # Cache policy sits *outside* the auth and body-limit layers so their
+    # direct 401/413 responses carry the same Cache-Control as every other
+    # response on the path; route-set headers (the SSE ``no-cache``) win.
+    application.add_middleware(CacheControlMiddleware)
+
+    # Outermost custom layer: logs one ``method path status duration`` line
+    # per request, whether it succeeded, failed or never produced a response.
+    application.add_middleware(RequestLoggingMiddleware)
 
     if cors:
         application.add_middleware(
