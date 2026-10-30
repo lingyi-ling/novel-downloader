@@ -5,10 +5,13 @@ novel_downloader.apps.cli.commands.search
 
 """
 
+from __future__ import annotations
+
 import json
 from argparse import ArgumentParser, Namespace
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from novel_downloader.apps.cli import prompts, ui
 from novel_downloader.apps.utils import load_or_init_config
@@ -25,6 +28,9 @@ from ..ui_adapters import (
     CLIProcessUI,
 )
 from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail
+
+if TYPE_CHECKING:
+    from novel_downloader.plugins.search import SearchEvent
 
 
 class SearchCmd(Command):
@@ -120,6 +126,45 @@ class SearchCmd(Command):
         async def _run() -> None:
             from novel_downloader.plugins.search import search
 
+            # ``search()`` is the aggregate (non-streaming) call, so its
+            # ``completed``/``failed`` events arrive in one burst when every
+            # site has finished; the browser-assistance events arrive earlier,
+            # while the searchers are prepared.  Either way each event is a
+            # per-site status line on stderr, keeping stdout machine readable.
+            events: list[SearchEvent] = []
+
+            def _on_event(event: SearchEvent) -> None:
+                """Record one per-site search event and echo it on stderr."""
+                events.append(event)
+                if as_json:
+                    # Keep stdout parseable: no per-site lines in JSON mode.
+                    return
+                if event.kind == "completed":
+                    count = 0 if event.result_count is None else event.result_count
+                    ui.success(
+                        f"✓ {event.site} · "
+                        + t("{count} result(s)").format(count=count)
+                    )
+                elif event.kind == "failed":
+                    ui.warn(
+                        f"✗ {event.site} · "
+                        + t("Search failed: {err}").format(err=event.message)
+                    )
+                elif event.kind == "browser_assisted":
+                    ui.info(f"↷ {event.site} · " + t("browser-assisted"))
+                elif event.kind == "browser_skipped":
+                    ui.info(f"↷ {event.site} · " + t("skipped (browser-assisted)"))
+
+            def _print_search_summary() -> None:
+                """Print the per-site outcome tally (stderr in every mode)."""
+                done = sum(1 for e in events if e.kind == "completed")
+                failed = sum(1 for e in events if e.kind == "failed")
+                skipped = sum(1 for e in events if e.kind == "browser_skipped")
+                summary = t(
+                    "{done} site(s) completed / {failed} failed / {skipped} skipped"
+                )
+                ui.info(summary.format(done=done, failed=failed, skipped=skipped))
+
             if as_json:
                 results = await search(
                     keyword=keyword,
@@ -128,7 +173,9 @@ class SearchCmd(Command):
                     per_site_limit=per_site_limit,
                     timeout=timeout,
                     sort=result_sort,
+                    on_event=_on_event,
                 )
+                _print_search_summary()
                 ui.emit(json.dumps(list(results), ensure_ascii=False, indent=2))
                 return
 
@@ -140,7 +187,9 @@ class SearchCmd(Command):
                     per_site_limit=per_site_limit,
                     timeout=timeout,
                     sort=result_sort,
+                    on_event=_on_event,
                 )
+            _print_search_summary()
 
             if not results:
                 ui.warn(t("No results found for '{keyword}'.").format(keyword=keyword))

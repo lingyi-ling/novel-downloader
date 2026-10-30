@@ -30,12 +30,17 @@ __all__ = [
     "FILTER_ALL",
     "FILTER_COMPLETED",
     "FILTER_FAILED",
+    "FOLLOW_ADDED",
+    "FOLLOW_ALREADY",
+    "FOLLOW_INVALID",
     "TASK_FILTER_CODES",
     "ExportChoice",
     "RetryParams",
     "TaskMenuState",
     "TaskOutputActions",
+    "can_follow_search_result",
     "filter_tasks",
+    "follow_feedback_message",
     "follow_row",
     "format_duration",
     "format_error",
@@ -830,3 +835,71 @@ def follow_row(entry: object) -> tuple[str, str, str, str, str]:
         str(getattr(entry, "last_chapter", "") or ""),
         format_follow_updated(str(getattr(entry, "updated_at", "") or "")),
     )
+
+
+# ---------------------------------------------------------------------------
+# Follow a search result ("追更") helpers
+# ---------------------------------------------------------------------------
+
+#: The book was newly written to the follow list.
+FOLLOW_ADDED = "added"
+
+#: The book was already followed; nothing changed on disk.
+FOLLOW_ALREADY = "already_followed"
+
+#: The row lacks a required field and cannot be followed at all.
+FOLLOW_INVALID = "invalid"
+
+
+def can_follow_search_result(site: object, book_id: object, title: object) -> bool:
+    """
+    Whether a search result row has everything the follow list needs.
+
+    A row is followable when its site, book id and title are all present after
+    trimming whitespace: the update check locates the book by name, so an
+    untitled row could never be refreshed.
+
+    :param site: Source site key of the result.
+    :param book_id: Site-specific book id of the result.
+    :param title: Display title of the result.
+    :return: ``True`` when the row may be added to the follow list.
+    """
+    return all(str(value or "").strip() for value in (site, book_id, title))
+
+
+def _follow_label(site: object, book_id: object, title: object) -> str:
+    """Render the book label used in follow feedback (title, or site/id)."""
+    label = str(title or "").strip()
+    if label:
+        return label
+    parts = (str(site or "").strip(), str(book_id or "").strip())
+    return "/".join(part for part in parts if part)
+
+
+def follow_feedback_message(
+    outcome: str,
+    *,
+    site: object = "",
+    book_id: object = "",
+    title: object = "",
+) -> str:
+    """
+    Status-bar text for one follow request raised on a search result.
+
+    :param outcome: :data:`FOLLOW_ADDED`, :data:`FOLLOW_ALREADY` or
+        :data:`FOLLOW_INVALID`.
+    :param site: Source site key of the result.
+    :param book_id: Site-specific book id of the result.
+    :param title: Display title of the result; used as the book label, with
+        ``"site/book_id"`` as the fallback when it is blank.
+    :return: A localized one-line message.
+    """
+    if outcome == FOLLOW_ADDED:
+        return t("Added to the follow list: {title}").format(
+            title=_follow_label(site, book_id, title)
+        )
+    if outcome == FOLLOW_ALREADY:
+        return t("Already in the follow list: {title}").format(
+            title=_follow_label(site, book_id, title)
+        )
+    return t("Cannot follow: site, book id and title are required.")

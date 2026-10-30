@@ -54,10 +54,15 @@ from novel_downloader.schemas import SearchResult
 from .engine import AsyncEngine
 from .formatting import (
     FILTER_ALL,
+    FOLLOW_ADDED,
+    FOLLOW_ALREADY,
+    FOLLOW_INVALID,
     TASK_FILTER_CODES,
     ExportChoice,
     TaskMenuState,
+    can_follow_search_result,
     filter_tasks,
+    follow_feedback_message,
     follow_row,
     format_error,
     health_rows,
@@ -145,6 +150,12 @@ class DesktopApp:
         self.search_button: ttk.Button | None = None
         self.search_last_button: ttk.Button | None = None
         self.search_tree: ttk.Treeview | None = None
+        # Follow ("追更") button on the search tab: acts on the selected rows.
+        self.search_follow_button: ttk.Button | None = None
+        # (site, book_id) pairs whose follow-add is currently running on a
+        # worker thread; re-triggering those rows is a no-op until the worker
+        # reports back, so a double click cannot queue the same book twice.
+        self._search_follow_pending: set[tuple[str, str]] = set()
         self._last_search: SearchState | None = None
 
         # Download widgets.
@@ -220,6 +231,10 @@ class DesktopApp:
         self._follow_entries: list[WatchEntry] = []
         self._follow_checking = False
         self._follow_counts: dict[str, int] = {}
+        # One-shot status message ("added" / "already followed") raised by a
+        # search-tab follow request; the next follow-list refresh shows it
+        # instead of the generic entry count.
+        self._follow_status_after_reload: str | None = None
         self.follow_tree: ttk.Treeview | None = None
         self.follow_add_button: ttk.Button | None = None
         self.follow_remove_button: ttk.Button | None = None
@@ -325,6 +340,7 @@ class DesktopApp:
         tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         tree.bind("<Double-1>", self._on_search_double_click)
+        tree.bind("<<TreeviewSelect>>", self._on_search_selection)
         self.search_tree = tree
 
         actions = ttk.Frame(self.search_tab)
@@ -341,6 +357,13 @@ class DesktopApp:
             text=t("Add to download queue"),
             command=self._add_selected_results,
         ).pack(side="left", padx=(6, 0))
+        self.search_follow_button = ttk.Button(
+            actions,
+            text=t("Follow"),
+            command=self._follow_selected_results,
+            state="disabled",
+        )
+        self.search_follow_button.pack(side="left", padx=(6, 0))
 
     def _build_download_tab(self) -> None:
         filters = ttk.Frame(self.download_tab)
@@ -835,6 +858,12 @@ class DesktopApp:
             )
         else:
             self._set_status(t("No followed books."))
+        # A follow request raised on the search tab owns the status line: its
+        # outcome is more specific than the generic count rendered above.
+        message = self._follow_status_after_reload
+        if message is not None:
+            self._follow_status_after_reload = None
+            self._set_status(message)
 
     def _follow_selected(self) -> list[WatchEntry]:
         """Return the entries behind the selected rows (empty when none)."""
@@ -1219,6 +1248,9 @@ class DesktopApp:
             self._render_follow_entries(payload)
         elif kind == "follow_load_error":
             logger.error("Watchlist load failed: %s", payload)
+            # The reload that should have shown the follow feedback failed;
+            # drop it so a later refresh cannot resurrect a stale message.
+            self._follow_status_after_reload = None
             self._set_status(
                 t("Could not load the follow list: {error}").format(error=payload)
             )
@@ -1226,6 +1258,10 @@ class DesktopApp:
             self._on_follow_item(payload)
         elif kind == "follow_check_done":
             self._follow_check_finished(payload)
+        elif kind == "search_follow_done":
+            self._on_search_follow_done(payload)
+        elif kind == "search_follow_finished":
+            self._on_search_follow_finished(payload)
         else:
             logger.debug("Ignoring unknown desktop event: %s", kind)
 
@@ -1339,6 +1375,7 @@ class DesktopApp:
                 tree.insert("", "end", iid=str(index), values=search_row(result))
         if self.search_button is not None:
             self.search_button.state(["!disabled"])
+        self._update_search_follow_button()
         self._set_status(
             t("Found {count} result(s) for '{keyword}'.").format(
                 count=len(results), keyword=keyword
@@ -1376,6 +1413,112 @@ class DesktopApp:
 
         if queued:
             self._set_status(t("Queued {count} task(s).").format(count=queued))
+
+    # ------------------------------------------------------------------
+    # Follow ("追更") from the search tab
+    # ------------------------------------------------------------------
+    def _on_search_selection(self, _event: object | None = None) -> None:
+        self._update_search_follow_button()
+
+    def _selected_search_results(self) -> list[SearchResult]:
+        """Return the results behind the selected rows (empty when none)."""
+        tree = self.search_tree
+        if tree is None:
+            return []
+        chosen: list[SearchResult] = []
+        for iid in tree.selection():
+            try:
+                chosen.append(self._search_results[int(iid)])
+            except (ValueError, IndexError):
+                continue
+        return chosen
+
+    def _update_search_follow_button(self) -> None:
+        """Enable the follow button while a followable row is selected."""
+        if self._search_follow_pending:
+            # An add is still writing to the store; keep the button down.
+            self._set_button_enabled(self.search_follow_button, False)
+            return
+        allowed = any(
+            can_follow_search_result(
+                result.get("site", ""),
+                result.get("book_id", ""),
+                result.get("title", ""),
+            )
+            for result in self._selected_search_results()
+        )
+        self._set_button_enabled(self.search_follow_button, allowed)
+
+    def _follow_selected_results(self) -> None:
+        """Add the selected search results to the shared follow list."""
+        targets: list[tuple[str, str, str]] = []
+        invalid = False
+        for result in self._selected_search_results():
+            site = str(result.get("site", ""))
+            book_id = str(result.get("book_id", ""))
+            title = str(result.get("title", ""))
+            if not can_follow_search_result(site, book_id, title):
+                invalid = True
+                continue
+            key = (site.strip(), book_id.strip())
+            if key in self._search_follow_pending:
+                continue  # an add for this row is already in flight
+            targets.append((site, book_id, title))
+
+        if not targets:
+            if invalid:
+                self._set_status(follow_feedback_message(FOLLOW_INVALID))
+            return
+
+        for site, book_id, _title in targets:
+            self._search_follow_pending.add((site.strip(), book_id.strip()))
+        self._set_button_enabled(self.search_follow_button, False)
+        self._set_status(
+            t("Adding {count} result(s) to the follow list...").format(
+                count=len(targets)
+            )
+        )
+        threading.Thread(
+            target=self._search_follow_worker,
+            args=(targets,),
+            name="desktop-search-follow",
+            daemon=True,
+        ).start()
+
+    def _search_follow_worker(self, targets: list[tuple[str, str, str]]) -> None:
+        """Persist every target on the shared store; one failure stops none."""
+        for site, book_id, title in targets:
+            try:
+                with self._watch_lock:
+                    _entry, created = self._watch_store.add(
+                        site, book_id, title=title or None
+                    )
+            except Exception as exc:  # noqa: BLE001 - delivered to the UI thread
+                self.events.put(("error", format_error(exc)))
+                self.events.put(("search_follow_done", (site, book_id, title, None)))
+                continue
+            self.events.put(("search_follow_done", (site, book_id, title, created)))
+        self.events.put(("search_follow_finished", None))
+
+    def _on_search_follow_done(
+        self, payload: tuple[str, str, str, bool | None]
+    ) -> None:
+        """Release the row's pending marker and remember its feedback line."""
+        site, book_id, title, created = payload
+        self._search_follow_pending.discard((site.strip(), book_id.strip()))
+        if created is None:
+            return  # the failure was already reported through the error event
+        self._follow_status_after_reload = follow_feedback_message(
+            FOLLOW_ADDED if created else FOLLOW_ALREADY,
+            site=site,
+            book_id=book_id,
+            title=title,
+        )
+
+    def _on_search_follow_finished(self, _payload: object) -> None:
+        """Re-arm the button and refresh the follow tab from the shared store."""
+        self._update_search_follow_button()
+        self._reload_follow_async()
 
     # ------------------------------------------------------------------
     # Download progress

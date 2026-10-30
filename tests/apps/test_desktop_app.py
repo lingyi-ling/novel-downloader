@@ -1133,6 +1133,75 @@ def test_format_follow_updated_converts_utc_to_local_time() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Follow list: following a search result (availability + feedback)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("site", "book_id", "title", "expected"),
+    [
+        # A complete row is followable.
+        ("b520", "8_8187", "凡人修仙传", True),
+        # Whitespace around a field is trimmed, not rejected.
+        ("  b520  ", " 8_8187 ", " 凡人修仙传 ", True),
+        # Any missing field disables the action.
+        ("", "1", "Title", False),
+        ("b520", "", "Title", False),
+        ("b520", "1", "", False),
+        # Whitespace-only fields count as missing.
+        ("   ", "1", "Title", False),
+        ("b520", "   ", "Title", False),
+        ("b520", "1", "   ", False),
+        # None degrades to a missing field instead of raising.
+        (None, "1", "Title", False),
+        ("b520", None, "Title", False),
+        ("b520", "1", None, False),
+        (None, None, None, False),
+    ],
+)
+def test_can_follow_search_result_requires_all_fields(
+    site: object, book_id: object, title: object, expected: bool
+) -> None:
+    assert fmt.can_follow_search_result(site, book_id, title) is expected
+
+
+def test_follow_feedback_message_for_a_new_entry() -> None:
+    message = fmt.follow_feedback_message(
+        fmt.FOLLOW_ADDED, site="b520", book_id="8_8187", title=" 凡人修仙传 "
+    )
+    assert message == t("Added to the follow list: {title}").format(title="凡人修仙传")
+
+
+def test_follow_feedback_message_for_an_existing_entry() -> None:
+    message = fmt.follow_feedback_message(
+        fmt.FOLLOW_ALREADY, site="b520", book_id="8_8187", title="凡人修仙传"
+    )
+    assert message == t("Already in the follow list: {title}").format(
+        title="凡人修仙传"
+    )
+
+
+def test_follow_feedback_message_for_an_invalid_row() -> None:
+    assert fmt.follow_feedback_message(fmt.FOLLOW_INVALID) == t(
+        "Cannot follow: site, book id and title are required."
+    )
+    # The identity fields are ignored for the invalid outcome.
+    assert fmt.follow_feedback_message(
+        fmt.FOLLOW_INVALID, site="b520", book_id="1", title="T"
+    ) == t("Cannot follow: site, book id and title are required.")
+
+
+def test_follow_feedback_message_falls_back_to_site_and_book_id() -> None:
+    # A blank title labels the book as "site/book_id" instead.
+    message = fmt.follow_feedback_message(
+        fmt.FOLLOW_ADDED, site="b520", book_id="42", title="  "
+    )
+    assert message == t("Added to the follow list: {title}").format(title="b520/42")
+    # Missing site and book id degrade to an empty label.
+    assert fmt.follow_feedback_message(fmt.FOLLOW_ALREADY, title=None) == t(
+        "Already in the follow list: {title}"
+    ).format(title="")
+
+
+# ---------------------------------------------------------------------------
 # Window smoke test (guarded: needs a display)
 # ---------------------------------------------------------------------------
 def test_desktop_window_builds_all_tabs(
@@ -1161,6 +1230,10 @@ def test_desktop_window_builds_all_tabs(
         assert app.history_tree is not None
         assert app.search_button is not None
         assert app.search_last_button is not None
+        assert app.search_follow_button is not None
+        assert app.search_follow_button.cget("text") == t("Follow")
+        # Nothing is selected yet, so the follow action is unavailable.
+        assert "disabled" in app.search_follow_button.state()
         assert app.retry_button is not None
         assert app.open_file_button is not None
         assert app.open_folder_button is not None
@@ -1283,6 +1356,8 @@ def _drain_and_dispatch(
             "follow_entries",
             "follow_item",
             "follow_check_done",
+            "search_follow_done",
+            "search_follow_finished",
             "music_health_item",
             "music_health_done",
         }:
@@ -1517,6 +1592,121 @@ def test_follow_add_and_remove_workers_persist_entries(
         app.follow_tree.selection_set([])
         app._remove_follow_selected()
         assert [entry.key for entry in store.entries()] == [("site-b", "2")]
+    finally:
+        app._closing = True
+        with contextlib.suppress(Exception):
+            app.engine.shutdown()
+        with contextlib.suppress(Exception):
+            root.destroy()
+
+
+def test_search_follow_button_adds_selection_to_the_watchlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The search tab's follow button feeds the shared watchlist store."""
+    app, root = _open_desktop_app(tmp_path, monkeypatch)
+    try:
+        root.update_idletasks()
+        # Let the initial watchlist load finish so its render cannot clobber
+        # the fixture state below.
+        _drain_and_dispatch(
+            app,
+            stop=lambda found: any(kind == "follow_entries" for kind, _ in found),
+        )
+        store = WatchlistStore()
+        store.add("site-a", "1", title="Alpha Book")
+
+        results = [
+            _search_result(site="site-a", book_id="1", title="Alpha Book"),
+            _search_result(site="site-b", book_id="2", title="Beta Book"),
+            # Missing book_id: this row can never be followed.
+            _search_result(site="site-c", book_id="", title="No Id"),
+        ]
+        app._search_results = results
+        assert app.search_tree is not None
+        tree = app.search_tree
+        tree.delete(*tree.get_children())
+        for index, result in enumerate(results):
+            tree.insert("", "end", iid=str(index), values=fmt.search_row(result))
+
+        button = app.search_follow_button
+        assert button is not None
+
+        # No selection: the button stays down.
+        tree.selection_set([])
+        app._update_search_follow_button()
+        assert "disabled" in button.state()
+
+        # Selecting only the invalid row keeps the button disabled, and a
+        # forced click explains why instead of touching the store.
+        tree.selection_set("2")
+        app._update_search_follow_button()
+        assert "disabled" in button.state()
+        app._follow_selected_results()
+        assert app._status_var.get() == t(
+            "Cannot follow: site, book id and title are required."
+        )
+        assert [entry.key for entry in store.entries()] == [("site-a", "1")]
+
+        # A mixed selection (valid + invalid) enables the button; the invalid
+        # row is skipped and the valid one is persisted on a worker thread.
+        tree.selection_set("1", "2")
+        app._update_search_follow_button()
+        assert "disabled" not in button.state()
+        app._follow_selected_results()
+        assert "disabled" in button.state()  # held down while the add runs
+        _drain_and_dispatch(
+            app,
+            stop=lambda found: (
+                any(kind == "search_follow_finished" for kind, _ in found)
+                and any(kind == "follow_entries" for kind, _ in found)
+            ),
+        )
+        entry = store.get("site-b", "2")
+        assert entry is not None
+        assert entry.title == "Beta Book"
+        # The follow tab was refreshed through the shared store...
+        assert app.follow_tree is not None
+        assert len(app.follow_tree.get_children()) == 2
+        # ...and the specific feedback outlives the generic count message.
+        assert app._status_var.get() == t("Added to the follow list: {title}").format(
+            title="Beta Book"
+        )
+        assert app._search_follow_pending == set()
+        # The batch is over: the button is usable for the still-selected rows.
+        assert "disabled" not in button.state()
+
+        # While a row's add is in flight its key is guarded against a repeated
+        # click: the guard keeps the button down and swallows the re-trigger.
+        app._search_follow_pending.add(("site-b", "2"))
+        app._update_search_follow_button()
+        assert "disabled" in button.state()
+        app._follow_selected_results()
+        assert app._search_follow_pending == {("site-b", "2")}
+        app._search_follow_pending.clear()
+
+        # Following a book that is already in the list changes nothing on disk
+        # and says so.
+        tree.selection_set("0")
+        app._update_search_follow_button()
+        assert "disabled" not in button.state()
+        app._follow_selected_results()
+        _drain_and_dispatch(
+            app,
+            stop=lambda found: (
+                any(kind == "search_follow_finished" for kind, _ in found)
+                and any(kind == "follow_entries" for kind, _ in found)
+            ),
+        )
+        assert [entry.key for entry in store.entries()] == [
+            ("site-a", "1"),
+            ("site-b", "2"),
+        ]
+        assert store.get("site-a", "1") is not None
+        assert store.get("site-a", "1").title == "Alpha Book"  # type: ignore[union-attr]
+        assert app._status_var.get() == t("Already in the follow list: {title}").format(
+            title="Alpha Book"
+        )
     finally:
         app._closing = True
         with contextlib.suppress(Exception):
