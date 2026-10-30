@@ -11,16 +11,16 @@ tags:
 ## 基本信息
 
 * 标识符: `bixiange`
-* 主页: https://m.bixiange.me/
+* 主页: https://m.bixiange.top/
 * 备用域名:
-    * https://m.bixiange.top/
     * https://www.bixiange.top/
+    * https://m.bixiange.me/
 * 语言: 简体中文
 * 站点状态: :orange_circle: Unstable
 * 支持分卷: :material-close: 否
 * 支持插图: :material-close: 否
 * 支持登录: :material-close: 否
-* 支持搜索: :material-close: 否
+* 支持搜索: :material-check: 是
 
 ---
 
@@ -31,7 +31,7 @@ tags:
 URL:
 
 ```
-https://m.bixiange.me/wxxz/20921/
+https://m.bixiange.top/wxxz/20921/
 ```
 
 * Book ID: `wxxz-20921`

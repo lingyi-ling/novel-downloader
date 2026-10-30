@@ -38,10 +38,11 @@ from novel_downloader.apps.constants import (
     DOWNLOAD_SUPPORT_SITES,
     SEARCH_SUPPORT_SITES,
 )
-from novel_downloader.apps.core import cred_broker
 from novel_downloader.apps.core.cred_broker import (
     complete_request,
     get_req_state,
+    list_requests,
+    request_to_dict,
 )
 from novel_downloader.apps.core.models import CredRequest, DownloadTask
 from novel_downloader.apps.core.task_manager import TaskManager, manager
@@ -480,43 +481,21 @@ def cred_request_to_dict(req: CredRequest) -> dict[str, Any]:
     """
     Serialise a credential request for the JSON API.
 
-    ``label`` / ``placeholder`` / ``description`` are passed through verbatim:
-    they come from the site plugins and the server does not translate them
-    (there is no server-side rendering any more); clients decide how to
-    display them.
+    Thin alias over the broker's own serialiser so the response shape has a
+    single source of truth (``label`` / ``placeholder`` / ``description`` are
+    passed through verbatim; clients decide how to display them).
     """
-    return {
-        "req_id": req.req_id,
-        "task_id": req.task_id,
-        "title": req.title,
-        "fields": [
-            {
-                "name": field.name,
-                "label": field.label,
-                "type": field.type,
-                "required": field.required,
-                "default": field.default,
-                "placeholder": field.placeholder,
-                "description": field.description,
-            }
-            for field in req.fields
-        ],
-        "prefill": dict(req.prefill),
-        "done": req.done,
-    }
+    return request_to_dict(req)
 
 
 async def _pending_login_requests() -> list[dict[str, Any]]:
     """
     Snapshot the broker's pending (not yet completed) credential requests.
 
-    The broker has no public listing function yet, so this reads its
-    module-level store under the broker's own lock; the claim state is left
-    untouched.
+    Delegates to the broker's public listing API, which snapshots inside the
+    broker's own lock; the claim state is left untouched.
     """
-    async with cred_broker._CRED_LOCK:
-        pending = [r for r in cred_broker._CRED_REQS.values() if not r.done]
-    return [cred_request_to_dict(r) for r in pending]
+    return await list_requests()
 
 
 @router.get("/login/requests", tags=["login"])

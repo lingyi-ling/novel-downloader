@@ -2,6 +2,29 @@
 """
 novel_downloader.plugins.sites.bixiange.searcher
 ------------------------------------------------
+
+Searcher for 笔仙阁 (m.bixiange.top).  The old domain ``m.bixiange.me`` no
+longer resolves (NXDOMAIN); the EmpireCMS search backend lives on under the
+new domain with one change: a keyword that *has* hits now answers the POST
+with ``302 -> /e/search/result/?searchid=N`` (followed transparently by the
+session wrappers), while a keyword with no hits answers ``200`` with the
+"没有搜索到相关的内容" info page, which simply parses to zero rows.
+
+Three site quirks the searcher compensates for:
+
+* The keyword must be form-encoded as GBK -- UTF-8 bytes silently match
+  nothing on this site.
+* The backend silently answers "no results" for any keyword whose GBK
+  encoding exceeds 20 bytes (``MAX_KEYWORD_BYTES``), even when a shorter
+  prefix would match, so longer queries are truncated on GBK character
+  boundaries before posting (verified 2026-10-31: "从气运词条开始成就人皇"
+  matches nothing while its 20-byte prefix finds /wxxz/20921).
+* The site sets an ``eltphlastsearchtime`` cookie and enforces a 15-second
+  interval between searches *within one cookie session* ("系统限制的搜索
+  时间间隔为 15 秒").  The aggregate search orchestrator builds a fresh
+  ``aiohttp.ClientSession`` per call, so normal usage never trips it; a
+  caller reusing one session for rapid repeated searches gets an empty
+  result list (logged, never crashes) until the interval elapses.
 """
 
 import logging
@@ -19,16 +42,44 @@ logger = logging.getLogger(__name__)
 class BixiangeSearcher(BaseSearcher):
     site_name = "bixiange"
     priority = 30
-    BASE_URL = "https://m.bixiange.me"
-    SEARCH_URL = "https://m.bixiange.me/e/search/indexpage.php"
+    BASE_URL = "https://m.bixiange.top"
+    SEARCH_URL = "https://m.bixiange.top/e/search/indexpage.php"
+
+    #: GBK byte cap enforced by the EmpireCMS ``keyboard`` backend above
+    #: which every query is answered with the "no results" page.
+    MAX_KEYWORD_BYTES = 20
+
+    #: Marker of the per-cookie-session search cooldown page ("系统限制的
+    #: 搜索时间间隔为 15 秒,请稍后再搜索").
+    RATELIMIT_MARKER = "系统限制的搜索时间间隔"
+
+    #: keyword captured in _fetch_html for cooldown diagnostics
+    _last_keyword: str = ""
+
+    @classmethod
+    def _truncate_keyword(cls, keyword: str) -> str:
+        """Clamp ``keyword`` to :data:`MAX_KEYWORD_BYTES` GBK bytes."""
+        raw = keyword.encode("gbk", errors="replace")
+        if len(raw) <= cls.MAX_KEYWORD_BYTES:
+            return keyword
+        raw = raw[: cls.MAX_KEYWORD_BYTES]
+        while raw:
+            try:
+                return raw.decode("gbk")
+            except UnicodeDecodeError:
+                raw = raw[:-1]
+        return ""
 
     async def _fetch_html(self, keyword: str) -> str:
-        kw = self._quote(keyword, encoding="gbk", errors="replace")
+        self._last_keyword = keyword
+        kw = self._quote(
+            self._truncate_keyword(keyword), encoding="gbk", errors="replace"
+        )
         data = f"keyboard={kw}&show=title&classid=0"
         headers = {
             **self.session.headers,
-            "Referer": "https://m.bixiange.me/",
-            "Origin": "https://m.bixiange.me",
+            "Referer": "https://m.bixiange.top/",
+            "Origin": "https://m.bixiange.top",
             "Content-Type": "application/x-www-form-urlencoded",
         }
         try:
@@ -36,7 +87,7 @@ class BixiangeSearcher(BaseSearcher):
                 self.SEARCH_URL, headers=headers, data=data
             ) as resp:
                 resp.raise_for_status()
-                return await self._response_to_str(resp)
+                return await self._response_to_str(resp, encoding="gbk")
         except Exception:
             logger.error(
                 "Failed to fetch HTML for keyword '%s' from '%s'",
@@ -48,6 +99,14 @@ class BixiangeSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if self.RATELIMIT_MARKER in html_str:
+            logger.warning(
+                "bixiange search hit the 15s per-session interval limit; "
+                "returning no results for keyword '%s'",
+                self._last_keyword,
+            )
+            return []
+
         doc = html.fromstring(html_str)
         rows = doc.xpath('//div[contains(@class, "list")]//li')
         results: list[SearchResult] = []

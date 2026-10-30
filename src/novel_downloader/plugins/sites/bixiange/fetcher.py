@@ -13,7 +13,8 @@ from novel_downloader.plugins.registry import registrar
 @registrar.register_fetcher()
 class BixiangeFetcher(BaseFetcher):
     """
-    A session class for interacting with the 笔仙阁 (m.bixiange.me) novel
+    A session class for interacting with the 笔仙阁 (m.bixiange.top) novel
+    site.  The old domain ``m.bixiange.me`` no longer resolves (NXDOMAIN).
     """
 
     site_name: str = "bixiange"
@@ -30,9 +31,9 @@ class BixiangeFetcher(BaseFetcher):
         prefix = book_id.split("/")[0]
 
         if prefix in self.INFO_HTML_SUFFIX:
-            url = f"https://m.bixiange.me/{book_id}.html"
+            url = f"https://m.bixiange.top/{book_id}.html"
         else:
-            url = f"https://m.bixiange.me/{book_id}/"
+            url = f"https://m.bixiange.top/{book_id}/"
 
         return [await self.fetch(url, **kwargs)]
 
@@ -46,8 +47,8 @@ class BixiangeFetcher(BaseFetcher):
         prefix = book_id.split("/")[0]
 
         if prefix in self.CHAPTER_NO_INDEX:
-            url = f"https://m.bixiange.me/{book_id}/{chapter_id}.html"
+            url = f"https://m.bixiange.top/{book_id}/{chapter_id}.html"
         else:
-            url = f"https://m.bixiange.me/{book_id}/index/{chapter_id}.html"
+            url = f"https://m.bixiange.top/{book_id}/index/{chapter_id}.html"
 
         return [await self.fetch(url, **kwargs)]

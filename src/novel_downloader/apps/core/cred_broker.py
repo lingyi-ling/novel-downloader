@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Any
 
 from novel_downloader.schemas import LoginField
 
@@ -104,6 +105,48 @@ async def get_req_state(req_id: str) -> tuple[bool, bool]:
         if not r:
             return False, False
         return True, r.done
+
+
+def request_to_dict(req: CredRequest) -> dict[str, Any]:
+    """
+    Serialise a credential request for the JSON API.
+
+    ``label`` / ``placeholder`` / ``description`` are passed through verbatim:
+    they come from the site plugins and are not translated here; clients
+    decide how to display them.
+    """
+    return {
+        "req_id": req.req_id,
+        "task_id": req.task_id,
+        "title": req.title,
+        "fields": [
+            {
+                "name": field.name,
+                "label": field.label,
+                "type": field.type,
+                "required": field.required,
+                "default": field.default,
+                "placeholder": field.placeholder,
+                "description": field.description,
+            }
+            for field in req.fields
+        ],
+        "prefill": dict(req.prefill),
+        "done": req.done,
+    }
+
+
+async def list_requests() -> list[dict[str, Any]]:
+    """
+    Snapshot the pending (not yet completed) credential requests.
+
+    Both the filtering and the serialisation happen inside the broker lock, so
+    concurrent ``create_cred_request`` / ``complete_request`` calls on the same
+    loop can never produce a torn view. The claim state is left untouched and
+    done requests are filtered out.
+    """
+    async with _CRED_LOCK:
+        return [request_to_dict(r) for r in _CRED_REQS.values() if not r.done]
 
 
 def cleanup_request(req_id: str) -> None:

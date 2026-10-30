@@ -2126,8 +2126,8 @@ hidden = true
 
 [sites.bixiange]
 name = "笔仙阁"
-homepage = "https://m.bixiange.me/"
-alt_domains = ["https://m.bixiange.top/", "https://www.bixiange.top/"]
+homepage = "https://m.bixiange.top/"
+alt_domains = ["https://www.bixiange.top/", "https://m.bixiange.me/"]
 site_status = "unstable"
 description = """
 笔仙阁提供免费的手机小说,小说在线阅读,txt小说下载,不放任何弹窗。
@@ -2140,11 +2140,11 @@ tags = ["转载站"]
 volumes = "no"
 images = "no"
 login = "no"
-search = "no"
+search = "yes"
 
 [[sites.bixiange.url_examples]]
 title = "Book URL"
-url = "https://m.bixiange.me/wxxz/20921/"
+url = "https://m.bixiange.top/wxxz/20921/"
 book_id = "wxxz-20921"
 hidden = false
 

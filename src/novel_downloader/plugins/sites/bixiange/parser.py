@@ -25,7 +25,7 @@ class BixiangeParser(BaseParser):
     """
 
     site_name: str = "bixiange"
-    BASE_URL = "https://m.bixiange.me"
+    BASE_URL = "https://m.bixiange.top"
 
     def parse_book_info(
         self,

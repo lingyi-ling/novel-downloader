@@ -13,8 +13,8 @@
 | ---- | ---- |
 | 站点条目总数 (`supported_sites.toml`) | 92 |
 | 支持下载 (`DOWNLOAD_SUPPORT_SITES`) | 84 |
-| 支持搜索 (`SEARCH_SUPPORT_SITES`) | 58 |
-| 仅支持下载 (不参与搜索) | 26 |
+| 支持搜索 (`SEARCH_SUPPORT_SITES`) | 59 |
+| 仅支持下载 (不参与搜索) | 25 |
 | 已归档 (archived) | 8 |
 
 !!! note "统计口径"
@@ -54,7 +54,7 @@
 | [笔趣阁](./site-details/biquge5.md) | `biquge5` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-help-circle: |
 | [笔趣阁小说网](./site-details/biquguo.md) | `biquguo` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-help-circle: |
 | [精彩小说](./site-details/biquyuedu.md) | `biquyuedu` | :red_circle: | :material-close: | :material-close: | — | :material-close: | :material-close: | :material-help-circle: |
-| [笔仙阁](./site-details/bixiange.md) | `bixiange` | :orange_circle: | :material-check: | :material-close: | — | :material-close: | :material-close: | :material-close: |
+| [笔仙阁](./site-details/bixiange.md) | `bixiange` | :orange_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-close: |
 | [笔趣读](./site-details/blqudu.md) | `blqudu` | :green_circle: | :material-check: | :material-close: | — | :material-close: | :material-close: | :material-help-circle: |
 | [笔下文学网](./site-details/bxwx9.md) | `bxwx9` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-help-circle: |
 | [思路客](./site-details/ciluke.md) | `ciluke` | :green_circle: | :material-check: | :material-check: | 30 | :material-close: | :material-close: | :material-help-circle: |

@@ -47,6 +47,7 @@ CASES_SUCCESS = [
     SuccessCase("https://m.bixiange.me/wxxz/20876/", "bixiange", "wxxz-20876", None),
     SuccessCase("https://m.bixiange.me/wxxz/20876/index/1.html", "bixiange", "wxxz-20876", "1"),
     SuccessCase("https://m.bixiange.me/wxxz/20921/", "bixiange", "wxxz-20921", None),
+    SuccessCase("https://m.bixiange.top/wxxz/20921/", "bixiange", "wxxz-20921", None),
     SuccessCase("https://m.bixiange.me/wxxz/20921/index/1.html", "bixiange", "wxxz-20921", "1"),
     SuccessCase("https://m.bixiange.me/dsyq/22747/", "bixiange", "dsyq-22747", None),
     SuccessCase("https://m.bixiange.me/dsyq/22747/index/1.html", "bixiange", "dsyq-22747", "1"),

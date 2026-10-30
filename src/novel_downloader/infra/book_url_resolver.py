@@ -167,7 +167,7 @@ def extract_biquyuedu(path: str, query: str) -> BookURLInfo | None:
     return None
 
 
-@register_extractor(["m.bixiange.me"])
+@register_extractor(["m.bixiange.me", "m.bixiange.top"])
 def extract_bixiange(path: str, query: str) -> BookURLInfo | None:
     if m := re.match(r"^/([^/]+)/(\d+)/index/(\d+)\.html$", path):
         cat, bid, chap = m.groups()

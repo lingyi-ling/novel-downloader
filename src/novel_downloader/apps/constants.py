@@ -113,6 +113,7 @@ SEARCH_SUPPORT_SITES = {
     "biquge345": "笔趣阁 (biquge345)",
     "biquguo": "笔趣阁小说网",
     "bxwx9": "笔下文学网",
+    "bixiange": "笔仙阁 (bixiange)",
     "ciluke": "思路客",
     "ciweimao": "刺猬猫 (ciweimao)",
     "ciyuanji": "次元姬小说网",
