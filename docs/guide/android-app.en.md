@@ -29,6 +29,15 @@ cd android
 
 You can also open `android/` in Android Studio, sync, and run it.
 
+## Run the Unit Tests
+
+The app ships device-free JVM unit tests (API client, follow queueing, navigation, and more):
+
+```bash
+cd android
+./gradlew testDebugUnitTest
+```
+
 ## First-time Configuration
 
 Open "Settings" in the top-right corner of the app:
@@ -42,10 +51,15 @@ If the API has a token configured, enter the same value in "API key".
 
 ## Features
 
-- **Search**: keyword plus optional site filter (comma-separated; empty means all sites). Results can be added to the download queue with one tap.
+Bottom tabs: **Search / Tasks / History / Music / Follow**.
+
+- **Search**: keyword plus optional site filter (comma-separated; empty means all sites). Results can be added to the download queue with one tap, or followed via the "Follow" action.
+- **Follow**: maintain the follow list (list / add / remove); "Check updates" searches each book for its latest chapter, and entries with new chapters can join the download queue with one tap.
 - **Tasks**: running / queued / completed sections, progress bars and chapter counts, auto-refresh (every 2 seconds), and cancellation.
-- **History**: exported files; tap one to hand it to the system browser/downloader for saving.
+- **History**: exported files; tapping one hands it to the system DownloadManager, which saves it into the public Downloads directory.
 - **Music**: choose a platform, search songs, select multiple results, create a download job, and view progress.
+
+When a task finishes (completed or failed) the app posts a system notification. On Android 13+ the first launch asks for the "Notifications" permission (`POST_NOTIFICATIONS`); if it was denied, re-enable it from the system settings.
 
 ## Security Notes
 

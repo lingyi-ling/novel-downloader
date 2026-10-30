@@ -1508,12 +1508,14 @@ class DesktopApp:
         self._search_follow_pending.discard((site.strip(), book_id.strip()))
         if created is None:
             return  # the failure was already reported through the error event
-        self._follow_status_after_reload = follow_feedback_message(
+        message = follow_feedback_message(
             FOLLOW_ADDED if created else FOLLOW_ALREADY,
             site=site,
             book_id=book_id,
             title=title,
         )
+        # Point the user at the Follow tab, which the reload below refreshes.
+        self._follow_status_after_reload = f"{message} ({t('Follow')})"
 
     def _on_search_follow_finished(self, _payload: object) -> None:
         """Re-arm the button and refresh the follow tab from the shared store."""

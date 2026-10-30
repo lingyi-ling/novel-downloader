@@ -19,6 +19,8 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.BookmarkAdd
+import androidx.compose.material.icons.outlined.BookmarkAdded
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -26,6 +28,8 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -80,6 +84,22 @@ fun SearchScreen(onMessage: (String) -> Unit) {
     var total by remember { mutableStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     var results by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
+    // Keys ("site/book_id") already in the watchlist: seeded from the server
+    // on entry and extended locally on success, so a followed result keeps a
+    // disabled button across new searches within this visit.
+    var watchedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // Follow requests currently in flight, so a row cannot be followed twice.
+    var watchingKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    // Best-effort seed of what the server already follows; failures stay
+    // silent because the local set still prevents duplicate prompts.
+    LaunchedEffect(Unit) {
+        Api.call { Api.service().watchlist() }
+            .onSuccess { response ->
+                watchedKeys = watchedKeys +
+                    response.books.map { searchWatchKey(it.site, it.book_id) }
+            }
+    }
 
     LaunchedEffect(siteReloadKey) {
         sitesLoading = true
@@ -137,6 +157,26 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             }.onFailure {
                 onMessage(context.getString(R.string.state_error, it.message ?: ""))
             }
+        }
+    }
+
+    /** Follows a result via `POST /api/v1/watchlist`; no-ops when already followed. */
+    fun follow(result: SearchResult) {
+        val target = followRequest(result) ?: return
+        val key = result.watchKey()
+        if (key in watchedKeys || key in watchingKeys) return
+        watchingKeys = watchingKeys + key
+        scope.launch {
+            val outcome = Api.call { Api.service().addWatch(target) }
+            watchingKeys = watchingKeys - key
+            outcome
+                .onSuccess {
+                    watchedKeys = watchedKeys + key
+                    onMessage(context.getString(R.string.search_follow_added))
+                }
+                .onFailure {
+                    onMessage(context.getString(R.string.state_error, it.message ?: ""))
+                }
         }
     }
 
@@ -268,14 +308,47 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            TextButton(onClick = { addTask(result) }) {
-                                Text(stringResource(R.string.action_add_to_queue))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                FollowIconButton(
+                                    followed = result.watchKey() in watchedKeys,
+                                    watching = result.watchKey() in watchingKeys,
+                                    onFollow = { follow(result) },
+                                )
+                                TextButton(onClick = { addTask(result) }) {
+                                    Text(stringResource(R.string.action_add_to_queue))
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/**
+ * The per-row "follow" icon button. Disabled once the book is in the
+ * watchlist (server seed or a successful follow) or while the request is in
+ * flight, so a result can never be followed twice.
+ */
+@Composable
+private fun FollowIconButton(
+    followed: Boolean,
+    watching: Boolean,
+    onFollow: () -> Unit,
+) {
+    IconButton(onClick = onFollow, enabled = !followed && !watching) {
+        Icon(
+            imageVector = if (followed) Icons.Outlined.BookmarkAdded else Icons.Outlined.BookmarkAdd,
+            contentDescription = stringResource(
+                when {
+                    followed -> R.string.search_follow_in_list
+                    watching -> R.string.search_follow_in_progress
+                    else -> R.string.search_follow_add
+                },
+            ),
+            tint = if (followed) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+        )
     }
 }
 

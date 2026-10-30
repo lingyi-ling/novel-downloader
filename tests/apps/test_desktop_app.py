@@ -1668,9 +1668,11 @@ def test_search_follow_button_adds_selection_to_the_watchlist(
         # The follow tab was refreshed through the shared store...
         assert app.follow_tree is not None
         assert len(app.follow_tree.get_children()) == 2
-        # ...and the specific feedback outlives the generic count message.
-        assert app._status_var.get() == t("Added to the follow list: {title}").format(
-            title="Beta Book"
+        # ...and the specific feedback outlives the generic count message;
+        # it ends with a pointer to the Follow tab.
+        assert app._status_var.get() == (
+            t("Added to the follow list: {title}").format(title="Beta Book")
+            + f" ({t('Follow')})"
         )
         assert app._search_follow_pending == set()
         # The batch is over: the button is usable for the still-selected rows.
@@ -1704,8 +1706,9 @@ def test_search_follow_button_adds_selection_to_the_watchlist(
         ]
         assert store.get("site-a", "1") is not None
         assert store.get("site-a", "1").title == "Alpha Book"  # type: ignore[union-attr]
-        assert app._status_var.get() == t("Already in the follow list: {title}").format(
-            title="Alpha Book"
+        assert app._status_var.get() == (
+            t("Already in the follow list: {title}").format(title="Alpha Book")
+            + f" ({t('Follow')})"
         )
     finally:
         app._closing = True

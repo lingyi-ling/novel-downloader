@@ -180,7 +180,19 @@ schtasks /Delete /TN "NovelFollowCheck" /F
 
 ---
 
-### 4. Connect the Android client to the computer
+### 4. One-tap update checks in the desktop client
+
+When a scheduled task is too much setup, use the desktop client (`novel-desktop`) to check for updates by hand. The follow list is shared with `novel-cli follow` through the same `watchlist.json`, so entries added on either side show up in both.
+
+1. Start `novel-desktop`, select a book on the "Search" tab and press "Follow"; or press "Add" on the "Follow" tab and enter the site and book ID by hand (adding a title is recommended so the update check can search for the book).
+2. Press "Check updates" on the "Follow" tab; the desktop client searches each book for its latest chapter and refreshes the list.
+3. When new chapters are found, select the entries and press "Download selected" to queue them; with nothing selected, every followed book is queued. Progress and exported files show up on the "Download" and "History" tabs.
+
+> The "Music" tab also offers a "Check platforms" health check that probes every music platform at once.
+
+---
+
+### 5. Connect the Android client to the computer
 
 The Android client talks to the local REST API, so both devices must be on the same local network.
 
@@ -243,7 +255,7 @@ On the phone, open `http://192.168.1.23:8081/docs` in its browser. Seeing the AP
 
 ---
 
-### 5. Integrate the API into your own program
+### 6. Integrate the API into your own program
 
 The API lives in the optional `api` extra:
 
@@ -349,7 +361,7 @@ curl -s -X POST "$BASE/api/v1/watchlist/check" \
 
 ---
 
-### 6. FAQ
+### 7. FAQ
 
 **`novel-cli` is not recognized**
 

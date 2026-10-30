@@ -492,12 +492,12 @@ Search and download songs from multiple music platforms. This feature depends on
 pip install "novel-downloader[music]"
 ```
 
-`music` has three subcommands: `platforms`, `search`, and `download`.
+`music` has five subcommands: `platforms`, `search`, `download`, `export-m3u`, and `health`.
 
 **Synopsis**
 
 ```bash
-novel-cli music [-h] {platforms,search,download} ...
+novel-cli music [-h] {platforms,search,download,export-m3u,health} ...
 
 novel-cli music platforms
 
@@ -507,6 +507,11 @@ novel-cli music download [-h] [--keyword KEYWORD] [--platform KEY] [--limit N]
                          [--level {hires,lossless,exhigh,higher,standard}]
                          [--out DIR] [--pick N[,N|ID]] [--yes]
                          [KEYWORD]
+
+novel-cli music export-m3u [-h] --keyword KEYWORD [--platform KEY] [--limit N]
+                           [--out FILE]
+
+novel-cli music health [-h] [--platform KEY] [--keyword KEYWORD]
 ```
 
 **General Options**
@@ -547,6 +552,32 @@ Search first, then select and download songs:
 * `--yes`: download every search result without prompting
 
 When neither `--pick` nor `--yes` is given and the terminal is interactive, a paged selector appears (enter numbers, `a` for all, `n` next, `p` previous, Enter to cancel). In a non-interactive environment you must pass `--pick` or `--yes`.
+
+**export-m3u**
+
+Export search results as an M3U playlist without downloading any audio:
+
+* `--keyword KEYWORD, -k KEYWORD` (required): keyword used to search for the songs to add
+* `--out FILE`: playlist path, defaults to `<output directory>/<keyword>.m3u8`
+
+```bash
+novel-cli music export-m3u --keyword "keyword" --platform netease --limit 10
+```
+
+**health**
+
+Run one bounded search per platform (1 result is enough) to check whether it can be reached; useful for troubleshooting network or platform problems. A search that succeeds but returns zero results still counts as healthy (for example, an auth-gated platform without configured credentials):
+
+* `--platform KEY`: check only the given platform; omit it to check every platform
+* `--keyword KEYWORD`: keyword used for the connectivity probe, defaults to `test`
+
+```bash
+# Check every platform
+novel-cli music health
+
+# Check NetEase only
+novel-cli music health --platform netease
+```
 
 **Examples**
 

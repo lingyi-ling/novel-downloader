@@ -123,6 +123,23 @@ class WatchlistApiTest {
     }
 
     @Test
+    fun addWatchSurfacesTheServerDetailOnValidationError() = runBlocking {
+        server.enqueue(json("""{"detail":"Request validation failed: site: Field required"}""", 422))
+        Api.configure(baseUrl(), null)
+
+        val result = Api.call {
+            Api.service().addWatch(WatchlistAddRequest(site = "", book_id = "8_8187"))
+        }
+
+        assertTrue(result.isFailure)
+        assertEquals(
+            "Request validation failed: site: Field required",
+            result.exceptionOrNull()?.message,
+        )
+        assertEquals("POST", server.takeRequest().method)
+    }
+
+    @Test
     fun removeWatchUsesDeleteAndParsesOk() = runBlocking {
         server.enqueue(json("""{"ok":true}"""))
         Api.configure(baseUrl(), null)

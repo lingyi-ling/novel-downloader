@@ -34,6 +34,10 @@
     <string name="search_no_results">No results found</string>
     <string name="search_task_added">Added to the download queue</string>
     <string name="search_meta">%1$s · %2$s · %3$s</string>
+    <string name="search_follow_add">Follow updates</string>
+    <string name="search_follow_in_progress">Following…</string>
+    <string name="search_follow_in_list">Already in the follow list</string>
+    <string name="search_follow_added">Added to follow updates</string>
 
     <string name="tasks_running">Running</string>
     <string name="tasks_pending">Queued</string>
@@ -76,6 +80,9 @@
     <string name="music_no_selection">Select songs first</string>
     <string name="music_vip">VIP</string>
     <string name="music_unknown_artist">Unknown artist</string>
+    <string name="music_health_checking">Checking platform connectivity…</string>
+    <string name="music_health_ok">Platform reachable in %1$d ms</string>
+    <string name="music_health_failed">Platform unavailable: %1$s</string>
 
     <string name="follow_add">Add</string>
     <string name="follow_add_dialog_title">Follow a book</string>

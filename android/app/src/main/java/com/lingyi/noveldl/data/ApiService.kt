@@ -5,6 +5,7 @@ import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Path
+import retrofit2.http.Query
 
 interface ApiService {
     @GET("api/v1/health")
@@ -39,6 +40,13 @@ interface ApiService {
 
     @GET("api/v1/music/jobs/{job_id}")
     suspend fun musicJob(@Path("job_id") jobId: String): MusicJob
+
+    /** Per-platform connectivity probe; returns a one-element list for a known [platform]. */
+    @GET("api/v1/music/health")
+    suspend fun musicHealth(
+        @Query("platform") platform: String,
+        @Query("timeout") timeout: Int,
+    ): List<MusicHealthItem>
 
     @GET("api/v1/watchlist")
     suspend fun watchlist(): WatchlistResponse

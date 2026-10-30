@@ -127,6 +127,15 @@ data class MusicSearchResponse(
     val tracks: List<MusicTrack> = emptyList(),
 )
 
+/** One probe of `GET /api/v1/music/health` (per-platform connectivity). */
+@Serializable
+data class MusicHealthItem(
+    val platform: String = "",
+    val ok: Boolean = false,
+    val elapsed_ms: Long = 0,
+    val error: String = "",
+)
+
 @Serializable
 data class MusicJobRequest(
     val platform: String,

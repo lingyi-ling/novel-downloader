@@ -37,6 +37,10 @@
     <string name="search_no_results">没有找到结果</string>
     <string name="search_task_added">已加入下载队列</string>
     <string name="search_meta">%1$s · %2$s · %3$s</string>
+    <string name="search_follow_add">追更</string>
+    <string name="search_follow_in_progress">正在加入追更…</string>
+    <string name="search_follow_in_list">已在追更列表中</string>
+    <string name="search_follow_added">已加入追更</string>
 
     <!-- 任务 -->
     <string name="tasks_running">进行中</string>
@@ -83,6 +87,9 @@
     <string name="music_no_selection">请先选择歌曲</string>
     <string name="music_vip">VIP</string>
     <string name="music_unknown_artist">未知歌手</string>
+    <string name="music_health_checking">正在检查平台连通性…</string>
+    <string name="music_health_ok">平台可用，耗时 %1$d ms</string>
+    <string name="music_health_failed">平台不可用：%1$s</string>
 
     <!-- 追更 -->
     <string name="follow_add">添加</string>

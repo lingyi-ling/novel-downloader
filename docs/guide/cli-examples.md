@@ -492,12 +492,12 @@ novel-cli login --list
 pip install "novel-downloader[music]"
 ```
 
-`music` 包含三个子命令: `platforms`、`search`、`download`。
+`music` 包含五个子命令: `platforms`、`search`、`download`、`export-m3u`、`health`。
 
 **Synopsis**
 
 ```bash
-novel-cli music [-h] {platforms,search,download} ...
+novel-cli music [-h] {platforms,search,download,export-m3u,health} ...
 
 novel-cli music platforms
 
@@ -507,6 +507,11 @@ novel-cli music download [-h] [--keyword KEYWORD] [--platform KEY] [--limit N]
                          [--level {hires,lossless,exhigh,higher,standard}]
                          [--out DIR] [--pick N[,N|ID]] [--yes]
                          [KEYWORD]
+
+novel-cli music export-m3u [-h] --keyword KEYWORD [--platform KEY] [--limit N]
+                           [--out FILE]
+
+novel-cli music health [-h] [--platform KEY] [--keyword KEYWORD]
 ```
 
 **General Options**
@@ -547,6 +552,32 @@ novel-cli music search "关键词" --json
 * `--yes`: 无需确认, 直接下载全部搜索结果
 
 未指定 `--pick` 或 `--yes` 且处于交互式终端时, 会进入分页选择界面 (输入编号、`a` 全选、`n` 下一页、`p` 上一页, 回车取消)。非交互式环境下必须显式提供 `--pick` 或 `--yes`。
+
+**export-m3u**
+
+把搜索结果导出为 M3U 歌单, 不下载音频:
+
+* `--keyword KEYWORD, -k KEYWORD` (必填): 用于搜索待添加歌曲的关键词
+* `--out FILE`: 歌单路径, 默认 `<输出目录>/<关键词>.m3u8`
+
+```bash
+novel-cli music export-m3u --keyword "关键词" --platform netease --limit 10
+```
+
+**health**
+
+逐个平台执行一次受限搜索 (只取 1 条结果), 检查平台是否可正常连通; 用于排查网络或平台故障。搜索成功但结果为空也算连通 (如未配置凭据的鉴权型平台):
+
+* `--platform KEY`: 只检查指定平台, 省略时检查全部平台
+* `--keyword KEYWORD`: 连通性探测使用的关键词, 默认 `test`
+
+```bash
+# 检查全部平台
+novel-cli music health
+
+# 只检查网易云
+novel-cli music health --platform netease
+```
 
 **Examples**
 

@@ -186,11 +186,19 @@ The API reuses the same service layer as the CLI and exposes endpoints for site 
 
 ### Desktop Client
 
-`novel-desktop` provides a Tkinter graphical interface with search, the download queue, export history, and music downloads:
+`novel-desktop` provides a Tkinter graphical interface:
 
 ```bash
 novel-desktop
 ```
+
+| Tab | Features |
+| --- | --- |
+| Search | multi-site aggregated search; add results to the download queue or follow them with one tap |
+| Download | task queue with live progress, retry / cancel, open exported files and their folder |
+| History | browse exported files, open the containing folder |
+| Music | multi-platform search and download, platform health check (requires the `music` extra) |
+| Follow | maintain the follow list, check for new chapters, queue new chapters for download |
 
 ### Music Download (CLI)
 
