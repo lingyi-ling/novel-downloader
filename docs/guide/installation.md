@@ -57,7 +57,7 @@ pip install .
 | --- | --- | --- |
 | `api` | `pip install "novel-downloader[api]"` | 本地 REST API (FastAPI + uvicorn) |
 | `music` | `pip install "novel-downloader[music]"` | 音乐下载 (mutagen、pathvalidate、qrcode、websocket-client 等) |
-| `music-desktop` | `pip install "novel-downloader[music-desktop]"` | 音乐下载及桌面界面附加依赖 (customtkinter) |
+| `music-desktop` | `pip install "novel-downloader[music-desktop]"` | 音乐下载及传统桌面 GUI 附加依赖 (customtkinter, 仅旧版音乐桌面工具需要) |
 | `image-utils` | `pip install "novel-downloader[image-utils]"` | 图片/字体处理 (pillow、numpy、fonttools、brotli) |
 | `httpx` | `pip install "novel-downloader[httpx]"` | httpx HTTP/2 后端 |
 | `curl_cffi` | `pip install "novel-downloader[curl_cffi]"` | curl_cffi 后端与浏览器仿真 |
@@ -104,11 +104,13 @@ novel-cli music search "关键词" --platform netease
 novel-cli music download "关键词" --pick 1
 ```
 
-如需额外的桌面界面依赖, 可安装 `music-desktop`:
+如需运行旧版独立音乐桌面工具 (`legacy/music_desktop`), 可安装 `music-desktop`:
 
 ```bash
 pip install "novel-downloader[music-desktop]"
 ```
+
+> 主桌面客户端 `novel-desktop` 基于 pywebview, 依赖已随基础安装携带, 无需额外安装。
 
 ### 可插拔式 HTTP 后端 (可选)
 

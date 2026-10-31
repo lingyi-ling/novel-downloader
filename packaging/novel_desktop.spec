@@ -17,9 +17,9 @@ Differences from ``novel_cli.spec``:
   PyInstaller then also installs its windowed traceback handler, which is why
   ``disable_windowed_traceback`` stays ``False``: a crash during start-up is
   reported in a dialog instead of vanishing.
-* Tkinter lives in the standard library and is imported lazily by ``ui.py``,
-  so every widget module is listed as a hidden import and PyInstaller's own
-  ``_tkinter`` hook then pulls in the Tcl/Tk data files and DLLs.
+* The UI renders through pywebview (Edge WebView2 on Windows).  The community
+  ``hook-webview`` carries the WebView2Loader binaries, and the dynamically
+  imported platform backends are listed as hidden imports below.
 
 The bundle stays onedir for the same reason as the CLI: the data-heavy
 resources (locales, site plugins, vendored musicdl) are read from disk at
@@ -53,23 +53,14 @@ try:  # noqa: SIM105 - the fallback is the point
 except Exception:  # noqa: BLE001 - fall back to the source tree layout
     ICON_PATH = SRC_DIR / "novel_downloader" / "resources" / "icons" / "app.ico"
 
-#: Standard-library Tk modules.  ``tkinter`` is imported from ``ui.py`` via a
-#: deferred ``from .ui import run_app`` in ``main``; listing the widget modules
-#: explicitly guarantees the extension module ``_tkinter`` (and therefore
-#: PyInstaller's ``hook-_tkinter``, which ships the Tcl/Tk runtime) is collected
-#: even if a future refactor hides the import from the analyser.
-TKINTER_MODULES: tuple[str, ...] = (
-    "tkinter",
-    "tkinter.colorchooser",
-    "tkinter.commondialog",
-    "tkinter.constants",
-    "tkinter.dialog",
-    "tkinter.filedialog",
-    "tkinter.font",
-    "tkinter.messagebox",
-    "tkinter.scrolledtext",
-    "tkinter.simpledialog",
-    "tkinter.ttk",
+#: pywebview platform backends.  The front end renders through Edge WebView2
+#: (the ``webview`` hook from pyinstaller-hooks-contrib carries the loader
+#: DLLs); the platform modules are imported dynamically at runtime, so they
+#: are listed explicitly to guarantee the Windows backend ships.
+WEBVIEW_MODULES: tuple[str, ...] = (
+    "webview",
+    "webview.platforms.winforms",
+    "webview.platforms.edgechromium",
 )
 
 datas, hiddenimports = collect_common(SRC_DIR)
@@ -89,7 +80,7 @@ for entry in (*datas, *collect_data_files("novel_downloader")):
     _merged_datas.append(entry)
 datas = _merged_datas
 
-hiddenimports = sorted({*hiddenimports, *TKINTER_MODULES})
+hiddenimports = sorted({*hiddenimports, *WEBVIEW_MODULES})
 
 a = Analysis(
     [str(SPEC_DIR / "desktop_entry.py")],

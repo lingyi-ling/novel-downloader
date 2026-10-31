@@ -60,7 +60,7 @@ Dependencies flow in one direction: `apps/* → plugins/* → infra/* / libs/*`.
 | --- | --- | --- | --- |
 | CLI | `apps/cli/main.py` | `novel-cli` | `argparse` subcommands: `download` / `search` / `follow` / `export` / `login` / `config` / `clean` / `storage` / `doctor` / `sources` / `music` |
 | REST API | `apps/api/main.py` | `novel-api` | FastAPI + uvicorn, default `127.0.0.1:8081`, route prefix `/api/v1` |
-| Desktop client | `apps/desktop/main.py` | `novel-desktop` | Tkinter UI; `AsyncEngine` in `apps/desktop/engine.py` owns a background asyncio event loop |
+| Desktop client | `apps/desktop/main.py` | `novel-desktop` | pywebview window hosting a single-file HTML front end (`web_assets.py`) driven by `webview_app.ApiBridge`; `AsyncEngine` in `apps/desktop/engine.py` owns a background asyncio event loop |
 | Android | `android/app/src/main/java/com/lingyi/noveldl/` | Gradle build | Calls the local API over HTTP; no direct Python dependency |
 
 The command entry points are declared under `[project.scripts]` in `pyproject.toml`.

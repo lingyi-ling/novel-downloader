@@ -69,6 +69,10 @@ EXCLUDES: tuple[str, ...] = (
     # Removed desktop/web UI (the API no longer serves a web frontend)
     "nicegui",
     "customtkinter",
+    # The pywebview client renders with Edge WebView2, not Tk; the only
+    # remaining importer is the vendored musicdl (lazy, fallback-only paths).
+    "tkinter",
+    "_tkinter",
     # Notebook / scientific stacks not used by the downloader runtime
     "matplotlib",
     "pandas",

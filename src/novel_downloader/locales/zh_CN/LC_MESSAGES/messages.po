@@ -55,10 +55,6 @@ msgstr "在此粘贴您的登录 Cookies"
 msgid "Copy the cookies from your browser's developer tools while logged in."
 msgstr "请在已登录状态下从浏览器开发者工具复制 Cookies"
 
-#: src/novel_downloader/apps/browser/main.py:339
-msgid "pywebview is required for browser-assisted search. Install the 'desktop' extra: pip install 'novel-downloader[desktop]'"
-msgstr "浏览器辅助搜索需要 pywebview。请安装『desktop』扩展依赖：pip install 'novel-downloader[desktop]'"
-
 #: src/novel_downloader/apps/browser/main.py:361
 #: src/novel_downloader/apps/browser/main.py:735
 #, python-brace-format
@@ -2105,10 +2101,6 @@ msgstr "请在打开的窗口中完成登录。"
 msgid "Login detected; session cookies saved to {path}"
 msgstr "已检测到登录，会话 Cookies 已保存至 {path}"
 
-#: src/novel_downloader/apps/login/main.py:655
-msgid "pywebview is required for the login window. Install the 'desktop' extra: pip install 'novel-downloader[desktop]'"
-msgstr "登录窗口需要 pywebview。请安装『desktop』扩展依赖：pip install 'novel-downloader[desktop]'"
-
 #: src/novel_downloader/apps/login/main.py:665
 #, python-brace-format
 msgid "Opening a login window for {site}..."
@@ -2488,4 +2480,10 @@ msgstr "{dir} 中共 {n} 个文件"
 #, python-brace-format
 msgid "{n} results in {s}s"
 msgstr "{s} 秒内找到 {n} 条结果"
+
+msgid "pywebview is required for browser-assisted search. Reinstall the package: pip install -U novel-downloader"
+msgstr "浏览器辅助搜索需要 pywebview。请重新安装本包：pip install -U novel-downloader"
+
+msgid "pywebview is required for the login window. Reinstall the package: pip install -U novel-downloader"
+msgstr "登录窗口需要 pywebview。请重新安装本包：pip install -U novel-downloader"
 

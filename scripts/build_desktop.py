@@ -12,7 +12,7 @@ The spec lives in ``packaging/novel_desktop.spec``.  This wrapper checks the
 toolchain, optionally removes stale output, invokes PyInstaller and then
 verifies that the bundle really is a windowed onedir build carrying the runtime
 data files (locales, builtin rules, resources), the dynamically imported site
-plugins and the Tcl/Tk runtime that ``tkinter`` needs.
+plugins and the pywebview runtime (WebView2 loader binaries) the window needs.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ WORK_NAME = "novel_desktop"
 
 # Modules that must be importable in the build environment.  (module, purpose)
 CORE_MODULES: tuple[tuple[str, str], ...] = (
-    ("tkinter", "desktop window (standard library, needs a Tcl/Tk install)"),
+    ("webview", "desktop window (pywebview, renders via Edge WebView2)"),
     ("rich", "logging/CLI rendering"),
     ("requests", "HTTP client"),
     ("aiohttp", "async HTTP client"),
@@ -185,24 +185,30 @@ def _count_site_dirs(sites_dir: Path) -> int:
     return sum(1 for item in sites_dir.iterdir() if item.is_dir())
 
 
-def _has_tkinter_modules(internal: Path, modules: list[str]) -> bool:
+def _has_webview_modules(internal: Path, modules: list[str]) -> bool:
     """
-    Whether the frozen bundle carries the pure-Python ``tkinter`` package.
+    Whether the frozen bundle carries the pywebview package and backends.
 
-    Depending on the PyInstaller version the package ends up in the PYZ
-    archive, in ``base_library.zip`` or as a directory next to the executable,
-    so all three places are accepted.
+    Depending on the PyInstaller version modules end up in the PYZ archive,
+    in ``base_library.zip`` or as a directory next to the executable, so all
+    three places are accepted.
     """
-    if "tkinter" in modules and "tkinter.ttk" in modules:
+    needed = ("webview", "webview.platforms.edgechromium")
+    if all(name in modules for name in needed):
         return True
-    if (internal / "tkinter").is_dir():
+    webview_dir = internal / "webview"
+    if webview_dir.is_dir() and (webview_dir / "platforms").is_dir():
         return True
     base_library = internal / "base_library.zip"
     if base_library.is_file():
         import zipfile
 
         with zipfile.ZipFile(base_library) as archive:
-            return any(name.startswith("tkinter/") for name in archive.namelist())
+            names = archive.namelist()
+            return all(
+                any(name == f"{need.replace('.', '/')}.pyc" for name in names)
+                for need in needed
+            )
     return False
 
 
@@ -327,23 +333,18 @@ def _validate(root: Path, *, smoke_seconds: float) -> BuildResult:
         result.site_dirs >= MIN_SITE_SEARCHERS,
     )
 
-    # Tkinter: the extension module plus the Tcl/Tk data directories.  These
-    # are collected by PyInstaller's ``hook-_tkinter``; their presence is what
+    # pywebview: the WebView2 loader binaries collected by the community
+    # ``hook-webview``, plus the webview Python modules (which may live in
+    # the PYZ archive or as a package directory).  Their presence is what
     # proves the window can actually be created in the frozen app.
-    tkinter_ext = internal / "_tkinter.pyd"
-    tcl_data = internal / "_tcl_data"
-    tk_data = internal / "_tk_data"
-    legacy_tcl = internal / "tcl"
-    legacy_tk = internal / "tk"
-    result.check("_tkinter extension module", tkinter_ext.is_file())
+    loader_dll = internal / "WebView2Loader.dll"
     result.check(
-        "Tcl/Tk runtime data",
-        (tcl_data.is_dir() or legacy_tcl.is_dir())
-        and (tk_data.is_dir() or legacy_tk.is_dir()),
+        "WebView2 loader binaries",
+        loader_dll.is_file() or any(internal.glob("**/WebView2Loader*.dll")),
     )
 
     modules = _read_pyz_modules(work_dir)
-    result.check("tkinter Python modules", _has_tkinter_modules(internal, modules))
+    result.check("webview Python modules", _has_webview_modules(internal, modules))
     result.site_modules = sum(
         1 for mod in modules if mod.startswith("novel_downloader.plugins.sites.")
     )

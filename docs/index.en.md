@@ -186,7 +186,7 @@ The API reuses the same service layer as the CLI and exposes endpoints for site 
 
 ### Desktop Client
 
-`novel-desktop` provides a Tkinter graphical interface:
+`novel-desktop` provides a graphical interface (rendered with pywebview):
 
 ```bash
 novel-desktop

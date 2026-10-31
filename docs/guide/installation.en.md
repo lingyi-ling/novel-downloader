@@ -57,7 +57,7 @@ pip install .
 | --- | --- | --- |
 | `api` | `pip install "novel-downloader[api]"` | Local REST API (FastAPI + uvicorn) |
 | `music` | `pip install "novel-downloader[music]"` | Music downloads (mutagen, pathvalidate, qrcode, websocket-client, etc.) |
-| `music-desktop` | `pip install "novel-downloader[music-desktop]"` | Music downloads plus desktop UI dependencies (customtkinter) |
+| `music-desktop` | `pip install "novel-downloader[music-desktop]"` | Music downloads plus the legacy desktop GUI dependencies (customtkinter, only for the old standalone music tool) |
 | `image-utils` | `pip install "novel-downloader[image-utils]"` | Image/font processing (pillow, numpy, fonttools, brotli) |
 | `httpx` | `pip install "novel-downloader[httpx]"` | httpx HTTP/2 backend |
 | `curl_cffi` | `pip install "novel-downloader[curl_cffi]"` | curl_cffi backend and browser impersonation |
@@ -104,11 +104,13 @@ novel-cli music search "keyword" --platform netease
 novel-cli music download "keyword" --pick 1
 ```
 
-Install `music-desktop` if you also need the desktop UI dependencies:
+Install `music-desktop` to run the legacy standalone music desktop tool (`legacy/music_desktop`):
 
 ```bash
 pip install "novel-downloader[music-desktop]"
 ```
+
+> The main desktop client `novel-desktop` is built on pywebview; its dependency ships with the base install and needs nothing extra.
 
 ### Pluggable HTTP Backend (Optional)
 

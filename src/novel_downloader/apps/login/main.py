@@ -653,7 +653,7 @@ def run_login_result(
             emit,
             t(
                 "pywebview is required for the login window. "
-                "Install the 'desktop' extra: pip install 'novel-downloader[desktop]'"
+                "Reinstall the package: pip install -U novel-downloader"
             ),
         )
         return LoginOutcome(

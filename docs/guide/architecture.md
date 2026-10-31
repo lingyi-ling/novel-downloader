@@ -60,7 +60,7 @@
 | --- | --- | --- | --- |
 | CLI | `apps/cli/main.py` | `novel-cli` | `argparse` 子命令：`download` / `search` / `follow` / `export` / `login` / `config` / `clean` / `storage` / `doctor` / `sources` / `music` |
 | REST API | `apps/api/main.py` | `novel-api` | FastAPI + uvicorn，默认 `127.0.0.1:8081`，路由前缀 `/api/v1` |
-| 桌面客户端 | `apps/desktop/main.py` | `novel-desktop` | Tkinter UI；`apps/desktop/engine.py` 中的 `AsyncEngine` 持有后台 asyncio 事件循环 |
+| 桌面客户端 | `apps/desktop/main.py` | `novel-desktop` | pywebview 窗口承载单文件 HTML 前端（`web_assets.py`），`webview_app.ApiBridge` 暴露 JSON 方法；`apps/desktop/engine.py` 中的 `AsyncEngine` 持有后台 asyncio 事件循环 |
 | Android | `android/app/src/main/java/com/lingyi/noveldl/` | Gradle 构建 | 通过 HTTP 调用本地 API，不直接依赖 Python 代码 |
 
 命令入口在 `pyproject.toml` 的 `[project.scripts]` 中声明。

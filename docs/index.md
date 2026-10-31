@@ -186,7 +186,7 @@ API 复用与 CLI 相同的服务层, 提供站点列表、聚合搜索、下载
 
 ### 桌面客户端
 
-`novel-desktop` 提供 Tkinter 图形界面:
+`novel-desktop` 提供图形界面（pywebview 渲染）:
 
 ```bash
 novel-desktop

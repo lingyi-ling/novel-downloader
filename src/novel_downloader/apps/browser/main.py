@@ -337,7 +337,7 @@ def capture_search_json(
         emit(
             t(
                 "pywebview is required for browser-assisted search. "
-                "Install the 'desktop' extra: pip install 'novel-downloader[desktop]'"
+                "Reinstall the package: pip install -U novel-downloader"
             )
         )
         return None
@@ -635,8 +635,8 @@ def search_via_browser_result(
 
         if not is_browser_available():
             message = (
-                "pywebview is not installed; install the 'desktop' extra: "
-                "pip install 'novel-downloader[desktop]'"
+                "pywebview is not installed; reinstall the package: "
+                "pip install -U novel-downloader"
             )
             logger.error(
                 "browser-assisted search for %s is unavailable: %s", site, message
@@ -725,8 +725,8 @@ def run_browser_search_detailed(
 
     if not is_browser_available():
         message = (
-            "pywebview is not installed; install the 'desktop' extra: "
-            "pip install 'novel-downloader[desktop]'"
+            "pywebview is not installed; reinstall the package: "
+            "pip install -U novel-downloader"
         )
         logger.error("browser-assisted search for %s is unavailable: %s", site, message)
         emit(message)
