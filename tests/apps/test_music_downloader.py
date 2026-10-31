@@ -9,11 +9,17 @@ Offline tests for the music download helpers:
 * ``save_lyric`` sidecar files (``.lrc`` / ``.zh.lrc``)
 * tag/cover writing degradation (synthetic MP3 bytes, no network)
 * ``download_track`` orchestration with fakes (no real downloads)
+* ``_download_file`` resume branches (206/200/416, content-type guard)
+* destination sanitization: crafted ext / id must stay inside ``out_dir``
+* ``download_many``: duplicate tracks never write the same file concurrently
+  and the throttled ``on_tick`` callback never runs from two threads at once
 """
 
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -419,3 +425,337 @@ def test_download_track_skip_remembers_existing_path(
 
     assert result.status == "skip"
     assert track.path == str(existing)
+
+
+# ---------------------------------------------------------------------------
+# _download_file: resume branches (Range -> 206 / 200 / 416)
+# ---------------------------------------------------------------------------
+
+
+class _StreamResponse:
+    """Minimal streaming ``requests.Response`` double."""
+
+    def __init__(
+        self,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        chunks: tuple[bytes, ...] = (b"data",),
+    ) -> None:
+        self.status_code = status_code
+        self.headers = dict(headers or {})
+        self._chunks = list(chunks)
+        self.closed = False
+
+    def iter_content(self, chunk_size: int | None = None):
+        return iter(self._chunks)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _install_fake_get(
+    monkeypatch: pytest.MonkeyPatch, responses: list[_StreamResponse]
+) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+    queue = list(responses)
+
+    def fake_get(url: str, **kwargs: object) -> _StreamResponse:
+        calls.append({"url": url, **kwargs})
+        assert queue, f"unexpected request: {url}"
+        return queue.pop(0)
+
+    monkeypatch.setattr(downloader.requests, "get", fake_get)
+    return calls
+
+
+def test_download_file_resumes_via_206(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "song.mp3"
+    part = tmp_path / "song.mp3.part"
+    part.write_bytes(b"A" * 512)  # bytes already downloaded earlier
+    body = b"B" * 512
+    response = _StreamResponse(
+        status_code=206,
+        headers={
+            "Content-Range": "bytes 512-1023/1024",
+            "Content-Length": "512",
+            "Content-Type": "audio/mpeg",
+        },
+        chunks=(body,),
+    )
+    calls = _install_fake_get(monkeypatch, [response])
+
+    size, resumed = downloader._download_file("http://fake.test/a.mp3", str(dest))
+
+    assert (size, resumed) == (1024, 512)
+    assert dest.read_bytes() == b"A" * 512 + b"B" * 512
+    assert not part.exists()
+    # The Range header asked for exactly the missing bytes.
+    sent = calls[0]["headers"]
+    assert isinstance(sent, dict) and sent.get("Range") == "bytes=512-"
+
+
+def test_download_file_truncates_when_server_ignores_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "song.mp3"
+    part = tmp_path / "song.mp3.part"
+    part.write_bytes(b"A" * 512)  # stale partial, server answers 200
+    body = b"B" * 1024
+    response = _StreamResponse(
+        status_code=200,
+        headers={"Content-Length": "1024", "Content-Type": "audio/mpeg"},
+        chunks=(body,),
+    )
+    _install_fake_get(monkeypatch, [response])
+
+    size, resumed = downloader._download_file("http://fake.test/a.mp3", str(dest))
+
+    assert (size, resumed) == (1024, 0)
+    # The old partial was discarded, not appended to.
+    assert dest.read_bytes() == body
+    assert not part.exists()
+
+
+def test_download_file_restarts_when_206_serves_unrequested_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 206 whose Content-Range start differs from the request is untrusted.
+
+    Appending a full-body 206 onto the stale ``.part`` would corrupt the file
+    (or at best fail the size check and burn a retry), so the partial must be
+    rewritten from scratch instead.
+    """
+    dest = tmp_path / "song.mp3"
+    part = tmp_path / "song.mp3.part"
+    part.write_bytes(b"A" * 512)
+    body = b"B" * 1024
+    response = _StreamResponse(
+        status_code=206,
+        headers={
+            "Content-Range": "bytes 0-1023/1024",  # server ignored bytes=512-
+            "Content-Length": "1024",
+            "Content-Type": "audio/mpeg",
+        },
+        chunks=(body[:512], body[512:]),
+    )
+    calls = _install_fake_get(monkeypatch, [response])
+
+    size, resumed = downloader._download_file("http://fake.test/a.mp3", str(dest))
+
+    assert (size, resumed) == (1024, 0)
+    assert dest.read_bytes() == body
+    assert not part.exists()
+    sent = calls[0]["headers"]
+    assert isinstance(sent, dict) and sent.get("Range") == "bytes=512-"
+
+
+def test_download_file_discards_oversized_part_on_416(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "song.mp3"
+    part = tmp_path / "song.mp3.part"
+    part.write_bytes(b"A" * 2000)  # larger than the real remote file
+    body = b"C" * 100
+    too_big = _StreamResponse(status_code=416)
+    fresh = _StreamResponse(
+        status_code=200,
+        headers={"Content-Length": "100", "Content-Type": "audio/mpeg"},
+        chunks=(body,),
+    )
+    _install_fake_get(monkeypatch, [too_big, fresh])
+
+    size, resumed = downloader._download_file("http://fake.test/a.mp3", str(dest))
+
+    assert (size, resumed) == (100, 0)
+    assert dest.read_bytes() == body
+    assert not part.exists()
+    assert too_big.closed
+
+
+def test_download_file_rejects_non_audio_content_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "song.mp3"
+    response = _StreamResponse(
+        status_code=200,
+        headers={"Content-Type": "text/html; charset=utf-8"},
+        chunks=(b"<html>expired link</html>",),
+    )
+    _install_fake_get(monkeypatch, [response])
+
+    with pytest.raises(OSError, match="不是音频"):
+        downloader._download_file("http://fake.test/a.mp3", str(dest))
+
+    assert not dest.exists()
+    assert not (tmp_path / "song.mp3.part").exists()
+
+
+# ---------------------------------------------------------------------------
+# destination sanitization (path traversal)
+# ---------------------------------------------------------------------------
+
+
+def _quick_opts(tmp_path: Path) -> DownloadOptions:
+    return DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=False,
+        skip_existing=False,
+        retries=0,
+    )
+
+
+def test_download_track_ext_cannot_escape_out_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(downloader, "_download_file", _fake_download)
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+
+    class EvilExtProvider(_FakeProvider):
+        def resolve(self, track: Track, level: str | None = None) -> ResolveResult:
+            # A crafted/hijacked platform response embeds path separators and
+            # ".." segments into the extension.
+            return ResolveResult(url="http://fake.test/audio", ext="mp3/../../pwned")
+
+    track = Track(provider="fake", id="1", name="Song", artists="Artist", album="Album")
+
+    result = downloader.download_track(EvilExtProvider(), track, _quick_opts(tmp_path))
+
+    assert result.status == "ok"
+    # Whatever the provider claims, the file must stay inside out_dir.
+    assert Path(result.path).resolve().is_relative_to(tmp_path.resolve())
+    assert result.path.endswith(".mp3")
+    assert (tmp_path / "Song - Artist.mp3").is_file()
+
+
+def test_download_track_id_suffix_cannot_escape_out_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mutagen")
+    # An existing file with a different title triggers the "[id]" fallback name,
+    # which used to interpolate the raw track id into the path.
+    existing = tmp_path / "Song - Artist.mp3"
+    existing.write_bytes(_mp3_bytes())
+    downloader._write_tags(
+        str(existing), Track(name="Different Song", artists="Artist", album="Album")
+    )
+
+    monkeypatch.setattr(downloader, "_download_file", _fake_download)
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+
+    track = Track(
+        provider="fake",
+        id="../../../../evil",
+        name="Song",
+        artists="Artist",
+        album="Album",
+    )
+
+    result = downloader.download_track(_FakeProvider(), track, _quick_opts(tmp_path))
+
+    assert result.status == "ok"
+    assert Path(result.path).resolve().is_relative_to(tmp_path.resolve())
+    assert (tmp_path / "Song - Artist.mp3").is_file()
+
+
+# ---------------------------------------------------------------------------
+# download_many: same-destination concurrency and tick throttling
+# ---------------------------------------------------------------------------
+
+
+def test_download_many_duplicate_tracks_never_write_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same track twice in one batch must not write one file from two threads."""
+    guard = threading.Lock()
+    state = {"active": 0}
+    overlaps: list[str] = []
+
+    def slow_fake_download(url, dest, **kwargs):
+        with guard:
+            state["active"] += 1
+            if state["active"] > 1:
+                overlaps.append(dest)
+        try:
+            time.sleep(0.05)  # widen the window; concurrent writers overlap here
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            Path(dest).write_bytes(_mp3_bytes() * 10)
+            return os.path.getsize(dest), 0
+        finally:
+            with guard:
+                state["active"] -= 1
+
+    monkeypatch.setattr(downloader, "_download_file", slow_fake_download)
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+
+    track = Track(provider="fake", id="1", name="Song", artists="Artist", album="Album")
+    opts = DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=False,
+        skip_existing=True,
+        retries=0,
+    )
+
+    ok, skip, fail, _, _ = downloader.download_many(
+        _FakeProvider(), [track, track], opts, workers=2
+    )
+
+    assert overlaps == []
+    assert fail == 0
+    # The duplicate must be recognized after the first write finished.
+    assert (ok, skip) == (1, 1)
+
+
+def test_download_many_tick_never_runs_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine promises a throttled on_tick; it must also be serialized."""
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+
+    def ticking_download(url, dest, progress=None, stop_flag=None, **kwargs):
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        for i in range(4):
+            if progress:
+                progress((i + 1) * 100, 400)
+            time.sleep(0.002)
+        Path(dest).write_bytes(_mp3_bytes())
+        return os.path.getsize(dest), 0
+
+    monkeypatch.setattr(downloader, "_download_file", ticking_download)
+
+    guard = threading.Lock()
+    inside = {"n": 0}
+    violations: list[float] = []
+
+    def on_tick(fraction: float, done: int) -> None:
+        with guard:
+            inside["n"] += 1
+            if inside["n"] > 1:
+                violations.append(fraction)
+        time.sleep(0.01)  # hold the callback so overlaps are observable
+        with guard:
+            inside["n"] -= 1
+
+    tracks = [
+        Track(provider="fake", id="1", name="One", artists="Artist", album="Album"),
+        Track(provider="fake", id="2", name="Two", artists="Artist", album="Album"),
+    ]
+
+    ok, skip, fail, _, _ = downloader.download_many(
+        _FakeProvider(),
+        tracks,
+        _quick_opts(tmp_path),
+        workers=2,
+        on_tick=on_tick,
+        min_interval=0,  # disable the interval so every tick reaches on_tick
+    )
+
+    assert (ok, fail) == (2, 0)
+    assert violations == []

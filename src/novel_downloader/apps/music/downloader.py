@@ -23,6 +23,7 @@ from .weapi import UA, LoginExpired
 
 _CHUNK = 64 * 1024
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+_CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)")
 
 
 @dataclass
@@ -70,6 +71,25 @@ def build_stem(track):
     return f"{sanitize(track.name)} - {sanitize(track.artists)}"
 
 
+def _safe_ext(ext, default="mp3"):
+    """扩展名只保留首个字母数字段。
+
+    ext 来自平台接口返回（外部数据），可能被塞进路径分隔符或 ``..``；
+    原样拼进文件名会越出输出目录，这里剥成纯 token。
+    """
+    m = re.search(r"[A-Za-z0-9]+", str(ext or ""))
+    return m.group(0) if m else default
+
+
+def _content_range_start(value):
+    """解析 Content-Range 的区间起点（``bytes 512-1023/1024`` -> 512）。
+
+    头缺失或畸形时返回 None，由调用方决定是否信任。
+    """
+    m = _CONTENT_RANGE.match((value or "").strip())
+    return int(m.group(1)) if m else None
+
+
 def _remove(path):
     if os.path.exists(path):
         with contextlib.suppress(OSError):
@@ -92,6 +112,8 @@ def _download_file(
     续传策略：
     - 已有 .part 就带 Range 请求，服务端回 206 表示支持，接续写入
     - 回 200 说明服务端不支持 Range，只能截断重下
+    - 回 206 但 Content-Range 起点和请求不符：内容从 0 开始就丢弃分片整段
+      重写；起点错位到别处则直接报错（不把可疑字节拼进分片）
     - 回 416 说明分片比服务端文件还大（不可信），丢弃重来
     - 下完校验总大小，不符视为失败，避免留下损坏文件
     """
@@ -121,6 +143,18 @@ def _download_file(
             start = 0  # 服务端不支持续传，截断重下
         if r.status_code not in (200, 206):
             raise OSError(f"HTTP {r.status_code}")
+
+        if start:
+            served = _content_range_start(r.headers.get("Content-Range"))
+            if served is not None and served != start:
+                if served:
+                    raise OSError(
+                        f"206 续传起点与请求不符"
+                        f"（请求 bytes={start}-，返回 bytes={served}-）"
+                    )
+                # 服务端无视 Range 却回了 206 且内容从 0 开始：
+                # 分片作废整段重写，避免把完整文件拼到旧分片后面
+                start = 0
 
         ctype = (r.headers.get("Content-Type") or "").lower()
         # 直链过期时 CDN 常返回 200 + 一段 HTML/JSON 错误页；
@@ -228,12 +262,46 @@ def _write_tags(path, track, cover_bytes=None):
         pass
 
 
+# ---------------------------------------------------------------------------
+# 同一目标文件的串行写
+# ---------------------------------------------------------------------------
+
+_dest_locks: dict = {}
+_dest_locks_guard = threading.Lock()
+
+
+@contextlib.contextmanager
+def _dest_lock(dest):
+    """持有期间独占 dest 的写入权（含 .part / 标签 / 歌词落盘）。
+
+    同一批次里出现重复曲目、或多首同名歌并发下载时，保证「检查存在 ->
+    下载 -> 改名 -> 写标签」对同一路径是串行的：后到者会看到前者写完的
+    文件（skip_existing 因此能生效），而不是两个线程交叉写同一个文件。
+    锁表带引用计数，空闲即清理，长会话不会无限增长。
+    """
+    key = os.path.normcase(os.path.abspath(dest))
+    with _dest_locks_guard:
+        entry = _dest_locks.setdefault(key, [threading.Lock(), 0])
+        entry[1] += 1
+    entry[0].acquire()
+    try:
+        yield
+    finally:
+        entry[0].release()
+        with _dest_locks_guard:
+            entry[1] -= 1
+            if entry[1] <= 0 and _dest_locks.get(key) is entry:
+                del _dest_locks[key]
+
+
 def download_track(
     provider, track, opts: DownloadOptions, progress=None, stop_flag=None
 ):
     """下载单首歌。返回 TrackResult。
 
     直链解析交给 provider（各平台逻辑不同），本函数只管落盘。
+    同一目标文件全程持有文件锁（见 _dest_lock），并发批次里的重复
+    曲目不会两个线程交叉写同一路径。
     """
     if not track.id:
         return TrackResult("fail", "缺少歌曲 id")
@@ -244,84 +312,93 @@ def download_track(
             "fail", rr.reason or "无法获取播放地址", retryable=rr.retryable
         )
     url = rr.url
-    ext = rr.ext or track.ext or "mp3"
+    ext = _safe_ext(rr.ext or track.ext)
     folder = build_dir(opts, track)
     stem = build_stem(track)
     dest = os.path.join(folder, f"{stem}.{ext}")
 
-    # 同名不同曲的情况：用 id 兜底避免互相覆盖
+    # 同名不同曲的情况：用 id 兜底避免互相覆盖。
+    # ext / id 都来自平台返回的外部数据，同样要清洗，防止拼出越界路径
     if os.path.exists(dest):
+        suffix = f"[{sanitize(track.id)}]"
         try:
             from mutagen import File as MutaFile
 
             other = MutaFile(dest, easy=True)
             if other and str(other.get("title", [""])[0]) != track.name:
-                dest = os.path.join(folder, f"{stem} [{track.id}].{ext}")
+                dest = os.path.join(folder, f"{stem} {suffix}.{ext}")
         except Exception:
-            dest = os.path.join(folder, f"{stem} [{track.id}].{ext}")
+            dest = os.path.join(folder, f"{stem} {suffix}.{ext}")
 
-    if opts.skip_existing and os.path.exists(dest) and os.path.getsize(dest) > 10240:
-        _remember_path(track, dest)
-        return TrackResult("skip", "已存在", path=dest, bytes_=os.path.getsize(dest))
-
-    os.makedirs(folder, exist_ok=True)
-
-    # 传输类失败自动重试；重试期间 .part 保留，因此顺带就是续传
-    size, resumed = 0, 0
-    attempts = max(0, opts.retries) + 1  # 0 次重试 = 只尝试 1 次
-    last_err = None
-    for i in range(attempts):
-        try:
-            size, resumed = _download_file(
-                url,
-                dest,
-                progress=progress,
-                stop_flag=stop_flag,
-                extra_headers=rr.http_headers,
+    with _dest_lock(dest):
+        if (
+            opts.skip_existing
+            and os.path.exists(dest)
+            and os.path.getsize(dest) > 10240
+        ):
+            _remember_path(track, dest)
+            return TrackResult(
+                "skip", "已存在", path=dest, bytes_=os.path.getsize(dest)
             )
-            last_err = None
-            break
-        except InterruptedError:
-            # 用户中途停止：保留 .part，下次可从这里续传
-            raise
-        except Exception as e:
-            last_err = e
-            if i < attempts - 1:
-                time.sleep(min(1.5 * (i + 1), 5))
-    if last_err is not None:
-        detail = f"{type(last_err).__name__} {str(last_err)[:50]}"
+
+        os.makedirs(folder, exist_ok=True)
+
+        # 传输类失败自动重试；重试期间 .part 保留，因此顺带就是续传
+        size, resumed = 0, 0
+        attempts = max(0, opts.retries) + 1  # 0 次重试 = 只尝试 1 次
+        last_err = None
+        for i in range(attempts):
+            try:
+                size, resumed = _download_file(
+                    url,
+                    dest,
+                    progress=progress,
+                    stop_flag=stop_flag,
+                    extra_headers=rr.http_headers,
+                )
+                last_err = None
+                break
+            except InterruptedError:
+                # 用户中途停止：保留 .part，下次可从这里续传
+                raise
+            except Exception as e:
+                last_err = e
+                if i < attempts - 1:
+                    time.sleep(min(1.5 * (i + 1), 5))
+        if last_err is not None:
+            detail = f"{type(last_err).__name__} {str(last_err)[:50]}"
+            return TrackResult(
+                "fail",
+                f"下载失败（试了 {attempts} 次）：{detail}",
+                retryable=True,
+            )
+
+        _remember_path(track, dest)
+
+        if opts.embed_tags or opts.embed_cover:
+            cover = None
+            if opts.embed_cover:
+                pic = track.cover_url
+                if pic:
+                    try:
+                        cover = requests.get(
+                            pic, headers={"User-Agent": UA}, timeout=20
+                        ).content
+                    except Exception:
+                        cover = None
+            _write_tags(dest, track, cover if opts.embed_cover else None)
+
+        if opts.save_lyric:
+            try:
+                lrc, tlrc = provider.lyric(track)
+                save_lyric(dest, lrc, tlrc)
+            except Exception:
+                # 歌词获取/落盘失败同样不影响音频
+                pass
+
         return TrackResult(
-            "fail",
-            f"下载失败（试了 {attempts} 次）：{detail}",
-            retryable=True,
+            "ok", path=dest, bytes_=size, level=rr.level, resumed_from=resumed
         )
-
-    _remember_path(track, dest)
-
-    if opts.embed_tags or opts.embed_cover:
-        cover = None
-        if opts.embed_cover:
-            pic = track.cover_url
-            if pic:
-                try:
-                    cover = requests.get(
-                        pic, headers={"User-Agent": UA}, timeout=20
-                    ).content
-                except Exception:
-                    cover = None
-        _write_tags(dest, track, cover if opts.embed_cover else None)
-
-    if opts.save_lyric:
-        try:
-            lrc, tlrc = provider.lyric(track)
-            save_lyric(dest, lrc, tlrc)
-        except Exception:
-            # 歌词获取/落盘失败同样不影响音频
-            pass
-
-    return TrackResult(
-        "ok", path=dest, bytes_=size, level=rr.level, resumed_from=resumed
-    )
 
 
 def download_many(
@@ -349,6 +426,7 @@ def download_many(
         return 0, 0, 0, [], []
 
     lock = threading.Lock()
+    tick_lock = threading.Lock()
     active = {}  # index -> 该文件完成比例
     c = {"done": 0, "ok": 0, "skip": 0, "fail": 0}
     failed_pairs, failed_tracks = [], []
@@ -359,11 +437,15 @@ def download_many(
         return cancelling["v"] or bool(should_stop and should_stop())
 
     def tick(force=False):
-        now = time.time()
-        if not force and now - last_tick["t"] < min_interval:
+        if on_tick is None:
             return
-        last_tick["t"] = now
-        if on_tick:
+        # on_tick 通常是界面回调：节流判断、快照读取与回调本身都串行化，
+        # 避免两个工作线程同时把进度刷给界面
+        with tick_lock:
+            now = time.time()
+            if not force and now - last_tick["t"] < min_interval:
+                return
+            last_tick["t"] = now
             with lock:
                 frac = (c["done"] + sum(active.values())) / total
                 done_n = c["done"]
