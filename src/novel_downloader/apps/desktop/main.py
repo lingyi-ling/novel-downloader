@@ -3,13 +3,13 @@
 novel_downloader.apps.desktop.main
 ----------------------------------
 
-Entry point for the native Tkinter desktop client.
+Entry point for the native CustomTkinter desktop client.
 
-Importing this module performs no UI work: ``tk.Tk()`` is created only when
-:func:`desktop_main` is called.  The application home directory is resolved
-and used as the working directory first, so the existing relative-path logic
-(``settings.toml`` and ``./downloads``) keeps working no matter where the
-program was launched from.
+Importing this module performs no UI work: the ``customtkinter.CTk()`` window
+is created only when :func:`desktop_main` is called.  The application home
+directory is resolved and used as the working directory first, so the existing
+relative-path logic (``settings.toml`` and ``./downloads``) keeps working no
+matter where the program was launched from.
 """
 
 from __future__ import annotations

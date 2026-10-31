@@ -3,16 +3,17 @@
 tests.apps.test_desktop_app
 ---------------------------
 
-Offline tests for the Tkinter desktop client.
+Offline tests for the CustomTkinter desktop client.
 
-The bulk of the suite covers :mod:`novel_downloader.apps.desktop.formatting`,
-which is deliberately free of Tk imports, plus the threading helpers in
+The bulk of the suite covers :mod:`novel_downloader.apps.desktop.formatting`
+and :mod:`novel_downloader.apps.desktop.theme`, which are deliberately free of
+Tk imports, plus the threading helpers in
 :mod:`novel_downloader.apps.desktop.engine` and the home-directory bootstrap in
-:mod:`novel_downloader.apps.desktop.main`.  A single guarded smoke test builds
-the real window when a display is available so that a missing widget or an
+:mod:`novel_downloader.apps.desktop.main`.  Guarded smoke tests build the real
+CustomTkinter window when a display is available so that a missing widget or an
 untranslated label is caught without requiring user interaction.
 
-No network access and no windowed interaction happen here: the Tk window is
+No network access and no windowed interaction happen here: the CTk window is
 created, inspected via ``update_idletasks`` (which does not run the ``after``
 poll callbacks) and destroyed again.
 """
@@ -41,6 +42,7 @@ from novel_downloader.apps.desktop import formatting as fmt
 from novel_downloader.apps.desktop import main as desktop_main
 from novel_downloader.apps.desktop import notifications as notif
 from novel_downloader.apps.desktop import preferences as prefs
+from novel_downloader.apps.desktop import theme as ui_palette
 from novel_downloader.apps.desktop import window_state as wstate
 from novel_downloader.apps.desktop.engine import AsyncEngine
 from novel_downloader.infra.i18n import t
@@ -1720,17 +1722,19 @@ def test_window_state_file_lives_in_the_music_data_dir(
 # ---------------------------------------------------------------------------
 # Window smoke test (guarded: needs a display)
 # ---------------------------------------------------------------------------
-def test_desktop_window_builds_all_tabs(
+def test_desktop_window_builds_all_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tk = pytest.importorskip("tkinter")
+    ctk = pytest.importorskip("customtkinter")
+    import tkinter as tk_mod
+
     monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
     # Keep the window-state file on the private data directory as well.
     monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path / "music"))
 
     try:
-        root = tk.Tk()
-    except tk.TclError as exc:  # pragma: no cover - headless environments
+        root = ctk.CTk()
+    except tk_mod.TclError as exc:  # pragma: no cover - headless environments
         pytest.skip(f"Tk display unavailable: {exc}")
 
     root.withdraw()
@@ -1743,38 +1747,42 @@ def test_desktop_window_builds_all_tabs(
         # ``after`` poll callback, so no engine thread is started here.
         root.update_idletasks()
 
-        assert app.search_tree is not None
-        assert app.task_tree is not None
-        assert app.history_tree is not None
+        # Sidebar navigation: five pages, five buttons.
+        assert len(app._nav_buttons) == 5
+        assert app.search_entry is not None
         assert app.search_button is not None
         assert app.search_last_button is not None
         assert app.search_follow_button is not None
         assert app.search_follow_button.cget("text") == t("Follow")
         # Nothing is selected yet, so the follow action is unavailable.
-        assert "disabled" in app.search_follow_button.state()
+        assert app.search_follow_button.cget("state") == "disabled"
+        assert app.task_list is not None
         assert app.retry_button is not None
         assert app.open_file_button is not None
         assert app.open_folder_button is not None
-        assert app.task_filter_combo is not None
+        assert app.task_filter_menu is not None
         assert app.task_keyword_entry is not None
         assert app._task_file_menu is not None
         assert str(app._status_var.get())  # status bar shows something
         assert root.title() == f"{t('Novel Downloader')} v{__version__}"
         assert str(app._env_var.get())  # API/data-directory information
         assert app.task_detail_var.get() == t("Select a task to view its details.")
-        assert "disabled" in app.retry_button.state()
-        assert "disabled" in app.open_file_button.state()
-        assert "disabled" in app.open_folder_button.state()
-        assert "disabled" in app.search_last_button.state()
-        assert app.task_filter_combo.get() == t("All")
+        assert app.retry_button.cget("state") == "disabled"
+        assert app.open_file_button.cget("state") == "disabled"
+        assert app.open_folder_button.cget("state") == "disabled"
+        assert app.search_last_button.cget("state") == "disabled"
+        assert app.task_filter_menu.get() == t("All")
         assert app.task_keyword_var.get() == ""
         # Task-completion notification bookkeeping starts empty.
         assert app._status_label is not None
         assert app._previous_task_states == {}
         assert app._status_highlight_after is None
+        # The dark-mode switch exists and holds a resolved position.
+        assert app._dark_mode_var is not None
+        assert app._dark_mode_var.get() in {"light", "dark"}
 
-        # Follow ("追更") tab: widgets exist and the tab can be raised.
-        assert app.follow_tree is not None
+        # Follow ("追更") page: widgets exist and the page can be raised.
+        assert app.follow_list is not None
         assert app.follow_add_button is not None
         assert app.follow_remove_button is not None
         assert app.follow_check_button is not None
@@ -1785,29 +1793,28 @@ def test_desktop_window_builds_all_tabs(
             app.follow_check_button,
             app.follow_download_button,
         ):
-            assert button.instate(["!disabled"])
-        notebook = app.follow_tab.master
-        notebook.select(app.follow_tab)
-        root.update_idletasks()
-        assert notebook.tab(app.follow_tab, "text") == t("Follow")
+            assert button.cget("state") == "normal"
 
-        # Music tab: it can be raised, and the health-check widgets exist
-        # whenever the optional music engine is installed.
-        notebook.select(app.music_tab)
+        app._show_page(4)
         root.update_idletasks()
-        assert notebook.tab(app.music_tab, "text") == t("Music")
+        assert app._page_index == 4
+        # The selected navigation item carries the accent-tinted style.
+        assert app._nav_buttons[4].cget("fg_color") == ui_palette.ACCENT_SOFT
+        assert app._nav_buttons[0].cget("fg_color") == "transparent"
+
+        # Music page: it can be raised, and the health-check widgets exist
+        # whenever the optional music engine is installed.
+        app._show_page(3)
+        root.update_idletasks()
         if app._music_ready:
             engine = app._music_engine
             assert engine is not None
             assert callable(engine["health_check"])
-            assert app.music_platform_combo is not None
+            assert app.music_platform_menu is not None
             assert app.music_search_button is not None
             assert app.music_health_button is not None
-            assert app.music_health_tree is not None
-            assert "disabled" not in app.music_health_button.state()
-            assert app.music_health_tree.heading("ok", "text") == t("OK")
-            assert app.music_health_tree.heading("elapsed", "text") == t("Elapsed (ms)")
-            assert app.music_health_tree.heading("error", "text") == t("Error")
+            assert app.music_health_list is not None
+            assert app.music_health_button.cget("state") == "normal"
 
             # The note label follows the selected platform.
             noted = [
@@ -1828,26 +1835,28 @@ def test_desktop_window_builds_all_tabs(
     finally:
         if app is not None:
             app._closing = True
-        with contextlib.suppress(tk.TclError):
+        with contextlib.suppress(tk_mod.TclError):
             root.destroy()
 
 
 # ---------------------------------------------------------------------------
-# Follow tab (window, guarded: needs a display)
+# Follow page (window, guarded: needs a display)
 # ---------------------------------------------------------------------------
 def _open_desktop_app(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[Any, Any]:
     """Build a hidden window on a private data directory, or skip."""
-    tk = pytest.importorskip("tkinter")
+    ctk = pytest.importorskip("customtkinter")
+    import tkinter as tk_mod
+
     import novel_downloader.apps.desktop.ui as ui_mod
 
     monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
     # Keep the window-state file on the private data directory as well.
     monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path / "music"))
     try:
-        root = tk.Tk()
-    except tk.TclError as exc:  # pragma: no cover - headless environments
+        root = ctk.CTk()
+    except tk_mod.TclError as exc:  # pragma: no cover - headless environments
         pytest.skip(f"Tk display unavailable: {exc}")
     root.withdraw()
     return ui_mod.DesktopApp(root), root
@@ -1939,7 +1948,8 @@ def test_follow_check_updates_entries_and_reenables_buttons(
         app._follow_entries = store.entries()
         app._start_follow_check()
 
-        assert "disabled" in app.follow_check_button.state()  # type: ignore[union-attr]
+        assert app.follow_check_button is not None  # type: ignore[union-attr]
+        assert app.follow_check_button.cget("state") == "disabled"  # type: ignore[union-attr]
         events = _drain_and_dispatch(
             app,
             stop=lambda found: any(kind == "follow_check_done" for kind, _ in found),
@@ -1974,7 +1984,7 @@ def test_follow_check_updates_entries_and_reenables_buttons(
         }
         # The check finished: the action buttons are usable again.
         assert app.follow_check_button is not None
-        assert "disabled" not in app.follow_check_button.state()
+        assert app.follow_check_button.cget("state") == "normal"
         assert app._follow_checking is False
     finally:
         app._closing = True
@@ -2021,10 +2031,10 @@ def test_follow_download_queues_selected_entries(
         ]
         app._follow_entries = entries
         app._render_follow_entries(entries)
-        assert app.follow_tree is not None
+        assert app.follow_list is not None
 
-        # Only the selected row is queued, and only its success is reported.
-        app.follow_tree.selection_set("0")
+        # Only the selected card is queued, and only its success is reported.
+        app._follow_selector.set_selection([0])
         app._download_follow_selection()
         events = _drain_and_dispatch(
             app, stop=lambda found: sum(1 for kind, _ in found if kind == "status") >= 1
@@ -2033,7 +2043,7 @@ def test_follow_download_queues_selected_entries(
 
         # Nothing selected: the whole list is queued; failures are reported.
         stub.added.clear()
-        app.follow_tree.selection_set([])
+        app._follow_selector.set_selection([])
         app._download_follow_selection()
         events = _drain_and_dispatch(
             app,
@@ -2096,20 +2106,20 @@ def test_follow_add_and_remove_workers_persist_entries(
         assert second is not None
         assert second.title == ""
 
-        # The rendered list mirrors the file (one row per entry).
+        # The rendered list mirrors the file (one card per entry).
         _drain_and_dispatch(
             app,
             stop=lambda found: (
                 any(kind == "follow_entries" for kind, _ in found)
-                and app.follow_tree is not None
-                and len(app.follow_tree.get_children()) == 2
+                and app.follow_list is not None
+                and len(app.follow_list.winfo_children()) == 2
             ),
         )
-        assert app.follow_tree is not None
-        assert len(app.follow_tree.get_children()) == 2
+        assert app.follow_list is not None
+        assert len(app.follow_list.winfo_children()) == 2
 
-        # Removing the selected first row (site-a) deletes only that entry.
-        app.follow_tree.selection_set("0")
+        # Removing the selected first card (site-a) deletes only that entry.
+        app._follow_selector.set_selection([0])
         app._remove_follow_selected()
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and any(
@@ -2119,7 +2129,7 @@ def test_follow_add_and_remove_workers_persist_entries(
         assert [entry.key for entry in store.entries()] == [("site-b", "2")]
 
         # Removing with nothing selected only hints at the status bar.
-        app.follow_tree.selection_set([])
+        app._follow_selector.set_selection([])
         app._remove_follow_selected()
         assert [entry.key for entry in store.entries()] == [("site-b", "2")]
     finally:
@@ -2133,7 +2143,7 @@ def test_follow_add_and_remove_workers_persist_entries(
 def test_search_follow_button_adds_selection_to_the_watchlist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The search tab's follow button feeds the shared watchlist store."""
+    """The search page's follow button feeds the shared watchlist store."""
     app, root = _open_desktop_app(tmp_path, monkeypatch)
     try:
         root.update_idletasks()
@@ -2152,26 +2162,22 @@ def test_search_follow_button_adds_selection_to_the_watchlist(
             # Missing book_id: this row can never be followed.
             _search_result(site="site-c", book_id="", title="No Id"),
         ]
-        app._search_results = results
-        assert app.search_tree is not None
-        tree = app.search_tree
-        tree.delete(*tree.get_children())
-        for index, result in enumerate(results):
-            tree.insert("", "end", iid=str(index), values=fmt.search_row(result))
+        app._render_search_results(("kw", results))
+        assert len(app._search_cards) == 3
 
         button = app.search_follow_button
         assert button is not None
 
         # No selection: the button stays down.
-        tree.selection_set([])
+        app._search_selector.set_selection([])
         app._update_search_follow_button()
-        assert "disabled" in button.state()
+        assert button.cget("state") == "disabled"
 
-        # Selecting only the invalid row keeps the button disabled, and a
+        # Selecting only the invalid card keeps the button disabled, and a
         # forced click explains why instead of touching the store.
-        tree.selection_set("2")
+        app._search_selector.set_selection([2])
         app._update_search_follow_button()
-        assert "disabled" in button.state()
+        assert button.cget("state") == "disabled"
         app._follow_selected_results()
         assert app._status_var.get() == t(
             "Cannot follow: site, book id and title are required."
@@ -2179,12 +2185,12 @@ def test_search_follow_button_adds_selection_to_the_watchlist(
         assert [entry.key for entry in store.entries()] == [("site-a", "1")]
 
         # A mixed selection (valid + invalid) enables the button; the invalid
-        # row is skipped and the valid one is persisted on a worker thread.
-        tree.selection_set("1", "2")
+        # card is skipped and the valid one is persisted on a worker thread.
+        app._search_selector.set_selection([1, 2])
         app._update_search_follow_button()
-        assert "disabled" not in button.state()
+        assert button.cget("state") == "normal"
         app._follow_selected_results()
-        assert "disabled" in button.state()  # held down while the add runs
+        assert button.cget("state") == "disabled"  # held down while the add runs
         _drain_and_dispatch(
             app,
             stop=lambda found: (
@@ -2195,33 +2201,34 @@ def test_search_follow_button_adds_selection_to_the_watchlist(
         entry = store.get("site-b", "2")
         assert entry is not None
         assert entry.title == "Beta Book"
-        # The follow tab was refreshed through the shared store...
-        assert app.follow_tree is not None
-        assert len(app.follow_tree.get_children()) == 2
+        # The follow page was refreshed through the shared store...
+        assert app.follow_list is not None
+        assert len(app.follow_list.winfo_children()) == 2
         # ...and the specific feedback outlives the generic count message;
-        # it ends with a pointer to the Follow tab.
+        # it ends with a pointer to the Follow page.
         assert app._status_var.get() == (
             t("Added to the follow list: {title}").format(title="Beta Book")
             + f" ({t('Follow')})"
         )
         assert app._search_follow_pending == set()
         # The batch is over: the button is usable for the still-selected rows.
-        assert "disabled" not in button.state()
+        assert button.cget("state") == "normal"
 
-        # While a row's add is in flight its key is guarded against a repeated
-        # click: the guard keeps the button down and swallows the re-trigger.
+        # While a card's add is in flight its key is guarded against a
+        # repeated click: the guard keeps the button down and swallows the
+        # re-trigger.
         app._search_follow_pending.add(("site-b", "2"))
         app._update_search_follow_button()
-        assert "disabled" in button.state()
+        assert button.cget("state") == "disabled"
         app._follow_selected_results()
         assert app._search_follow_pending == {("site-b", "2")}
         app._search_follow_pending.clear()
 
         # Following a book that is already in the list changes nothing on disk
         # and says so.
-        tree.selection_set("0")
+        app._search_selector.set_selection([0])
         app._update_search_follow_button()
-        assert "disabled" not in button.state()
+        assert button.cget("state") == "normal"
         app._follow_selected_results()
         _drain_and_dispatch(
             app,
@@ -2249,7 +2256,7 @@ def test_search_follow_button_adds_selection_to_the_watchlist(
 
 
 # ---------------------------------------------------------------------------
-# Search tab context menu (window, guarded: needs a display)
+# Search page context menu (window, guarded: needs a display)
 # ---------------------------------------------------------------------------
 def test_search_context_menu_offers_row_actions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2285,17 +2292,13 @@ def test_search_context_menu_offers_row_actions(
             # Missing book_id and book_url: this row is dead weight.
             _search_result(site="site-c", book_id="", title="No Id", book_url=""),
         ]
-        app._search_results = results
-        assert app.search_tree is not None
-        tree = app.search_tree
-        tree.delete(*tree.get_children())
-        for index, result in enumerate(results):
-            tree.insert("", "end", iid=str(index), values=fmt.search_row(result))
+        app._render_search_results(("kw", results))
 
-        # Right-clicking a row pops the menu with the three batch actions.
-        tree.selection_set("0", "1")
-        app._on_search_right_click(
-            SimpleNamespace(x=10, y=-1, x_root=123, y_root=45)  # type: ignore[arg-type]
+        # Right-clicking a card pops the menu with the three batch actions.
+        app._search_selector.set_selection([0, 1])
+        app._on_search_card_right_click(
+            0,
+            SimpleNamespace(x_root=123, y_root=45),  # type: ignore[arg-type]
         )
         assert popups == [(123, 45)]
         menu = app._search_menu
@@ -2308,20 +2311,24 @@ def test_search_context_menu_offers_row_actions(
         for index in (0, 1, 3):
             assert menu.entrycget(index, "state") == "normal"
 
-        # Selecting only the dead row disables every entry.
-        tree.selection_set("2")
-        app._on_search_right_click(
-            SimpleNamespace(x=10, y=-1, x_root=1, y_root=1)  # type: ignore[arg-type]
+        # Right-clicking an unselected card first selects just that card...
+        app._search_selector.set_selection([])
+        app._on_search_card_right_click(
+            2,
+            SimpleNamespace(x_root=1, y_root=1),  # type: ignore[arg-type]
         )
+        assert app._search_selector.selection == [2]
+        assert popups == [(123, 45), (1, 1)]
+        # ...and the dead row disables every entry.
         assert app._search_menu is menu  # the lazy menu is reused
         for index in (0, 1, 3):
             assert app._search_menu.entrycget(index, "state") == "disabled"
-        assert popups == [(123, 45), (1, 1)]
 
         # "Follow" feeds the shared watchlist store, like the toolbar button.
-        tree.selection_set("1")
-        app._on_search_right_click(
-            SimpleNamespace(x=10, y=-1, x_root=2, y_root=2)  # type: ignore[arg-type]
+        app._search_selector.set_selection([1])
+        app._on_search_card_right_click(
+            1,
+            SimpleNamespace(x_root=2, y_root=2),  # type: ignore[arg-type]
         )
         assert app._search_menu.entrycget(1, "state") == "normal"
         app._search_menu.invoke(1)
@@ -2349,7 +2356,7 @@ def test_search_context_menu_offers_row_actions(
 
 
 # ---------------------------------------------------------------------------
-# Music tab (window, guarded): platform health check
+# Music page (window, guarded): platform health check
 # ---------------------------------------------------------------------------
 def test_music_health_check_checks_every_platform_serially_and_reenables_button(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2392,7 +2399,7 @@ def test_music_health_check_checks_every_platform_serially_and_reenables_button(
         app._start_music_health_check()
         button = app.music_health_button
         assert button is not None
-        assert "disabled" in button.state()  # disabled while the check runs
+        assert button.cget("state") == "disabled"  # disabled while the check runs
         events = _drain_and_dispatch(
             app,
             stop=lambda found: any(kind == "music_health_done" for kind, _ in found),
@@ -2408,26 +2415,32 @@ def test_music_health_check_checks_every_platform_serially_and_reenables_button(
         items = [payload for kind, payload in events if kind == "music_health_item"]
         assert len(items) == len(labels)
 
-        # The table renders healthy-first; the failing platforms show a
+        # The card list renders healthy-first; the failing platforms show a
         # one-line error summary.
-        tree = app.music_health_tree
-        assert tree is not None
-        rows = [tuple(tree.item(iid, "values")) for iid in tree.get_children()]
-        assert len(rows) == len(labels)
-        failed_rows = [row for row in rows if row[1] == t("Failed")]
-        assert [row[0] for row in failed_rows] == [first_key, last_key]
-        assert failed_rows[0][2] == "0"
-        assert failed_rows[0][3] == "RuntimeError: worker blew up"
-        assert failed_rows[1][3] == "down now"
+        cards = app._music_health_cards
+        assert len(cards) == len(labels)
+        titles = [card.title_label.cget("text") for card in cards]
+        metas = {
+            card.title_label.cget("text"): card.meta_label.cget("text")
+            for card in cards
+        }
+        failed_titles = [
+            title for title in titles if metas[title].startswith(t("Failed"))
+        ]
+        assert failed_titles == [first_key, last_key]
+        assert "RuntimeError: worker blew up" in metas[first_key]
+        assert "down now" in metas[last_key]
         assert all(
-            row[1] == t("OK") for row in rows if row[0] not in {first_key, last_key}
+            metas[title].startswith(t("OK"))
+            for title in titles
+            if title not in {first_key, last_key}
         )
 
         # Summary and status; the button is usable again.
         summary = fmt.health_summary(app._music_health_results)
         assert app.music_health_summary_var.get() == summary
         assert app._status_var.get() == summary
-        assert "disabled" not in button.state()
+        assert button.cget("state") == "normal"
         assert app._music_health_running is False
     finally:
         app._closing = True
@@ -2472,7 +2485,7 @@ def test_task_notification_beeps_and_highlights_when_window_is_hidden(
         )
         label = app._status_label
         assert label is not None
-        assert str(label.cget("foreground")) == ui_mod._STATUS_HIGHLIGHT_COMPLETED
+        assert label.cget("text_color") == ui_mod._STATUS_HIGHLIGHT_COMPLETED
         assert app._status_highlight_after is not None
 
         # Re-rendering the same snapshot cannot notify twice.
@@ -2481,7 +2494,7 @@ def test_task_notification_beeps_and_highlights_when_window_is_hidden(
 
         # Any new status message ends the highlight and restores the color.
         app._set_status(t("Ready"))
-        assert str(label.cget("foreground")) == "black"
+        assert label.cget("text_color") == ui_mod._STATUS_DEFAULT_TEXT
         assert app._status_highlight_after is None
     finally:
         app._closing = True
@@ -2534,7 +2547,7 @@ def test_task_notification_gates_the_beep_by_window_state(
         # A mixed batch highlights in the failure color.
         label = app._status_label
         assert label is not None
-        assert str(label.cget("foreground")) == ui_mod._STATUS_HIGHLIGHT_FAILED
+        assert label.cget("text_color") == ui_mod._STATUS_HIGHLIGHT_FAILED
         assert app._previous_task_states == {
             "task-2": "failed",
             "task-3": "completed",
@@ -2563,15 +2576,17 @@ def _open_desktop_app_with_state(
     Returns the app, the root and the state file path; skips when Tk cannot
     open a display.
     """
-    tk = pytest.importorskip("tkinter")
+    ctk = pytest.importorskip("customtkinter")
+    import tkinter as tk_mod
+
     import novel_downloader.apps.desktop.ui as ui_mod
 
     state_dir = tmp_path / "music"
     monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
     monkeypatch.setenv("NOVEL_MUSIC_HOME", str(state_dir))
     try:
-        root = tk.Tk()
-    except tk.TclError as exc:  # pragma: no cover - headless environments
+        root = ctk.CTk()
+    except tk_mod.TclError as exc:  # pragma: no cover - headless environments
         pytest.skip(f"Tk display unavailable: {exc}")
     root.withdraw()
     return ui_mod.DesktopApp(root), root, state_dir / "window_state.json"
@@ -2580,75 +2595,80 @@ def _open_desktop_app_with_state(
 def test_desktop_window_restores_stored_geometry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tk = pytest.importorskip("tkinter")
     app, root, state_file = _open_desktop_app_with_state(tmp_path, monkeypatch)
     try:
         # Record the geometry strings the restore path applies.  The query
-        # side stays live: a fully specified geometry (with position) takes
-        # effect, while Tk propagation may still force a size-only request
-        # up to the packed content's required size.
+        # side mirrors the last applied value: on Windows CTk's titlebar
+        # manipulation makes the live ``wm geometry`` query of a never-mapped
+        # window unreliable, and the mapping behavior itself is covered by
+        # the real-run verification, not by this unit test.
         applied: list[str] = []
         set_geometry = root.geometry
 
         def geometry_spy(value: str | None = None) -> str:
             if value is None:
-                return set_geometry()
+                return applied[-1] if applied else set_geometry()
             applied.append(value)
             return set_geometry(value)
 
         monkeypatch.setattr(root, "geometry", geometry_spy)
 
-        # A stored geometry is applied verbatim on launch and takes effect.
+        # A stored geometry is applied verbatim on launch.
         assert wstate.save_window_geometry(
             state_file, wstate.WindowGeometry(900, 600, 22, 33)
         )
         app._restore_window_geometry()
         assert applied == ["900x600+22+33"]
-        root.update_idletasks()
-        current = wstate.parse_geometry(set_geometry())
-        assert current is not None
-        assert (current.x, current.y) == (22, 33)
-        assert current.width >= 900 and current.height >= 600
 
         # A stored size below the minimum is clamped to 400x300 before it
-        # reaches the window (the content may still demand a larger one).
+        # reaches the window.
         assert wstate.save_window_geometry(
             state_file, wstate.WindowGeometry(200, 100, 0, 0)
         )
         app._restore_window_geometry()
         assert applied[-1] == "400x300+0+0"
-        root.update_idletasks()
-        current = wstate.parse_geometry(set_geometry())
-        assert current is not None
-        assert (current.x, current.y) == (0, 0)
-        assert current.width >= wstate.MIN_WINDOW_WIDTH
-        assert current.height >= wstate.MIN_WINDOW_HEIGHT
 
         # A corrupted file falls back to the default geometry string.
         state_file.write_text("not json", encoding="utf-8")
         app._restore_window_geometry()
-        assert applied[-1] == "1100x720"
+        assert applied[-1] == "1200x780"
 
         # A missing file falls back to the default geometry string too.
         state_file.unlink()
         app._restore_window_geometry()
-        assert applied[-1] == "1100x720"
+        assert applied[-1] == "1200x780"
+
+        # Every applied string is a well-formed Tk geometry string.
+        for value in applied:
+            assert wstate.parse_geometry(value) is not None
     finally:
         app._closing = True
         with contextlib.suppress(Exception):
             app.engine.shutdown()
-        with contextlib.suppress(tk.TclError):
+        with contextlib.suppress(Exception):
             root.destroy()
 
 
 def test_desktop_window_saves_geometry_on_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    pytest.importorskip("tkinter")
     app, root, state_file = _open_desktop_app_with_state(tmp_path, monkeypatch)
     try:
-        root.geometry("980x640+15+25")
-        root.update_idletasks()
+        # Serve the geometry the window "has" through a spy: the live query
+        # of a never-mapped CTk window is unreliable on Windows (see the
+        # restore test), and the close path must persist whatever the query
+        # reports for a real mapped window.
+        current_geometry = "980x640+15+25"
+        set_geometry = root.geometry
+
+        def geometry_spy(value: str | None = None) -> str:
+            nonlocal current_geometry
+            if value is None:
+                return current_geometry
+            current_geometry = value
+            return set_geometry(value)
+
+        monkeypatch.setattr(root, "geometry", geometry_spy)
         assert not state_file.exists()
 
         # Closing the window persists the geometry it had.
@@ -2694,7 +2714,9 @@ def test_desktop_window_keeps_previous_state_for_degenerate_geometry(
 def test_keyboard_shortcuts_are_registered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tk = pytest.importorskip("tkinter")
+    ctk = pytest.importorskip("customtkinter")
+    import tkinter as tk_mod
+
     import novel_downloader.apps.desktop.ui as ui_mod
 
     monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
@@ -2702,7 +2724,7 @@ def test_keyboard_shortcuts_are_registered(
 
     # Spy on ``bind_all`` while keeping the real binding alive.
     registered: dict[str, Any] = {}
-    original = tk.Tk.bind_all
+    original = tk_mod.Tk.bind_all
 
     def spy(
         self: Any,
@@ -2714,11 +2736,11 @@ def test_keyboard_shortcuts_are_registered(
             registered[sequence] = func
         return original(self, sequence, func, add)
 
-    monkeypatch.setattr(tk.Tk, "bind_all", spy)
+    monkeypatch.setattr(tk_mod.Tk, "bind_all", spy)
 
     try:
-        root = tk.Tk()
-    except tk.TclError as exc:  # pragma: no cover - headless environments
+        root = ctk.CTk()
+    except tk_mod.TclError as exc:  # pragma: no cover - headless environments
         pytest.skip(f"Tk display unavailable: {exc}")
     root.withdraw()
     app = ui_mod.DesktopApp(root)
@@ -2732,23 +2754,22 @@ def test_keyboard_shortcuts_are_registered(
         assert expected <= set(registered)
         assert all(callable(registered[sequence]) for sequence in expected)
 
-        notebook = app.history_tab.master
-
-        # Ctrl+N raises the Nth tab (Search=1 ... Follow=5).
+        # Ctrl+N raises the Nth page (Search=1 ... Follow=5).
         registered["<Control-1>"](SimpleNamespace())
-        assert notebook.select() == str(app.search_tab)
+        assert app._page_index == 0
         registered["<Control-3>"](SimpleNamespace())
-        assert notebook.select() == str(app.history_tab)
+        assert app._page_index == 2
         registered["<Control-5>"](SimpleNamespace())
-        assert notebook.select() == str(app.follow_tab)
+        assert app._page_index == 4
 
-        # Ctrl+F focuses the search keyword entry.
+        # Ctrl+F raises the search page and focuses the keyword entry.
         assert app.search_entry is not None
         focused: list[int] = []
         monkeypatch.setattr(app.search_entry, "focus_set", lambda: focused.append(1))
         registered["<Control-f>"](SimpleNamespace())
         registered["<Control-F>"](SimpleNamespace())
         assert focused == [1, 1]
+        assert app._page_index == 0
 
         # Ctrl+D queues the search selection, like the toolbar button.
         queued: list[int] = []
@@ -2760,5 +2781,5 @@ def test_keyboard_shortcuts_are_registered(
         app._closing = True
         with contextlib.suppress(Exception):
             app.engine.shutdown()
-        with contextlib.suppress(tk.TclError):
+        with contextlib.suppress(tk_mod.TclError):
             root.destroy()

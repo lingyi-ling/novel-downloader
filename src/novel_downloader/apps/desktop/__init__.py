@@ -3,7 +3,7 @@
 novel_downloader.apps.desktop
 -----------------------------
 
-Native Tkinter desktop client.
+Native CustomTkinter desktop client.
 """
 
 __all__ = ["desktop_main"]

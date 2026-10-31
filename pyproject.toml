@@ -36,6 +36,7 @@ dependencies = [
     "lxml",
     "cssselect",
     "platformdirs",
+    "customtkinter",
 ]
 
 [project.optional-dependencies]
