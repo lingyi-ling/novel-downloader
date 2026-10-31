@@ -158,4 +158,9 @@
     <string name="settings_download_dir_unavailable">自定义下载目录不可用，请在设置中重新选择</string>
     <string name="settings_download_dir_create_failed">无法在自定义下载目录中创建文件</string>
     <string name="settings_download_hint">选择 SAF 目录后，导出文件会保存到该目录的 NovelDL 子文件夹；未选择时保存到系统 Downloads。</string>
+    <string name="settings_standalone_title">独立引擎（无需电脑）</string>
+    <string name="settings_standalone_hint">在手机本地运行完整下载引擎；开启后不再连接电脑端的 novel-api</string>
+    <string name="settings_standalone_on">独立引擎已开启，正在本地启动…</string>
+    <string name="settings_standalone_off">已切回远程 API 模式</string>
+    <string name="settings_standalone_error">独立引擎启动失败：%1$s</string>
 </resources>

@@ -67,6 +67,7 @@ Open "Settings" in the top-right corner of the app:
 | --- | --- |
 | Emulator reaching the computer | `http://10.0.2.2:8081/` |
 | Physical device reaching the computer | `http://<computer LAN IP>:8081/` |
+| Standalone mode ("Standalone engine" on) | No configuration needed — uses `http://127.0.0.1:8081/` automatically |
 
 If the API has a token configured, enter the same value in "API key".
 
@@ -82,6 +83,21 @@ Bottom tabs: **Search / Tasks / History / Music / Follow**.
 - **Music**: choose a platform, search songs, select multiple results, create a download job, and view progress.
 
 When a task finishes (completed or failed) the app posts a system notification. On Android 13+ the first launch asks for the "Notifications" permission (`POST_NOTIFICATIONS`); if it was denied, re-enable it from the system settings.
+
+## Standalone Engine (No PC Needed)
+
+The app supports two operating modes, switched at any time via the "Standalone engine (no PC needed)" toggle on the Settings page:
+
+- **Remote mode (default, toggle off)**: the phone remote-controls novel-api on the computer, where searching, downloading, and everything else run; the computer must run the API service on the same LAN as the phone — the original mode described above.
+- **Standalone mode (toggle on)**: no computer needed — the phone runs the full download engine itself. The APK embeds a Python 3.12 runtime via Chaquopy (both arm64-v8a and x86_64 ABIs) and bundles the entire novel_downloader service layer; the engine serves the same REST contract as novel-api on the loopback address `http://127.0.0.1:8081/`. Search, tasks, history, follow, and all other features run on the phone, and data, tasks, and history stay on the device.
+
+When the toggle is on, the app starts the local engine at launch before initializing the API client (the API address is fixed to the loopback address automatically, so no configuration is needed — see "First-time Configuration"); turning the toggle off switches back to remote mode and reconnects to novel-api on the computer.
+
+Notes:
+
+- **Music page shows an empty state**: the music extras are not packaged into the APK, so the music endpoints return empty lists in standalone mode and the Music page shows an empty state.
+- **Larger APK**: bundling the Python runtime and its dependencies (aiohttp, lxml, cssselect, pycryptodome, rich, platformdirs, and more) grows the APK from about 12 MB to about 68 MB.
+- The embedded engine binds to the loopback address `127.0.0.1` only, so it is reachable by the app itself and not by other devices on the LAN.
 
 ## Security Notes
 

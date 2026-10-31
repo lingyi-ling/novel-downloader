@@ -10,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.lingyi.noveldl.data.Api
+import com.lingyi.noveldl.data.EmbeddedEngine
 import com.lingyi.noveldl.data.SettingsStore
 import com.lingyi.noveldl.notifications.TaskNotifier
 import com.lingyi.noveldl.ui.NovelApp
@@ -29,7 +30,10 @@ class MainActivity : ComponentActivity() {
         val store = SettingsStore(this)
         lifecycleScope.launch {
             val settings = store.settings.first()
-            Api.configure(settings.baseUrl, settings.apiKey)
+            if (settings.standalone) {
+                EmbeddedEngine.ensureStarted(this@MainActivity)
+            }
+            Api.configure(settings.effectiveBaseUrl, settings.apiKey)
             setContent {
                 NovelTheme {
                     NovelApp(store)

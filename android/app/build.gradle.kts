@@ -5,6 +5,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.chaquo.python")
 }
 
 // Release signing is opt-in. Create android/keystore.properties (git-ignored)
@@ -42,6 +43,9 @@ android {
         targetSdk = 35
         versionCode = 3
         versionName = "1.2.0"
+        // Chaquopy requires explicit ABIs; arm64 covers modern phones, x86_64
+        // keeps the emulator usable.
+        ndk.abiFilters += listOf("arm64-v8a", "x86_64")
     }
 
     signingConfigs {
@@ -86,6 +90,33 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+}
+
+// Embedded Python engine (Chaquopy): runs the novel_downloader service layer
+// on-device so the app works without a PC. The Python source tree is shared
+// with the repository root (../../src), and the loopback HTTP server in
+// apps.embedded.server speaks the same REST contract as novel-api.
+chaquopy {
+    defaultConfig {
+        version = "3.12"
+        // Prefer the repo venv as the build-time interpreter when present.
+        rootProject.file("../.venv/Scripts/python.exe")
+            .takeIf { it.exists() }
+            ?.let { buildPython = listOf(it.absolutePath) }
+        pip {
+            install("aiohttp")
+            install("lxml")
+            install("cssselect")
+            install("pycryptodome")
+            install("rich")
+            install("platformdirs")
+        }
+    }
+    sourceSets {
+        getByName("main") {
+            srcDir("../../src")
         }
     }
 }

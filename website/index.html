@@ -185,7 +185,7 @@
         <article class="client-card reveal">
           <h3>Android</h3>
           <p class="client-tag">Gradle</p>
-          <p data-en="Kotlin + Compose native client, Material 3, talks to the local API, files land via DownloadManager.">Kotlin + Compose 原生客户端，Material 3，直连本地 API，DownloadManager 落盘。</p>
+          <p data-en="Kotlin + Compose native client, Material 3, files land via DownloadManager; the optional standalone engine embeds Python 3.12 (Chaquopy) so all 84 sites / 59 sources run on your phone via a loopback API — no PC needed. Toggle off to keep remote-controlling a PC-side novel-api.">Kotlin + Compose 原生客户端，Material 3，DownloadManager 落盘；可选「独立引擎」——Chaquopy 内嵌 Python 3.12，84 站点 / 59 搜索源全部跑在手机本地（环回 API，无需电脑），关闭开关则仍遥控电脑端 novel-api。</p>
         </article>
       </div>
     </div>
@@ -255,7 +255,8 @@ cd novel-downloader/android
 ./gradlew assembleDebug
 
 <span class="c"># 安装后在本机跑 novel-api，
-# App 内设置 API 地址即连上同一套服务层</span></code></pre>
+# App 内设置 API 地址即连上同一套服务层</span>
+<span class="c"># ——或在 App 内开启「独立引擎」，内嵌 Python，手机单机直跑全套服务层</span></code></pre>
         </div>
       </div>
     </div>
@@ -282,7 +283,7 @@ cd novel-downloader/android
         <a class="card download-card reveal" href="https://github.com/lingyi-ling/novel-downloader/actions/workflows/build.yml" target="_blank" rel="noopener">
           <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg></div>
           <h3>Android</h3>
-          <p data-en="CI builds a debug APK on every push (Actions artifacts), or run ./gradlew assembleRelease for a signed build; pairs with a local novel-api.">CI 持续构建 debug APK（Actions 工件），或自行 <code>./gradlew assembleRelease</code> 出签名包；需配合本机 novel-api 使用。</p>
+          <p data-en="CI builds a debug APK on every push (Actions artifacts), or run ./gradlew assembleRelease for a signed build; the ~68 MB APK embeds the Python runtime, so the standalone engine runs the full service layer on your phone — no PC-side novel-api needed (music is an empty state in this mode for now).">CI 持续构建 debug APK（Actions 工件），或自行 <code>./gradlew assembleRelease</code> 出签名包；APK 约 68 MB（内嵌 Python 运行时），开启「独立引擎」即可手机单机下载、无需电脑端 novel-api（独立模式下音乐暂为空态）。</p>
           <span class="dl-link" data-en="Build artifacts →">构建工件 →</span>
         </a>
       </div>

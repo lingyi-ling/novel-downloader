@@ -18,6 +18,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -28,6 +29,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -36,6 +38,7 @@ import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiSettings
 import com.lingyi.noveldl.data.DownloadTarget
+import com.lingyi.noveldl.data.EmbeddedEngine
 import com.lingyi.noveldl.data.SettingsStore
 import com.lingyi.noveldl.data.SitesSummary
 import com.lingyi.noveldl.data.resolveDownloadTarget
@@ -191,6 +194,50 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        Spacer(Modifier.height(12.dp))
+        // ----- Standalone engine -----
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.settings_standalone_title),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    stringResource(R.string.settings_standalone_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = settings.standalone,
+                onCheckedChange = { enabled ->
+                    scope.launch {
+                        store.saveStandalone(enabled)
+                        if (enabled) EmbeddedEngine.ensureStarted(context)
+                        onMessage(
+                            context.getString(
+                                if (enabled) {
+                                    R.string.settings_standalone_on
+                                } else {
+                                    R.string.settings_standalone_off
+                                },
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+        if (settings.standalone && EmbeddedEngine.lastError != null) {
+            Text(
+                stringResource(R.string.settings_standalone_error, EmbeddedEngine.lastError.orEmpty()),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
 
         Spacer(Modifier.height(16.dp))
         HorizontalDivider()
