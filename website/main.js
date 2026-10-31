@@ -1,37 +1,61 @@
 /* Novel Downloader website interactions. */
 "use strict";
 
-/* ------------------------------------------------ theme (matches site + persists) */
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
+
+/* ------------------------------------------------ theme (persisted) */
 const root = document.documentElement;
-const stored = (() => {
+const storedTheme = (() => {
   try { return localStorage.getItem("noveldl-theme"); } catch { return null; }
 })();
-if (stored === "dark" || stored === "light") {
-  root.dataset.theme = stored;
+if (storedTheme === "dark" || storedTheme === "light") {
+  root.dataset.theme = storedTheme;
 } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
   root.dataset.theme = "dark";
 }
-document.getElementById("theme-btn").addEventListener("click", () => {
+$("#theme-btn").addEventListener("click", () => {
   const next = root.dataset.theme === "dark" ? "light" : "dark";
   root.dataset.theme = next;
   try { localStorage.setItem("noveldl-theme", next); } catch { /* private mode */ }
 });
 
+/* ------------------------------------------------ i18n (zh source of truth, data-en swap) */
+const langBtn = $("#lang-btn");
+function currentLang() {
+  try { return localStorage.getItem("noveldl-lang") || "zh"; } catch { return "zh"; }
+}
+function applyLang(lang) {
+  document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
+  if (langBtn) langBtn.textContent = lang === "en" ? "中文" : "EN";
+  $$("[data-en]").forEach((el) => {
+    if (el.dataset.zh === undefined) el.dataset.zh = el.innerHTML;
+    el.innerHTML = lang === "en" ? el.dataset.en : el.dataset.zh;
+  });
+  document.title = lang === "en"
+    ? "Novel Downloader — aggregate search · async downloads · four clients"
+    : "Novel Downloader — 多站点聚合 · 异步下载 · 四端同源";
+}
+if (currentLang() === "en") applyLang("en");
+if (langBtn) {
+  langBtn.addEventListener("click", () => {
+    const next = currentLang() === "en" ? "zh" : "en";
+    try { localStorage.setItem("noveldl-lang", next); } catch { /* private mode */ }
+    applyLang(next);
+  });
+}
+
 /* ------------------------------------------------ tabs */
-document.querySelectorAll(".tab").forEach((tab) => {
+$$(".tab").forEach((tab) => {
   tab.addEventListener("click", () => {
     const key = tab.dataset.tab;
-    document.querySelectorAll(".tab").forEach((t) =>
-      t.classList.toggle("active", t === tab),
-    );
-    document.querySelectorAll(".tab-panel").forEach((p) =>
-      p.classList.toggle("active", p.dataset.panel === key),
-    );
+    $$(".tab").forEach((t) => t.classList.toggle("active", t === tab));
+    $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.dataset.panel === key));
   });
 });
 
 /* ------------------------------------------------ scroll reveal */
-const revealables = document.querySelectorAll(".reveal");
+const revealables = $$(".reveal");
 if ("IntersectionObserver" in window) {
   const io = new IntersectionObserver(
     (entries) => {
@@ -50,8 +74,8 @@ if ("IntersectionObserver" in window) {
 }
 
 /* ------------------------------------------------ hero count-up */
-const counters = document.querySelectorAll("[data-count]");
-const animate = (el) => {
+const counters = $$("[data-count]");
+const animateCount = (el) => {
   const target = Number(el.dataset.count) || 0;
   const started = performance.now();
   const duration = 900;
@@ -68,7 +92,7 @@ if ("IntersectionObserver" in window) {
     (entries) => {
       entries.forEach((entry) => {
         if (entry.isIntersecting) {
-          animate(entry.target);
+          animateCount(entry.target);
           cio.unobserve(entry.target);
         }
       });
@@ -77,7 +101,105 @@ if ("IntersectionObserver" in window) {
   );
   counters.forEach((el) => cio.observe(el));
 } else {
-  counters.forEach((el) => {
-    el.textContent = el.dataset.count;
+  counters.forEach((el) => { el.textContent = el.dataset.count; });
+}
+
+/* ------------------------------------------------ scrollspy */
+const spyLinks = $$(".nav-links a[href^='#']");
+const spyTargets = spyLinks
+  .map((a) => document.querySelector(a.getAttribute("href")))
+  .filter(Boolean);
+if ("IntersectionObserver" in window && spyTargets.length) {
+  const sio = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        spyLinks.forEach((a) =>
+          a.classList.toggle("active", a.getAttribute("href") === "#" + entry.target.id),
+        );
+      });
+    },
+    { rootMargin: "-40% 0px -55% 0px" },
+  );
+  spyTargets.forEach((sec) => sio.observe(sec));
+}
+
+/* ------------------------------------------------ mobile menu */
+const burger = $("#burger-btn");
+const mobileMenu = $("#mobile-menu");
+if (burger && mobileMenu) {
+  burger.addEventListener("click", () => {
+    const open = mobileMenu.classList.toggle("open");
+    mobileMenu.hidden = !open;
+    burger.setAttribute("aria-expanded", String(open));
   });
+  mobileMenu.addEventListener("click", (e) => {
+    if (e.target.closest("a")) {
+      mobileMenu.classList.remove("open");
+      mobileMenu.hidden = true;
+      burger.setAttribute("aria-expanded", "false");
+    }
+  });
+}
+
+/* ------------------------------------------------ back to top */
+const toTop = $("#to-top");
+if (toTop) {
+  window.addEventListener(
+    "scroll",
+    () => {
+      toTop.hidden = false;
+      toTop.classList.toggle("show", window.scrollY > 520);
+    },
+    { passive: true },
+  );
+  toTop.addEventListener("click", () =>
+    window.scrollTo({ top: 0, behavior: "smooth" }),
+  );
+}
+
+/* ------------------------------------------------ github chips (graceful) */
+function ghCacheGet(key) {
+  try { return sessionStorage.getItem(key); } catch { return null; }
+}
+function ghCacheSet(key, value) {
+  try { sessionStorage.setItem(key, value); } catch { /* private mode */ }
+}
+async function ghJson(path, cacheKey) {
+  const cached = ghCacheGet(cacheKey);
+  if (cached) return JSON.parse(cached);
+  const resp = await fetch("https://api.github.com" + path, {
+    headers: { Accept: "application/vnd.github+json" },
+  });
+  if (!resp.ok) throw new Error(String(resp.status));
+  const data = await resp.json();
+  ghCacheSet(cacheKey, JSON.stringify(data));
+  return data;
+}
+function formatStars(n) {
+  return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+}
+const starsEl = $("#gh-stars");
+if (starsEl) {
+  ghJson("/repos/lingyi-ling/novel-downloader", "gh-repo")
+    .then((d) => {
+      const n = document.getElementById("gh-stars-n");
+      if (typeof d.stargazers_count === "number" && n) {
+        n.textContent = formatStars(d.stargazers_count);
+        starsEl.hidden = false;
+      }
+    })
+    .catch(() => {});
+}
+const releaseEl = $("#gh-release");
+if (releaseEl) {
+  ghJson("/repos/lingyi-ling/novel-downloader/releases/latest", "gh-release")
+    .then((d) => {
+      const n = document.getElementById("gh-release-n");
+      if (d.tag_name && n) {
+        n.textContent = String(d.tag_name).replace(/^v/, "");
+        releaseEl.hidden = false;
+      }
+    })
+    .catch(() => {});
 }
