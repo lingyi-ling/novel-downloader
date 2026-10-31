@@ -8,6 +8,7 @@ import base64
 import copy
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from typing import Any
@@ -40,6 +41,7 @@ class EdgeTranslaterProcessor:
         )
         self._auth_url: str = "https://edge.microsoft.com/translate/auth"
         self._token_cache: dict[str, Any] | None = None
+        self._token_lock = threading.Lock()
         self._cache = build_cache("edge", self._source, self._target, config)
         self._dedupe, self._dedupe_max_length = dedupe_settings(config)
 
@@ -157,13 +159,25 @@ class EdgeTranslaterProcessor:
     def _get_token(self) -> str:
         """
         Fetch a fresh token from Edge if none cached or expired.
+
+        The fetch runs under ``_token_lock`` and re-checks the cache after
+        acquiring it, so concurrent callers coalesce into a single auth
+        request instead of racing one another.
         """
         if self._token_cache is None or datetime.now() >= self._token_cache["expire"]:
-            logger.debug("Fetching new Microsoft Edge translator token...")
-            r = requests.get(self._auth_url, timeout=10)
-            r.raise_for_status()
-            token = r.text.strip()
-            self._token_cache = self._parse_jwt(token)
+            with self._token_lock:
+                # Another thread may have refreshed the token while this
+                # one waited on the lock; only the winner performs the
+                # request.
+                if (
+                    self._token_cache is None
+                    or datetime.now() >= self._token_cache["expire"]
+                ):
+                    logger.debug("Fetching new Microsoft Edge translator token...")
+                    r = requests.get(self._auth_url, timeout=10)
+                    r.raise_for_status()
+                    token = r.text.strip()
+                    self._token_cache = self._parse_jwt(token)
         return self._token_cache["token"]  # type: ignore[no-any-return]
 
     def _translate(self, text: str) -> str:

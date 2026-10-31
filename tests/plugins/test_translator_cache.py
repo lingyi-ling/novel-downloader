@@ -639,3 +639,88 @@ class TestYoudaoCache:
         assert client.calls == ["hello", "hello"]
         assert zh.cache_stats["size"] == 1
         assert en.cache_stats["size"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# concurrent auth / key fetch races
+# --------------------------------------------------------------------------- #
+class SlowCountingSession:
+    """``requests.Session``-like stub whose GET blocks to widen races.
+
+    The block uses ``Event.wait`` rather than ``time.sleep`` so the suite's
+    autouse sleep-stubbing fixture cannot deflate the race window.
+    """
+
+    def __init__(self, delay: float = 0.3) -> None:
+        self.gets = 0
+        self._gate = threading.Event()
+        self._delay = delay
+
+    def get(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.gets += 1
+        self._gate.wait(self._delay)
+        return FakeResponse(
+            200,
+            {"code": 0, "data": {"secretKey": "S", "aesKey": "K", "aesIv": "I"}},
+        )
+
+
+def make_fake_jwt(exp: datetime) -> str:
+    import base64 as b64
+    import json as json_mod
+
+    payload = json_mod.dumps({"exp": int(exp.timestamp())}).encode()
+    return "h." + b64.urlsafe_b64encode(payload).decode().rstrip("=") + ".s"
+
+
+class TestConcurrentAuth:
+    def test_concurrent_youdao_key_fetches_are_coalesced(self) -> None:
+        client = youdao_module._YoudaoWebFanyi()
+        slow = SlowCountingSession()
+        client.sess = slow  # type: ignore[assignment]
+
+        threads = [threading.Thread(target=client._ensure_keys) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert slow.gets == 1
+
+    def test_concurrent_edge_token_fetches_are_coalesced(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gets = {"n": 0}
+
+        gate = threading.Event()
+
+        def slow_get(url: str, **kwargs: Any) -> FakeResponse:
+            gets["n"] += 1
+            gate.wait(0.3)
+            return FakeResponse(200, text=make_fake_jwt(FAR_FUTURE))
+
+        monkeypatch.setattr(requests, "get", slow_get)
+        proc = EdgeTranslaterProcessor({})
+
+        threads = [threading.Thread(target=proc._get_token) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert gets["n"] == 1
+
+    def test_youdao_blank_text_short_circuits(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A whitespace-only title must not be sent to the service; Google and
+        # Edge already short-circuit it.
+        client = CountingClient(result="T")
+        monkeypatch.setattr(youdao_module, "_YoudaoWebFanyi", lambda: client)
+        proc = YoudaoTranslaterProcessor({})
+
+        proc.process_chapter(make_chapter(title="   ", content=""))
+
+        assert client.calls == []

@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 import logging
+import threading
 import time
 from typing import Any
 
@@ -136,11 +137,13 @@ class YoudaoTranslaterProcessor:
         """
         Translate ``text``, returning ``(result, succeeded)``.
 
-        A client exception means the original text is returned with
-        ``succeeded=False``; such a result is never cached or deduplicated.
+        Blank or whitespace-only input is returned untouched without a
+        request, matching the Google and Edge processors. A client exception
+        means the original text is returned with ``succeeded=False``; such a
+        result is never cached or deduplicated.
         """
-        if not text:
-            return "", False
+        if not text.strip():
+            return text, False
 
         key = self._cache.make_key(text)
         if key is None:  # caching disabled or a paragraph is over the limit
@@ -198,6 +201,7 @@ class _YoudaoWebFanyi:
         self._aes_key_bytes: bytes = b""
         self._aes_iv_bytes: bytes = b""
         self._key_fetched_at: float = 0.0
+        self._key_lock = threading.Lock()
 
     @staticmethod
     def _md5_hex(s: str) -> str:
@@ -215,56 +219,69 @@ class _YoudaoWebFanyi:
         s = f"client=fanyideskweb&mysticTime={mystic_time_ms}&product=webfanyi&key={secret_key}"  # noqa: E501
         return self._md5_hex(s)
 
+    def _keys_are_fresh(self) -> bool:
+        """Whether the cached signing keys are present and recent enough."""
+        return bool(self._secret_key) and (time.time() - self._key_fetched_at) < 600
+
     def _ensure_keys(self, force: bool = False) -> None:
-        if (
-            not force
-            and self._secret_key
-            and (time.time() - self._key_fetched_at) < 600
-        ):
+        """
+        Make sure signing keys are available, fetching them when needed.
+
+        The fetch runs under ``_key_lock`` and re-checks freshness after
+        acquiring it, so concurrent callers coalesce into a single key
+        request instead of racing one another.
+        """
+        if not force and self._keys_are_fresh():
             return
 
-        last_err = None
-        mt = int(time.time() * 1000)
-
-        for keyid in self._KEYIDS:
-            try:
-                sign = self._sign_for_key(mt)
-                params = {
-                    "keyid": keyid,
-                    "sign": sign,
-                    "client": "fanyideskweb",
-                    "product": "webfanyi",
-                    "appVersion": "1.0.0",
-                    "vendor": "web",
-                    "pointParam": "client,mysticTime,product",
-                    "mysticTime": str(mt),
-                    "keyfrom": "fanyi.web",
-                    "mid": "1",
-                    "screen": "1",
-                    "model": "1",
-                    "network": "wifi",
-                    "abtest": "0",
-                    "yduuid": "abcdefg",
-                }
-                r = self.sess.get(self.KEY_URL, params=params, timeout=10)
-                r.raise_for_status()
-                js = r.json()
-                if js.get("code") != 0:
-                    raise RuntimeError(f"key endpoint error: {js}")
-                data = js["data"]
-                self._secret_key = data["secretKey"]
-                self._aes_key_str = data["aesKey"]
-                self._aes_iv_str = data["aesIv"]
-                self._aes_key_bytes = self._md5_bytes(self._aes_key_str)
-                self._aes_iv_bytes = self._md5_bytes(self._aes_iv_str)
-                self._key_fetched_at = time.time()
-                logger.debug("Youdao keys fetched via %s", keyid)
+        with self._key_lock:
+            # Another thread may have refreshed the keys while this one
+            # waited on the lock; only the winner performs the request.
+            if not force and self._keys_are_fresh():
                 return
-            except Exception as e:  # try the next keyid
-                last_err = e
-                logger.debug("Key fetch failed via %s: %s", keyid, e)
 
-        raise RuntimeError(f"Failed to fetch Youdao keys: {last_err}")
+            last_err = None
+            mt = int(time.time() * 1000)
+
+            for keyid in self._KEYIDS:
+                try:
+                    sign = self._sign_for_key(mt)
+                    params = {
+                        "keyid": keyid,
+                        "sign": sign,
+                        "client": "fanyideskweb",
+                        "product": "webfanyi",
+                        "appVersion": "1.0.0",
+                        "vendor": "web",
+                        "pointParam": "client,mysticTime,product",
+                        "mysticTime": str(mt),
+                        "keyfrom": "fanyi.web",
+                        "mid": "1",
+                        "screen": "1",
+                        "model": "1",
+                        "network": "wifi",
+                        "abtest": "0",
+                        "yduuid": "abcdefg",
+                    }
+                    r = self.sess.get(self.KEY_URL, params=params, timeout=10)
+                    r.raise_for_status()
+                    js = r.json()
+                    if js.get("code") != 0:
+                        raise RuntimeError(f"key endpoint error: {js}")
+                    data = js["data"]
+                    self._secret_key = data["secretKey"]
+                    self._aes_key_str = data["aesKey"]
+                    self._aes_iv_str = data["aesIv"]
+                    self._aes_key_bytes = self._md5_bytes(self._aes_key_str)
+                    self._aes_iv_bytes = self._md5_bytes(self._aes_iv_str)
+                    self._key_fetched_at = time.time()
+                    logger.debug("Youdao keys fetched via %s", keyid)
+                    return
+                except Exception as e:  # try the next keyid
+                    last_err = e
+                    logger.debug("Key fetch failed via %s: %s", keyid, e)
+
+            raise RuntimeError(f"Failed to fetch Youdao keys: {last_err}")
 
     def _decrypt_payload(self, payload_text: str) -> dict[str, Any]:
         if not (self._aes_key_bytes and self._aes_iv_bytes):
