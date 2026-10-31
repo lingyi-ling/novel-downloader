@@ -17,6 +17,7 @@ Provides:
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import zipfile
 from pathlib import Path
@@ -55,6 +56,26 @@ from .models import (
     OpfDocument,
 )
 
+# Characters that must never appear in a single ZIP entry component or a
+# manifest id: path separators (both flavours), parent-directory markers
+# (".."), Windows drive letters (":"), and other Windows-illegal characters.
+_UNSAFE_ENTRY_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _sanitize_entry_name(name: str, fallback: str) -> str:
+    """
+    Make ``name`` safe to embed as one component of a ZIP entry path.
+
+    Two distinct chapter ids (e.g. ``a/b`` and ``a_b``) can sanitize down to
+    the same filename; :meth:`EpubBuilder._unique_name` handles that, this
+    helper only strips the characters that could make an entry escape its
+    directory (``..``, backslashes, absolute paths) when the archive is
+    extracted by tools that normalize names more loosely than Python's
+    :mod:`zipfile`.
+    """
+    cleaned = _UNSAFE_ENTRY_CHARS.sub("_", name).strip(" .")
+    return cleaned or fallback
+
 
 class EpubBuilder:
     def __init__(
@@ -81,6 +102,12 @@ class EpubBuilder:
         self._font_idx = 0
 
         self._vol_idx = 0
+
+        # Manifest ids and Text/ filenames already taken. Chapter ids and
+        # filenames come from callers (ultimately from site data), so they
+        # are deduplicated against these on registration.
+        self._used_ids: set[str] = {"nav", "ncx", "style", "intro"}
+        self._used_filenames: set[str] = {"intro.xhtml"}
 
         # core EPUB documents
         self.nav = NavDocument(title=title, language=language)
@@ -319,6 +346,25 @@ class EpubBuilder:
         return font
 
     def add_chapter(self, chap: EpubChapter) -> None:
+        """
+        Register a standalone chapter.
+
+        The chapter's id and filename are sanitized and de-duplicated in
+        place before registration: two chapters whose caller-side names
+        collide (e.g. chapter ids ``a/b`` and ``a_b`` both mapping to
+        ``ca_b``) must not overwrite each other inside the archive.
+        """
+        self._prepare_chapter(chap)
+        self._register_chapter(chap)
+
+    def _prepare_chapter(self, chap: EpubChapter) -> None:
+        """Sanitize and de-duplicate ``chap``'s id and filename in place."""
+        filename = _sanitize_entry_name(chap.filename, "chapter.xhtml")
+        chap.filename = self._unique_name(filename, self._used_filenames)
+        cid = _sanitize_entry_name(chap.id, "chapter")
+        chap.id = self._unique_name(cid, self._used_ids)
+
+    def _register_chapter(self, chap: EpubChapter) -> None:
         self.items.append(chap)
         self.opf.add_manifest_item(
             chap.id,
@@ -328,6 +374,27 @@ class EpubBuilder:
         self.opf.add_spine_item(chap.id)
         self.nav.add_chapter(chap.id, chap.title, f"{TEXT_DIR}/{chap.filename}")
         self.ncx.add_chapter(chap.id, chap.title, f"{TEXT_DIR}/{chap.filename}")
+
+    def _unique_name(self, name: str, used: set[str]) -> str:
+        """
+        Return ``name`` unless it was already used, in which case a numeric
+        suffix (``name_2.ext``, ``name_3.ext``, ...) is appended until the
+        name is free.
+        """
+        if name not in used:
+            used.add(name)
+            return name
+
+        stem, dot, ext = name.rpartition(".")
+        if not dot:
+            stem, ext = name, ""
+        index = 2
+        while True:
+            candidate = f"{stem}_{index}.{ext}" if ext else f"{stem}_{index}"
+            if candidate not in used:
+                used.add(candidate)
+                return candidate
+            index += 1
 
     def add_volume(self, volume: EpubVolume) -> None:
         """Add a volume cover, intro, and all its chapters to the EPUB."""
@@ -353,6 +420,8 @@ class EpubBuilder:
             )
 
         self.items.append(vol_cover)
+        self._used_ids.add(vol_cover.id)
+        self._used_filenames.add(vol_cover.filename)
         self.opf.add_manifest_item(
             vol_cover.id,
             f"{TEXT_DIR}/{vol_cover.filename}",
@@ -376,6 +445,8 @@ class EpubBuilder:
                     description=volume.intro,
                 )
             self.items.append(vol_intro)
+            self._used_ids.add(vol_intro.id)
+            self._used_filenames.add(vol_intro.filename)
             self.opf.add_manifest_item(
                 vol_intro.id,
                 f"{TEXT_DIR}/{vol_intro.filename}",
@@ -386,6 +457,10 @@ class EpubBuilder:
         # nested chapters
         entries: list[tuple[str, str, str]] = []
         for chap in volume.chapters:
+            # Same sanitization / de-duplication as add_chapter(): ids and
+            # filenames ultimately come from site data, so two chapters in
+            # a volume can otherwise overwrite each other in the archive.
+            self._prepare_chapter(chap)
             self.items.append(chap)
             self.opf.add_manifest_item(
                 chap.id,
@@ -449,6 +524,8 @@ class EpubBuilder:
 
         cover_item = EpubCover(ext=ext)
         self.items.append(cover_item)
+        self._used_ids.update({cover_img.id, cover_item.id})
+        self._used_filenames.add(cover_item.filename)
         self.opf.add_manifest_item(
             cover_item.id,
             f"{TEXT_DIR}/{cover_item.filename}",

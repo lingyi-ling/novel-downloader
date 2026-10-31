@@ -399,3 +399,66 @@ def test_export_chapter_epub(scenario: Scenario) -> None:
     assert "OEBPS/Text/c1.xhtml" in names
     with zipfile.ZipFile(path) as zf:
         assert "单章内容" in zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Sanitization collisions & robustness (chapter ids that sanitize alike)
+# ---------------------------------------------------------------------------
+
+
+def test_export_book_epub_sanitized_cid_collision_keeps_both(
+    scenario: Scenario,
+) -> None:
+    # "a/b" and "a_b" both sanitize to "ca_b": the second chapter must not
+    # silently overwrite the first inside the archive.
+    scenario.write_book_info(
+        make_book_info(
+            volumes=[
+                make_volume(
+                    "卷",
+                    [make_chapter_info("a/b", "章A"), make_chapter_info("a_b", "章B")],
+                )
+            ]
+        )
+    )
+    scenario.write_chapters(
+        [
+            make_chapter("a/b", "内容A", title="章A"),
+            make_chapter("a_b", "内容B", title="章B"),
+        ]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        assert len(names) == len(set(names))
+        chapters = [n for n in names if n.startswith("OEBPS/Text/ca_b")]
+        assert len(chapters) == 2
+        bodies = "\n".join(zf.read(n).decode("utf-8") for n in chapters)
+        assert "内容A" in bodies
+        assert "内容B" in bodies
+
+
+def test_xp_epub_chapter_tolerates_none_title_and_content(
+    scenario: Scenario,
+) -> None:
+    # A chapter dict whose title/content are None (e.g. hand-written JSON
+    # metadata) must render a placeholder, not raise AttributeError.
+    chapter: dict[str, object] = {
+        "id": "1",
+        "title": None,
+        "content": None,
+        "extra": {},
+    }
+
+    chapter_obj = scenario.client._xp_epub_chapter(
+        book=None,  # type: ignore[arg-type]
+        cid="1",
+        chap_title=None,
+        chap=chapter,  # type: ignore[arg-type]
+        media_dir=scenario.output_dir,
+    )
+
+    assert chapter_obj.filename == "c1.xhtml"
+    assert chapter_obj.title == ""
+    assert chapter_obj.content == ""

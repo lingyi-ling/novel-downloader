@@ -230,3 +230,119 @@ def test_export_mimetype_stored(tmp_path):
         info = z.getinfo("mimetype")
         # Compression must be ZIP_STORED (0)
         assert info.compress_type == zipfile.ZIP_STORED
+
+
+# ---------------------------------------------------------
+# Test: two chapters whose filenames collide after caller-side
+# sanitization (e.g. cids "a/b" and "a_b") must not produce
+# duplicate ZIP entries or silently lose one chapter.
+# ---------------------------------------------------------
+def test_chapter_filename_collision_is_renamed(tmp_path):
+    b = EpubBuilder(title="Book")
+    b.add_chapter(
+        EpubChapter(id="c1", filename="ca_b.xhtml", title="A", content="<p>AA</p>")
+    )
+    b.add_chapter(
+        EpubChapter(id="c2", filename="ca_b.xhtml", title="B", content="<p>BB</p>")
+    )
+
+    out = tmp_path / "col.epub"
+    b.export(out)
+
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+        assert len(names) == len(set(names))  # no duplicate entries
+        text_entries = sorted(
+            n for n in names if n.startswith(f"{ROOT_PATH}/{TEXT_DIR}/")
+        )
+        assert len(text_entries) == 3  # intro + 2 chapters
+        bodies = {z.read(n).decode("utf-8") for n in text_entries}
+        assert any("AA" in body for body in bodies)
+        assert any("BB" in body for body in bodies)
+        # both chapters are reachable from the manifest with distinct ids
+        hrefs = [ln for ln in b.opf.manifest_lines if "ca_b" in ln]
+        assert len(hrefs) == 2
+
+
+def test_chapter_id_collision_is_renamed(tmp_path):
+    b = EpubBuilder(title="Book")
+    b.add_chapter(EpubChapter(id="dup", filename="one.xhtml", title="A"))
+    b.add_chapter(EpubChapter(id="dup", filename="two.xhtml", title="B"))
+
+    ids = [ln.split('"')[1] for ln in b.opf.manifest_lines if 'id="' in ln]
+    assert len(ids) == len(set(ids))
+
+
+# ---------------------------------------------------------
+# Test: entry names supplied by callers can never traverse out
+# of their archive directory ("..", backslashes, drive letters).
+# ---------------------------------------------------------
+def test_zip_entries_never_escape_their_directory(tmp_path):
+    b = EpubBuilder(title="Book")
+    b.add_chapter(
+        EpubChapter(id="t1", filename="../evil.xhtml", title="E", content="<p>E</p>")
+    )
+    b.add_chapter(
+        EpubChapter(
+            id="t2", filename=r"..\evil2.xhtml", title="E2", content="<p>E2</p>"
+        )
+    )
+    b.add_chapter(
+        EpubChapter(id="t3", filename="C:/evil3.xhtml", title="E3", content="<p>E3</p>")
+    )
+
+    out = tmp_path / "trav.epub"
+    b.export(out)
+
+    with zipfile.ZipFile(out) as z:
+        for name in z.namelist():
+            parts = name.split("/")
+            assert "\\" not in name
+            assert ":" not in name
+            assert all(p not in ("", ".", "..") for p in parts)
+
+        text_entries = [
+            n for n in z.namelist() if n.startswith(f"{ROOT_PATH}/{TEXT_DIR}/")
+        ]
+        # chapter entries stay flat inside Text/ (OEBPS/Text/<name>, 3 parts)
+        assert all(len(n.split("/")) == 3 for n in text_entries)
+        # every manifest href must point at a real, flat entry
+        for ln in b.opf.manifest_lines:
+            if f"{TEXT_DIR}/" in ln:
+                href = ln.split('href="')[1].split('"')[0]
+                assert f"{ROOT_PATH}/{href}" in z.namelist()
+
+
+# ---------------------------------------------------------
+# Test: an interrupted (BaseException) write must not leave a
+# temporary file behind nor touch an existing archive.
+# ---------------------------------------------------------
+def test_interrupted_write_leaves_no_temp_file(tmp_path, monkeypatch):
+    good = EpubBuilder(title="Good")
+    good.add_chapter(EpubChapter(id="c1", filename="c1.xhtml", title="ok"))
+    out = tmp_path / "book.epub"
+    good.export(out)
+    before = out.read_bytes()
+
+    calls = {"n": 0}
+    real_writestr = zipfile.ZipFile.writestr
+
+    def bombing_writestr(self, name, data, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise KeyboardInterrupt
+        return real_writestr(self, name, data, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", bombing_writestr)
+
+    bad = EpubBuilder(title="Bad")
+    bad.add_chapter(EpubChapter(id="c2", filename="c2.xhtml", title="bad"))
+    try:
+        bad.export(out)
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("expected KeyboardInterrupt")
+
+    assert out.read_bytes() == before
+    assert list(tmp_path.glob("*.tmp")) == []

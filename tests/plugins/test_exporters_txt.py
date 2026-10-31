@@ -347,3 +347,23 @@ def test_export_chapter_txt_missing_id_returns_none(scenario: Scenario) -> None:
     scenario.write_chapters([make_chapter("1", "内容")])
 
     assert scenario.export_chapter("does-not-exist", "txt")["txt"] is None
+
+
+# ---------------------------------------------------------------------------
+# Robustness: chapter dicts with None fields
+# ---------------------------------------------------------------------------
+
+
+def test_xp_txt_chapter_tolerates_none_title_and_content(
+    scenario: Scenario,
+) -> None:
+    chapter: dict[str, object] = {
+        "id": "1",
+        "title": None,
+        "content": None,
+        "extra": {},
+    }
+
+    text = scenario.client._xp_txt_chapter(None, chapter)  # type: ignore[arg-type]
+
+    assert text == "\n\n\n\n"

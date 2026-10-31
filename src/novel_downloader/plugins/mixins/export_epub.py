@@ -423,9 +423,13 @@ class ExportEpubMixin:
         """
         Build a Chapter object with XHTML content and optionally place images / font.
         """
-        title = chap_title or chap.get("title", "").strip()
-        content = chap.get("content", "")
-        resources: list[MediaResource] = chap.get("extra", {}).get("resources", [])
+        # Hand-written / legacy chapter records may store explicit nulls
+        # ("title": null), so ``get``'s default never fires: coerce to "".
+        title = chap_title or (chap.get("title") or "").strip()
+        content = chap.get("content") or ""
+        resources: list[MediaResource] = (chap.get("extra") or {}).get(
+            "resources"
+        ) or []
 
         lines = content.splitlines()
         max_i = len(lines)

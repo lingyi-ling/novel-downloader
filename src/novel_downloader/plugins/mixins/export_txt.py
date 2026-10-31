@@ -257,10 +257,11 @@ class ExportTxtMixin:
         """
         Render one chapter to text
         """
-        # Title
-        title_line = chap_title or chap.get("title", "").strip()
+        # Hand-written / legacy chapter records may store explicit nulls
+        # ("title": null), so ``get``'s default never fires: coerce to "".
+        title_line = chap_title or (chap.get("title") or "").strip()
 
-        cleaned = chap.get("content", "").strip()
+        cleaned = (chap.get("content") or "").strip()
         body = "\n".join(s for line in cleaned.splitlines() if (s := line.strip()))
 
         # Extras

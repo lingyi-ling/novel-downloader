@@ -295,3 +295,67 @@ def test_export_chapter_html_missing_id_returns_none(scenario: Scenario) -> None
     scenario.write_chapters([make_chapter("1", "内容")])
 
     assert scenario.export_chapter("nope", "html")["html"] is None
+
+
+# ---------------------------------------------------------------------------
+# Sanitization collisions & robustness
+# ---------------------------------------------------------------------------
+
+
+def test_export_book_html_sanitized_cid_collision_keeps_both(
+    scenario: Scenario,
+) -> None:
+    # "a/b" and "a_b" both sanitize to "ca_b": the second chapter file must
+    # not overwrite the first, and the index must link to both files.
+    scenario.write_book_info(
+        make_book_info(
+            volumes=[
+                make_volume(
+                    "卷",
+                    [make_chapter_info("a/b", "章A"), make_chapter_info("a_b", "章B")],
+                )
+            ]
+        )
+    )
+    scenario.write_chapters(
+        [
+            make_chapter("a/b", "内容A", title="章A"),
+            make_chapter("a_b", "内容B", title="章B"),
+        ]
+    )
+
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+    chapter_files = sorted(p.name for p in (folder / "chapters").iterdir())
+    assert chapter_files == ["ca_b.html", "ca_b_2.html"]
+
+    index = (folder / "index.html").read_text("utf-8")
+    assert 'href="chapters/ca_b.html"' in index
+    assert 'href="chapters/ca_b_2.html"' in index
+
+    body_a = (folder / "chapters" / "ca_b.html").read_text("utf-8")
+    body_b = (folder / "chapters" / "ca_b_2.html").read_text("utf-8")
+    assert "内容A" in body_a
+    assert "内容B" in body_b
+
+
+def test_xp_html_chapter_tolerates_none_title_and_content(
+    scenario: Scenario,
+) -> None:
+    chapter: dict[str, object] = {
+        "id": "1",
+        "title": None,
+        "content": None,
+        "extra": {},
+    }
+
+    chapter_obj = scenario.client._xp_html_chapter(
+        builder=None,  # type: ignore[arg-type]
+        cid="1",
+        chap_title=None,
+        chap=chapter,  # type: ignore[arg-type]
+        media_dir=scenario.output_dir,
+    )
+
+    assert chapter_obj.filename == "c1.html"
+    assert chapter_obj.title == ""
+    assert chapter_obj.content == ""

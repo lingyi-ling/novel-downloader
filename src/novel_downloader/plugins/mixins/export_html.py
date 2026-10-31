@@ -6,6 +6,7 @@ novel_downloader.plugins.mixins.export_html
 
 import base64
 import logging
+from dataclasses import replace
 from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -26,6 +27,31 @@ from novel_downloader.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _unique_chapter_filename(filename: str, used: set[str]) -> str:
+    """
+    Return ``filename`` unless it was already used in this export.
+
+    Two chapter ids can sanitize down to the same filename (``a/b`` and
+    ``a_b`` both become ``ca_b``); appending a numeric suffix (``_2``,
+    ``_3``, ...) then keeps the later chapter from silently overwriting
+    the earlier one and keeps the index pointing at both files.
+    """
+    if filename not in used:
+        used.add(filename)
+        return filename
+
+    stem, dot, ext = filename.rpartition(".")
+    if not dot:
+        stem, ext = filename, ""
+    index = 2
+    while True:
+        candidate = f"{stem}_{index}.{ext}" if ext else f"{stem}_{index}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+        index += 1
 
 
 if TYPE_CHECKING:
@@ -117,6 +143,9 @@ class ExportHtmlMixin:
 
         # --- Compile columes ---
         seen_cids: set[str] = set()
+        # Chapter filenames are derived from cids; distinct cids can collide
+        # after sanitization ("a/b" vs "a_b"), so reserve them book-wide.
+        used_chapter_files: set[str] = set()
         with ChapterStorage(raw_base, filename=f"chapter.{stage}.sqlite") as storage:
             for v_idx, vol in enumerate(vols, start=1):
                 vol_title = vol.get("volume_name") or f"卷 {v_idx}"
@@ -153,6 +182,12 @@ class ExportHtmlMixin:
                                 cid=cid,
                                 chap_title=ch_title,
                             )
+                            chapter_obj = replace(
+                                chapter_obj,
+                                filename=_unique_chapter_filename(
+                                    chapter_obj.filename, used_chapter_files
+                                ),
+                            )
                             curr_vol.chapters.append(chapter_obj)
                         continue
 
@@ -162,6 +197,12 @@ class ExportHtmlMixin:
                         chap_title=ch_title,
                         chap=ch,
                         media_dir=media_dir,
+                    )
+                    chapter_obj = replace(
+                        chapter_obj,
+                        filename=_unique_chapter_filename(
+                            chapter_obj.filename, used_chapter_files
+                        ),
                     )
 
                     curr_vol.chapters.append(chapter_obj)
@@ -267,9 +308,13 @@ class ExportHtmlMixin:
         """
         Build a Chapter object with HTML content and optionally place images / font.
         """
-        title = chap_title or chap.get("title", "").strip()
-        content = chap.get("content", "")
-        resources: list[MediaResource] = chap.get("extra", {}).get("resources", [])
+        # Hand-written / legacy chapter records may store explicit nulls
+        # ("title": null), so ``get``'s default never fires: coerce to "".
+        title = chap_title or (chap.get("title") or "").strip()
+        content = chap.get("content") or ""
+        resources: list[MediaResource] = (chap.get("extra") or {}).get(
+            "resources"
+        ) or []
 
         lines = content.splitlines()
         max_i = len(lines)
