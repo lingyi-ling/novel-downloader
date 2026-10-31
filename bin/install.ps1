@@ -122,10 +122,9 @@ function Install-FromPip {
         Write-Warn2 'or grab a packaged build from the Releases page once published.'
         return
     }
-    $ver = (& python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-    $minor = [int]($ver.Split('.')[1])
-    if ([int]($ver.Split('.')[0]) -lt 3 -or $minor -lt 11) {
-        Write-Warn2 "Python $ver found; 3.11+ is required."
+    $parts = (& python -c "import sys; print(sys.version_info[0], sys.version_info[1])") -split '\s+'
+    if ([int]$parts[0] -lt 3 -or ([int]$parts[0] -eq 3 -and [int]$parts[1] -lt 11)) {
+        Write-Warn2 "Python $($parts[0]).$($parts[1]) found; 3.11+ is required."
         return
     }
     & python -m pip install -U --user 'novel-downloader[api,music]'
