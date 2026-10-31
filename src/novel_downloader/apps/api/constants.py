@@ -75,15 +75,20 @@ MSG_MUSIC_UNAVAILABLE = (
 #: platform keys, mirroring the CLI's message for the same condition.
 MSG_UNKNOWN_MUSIC_PLATFORM = "Unknown music platform: {platform}. Available: {keys}"
 
-#: ``detail`` of the 400 response when a known platform cannot be constructed.
+#: ``detail`` of the 500 response when a known platform cannot be constructed.
+#: ``error`` carries only the exception class name — the message may embed
+#: internal paths or credentials and is kept in the server log instead.
 MSG_MUSIC_PLATFORM_INIT_FAILED = (
     "Could not initialise music platform {platform!r}: {error}"
 )
 
-#: ``detail`` of the 400 response when writing an M3U8 playlist fails.
+#: ``detail`` of the 500 response when writing an M3U8 playlist fails.
+#: ``target`` is the caller's own input and safe to echo; ``error`` carries
+#: only the exception class name (same anti-leak rule as above).
 MSG_PLAYLIST_WRITE_FAILED = "Could not write playlist {target}: {error}"
 
-#: ``detail`` of the 400 response when the download engine raises.
+#: ``detail`` of the 502 response when the download engine raises.
+#: ``error`` carries only the exception class name (same anti-leak rule).
 MSG_MUSIC_DOWNLOAD_FAILED = "Music download failed: {error}"
 
 #: ``detail`` of the 404 response for an unknown async music job id.

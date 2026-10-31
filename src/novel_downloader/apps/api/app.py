@@ -159,9 +159,11 @@ def create_app(
     """
     Build the REST API application.
 
-    :param token: API token; when ``None`` ``NOVEL_API_TOKEN`` is used. An empty
-        value disables authentication (suitable for localhost-only use). When
-        set, the token protects both ``/api/v1/*`` and ``/downloads/*``.
+    :param token: API token; when ``None`` ``NOVEL_API_TOKEN`` is used. The
+        value is stripped, so surrounding whitespace never locks out clients
+        that send the trimmed token; an empty (or whitespace-only) value
+        disables authentication (suitable for localhost-only use). When set,
+        the token protects both ``/api/v1/*`` and ``/downloads/*``.
     :param cors: Add a permissive CORS middleware (see module docstring).
     :param output_dir: Override ``general.output_dir`` for ``/downloads``;
         mainly useful in tests.
@@ -183,6 +185,12 @@ def create_app(
     :return: A configured :class:`fastapi.FastAPI` instance.
     """
     resolved_token = token if token is not None else os.environ.get("NOVEL_API_TOKEN")
+    if resolved_token is not None:
+        # The provided token is stripped on every request, so a configured
+        # token with stray whitespace must be normalized the same way or no
+        # client could ever authenticate. Whitespace-only collapses to the
+        # documented "empty token disables auth" case.
+        resolved_token = resolved_token.strip()
     resolved_webhook = (
         webhook_url if webhook_url is not None else webhook_url_from_env()
     )

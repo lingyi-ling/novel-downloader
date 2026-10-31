@@ -509,13 +509,25 @@ class NovelApiClient:
         return self._request("GET", "music/platforms")
 
     def music_search(
-        self, platform: str, keyword: str, limit: int = 20
+        self, platform: str, keyword: str, limit: int = 20, offset: int = 0
     ) -> dict[str, Any]:
-        """Search a music platform."""
+        """
+        Search a music platform.
+
+        :param limit: Maximum number of tracks to return (``>= 1``).
+        :param offset: Number of tracks to skip (``>= 0``); sent explicitly so
+            pagination works against the server's ``offset`` parameter.
+        :return: A payload with ``total`` and ``tracks`` keys.
+        """
         return self._request(
             "POST",
             "music/search",
-            json={"platform": platform, "keyword": keyword, "limit": limit},
+            json={
+                "platform": platform,
+                "keyword": keyword,
+                "limit": limit,
+                "offset": offset,
+            },
         )
 
     def music_download(

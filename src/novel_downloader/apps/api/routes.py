@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable
@@ -76,6 +77,9 @@ from .schemas import (
     WatchlistAddRequest,
     WatchlistCheckRequest,
 )
+
+#: Logger for sanitized failures whose full reason stays server-side.
+logger = logging.getLogger(__name__)
 
 #: OpenAPI groups shown in ``/docs``.
 OPENAPI_TAGS: list[dict[str, str]] = [
@@ -219,9 +223,18 @@ async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
     """
     Search all (or the selected) sites and return ranked results.
 
+    An omitted ``sites`` searches every registered site; ``sites: []`` searches
+    none (matching the SSE endpoint's ``sites=`` empty-value semantics) instead
+    of silently fanning out to every site.
+
     The aggregate search is bounded by an overall deadline (in addition to the
     per-site ``timeout``); exceeding it returns ``504``.
     """
+    if body.sites is not None and not body.sites:
+        # An explicit empty selection means "search no site": do not start
+        # the aggregate search at all.
+        return {"total": 0, "results": []}
+
     timeout = _blocking_timeout(request, "search")
     results = await _with_timeout(
         search(
@@ -261,7 +274,14 @@ async def _search_event_stream(
     wrapper is closed or cancelled. Starlette cancels the response generator
     when the client disconnects, so the ``finally`` block inside
     ``search_stream`` runs and its per-site tasks are cancelled too.
+
+    ``sites=[]`` means "search no site": only the final ``done`` frame is
+    emitted and the underlying search is never started.
     """
+    if sites is not None and not sites:
+        yield _sse_frame("done", {"total": 0})
+        return
+
     total = 0
     async with aclosing(
         search_stream(
@@ -909,9 +929,14 @@ def _create_provider(components: _MusicComponents, platform: str) -> Any:
             ),
         ) from exc
     except Exception as exc:  # noqa: BLE001 - provider construction
+        # Only the exception class reaches the client; the message may carry
+        # internal paths or credentials and stays in the server log.
+        logger.warning("Music platform %r failed to initialise: %s", platform, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=MSG_MUSIC_PLATFORM_INIT_FAILED.format(platform=platform, error=exc),
+            detail=MSG_MUSIC_PLATFORM_INIT_FAILED.format(
+                platform=platform, error=type(exc).__name__
+            ),
         ) from exc
 
 
@@ -1011,9 +1036,14 @@ async def music_export(body: MusicExportRequest) -> dict[str, Any]:
     try:
         written = await run_in_threadpool(components.export_m3u, tracks, target)
     except OSError as exc:
+        # The caller's own ``target`` is echoed back, but not the raw OS error
+        # (it may embed server-internal paths); the full reason is logged.
+        logger.warning("Playlist write failed for %s: %s", target, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=MSG_PLAYLIST_WRITE_FAILED.format(target=target, error=exc),
+            detail=MSG_PLAYLIST_WRITE_FAILED.format(
+                target=target, error=type(exc).__name__
+            ),
         ) from exc
 
     return {
@@ -1124,9 +1154,12 @@ async def music_download(
     except Exception as exc:  # noqa: BLE001 - download engine errors
         if isinstance(exc, HTTPException):
             raise
+        # Same anti-leak rule as the 503 handler and the generic 500: the
+        # client sees the exception class, the operator sees the message.
+        logger.warning("Music download failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=MSG_MUSIC_DOWNLOAD_FAILED.format(error=exc),
+            detail=MSG_MUSIC_DOWNLOAD_FAILED.format(error=type(exc).__name__),
         ) from exc
 
     ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
@@ -1186,10 +1219,17 @@ def _music_job_update(job_id: str, **fields: Any) -> None:
 
 
 def _music_job_set_progress(job_id: str, done: int) -> None:
-    """Record how many tracks have finished so far."""
+    """
+    Record how many tracks have finished so far.
+
+    Ignored once the job is terminal: cancelling the timeout only stops the
+    *request* from waiting, so the worker thread keeps calling back after the
+    terminal state was recorded, and a finished job's ``progress`` must stay
+    frozen at the value its clients already saw.
+    """
     with _MUSIC_JOBS_LOCK:
         job = _MUSIC_JOBS.get(job_id)
-        if job is not None:
+        if job is not None and job["status"] not in _TERMINAL_MUSIC_STATUSES:
             job["progress"]["done"] = done
 
 

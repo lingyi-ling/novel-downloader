@@ -415,10 +415,13 @@ def test_music_search() -> None:
         assert client.music_search("netease", "song", limit=5) == payload
 
     assert recorder.requests[0].url.path == "/api/v1/music/search"
+    # ``offset`` is always sent explicitly (the server-side default is 0),
+    # per test_api_r5.test_client_music_search_sends_offset.
     assert recorder.json_body() == {
         "platform": "netease",
         "keyword": "song",
         "limit": 5,
+        "offset": 0,
     }
 
 

@@ -125,6 +125,12 @@ def api_main(argv: Sequence[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
 
     token = args.token if args.token is not None else os.environ.get(TOKEN_ENV_VAR)
+    if token is not None:
+        # Normalize like the app factory does: a token configured with stray
+        # whitespace stays usable, and whitespace-only counts as "no token"
+        # for the public-bind warning instead of silently enabling auth-less
+        # remote access.
+        token = token.strip()
     warn_if_insecure_bind(args.host, token, args.cors)
 
     application = create_app(
