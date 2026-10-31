@@ -235,3 +235,13 @@ downloads/{book_name}_{author}/
     ├── img_2.png
     └── ...                     # 字体 / 资源缓存
 ```
+
+## 推荐阅读器
+
+导出的 EPUB 在这些阅读器上体验最佳:
+
+* **桌面端**: [Readest](https://readest.com/)、[Koodo Reader](https://www.koodoreader.com/zh)、[Calibre](https://calibre-ebook.com/zh_CN)
+* **移动端**: [Readest](https://readest.com/)、Apple Books、[静读天下 Moon+ Reader](https://moondownload.com/chinese.html)、Kindle
+
+需要转换为其它电子书格式时, 可使用 [Calibre](https://calibre-ebook.com/zh_CN)
+或 [FreeConvert](https://www.freeconvert.com/zh) 等工具。

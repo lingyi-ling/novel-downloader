@@ -1,0 +1,34 @@
+# Docker Compose for the Novel Downloader REST API.
+#
+# Build the image locally first (the compose file builds it from the repo):
+#
+#   docker compose -f packaging/docker-compose.yml up -d
+#
+# The API listens on 127.0.0.1:8081 inside the container; the mapping below
+# publishes it on localhost only. Set NOVEL_API_TOKEN to require a token on
+# every endpoint (recommended when the port is exposed beyond localhost).
+
+services:
+  novel-api:
+    build:
+      context: ..
+      dockerfile: packaging/Dockerfile
+    image: novel-downloader-api:local
+    container_name: novel-api
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      # NOVEL_API_TOKEN: change-me        # uncomment to require a token
+      NOVEL_HOME: /data
+    volumes:
+      - noveldl-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8081/api/v1/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  noveldl-data:

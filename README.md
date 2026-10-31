@@ -2,6 +2,13 @@
 
 [中文](./README.md) | [English](./README.en.md)
 
+[![CI](https://github.com/lingyi-ling/novel-downloader/actions/workflows/ci.yml/badge.svg)](https://github.com/lingyi-ling/novel-downloader/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/lingyi-ling/novel-downloader)](https://github.com/lingyi-ling/novel-downloader/releases/latest)
+[![GitHub Downloads](https://img.shields.io/github/downloads/lingyi-ling/novel-downloader/total)](https://github.com/lingyi-ling/novel-downloader/releases)
+[![License](https://img.shields.io/github/license/lingyi-ling/novel-downloader)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](./docs/guide/installation.md)
+[![GitHub Stars](https://img.shields.io/github/stars/lingyi-ling/novel-downloader?style=flat&color=fbca04)](https://github.com/lingyi-ling/novel-downloader/stargazers)
+
 异步、可扩展的小说下载与处理工具包, 同时内置多平台音乐下载。
 
 支持断点续爬、下载队列与进度、多格式导出、文本处理流水线, 提供 CLI (`novel-cli`)、本地 REST API (`novel-api`)、桌面客户端 (`novel-desktop`) 与 Android 客户端四种使用方式。
@@ -31,6 +38,26 @@
 
 ## 安装与更新
 
+### 🚀 一键安装 (推荐)
+
+**Windows** (PowerShell, 无需管理员):
+
+```powershell
+irm https://raw.githubusercontent.com/lingyi-ling/novel-downloader/main/bin/install.ps1 | iex
+```
+
+**Linux / macOS**:
+
+```bash
+bash <(curl -sSL https://raw.githubusercontent.com/lingyi-ling/novel-downloader/main/bin/install.sh)
+```
+
+Windows 脚本会从 Releases 下载打包成品 (CLI + 桌面客户端), 自动加入 PATH
+并创建桌面/开始菜单快捷方式; 未发布 Release 时回退到 pip 安装。
+Linux/macOS 脚本创建独立 venv 并把入口链接到 `~/.local/bin`。
+
+### 📦 手动安装
+
 使用 `pip` 安装最新稳定版本:
 
 ```bash
@@ -48,6 +75,16 @@ pip install "novel-downloader[api]"
 ```bash
 pip install "novel-downloader[music]"
 ```
+
+### 🐳 Docker (REST API)
+
+```bash
+docker build -f packaging/Dockerfile -t novel-downloader-api:local .
+docker run -d -p 8081:8081 -v noveldl-data:/data novel-downloader-api:local
+```
+
+详见 [packaging/README-docker.md](packaging/README-docker.md);
+Compose 示例见 [packaging/docker-compose.yml](packaging/docker-compose.yml)。
 
 如需启用其它可选功能 (本地 API、音乐、图片转文字、额外后端等), 请参见: [安装指南](./docs/guide/installation.md)
 
@@ -235,3 +272,9 @@ pip install .
 * 本项目仅供学习和研究使用, **不得**用于任何商业或违法用途
 * 请遵守目标网站的 `robots.txt` 及相关法律法规
 * 使用本项目产生的任何法律责任由使用者自行承担, 作者不承担相关责任
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=lingyi-ling/novel-downloader&type=Date)](https://star-history.com/#lingyi-ling/novel-downloader&Date)

@@ -235,3 +235,13 @@ downloads/{book_name}_{author}/
     ├── img_2.png
     └── ...                     # Font / resource cache
 ```
+
+## Recommended readers
+
+The exported EPUB works best in these readers:
+
+* **Desktop**: [Readest](https://readest.com/), [Koodo Reader](https://www.koodoreader.com/en), [Calibre](https://calibre-ebook.com)
+* **Mobile**: [Readest](https://readest.com/), Apple Books, [Moon+ Reader](https://moondownload.com/chinese.html), Kindle
+
+To convert to other ebook formats, use [Calibre](https://calibre-ebook.com)
+or [FreeConvert](https://www.freeconvert.com/).

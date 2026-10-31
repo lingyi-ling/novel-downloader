@@ -204,7 +204,13 @@
           <button class="tab" role="tab" data-tab="android">Android</button>
         </div>
         <div class="tab-panel active" data-panel="cli">
-          <pre><code><span class="c"># 安装</span>
+          <pre><code><span class="c"># Windows 一键安装（PowerShell，无需管理员）</span>
+irm https://raw.githubusercontent.com/lingyi-ling/novel-downloader/main/bin/install.ps1 | iex
+
+<span class="c"># Linux / macOS 一键安装</span>
+bash &lt;(curl -sSL https://raw.githubusercontent.com/lingyi-ling/novel-downloader/main/bin/install.sh)
+
+<span class="c"># —— 或者用 pip ——</span>
 pip install -U novel-downloader
 
 <span class="c"># 聚合搜索</span>

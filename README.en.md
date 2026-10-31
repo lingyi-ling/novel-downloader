@@ -2,6 +2,13 @@
 
 [中文](./README.md) | [English](./README.en.md)
 
+[![CI](https://github.com/lingyi-ling/novel-downloader/actions/workflows/ci.yml/badge.svg)](https://github.com/lingyi-ling/novel-downloader/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/lingyi-ling/novel-downloader)](https://github.com/lingyi-ling/novel-downloader/releases/latest)
+[![GitHub Downloads](https://img.shields.io/github/downloads/lingyi-ling/novel-downloader/total)](https://github.com/lingyi-ling/novel-downloader/releases)
+[![License](https://img.shields.io/github/license/lingyi-ling/novel-downloader)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](./docs/guide/installation.en.md)
+[![GitHub Stars](https://img.shields.io/github/stars/lingyi-ling/novel-downloader?style=flat&color=fbca04)](https://github.com/lingyi-ling/novel-downloader/stargazers)
+
 Asynchronous, modular, and extensible toolkit for downloading and processing online novels, with built-in multi-platform music downloading.
 
 Supports resumable crawling, download queues with progress, multi-format exporting, and a text processing pipeline, exposed through the CLI (`novel-cli`), a local REST API (`novel-api`), a desktop client (`novel-desktop`), and an Android client.
@@ -30,6 +37,28 @@ Supports resumable crawling, download queues with progress, multi-format exporti
 ---
 
 ## Installation
+
+### 🚀 One-line install (recommended)
+
+**Windows** (PowerShell, no admin needed):
+
+```powershell
+irm https://raw.githubusercontent.com/lingyi-ling/novel-downloader/main/bin/install.ps1 | iex
+```
+
+**Linux / macOS**:
+
+```bash
+bash <(curl -sSL https://raw.githubusercontent.com/lingyi-ling/novel-downloader/main/bin/install.sh)
+```
+
+The Windows script downloads the packaged builds from Releases (CLI +
+desktop client), adds them to PATH and creates desktop / Start-menu
+shortcuts; it falls back to pip when no release is published. The
+Linux/macOS script creates an isolated venv and links entry points into
+`~/.local/bin`.
+
+### 📦 Manual install
 
 Install the latest stable release:
 
@@ -163,3 +192,9 @@ Do not use it for commercial or illegal activities.
 
 Users are responsible for complying with target sites' `robots.txt` and local regulations.
 The author assumes no liability for misuse.
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=lingyi-ling/novel-downloader&type=Date)](https://star-history.com/#lingyi-ling/novel-downloader&Date)
