@@ -1,4 +1,9 @@
-/* ============================================================ tokens */
+/* ============================================================ tokens
+   Contrast (WCAG 2.x relative-luminance, AA):
+   light: text 15.1 / text-2 5.0 / text-3 4.7 / accent 4.2 (bg), 4.5 (card)
+          accent-ink >= 4.8 everywhere incl. 10% soft tints
+          on-accent (white) on accent 4.6, on hover 5.8
+   dark:  text 14.9 / text-2 6.8 / text-3 5.3 / accent 6.9 / on-accent 7.0 */
 :root {
   --bg: #f6f5f1;
   --bg-alt: #efede6;
@@ -6,11 +11,12 @@
   --border: #e5e2d8;
   --text: #201f1b;
   --text-2: #6d6960;
-  --text-3: #a09a8c;
-  --accent: #d97757;
-  --accent-hover: #c4653f;
-  --accent-soft: rgba(217, 119, 87, .10);
-  --accent-soft-2: rgba(217, 119, 87, .20);
+  --text-3: #726d5f;
+  --accent: #b95a2c;
+  --accent-hover: #9a4724;
+  --accent-ink: #9c4526;
+  --accent-soft: rgba(185, 90, 44, .10);
+  --accent-soft-2: rgba(185, 90, 44, .20);
   --on-accent: #ffffff;
   --code-bg: #201f1b;
   --code-text: #ece9e2;
@@ -25,9 +31,10 @@
   --border: #34322c;
   --text: #ece9e2;
   --text-2: #a39e93;
-  --text-3: #726d62;
+  --text-3: #8f8a7d;
   --accent: #e08a63;
   --accent-hover: #eb9d78;
+  --accent-ink: #e08a63;
   --accent-soft: rgba(224, 138, 99, .13);
   --accent-soft-2: rgba(224, 138, 99, .24);
   --on-accent: #1c1208;
@@ -50,7 +57,15 @@ body {
 }
 a { color: inherit; text-decoration: none; }
 svg { display: block; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* accent-filled controls need a ring that reads against both the accent fill
+   and the page: text-color ring + page-color halo gap */
+.btn-primary:focus-visible, .skip-link:focus {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--bg);
+}
+.tab:focus-visible { outline-color: var(--code-text); }
 
 /* ============================================================ nav */
 .nav {
@@ -74,13 +89,13 @@ svg { display: block; }
 .brand-mark.small svg { width: 14px; height: 14px; }
 .nav-links { margin-left: auto; display: flex; gap: 22px; font-size: 14.5px; font-weight: 500; color: var(--text-2); }
 .nav-links a { transition: color .15s ease; }
-.nav-links a:hover { color: var(--accent); }
+.nav-links a:hover { color: var(--accent-ink); }
 .icon-btn {
   width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 10px;
   background: var(--card); color: var(--text-2); cursor: pointer;
   display: grid; place-items: center; transition: color .15s, border-color .15s, transform .12s;
 }
-.icon-btn:hover { color: var(--accent); border-color: var(--accent); }
+.icon-btn:hover { color: var(--accent-ink); border-color: var(--accent); }
 .icon-btn:active { transform: scale(.94); }
 .icon-btn svg { width: 17px; height: 17px; }
 .icon-sun { display: none; }
@@ -101,7 +116,7 @@ svg { display: block; }
 }
 .hero-eyebrow {
   display: inline-block; font-size: 13px; font-weight: 600; letter-spacing: .04em;
-  color: var(--accent); background: var(--accent-soft);
+  color: var(--accent-ink); background: var(--accent-soft);
   border: 1px solid var(--accent-soft-2);
   padding: 4px 14px; border-radius: 99px; margin-bottom: 26px;
 }
@@ -111,7 +126,7 @@ svg { display: block; }
 }
 .hero h1 em {
   font-style: normal; color: var(--accent);
-  background: linear-gradient(120deg, var(--accent), #e8a37e);
+  background: linear-gradient(120deg, var(--accent), #c96f42);
   -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
 }
 .hero-sub {
@@ -133,7 +148,7 @@ svg { display: block; }
 }
 .btn-primary:hover { background: var(--accent-hover); transform: translateY(-1px); box-shadow: var(--shadow-2); }
 .btn-ghost { border: 1px solid var(--border); background: var(--card); color: var(--text); }
-.btn-ghost:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent-ink); transform: translateY(-1px); }
 .hero-stats {
   display: flex; justify-content: center; gap: clamp(24px, 6vw, 64px);
   margin-top: 58px; flex-wrap: wrap;
@@ -193,7 +208,7 @@ svg { display: block; }
 .client-card h3 { font-size: 17px; font-weight: 800; }
 .client-tag {
   display: inline-block; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-  font-size: 12px; color: var(--accent); background: var(--accent-soft);
+  font-size: 12px; color: var(--accent-ink); background: var(--accent-soft);
   border-radius: 6px; padding: 2px 8px; margin: 6px 0 12px;
 }
 .client-card p:last-child { font-size: 13.5px; color: var(--text-2); }
@@ -202,11 +217,11 @@ svg { display: block; }
 .download-card p { flex: 1; }
 .download-card code {
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-  font-size: 12.5px; color: var(--accent);
+  font-size: 12.5px; color: var(--accent-ink);
   background: var(--accent-soft); border-radius: 5px; padding: 1px 5px;
 }
 .dl-link {
-  margin-top: 14px; font-size: 13.5px; font-weight: 600; color: var(--accent);
+  margin-top: 14px; font-size: 13.5px; font-weight: 600; color: var(--accent-ink);
   transition: transform .18s ease;
 }
 .download-card:hover .dl-link { transform: translateX(4px); }
@@ -220,7 +235,7 @@ svg { display: block; }
 .tab-bar { display: flex; gap: 4px; padding: 10px 12px 0; border-bottom: 1px solid rgba(255,255,255,.08); }
 .tab {
   appearance: none; border: none; background: none; cursor: pointer;
-  color: #8b867a; font: 600 13.5px/1 inherit;
+  color: #94907f; font: 600 13.5px/1 inherit;
   padding: 10px 16px; border-radius: 8px 8px 0 0;
   transition: color .15s, background .15s;
 }
@@ -233,7 +248,7 @@ svg { display: block; }
   font: 13.5px/1.75 ui-monospace, "Cascadia Code", Consolas, monospace;
   color: var(--code-text);
 }
-.tab-panel .c { color: #7d786c; user-select: none; }
+.tab-panel .c { color: #8f8a7c; user-select: none; }
 
 /* ============================================================ footer cta */
 .footer-cta {
@@ -252,7 +267,8 @@ svg { display: block; }
 }
 .foot-brand { display: flex; align-items: center; gap: 9px; font-weight: 700; }
 .foot-links { display: flex; gap: 20px; font-size: 14px; color: var(--text-2); }
-.foot-links a:hover { color: var(--accent); }
+.foot-links a:hover { color: var(--accent-ink); }
+.foot-note { font-size: 12.5px; color: var(--text-3); line-height: 1.8; }
 .foot-legal { font-size: 12.5px; color: var(--text-3); line-height: 1.8; }
 
 /* ============================================================ reveal */
@@ -280,7 +296,7 @@ svg { display: block; }
   border-radius: 99px; padding: 2px 9px;
 }
 .gh-chip.inline {
-  margin-right: 8px; color: var(--accent);
+  margin-right: 8px; color: var(--accent-ink);
   background: var(--accent-soft); border-color: var(--accent-soft-2);
 }
 
@@ -292,7 +308,7 @@ svg { display: block; }
   color: var(--text-2); font: 700 12.5px/1 inherit; letter-spacing: .04em;
   cursor: pointer; transition: color .15s, border-color .15s;
 }
-.lang-btn:hover { color: var(--accent); border-color: var(--accent); }
+.lang-btn:hover { color: var(--accent-ink); border-color: var(--accent); }
 .burger { display: none; }
 .mobile-menu {
   display: none; flex-direction: column; gap: 2px;
@@ -300,7 +316,7 @@ svg { display: block; }
   background: var(--bg);
 }
 .mobile-menu a { padding: 10px 12px; border-radius: 9px; font-weight: 500; color: var(--text-2); }
-.mobile-menu a:hover { background: var(--bg-alt); color: var(--accent); }
+.mobile-menu a:hover { background: var(--bg-alt); color: var(--accent-ink); }
 @media (max-width: 760px) {
   .nav-links { display: none; }
   .burger { display: grid; }
@@ -308,7 +324,7 @@ svg { display: block; }
 }
 
 /* scrollspy active state */
-.nav-links a.active { color: var(--accent); font-weight: 600; }
+.nav-links a.active { color: var(--accent-ink); font-weight: 600; }
 
 /* ============================================================ showcase */
 .showcase { padding-bottom: 40px; }
@@ -330,7 +346,7 @@ svg { display: block; }
 .appwin-title { margin-left: 8px; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
 .appwin-pill {
   margin-left: auto; font-size: 10.5px; font-weight: 700;
-  color: var(--accent); background: var(--accent-soft);
+  color: var(--accent-ink); background: var(--accent-soft);
   border-radius: 99px; padding: 2px 9px;
 }
 .appwin-body {
@@ -423,5 +439,5 @@ svg { display: block; }
   transition: opacity .25s ease, transform .25s ease, color .15s, border-color .15s;
 }
 .to-top.show { opacity: 1; transform: none; pointer-events: auto; }
-.to-top:hover { color: var(--accent); border-color: var(--accent); }
+.to-top:hover { color: var(--accent-ink); border-color: var(--accent); }
 .to-top svg { width: 19px; height: 19px; }

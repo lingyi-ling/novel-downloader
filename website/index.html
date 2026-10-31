@@ -6,13 +6,54 @@
 <title>Novel Downloader — 多站点聚合 · 异步下载 · 四端同源</title>
 <meta name="description" content="异步、模块化、可扩展的小说下载工具链：84 个下载站点、59 个搜索源、25 个音乐平台，CLI / REST API / Windows 桌面 / Android 四端同源。">
 <meta name="keywords" content="小说下载,聚合搜索,EPUB,音乐下载,开源,Novel Downloader">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171614" media="(prefers-color-scheme: dark)">
+<link rel="canonical" href="http://43.165.170.43/noveldl/">
+<link rel="alternate" hreflang="zh-CN" href="http://43.165.170.43/noveldl/?lang=zh">
+<link rel="alternate" hreflang="en" href="http://43.165.170.43/noveldl/?lang=en">
+<link rel="alternate" hreflang="x-default" href="http://43.165.170.43/noveldl/">
 <meta property="og:title" content="Novel Downloader">
 <meta property="og:description" content="多站点聚合 · 异步下载 · 四端同源的小说下载工具链">
 <meta property="og:type" content="website">
-<meta property="og:image" content="og-image.png">
+<meta property="og:url" content="http://43.165.170.43/noveldl/">
+<meta property="og:image" content="http://43.165.170.43/noveldl/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Novel Downloader — 84 个下载站点 · 59 个搜索源 · 25 个音乐平台 · 四端同源">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:locale:alternate" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="http://43.165.170.43/noveldl/og-image.png">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
+<script id="ld-software" type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Novel Downloader",
+  "url": "http://43.165.170.43/noveldl/",
+  "description": "异步、模块化、可扩展的小说下载工具链：84 个下载站点、59 个搜索源、25 个音乐平台，CLI / REST API / Windows 桌面 / Android 四端同源。",
+  "softwareVersion": "1.2.0",
+  "operatingSystem": "Windows, Linux, macOS, Android",
+  "applicationCategory": "UtilitiesApplication",
+  "programmingLanguage": "Python, Kotlin",
+  "inLanguage": ["zh-CN", "en"],
+  "isAccessibleForFree": true,
+  "license": "https://spdx.org/licenses/Apache-2.0.html",
+  "downloadUrl": "https://github.com/lingyi-ling/novel-downloader/releases/latest",
+  "featureList": [
+    "聚合搜索",
+    "队列与断点续传",
+    "TXT / EPUB / HTML 多格式导出",
+    "追更",
+    "音乐下载",
+    "处理器管线"
+  ],
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Organization", "name": "Novel Downloader contributors", "url": "https://github.com/lingyi-ling" }
+}
+</script>
 </head>
 <body>
 <a class="skip-link" href="#main">跳到主要内容</a>
@@ -20,7 +61,7 @@
 <header class="nav">
   <div class="nav-inner">
     <a class="brand" href="#top">
-      <span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg></span>
+      <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg></span>
       <span class="brand-name">Novel Downloader</span>
       <span class="gh-chip" id="gh-stars" hidden>★ <span id="gh-stars-n">–</span></span>
     </a>
@@ -35,11 +76,11 @@
     <div class="nav-actions">
       <button class="lang-btn" id="lang-btn" aria-label="Switch language">EN</button>
       <button class="icon-btn" id="theme-btn" aria-label="切换主题">
-        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
-        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/></svg>
       </button>
-      <button class="icon-btn burger" id="burger-btn" aria-label="菜单" aria-expanded="false">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      <button class="icon-btn burger" id="burger-btn" aria-label="菜单" aria-expanded="false" aria-controls="mobile-menu">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
       </button>
     </div>
   </div>
@@ -53,7 +94,7 @@
   </nav>
 </header>
 
-<main id="main" id="top">
+<main id="main">
 
   <!-- ============================== HERO -->
   <section class="hero" id="top">
@@ -128,32 +169,32 @@
       <p class="section-sub" data-en="Search to shelf — every step is programmable, extensible, observable.">从搜到存，每一步都可编程、可扩展、可观测。</p>
       <div class="grid grid-3">
         <article class="card reveal">
-          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
           <h3 data-en="Aggregate search">聚合搜索</h3>
           <p data-en="59 sources queried concurrently, ranked by a five-signal quality score; same-book results merge across sites with recent-search caching.">59 个搜索源并发查询，按关键词覆盖度、字数、更新时间、站点权重五信号智能排序；同书多源自动合并，最近搜索缓存，秒级响应。</p>
         </article>
         <article class="card reveal">
-          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg></div>
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg></div>
           <h3 data-en="Queue & resume">队列与断点续传</h3>
           <p data-en="Per-site concurrency, chapter-level resume, automatic retries on transient failures, live progress; processing and export are cancellable too.">站点级并发调度、章节级断点续传、传输类失败自动重试、进度实时可见；处理与导出阶段同样可取消。</p>
         </article>
         <article class="card reveal">
-          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg></div>
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg></div>
           <h3 data-en="Multi-format export">多格式导出</h3>
           <p data-en="TXT / EPUB / HTML in one step: atomic writes, volume dedup, chapter cleaning; re-export downloaded books anytime.">TXT / EPUB / HTML 一步到位：原子写入、分卷去重、章节净化，随时对已下载书目重新导出。</p>
         </article>
         <article class="card reveal">
-          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.5-1.5 3-3.2 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.8 0-3 .5-4.5 2-1.5-1.5-2.7-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4 3 5.5l7 7Z"/></svg></div>
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.5-1.5 3-3.2 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.8 0-3 .5-4.5 2-1.5-1.5-2.7-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4 3 5.5l7 7Z"/></svg></div>
           <h3 data-en="Follow updates">追更</h3>
           <p data-en="A watchlist self-checks for new chapters; one tap queues the update. Bounded concurrency keeps slow sites from dragging the sweep.">关注列表定时自检新章节，发现更新即可一键入队；全量检查并发受控，慢站不拖快站。</p>
         </article>
         <article class="card reveal">
-          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
           <h3 data-en="Music downloads">音乐下载</h3>
           <p data-en="Search across 25 platforms, five quality tiers up to Hi-Res, tag/cover/lyric embedding, playlist export, per-platform health checks.">25 个平台聚合搜索，Hi-Res 到标准音质五档可选，标签/封面/歌词嵌入，播放列表导出，平台连通性健康检查。</p>
         </article>
         <article class="card reveal">
-          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg></div>
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg></div>
           <h3 data-en="Processor pipeline">处理器管线</h3>
           <p data-en="Ad cleaning, zh conversion, OCR for image chapters, machine translation — plugins between download and export; JSON rule sources add sites without code.">广告净化、简繁转换、OCR 视频章节、机翻润色——以插件形式串在下载与导出之间，JSON 规则书源免代码接入新站点。</p>
         </article>
@@ -197,66 +238,78 @@
       <h2 class="section-title" data-en="Up and running in 30 seconds">三十秒上手</h2>
       <p class="section-sub" data-en="Pick your door, copy, run.">选你的入口，复制，运行。</p>
       <div class="tabs reveal">
-        <div class="tab-bar" role="tablist">
-          <button class="tab active" role="tab" data-tab="cli">CLI</button>
-          <button class="tab" role="tab" data-tab="api">REST API</button>
-          <button class="tab" role="tab" data-tab="desktop" data-en="Desktop">桌面</button>
-          <button class="tab" role="tab" data-tab="android">Android</button>
+        <div class="tab-bar" role="tablist" id="start-tabs" aria-label="快速开始方式">
+          <button class="tab active" id="tab-cli" role="tab" aria-selected="true" aria-controls="panel-cli" tabindex="0" data-tab="cli">CLI</button>
+          <button class="tab" id="tab-api" role="tab" aria-selected="false" aria-controls="panel-api" tabindex="-1" data-tab="api">REST API</button>
+          <button class="tab" id="tab-desktop" role="tab" aria-selected="false" aria-controls="panel-desktop" tabindex="-1" data-tab="desktop" data-en="Desktop">桌面</button>
+          <button class="tab" id="tab-android" role="tab" aria-selected="false" aria-controls="panel-android" tabindex="-1" data-tab="android">Android</button>
+          <button class="tab" id="tab-engine" role="tab" aria-selected="false" aria-controls="panel-engine" tabindex="-1" data-tab="engine" data-en="Standalone">独立引擎</button>
         </div>
-        <div class="tab-panel active" data-panel="cli">
-          <pre><code><span class="c"># Windows 一键安装（PowerShell，无需管理员）</span>
+        <div class="tab-panel active" id="panel-cli" role="tabpanel" aria-labelledby="tab-cli" tabindex="0" data-panel="cli">
+          <pre><code><span class="c" data-en="# Windows one-line install (PowerShell, no admin needed)"># Windows 一键安装（PowerShell，无需管理员）</span>
 irm https://raw.githubusercontent.com/lingyi-ling/novel-downloader/main/bin/install.ps1 | iex
 
-<span class="c"># Linux / macOS 一键安装</span>
+<span class="c" data-en="# Linux / macOS one-line install"># Linux / macOS 一键安装</span>
 bash &lt;(curl -sSL https://raw.githubusercontent.com/lingyi-ling/novel-downloader/main/bin/install.sh)
 
-<span class="c"># —— 或者用 pip ——</span>
+<span class="c" data-en="# — or with pip —"># —— 或者用 pip ——</span>
 pip install -U novel-downloader
 
-<span class="c"># 聚合搜索</span>
+<span class="c" data-en="# Aggregate search"># 聚合搜索</span>
 novel-cli search "凡人修仙传"
 
-<span class="c"># 一键下载（支持断点续传）</span>
+<span class="c" data-en="# One-command download (resumable)"># 一键下载（支持断点续传）</span>
 novel-cli download --site qidian 107580
 
-<span class="c"># 追更 + 音乐</span>
+<span class="c" data-en="# Follow updates + music"># 追更 + 音乐</span>
 novel-cli follow add --site qidian 107580
 novel-cli music search "晴天" --platform netease</code></pre>
         </div>
-        <div class="tab-panel" data-panel="api">
-          <pre><code><span class="c"># 启动本地 REST 服务（127.0.0.1:8081）</span>
+        <div class="tab-panel" id="panel-api" role="tabpanel" aria-labelledby="tab-api" tabindex="0" data-panel="api">
+          <pre><code><span class="c" data-en="# Start the local REST service (127.0.0.1:8081)"># 启动本地 REST 服务（127.0.0.1:8081）</span>
 pip install "novel-downloader[api]"
 novel-api
 
-<span class="c"># 搜索</span>
+<span class="c" data-en="# Search"># 搜索</span>
 curl -X POST http://127.0.0.1:8081/api/v1/search \
   -H "Content-Type: application/json" \
   -d '{"keyword": "凡人修仙传"}'
 
-<span class="c"># 入队下载</span>
+<span class="c" data-en="# Queue a download"># 入队下载</span>
 curl -X POST http://127.0.0.1:8081/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{"site": "qidian", "book_id": "107580", "title": "凡人修仙传"}'</code></pre>
         </div>
-        <div class="tab-panel" data-panel="desktop">
-          <pre><code><span class="c"># 安装（含 pywebview 桌面壳）</span>
+        <div class="tab-panel" id="panel-desktop" role="tabpanel" aria-labelledby="tab-desktop" tabindex="0" data-panel="desktop">
+          <pre><code><span class="c" data-en="# Install (includes the pywebview desktop shell)"># 安装（含 pywebview 桌面壳）</span>
 pip install -U novel-downloader
 
-<span class="c"># 启动图形界面</span>
+<span class="c" data-en="# Launch the GUI"># 启动图形界面</span>
 novel-desktop
 
-<span class="c"># 暖纸色双主题 · 实时下载进度 · 平台健康检查
+<span class="c" data-en="# Warm-paper dual theme · live download progress · site health checks
+# Ctrl+1-5 switches the five pages"># 暖纸色双主题 · 实时下载进度 · 平台健康检查
 # Ctrl+1-5 切换五个页面</span></code></pre>
         </div>
-        <div class="tab-panel" data-panel="android">
-          <pre><code><span class="c"># 从源码构建（JDK 17 + Android SDK 35）</span>
+        <div class="tab-panel" id="panel-android" role="tabpanel" aria-labelledby="tab-android" tabindex="0" data-panel="android">
+          <pre><code><span class="c" data-en="# Build from source (JDK 17 + Android SDK 35)"># 从源码构建（JDK 17 + Android SDK 35）</span>
 git clone https://github.com/lingyi-ling/novel-downloader
 cd novel-downloader/android
 ./gradlew assembleDebug
 
-<span class="c"># 安装后在本机跑 novel-api，
+<span class="c" data-en="# Run novel-api on your PC, then point the app at
+# its API address to share the same service layer"># 安装后在本机跑 novel-api，
 # App 内设置 API 地址即连上同一套服务层</span>
-<span class="c"># ——或在 App 内开启「独立引擎」，内嵌 Python，手机单机直跑全套服务层</span></code></pre>
+<span class="c" data-en="# — or flip on the standalone engine in the app: embedded Python, full service layer on the phone"># ——或在 App 内开启「独立引擎」，内嵌 Python，手机单机直跑全套服务层</span></code></pre>
+        </div>
+        <div class="tab-panel" id="panel-engine" role="tabpanel" aria-labelledby="tab-engine" tabindex="0" data-panel="engine">
+          <pre><code><span class="c" data-en="# Android app → Settings → enable the standalone engine"># Android App → 设置 → 开启「独立引擎」</span>
+<span class="c" data-en="# Embedded Python 3.12 (Chaquopy), initialized automatically on first enable"># 内嵌 Python 3.12（Chaquopy），首次开启时自动初始化</span>
+<span class="c" data-en="# The full service layer runs on the phone — loopback API, local only"># 全套服务层跑在手机本地 —— 环回 API，仅本机可访问</span>
+<span class="c" data-en="# All 84 download sites / 59 search sources, no PC needed"># 84 站点 / 59 搜索源单机直跑，无需电脑</span>
+
+<span class="c" data-en="# Flip the switch off to go back to remote mode (drive a PC-side novel-api)"># 关闭开关 = 回到远程模式（遥控电脑端 novel-api）</span>
+<span class="c" data-en="# Note: music is an empty state in this mode for now; APK ≈ 68 MB (Python runtime included)"># 独立模式下音乐页暂为空态；APK 约 68 MB（含 Python 运行时）</span></code></pre>
         </div>
       </div>
     </div>
@@ -269,19 +322,19 @@ cd novel-downloader/android
       <p class="section-sub" data-en="Packaged builds — or start from source.">打包好的成品，或从源码开始。</p>
       <div class="grid grid-3">
         <a class="card download-card reveal" href="https://github.com/lingyi-ling/novel-downloader/releases/latest" target="_blank" rel="noopener">
-          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></svg></div>
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></svg></div>
           <h3 data-en="Windows desktop">Windows 桌面</h3>
           <p data-en="Download the setup exe and click through — desktop and Start-menu icons are created for you (no Python needed). A portable zip is also available.">下载 setup 安装包，双击下一步即可——自动创建桌面与开始菜单图标（无需 Python）；也提供免安装 zip。</p>
           <span class="dl-link" data-en="Open Releases →">前往 Releases →</span>
         </a>
         <a class="card download-card reveal" href="https://pypi.org/project/novel-downloader/" target="_blank" rel="noopener">
-          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg></div>
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg></div>
           <h3>PyPI</h3>
           <p><code>pip install -U novel-downloader</code><span data-en=" gives you novel-cli / novel-api / novel-desktop, with optional [api] and [music] extras."> 得到 novel-cli / novel-api / novel-desktop 三个入口；可选 <code>[api]</code> <code>[music]</code> 扩展组。</span></p>
           <span class="dl-link" data-en="PyPI page →">PyPI 项目页 →</span>
         </a>
         <a class="card download-card reveal" href="https://github.com/lingyi-ling/novel-downloader/actions/workflows/build.yml" target="_blank" rel="noopener">
-          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg></div>
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg></div>
           <h3>Android</h3>
           <p data-en="CI builds a debug APK on every push (Actions artifacts), or run ./gradlew assembleRelease for a signed build; the ~68 MB APK embeds the Python runtime, so the standalone engine runs the full service layer on your phone — no PC-side novel-api needed (music is an empty state in this mode for now).">CI 持续构建 debug APK（Actions 工件），或自行 <code>./gradlew assembleRelease</code> 出签名包；APK 约 68 MB（内嵌 Python 运行时），开启「独立引擎」即可手机单机下载、无需电脑端 novel-api（独立模式下音乐暂为空态）。</p>
           <span class="dl-link" data-en="Build artifacts →">构建工件 →</span>
@@ -317,8 +370,16 @@ cd novel-downloader/android
           <p data-en="The app checks GitHub Releases once per day; a clickable toast appears when a newer version exists. Update checks are offline-safe and stay silent on failure.">应用每 24 小时检查一次 GitHub Releases，发现新版本会弹出可点击的提示；离线时静默，不打扰。</p>
         </details>
         <details>
+          <summary data-en="How does the update mechanism work?">更新机制是怎么工作的？</summary>
+          <p data-en="CLI, API and desktop come from the same pip package — pip install -U novel-downloader (or re-running the one-line installer) gets you the latest; the Windows desktop additionally self-checks GitHub Releases every 24 h. Site parser fixes and new book sources ship with regular releases, so a plain upgrade fixes most broken sites — your config, queue and downloaded library carry over untouched.">CLI、API、桌面端同源于同一个 pip 包——pip install -U novel-downloader（或重跑一键安装脚本）即升到最新版，Windows 桌面端另有每 24 小时一次的 Releases 自查。站点解析修复与新书源随常规版本发布，普通升级即可修复大多数失效站点——你的配置、队列与已下载书目原样保留。</p>
+        </details>
+        <details>
           <summary data-en="A site stopped working — what now?">某个站点失效了怎么办？</summary>
           <p data-en="Site structures change; open an issue with the site name and error. The parser layer isolates failures so one broken site never blocks the rest.">站点改版不可避免。带站点名和报错信息提 Issue 即可；解析层故障隔离，单站失效不影响其他站点。</p>
+        </details>
+        <details>
+          <summary data-en="Standalone engine vs. remote mode — what's the difference?">独立引擎和远程模式有什么区别？</summary>
+          <p data-en="Remote mode: the phone is just a remote — search and downloads actually run on a PC-side novel-api, and the app points at the PC's API address. Standalone engine: the app embeds Python 3.12 via Chaquopy and runs the whole service layer on the phone itself (loopback API) — no PC needed. Data follows the engine: it lives on the PC in remote mode, on the phone in standalone mode. Standalone mode currently shows an empty state for music, and the APK grows to about 68 MB with the embedded runtime. One toggle in settings switches between the two.">远程模式：手机只是遥控器——搜索与下载实际跑在电脑端 novel-api 上，App 里填电脑的 API 地址即可。独立引擎：App 经 Chaquopy 内嵌 Python 3.12，把整套服务层跑在手机本地（环回 API），无需电脑。数据跟着引擎走：远程模式留在电脑，独立模式留在手机。独立模式下音乐页暂为空态，APK 也因内嵌运行时增至约 68 MB。设置里的一个开关即可随时切换两种模式。</p>
         </details>
       </div>
     </div>
@@ -348,6 +409,9 @@ cd novel-downloader/android
       <a href="https://github.com/lingyi-ling/novel-downloader/tree/main/docs" target="_blank" rel="noopener" data-en="Docs">文档</a>
       <a href="https://github.com/lingyi-ling/novel-downloader/issues" target="_blank" rel="noopener">Issues</a>
     </nav>
+    <p class="foot-note">
+      <span data-en="This site is a static single page (plain HTML / CSS / JS, no backend). The website/ directory in the repository is the entire source — point any static server (nginx, GitHub Pages, object storage …) at it and you are self-hosting, no build step required.">本官网是纯静态单页（HTML / CSS / JS，无后端）。仓库 website/ 目录即全部源码——任意静态服务器（nginx、GitHub Pages、对象存储等）指向该目录即可自托管，无需构建步骤。</span>
+    </p>
     <p class="foot-legal">
       <span data-en="For learning and research only; respect target sites' robots.txt and local laws. No commercial use.">本项目仅供学习与研究，请勿用于商业或非法用途；请遵守目标站点 robots.txt 与当地法规。</span><br>
       © 2026 Novel Downloader contributors · Apache-2.0
@@ -356,7 +420,7 @@ cd novel-downloader/android
 </footer>
 
 <button class="to-top" id="to-top" aria-label="回到顶部" hidden>
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+  <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
 </button>
 
 <script src="main.js"></script>
