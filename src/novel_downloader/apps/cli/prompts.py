@@ -146,18 +146,17 @@ def select_books(raw_dir: Path, site: str, per_page: int = 10) -> list[str]:
             page_rows,
         )
 
-        numeric_choices = [str(i) for i in range(start, end + 1)]
-        nav_choices = []
-        if page < total_pages:
-            nav_choices.append("n")
-        if page > 1:
-            nav_choices.append("p")
-
-        choice = ui.prompt_choice(
-            t(
-                "Enter numbers (e.g. 1,3,5), 'a' for all, 'n' next, 'p' previous (Enter to cancel)"  # noqa: E501
-            ),
-            numeric_choices + nav_choices + ["a"],
+        # Free-form input (not ui.prompt_choice): a constrained prompt would
+        # reject the advertised multi-select "1,3,5" answers, leaving the
+        # comma branch below unreachable for real users.
+        choice = (
+            ui.prompt(
+                t(
+                    "Enter numbers (e.g. 1,3,5), 'a' for all, 'n' next, 'p' previous (Enter to cancel)"  # noqa: E501
+                )
+            )
+            .strip()
+            .lower()
         )
 
         if choice == "":
@@ -170,16 +169,20 @@ def select_books(raw_dir: Path, site: str, per_page: int = 10) -> list[str]:
         if choice == "p" and page > 1:
             page -= 1
             continue
-        if "," in choice or choice in numeric_choices:
-            try:
-                idxs = sorted({int(s) for s in choice.split(",") if s.strip()})
-            except ValueError:
-                ui.warn(t("Invalid input."))
-                continue
+        if choice in {"n", "p"}:
+            # Navigation entered where it does not apply (e.g. "n" on the
+            # last page): ignore and re-display the current page.
+            continue
+        tokens = [s.strip() for s in choice.split(",") if s.strip()]
+        # isdecimal(), not isdigit(): digit look-alikes such as "²" pass
+        # isdigit() but int() would then raise ValueError here.
+        if tokens and all(s.isdecimal() for s in tokens):
+            idxs = sorted({int(s) for s in tokens})
             if any(i < 1 or i > len(book_dirs) for i in idxs):
                 ui.warn(t("One or more indices out of range."))
                 continue
             return [book_dirs[i - 1].name for i in idxs]
+        ui.warn(t("Invalid input."))
 
 
 def select_search_result(

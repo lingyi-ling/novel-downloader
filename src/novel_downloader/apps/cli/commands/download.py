@@ -151,7 +151,9 @@ class DownloadCmd(Command):
                 )
 
         if not books:
-            fail(t("No book IDs provided. Exiting."), EXIT_FAILURE)
+            # Documented exit-code contract: no URL/book ID supplied at all
+            # is a usage error, not a runtime failure.
+            fail(t("No book IDs provided. Exiting."), EXIT_USAGE)
 
         ui.setup_logging(
             log_dir=adapter.get_log_dir(),

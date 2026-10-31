@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Offline unit tests for the interactive CLI prompt helpers.
 
-``ui.prompt_choice`` is scripted through a queue so the pagination and
-selection logic of :mod:`novel_downloader.apps.cli.prompts` is fully
-deterministic; nothing is read from the real user profile.
+``ui.prompt_choice`` and ``ui.prompt`` are scripted through a queue so the
+pagination and selection logic of :mod:`novel_downloader.apps.cli.prompts`
+is fully deterministic; nothing is read from the real user profile.
+
+``select_books`` reads free-form input via ``ui.prompt`` (a constrained
+``prompt_choice`` would reject the advertised "1,3,5" multi-select), so its
+answers flow through the same queue.
 """
 
 from __future__ import annotations
@@ -23,6 +27,10 @@ def answers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     queue: list[str] = []
     monkeypatch.setattr(
         "novel_downloader.apps.cli.prompts.ui.prompt_choice",
+        lambda *a, **k: queue.pop(0),
+    )
+    monkeypatch.setattr(
+        "novel_downloader.apps.cli.prompts.ui.prompt",
         lambda *a, **k: queue.pop(0),
     )
     return queue

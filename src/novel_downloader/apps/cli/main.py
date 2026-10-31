@@ -86,7 +86,13 @@ def cli_main() -> None:
     if args.command is None:
         from novel_downloader.apps.cli.interactive import start_interactive
 
-        start_interactive()
+        try:
+            start_interactive()
+        except KeyboardInterrupt as err:
+            # Same contract as the command path above: "Aborted." on stderr,
+            # exit code 1 -- never a raw traceback out of interactive mode.
+            print("\n" + t("Aborted."), file=sys.stderr)
+            raise SystemExit(1) from err
         return
 
     if hasattr(args, "func"):

@@ -76,11 +76,17 @@ def confirm(message: str, *, default: bool = False) -> bool:
     :param message: The question to display (without [y/N] suffix).
     :param default: Default choice (pressing Enter = Yes if True, No if False).
     :return: True if user confirms (Yes), otherwise False.
+
+    ``KeyboardInterrupt`` is deliberately NOT caught: the caller (``cli_main``)
+    turns it into the documented "Aborted." exit. Only a closed stdin
+    (``EOFError``) is treated as "no".
     """
     try:
-        result: bool = Confirm.ask(f"[bold]{message}[/bold]", default=default)
+        result: bool = Confirm.ask(
+            f"[bold]{escape(message)}[/bold]", default=default, console=_CONSOLE
+        )
         return result
-    except (KeyboardInterrupt, EOFError):
+    except EOFError:
         warn(t("Cancelled."))
         return False
 
@@ -91,12 +97,19 @@ def prompt(message: str, *, default: str | None = None) -> str:
 
     :param message: Prompt message.
     :param default: Default value if the user presses Enter.
-    :return: The user's input.
+    :return: The user's input (the default when stdin is closed).
+
+    ``KeyboardInterrupt`` propagates so the CLI can abort with exit code 1.
     """
     try:
-        result: str = Prompt.ask(message, default=default or "", show_default=False)
+        result: str = Prompt.ask(
+            escape(message),
+            default=default or "",
+            show_default=False,
+            console=_CONSOLE,
+        )
         return result
-    except (KeyboardInterrupt, EOFError):
+    except EOFError:
         warn(t("Cancelled."))
         return default or ""
 
@@ -107,11 +120,13 @@ def prompt_password(message: str) -> str:
 
     :param message: Prompt message.
     :return: The user's input (may be empty).
+
+    ``KeyboardInterrupt`` propagates so the CLI can abort with exit code 1.
     """
     try:
-        result: str = Prompt.ask(message, password=True)
+        result: str = Prompt.ask(escape(message), password=True, console=_CONSOLE)
         return result
-    except (KeyboardInterrupt, EOFError):
+    except EOFError:
         warn(t("Cancelled."))
         return ""
 
@@ -130,9 +145,11 @@ def render_table(
     """
     from rich.table import Table
 
-    table = Table(title=title, show_lines=True, expand=True)
+    # The title (e.g. "Available Books for <site>") and column headers may
+    # contain user data; escape them like the cell values below.
+    table = Table(title=escape(title), show_lines=True, expand=True)
     for col in columns:
-        table.add_column(col, overflow="fold")
+        table.add_column(escape(col), overflow="fold")
     # Cell values come from remote/user data (book titles, rule names, ...);
     # escape them so a stray "[...]" is printed literally instead of being
     # parsed as rich markup.
@@ -147,20 +164,24 @@ def prompt_choice(prompt_text: str, choices: Sequence[str]) -> str:
 
     :param prompt_text: Prompt message shown to the user.
     :param choices: Valid choices (strings). Empty string is treated as cancel.
-    :return: The raw user input, lowercased and trimmed. Returns "" if cancelled.
+    :return: The raw user input, lowercased and trimmed. Returns "" when
+        stdin is closed (EOF); ``KeyboardInterrupt`` propagates so the CLI
+        can abort with exit code 1.
     """
     try:
         resp: str = Prompt.ask(
-            prompt_text,
+            escape(prompt_text),
             choices=list(choices) + [""],
+            case_sensitive=False,
             show_choices=False,
             default="",
             show_default=False,
+            console=_CONSOLE,
         )
         return resp.strip().lower()
-    except (KeyboardInterrupt, EOFError):
-        # Non-interactive stdin (a pipe, a closed terminal, Ctrl-C, ...):
-        # treat as "cancel" instead of letting the exception escape.
+    except EOFError:
+        # Non-interactive stdin (a pipe, a closed terminal, ...): treat as
+        # "cancel" instead of letting the exception escape.
         return ""
 
 
@@ -182,13 +203,15 @@ class ProgressUI:
     async def update(self, done: int, total: int) -> None:
         if self._task_id is None:
             self._task_id = self._progress.add_task(
-                f"[cyan]{self._prefix}[/]", total=max(1, total)
+                f"[cyan]{escape(self._prefix)}[/]", total=max(1, total)
             )
         self._progress.update(
             self._task_id,
             completed=done,
             total=max(1, total),
-            description=f"{self._prefix} ({done}/{total} {self._unit})",
+            # Rich parses markup in progress descriptions too, so a stage
+            # name containing "[...]" must be escaped.
+            description=f"{escape(self._prefix)} ({done}/{total} {self._unit})",
         )
 
     def update_sync(self, done: int, total: int) -> None:

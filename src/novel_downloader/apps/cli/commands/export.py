@@ -86,7 +86,9 @@ class ExportCmd(Command):
         # site selection
         if not site:
             book_ids = []  # ignore passed-in ids when site is not specified
-            if not sys.stdin.isatty():
+            if as_json or not sys.stdin.isatty():
+                # --json must never enter interactive selection (documented
+                # contract); non-TTY stdin could not answer it either way.
                 fail(
                     t(
                         "Interactive selection requires a terminal; "
@@ -111,7 +113,7 @@ class ExportCmd(Command):
 
         # book selection
         if not book_ids:
-            if not sys.stdin.isatty():
+            if as_json or not sys.stdin.isatty():
                 fail(
                     t(
                         "Interactive selection requires a terminal; "
