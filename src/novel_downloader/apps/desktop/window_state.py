@@ -3,21 +3,20 @@
 novel_downloader.apps.desktop.window_state
 ------------------------------------------
 
-Window geometry persistence for the Tkinter desktop client.
+Window geometry persistence for the desktop client.
 
 The last main-window geometry (width, height and position) is stored as JSON
 in :func:`novel_downloader.apps.music.paths.music_data_dir` and restored on
-the next launch.  The parsing, validation and serialization helpers here are
-pure (no Tk imports), so the file format is testable without a display; only
-:func:`load_window_geometry` and :func:`save_window_geometry` touch the disk,
-and both tolerate a missing or corrupted file by falling back to ``None``.
+the next launch.  The validation helpers here are pure, so the file format is
+testable without a display; only :func:`load_window_geometry` and
+:func:`save_window_geometry` touch the disk, and both tolerate a missing or
+corrupted file by falling back to ``None``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,11 +31,8 @@ __all__ = [
     "WindowGeometry",
     "clamp_geometry",
     "load_window_geometry",
-    "parse_geometry",
     "save_window_geometry",
-    "serialize_geometry",
     "window_geometry_from_mapping",
-    "window_geometry_to_mapping",
     "window_state_file",
 ]
 
@@ -51,10 +47,6 @@ MIN_WINDOW_HEIGHT = 300
 #: Name of the JSON file inside :func:`music_data_dir`.
 WINDOW_STATE_FILENAME = "window_state.json"
 
-#: Tk geometry string: ``WIDTHxHEIGHT`` optionally followed by signed X/Y
-#: offsets (a negative offset is anchored to the right/bottom screen edge).
-_GEOMETRY_RE = re.compile(r"^=?(\d+)x(\d+)(?:([+-])(\d+)([+-])(\d+))?$")
-
 
 @dataclass(frozen=True)
 class WindowGeometry:
@@ -62,46 +54,10 @@ class WindowGeometry:
 
     width: int
     height: int
-    #: Position offsets; ``None`` (or a half-pair) means "keep the position
-    #: the window manager picks".  Negative values keep their Tk meaning:
-    #: distance from the right/bottom screen edge.
+    #: Position offsets; ``None`` means "keep the position the window manager
+    #: picks".
     x: int | None = None
     y: int | None = None
-
-
-def parse_geometry(raw: str) -> WindowGeometry | None:
-    """
-    Parse a Tk geometry string such as ``"1100x720+50+30"``.
-
-    An optional leading ``=`` and surrounding whitespace are accepted; the
-    position part is optional.  Anything unparsable yields ``None``.
-
-    :param raw: Geometry string as returned by ``Tk.geometry()``.
-    :return: The parsed geometry, or ``None`` when ``raw`` is not one.
-    """
-    match = _GEOMETRY_RE.match(str(raw or "").strip())
-    if match is None:
-        return None
-    width, height, x_sign, x_text, y_sign, y_text = match.groups()
-    pos_x: int | None = None
-    pos_y: int | None = None
-    if x_sign is not None and y_sign is not None:
-        pos_x = int(x_text) if x_sign == "+" else -int(x_text)
-        pos_y = int(y_text) if y_sign == "+" else -int(y_text)
-    return WindowGeometry(width=int(width), height=int(height), x=pos_x, y=pos_y)
-
-
-def serialize_geometry(geometry: WindowGeometry) -> str:
-    """
-    Render a geometry as the string accepted by ``Tk.geometry()``.
-
-    :param geometry: The geometry to render.
-    :return: ``"WIDTHxHEIGHT"`` plus ``"+X+Y"`` when the position is known.
-    """
-    text = f"{geometry.width}x{geometry.height}"
-    if geometry.x is None or geometry.y is None:
-        return text
-    return f"{text}{geometry.x:+d}{geometry.y:+d}"
 
 
 def clamp_geometry(geometry: WindowGeometry) -> WindowGeometry:

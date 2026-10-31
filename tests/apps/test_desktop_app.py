@@ -5,8 +5,7 @@ tests.apps.test_desktop_app
 
 Offline tests for the pywebview desktop client.
 
-The bulk of the suite covers :mod:`novel_downloader.apps.desktop.formatting`,
-:mod:`novel_downloader.apps.desktop.preferences`,
+The suite covers :mod:`novel_downloader.apps.desktop.formatting`,
 :mod:`novel_downloader.apps.desktop.notifications` and
 :mod:`novel_downloader.apps.desktop.window_state`, which are deliberately free
 of GUI imports, plus the threading helpers in
@@ -23,7 +22,6 @@ from __future__ import annotations
 import os
 import re
 import sys
-import time
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
@@ -32,20 +30,17 @@ from typing import Any
 
 import pytest
 
-from novel_downloader.apps.common.history_files import FileItem
 from novel_downloader.apps.core.models import DownloadTask, Status
 from novel_downloader.apps.core.watchlist import WatchEntry
 from novel_downloader.apps.desktop import formatting as fmt
 from novel_downloader.apps.desktop import main as desktop_main
 from novel_downloader.apps.desktop import notifications as notif
-from novel_downloader.apps.desktop import preferences as prefs
 from novel_downloader.apps.desktop import window_state as wstate
 from novel_downloader.apps.desktop.engine import AsyncEngine
 from novel_downloader.apps.desktop.web_assets import APP_HTML
 from novel_downloader.apps.desktop.webview_app import (
     ApiBridge,
     _format_health_ms,
-    _format_size,
     _i18n_catalog,
     _music_track_dict,
     _result_dict,
@@ -131,263 +126,15 @@ def test_status_label_handles_none() -> None:
 # ---------------------------------------------------------------------------
 # Task progress / rows
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    ("done", "total", "expected"),
-    [
-        (3, 10, "3/10 (30%)"),
-        (1, 3, "1/3 (33%)"),
-        (2, 3, "2/3 (67%)"),
-        (10, 10, "10/10 (100%)"),
-        (0, 10, "0/10 (0%)"),
-        (1, 1000, "1/1000 (0%)"),
-        # Unknown total renders as a question mark.
-        (0, 0, "0/?"),
-        (5, 0, "5/?"),
-        # Negative values are clamped so the UI never shows a negative count.
-        (-5, -1, "0/?"),
-        (-3, 10, "0/10 (0%)"),
-    ],
-)
-def test_format_task_progress(done: int, total: int, expected: str) -> None:
-    assert fmt.format_task_progress(done, total) == expected
-
-
-def test_task_row_renders_all_columns() -> None:
-    task = DownloadTask(title="My Book", site="qidian", book_id="7")
-    task.status = Status.RUNNING
-    task.chapters_done = 3
-    task.chapters_total = 12
-    assert fmt.task_row(task) == ("Running", "My Book", "qidian", "3/12 (25%)", "")
-
-
-def test_task_row_includes_error_text() -> None:
-    task = DownloadTask(title="Broken", site="b520", book_id="1")
-    task.status = Status.FAILED
-    task.error = "network down"
-    status, title, site, progress, error = fmt.task_row(task)
-    assert (status, title, site, error) == ("Failed", "Broken", "b520", "network down")
-    assert progress == "0/?"
-
-
-def test_search_row_uses_expected_keys() -> None:
-    result = _search_result(
-        title="Novel",
-        author="Someone",
-        site="b520",
-        word_count="909",
-        update_date="2024-05-06",
-    )
-    assert fmt.search_row(result) == ("Novel", "Someone", "b520", "909", "2024-05-06")
-
-
-def test_search_row_tolerates_missing_keys() -> None:
-    assert fmt.search_row({}) == ("", "", "", "", "")  # type: ignore[arg-type]
-
-
-def test_history_row_formats_size_and_time() -> None:
-    item = FileItem(
-        path=Path("downloads/a.txt"),
-        name="a.txt",
-        ext="txt",
-        size=1536,
-        mtime=1700000000.0,
-    )
-    name, size, modified = fmt.history_row(item)
-    assert name == "a.txt"
-    assert size == "1 KB"
-    assert modified == time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(1700000000.0))
-
-
 # ---------------------------------------------------------------------------
 # Size / time / duration formatting
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    ("size", "expected"),
-    [
-        (0, "0 B"),
-        (1, "1 B"),
-        (512, "512 B"),
-        (1023, "1023 B"),
-        (1024, "1 KB"),
-        (1536, "1 KB"),
-        (1048575, "1023 KB"),
-        (1048576, "1.0 MB"),
-        (1024**3, "1.0 GB"),
-        (5 * 1024**3, "5.0 GB"),
-        (1024**4, "1024.0 GB"),
-    ],
-)
-def test_format_size(size: int, expected: str) -> None:
-    assert fmt.format_size(size) == expected
-
-
-def test_format_mtime_uses_local_wall_clock() -> None:
-    stamp = 1700000000.0
-    rendered = fmt.format_mtime(stamp)
-    assert rendered == time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stamp))
-    assert len(rendered) == 19 and rendered[4] == "-" and rendered[13] == ":"
-
-
-@pytest.mark.parametrize(
-    ("seconds", "expected"),
-    [
-        (0, "-"),
-        (-5, "-"),
-        (-1, "-"),
-        (1, "0:01"),
-        (59, "0:59"),
-        (60, "1:00"),
-        (61, "1:01"),
-        (599, "9:59"),
-        (3599, "59:59"),
-        (3600, "1:00:00"),
-        (3661, "1:01:01"),
-        (86399, "23:59:59"),
-        (360000, "100:00:00"),
-    ],
-)
-def test_format_duration(seconds: int, expected: str) -> None:
-    assert fmt.format_duration(seconds) == expected
-
-
-def test_music_row_renders_track_fields() -> None:
-    assert fmt.music_row(_track()) == ("Song", "Singer", "Album", "3:35")
-
-
-def test_music_row_tolerates_missing_fields() -> None:
-    assert fmt.music_row(SimpleNamespace()) == ("", "", "", "-")
-    # Zero/absent durations render as unknown, and ``None`` artists stay empty.
-    track = _track(duration_s=0, artists=None, album=None, name=None)
-    assert fmt.music_row(track) == ("", "", "", "-")
-
-
 # ---------------------------------------------------------------------------
 # Music platform health check: pure formatting / summary / ordering
 # ---------------------------------------------------------------------------
-def test_truncate_error_collapses_whitespace_and_keeps_short_text() -> None:
-    assert (
-        fmt.truncate_error("  HTTP 500:\n upstream \t refused ")
-        == "HTTP 500: upstream refused"
-    )
-    assert fmt.truncate_error("") == ""
-    assert fmt.truncate_error(None) == ""
-
-
-def test_truncate_error_cuts_long_text_with_ellipsis() -> None:
-    out = fmt.truncate_error("x" * 200, limit=80)
-    assert len(out) == 80
-    assert out.endswith("…")
-    assert out.startswith("x" * 79)
-    # Short messages are never cut.
-    assert fmt.truncate_error("short", limit=80) == "short"
-
-
-def test_sort_health_results_puts_ok_first_then_fastest() -> None:
-    results = [
-        ("slow-ok", {"ok": True, "elapsed_ms": 900}),
-        ("failed", {"ok": False, "elapsed_ms": 50}),
-        ("fast-ok", {"ok": True, "elapsed_ms": 120}),
-    ]
-    assert [platform for platform, _ in fmt.sort_health_results(results)] == [
-        "fast-ok",
-        "slow-ok",
-        "failed",
-    ]
-
-
-def test_sort_health_results_tolerates_missing_fields() -> None:
-    # A missing elapsed_ms counts as 0 and missing ok counts as failed;
-    # ties keep alphabetical platform order.
-    results = [("b", {"ok": True}), ("a", {"ok": False, "elapsed_ms": 10})]
-    assert [platform for platform, _ in fmt.sort_health_results(results)] == [
-        "b",
-        "a",
-    ]
-
-
-def test_health_rows_format_and_sort() -> None:
-    rows = fmt.health_rows(
-        {
-            "netease": {"ok": True, "elapsed_ms": 1234, "error": ""},
-            "kugou": {"ok": False, "elapsed_ms": 15, "error": "a\nb"},
-        }
-    )
-    assert rows == [
-        ("netease", t("OK"), "1234", ""),
-        ("kugou", t("Failed"), "15", "a b"),
-    ]
-
-
-def test_health_rows_empty_results() -> None:
-    assert fmt.health_rows({}) == []
-    assert fmt.health_rows([]) == []
-    assert fmt.health_summary({}) == (
-        t("Health check finished: {ok} ok, {failed} failed.").format(ok=0, failed=0)
-    )
-
-
-def test_health_summary_all_failed_and_error_truncation() -> None:
-    results = {
-        "a": {"ok": False, "elapsed_ms": 1, "error": "x" * 300},
-        "b": {"ok": False, "elapsed_ms": 2, "error": "boom"},
-    }
-    rows = fmt.health_rows(results)
-    assert all(row[1] == t("Failed") for row in rows)
-    # The overlong error is truncated for the table cell only.
-    assert len(rows[0][3]) == 80
-    assert rows[1][3] == "boom"
-    assert fmt.health_summary(results) == (
-        t("Health check finished: {ok} ok, {failed} failed.").format(ok=0, failed=2)
-    )
-
-
-def test_health_summary_counts_mixed_results() -> None:
-    results = {
-        "ok-fast": {"ok": True, "elapsed_ms": 10, "error": ""},
-        "ok-slow": {"ok": True, "elapsed_ms": 400, "error": ""},
-        "bad": {"ok": False, "elapsed_ms": 5, "error": "down"},
-    }
-    assert fmt.health_summary(results) == (
-        t("Health check finished: {ok} ok, {failed} failed.").format(ok=2, failed=1)
-    )
-    assert fmt.health_counts(results) == (2, 1)
-
-
 # ---------------------------------------------------------------------------
 # Site parsing
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("qidian, b520", ["qidian", "b520"]),
-        ("qidian", ["qidian"]),
-        ("qidian b520", ["qidian", "b520"]),
-        ("qidian,b520,syosetu", ["qidian", "b520", "syosetu"]),
-        ("  qidian ,  b520  ", ["qidian", "b520"]),
-        ("qidian\nb520\takatsuki_novels", ["qidian", "b520", "akatsuki_novels"]),
-        # Case is folded so mixed-case input still matches the registry keys.
-        ("Qidian", ["qidian"]),
-        ("QIDIAN, B520", ["qidian", "b520"]),
-        ("Qidian,b520", ["qidian", "b520"]),
-        # Differently-cased duplicates collapse into one entry.
-        ("a,a,A", ["a"]),
-        ("qidian,Qidian,QIDIAN", ["qidian"]),
-        # CJK separators are supported.
-        ("qidian，b520", ["qidian", "b520"]),
-        ("qidian；b520", ["qidian", "b520"]),
-        ("qidian,,b520", ["qidian", "b520"]),
-        ("qidian，；b520", ["qidian", "b520"]),
-    ],
-)
-def test_parse_sites(text: str, expected: list[str]) -> None:
-    assert fmt.parse_sites(text) == expected
-
-
-@pytest.mark.parametrize("text", ["", "   ", "\t\n", ",", "，，", " ; "])
-def test_parse_sites_empty_input_returns_none(text: str) -> None:
-    assert fmt.parse_sites(text) is None
-
-
 # ---------------------------------------------------------------------------
 # Error wrapping
 # ---------------------------------------------------------------------------
@@ -530,241 +277,9 @@ def _task(
     return task
 
 
-def test_music_settings_defaults_fill_missing_values(tmp_path: Path) -> None:
-    settings = prefs.music_settings_from_mapping(None, tmp_path)
-    assert settings.out_dir == str(tmp_path)
-    assert settings.level == prefs.DEFAULT_MUSIC_LEVEL
-    assert settings.embed_tags is True
-    assert settings.embed_cover is True
-    assert settings.save_lyric is True
-    assert settings.split_folder is True
-    assert settings.skip_existing is True
-
-
-def test_music_settings_blank_output_dir_uses_default(tmp_path: Path) -> None:
-    settings = prefs.music_settings_from_mapping({"out_dir": "   "}, tmp_path)
-    assert settings.out_dir == str(tmp_path)
-
-
-def test_music_settings_keep_explicit_output_dir(tmp_path: Path) -> None:
-    settings = prefs.music_settings_from_mapping(
-        {"out_dir": "  D:/Music/Novel  "}, tmp_path
-    )
-    assert settings.out_dir == "D:/Music/Novel"
-
-
-@pytest.mark.parametrize("level", ["hires", "lossless", "exhigh", "higher", "standard"])
-def test_music_settings_accept_supported_levels(level: str, tmp_path: Path) -> None:
-    settings = prefs.music_settings_from_mapping({"level": level}, tmp_path)
-    assert settings.level == level
-
-
-@pytest.mark.parametrize("level", ["", "   ", "bogus", "unknown"])
-def test_music_settings_normalize_unknown_levels(level: str, tmp_path: Path) -> None:
-    settings = prefs.music_settings_from_mapping({"level": level}, tmp_path)
-    assert settings.level == prefs.DEFAULT_MUSIC_LEVEL
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        (False, False),
-        (True, True),
-        ("false", False),
-        ("FALSE", False),
-        ("0", False),
-        ("no", False),
-        ("off", False),
-        ("true", True),
-        ("yes", True),
-        ("1", True),
-        ("", True),
-        (None, True),
-        (0, False),
-        (1, True),
-    ],
-)
-def test_music_settings_coerce_boolean_flags(
-    raw: object, expected: bool, tmp_path: Path
-) -> None:
-    settings = prefs.music_settings_from_mapping(
-        {"embed_cover": raw, "save_lyric": raw}, tmp_path
-    )
-    assert settings.embed_cover is expected
-    assert settings.save_lyric is expected
-
-
-def test_music_settings_round_trip_mapping(tmp_path: Path) -> None:
-    original = prefs.music_settings_from_mapping(
-        {
-            "out_dir": str(tmp_path / "music"),
-            "level": "lossless",
-            "embed_tags": False,
-            "embed_cover": False,
-            "save_lyric": False,
-            "split_folder": False,
-            "skip_existing": False,
-        },
-        tmp_path,
-    )
-    mapped = prefs.music_settings_to_mapping(original)
-    restored = prefs.music_settings_from_mapping(mapped, tmp_path)
-    assert restored == original
-    # Only the keys the desktop UI owns are written back.
-    assert set(mapped) == {
-        "out_dir",
-        "level",
-        "embed_tags",
-        "embed_cover",
-        "save_lyric",
-        "split_folder",
-        "skip_existing",
-    }
-
-
-def test_level_display_and_code_round_trip() -> None:
-    for level in prefs.MUSIC_LEVELS:
-        assert prefs.level_code(prefs.level_display(level)) == level
-        # Raw codes are accepted too (e.g. pasted from the CLI).
-        assert prefs.level_code(level) == level
-
-
-def test_level_code_falls_back_to_default() -> None:
-    assert prefs.level_code("unknown") == prefs.DEFAULT_MUSIC_LEVEL
-    assert prefs.level_code("") == prefs.DEFAULT_MUSIC_LEVEL
-
-
-def test_resolve_output_dir_expands_user_home() -> None:
-    resolved = prefs.resolve_output_dir("~", "/fallback")
-    assert resolved != "~"
-    assert resolved.startswith(os.path.expanduser("~"))
-
-
-def test_resolve_output_dir_expands_environment_variables(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("DESKTOP_TEST_DIR", str(tmp_path))
-    resolved = prefs.resolve_output_dir(
-        "${DESKTOP_TEST_DIR}/out" if os.name != "nt" else "%DESKTOP_TEST_DIR%/out",
-        "/fallback",
-    )
-    assert Path(resolved) == tmp_path / "out"
-
-
-def test_environment_summary_includes_api_and_data_dir(tmp_path: Path) -> None:
-    summary = prefs.environment_summary("http://127.0.0.1:8081", tmp_path)
-    assert "http://127.0.0.1:8081" in summary
-    assert str(tmp_path) in summary
-
-
-def test_remember_search_trims_both_fields() -> None:
-    state = prefs.remember_search("  dune  ", "  qidian, b520  ")
-    assert state.keyword == "dune"
-    assert state.sites == "qidian, b520"
-    assert state.has_previous is True
-
-
-@pytest.mark.parametrize("keyword", ["", "   ", "\t"])
-def test_remember_search_rejects_blank_keywords(keyword: str) -> None:
-    assert prefs.remember_search(keyword, "qidian").has_previous is False
-
-
 # ---------------------------------------------------------------------------
 # Task output actions / detail text
 # ---------------------------------------------------------------------------
-def test_task_export_paths_prefers_epub_then_txt() -> None:
-    task = _task(
-        Status.COMPLETED,
-        {
-            "txt": Path("downloads/book.txt"),
-            "epub": Path("downloads/book.epub"),
-            "pdf": Path("downloads/book.pdf"),
-        },
-    )
-    assert fmt.task_export_paths(task) == (
-        Path("downloads/book.epub"),
-        Path("downloads/book.txt"),
-        Path("downloads/book.pdf"),
-    )
-
-
-def test_task_export_paths_deduplicates_and_skips_none() -> None:
-    task = _task(Status.COMPLETED)
-    task.exported_paths = {
-        "epub": Path("downloads/book.epub"),
-        "txt": Path("downloads/book.epub"),
-        "pdf": None,
-    }
-    assert fmt.task_export_paths(task) == (Path("downloads/book.epub"),)
-
-
-@pytest.mark.parametrize("status", [Status.COMPLETED, Status.FAILED])
-def test_task_output_actions_enabled_for_finished_tasks(status: Status) -> None:
-    task = _task(status, {"epub": Path("downloads/book.epub")})
-    actions = fmt.task_output_actions(task)
-    assert actions.can_open_file is True
-    assert actions.can_open_folder is True
-    assert actions.file_path == Path("downloads/book.epub")
-    assert actions.folder_path == Path("downloads")
-
-
-@pytest.mark.parametrize(
-    "status",
-    [Status.QUEUED, Status.RUNNING, Status.PROCESSING, Status.EXPORTING],
-)
-def test_task_output_actions_disabled_before_completion(status: Status) -> None:
-    task = _task(status, {"epub": Path("downloads/book.epub")})
-    actions = fmt.task_output_actions(task)
-    assert actions.can_open_file is False
-    assert actions.can_open_folder is False
-    assert actions.file_path is None
-    assert actions.folder_path is None
-
-
-def test_task_output_actions_disabled_without_exported_paths() -> None:
-    task = _task(Status.COMPLETED)
-    actions = fmt.task_output_actions(task)
-    assert actions.can_open_file is False
-    assert actions.can_open_folder is False
-
-
-def test_task_output_actions_handle_missing_selection() -> None:
-    actions = fmt.task_output_actions(None)
-    assert actions.can_open_file is False
-    assert actions.can_open_folder is False
-
-
-def test_task_output_actions_handle_duck_typed_task() -> None:
-    task = SimpleNamespace(
-        status=SimpleNamespace(value="completed"),
-        exported_paths={"txt": Path("downloads/other.txt")},
-    )
-    actions = fmt.task_output_actions(task)
-    assert actions.file_path == Path("downloads/other.txt")
-    assert actions.folder_path == Path("downloads")
-
-
-def test_task_detail_text_includes_full_error() -> None:
-    long_error = " | ".join(["HTTP 500: upstream refused the request"] * 8)
-    task = _task(Status.FAILED, error=long_error)
-    detail = fmt.task_detail_text(task)
-    assert long_error in detail
-    assert t("Error") in detail
-    assert t("Status") in detail
-    assert t("Failed") in detail
-
-
-def test_task_detail_text_lists_exported_files() -> None:
-    task = _task(Status.COMPLETED, {"epub": Path("downloads/a.epub")})
-    detail = fmt.task_detail_text(task)
-    assert t("Exported files") in detail
-    assert "downloads" in detail
-
-
-def test_task_detail_text_for_no_selection() -> None:
-    assert fmt.task_detail_text(None) == t("Select a task to view its details.")
-
-
 # ---------------------------------------------------------------------------
 # Retry parameters
 # ---------------------------------------------------------------------------
@@ -809,203 +324,12 @@ def test_retry_params_for_no_selection() -> None:
 # ---------------------------------------------------------------------------
 # Exported-file choices
 # ---------------------------------------------------------------------------
-def test_task_export_choices_prefer_epub_then_txt_with_labels() -> None:
-    task = _task(
-        Status.COMPLETED,
-        {
-            "txt": Path("downloads/book.txt"),
-            "epub": Path("downloads/book.epub"),
-            "pdf": Path("downloads/book.pdf"),
-        },
-    )
-    choices = fmt.task_export_choices(task)
-    assert [choice.key for choice in choices] == ["epub", "txt", "pdf"]
-    assert [choice.path for choice in choices] == [
-        Path("downloads/book.epub"),
-        Path("downloads/book.txt"),
-        Path("downloads/book.pdf"),
-    ]
-    assert choices[0].label == "EPUB: book.epub"
-
-
-def test_task_export_choices_deduplicate_keeping_the_first_key() -> None:
-    task = _task(Status.COMPLETED)
-    task.exported_paths = {
-        "epub": Path("downloads/book.epub"),
-        "txt": Path("downloads/book.epub"),
-        "pdf": None,
-    }
-    choices = fmt.task_export_choices(task)
-    assert len(choices) == 1
-    assert choices[0].key == "epub"
-    assert choices[0].path == Path("downloads/book.epub")
-    assert fmt.task_export_paths(task) == (Path("downloads/book.epub"),)
-
-
-def test_task_export_choices_empty_without_exports() -> None:
-    assert fmt.task_export_choices(_task(Status.COMPLETED)) == ()
-    assert fmt.task_export_choices(None) == ()
-
-
 # ---------------------------------------------------------------------------
 # Context-menu availability
 # ---------------------------------------------------------------------------
-def test_task_menu_state_for_completed_task_with_multiple_files() -> None:
-    task = _task(
-        Status.COMPLETED,
-        {
-            "epub": Path("downloads/book.epub"),
-            "txt": Path("downloads/book.txt"),
-        },
-    )
-    state = fmt.task_menu_state(task)
-    assert state.can_open_file is True
-    assert state.can_open_folder is True
-    assert state.can_copy_path is True
-    assert state.can_show_details is True
-    assert state.can_retry is False
-    assert state.can_copy_error is False
-    assert [choice.key for choice in state.choices] == ["epub", "txt"]
-
-
-def test_task_menu_state_offers_retry_and_error_copy_for_failed_task() -> None:
-    task = _task(Status.FAILED, error=" network down ")
-    state = fmt.task_menu_state(task)
-    assert state.can_retry is True
-    assert state.can_copy_error is True
-    assert state.can_show_details is True
-    assert state.can_copy_path is False
-
-
-def test_task_menu_state_respects_retry_blocked() -> None:
-    task = _task(Status.FAILED, error="boom")
-    assert fmt.task_menu_state(task).can_retry is True
-    assert fmt.task_menu_state(task, retry_blocked=True).can_retry is False
-
-
-def test_task_menu_state_for_cancelled_task_is_retryable() -> None:
-    assert fmt.task_menu_state(_task(Status.CANCELLED)).can_retry is True
-
-
-def test_task_menu_state_for_running_task_disables_output_actions() -> None:
-    task = _task(Status.RUNNING, {"epub": Path("downloads/book.epub")})
-    state = fmt.task_menu_state(task)
-    assert state.can_open_file is False
-    assert state.can_open_folder is False
-    assert state.can_copy_path is True  # the path can still be copied
-    assert state.can_retry is False
-
-
-def test_task_menu_state_for_no_selection() -> None:
-    state = fmt.task_menu_state(None)
-    assert state == fmt.TaskMenuState(
-        can_retry=False,
-        can_open_file=False,
-        can_open_folder=False,
-        can_copy_path=False,
-        can_copy_error=False,
-        can_show_details=False,
-        choices=(),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Status / keyword filtering
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    ("status", "expected"),
-    [
-        (Status.QUEUED, fmt.FILTER_ACTIVE),
-        (Status.RUNNING, fmt.FILTER_ACTIVE),
-        (Status.PROCESSING, fmt.FILTER_ACTIVE),
-        (Status.EXPORTING, fmt.FILTER_ACTIVE),
-        (Status.COMPLETED, fmt.FILTER_COMPLETED),
-        (Status.FAILED, fmt.FILTER_FAILED),
-        # Cancelled tasks stay reachable from the failed filter.
-        (Status.CANCELLED, fmt.FILTER_FAILED),
-        ("running", fmt.FILTER_ACTIVE),
-        ("unknown", "other"),
-        (None, "other"),
-    ],
-)
-def test_task_status_group(status: object, expected: str) -> None:
-    assert fmt.task_status_group(status) == expected
-
-
-@pytest.mark.parametrize(
-    ("status", "filter_code", "expected"),
-    [
-        (Status.RUNNING, fmt.FILTER_ALL, True),
-        (Status.RUNNING, fmt.FILTER_ACTIVE, True),
-        (Status.RUNNING, fmt.FILTER_COMPLETED, False),
-        (Status.RUNNING, fmt.FILTER_FAILED, False),
-        (Status.COMPLETED, fmt.FILTER_COMPLETED, True),
-        (Status.COMPLETED, fmt.FILTER_ACTIVE, False),
-        (Status.FAILED, fmt.FILTER_FAILED, True),
-        (Status.CANCELLED, fmt.FILTER_FAILED, True),
-        (Status.CANCELLED, fmt.FILTER_COMPLETED, False),
-    ],
-)
-def test_task_matches_filter_by_status(
-    status: Status, filter_code: str, expected: bool
-) -> None:
-    task = _task(status)
-    assert fmt.task_matches_filter(task, status=filter_code) is expected
-
-
-def test_task_matches_filter_by_title_is_case_insensitive() -> None:
-    task = DownloadTask(title="The Great Novel", site="qidian", book_id="1")
-    assert fmt.task_matches_filter(task, keyword="great") is True
-    assert fmt.task_matches_filter(task, keyword="  GREAT  ") is True
-    assert fmt.task_matches_filter(task, keyword="novel") is True
-    assert fmt.task_matches_filter(task, keyword="") is True
-    assert fmt.task_matches_filter(task, keyword="   ") is True
-    # Only the title is searched, not the site or book id.
-    assert fmt.task_matches_filter(task, keyword="qidian") is False
-    assert fmt.task_matches_filter(task, keyword="missing") is False
-
-
-def test_filter_tasks_combines_filters_and_preserves_order() -> None:
-    running = DownloadTask(title="Alpha", site="qidian", book_id="1")
-    running.status = Status.RUNNING
-    failed_match = DownloadTask(title="Alpha Failure", site="qidian", book_id="2")
-    failed_match.status = Status.FAILED
-    failed_other = DownloadTask(title="Beta Failure", site="qidian", book_id="3")
-    failed_other.status = Status.CANCELLED
-    completed = DownloadTask(title="Alpha Done", site="qidian", book_id="4")
-    completed.status = Status.COMPLETED
-    tasks = [running, failed_match, failed_other, completed]
-
-    assert fmt.filter_tasks(tasks, status=fmt.FILTER_FAILED, keyword="alpha") == [
-        failed_match
-    ]
-    assert fmt.filter_tasks(tasks, keyword="ALPHA") == [
-        running,
-        failed_match,
-        completed,
-    ]
-    assert fmt.filter_tasks(tasks, status=fmt.FILTER_ACTIVE) == [running]
-    assert fmt.filter_tasks(tasks, status=fmt.FILTER_ALL) == tasks
-
-
-def test_task_filter_labels_and_codes_round_trip() -> None:
-    for code in fmt.TASK_FILTER_CODES:
-        label = fmt.task_filter_label(code)
-        assert label
-        assert fmt.task_filter_code(label) == code
-        assert fmt.task_filter_code(code) == code
-        assert fmt.task_filter_code(code.upper()) == code
-    assert fmt.task_filter_code("bogus") == fmt.FILTER_ALL
-    assert fmt.task_filter_code(None) == fmt.FILTER_ALL
-
-
-def test_task_filter_labels_use_translations() -> None:
-    assert fmt.task_filter_label(fmt.FILTER_ALL) == t("All")
-    assert fmt.task_filter_label(fmt.FILTER_ACTIVE) == t("Active")
-    assert fmt.task_filter_label(fmt.FILTER_COMPLETED) == t("Completed")
-    assert fmt.task_filter_label(fmt.FILTER_FAILED) == t("Failed")
-
-
 # ---------------------------------------------------------------------------
 # Task notifications: pure transition rules (the Android TaskEvents pattern)
 # ---------------------------------------------------------------------------
@@ -1035,192 +359,6 @@ def _task_snapshot(
     }
 
 
-@pytest.mark.parametrize(
-    ("status", "expected"),
-    [
-        (Status.QUEUED, False),
-        (Status.RUNNING, False),
-        (Status.PROCESSING, False),
-        (Status.EXPORTING, False),
-        (Status.COMPLETED, True),
-        (Status.CANCELLED, True),
-        (Status.FAILED, True),
-        # Raw strings are accepted, with trimming and case folding.
-        ("completed", True),
-        ("  FAILED  ", True),
-        ("Cancelled", True),
-        ("running", False),
-        ("bogus", False),
-        (None, False),
-    ],
-)
-def test_is_terminal_status(status: object, expected: bool) -> None:
-    assert notif.is_terminal_status(status) is expected
-
-
-def test_first_observation_is_only_a_baseline() -> None:
-    """Tasks seen for the first time never notify (their history is unknown)."""
-    tasks = [
-        _status_task(Status.COMPLETED, task_id="done"),
-        _status_task(Status.FAILED, task_id="broken", error="boom"),
-    ]
-    assert notif.detect_task_notifications({}, tasks) == []
-
-
-def test_running_to_completed_produces_completed_event() -> None:
-    task = _status_task(Status.COMPLETED)
-    events = notif.detect_task_notifications({task.task_id: "running"}, [task])
-    assert events == [
-        notif.TaskNotification(
-            task_id="task-1",
-            title="Alpha",
-            outcome=notif.TaskOutcome.COMPLETED,
-            error="",
-        )
-    ]
-
-
-def test_running_to_failed_produces_failed_event_with_error() -> None:
-    task = _status_task(Status.FAILED, task_id="task-2", error="HTTPError: 500")
-    events = notif.detect_task_notifications({"task-2": "running"}, [task])
-    assert events == [
-        notif.TaskNotification(
-            task_id="task-2",
-            title="Alpha",
-            outcome=notif.TaskOutcome.FAILED,
-            error="HTTPError: 500",
-        )
-    ]
-
-
-def test_cancellation_is_terminal_but_never_notifies() -> None:
-    task = _status_task(Status.CANCELLED, error="Cancelled by user")
-    assert notif.detect_task_notifications({"task-1": "running"}, [task]) == []
-    # ...and a cancelled task is terminal, so a later poll cannot notify either.
-    assert notif.detect_task_notifications({"task-1": "cancelled"}, [task]) == []
-
-
-@pytest.mark.parametrize("before", ["completed", "failed", "cancelled"])
-def test_terminal_to_terminal_does_not_notify_twice(before: str) -> None:
-    completed = _status_task(Status.COMPLETED)
-    failed = _status_task(Status.FAILED, task_id="task-2", error="boom")
-    previous = {"task-1": before, "task-2": before}
-    assert notif.detect_task_notifications(previous, [completed, failed]) == []
-
-
-@pytest.mark.parametrize("before", ["queued", "running", "processing", "exporting"])
-def test_every_non_terminal_baseline_notifies_on_completion(before: str) -> None:
-    task = _status_task(Status.COMPLETED)
-    assert len(notif.detect_task_notifications({"task-1": before}, [task])) == 1
-
-
-def test_unknown_previous_status_still_notifies_on_completion() -> None:
-    """Only a *missing* entry is a baseline; an unknown value is non-terminal."""
-    task = _status_task(Status.COMPLETED)
-    assert len(notif.detect_task_notifications({"task-1": "mystery"}, [task])) == 1
-
-
-def test_active_statuses_never_notify() -> None:
-    previous = {"task-1": "running"}
-    tasks = [
-        _status_task(Status.QUEUED),
-        _status_task(Status.RUNNING, task_id="task-2"),
-        _status_task(Status.PROCESSING, task_id="task-3"),
-        _status_task(Status.EXPORTING, task_id="task-4"),
-    ]
-    assert notif.detect_task_notifications(previous, tasks) == []
-
-
-def test_poll_cycle_notifies_once_per_transition() -> None:
-    """The full loop: baseline -> transition -> one event -> silence."""
-    task = _status_task(Status.RUNNING)
-
-    # Poll 1: the first sight of the task only builds the baseline.
-    previous = notif.snapshot_task_states([task])
-    assert previous == {"task-1": "running"}
-    assert notif.detect_task_notifications(previous, [task]) == []
-
-    # Poll 2: the task finished -> exactly one notification.
-    task.status = Status.COMPLETED
-    events = notif.detect_task_notifications(previous, [task])
-    assert len(events) == 1
-
-    # Poll 3+: the baseline caught up; the same snapshot is silent forever.
-    previous = notif.snapshot_task_states([task])
-    assert notif.detect_task_notifications(previous, [task]) == []
-
-
-def test_snapshot_deduplicates_tasks_by_id_keeping_the_first() -> None:
-    first = _status_task(Status.COMPLETED, title="First")
-    same_id = _status_task(Status.COMPLETED, title="Second")
-    flattened = notif.flatten_task_snapshot(_task_snapshot(completed=[first, same_id]))
-    assert flattened == [first]
-
-    # Detection sees one task, so one transition cannot double-notify.
-    events = notif.detect_task_notifications({"task-1": "queued"}, flattened)
-    assert len(events) == 1
-    assert events[0].title == "First"
-
-
-def test_flatten_task_snapshot_covers_all_sections_in_order() -> None:
-    running = _status_task(Status.RUNNING)
-    pending = _status_task(Status.QUEUED, task_id="task-2")
-    completed = _status_task(Status.COMPLETED, task_id="task-3")
-    flattened = notif.flatten_task_snapshot(
-        _task_snapshot(running=[running], pending=[pending], completed=[completed])
-    )
-    assert flattened == [running, pending, completed]
-
-
-def test_snapshot_task_states_uses_raw_status_values() -> None:
-    tasks = [_status_task(Status.RUNNING), _status_task(Status.FAILED, task_id="t2")]
-    assert notif.snapshot_task_states(tasks) == {"task-1": "running", "t2": "failed"}
-
-
-def test_task_event_status_message_for_a_completed_task() -> None:
-    event = notif.TaskNotification(
-        task_id="1", title="Alpha", outcome=notif.TaskOutcome.COMPLETED
-    )
-    assert notif.task_event_status_message([event]) == t(
-        "Download completed: {book}"
-    ).format(book="Alpha")
-
-
-def test_task_event_status_message_for_a_failed_task() -> None:
-    event = notif.TaskNotification(
-        task_id="1", title="Alpha", outcome=notif.TaskOutcome.FAILED, error="boom"
-    )
-    assert notif.task_event_status_message([event]) == t(
-        "Download failed for {book}: {error}"
-    ).format(book="Alpha", error="boom")
-
-    # A missing error falls back to the localized status label.
-    blank = notif.TaskNotification(
-        task_id="1", title="Alpha", outcome=notif.TaskOutcome.FAILED, error="  "
-    )
-    assert notif.task_event_status_message([blank]) == t(
-        "Download failed for {book}: {error}"
-    ).format(book="Alpha", error=t("Failed"))
-
-
-def test_task_event_status_message_joins_a_batch() -> None:
-    events = [
-        notif.TaskNotification(
-            task_id="1", title="Alpha", outcome=notif.TaskOutcome.COMPLETED
-        ),
-        notif.TaskNotification(
-            task_id="2", title="Beta", outcome=notif.TaskOutcome.FAILED, error="boom"
-        ),
-    ]
-    assert notif.task_event_status_message(events) == " | ".join(
-        [
-            t("Download completed: {book}").format(book="Alpha"),
-            t("Download failed for {book}: {error}").format(book="Beta", error="boom"),
-        ]
-    )
-    assert notif.task_event_status_message([]) == ""
-
-
 def test_play_notification_sound_uses_the_system_beep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1244,116 +382,12 @@ def test_play_notification_sound_swallows_audio_errors(
 # ---------------------------------------------------------------------------
 # Follow list ("追更"): title normalization
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("Hello, World!", "helloworld"),
-        ("  spaced  out  ", "spacedout"),
-        # Case and punctuation differences collapse to the same key.
-        ("Hello,  WORLD!", "helloworld"),
-        ("斗破苍穹：第二卷", "斗破苍穹第二卷"),
-        ("O'Neill—凡人修仙传（精校）", "oneill凡人修仙传精校"),
-        ("ABC", "abc"),
-        ("", ""),
-    ],
-)
-def test_normalize_title(raw: object, expected: str) -> None:
-    assert fmt.normalize_title(raw) == expected
-
-
-def test_normalize_title_handles_none() -> None:
-    assert fmt.normalize_title(None) == ""
-
-
-def test_normalize_title_matches_punctuation_and_case_variants() -> None:
-    assert fmt.normalize_title("Dune Messiah（精校版）") == fmt.normalize_title(
-        "dune messiah 精校版"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Follow list: matching a search result to a followed book
 # ---------------------------------------------------------------------------
-def test_match_watch_result_prefers_exact_site_and_book_id() -> None:
-    result = _search_result(site="b520", book_id="9", title="Other Name")
-    # The title differs, but the site/book id identity wins.
-    assert fmt.match_watch_result("b520", "9", "Wanted Title", [result]) is result
-
-
-def test_match_watch_result_falls_back_to_normalized_title() -> None:
-    # Different id, same site: only the normalized title can identify the book.
-    result = _search_result(site="b520", book_id="777", title="  Hello,  WORLD! ")
-    assert fmt.match_watch_result("b520", "1", "hello world", [result]) is result
-
-
-def test_match_watch_result_title_fallback_ignores_other_sites() -> None:
-    result = _search_result(site="qidian", book_id="1", title="Same Title")
-    assert fmt.match_watch_result("b520", "1", "Same Title", [result]) is None
-
-
-@pytest.mark.parametrize("title", ["", "   "])
-def test_match_watch_result_empty_title_disables_fallback(title: str) -> None:
-    result = _search_result(site="b520", book_id="777", title="Whatever")
-    assert fmt.match_watch_result("b520", "1", title, [result]) is None
-
-
-def test_match_watch_result_without_any_results() -> None:
-    assert fmt.match_watch_result("b520", "1", "Title", []) is None
-
-
-def test_match_watch_result_without_a_match() -> None:
-    result = _search_result(site="b520", book_id="9", title="Different")
-    assert fmt.match_watch_result("b520", "1", "Title", [result]) is None
-
-
-def test_match_watch_result_returns_first_of_duplicate_titles() -> None:
-    first = _search_result(site="b520", book_id="7", title="Same")
-    second = _search_result(site="b520", book_id="8", title="Same")
-    assert fmt.match_watch_result("b520", "1", "Same", [first, second]) is first
-
-
-def test_match_watch_result_tolerates_empty_identity() -> None:
-    result = _search_result(site="b520", book_id="777", title="Same")
-    assert fmt.match_watch_result("", "", "Same", [result]) is None
-
-
 # ---------------------------------------------------------------------------
 # Follow list: row formatting
 # ---------------------------------------------------------------------------
-def test_follow_row_renders_all_columns() -> None:
-    entry = WatchEntry(
-        site="b520",
-        book_id="8_8187",
-        title="凡人修仙传",
-        last_chapter="第10章",
-        updated_at="2026-01-01T00:00:00+00:00",
-    )
-    site, book_id, title, last_chapter, updated = fmt.follow_row(entry)
-    assert (site, book_id, title, last_chapter) == (
-        "b520",
-        "8_8187",
-        "凡人修仙传",
-        "第10章",
-    )
-    expected = (
-        datetime.fromisoformat("2026-01-01T00:00:00+00:00")
-        .astimezone()
-        .strftime("%Y-%m-%d %H:%M:%S")
-    )
-    assert updated == expected
-
-
-def test_follow_row_tolerates_missing_fields() -> None:
-    assert fmt.follow_row(SimpleNamespace()) == ("", "", "", "", "")
-
-
-def test_follow_row_keeps_unparsable_timestamps_visible() -> None:
-    entry = SimpleNamespace(
-        site="s", book_id="1", title="t", last_chapter="c", updated_at="yesterday"
-    )
-    assert fmt.follow_row(entry)[4] == "yesterday"
-
-
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -1382,190 +416,12 @@ def test_format_follow_updated_converts_utc_to_local_time() -> None:
 # ---------------------------------------------------------------------------
 # Follow list: following a search result (availability + feedback)
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    ("site", "book_id", "title", "expected"),
-    [
-        # A complete row is followable.
-        ("b520", "8_8187", "凡人修仙传", True),
-        # Whitespace around a field is trimmed, not rejected.
-        ("  b520  ", " 8_8187 ", " 凡人修仙传 ", True),
-        # Any missing field disables the action.
-        ("", "1", "Title", False),
-        ("b520", "", "Title", False),
-        ("b520", "1", "", False),
-        # Whitespace-only fields count as missing.
-        ("   ", "1", "Title", False),
-        ("b520", "   ", "Title", False),
-        ("b520", "1", "   ", False),
-        # None degrades to a missing field instead of raising.
-        (None, "1", "Title", False),
-        ("b520", None, "Title", False),
-        ("b520", "1", None, False),
-        (None, None, None, False),
-    ],
-)
-def test_can_follow_search_result_requires_all_fields(
-    site: object, book_id: object, title: object, expected: bool
-) -> None:
-    assert fmt.can_follow_search_result(site, book_id, title) is expected
-
-
-def test_follow_feedback_message_for_a_new_entry() -> None:
-    message = fmt.follow_feedback_message(
-        fmt.FOLLOW_ADDED, site="b520", book_id="8_8187", title=" 凡人修仙传 "
-    )
-    assert message == t("Added to the follow list: {title}").format(title="凡人修仙传")
-
-
-def test_follow_feedback_message_for_an_existing_entry() -> None:
-    message = fmt.follow_feedback_message(
-        fmt.FOLLOW_ALREADY, site="b520", book_id="8_8187", title="凡人修仙传"
-    )
-    assert message == t("Already in the follow list: {title}").format(
-        title="凡人修仙传"
-    )
-
-
-def test_follow_feedback_message_for_an_invalid_row() -> None:
-    assert fmt.follow_feedback_message(fmt.FOLLOW_INVALID) == t(
-        "Cannot follow: site, book id and title are required."
-    )
-    # The identity fields are ignored for the invalid outcome.
-    assert fmt.follow_feedback_message(
-        fmt.FOLLOW_INVALID, site="b520", book_id="1", title="T"
-    ) == t("Cannot follow: site, book id and title are required.")
-
-
-def test_follow_feedback_message_falls_back_to_site_and_book_id() -> None:
-    # A blank title labels the book as "site/book_id" instead.
-    message = fmt.follow_feedback_message(
-        fmt.FOLLOW_ADDED, site="b520", book_id="42", title="  "
-    )
-    assert message == t("Added to the follow list: {title}").format(title="b520/42")
-    # Missing site and book id degrade to an empty label.
-    assert fmt.follow_feedback_message(fmt.FOLLOW_ALREADY, title=None) == t(
-        "Already in the follow list: {title}"
-    ).format(title="")
-
-
 # ---------------------------------------------------------------------------
 # Search results context menu (pure availability logic)
 # ---------------------------------------------------------------------------
-def test_search_menu_state_without_selection() -> None:
-    # No selected rows: nothing may be done at all.
-    assert fmt.search_menu_state([]) == fmt.SearchMenuState(
-        can_add_to_queue=False, can_follow=False, can_open_url=False
-    )
-
-
-def test_search_menu_state_for_a_complete_selection() -> None:
-    assert fmt.search_menu_state([_search_result()]) == fmt.SearchMenuState(
-        can_add_to_queue=True, can_follow=True, can_open_url=True
-    )
-
-
-def test_search_menu_state_tracks_each_entry_independently() -> None:
-    # Missing site and book id: cannot queue and cannot follow, but the
-    # book page can still be opened in a browser.
-    row = _search_result(site="", book_id="", title="", book_url="https://a/b")
-    state = fmt.search_menu_state([row])
-    assert state == fmt.SearchMenuState(
-        can_add_to_queue=False, can_follow=False, can_open_url=True
-    )
-
-    # A blank-but-present book_url behaves exactly like a missing one, while
-    # the identity fields still allow queueing and following.
-    row = _search_result(site="b520", book_id="1", title="T", book_url="   ")
-    state = fmt.search_menu_state([row])
-    assert state == fmt.SearchMenuState(
-        can_add_to_queue=True, can_follow=True, can_open_url=False
-    )
-
-
-def test_search_menu_state_any_valid_row_enables_an_entry() -> None:
-    # The menu acts on the whole selection: an entry stays available while
-    # any selected row could use it, and each entry is judged separately.
-    results = [
-        _search_result(site="", book_id="", title="", book_url=""),
-        _search_result(site="b520", book_id="7", title="No Url", book_url=""),
-        _search_result(site="b520", book_id="8", title="", book_url="https://a/b"),
-    ]
-    state = fmt.search_menu_state(results)
-    assert state == fmt.SearchMenuState(
-        can_add_to_queue=True, can_follow=True, can_open_url=True
-    )
-
-
 # ---------------------------------------------------------------------------
 # Window state: geometry parsing / serialization (pure)
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("1100x720", wstate.WindowGeometry(width=1100, height=720)),
-        ("1100x720+50+30", wstate.WindowGeometry(1100, 720, 50, 30)),
-        # Negative offsets keep their Tk meaning (right/bottom screen edge).
-        ("900x600-40-20", wstate.WindowGeometry(900, 600, -40, -20)),
-        ("900x600+40-20", wstate.WindowGeometry(900, 600, 40, -20)),
-        ("900x600-40+20", wstate.WindowGeometry(900, 600, -40, 20)),
-        ("0x0", wstate.WindowGeometry(0, 0)),
-        # A leading "=" and surrounding whitespace are tolerated.
-        ("=1100x720+1+2", wstate.WindowGeometry(1100, 720, 1, 2)),
-        ("  1100x720+1+2  ", wstate.WindowGeometry(1100, 720, 1, 2)),
-    ],
-)
-def test_parse_geometry_accepts_tk_geometry_strings(
-    raw: str, expected: wstate.WindowGeometry
-) -> None:
-    assert wstate.parse_geometry(raw) == expected
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        "",
-        "   ",
-        "abc",
-        "1100",
-        "x720",
-        "1100xx720",
-        "1100 x 720",
-        "1100x720+",
-        "1100x720++1+1",
-        "1100x720+1",
-        "1100x720+1+2+3",
-    ],
-)
-def test_parse_geometry_rejects_invalid_strings(raw: str) -> None:
-    assert wstate.parse_geometry(raw) is None
-    assert wstate.parse_geometry(None) is None  # type: ignore[arg-type]
-
-
-def test_serialize_geometry_matches_the_tk_format() -> None:
-    assert wstate.serialize_geometry(wstate.WindowGeometry(1100, 720)) == "1100x720"
-    assert (
-        wstate.serialize_geometry(wstate.WindowGeometry(1100, 720, 50, 30))
-        == "1100x720+50+30"
-    )
-    assert (
-        wstate.serialize_geometry(wstate.WindowGeometry(900, 600, -40, -20))
-        == "900x600-40-20"
-    )
-
-
-@pytest.mark.parametrize(
-    "geometry",
-    [
-        wstate.WindowGeometry(1100, 720),
-        wstate.WindowGeometry(1100, 720, 50, 30),
-        wstate.WindowGeometry(900, 600, -40, -20),
-        wstate.WindowGeometry(1, 1, 0, 0),
-    ],
-)
-def test_geometry_parse_serialize_round_trip(geometry: wstate.WindowGeometry) -> None:
-    assert wstate.parse_geometry(wstate.serialize_geometry(geometry)) == geometry
-
-
 def test_clamp_geometry_enforces_the_minimum_size() -> None:
     clamped = wstate.clamp_geometry(wstate.WindowGeometry(200, 100, 7, 8))
     assert clamped == wstate.WindowGeometry(
@@ -1653,16 +509,6 @@ def test_window_geometry_from_mapping_drops_invalid_positions(
     mapping: dict[str, Any], expected: wstate.WindowGeometry
 ) -> None:
     assert wstate.window_geometry_from_mapping(mapping) == expected
-
-
-def test_window_geometry_mapping_round_trip() -> None:
-    for geometry in (
-        wstate.WindowGeometry(1100, 720),
-        wstate.WindowGeometry(1100, 720, 50, 30),
-        wstate.WindowGeometry(900, 600, -40, -20),
-    ):
-        mapping = wstate.window_geometry_to_mapping(geometry)
-        assert wstate.window_geometry_from_mapping(mapping) == geometry
 
 
 # ---------------------------------------------------------------------------
@@ -1905,14 +751,6 @@ def test_music_track_dict_falls_back_to_attributes() -> None:
     assert data["duration_s"] == 10
 
 
-@pytest.mark.parametrize(
-    ("size", "expected"),
-    [(0, "0 B"), (512, "512 B"), (2048, "2.0 KB"), (3 * 1024 * 1024, "3.0 MB")],
-)
-def test_format_size_units(size: int, expected: str) -> None:
-    assert _format_size(size) == expected
-
-
 def test_format_health_ms_units() -> None:
     assert _format_health_ms(850) == "850ms"
     assert _format_health_ms(1500) == "1.5s"
@@ -1921,17 +759,6 @@ def test_format_health_ms_units() -> None:
 # ---------------------------------------------------------------------------
 # Webview bridge (webview_app): ApiBridge behaviour
 # ---------------------------------------------------------------------------
-
-
-def test_bridge_initial_state_shape(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "novel_downloader.apps.desktop.webview_app._load_prefs",
-        lambda: {"theme": "dark"},
-    )
-    state = ApiBridge().get_initial_state()
-    assert state["theme"] == "dark"
-    assert "search" in state["sites"] and "download" in state["sites"]
-    assert state["i18n"]["Search"] == t("Search")
 
 
 def test_bridge_add_task_requires_site_and_book_id() -> None:
@@ -2129,20 +956,6 @@ def test_bridge_open_url_ignores_unsafe_schemes(
     bridge.open_url("file:///etc/passwd")
     bridge.open_url("https://example.invalid/book")
     assert opened == ["https://example.invalid/book"]
-
-
-def test_bridge_prefs_round_trip(tmp_path: Path) -> None:
-    import novel_downloader.apps.desktop.webview_app as wa
-
-    patcher = pytest.MonkeyPatch()
-    try:
-        patcher.setattr(wa, "_prefs_path", lambda: tmp_path / "prefs.json")
-        wa._save_prefs({"theme": "dark"})
-        assert wa._load_prefs() == {"theme": "dark"}
-        wa._save_prefs({"lang": "zh"})
-        assert wa._load_prefs() == {"theme": "dark", "lang": "zh"}
-    finally:
-        patcher.undo()
 
 
 def test_absolutize_argv0_resolves_relative_paths() -> None:

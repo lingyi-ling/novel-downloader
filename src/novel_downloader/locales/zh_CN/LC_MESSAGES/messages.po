@@ -1939,81 +1939,14 @@ msgstr "已取消"
 msgid "Failed"
 msgstr "失败"
 
-#: src/novel_downloader/apps/desktop/formatting.py:120
-#, python-brace-format
-msgid "{done}/?"
-msgstr "{done}/?"
-
-#: src/novel_downloader/apps/desktop/formatting.py:122
-#, python-brace-format
-msgid "{done}/{total} ({percent}%)"
-msgstr "{done}/{total}（{percent}%）"
-
-#: src/novel_downloader/apps/desktop/formatting.py:359
-msgid "All"
-msgstr "全部"
-
 #: src/novel_downloader/apps/desktop/formatting.py:360
 msgid "Active"
 msgstr "进行中"
-
-#: src/novel_downloader/apps/desktop/formatting.py:477
-#: src/novel_downloader/apps/desktop/ui.py:699
-msgid "Select a task to view its details."
-msgstr "请选择一个任务查看详情。"
-
-#: src/novel_downloader/apps/desktop/formatting.py:493
-msgid "Exported files"
-msgstr "导出文件"
 
 #: src/novel_downloader/apps/desktop/formatting.py:680
 #: src/novel_downloader/apps/desktop/ui.py:2778
 msgid "OK"
 msgstr "成功"
-
-#: src/novel_downloader/apps/desktop/formatting.py:737
-#, python-brace-format
-msgid "Health check finished: {ok} ok, {failed} failed."
-msgstr "健康检查完成：{ok} 个正常，{failed} 个失败。"
-
-#: src/novel_downloader/apps/desktop/formatting.py:900
-#, python-brace-format
-msgid "Added to the follow list: {title}"
-msgstr "已加入追更列表：{title}"
-
-#: src/novel_downloader/apps/desktop/formatting.py:904
-#, python-brace-format
-msgid "Already in the follow list: {title}"
-msgstr "已在追更列表中：{title}"
-
-#: src/novel_downloader/apps/desktop/formatting.py:907
-msgid "Cannot follow: site, book id and title are required."
-msgstr "无法追更：站点、书籍 ID 和标题均为必填。"
-
-#: src/novel_downloader/apps/desktop/preferences.py:54
-msgid "Hi-Res"
-msgstr "Hi-Res（高解析度）"
-
-#: src/novel_downloader/apps/desktop/preferences.py:55
-msgid "Lossless"
-msgstr "无损"
-
-#: src/novel_downloader/apps/desktop/preferences.py:56
-msgid "ExHigh"
-msgstr "极高"
-
-#: src/novel_downloader/apps/desktop/preferences.py:57
-msgid "Higher"
-msgstr "较高"
-
-#: src/novel_downloader/apps/desktop/preferences.py:58
-msgid "Standard"
-msgstr "标准"
-
-#: src/novel_downloader/apps/desktop/preferences.py:221
-#, python-brace-format
-msgid "API: {api} | Data: {data}"
-msgstr "API：{api} | 数据：{data}"
 
 #: src/novel_downloader/apps/desktop/ui.py:1112
 #: src/novel_downloader/apps/desktop/ui.py:1144
