@@ -547,8 +547,12 @@ function api(method, ...args) {
   return fn.apply(window.pywebview.api, args);
 }
 async function call(method, ...args) {
+  // Bridge errors are toasted here and the call resolves to ``undefined``:
+  // DOM handlers await ``call`` without wrapping it, so rethrowing would only
+  // surface as an unhandled promise rejection in the console.
   try { return await api(method, ...args); }
-  catch (err) { toast((err && err.message) || String(err), "err"); throw err; }
+  catch (err) { toast((err && err.message) || String(err), "err"); }
+  return undefined;
 }
 
 function toast(msg, kind = "info", ms = 3800, onclick = null) {
@@ -604,7 +608,8 @@ function showPage(name) {
 $("#nav").addEventListener("click", e => { const b = e.target.closest(".nav-item"); if (b) showPage(b.dataset.page); });
 
 /* ================================================================ theme */
-function setTheme(mode) {
+function setTheme(raw) {
+  const mode = raw === "dark" ? "dark" : "light";
   document.documentElement.dataset.theme = mode;
   $("#theme-btn").innerHTML = `<svg class="icon"><use href="#i-${mode === "dark" ? "sun" : "moon"}"/></svg>`;
   store.set("theme", mode);
@@ -629,9 +634,14 @@ async function doSearch() {
   $("#search-hint").textContent = t("Searching…");
   $("#results").innerHTML = "";
   try {
-    const data = await call("search", kw, $("#q-sites").value.trim());
-    renderResults(data.results || [], kw);
-    $("#search-hint").textContent = t("{n} results in {s}s").replace("{n}", (data.results || []).length).replace("{s}", (data.elapsed || 0).toFixed(1));
+    const data = await api("search", kw, $("#q-sites").value.trim());
+    // The bridge reports aggregate search failures inside the payload (site
+    // timeouts, engine errors), not as exceptions: surface them instead of
+    // letting them render as "No results".
+    if (data && data.error) throw new Error(data.error);
+    const results = (data && data.results) || [];
+    renderResults(results, kw);
+    $("#search-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", ((data && data.elapsed) || 0).toFixed(1));
   } catch (e) {
     $("#results").innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("Search failed"))}</div><div class="s">${esc(String(e && e.message || e))}</div></div>`;
     $("#search-hint").textContent = "";
@@ -676,6 +686,7 @@ $("#results").addEventListener("click", async e => {
   if (add) {
     const r = await call("add_task", add.dataset.site, add.dataset.bid, add.dataset.title);
     if (r && r.ok) { toast(t("Queued: {title}").replace("{title}", add.dataset.title), "ok"); showPage("download"); }
+    else if (r && r.error) toast(r.error, "err");
   } else if (fol) {
     const r = await call("add_watch", fol.dataset.site, fol.dataset.bid, fol.dataset.title);
     if (r) toast(r.message || (r.ok ? t("Added to follow list") : t("Already followed")), r.ok ? "ok" : "info");
@@ -684,7 +695,7 @@ $("#results").addEventListener("click", async e => {
   }
 });
 $("#btn-search").onclick = doSearch;
-$("#q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+$("#q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.isComposing) doSearch(); });
 
 /* ================================================================ download */
 let taskTimer = null;
@@ -766,7 +777,7 @@ $("#btn-refresh-tasks").onclick = refreshTasks;
 async function refreshHistory() {
   const body = $("#hist-body");
   try {
-    const items = await call("get_history");
+    const items = await api("get_history");
     $("#hist-sub").textContent = t("{n} files in {dir}").replace("{n}", items.length).replace("{dir}", await api("get_data_dir") || "");
     if (!items.length) {
       body.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-hist"/></svg><div class="t">${esc(t("No exported books yet"))}</div><div class="s">${esc(t("Files land here when a download finishes"))}</div></div>`;
@@ -810,7 +821,7 @@ async function initMusic() {
   try {
     const plats = await call("get_music_platforms");
     const sel = $("#m-platform");
-    sel.innerHTML = plats.map(p => `<option value="${esc(p.key)}">${esc(p.label)}</option>`).join("");
+    sel.innerHTML = (plats || []).map(p => `<option value="${esc(p.key)}">${esc(p.label)}</option>`).join("");
     sel.onchange = updateMusicNote;
     updateMusicNote();
   } catch (e) {
@@ -838,6 +849,14 @@ async function doMusicSearch() {
   $("#btn-m-search").disabled = true;
   try {
     const data = await call("music_search", $("#m-platform").value, kw, 30);
+    if (!data) return;
+    if (data.error) {
+      toast(data.error, "err");
+      music.tracks = [];
+      renderTracks();
+      $("#m-count").textContent = "0";
+      return;
+    }
     music.tracks = data.tracks || [];
     music.note = data.note || "";
     music.selected = new Set(music.tracks.map((_, i) => i).filter(i => !music.tracks[i].vip));
@@ -879,19 +898,28 @@ $("#btn-m-selall").onclick = () => {
   renderTracks();
 };
 $("#btn-m-search").onclick = doMusicSearch;
-$("#m-q").addEventListener("keydown", e => { if (e.key === "Enter") doMusicSearch(); });
+$("#m-q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.isComposing) doMusicSearch(); });
 
 $("#btn-m-dl").onclick = async () => {
   if (music.downloading || !music.selected.size) return;
-  const tracks = [...music.selected].sort((a, b) => a - b).map(i => music.tracks[i]);
-  const r = await call("music_download", $("#m-platform").value, tracks);
-  if (r && r.ok !== false) {
-    music.downloading = true;
-    $("#btn-m-stop").hidden = false;
-    $("#btn-m-dl").disabled = true;
-    $("#m-progress").hidden = false;
-    $("#m-progress").classList.add("indeterminate");
-    pollMusic();
+  // Disable synchronously (before the await): a double click would otherwise
+  // race past the guard and ask the bridge to start a second batch.
+  const btn = $("#btn-m-dl");
+  btn.disabled = true;
+  let started = false;
+  try {
+    const tracks = [...music.selected].sort((a, b) => a - b).map(i => music.tracks[i]);
+    const r = await call("music_download", $("#m-platform").value, tracks);
+    if (r && r.ok !== false) {
+      started = true;
+      music.downloading = true;
+      $("#btn-m-stop").hidden = false;
+      $("#m-progress").hidden = false;
+      $("#m-progress").classList.add("indeterminate");
+      pollMusic();
+    } else if (r && r.error) toast(r.error, "warn");
+  } finally {
+    if (!started) btn.disabled = false;
   }
 };
 $("#btn-m-stop").onclick = () => api("music_stop").catch(() => {});
@@ -949,7 +977,7 @@ healthPoll = setInterval(() => { if (currentPage === "music" && $("#m-health").c
 async function refreshFollow() {
   const body = $("#follow-body");
   try {
-    const items = await call("get_watchlist");
+    const items = await api("get_watchlist");
     if (!items.length) {
       body.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-heart"/></svg><div class="t">${esc(t("No followed books"))}</div><div class="s">${esc(t("Follow a search result or add a book manually"))}</div></div>`;
       return;
@@ -976,6 +1004,7 @@ $("#follow-body").addEventListener("click", async e => {
   if (d) {
     const r = await call("add_task", d.dataset.fdl, d.dataset.bid, d.dataset.title);
     if (r && r.ok) { toast(t("Queued: {title}").replace("{title}", d.dataset.title), "ok"); showPage("download"); }
+    else if (r && r.error) toast(r.error, "err");
   } else if (u) {
     await call("remove_watch", u.dataset.unfollow, u.dataset.bid);
     refreshFollow();
@@ -995,8 +1024,10 @@ $("#btn-f-check").onclick = async () => {
   $("#btn-f-check").disabled = true;
   try {
     const r = await call("check_updates");
-    toast(t("Checked {n} books, {u} updated, {f} failed").replace("{n}", r.checked).replace("{u}", r.updated).replace("{f}", r.failed),
-      r.failed ? "warn" : r.updated ? "ok" : "info", 6000);
+    if (r) {
+      toast(t("Checked {n} books, {u} updated, {f} failed").replace("{n}", r.checked).replace("{u}", r.updated).replace("{f}", r.failed),
+        r.failed ? "warn" : r.updated ? "ok" : "info", 6000);
+    }
     refreshFollow();
   } finally {
     $("#f-spin").classList.remove("on");
@@ -1031,7 +1062,16 @@ function openModal(fields, onOk) {
 }
 
 /* ================================================================ shortcuts */
+function typingTarget(el) {
+  if (!el || !el.tagName) return false;
+  const tag = el.tagName.toUpperCase();
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable === true;
+}
 document.addEventListener("keydown", e => {
+  // Never hijack keys while the user is typing or composing text (IME):
+  // Ctrl+F / Ctrl+D would otherwise steal keystrokes from the search fields.
+  if (e.isComposing) return;
+  if (typingTarget(e.target) || typingTarget(document.activeElement)) return;
   if (e.ctrlKey && !e.shiftKey && !e.altKey) {
     const pages = ["search", "download", "history", "music", "follow"];
     if (e.key >= "1" && e.key <= "5") { e.preventDefault(); showPage(pages[+e.key - 1]); }
@@ -1060,7 +1100,6 @@ function boot() {
         toast(msg, "info", 8000, () => api("open_url", r.url).catch(() => {}));
       }
     }).catch(() => {});
-    if (state.sites_csv) $("#q-sites").value = state.sites_csv;
     renderTracks();
     initMusic().catch(() => {});
     refreshTasks();

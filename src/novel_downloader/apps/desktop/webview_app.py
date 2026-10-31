@@ -118,6 +118,36 @@ def _shortcut_target() -> str | None:
     return None
 
 
+def _virtual_screen_rect() -> tuple[int, int, int, int] | None:
+    """
+    Bounding rectangle of the whole Windows virtual desktop.
+
+    Monitors laid out left of or above the primary produce negative screen
+    coordinates; the rectangle is what makes those restorable instead of
+    being clamped onto the primary monitor.
+
+    :return: ``(x, y, width, height)`` in screen coordinates, or ``None``
+        when the metrics are unavailable (non-Windows, headless session).
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        rect = (
+            int(user32.GetSystemMetrics(76)),  # SM_XVIRTUALSCREEN
+            int(user32.GetSystemMetrics(77)),  # SM_YVIRTUALSCREEN
+            int(user32.GetSystemMetrics(78)),  # SM_CXVIRTUALSCREEN
+            int(user32.GetSystemMetrics(79)),  # SM_CYVIRTUALSCREEN
+        )
+    except Exception:  # noqa: BLE001 - best effort, cosmetic only
+        return None
+    if rect[2] <= 0 or rect[3] <= 0:
+        return None
+    return rect
+
+
 def _shortcut_paths() -> tuple[Path, ...]:
     """Both locations the shortcut is written to."""
     dirs = (
@@ -417,7 +447,7 @@ def _load_prefs() -> dict[str, Any]:
     try:
         loaded = json.loads(_prefs_path().read_text(encoding="utf-8"))
         return loaded if isinstance(loaded, dict) else {}
-    except (OSError, ValueError):
+    except (OSError, TypeError, ValueError):
         return {}
 
 
@@ -431,7 +461,9 @@ def _save_prefs(values: dict[str, Any]) -> None:
         path.write_text(
             json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-    except OSError:
+    except (OSError, TypeError, ValueError):
+        # ``TypeError``/``ValueError`` guard against unserialisable stored
+        # content; preferences are best effort and never fatal.
         logger.debug("Could not persist desktop prefs", exc_info=True)
 
 
@@ -470,9 +502,15 @@ class ApiBridge:
     def get_initial_state(self) -> dict[str, Any]:
         """One-shot bootstrap payload for the front end."""
         prefs = _load_prefs()
+        # Only the two known themes are handed to the page: a hand-edited
+        # preference file must not inject an arbitrary string into the front
+        # end (the JS side re-normalises, this keeps the stored value sane).
+        theme = str(prefs.get("theme") or "light")
+        if theme not in ("light", "dark"):
+            theme = "light"
         return {
             "version": self._version(),
-            "theme": str(prefs.get("theme") or "light"),
+            "theme": theme,
             "data_dir": str(Path.cwd()),
             "is_frozen": bool(getattr(sys, "frozen", False)),
             "shortcut_exists": self.shortcut_exists(),
@@ -560,7 +598,11 @@ class ApiBridge:
         :return: ``{"available", "latest", "url", "message"?}``.
         """
         prefs = _load_prefs()
-        last = float(prefs.get("last_update_check") or 0.0)
+        try:
+            last = float(prefs.get("last_update_check") or 0.0)
+        except (TypeError, ValueError):
+            # A hand-edited preference file must not break the check.
+            last = 0.0
         now = time.time()
         if now - last < _UPDATE_CHECK_INTERVAL:
             return {"available": False, "throttled": True}
@@ -937,7 +979,10 @@ class ApiBridge:
         self, platform: str, tracks: list[dict[str, Any]], level: str | None
     ) -> None:
         """Download tracks on a worker thread, updating polled state."""
-        ok_count = skip_count = fail_count = 0
+        # ``download_many`` invokes the callbacks from its own worker pool, so
+        # every counter is updated under the bridge lock: an unlocked ``+=``
+        # loses results whenever two tracks finish concurrently.
+        counts = {"ok": 0, "skip": 0, "fail": 0}
         try:
             funcs = _music_funcs()
             if funcs is None:
@@ -955,21 +1000,20 @@ class ApiBridge:
                 self._music_total = len(objects)
 
             def on_result(_index: int, _track: object, result: object) -> None:
-                nonlocal ok_count, skip_count, fail_count
                 state = str(getattr(result, "status", "") or "").lower()
-                if state == "ok":
-                    ok_count += 1
-                elif state == "skip":
-                    skip_count += 1
-                else:
-                    fail_count += 1
+                key = "ok" if state == "ok" else "skip" if state == "skip" else "fail"
                 with self._lock:
+                    counts[key] += 1
+                    # Exactly one increment per finished track: the count is
+                    # owned here, ``on_tick`` only drives the fraction.
                     self._music_done += 1
 
-            def on_tick(fraction: float, done: int) -> None:
+            def on_tick(fraction: float, _done: int) -> None:
                 with self._lock:
-                    self._music_fraction = float(fraction)
-                    self._music_done = int(done)
+                    # Worker threads report snapshots that can arrive out of
+                    # order; keep the most advanced one so the progress bar
+                    # never moves backwards.
+                    self._music_fraction = max(self._music_fraction, float(fraction))
 
             funcs["download_many"](
                 provider,
@@ -982,8 +1026,8 @@ class ApiBridge:
             )
         except Exception as exc:  # noqa: BLE001 - reported through the poll
             logger.exception("Music download crashed")
-            fail_count += 1
             with self._lock:
+                counts["fail"] += 1
                 self._music_failed = True
                 self._music_summary = format_error(exc)
         finally:
@@ -991,18 +1035,18 @@ class ApiBridge:
                 self._music_active = False
                 self._music_fraction = 1.0
                 if not self._music_summary:
-                    if fail_count == 0 and skip_count == 0:
+                    if counts["fail"] == 0 and counts["skip"] == 0:
                         self._music_summary = t("Downloaded {n} tracks").replace(
-                            "{n}", str(ok_count)
+                            "{n}", str(counts["ok"])
                         )
                     else:
                         self._music_summary = (
                             t("Done: {ok} downloaded, {skip} skipped, {fail} failed")
-                            .replace("{ok}", str(ok_count))
-                            .replace("{skip}", str(skip_count))
-                            .replace("{fail}", str(fail_count))
+                            .replace("{ok}", str(counts["ok"]))
+                            .replace("{skip}", str(counts["skip"]))
+                            .replace("{fail}", str(counts["fail"]))
                         )
-                self._music_failed = self._music_failed or fail_count > 0
+                self._music_failed = self._music_failed or counts["fail"] > 0
 
     @staticmethod
     def _music_options(level: str | None) -> Any:
@@ -1166,6 +1210,7 @@ def run_webview_app() -> int:
 
     from novel_downloader.apps.desktop.window_state import (
         load_window_geometry,
+        visible_origin,
         window_state_file,
     )
 
@@ -1177,8 +1222,12 @@ def run_webview_app() -> int:
         "min_size": (980, 640),
     }
     if geometry is not None and geometry.x is not None and geometry.y is not None:
-        kwargs["x"] = max(geometry.x, 0)
-        kwargs["y"] = max(geometry.y, 0)
+        # Negative origins address monitors left of/above the primary, so the
+        # position is restored as stored; it is only dropped when it no longer
+        # lands on any connected monitor (the saved one was unplugged).
+        origin = visible_origin(geometry.x, geometry.y, _virtual_screen_rect())
+        if origin is not None:
+            kwargs["x"], kwargs["y"] = origin
 
     window = webview.create_window(
         "Novel Downloader",

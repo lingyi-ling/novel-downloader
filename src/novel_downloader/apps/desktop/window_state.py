@@ -32,6 +32,7 @@ __all__ = [
     "clamp_geometry",
     "load_window_geometry",
     "save_window_geometry",
+    "visible_origin",
     "window_geometry_from_mapping",
     "window_state_file",
 ]
@@ -106,6 +107,34 @@ def window_geometry_from_mapping(mapping: object) -> WindowGeometry | None:
     if pos_x is None or pos_y is None:
         pos_x = pos_y = None
     return WindowGeometry(width=width, height=height, x=pos_x, y=pos_y)
+
+
+def visible_origin(
+    x: int, y: int, bounds: tuple[int, int, int, int] | None
+) -> tuple[int, int] | None:
+    """
+    Decide whether a stored window origin still lands on a monitor.
+
+    Negative coordinates are legitimate: on multi-monitor setups a screen
+    placed left of or above the primary has a negative origin, and clamping
+    such a value to zero would yank the window back onto the primary screen.
+    The position is only dropped when it falls outside ``bounds`` — the
+    bounding rectangle of the currently connected monitors — which happens
+    when the monitor the window was saved on is no longer attached.
+
+    :param x: Stored window origin X (any sign).
+    :param y: Stored window origin Y (any sign).
+    :param bounds: ``(x, y, width, height)`` of the virtual desktop, or
+        ``None`` when the metrics are unknown (the origin is then trusted).
+    :return: ``(x, y)`` when the origin is plausibly visible, else ``None``
+        meaning "let the window manager pick a position".
+    """
+    if bounds is None:
+        return (x, y)
+    bx, by, bw, bh = bounds
+    if bx <= x < bx + bw and by <= y < by + bh:
+        return (x, y)
+    return None
 
 
 def window_geometry_to_mapping(geometry: WindowGeometry) -> dict[str, int | None]:

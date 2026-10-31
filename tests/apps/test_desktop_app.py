@@ -22,8 +22,10 @@ from __future__ import annotations
 import os
 import re
 import sys
+import threading
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -607,9 +609,9 @@ def test_app_html_declares_five_navigation_items() -> None:
 
 
 def test_i18n_catalog_covers_every_html_key() -> None:
-    """Every data-i18n / data-i18n-ph key in the HTML resolves via t()."""
+    """Every data-i18n / data-i18n-ph / data-i18n-title key resolves via t()."""
     catalog = _i18n_catalog()
-    keys = set(re.findall(r'data-i18n(?:-ph)?="([^"]+)"', APP_HTML))
+    keys = set(re.findall(r'data-i18n(?:-(?:ph|title))?="([^"]+)"', APP_HTML))
     assert keys, "the front end must declare translatable strings"
     missing = sorted(key for key in keys if key not in catalog)
     assert not missing, f"untranslated front-end keys: {missing}"
@@ -1116,6 +1118,8 @@ def test_check_update_quiet_when_current(
     from novel_downloader import __version__
 
     monkeypatch.setattr(wa, "_load_prefs", lambda: {})
+    # Keep the throttle timestamp out of the real user data directory.
+    monkeypatch.setattr(wa, "_save_prefs", lambda _v: None)
     monkeypatch.setattr(
         "urllib.request.urlopen",
         _fake_urlopen({"tag_name": f"v{__version__}", "html_url": "u"}),
@@ -1148,9 +1152,393 @@ def test_check_update_survives_offline(
     import novel_downloader.apps.desktop.webview_app as wa
 
     monkeypatch.setattr(wa, "_load_prefs", lambda: {})
+    # Keep the throttle timestamp out of the real user data directory.
+    monkeypatch.setattr(wa, "_save_prefs", lambda _v: None)
     monkeypatch.setattr(
         "urllib.request.urlopen", _fake_urlopen(None, error=OSError("offline"))
     )
     result = wa.ApiBridge().check_update()
     assert result["available"] is False
     assert "error" in result
+
+
+def test_check_update_tolerates_a_corrupt_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hand-edited prefs file must not make check_update raise."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(wa, "_load_prefs", lambda: {"last_update_check": "yesterday"})
+    monkeypatch.setattr(wa, "_save_prefs", lambda _v: None)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen({"tag_name": "v9.9.9", "html_url": "u"}),
+    )
+    result = wa.ApiBridge().check_update()  # must not raise ValueError
+    assert result["available"] is True
+
+
+# ---------------------------------------------------------------------------
+# Web front end (web_assets): escaping coverage
+# ---------------------------------------------------------------------------
+
+#: Fields rendered from bridge payloads.  Every one of them must reach the
+#: DOM through ``esc()`` / ``highlight()`` (or a pre-escaped variable), never
+#: as a raw template-literal interpolation.
+_DYNAMIC_FIELDS = [
+    "msg",
+    "r.title",
+    "r.author",
+    "r.site",
+    "r.book_id",
+    "r.book_url",
+    "r.latest_chapter",
+    "r.update_date",
+    "k.title",
+    "k.error",
+    "k.site",
+    "k.task_id",
+    "k.export_stage",
+    "it.name",
+    "it.path",
+    "it.ext",
+    "it.size_text",
+    "it.mtime_text",
+    "tr.name",
+    "tr.artists",
+    "tr.album",
+    "w.title",
+    "w.site",
+    "w.book_id",
+    "w.last_chapter",
+    "w.updated_text",
+    "p.key",
+    "p.label",
+]
+
+
+@pytest.mark.parametrize("field", _DYNAMIC_FIELDS)
+def test_app_html_never_interpolates_dynamic_fields_raw(field: str) -> None:
+    """A bare ``${field}`` in the page would be an XSS hole."""
+    # ``toast()`` escapes its message, so template literals passed to it as
+    # string arguments are safe; every other interpolation site must go
+    # through esc()/highlight().
+    sanitized = re.sub(r"toast\(`[^`]*`", "toast(``", APP_HTML)
+    assert f"${{{field}}}" not in sanitized
+
+
+def test_app_html_escapes_all_html_metacharacters() -> None:
+    """``esc`` must keep covering the full metacharacter set (& < > " ')."""
+    assert "replace(/[&<>\"']/g" in APP_HTML
+
+
+# ---------------------------------------------------------------------------
+# Web front end (web_assets): shortcut / IME guards
+# ---------------------------------------------------------------------------
+
+
+def test_app_html_shortcuts_ignore_typing_and_ime() -> None:
+    """Ctrl+F / Ctrl+D must not hijack keystrokes while the user is typing."""
+    assert "if (e.isComposing) return;" in APP_HTML
+    assert "typingTarget(e.target)" in APP_HTML
+    assert "typingTarget(document.activeElement)" in APP_HTML
+    # The typing guard runs before the Ctrl+key handling.
+    guard = APP_HTML.index("typingTarget(e.target)")
+    assert guard < APP_HTML.index("e.ctrlKey && !e.shiftKey")
+
+
+@pytest.mark.parametrize("field", ["#q", "#m-q"])
+def test_app_html_enter_search_ignores_ime_composition(field: str) -> None:
+    """Confirming an IME composition must not submit the search early."""
+    pattern = (
+        re.escape(field) + r'"\)\.addEventListener\("keydown", e => \{ '
+        r'if \(e\.key === "Enter" && !e\.isComposing\)'
+    )
+    assert re.search(pattern, APP_HTML), field
+
+
+# ---------------------------------------------------------------------------
+# Web front end (web_assets): timers / promises
+# ---------------------------------------------------------------------------
+
+
+def test_app_html_poll_timers_are_page_gated_and_cleared() -> None:
+    """Every poll checks the active page before hitting the bridge."""
+    assert 'if (currentPage !== "music") return;' in APP_HTML
+    assert 'if (currentPage !== "download") return;' in APP_HTML
+    assert 'if (currentPage === "music" && $("#m-health").childElementCount)' in (
+        APP_HTML
+    )
+    # The music poll is created exactly once...
+    assert "if (musicPoll) return;" in APP_HTML
+    # ...and all three intervals are torn down on unload.
+    for needle in (
+        "clearInterval(taskTimer)",
+        "clearInterval(musicPoll)",
+        "clearInterval(healthPoll)",
+    ):
+        assert needle in APP_HTML
+
+
+def test_app_html_update_check_promise_is_caught() -> None:
+    """The boot update check ends its chain with .catch()."""
+    assert 'api("check_update").then(' in APP_HTML
+    match = re.search(r'api\("check_update"\)\.then\([\s\S]*?\}\)\.catch\(', APP_HTML)
+    assert match, "the update check chain must not reject unhandled"
+
+
+def test_app_html_call_helper_toasts_instead_of_rejecting() -> None:
+    """``call`` resolves to undefined after toasting: no rethrown errors."""
+    assert "throw err;" not in APP_HTML
+    assert "return undefined;" in APP_HTML
+
+
+# ---------------------------------------------------------------------------
+# Web front end (web_assets): error payload surfacing
+# ---------------------------------------------------------------------------
+
+
+def test_app_html_search_surfaces_payload_errors() -> None:
+    """A failed aggregate search must not render as "No results"."""
+    assert "if (data && data.error) throw new Error(data.error);" in APP_HTML
+    assert 'toast(data.error, "err");' in APP_HTML
+
+
+def test_app_html_surfaces_rejected_task_errors() -> None:
+    """``{"ok": false, "error": ...}`` answers are toasted, not swallowed."""
+    assert 'else if (r && r.error) toast(r.error, "err");' in APP_HTML
+    assert 'else if (r && r.error) toast(r.error, "warn");' in APP_HTML
+
+
+def _js_handler(needle: str) -> str:
+    """Return the JS statement block starting at ``needle``."""
+    start = APP_HTML.index(needle)
+    end = APP_HTML.index("\n\n", start)
+    return APP_HTML[start:end]
+
+
+def test_app_html_music_download_guard_is_synchronous() -> None:
+    """The download button disables before the await (double-click race)."""
+    handler = _js_handler('$("#btn-m-dl").onclick')
+    assert "btn.disabled = true;" in handler
+    assert handler.index("btn.disabled = true;") < handler.index("await call")
+
+
+def test_app_html_normalizes_the_theme_value() -> None:
+    assert 'const mode = raw === "dark" ? "dark" : "light";' in APP_HTML
+
+
+def test_app_html_has_no_dead_sites_csv_bootstrap() -> None:
+    """The bridge never sends ``sites_csv``; the dead branch is gone."""
+    assert "sites_csv" not in APP_HTML
+
+
+def test_app_html_local_storage_access_is_guarded() -> None:
+    """localStorage can throw (disabled, quota, corrupted JSON) — never fatal."""
+    assert (
+        "try { const v = localStorage.getItem(k); return v === null ? d"
+        " : JSON.parse(v); } catch { return d; }" in APP_HTML
+    )
+    assert "try { localStorage.setItem(k, JSON.stringify(v)); } catch {}" in APP_HTML
+
+
+# ---------------------------------------------------------------------------
+# Window state: multi-monitor origins (negative coordinates)
+# ---------------------------------------------------------------------------
+
+
+def test_visible_origin_allows_negative_multi_monitor_coords() -> None:
+    """A monitor left of/above the primary has negative screen coordinates."""
+    # Virtual desktop: a 1920px monitor left of a 1920px primary.
+    bounds = (-1920, 0, 3840, 1080)
+    assert wstate.visible_origin(-1920, 0, bounds) == (-1920, 0)
+    assert wstate.visible_origin(-1, 1079, bounds) == (-1, 1079)
+
+
+def test_visible_origin_accepts_primary_monitor_origins() -> None:
+    bounds = (0, 0, 1920, 1080)
+    assert wstate.visible_origin(0, 0, bounds) == (0, 0)
+    assert wstate.visible_origin(1919, 1079, bounds) == (1919, 1079)
+    # Just past the edges: not on any monitor.
+    assert wstate.visible_origin(1920, 0, bounds) is None
+    assert wstate.visible_origin(0, 1080, bounds) is None
+
+
+def test_visible_origin_drops_origins_off_the_virtual_desktop() -> None:
+    """The saved monitor was unplugged: no connected screen has that origin."""
+    assert wstate.visible_origin(-1920, 0, (0, 0, 1920, 1080)) is None
+    assert wstate.visible_origin(5000, 200, (0, 0, 1920, 1080)) is None
+
+
+def test_visible_origin_trusts_the_origin_without_bounds() -> None:
+    """Unknown metrics (non-Windows) keep the stored position as-is."""
+    assert wstate.visible_origin(-40, 30, None) == (-40, 30)
+
+
+def test_virtual_screen_rect_reports_a_valid_rectangle() -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    rect = wa._virtual_screen_rect()
+    if sys.platform != "win32":
+        assert rect is None
+        return
+    assert rect is not None
+    x, y, width, height = rect
+    assert width > 0 and height > 0
+    # The primary monitor sits at (0, 0) and is part of the virtual desktop.
+    assert x <= 0 < x + width
+    assert y <= 0 < y + height
+
+
+def test_run_webview_app_restores_negative_window_origins() -> None:
+    """The zero clamp that broke multi-monitor restore is gone for good."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    source = Path(wa.__file__).read_text(encoding="utf-8")
+    assert "max(geometry.x, 0)" not in source
+    assert "visible_origin(" in source
+    assert "_virtual_screen_rect()" in source
+
+
+# ---------------------------------------------------------------------------
+# Desktop shortcuts: PowerShell quoting of the target path
+# ---------------------------------------------------------------------------
+
+
+def test_create_shortcut_doubles_single_quotes_in_the_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path with quotes must stay inside the PS single-quoted literal."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    exe = tmp_path / "Ling's Novel 'App'.exe"
+    exe.write_bytes(b"MZ")
+    monkeypatch.setattr(wa, "_shortcut_target", lambda: str(exe))
+    scripts: list[str] = []
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> Any:
+        scripts.append(cmd[-1])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(wa.subprocess, "run", fake_run)
+    assert wa.ApiBridge().create_shortcut()["ok"] is True
+    script = scripts[0]
+    # PowerShell escapes a single quote inside a single-quoted string by
+    # doubling it, so the target literal must contain the doubled form...
+    assert "$target = '" + str(exe).replace("'", "''") + "'" in script
+    # ...and never the raw, un-escaped path.
+    assert str(exe) not in script
+
+
+# ---------------------------------------------------------------------------
+# Bridge: music worker callback races
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeTrack:
+    name: str
+    artists: str
+
+
+def test_music_worker_counts_results_from_concurrent_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``download_many`` fires callbacks from a worker pool; counts must win."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    total = 24
+
+    def fake_download_many(
+        _provider: object,
+        tracks: list[_FakeTrack],
+        _opts: object,
+        workers: int = 3,
+        on_result: Any = None,
+        on_tick: Any = None,
+        should_stop: Any = None,
+    ) -> tuple[int, int, int, list[object], list[object]]:
+        assert len(tracks) == total
+        barrier = threading.Barrier(total)
+        guard = threading.Lock()
+        completed = {"n": 0}
+
+        def work(i: int) -> None:
+            barrier.wait()  # every callback fires at the same instant
+            assert on_result is not None and on_tick is not None
+            on_result(i, None, SimpleNamespace(status="ok"))
+            # Mirror the real contract: the tick reports the absolute number
+            # of finished tracks, which may lag the results just fired.
+            with guard:
+                completed["n"] += 1
+                done = completed["n"]
+            on_tick(done / total, done)
+
+        threads = [threading.Thread(target=work, args=(i,)) for i in range(total)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        return total, 0, 0, [], []
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "Track": _FakeTrack,
+            "create": lambda _platform: None,
+            "download_many": fake_download_many,
+        },
+    )
+    monkeypatch.setattr(wa.ApiBridge, "_music_options", staticmethod(lambda _l: None))
+
+    bridge = wa.ApiBridge()
+    raw = [
+        {"name": f"t{i}", "artists": "a", "junk": "filtered out"} for i in range(total)
+    ]
+    assert bridge.music_download("netease", raw)["ok"] is True
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and bridge.get_music_status()["active"]:
+        time.sleep(0.02)
+    status = bridge.get_music_status()
+    assert status["active"] is False
+    # Neither the counter race nor the out-of-order ticks lose progress.
+    assert status["done"] == total
+    assert status["fraction"] == 1.0
+    assert status["failed"] is False
+    assert status["summary"] == t("Downloaded {n} tracks").replace("{n}", str(total))
+
+
+# ---------------------------------------------------------------------------
+# Bridge: preference hardening
+# ---------------------------------------------------------------------------
+
+
+def test_get_initial_state_validates_the_stored_theme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only "light"/"dark" reach the page; junk falls back to "light"."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(wa, "_load_prefs", lambda: {"theme": "purple"})
+    state = wa.ApiBridge().get_initial_state()
+    assert state["theme"] == "light"
+    monkeypatch.setattr(wa, "_load_prefs", lambda: {"theme": "dark"})
+    assert wa.ApiBridge().get_initial_state()["theme"] == "dark"
+
+
+def test_save_prefs_swallows_serialization_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unserialisable stored value must not raise into the bridge."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(wa, "_prefs_path", lambda: tmp_path / "prefs.json")
+
+    def boom(_obj: object, **_kwargs: Any) -> str:
+        raise TypeError("not serialisable")
+
+    monkeypatch.setattr(wa.json, "dumps", boom)
+    wa._save_prefs({"theme": "dark"})  # must not raise
