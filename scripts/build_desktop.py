@@ -506,10 +506,13 @@ def _find_iscc() -> str | None:
     found = which("iscc")
     if found:
         return found
-    for candidate in (
+    candidates = (
         Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"),
         Path(r"C:\Program Files\Inno Setup 6\ISCC.exe"),
-    ):
+        # winget's per-user install layout
+        Path.home() / "AppData" / "Local" / "Programs" / "Inno Setup 6" / "ISCC.exe",
+    )
+    for candidate in candidates:
         if candidate.is_file():
             return str(candidate)
     return None
