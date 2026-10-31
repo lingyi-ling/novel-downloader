@@ -905,7 +905,7 @@ def _create_provider(components: _MusicComponents, platform: str) -> Any:
         ) from exc
     except Exception as exc:  # noqa: BLE001 - provider construction
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=MSG_MUSIC_PLATFORM_INIT_FAILED.format(platform=platform, error=exc),
         ) from exc
 
@@ -1004,7 +1004,7 @@ async def music_export(body: MusicExportRequest) -> dict[str, Any]:
         written = await run_in_threadpool(components.export_m3u, tracks, target)
     except OSError as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=MSG_PLAYLIST_WRITE_FAILED.format(target=target, error=exc),
         ) from exc
 
@@ -1117,7 +1117,7 @@ async def music_download(
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail=MSG_MUSIC_DOWNLOAD_FAILED.format(error=exc),
         ) from exc
 

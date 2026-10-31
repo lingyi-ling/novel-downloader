@@ -119,7 +119,11 @@ class CiweimaoFetcher(BaseFetcher):
             image_session_obj = sess_resp.json()
 
             if image_session_obj.get("code") != 100000:
-                logger.warning("image session code error: %s", image_session_obj)
+                logger.warning(
+                    "image session code error: code=%s msg=%s",
+                    image_session_obj.get("code"),
+                    image_session_obj.get("msg"),
+                )
                 return []
 
             image_code_plain = my_decrypt(
@@ -196,7 +200,11 @@ class CiweimaoFetcher(BaseFetcher):
 
         chapter_access_key = session_obj.get("chapter_access_key")
         if not chapter_access_key:
-            logger.warning("No chapter_access_key in session response: %s", session_obj)
+            logger.warning(
+                "No chapter_access_key in session response: code=%s msg=%s",
+                session_obj.get("code"),
+                session_obj.get("msg"),
+            )
             return results
 
         # 2) get chapter detail info
