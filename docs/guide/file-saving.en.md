@@ -1,24 +1,32 @@
 ## File Saving
 
-At runtime, the program creates three folders in the current working directory according to the configuration file (for example, `./settings.toml`):
+At runtime, the program creates the following folders in the current working directory according to the configuration file (for example, `./settings.toml`):
 
 - `downloads`
-- `novel_cache`
 - `raw_data`
+
+The cache directory (`novel_cache`) no longer defaults to the current directory;
+it lives in `cache/` under the application data directory
+(`%LOCALAPPDATA%\novel_downloader\cache` on Windows, overridable with the
+`NOVEL_HOME` environment variable). To restore the legacy "current directory"
+behavior, set `cache_dir = "./novel_cache"` in `settings.toml`. See
+[Settings Reference](./settings-reference.md).
 
 ---
 
-### novel_cache
+### Cache directory
 
-Stores caches and cookie data produced while the program runs.
+Stores caches and cookie data produced while the program runs (examples below
+use the default `cache/`; when `cache_dir` is configured, that directory is
+the root instead).
 
 #### Fixed font cache
 
 Caches obfuscated fonts to avoid downloading and parsing them repeatedly:
 
 ```text
-novel_cache/fixed_fonts/{font_name}.woff2
-novel_cache/fixed_font_map/{font_name}.json
+cache/fixed_fonts/{font_name}.woff2
+cache/fixed_font_maps/{font_name}.json
 ```
 
 ---

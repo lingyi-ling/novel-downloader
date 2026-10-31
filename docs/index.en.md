@@ -27,7 +27,7 @@ Core features include:
 
 ### Multi-site Search
 
-* Covers 57 search sites and 83 download sites; aggregate searches or target one or more sites
+* Covers 59 search sites and 84 download sites; aggregate searches or target one or more sites
 * Results can be sorted by quality, priority, site, title, author, word count, or update time
 * Extensible through rule-driven book sources, adding a site without writing Python code
 

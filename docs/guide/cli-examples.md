@@ -79,7 +79,7 @@ Commands:
 **Synopsis**
 
 ```bash
-novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [--format FORMAT [FORMAT ...]] [book_ids ...]
+novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [--format FORMAT [FORMAT ...]] [--json] [book_ids ...]
 ```
 
 **Options**
@@ -92,6 +92,8 @@ novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end E
 * `--start START`: 起始章节**唯一 ID** (仅用于第一个 `book_id`)
 * `--end`: 结束章节**唯一 ID**, **包含** (仅用于第一个 `book_id`)
 * `--no-export`: 仅下载, 不进行导出。启用后将跳过导出步骤
+* `--format FORMAT [FORMAT ...]`: 导出格式: `txt` / `epub` / `html`, 可指定多个, 默认使用配置文件设定
+* `--json`: 以 JSON 输出到标准输出并退出 (结构见文末表格)
 
 > `--start` / `--end` 用于临时下载部分章节, 仅影响**第一个**命令行提供的 `book_id`。
 >
@@ -187,18 +189,19 @@ novel-cli search -s b520 -s n23qb 三体
 **Synopsis**
 
 ```bash
-novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CONFIG] [--start START] [--end END] [--stage STAGE] [book_ids ...]
+novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CONFIG] [--start START] [--end END] [--stage STAGE] [--json] [book_ids ...]
 ```
 
 **Options**
 
 * `book_ids`: 要导出的一个或多个书籍 ID (可选; 若省略则会交互式选择)
-* `--format FORMAT [FORMAT ...]`: 导出格式: `txt` / `epub`, 可指定多个, 默认使用配置文件设定
+* `--format FORMAT [FORMAT ...]`: 导出格式: `txt` / `epub` / `html`, 可指定多个, 默认使用配置文件设定
 * `--site SITE`: 站点键 (如 `b520`, `qidian`, ...), (可选; 若省略则会交互式选择)
 * `--config CONFIG`: 指定配置文件路径 (可选)
 * `--start START`: 起始章节 ID (仅对第一本书生效)
 * `--end END`: 结束章节 ID (仅对第一本书生效)
 * `--stage STAGE`: 导出阶段 (例如 `raw`、`cleaner`), 默认使用最后阶段
+* `--json`: 以 JSON 输出到标准输出并退出 (结构见文末表格)
 
 **Examples**
 
@@ -408,7 +411,7 @@ novel-cli clean book [-h]
 * `--config CONFIG`: 配置文件路径
 * `--start START`: 起始章节 ID (仅对第一本书生效)
 * `--end END`: 结束章节 ID (仅对第一本书生效, **包含 end**)
-* `--stage STAGE`: 清理阶段 (如 `raw`, `cleaned`), 默认 `raw`
+* `--stage STAGE`: 清理阶段 (如 `raw`, `cleaner`), 默认 `raw`
 * `--no-chapters`: 不删除章节数据 (SQLite 不动)
 * `--metadata`: 删除 metadata JSON
 * `--media`: 删除媒体资源目录 (图片等)

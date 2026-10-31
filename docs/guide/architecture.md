@@ -285,8 +285,8 @@ CLI 与 API 以当前工作目录为基准，配置查找顺序为：
 | `./raw_data/<site>/<book_id>/chapter.<stage>.sqlite` | 章节正文数据库 |
 | `./raw_data/<site>/<book_id>/pipeline.json` | 处理流水线记录（`pipeline`、`executed`） |
 | `./raw_data/<site>/<book_id>/media/` | 下载到本地的图片、字体等资源 |
-| `./novel_cache/<site>/` | 站点级 Cookie 与缓存 |
-| `./novel_cache/fixed_fonts/`、`./novel_cache/fixed_font_map/` | 混淆字体缓存 |
+| `<应用数据目录>/cache/<site>/` | 站点级 Cookie 与缓存 (默认位置, 见 6.1; 设置 `general.cache_dir` 后改为该目录) |
+| `<缓存目录>/fixed_fonts/`、`<缓存目录>/fixed_font_maps/` | 混淆字体缓存 |
 | `./downloads/` | TXT / EPUB / HTML 导出结果 |
 | `./logs/` | 运行日志（`general.debug.log_dir`） |
 | `./debug/<site>/html/` | `general.debug.save_html = true` 时保存的原始 HTML |

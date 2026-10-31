@@ -29,6 +29,8 @@ novel-api
 | `--port` | `8081` | 监听端口。 |
 | `--token` | 环境变量 `NOVEL_API_TOKEN` | 设置后所有 `/api/v1/*` 与 `/downloads/*` 请求都要鉴权。 |
 | `--cors` | 关闭 | 允许任意来源跨域调用（`Access-Control-Allow-Origin: *`）。 |
+| `--rate-limit` | `120` | 每个客户端 IP 在滑动窗口内允许的最大请求数；`0` 关闭限流。 |
+| `--rate-limit-window` | `60` | 限流滑动窗口长度（秒）。 |
 
 ```bash
 # 带 token 启动
@@ -736,6 +738,16 @@ NOVEL_API_WEBHOOK=https://example.invalid/hooks/novel novel-api
 app = create_app(timeouts={"search": 30.0, "music_download": 600.0})
 ```
 
+### 请求频率限制
+
+API 默认启用按客户端 IP 的滑动窗口限流：每个 IP 在 `--rate-limit-window`
+（默认 `60` 秒）内最多 `--rate-limit`（默认 `120`）个请求，超出的请求返回
+`429` 并附带 `Retry-After` 头（等待多少秒后可有空位）。`--rate-limit 0`
+可完全关闭限流；`GET /api/v1/health` 不受限流影响，便于可用性监控。
+计数发生在鉴权之前，token 暴力枚举同样会被节流；被拒绝的请求不计数，
+客户端停止请求后窗口排空即自动恢复。限流状态保存在进程内存中，多 worker
+部署时各进程独立计数。
+
 ## 错误码
 
 错误响应统一为 `{"detail": "..."}`（`detail` 为英文，便于客户端判断）：
@@ -748,6 +760,7 @@ app = create_app(timeouts={"search": 30.0, "music_download": 600.0})
 | `409` | 登录凭据请求已完成、尚未被任务取走时再次提交。 |
 | `413` | 请求体超过该端点的大小上限。 |
 | `422` | 请求参数校验失败（缺少必填字段、数值越界、`tracks` 过多等）。 |
+| `429` | 超出按客户端 IP 的请求频率限制，响应带 `Retry-After` 头。 |
 | `500` | 服务端内部错误，固定返回 `{"detail": "Internal server error"}`，不泄漏堆栈。 |
 | `503` | 未安装音乐可选依赖，音乐相关端点不可用。 |
 | `504` | 阻塞型端点超过超时预算。 |

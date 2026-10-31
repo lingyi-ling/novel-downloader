@@ -32,6 +32,9 @@ Global runtime settings for downloads / concurrency / rate limits / directories 
 | `proxy_pass`         | `str/None`| `None`             | Proxy password |
 | `trust_env`          | `bool`    | `false`            | Whether to read system proxy and other environment variables |
 | `verify_ssl`         | `bool`    | `true`             | Whether to verify TLS certificates (disable only when diagnosing proxy issues) |
+| `locale_style`       | `str`     | `"simplified"`     | Site simplified/traditional mirror selection: `"simplified"` / `"traditional"` (only applies to sites offering both mirrors) |
+| `user_agent`         | `str/None` | `None`            | Custom request User-Agent (overrides the default) |
+| `headers`            | `dict/None` | `None`           | Extra custom request headers (key-value pairs) |
 
 **Cache directory**
 
@@ -107,6 +110,7 @@ These settings handle **obfuscated font decoding** and **image-chapter OCR**, an
 | `model_dir`        | `str/None`     | None    | OCR model storage path |
 | `input_shape`      | `tuple/None`   | None    | OCR model input image size in (C, H, W) format |
 | `device`           | `str/None`     | None    | Inference device, e.g. `"cpu"`, `"gpu"`, `"npu"`, `"gpu:0"`, `"gpu:0,1"` |
+| `precision`         | `str`          | `"fp32"` | Inference precision |
 | `cpu_threads`      | `int`          | 10      | Number of threads used for CPU inference |
 | `enable_hpi`       | `bool`         | false   | Whether to enable high-performance inference |
 | `use_truncation`   | `bool`         | true    | Whether to trim duplicated/truncated chapter content (e.g. qidian repeated paragraphs) |
@@ -145,13 +149,14 @@ Controls export formats, file naming, and EPUB details.
 | `append_timestamp`            | `bool`      | `true`               | Whether to append a timestamp to output filenames |
 | `filename_template`           | `str`       | `"{title}_{author}"` | Filename template |
 | `include_picture`             | `bool`      | `true`               | Whether to embed images from chapters (may increase file size) |
+| `split_mode`                  | `str`       | `"book"`             | Split mode for exports: `book` (one file per book) / `volume` (per volume) / `chapter` (per chapter) |
 
 #### Debug subsection
 
 | Parameter             | Type   | Default   | Description |
 | --------------------- | ------ | --------- | ----------- |
 | `debug.save_html`     | `bool` | `false`   | Whether to save fetched raw HTML to disk |
-| `debug.log_level`     | `str`  | `"INFO"`  | Log level: DEBUG, INFO, WARNING, ERROR |
+| `debug.log_level`     | `str`  | `"INFO"`  | Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL |
 | `debug.log_dir`       | `str`  | `"./logs"`| Directory for runtime logs |
 
 #### Example configuration

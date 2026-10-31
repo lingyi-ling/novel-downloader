@@ -64,11 +64,18 @@ Some sites require a login to access all content. Configure it as follows.
 
 #### Cookie cache
 
-After a successful login, cookies are cached automatically in the working directory:
+After a successful login, cookies are cached automatically in the cache directory (named after the HTTP backend):
 
 ```bash
-./novel_cache/<site_name>/*.cookies
+<cache_dir>/<site_name>/aiohttp.cookies
+<cache_dir>/<site_name>/curl_cffi.cookies
+<cache_dir>/<site_name>/httpx.cookies
 ```
+
+When `cache_dir` is not set, it defaults to `cache/` under the application data
+directory (`%LOCALAPPDATA%\novel_downloader\cache` on Windows); to restore the
+legacy "current directory" behavior, set `cache_dir = "./novel_cache"` in
+`settings.toml`.
 
 If you encounter login issues, expired cookies, or simply do not want to reuse cached state, delete the corresponding `.cookies` file. The program will try to log in again or prompt for cookies on the next request.
 

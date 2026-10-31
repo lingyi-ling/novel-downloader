@@ -285,8 +285,8 @@ Default relative directories:
 | `./raw_data/<site>/<book_id>/chapter.<stage>.sqlite` | Chapter body database |
 | `./raw_data/<site>/<book_id>/pipeline.json` | Processing pipeline records (`pipeline`, `executed`) |
 | `./raw_data/<site>/<book_id>/media/` | Images, fonts, and other locally cached resources |
-| `./novel_cache/<site>/` | Per-site cookies and cache |
-| `./novel_cache/fixed_fonts/`, `./novel_cache/fixed_font_map/` | Obfuscated-font cache |
+| `<app data dir>/cache/<site>/` | Per-site cookies and cache (default location, see 6.1; setting `general.cache_dir` moves it to that directory) |
+| `<cache dir>/fixed_fonts/`, `<cache dir>/fixed_font_maps/` | Obfuscated-font cache |
 | `./downloads/` | TXT / EPUB / HTML export results |
 | `./logs/` | Runtime logs (`general.debug.log_dir`) |
 | `./debug/<site>/html/` | Raw HTML saved when `general.debug.save_html = true` |

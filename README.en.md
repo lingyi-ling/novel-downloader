@@ -19,7 +19,7 @@ Supports resumable crawling, download queues with progress, multi-format exporti
 
 ## Features
 
-* Multi-site search: 57 search sites and 83 download sites, with aggregate search, ranking, and filtering
+* Multi-site search: 59 search sites and 84 download sites, with aggregate search, ranking, and filtering
 * Download queue and progress: resumable crawling, queue scheduling, and live progress
 * Export to TXT, EPUB, and HTML
 * History export: re-export previously downloaded books at any time

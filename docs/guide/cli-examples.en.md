@@ -79,7 +79,7 @@ Download a complete novel, supporting three approaches:
 **Synopsis**
 
 ```bash
-novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [--format FORMAT [FORMAT ...]] [book_ids ...]
+novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [--format FORMAT [FORMAT ...]] [--json] [book_ids ...]
 ```
 
 **Options**
@@ -92,6 +92,8 @@ novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end E
 * `--start START`: start chapter **unique ID** (only applied to the first `book_id`)
 * `--end`: end chapter **unique ID**, **inclusive** (only applied to the first `book_id`)
 * `--no-export`: download only, no export. When enabled, the export step is skipped
+* `--format FORMAT [FORMAT ...]`: export format: `txt` / `epub` / `html`; multiple values allowed; defaults to the setting in the configuration file
+* `--json`: print the result to stdout as JSON and exit (structure in the table at the end of this page)
 
 > `--start` / `--end` are used to temporarily download a subset of chapters, and only affect the **first** `book_id` provided on the command line.
 >
@@ -187,18 +189,19 @@ Export downloaded novels to a specified format
 **Synopsis**
 
 ```bash
-novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CONFIG] [--start START] [--end END] [--stage STAGE] [book_ids ...]
+novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CONFIG] [--start START] [--end END] [--stage STAGE] [--json] [book_ids ...]
 ```
 
 **Options**
 
 * `book_ids`: one or more book IDs to export (optional; if omitted, you will be prompted to select interactively)
-* `--format FORMAT [FORMAT ...]`: export format: `txt` / `epub`; multiple values allowed; defaults to the setting in the configuration file
+* `--format FORMAT [FORMAT ...]`: export format: `txt` / `epub` / `html`; multiple values allowed; defaults to the setting in the configuration file
 * `--site SITE`: site key (e.g. `b520`, `qidian`, ...), (optional; if omitted, you will be prompted to select interactively)
 * `--config CONFIG`: specify the configuration file path (optional)
 * `--start START`: start chapter ID, applied only to the first book
 * `--end END`: end chapter ID, applied only to the first book
 * `--stage STAGE`: export stage (e.g. `raw`, `cleaner`); defaults to the last stage
+* `--json`: print the result to stdout as JSON and exit (structure in the table at the end of this page)
 
 **Examples**
 
@@ -408,7 +411,7 @@ novel-cli clean book [-h]
 * `--config CONFIG`: configuration file path
 * `--start START`: start chapter ID (only effective for the first book)
 * `--end END`: end chapter ID (only effective for the first book, **inclusive of end**)
-* `--stage STAGE`: cleaning stage (e.g. `raw`, `cleaned`), defaults to `raw`
+* `--stage STAGE`: cleaning stage (e.g. `raw`, `cleaner`), defaults to `raw`
 * `--no-chapters`: do not delete chapter data (SQLite is left untouched)
 * `--metadata`: delete metadata JSON
 * `--media`: delete the media resource directory (images, etc.)

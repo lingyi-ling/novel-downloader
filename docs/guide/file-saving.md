@@ -1,24 +1,29 @@
 ## 文件保存
 
-运行时会根据配置文件 (如 `./settings.toml`) 在当前工作目录下自动创建三个文件夹:
+运行时会根据配置文件 (如 `./settings.toml`) 在当前工作目录下自动创建:
 
 - `downloads`
-- `novel_cache`
 - `raw_data`
+
+缓存目录 (`novel_cache`) 默认不再写入当前目录, 而是位于应用数据目录下的
+`cache/` (Windows 为 `%LOCALAPPDATA%\novel_downloader\cache`, 可用环境变量
+`NOVEL_HOME` 覆盖); 如需旧的「当前目录」行为, 可在 `settings.toml` 中设置
+`cache_dir = "./novel_cache"`。详见 [设置项参考](./settings-reference.md)。
 
 ---
 
-### novel_cache
+### 缓存目录
 
-用于存放运行过程中产生的缓存和 Cookies 数据
+用于存放运行过程中产生的缓存和 Cookies 数据 (下文以默认 `cache/` 为例;
+若配置了 `cache_dir`, 则以该目录为根)。
 
 #### 固定字体缓存
 
 用于缓存加密字体，避免重复下载与解析：
 
 ```text
-novel_cache/fixed_fonts/{font_name}.woff2
-novel_cache/fixed_font_map/{font_name}.json
+cache/fixed_fonts/{font_name}.woff2
+cache/fixed_font_maps/{font_name}.json
 ```
 
 ---

@@ -63,11 +63,17 @@ novel-cli download --site linovelib
 
 #### Cookie 缓存机制
 
-程序会将登录后获取的 Cookie 自动缓存在运行目录下:
+程序会将登录后获取的 Cookie 自动缓存在缓存目录下 (按后端命名):
 
 ```bash
-./novel_cache/<site_name>/*.cookies
+<cache_dir>/<site_name>/aiohttp.cookies
+<cache_dir>/<site_name>/curl_cffi.cookies
+<cache_dir>/<site_name>/httpx.cookies
 ```
+
+`cache_dir` 未设置时默认为应用数据目录下的 `cache/` (Windows 为
+`%LOCALAPPDATA%\novel_downloader\cache`); 如需旧的「当前目录」行为, 可在
+`settings.toml` 中设置 `cache_dir = "./novel_cache"`。
 
 如果遇到登录异常、Cookie 失效, 或不希望继续使用缓存内容, 可以直接删除对应的 `.cookies` 文件, 程序会在下次访问时尝试重新登录或提示输入 Cookie。
 

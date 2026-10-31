@@ -32,6 +32,9 @@
 | `proxy_pass`         | `str/None` | `None`         | 代理密码                                      |
 | `trust_env`          | `bool`  | `false`           | 是否读取系统代理等环境变量                     |
 | `verify_ssl`         | `bool`  | `true`            | 是否校验 TLS 证书 (排查代理问题时才考虑关闭)   |
+| `locale_style`       | `str`   | `"simplified"`    | 站点简/繁体镜像选择, 可选 `"simplified"` / `"traditional"` (仅对提供双镜像的站点生效) |
+| `user_agent`         | `str/None` | `None`         | 自定义请求 User-Agent (覆盖默认值)             |
+| `headers`            | `dict/None` | `None`        | 附加自定义请求头 (键值对)                      |
 
 **缓存目录**
 
@@ -107,6 +110,7 @@ browser_assisted_sites = ["fanqienovel"]
 | `model_dir`        | `str/None`     | None       | OCR 模型存储路径                                              |
 | `input_shape`      | `tuple/None`   | None       | OCR 模型输入图像尺寸, 格式为 (C, H, W)                         |
 | `device`           | `str/None`     | None       | 用于推理的设备, 例如: "cpu"、"gpu"、"npu"、"gpu:0"、"gpu:0,1"  |
+| `precision`         | `str`          | `"fp32"`   | 推理精度                                       |
 | `cpu_threads`      | `int`          | 10         | 在 CPU 上推理时使用的线程数量                                  |
 | `enable_hpi`       | `bool`         | false      | 是否启用高性能推理                                             |
 | `use_truncation`   | `bool`         | true       | 是否对重复/截断的章节内容做截断处理 (如起点重复段落)             |
@@ -145,13 +149,14 @@ OCR 功能依赖 `PaddleOCR` 及其模型, 请参考安装指南:
 | `append_timestamp`            | `bool`      | `true`                | 输出文件名是否追加时间戳                     |
 | `filename_template`           | `str`       | `"{title}_{author}"`  | 文件名模板                                  |
 | `include_picture`             | `bool`      | `true`                | 是否嵌入章节中的图片 (可能增加文件体积)       |
+| `split_mode`                  | `str`       | `"book"`              | 拆分导出模式: `book` (整本书一个文件) / `volume` (按卷) / `chapter` (按章) |
 
 #### 调试子节
 
 | 参数名                | 类型    | 默认值             | 说明                                  |
 | -------------------- | ------- | ----------------- | ------------------------------------- |
 | `debug.save_html`    | `bool`  | `false`           | 是否保存抓取到的原始 HTML 到磁盘         |
-| `debug.log_level`    | `str`   | `"INFO"`          | 日志级别: DEBUG, INFO, WARNING, ERROR  |
+| `debug.log_level`    | `str`   | `"INFO"`          | 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL |
 | `debug.log_dir`      | `str`   | `"./logs"`        | 运行日志存放目录                        |
 
 #### 示例配置
