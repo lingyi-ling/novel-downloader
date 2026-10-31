@@ -1,5 +1,9 @@
 package com.lingyi.noveldl.data
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -12,6 +16,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 /**
  * Transport level tests for [Api] backed by MockWebServer: request shape,
@@ -263,5 +268,126 @@ class ApiClientTest {
         assertTrue(result.isFailure)
         assertNotNull(result.exceptionOrNull())
         assertEquals(Api.NOT_CONFIGURED_MESSAGE, result.exceptionOrNull()?.message ?: "")
+    }
+
+    // ------------------------------------------------------------------
+    // Cancellation must propagate: Api.call runs inside LaunchedEffect /
+    // rememberCoroutineScope coroutines that are cancelled on navigation or
+    // effect restart, and a swallowed CancellationException turns those into
+    // bogus "failure" results (e.g. a "Job was cancelled" error flash on the
+    // tasks screen) while breaking structured concurrency.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun cancellingTheCallerCancelsTheCallInsteadOfFailing() = runBlocking {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        Api.configure(baseUrl(), null, readTimeoutMillis = 30_000)
+
+        var resolved: Result<Health>? = null
+        // Dispatched off the runBlocking event loop so the blocking
+        // takeRequest below does not starve the coroutine.
+        val job = launch(Dispatchers.IO) {
+            resolved = Api.call { Api.service().health() }
+        }
+        // The request reaching the server proves the call is suspended now.
+        assertNotNull("request should reach the server", server.takeRequest(5, TimeUnit.SECONDS))
+        job.cancelAndJoin()
+
+        assertTrue("job must end cancelled", job.isCancelled)
+        assertNull(
+            "a cancelled call must not resolve to a failure Result",
+            resolved,
+        )
+    }
+
+    @Test
+    fun cancellationThrownInsideTheBlockPropagates() {
+        val thrown = runCatching {
+            runBlocking {
+                Api.call { throw CancellationException("stop") }
+            }
+        }
+        assertTrue(
+            "CancellationException must reach the caller, not become a Result",
+            thrown.exceptionOrNull() is CancellationException,
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // configure() is called with user-typed text from the settings screen
+    // (inside a rememberCoroutineScope launch) and with persisted values at
+    // app start; a malformed URL must never crash those coroutines.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun malformedBaseUrlFallsBackToDefaultInsteadOfThrowing() {
+        val outcome = runCatching { Api.configure("not a url at all", null) }
+
+        assertTrue("configure must not throw for malformed input", outcome.isSuccess)
+        assertEquals(Api.DEFAULT_BASE_URL, Api.baseUrl)
+        assertTrue(Api.isConfigured())
+    }
+
+    @Test
+    fun nonHttpSchemeBaseUrlFallsBackToDefaultInsteadOfThrowing() {
+        val outcome = runCatching { Api.configure("ftp://10.0.2.2:8081/", null) }
+
+        assertTrue("configure must not throw for non-http schemes", outcome.isSuccess)
+        assertEquals(Api.DEFAULT_BASE_URL, Api.baseUrl)
+    }
+
+    @Test
+    fun reconfigureWithNewBaseUrlIsPickedUpImmediately() = runBlocking {
+        server.enqueue(json("""{"status":"ok","version":"1"}"""))
+        Api.configure(baseUrl(), null)
+        Api.call { Api.service().health() }
+        assertEquals("/api/v1/health", server.takeRequest().path)
+
+        // A second server: requests after configure() must go there, never to
+        // a cached service bound to the old base URL.
+        val second = MockWebServer()
+        second.start()
+        try {
+            second.enqueue(json("""{"status":"ok","version":"2"}"""))
+            Api.configure(second.url("/").toString(), null)
+            Api.call { Api.service().health() }
+
+            assertEquals("/api/v1/health", second.takeRequest().path)
+            assertNull("old server must see no further requests", server.takeRequest(200, TimeUnit.MILLISECONDS))
+        } finally {
+            second.shutdown()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Readable error mapping for non-JSON bodies and escaped details.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun nonJsonSuccessBodyBecomesReadableFormatError() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/html")
+                .setBody("<html><body>proxy login page</body></html>"),
+        )
+        Api.configure(baseUrl(), null)
+
+        val result = Api.call { Api.service().health() }
+
+        assertTrue(result.isFailure)
+        val message = result.exceptionOrNull()?.message ?: ""
+        assertTrue("unexpected message: $message", message.startsWith("响应格式错误"))
+    }
+
+    @Test
+    fun errorDetailWithEscapedQuotesIsFullyDecoded() = runBlocking {
+        server.enqueue(json("""{"detail":"bad \"quoted\" value"}""", 400))
+        Api.configure(baseUrl(), null)
+
+        val result = Api.call { Api.service().health() }
+
+        assertTrue(result.isFailure)
+        assertEquals("""bad "quoted" value""", result.exceptionOrNull()?.message ?: "")
     }
 }

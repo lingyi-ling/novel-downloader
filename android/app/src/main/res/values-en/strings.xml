@@ -127,6 +127,7 @@
     <string name="settings_api_key">API key (optional)</string>
     <string name="settings_saved">Saved</string>
     <string name="settings_url_empty">API URL is empty; using the default %1$s</string>
+    <string name="settings_url_invalid">Invalid API URL; using %1$s instead</string>
     <string name="settings_test_connection">Test connection</string>
     <string name="settings_test_ok">Connected: %1$s %2$s</string>
     <string name="settings_hint">Emulators reach the host at http://10.0.2.2:8081/; devices need the PC LAN IP (start with novel-api --host 0.0.0.0).</string>

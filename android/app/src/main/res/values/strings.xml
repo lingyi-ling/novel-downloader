@@ -136,6 +136,7 @@
     <string name="settings_api_key">API 密钥（可选）</string>
     <string name="settings_saved">已保存</string>
     <string name="settings_url_empty">API 地址为空，已改用默认地址 %1$s</string>
+    <string name="settings_url_invalid">API 地址无效，已改用 %1$s</string>
     <string name="settings_test_connection">测试连接</string>
     <string name="settings_test_ok">连接成功：%1$s %2$s</string>
     <string name="settings_hint">模拟器访问电脑用 http://10.0.2.2:8081/；真机用电脑局域网 IP（电脑需以 novel-api --host 0.0.0.0 启动）。</string>

@@ -40,8 +40,10 @@ import com.lingyi.noveldl.data.ApiSettings
 import com.lingyi.noveldl.data.DownloadTarget
 import com.lingyi.noveldl.data.EmbeddedEngine
 import com.lingyi.noveldl.data.SettingsStore
+import com.lingyi.noveldl.data.configureTargetUrl
 import com.lingyi.noveldl.data.SitesSummary
 import com.lingyi.noveldl.data.resolveDownloadTarget
+import com.lingyi.noveldl.data.standaloneTargetUrl
 import com.lingyi.noveldl.data.toSitesSummary
 import com.lingyi.noveldl.data.treeUriDisplayName
 import com.lingyi.noveldl.ui.healthSummary
@@ -66,12 +68,22 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
 
     fun save() {
         scope.launch {
+            // In standalone mode the engine stays the API target; the typed
+            // URL is persisted for when the user switches back.
+            val target = settings.configureTargetUrl(baseUrl)
+            val usable = Api.configure(target, apiKey)
             store.save(baseUrl, apiKey)
-            Api.configure(baseUrl, apiKey)
-            if (baseUrl.isBlank()) {
-                onMessage(context.getString(R.string.settings_url_empty, Api.baseUrl))
-            } else {
-                onMessage(context.getString(R.string.settings_saved))
+            when {
+                baseUrl.isBlank() ->
+                    onMessage(context.getString(R.string.settings_url_empty, Api.baseUrl))
+                !usable ->
+                    onMessage(
+                        context.getString(
+                            R.string.settings_url_invalid,
+                            Api.baseUrl,
+                        ),
+                    )
+                else -> onMessage(context.getString(R.string.settings_saved))
             }
         }
     }
@@ -80,7 +92,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
         if (testing) return
         testing = true
         scope.launch {
-            Api.configure(baseUrl, apiKey)
+            Api.configure(settings.configureTargetUrl(baseUrl), apiKey)
             Api.call { Api.service().health() }
                 .onSuccess {
                     health = healthSummary(it.status, it.version)
@@ -218,15 +230,33 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
                     scope.launch {
                         store.saveStandalone(enabled)
                         if (enabled) EmbeddedEngine.ensureStarted(context)
-                        onMessage(
-                            context.getString(
-                                if (enabled) {
-                                    R.string.settings_standalone_on
-                                } else {
-                                    R.string.settings_standalone_off
-                                },
-                            ),
+                        // The toggle must take effect immediately: without
+                        // reconfiguring, the app would keep talking to the
+                        // previous base URL until the process restarts.
+                        val usable = Api.configure(
+                            standaloneTargetUrl(enabled, settings),
+                            settings.apiKey,
                         )
+                        if (enabled && !usable) {
+                            // The engine URL is always valid; unreachable in
+                            // practice, kept as a guard.
+                            onMessage(
+                                context.getString(
+                                    R.string.settings_url_invalid,
+                                    Api.baseUrl,
+                                ),
+                            )
+                        } else {
+                            onMessage(
+                                context.getString(
+                                    if (enabled) {
+                                        R.string.settings_standalone_on
+                                    } else {
+                                        R.string.settings_standalone_off
+                                    },
+                                ),
+                            )
+                        }
                     }
                 },
             )
