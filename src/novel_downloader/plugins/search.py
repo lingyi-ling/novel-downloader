@@ -129,12 +129,24 @@ def _prepare_searchers(
     sites: they would otherwise start a browser window for every keyword.
     Explicitly requested sites have their browser fallback enabled, which is
     still up to the site's own searcher.
+
+    A class that appears more than once (the registry repeats it when the
+    same site key is requested twice) is instantiated and searched once.
     """
     browser_sites = _browser_assisted_sites()
     explicit = sites is not None
     entries: list[tuple[str, BaseSearcher]] = []
+    seen_classes: set[type[BaseSearcher]] = set()
 
     for cls in classes:
+        if cls in seen_classes:
+            logger.debug(
+                "search: site %s requested more than once; searching it once",
+                _site_key(cls),
+            )
+            continue
+        seen_classes.add(cls)
+
         site = _site_key(cls)
 
         if not explicit and site in browser_sites:
@@ -176,6 +188,13 @@ def _prepare_searchers(
         entries.append((site, instance))
 
     return _SearchPlan(entries=entries, browser_sites=browser_sites)
+
+
+def _invalid_payload_error(payload: object) -> TypeError:
+    """The error reported when a site returns something other than a list."""
+    return TypeError(
+        f"searcher returned {type(payload).__name__} instead of a list of results"
+    )
 
 
 def _report_failure(
@@ -239,7 +258,10 @@ async def search(
 
     :param keyword: The search term or keyword to query.
     :param sites: An optional sequence of site keys to limit which searchers.
-    :param limit: Maximum total number of results to return; if None, return all.
+        ``None`` means all registered sites; an empty sequence searches no
+        site at all.
+    :param limit: Maximum total number of results to return (applied after
+        ranking); if None, return all.
     :param per_site_limit: Maximum number of search results per site.
     :param timeout: Per-request time budget (seconds)
     :param nsfw: Whether to include NSFW searchers.
@@ -249,7 +271,13 @@ async def search(
         assistance, completion, failure).  Exceptions it raises are ignored.
     :return: A flat list of `SearchResult` objects.
     """
-    key = build_key(keyword, sites, per_site_limit, nsfw)
+    if sites is not None and not sites:
+        # An explicit empty selection searches nothing.  The registry treats
+        # any falsy ``sites`` (``[]`` included) as "all sites", so the empty
+        # selection must be short-circuited here.
+        return []
+
+    key = build_key(keyword, sites, per_site_limit, nsfw, timeout)
     cached = _CACHE.get(key)
     if cached is not None:
         # Cache holds the merged, unranked snapshot: rank/slice per call so a
@@ -283,6 +311,14 @@ async def search(
         if isinstance(item, BaseException):
             _report_failure(site, item, plan.browser_sites, on_event)
             continue
+        if not isinstance(item, list):
+            # A searcher that returns something other than a list is a site
+            # failure: report it and keep the other sites' results instead of
+            # letting it crash the whole aggregate.
+            _report_failure(
+                site, _invalid_payload_error(item), plan.browser_sites, on_event
+            )
+            continue
         results.extend(item)
         _report_completion(site, len(item), plan.browser_sites, on_event)
 
@@ -313,14 +349,19 @@ async def search_stream(
     instead of a new chunk type.
 
     :param keyword: Search keyword or term.
-    :param sites: Optional list of site keys; if None, use all registered sites.
+    :param sites: Optional list of site keys; if None, use all registered
+        sites.  An empty sequence searches no site at all.
     :param per_site_limit: Maximum number of results per site.
     :param timeout: Timeout per-site (seconds).
     :param nsfw: Whether to include NSFW searchers.
     :param on_event: Optional observer for per-site search states.
     :yield: Lists of `SearchResult` objects from each completed site.
     """
-    key = build_key(keyword, sites, per_site_limit, nsfw)
+    if sites is not None and not sites:
+        # An explicit empty selection searches nothing (see ``search``).
+        return
+
+    key = build_key(keyword, sites, per_site_limit, nsfw, timeout)
     cached = _CACHE.get(key)
     if cached is not None:
         yield cached
@@ -362,19 +403,30 @@ async def search_stream(
                 for task in done:
                     site = site_by_task[task]
                     try:
-                        site_results = task.result()
+                        payload: object = task.result()
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
                         _report_failure(site, exc, plan.browser_sites, on_event)
                         continue
 
+                    if not isinstance(payload, list):
+                        # A searcher that returns something other than a list
+                        # is a site failure; keep streaming the other sites.
+                        _report_failure(
+                            site,
+                            _invalid_payload_error(payload),
+                            plan.browser_sites,
+                            on_event,
+                        )
+                        continue
+
                     _report_completion(
-                        site, len(site_results), plan.browser_sites, on_event
+                        site, len(payload), plan.browser_sites, on_event
                     )
-                    if site_results:
-                        accumulated.extend(site_results)
-                        yield site_results
+                    if payload:
+                        accumulated.extend(payload)
+                        yield payload
         finally:
             # ensure no background tasks are left running after cancel/exit
             for task in site_by_task:

@@ -321,6 +321,15 @@ def _words_score(words: float | None) -> float:
 def _recency_score(updated: datetime | None, now: datetime) -> float:
     if updated is None:
         return 0.5
+    # ``parse_update_date`` yields *aware* datetimes for ISO strings with a
+    # UTC offset, while the clock used for scoring is naive.  Fold any aware
+    # datetime onto that naive local timeline first: subtracting mixed
+    # offset-aware/naive datetimes raises ``TypeError`` and would take down
+    # the whole aggregate search.
+    if now.tzinfo is not None:
+        now = now.astimezone().replace(tzinfo=None)
+    if updated.tzinfo is not None:
+        updated = updated.astimezone().replace(tzinfo=None)
     days = max(0.0, (now - updated).total_seconds() / 86400.0)
     if days <= 1:
         return 1.0

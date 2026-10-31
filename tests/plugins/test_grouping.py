@@ -175,6 +175,28 @@ def test_grouping_is_idempotent() -> None:
     assert first == [("b1", ["b1"]), ("a2", ["a2", "a1"]), ("c1", ["c1"])]
 
 
+def test_grouping_tolerates_timezone_aware_update_dates() -> None:
+    # ``parse_update_date`` produces aware datetimes for ISO strings with a
+    # UTC offset; the scoring inside ``group_results`` must not crash on them,
+    # and same-title/different-author entries must still stay separate.
+    same_author = _result(
+        book_id="a1",
+        title="三体",
+        author="刘慈欣",
+        update_date="2024-06-01T12:00:00+08:00",
+    )
+    other_author = _result(
+        book_id="b1",
+        title="三体",
+        author="别人",
+        update_date="2020-01-01T00:00:00+00:00",
+    )
+
+    groups = group_results([same_author, other_author], keyword="三体")
+
+    assert _shape(groups) == [("a1", ["a1"]), ("b1", ["b1"])]
+
+
 def test_grouping_does_not_modify_results_even_for_weird_input() -> None:
     results = [
         _result(book_id="1", title="", author=""),

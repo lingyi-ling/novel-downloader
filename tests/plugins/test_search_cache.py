@@ -79,6 +79,17 @@ def test_build_key_includes_limit_and_nsfw() -> None:
     assert _key("k", None, 5, False) != _key("k", None, 5, True)
 
 
+def test_build_key_includes_timeout() -> None:
+    # The timeout bounds how long slow sites may take, so two otherwise
+    # identical searches with different budgets can yield different result
+    # sets and must not share a cache entry.
+    fast = build_key("k", None, 5, False, timeout=1.0)
+    slow = build_key("k", None, 5, False, timeout=60.0)
+
+    assert fast != slow
+    assert fast == build_key("k", None, 5, False, timeout=1.0)
+
+
 def test_cache_key_is_hashable_and_frozen() -> None:
     key = _key()
     assert len({_key(), _key()}) == 1
@@ -386,3 +397,32 @@ async def test_search_and_stream_share_cache(_wired: None) -> None:
     chunks = [chunk async for chunk in search_stream("keyword")]
     assert _CountingSearcher.calls == 1  # search() warmed the shared cache
     assert chunks == [[_result("1", site="counting")]]
+
+
+@pytest.mark.asyncio
+async def test_search_cache_is_isolated_by_timeout(_wired: None) -> None:
+    # A sparse snapshot fetched with an aggressive budget must not serve a
+    # caller that asked for a generous one.
+    await search("keyword", timeout=5.0)
+    assert _CountingSearcher.calls == 1
+
+    await search("keyword", timeout=5.0)
+    assert _CountingSearcher.calls == 1  # same budget: cache hit
+
+    results = await search("keyword", timeout=60.0)
+    assert results  # re-fetched, not served from the 5s-budget snapshot
+    assert _CountingSearcher.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_search_stream_cache_is_isolated_by_timeout(_wired: None) -> None:
+    chunks = [chunk async for chunk in search_stream("keyword", timeout=5.0)]
+    assert _CountingSearcher.calls == 1
+
+    cached = [chunk async for chunk in search_stream("keyword", timeout=5.0)]
+    assert _CountingSearcher.calls == 1  # same budget: cache hit
+    assert cached == chunks
+
+    refetched = [chunk async for chunk in search_stream("keyword", timeout=60.0)]
+    assert refetched  # re-fetched, not a stale cache hit
+    assert _CountingSearcher.calls == 2

@@ -136,6 +136,53 @@ def test_rank_score_rises_with_recency() -> None:
     assert rank_score(fresh, keyword, now=NOW) > rank_score(old, keyword, now=NOW)
 
 
+def test_rank_score_tolerates_timezone_aware_update_date() -> None:
+    # ``parse_update_date`` accepts ISO strings with a UTC offset, which yield
+    # *aware* datetimes; the naive scoring clock must not crash on them.
+    aware = _result(title="斗破苍穹", update_date="2024-05-01 12:00:00+08:00")
+
+    score = rank_score(aware, "斗破苍穹", now=NOW)
+
+    assert 0.0 <= score <= 1.0
+
+
+def test_rank_score_tolerates_timezone_aware_clock() -> None:
+    # The scoring clock itself may be aware (callers can pass one).  Scoring
+    # must fold it onto the naive local timeline instead of raising
+    # ``TypeError`` on the mixed subtraction, and it must agree exactly with
+    # the naive wall clock it represents.
+    aware_now = NOW.astimezone()
+    naive_updated = _result(title="斗破苍穹", update_date="2024-06-14")
+    aware_updated = _result(title="斗破苍穹", update_date="2024-06-14 00:00:00+00:00")
+
+    for result in (naive_updated, aware_updated):
+        score = rank_score(result, "斗破苍穹", now=aware_now)
+        assert 0.0 <= score <= 1.0
+        assert score == rank_score(result, "斗破苍穹", now=NOW)
+
+
+def test_sort_results_quality_tolerates_aware_update_dates() -> None:
+    keyword = "斗破苍穹"
+    aware_fresh = _result(
+        book_id="a",
+        title=keyword,
+        update_date="2024-06-14 00:00:00+00:00",
+        word_count="300万字",
+    )
+    naive_old = _result(
+        book_id="b",
+        title=keyword,
+        update_date="2020-01-01",
+        word_count="300万字",
+    )
+
+    results = [naive_old, aware_fresh]
+    sort_results(results, keyword=keyword, now=NOW)
+
+    # Both entries survive the sort and the fresher one ranks first.
+    assert [r["book_id"] for r in results] == ["a", "b"]
+
+
 # --------------------------------------------------------------------------- #
 # default_order / sort_results
 # --------------------------------------------------------------------------- #

@@ -37,6 +37,7 @@ class CacheKey:
     sites: tuple[str, ...] | None
     per_site_limit: int
     nsfw: bool
+    timeout: float = 5.0
 
 
 def build_key(
@@ -44,6 +45,7 @@ def build_key(
     sites: Sequence[str] | None,
     per_site_limit: int = 5,
     nsfw: bool = False,
+    timeout: float = 5.0,
 ) -> CacheKey:
     """
     Build a normalized :class:`CacheKey` for a search query.
@@ -52,6 +54,11 @@ def build_key(
     punctuation/whitespace stripped) and ``sites`` becomes a sorted tuple so
     different orderings of the same site set collapse to one key. ``None``
     (meaning "all registered sites") is kept distinct from an empty selection.
+
+    ``timeout`` is part of the identity because it bounds how long slow sites
+    may take: two otherwise identical searches with different budgets can
+    produce different result sets (a short budget drops slow sites), so they
+    must not share a cache entry.
     """
     site_tuple: tuple[str, ...] | None = (
         None if sites is None else tuple(sorted({str(site) for site in sites}))
@@ -61,6 +68,7 @@ def build_key(
         sites=site_tuple,
         per_site_limit=per_site_limit,
         nsfw=nsfw,
+        timeout=timeout,
     )
 
 
