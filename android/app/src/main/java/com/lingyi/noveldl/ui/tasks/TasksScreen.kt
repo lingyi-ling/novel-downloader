@@ -19,8 +19,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -28,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -38,12 +41,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.HistoryDownloader
 import com.lingyi.noveldl.data.HistoryFile
+import com.lingyi.noveldl.data.LoginRequestDto
+import com.lingyi.noveldl.data.LoginRequestsResponse
+import com.lingyi.noveldl.data.LoginSubmitRequest
 import com.lingyi.noveldl.data.Task
 import com.lingyi.noveldl.data.TasksResponse
 import com.lingyi.noveldl.data.downloadFileName
@@ -59,6 +67,9 @@ fun TasksScreen(onMessage: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     var snapshot by remember { mutableStateOf(TasksResponse()) }
+    var loginReqs by remember { mutableStateOf(LoginRequestsResponse()) }
+    // Credential request currently opened in the submit dialog.
+    var editingLogin by remember { mutableStateOf<LoginRequestDto?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
     // Distinguishes a user-initiated refresh from the silent 2s polling loop.
@@ -87,6 +98,10 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                     error = null
                 }
                 .onFailure { error = it.message }
+            // Login-required sites park their task until credentials arrive;
+            // the pending-request list rides along with the task poll.
+            Api.call { Api.service().loginRequests() }
+                .onSuccess { loginReqs = it }
             refreshing = false
             delay(2000)
         }
@@ -162,6 +177,26 @@ fun TasksScreen(onMessage: (String) -> Unit) {
         onMessage(context.getString(R.string.tasks_error_copied))
     }
 
+    /** Submits credential values for [req] and closes the dialog on success. */
+    fun submitLogin(req: LoginRequestDto, values: Map<String, String>) {
+        scope.launch {
+            Api.call { Api.service().submitLogin(req.req_id, LoginSubmitRequest(values)) }
+                .onSuccess {
+                    onMessage(context.getString(R.string.login_submitted))
+                    editingLogin = null
+                    refreshNow()
+                }
+                .onFailure {
+                    onMessage(
+                        context.getString(
+                            R.string.login_submit_failed,
+                            it.message ?: "",
+                        ),
+                    )
+                }
+        }
+    }
+
     PullToRefreshBox(
         isRefreshing = refreshing,
         onRefresh = { refreshNow() },
@@ -190,7 +225,8 @@ fun TasksScreen(onMessage: (String) -> Unit) {
             }
             val isEmpty = snapshot.running.isEmpty() &&
                 snapshot.pending.isEmpty() &&
-                snapshot.completed.isEmpty()
+                snapshot.completed.isEmpty() &&
+                loginReqs.requests.isEmpty()
             if (isEmpty && error == null) {
                 Text(
                     stringResource(R.string.tasks_empty),
@@ -203,6 +239,24 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                if (loginReqs.requests.isNotEmpty()) {
+                    item {
+                        Column {
+                            SectionHeader(
+                                stringResource(R.string.login_section_title),
+                                loginReqs.requests.size,
+                            )
+                            Text(
+                                stringResource(R.string.login_section_hint),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    items(loginReqs.requests, key = { it.req_id }) { req ->
+                        LoginRequestCard(req, onProvide = { editingLogin = req })
+                    }
+                }
                 item { SectionHeader(stringResource(R.string.tasks_running), snapshot.running.size) }
                 items(snapshot.running) { task ->
                     TaskCard(
@@ -253,6 +307,110 @@ fun TasksScreen(onMessage: (String) -> Unit) {
             }
         }
     }
+    editingLogin?.let { req ->
+        LoginRequestDialog(
+            req = req,
+            onDismiss = { editingLogin = null },
+            onSubmit = ::submitLogin,
+        )
+    }
+}
+
+@Composable
+private fun LoginRequestCard(
+    req: LoginRequestDto,
+    onProvide: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+            Text(
+                req.title.ifBlank { req.req_id },
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                stringResource(R.string.login_section_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = onProvide) {
+                Text(stringResource(R.string.login_provide))
+            }
+        }
+    }
+}
+
+@Composable
+private fun LoginRequestDialog(
+    req: LoginRequestDto,
+    onDismiss: () -> Unit,
+    onSubmit: (LoginRequestDto, Map<String, String>) -> Unit,
+) {
+    val context = LocalContext.current
+    // One observable buffer per field, seeded with prefill/default values.
+    val buffers = remember(req.req_id) {
+        mutableStateMapOf<String, String>().apply {
+            req.fields.forEach { field ->
+                put(field.name, req.prefill[field.name] ?: field.default)
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.login_dialog_title)) },
+        text = {
+            Column {
+                if (req.fields.isEmpty()) {
+                    Text(stringResource(R.string.login_dialog_hint))
+                }
+                req.fields.forEach { field ->
+                    val supporting = buildString {
+                        if (field.required) append(context.getString(R.string.login_field_required))
+                        if (field.description.isNotBlank()) {
+                            if (isNotEmpty()) append(" · ")
+                            append(field.description)
+                        }
+                    }
+                    OutlinedTextField(
+                        value = buffers[field.name].orEmpty(),
+                        onValueChange = { buffers[field.name] = it },
+                        label = { Text(field.label.ifBlank { field.name }) },
+                        placeholder = {
+                            if (field.placeholder.isNotBlank()) Text(field.placeholder)
+                        },
+                        singleLine = true,
+                        visualTransformation =
+                            if (field.type == "password" || field.type == "cookie") {
+                                PasswordVisualTransformation()
+                            } else {
+                                VisualTransformation.None
+                            },
+                        supportingText = {
+                            if (supporting.isNotBlank()) Text(supporting)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            val complete = req.fields
+                .filter { it.required }
+                .all { !buffers[it.name].isNullOrBlank() }
+            TextButton(
+                enabled = complete,
+                onClick = { onSubmit(req, buffers.toMap()) },
+            ) {
+                Text(stringResource(R.string.login_submit))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.action_cancel))
+            }
+        },
+    )
 }
 
 @Composable

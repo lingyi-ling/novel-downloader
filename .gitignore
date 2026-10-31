@@ -230,3 +230,4 @@ android/local.properties
 android/.idea/
 *.apk
 *.aab
+.e2e_home/

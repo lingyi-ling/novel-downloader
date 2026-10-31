@@ -2,6 +2,8 @@
 
 ### Feat
 
+- **android**: 任务页新增登录凭据请求 UI——轮询 `/api/v1/login/requests`，需要登录的站点在任务页顶部显示凭据卡片，点开对话框按字段输入（password/cookie 掩码、必填校验、prefill 回填），提交后任务自动继续；含 MockWebServer 契约测试
+- **android**: 完成发布签名链路（`android/keystore.properties` + `release.jks`，git-ignored），`assembleRelease` 产出已验签的正式 APK
 - **desktop**: 桌面端重写为 pywebview + 单文件 HTML/CSS 前端（Edge WebView2 渲染）——完整 CSS 动效（页面过渡、卡片悬浮、渐变进度条、toast、模态）、暖纸色明暗双主题、SVG 图标、快捷键、平台健康检查面板、音乐实时进度；窗口几何持久化改在 `closing` 事件读取
 - **desktop**: `ApiBridge` 暴露搜索/任务/历史/追更/音乐/偏好设置共 20+ 方法给前端，音乐下载与健康检查在后台线程运行并通过轮询状态上报
 - **packaging**: 桌面打包迁移到 pywebview（隐藏导入 Windows 后端 + WebView2Loader 二进制），全部产物排除 tkinter；构建验证含 8 秒启动冒烟

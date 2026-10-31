@@ -243,3 +243,44 @@ data class WatchlistCheckResponse(
     val needs_download: List<WatchCheckItem> = emptyList(),
     val items: List<WatchCheckItem> = emptyList(),
 )
+
+// ---------------------------------------------------------------------------
+// Login credential requests (POST /api/v1/login/requests/{req_id})
+// ---------------------------------------------------------------------------
+
+@Serializable
+data class LoginField(
+    val name: String = "",
+    val label: String = "",
+    val type: String = "text",
+    val required: Boolean = false,
+    val default: String = "",
+    val placeholder: String = "",
+    val description: String = "",
+)
+
+@Serializable
+data class LoginRequestDto(
+    val req_id: String = "",
+    val task_id: String = "",
+    val title: String = "",
+    val fields: List<LoginField> = emptyList(),
+    val prefill: Map<String, String> = emptyMap(),
+    val done: Boolean = false,
+)
+
+@Serializable
+data class LoginRequestsResponse(
+    val total: Int = 0,
+    val requests: List<LoginRequestDto> = emptyList(),
+)
+
+@Serializable
+data class LoginSubmitRequest(
+    val values: Map<String, String> = emptyMap(),
+)
+
+@Serializable
+data class LoginSubmitResponse(
+    val ok: Boolean = false,
+)

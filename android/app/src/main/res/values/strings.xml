@@ -57,6 +57,15 @@
     <string name="tasks_status_cancelled">已取消</string>
     <string name="tasks_status_failed">失败</string>
     <string name="tasks_empty">暂无任务，去「搜索」页加入下载队列吧</string>
+    <string name="login_section_title">登录凭据请求</string>
+    <string name="login_section_hint">以下站点正在等待登录凭据，提交后任务会自动继续</string>
+    <string name="login_provide">提供凭据</string>
+    <string name="login_dialog_title">提供登录凭据</string>
+    <string name="login_dialog_hint">label 中的提示由站点插件提供</string>
+    <string name="login_submit">提交</string>
+    <string name="login_submitted">凭据已提交，任务将继续</string>
+    <string name="login_submit_failed">凭据提交失败：%1$s</string>
+    <string name="login_field_required">必填</string>
     <string name="tasks_detail_site">站点</string>
     <string name="tasks_detail_book_id">书籍 ID</string>
     <string name="tasks_detail_error">错误信息</string>

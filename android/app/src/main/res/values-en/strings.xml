@@ -53,6 +53,15 @@
     <string name="tasks_status_cancelled">Cancelled</string>
     <string name="tasks_status_failed">Failed</string>
     <string name="tasks_empty">No tasks yet — add one from the Search tab</string>
+    <string name="login_section_title">Login credential requests</string>
+    <string name="login_section_hint">These sites are waiting for credentials; tasks resume after you submit</string>
+    <string name="login_provide">Provide credentials</string>
+    <string name="login_dialog_title">Provide login credentials</string>
+    <string name="login_dialog_hint">Field hints come from the site plugin</string>
+    <string name="login_submit">Submit</string>
+    <string name="login_submitted">Credentials submitted — the task will resume</string>
+    <string name="login_submit_failed">Credential submit failed: %1$s</string>
+    <string name="login_field_required">required</string>
     <string name="tasks_detail_site">Site</string>
     <string name="tasks_detail_book_id">Book ID</string>
     <string name="tasks_detail_error">Error</string>

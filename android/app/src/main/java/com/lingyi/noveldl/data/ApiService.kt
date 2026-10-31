@@ -26,6 +26,17 @@ interface ApiService {
     @POST("api/v1/tasks/{task_id}/cancel")
     suspend fun cancelTask(@Path("task_id") taskId: String): CancelResponse
 
+    /** Pending credential requests created by login-required sites. */
+    @GET("api/v1/login/requests")
+    suspend fun loginRequests(): LoginRequestsResponse
+
+    /** Submits the credential values and wakes the waiting task. */
+    @POST("api/v1/login/requests/{req_id}")
+    suspend fun submitLogin(
+        @Path("req_id") reqId: String,
+        @Body body: LoginSubmitRequest,
+    ): LoginSubmitResponse
+
     @GET("api/v1/history")
     suspend fun history(): HistoryResponse
 
