@@ -14,6 +14,7 @@ traceback when it is missing.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -368,9 +369,22 @@ class MusicPlatformsCmd(Command):
     help = t("List available music platforms.")
 
     @classmethod
+    def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help=t("Print machine-readable JSON on stdout and exit."),
+        )
+
+    @classmethod
     def run(cls, args: Namespace) -> None:
         engine = _require_engine()
         labels = engine.labels()
+        if getattr(args, "json", False):
+            import json
+
+            print(json.dumps(dict(labels), ensure_ascii=False))
+            return
         if not labels:
             ui.warn(t("No music platforms are available."))
             return
