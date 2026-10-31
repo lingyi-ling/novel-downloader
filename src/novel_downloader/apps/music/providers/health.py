@@ -60,9 +60,12 @@ def health_check(
                 provider = create(platform, timeout=(min(5.0, bound), bound))
             except TypeError:
                 provider = create(platform)
+            except KeyError:
+                # 只有 create 的注册表未命中才叫「未知平台」；search 阶段抛出的
+                # KeyError 是平台自身 bug，须走下面的兜底按原样报告，不能误归类。
+                box["error"] = ValueError(f"未知平台：{platform}")
+                return
             box["result"] = provider.search(keyword, limit=max(1, int(limit)))
-        except KeyError:
-            box["error"] = ValueError(f"未知平台：{platform}")
         except Exception as exc:  # noqa: BLE001 - 健康检查只报告，不抛出
             box["error"] = exc
 

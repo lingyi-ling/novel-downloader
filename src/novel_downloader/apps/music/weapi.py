@@ -11,6 +11,7 @@ v1.0 关键决策：
 """
 
 import base64
+import contextlib
 import json
 import os
 import random
@@ -118,6 +119,10 @@ class NeteaseClient:
         tmp = self.cookie_file + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        # 里面存着 MUSIC_U 登录凭证，落盘前收紧到仅属主可读写
+        # （Windows 上 chmod 只能尽力而为，失败不影响保存）
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, 0o600)
         os.replace(tmp, self.cookie_file)
 
     def clear_cookies(self):
@@ -336,6 +341,9 @@ class NeteaseClient:
             batch = ids[i : i + 500]
             c = json.dumps([{"id": str(x)} for x in batch], separators=(",", ":"))
             j = self.post_weapi("v3/song/detail", {"c": c})
+            # 与其他目录接口一致：301 必须抛 LoginExpired，否则过期会话
+            # 在 playlist_tracks 里被当成「空歌单」静默吞掉
+            _guard(j)
             out.extend(j.get("songs") or [])
         return out
 

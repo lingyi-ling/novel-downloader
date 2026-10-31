@@ -156,6 +156,18 @@ class _NullTask:
         self.completed = 0
 
 
+def _to_duration_s(value):
+    """各平台 duration_s 形态不一：int/float/"185"/"185.5"/"3:45"。
+
+    解析失败（如 "3:45" 这种 mm:ss 形态）归 0——一行坏数据不能让整次
+    搜索结果列表全军覆没。
+    """
+    try:
+        return int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 class _NullProgress:
     """rich.Progress 的替身。
 
@@ -237,7 +249,7 @@ class MusicdlProvider(MusicProvider):
             name=info.song_name or "未知歌曲",
             artists=info.singers or "未知歌手",
             album=info.album or "未知专辑",
-            duration_s=int(info.duration_s or 0),
+            duration_s=_to_duration_s(info.duration_s),
             cover_url=info.cover_url or "",
             ext=(info.ext or "").lstrip("."),
             extra={"info": info},
@@ -277,19 +289,25 @@ class MusicdlProvider(MusicProvider):
         return tracks, len(tracks)
 
     def resolve(self, track, level=None):
-        info = track.extra.get("info")
+        # extra 可能为 None（如外部手工构造的 Track），别让 .get 直接炸
+        info = (track.extra or {}).get("info")
         if info is None:
             return ResolveResult(reason="缺少平台解析数据")
         if str(getattr(info, "protocol", "HTTP")).upper() == "HLS":
             return ResolveResult(reason="HLS 流暂不支持直链下载")
         if not info.with_valid_download_url:
             return ResolveResult(reason="该平台未返回可下载直链")
+        url = info.download_url
+        if not isinstance(url, str) or not url:
+            # 平台标了 with_valid_download_url 却给出非字符串/空直链
+            # （vendor 个别源确实如此）：拦下来，别让 requests 在拼接时崩
+            return ResolveResult(reason="该平台返回的直链不是有效 URL")
         return ResolveResult(
-            url=info.download_url,
+            url=url,
             ext=(info.ext or "").lstrip("."),
             http_headers=dict(info.default_download_headers or {}),
         )
 
     def lyric(self, track):
-        info = track.extra.get("info")
+        info = (track.extra or {}).get("info")
         return ((info.lyric or "") if info is not None else ""), ""

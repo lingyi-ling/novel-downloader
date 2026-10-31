@@ -18,12 +18,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from novel_downloader.apps.music import providers
 from novel_downloader.apps.music.providers import health_check
+from novel_downloader.apps.music.providers.base import Track
+from novel_downloader.apps.music.providers.musicdl import MusicdlProvider
 
 
 class _Provider:
@@ -142,6 +145,24 @@ def test_health_check_falls_back_when_create_rejects_timeout(
     assert calls == [{"timeout": (5.0, 15.0)}, {}]
 
 
+def test_health_check_does_not_misclassify_search_keyerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A KeyError raised by the platform's search is a platform bug.
+
+    The platform exists and was created successfully, so reporting it as
+    ``未知平台`` (reserved for registry misses) misleads the UI and the user.
+    """
+    provider = _Provider(error=KeyError("trackId"))
+    monkeypatch.setattr(providers, "create", lambda *a, **k: provider)
+
+    result = health_check("migu")
+
+    assert result["ok"] is False
+    assert "未知平台" not in result["error"]
+    assert "KeyError" in result["error"]
+
+
 def test_health_check_enforces_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _Provider(delay=0.8)
     monkeypatch.setattr(providers, "create", lambda *a, **k: provider)
@@ -229,3 +250,109 @@ def test_one_platform_import_failure_does_not_break_registry(
         provider.search("test")
     assert "缺少可选依赖" in str(excinfo.value)
     assert "pathvalidate" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# MusicdlProvider: Track conversion / resolve robustness
+# ---------------------------------------------------------------------------
+
+
+def _song_info(**overrides: Any) -> SimpleNamespace:
+    """A vendor ``SongInfo`` double with the attributes the adapter reads."""
+    base: dict[str, Any] = {
+        "identifier": "id-1",
+        "song_name": "Song",
+        "singers": "Artist",
+        "album": "Album",
+        "duration_s": 185,
+        "cover_url": "http://fake.test/cover.jpg",
+        "ext": "mp3",
+        "lyric": "[00:01.00]lrc",
+        "protocol": "HTTP",
+        "with_valid_download_url": True,
+        "download_url": "http://fake.test/a.mp3",
+        "default_download_headers": {},
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_musicdl_to_track_tolerates_unparsable_duration() -> None:
+    """One bad row from a platform must not kill the whole search result."""
+    provider = MusicdlProvider(key="migu")
+
+    track = provider._to_track(_song_info(duration_s="3:45"))
+
+    assert track.duration_s == 0
+    assert track.name == "Song"
+
+    assert provider._to_track(_song_info(duration_s="185.5")).duration_s == 185
+    assert provider._to_track(_song_info(duration_s=None)).duration_s == 0
+
+
+def test_musicdl_to_track_handles_missing_identifier() -> None:
+    provider = MusicdlProvider(key="kuwo")
+
+    track = provider._to_track(_song_info(identifier=None, song_name=None))
+
+    assert track.id == ""
+    assert track.name == "未知歌曲"
+    assert track.artists == "Artist"
+
+
+def test_musicdl_resolve_rejects_non_string_download_url() -> None:
+    """``with_valid_download_url`` can be True for non-HTTP url shapes.
+
+    The adapter must not hand a bogus url to the downloader (requests would
+    crash on a non-string).
+    """
+    provider = MusicdlProvider(key="migu")
+    track = Track(provider="migu", id="1", extra={"info": _song_info(download_url=42)})
+
+    result = provider.resolve(track)
+
+    assert result.ok is False
+    assert result.reason
+
+
+def test_musicdl_resolve_and_lyric_tolerate_missing_extra() -> None:
+    provider = MusicdlProvider(key="migu")
+    bare = Track(provider="migu", id="1", extra=None)
+
+    result = provider.resolve(bare)
+
+    assert result.ok is False
+    assert "缺少平台解析数据" in result.reason
+    assert provider.lyric(bare) == ("", "")
+
+
+def test_musicdl_resolve_hls_and_invalid_url_reasons() -> None:
+    provider = MusicdlProvider(key="migu")
+
+    hls = Track(provider="migu", id="1", extra={"info": _song_info(protocol="HLS")})
+    assert "HLS" in provider.resolve(hls).reason
+
+    no_url = Track(
+        provider="migu",
+        id="2",
+        extra={"info": _song_info(with_valid_download_url=False)},
+    )
+    result = provider.resolve(no_url)
+    assert result.ok is False
+    assert "未返回可下载直链" in result.reason
+
+
+def test_musicdl_resolve_success_passes_headers_and_ext() -> None:
+    provider = MusicdlProvider(key="migu")
+    info = _song_info(
+        ext=".flac", default_download_headers={"Referer": "http://fake.test/"}
+    )
+    track = Track(provider="migu", id="1", extra={"info": info})
+
+    result = provider.resolve(track)
+
+    assert result.ok is True
+    assert result.url == "http://fake.test/a.mp3"
+    assert result.ext == "flac"
+    assert result.http_headers == {"Referer": "http://fake.test/"}
+    assert provider.lyric(track) == ("[00:01.00]lrc", "")

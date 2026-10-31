@@ -208,6 +208,26 @@ def test_clear_cookies_removes_file(tmp_path: Path) -> None:
     assert not cookie_file.exists()
 
 
+def test_save_cookies_restricts_file_permissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cookie file holds the MUSIC_U session credential (a login secret)."""
+    chmod_calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        weapi.os, "chmod", lambda path, mode: chmod_calls.append((str(path), mode))
+    )
+    cookie_file = str(tmp_path / "cookies.json")
+
+    client = NeteaseClient(cookie_file=cookie_file)
+    client.s.cookies.set("MUSIC_U", "secret", domain=".music.163.com")
+
+    client.save_cookies()
+
+    assert (cookie_file + ".tmp", 0o600) in chmod_calls
+    assert Path(cookie_file).exists()
+    assert client.logged_in is True
+
+
 def test_save_cookies_without_file_is_noop() -> None:
     client = NeteaseClient()
     client.s.cookies.set("MUSIC_U", "x", domain=".music.163.com")
@@ -522,6 +542,26 @@ def test_playlist_tracks_short_circuits_when_complete() -> None:
     tracks = client.playlist_tracks(42)
     assert len(tracks) == 2
     assert len(session.calls) == 1
+
+
+def test_playlist_tracks_raises_login_expired_when_song_detail_returns_301() -> None:
+    """An expired session must surface as LoginExpired, not an empty playlist.
+
+    ``song_detail`` is the only catalogue call without the 301 guard; when the
+    session dies between the two requests the user used to silently get
+    ``[]`` (looks like an empty playlist) instead of a re-login prompt.
+    """
+    pl = {
+        "playlist": {
+            "tracks": [{"id": 1, "name": "one"}],
+            "trackIds": [{"id": 1}, {"id": 2}, {"id": 3}],
+        }
+    }
+    session = FakeSession([FakeResponse(pl), FakeResponse({"code": 301})])
+    client = _client(session)
+
+    with pytest.raises(LoginExpired):
+        client.playlist_tracks(42)
 
 
 def test_song_detail_batches_by_500() -> None:
