@@ -4,11 +4,18 @@
 
 - **desktop**: 桌面端重写为 pywebview + 单文件 HTML/CSS 前端（Edge WebView2 渲染）——完整 CSS 动效（页面过渡、卡片悬浮、渐变进度条、toast、模态）、暖纸色明暗双主题、SVG 图标、快捷键、平台健康检查面板、音乐实时进度；窗口几何持久化改在 `closing` 事件读取
 - **desktop**: `ApiBridge` 暴露搜索/任务/历史/追更/音乐/偏好设置共 20+ 方法给前端，音乐下载与健康检查在后台线程运行并通过轮询状态上报
+- **packaging**: 桌面打包迁移到 pywebview（隐藏导入 Windows 后端 + WebView2Loader 二进制），全部产物排除 tkinter；构建验证含 8 秒启动冒烟
 
 ### Fix
 
 - **desktop**: 修复 `sys.argv[0]` 为相对路径时 pywebview 内联 HTML 基准 URI 解析崩溃（chdir 前先绝对化）
 - **desktop**: 修复窗口关闭时几何保存读 `window.width` 抛 `TypeError`（后端已拆除）
+- **browser/login**: 修正指向不存在的 `desktop` extra 的安装提示（pywebview 已是基础依赖）
+- **docs**: 清理 api.md / architecture / index / installation / 站点文档中的 Web UI、Tkinter 陈旧表述
+
+### Refactor
+
+- **desktop**: 删除旧 UI 遗留死代码——formatting.py 裁剪至 4 个在用函数（958→133 行）、preferences.py 整体移除、notifications.py 仅保留提示音、window_state.py 去掉 Tk 几何串解析；同步剪枝 107 个失效测试与 15 条孤儿翻译
 
 ### Breaking
 
