@@ -195,11 +195,16 @@ const releaseEl = $("#gh-release");
 if (releaseEl) {
   ghJson("/repos/lingyi-ling/novel-downloader/releases/latest", "gh-release")
     .then((d) => {
+      if (!d.tag_name) return;
+      const ver = String(d.tag_name).replace(/^v/, "");
       const n = document.getElementById("gh-release-n");
-      if (d.tag_name && n) {
-        n.textContent = String(d.tag_name).replace(/^v/, "");
+      if (n) {
+        n.textContent = ver;
         releaseEl.hidden = false;
       }
+      // keep the showcase mock's version pill in sync with the real release
+      const pill = document.getElementById("appwin-ver");
+      if (pill) pill.textContent = "v" + ver;
     })
     .catch(() => {});
 }
