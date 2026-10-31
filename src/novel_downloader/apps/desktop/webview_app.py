@@ -53,6 +53,59 @@ TASK_WAIT_TIMEOUT = 30.0
 
 _PREFS_FILENAME = "desktop_prefs.json"
 
+#: Name of the shortcut files created on the desktop and in the Start menu.
+_SHORTCUT_NAME = "Novel Downloader.lnk"
+
+#: PowerShell template that writes the .lnk files via the WScript.Shell COM
+#: object.  ``{target}`` is the frozen executable path (single quotes doubled).
+_SHORTCUT_PS = """\
+$ErrorActionPreference = 'Stop'
+$ws = New-Object -ComObject WScript.Shell
+$target = '{target}'
+$workdir = Split-Path -Parent $target
+$desktop = [Environment]::GetFolderPath('Desktop')
+$programs = [Environment]::GetFolderPath('Programs')
+foreach ($dir in @($desktop, $programs)) {{
+  $lnk = $ws.CreateShortcut((Join-Path $dir '{name}'))
+  $lnk.TargetPath = $target
+  $lnk.WorkingDirectory = $workdir
+  $lnk.IconLocation = "$target,0"
+  $lnk.Description = 'Novel Downloader'
+  $lnk.Save()
+}}
+"""
+
+
+def _shell_folder(csidl: int) -> str | None:
+    """Resolve a Windows shell folder path (``None`` elsewhere or on error)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        buf = ctypes.create_unicode_buffer(260)
+        result = ctypes.windll.shell32.SHGetFolderPathW(None, csidl, None, 0, buf)
+        return buf.value if result == 0 else None
+    except Exception:  # noqa: BLE001 - best effort, cosmetic only
+        return None
+
+
+def _shortcut_target() -> str | None:
+    """Path of the frozen executable to point shortcuts at, if packaged."""
+    if getattr(sys, "frozen", False):
+        return str(sys.executable)
+    return None
+
+
+def _shortcut_paths() -> tuple[Path, ...]:
+    """Both locations the shortcut is written to."""
+    dirs = (
+        _shell_folder(0x0016),  # CSIDL_DESKTOPDIRECTORY
+        _shell_folder(0x0002),  # CSIDL_PROGRAMS (Start menu)
+    )
+    return tuple(Path(d) / _SHORTCUT_NAME for d in dirs if d)
+
+
 #: Lazily-loaded music engine entry points. The music modules are still
 #: untyped, so they are kept behind an ``Any``-valued mapping (the same
 #: pattern the previous Tkinter UI used) and imported only when the extras
@@ -137,6 +190,19 @@ def _i18n_catalog() -> dict[str, str]:
         "Skip existing": t("Skip existing"),
         "Platform health": t("Platform health"),
         "Ctrl+1-5 switch pages": t("Ctrl+1-5 switch pages"),
+        # shortcuts
+        "Create desktop shortcut": t("Create desktop shortcut"),
+        "Shortcuts created on the desktop and Start menu": t(
+            "Shortcuts created on the desktop and Start menu"
+        ),
+        "Shortcut already exists": t("Shortcut already exists"),
+        "Shortcuts require the packaged app": t("Shortcuts require the packaged app"),
+        "Shortcuts are only supported on Windows": t(
+            "Shortcuts are only supported on Windows"
+        ),
+        "Click here to create a desktop shortcut": t(
+            "Click here to create a desktop shortcut"
+        ),
         # subtitles
         "Search novels across all sites, ranked by quality": t(
             "Search novels across all sites, ranked by quality"
@@ -382,6 +448,8 @@ class ApiBridge:
             "version": self._version(),
             "theme": str(prefs.get("theme") or "light"),
             "data_dir": str(Path.cwd()),
+            "is_frozen": bool(getattr(sys, "frozen", False)),
+            "shortcut_exists": self.shortcut_exists(),
             "sites": {
                 "search": dict(SEARCH_SUPPORT_SITES),
                 "download": dict(DOWNLOAD_SUPPORT_SITES),
@@ -455,6 +523,63 @@ class ApiBridge:
             play_notification_sound()
         except Exception:  # noqa: BLE001 - sound is cosmetic
             logger.debug("Notification sound failed", exc_info=True)
+
+    @staticmethod
+    def shortcut_exists() -> bool:
+        """Whether both shortcut targets already exist."""
+        paths = _shortcut_paths()
+        return bool(paths) and all(p.exists() for p in paths)
+
+    def create_shortcut(self) -> dict[str, Any]:
+        """
+        Create desktop and Start-menu shortcuts (Windows, packaged app only).
+
+        :return: ``{"ok", "message", "existed?"}`` for the front-end toast.
+        """
+        target = _shortcut_target()
+        if target is None:
+            return {
+                "ok": False,
+                "message": t("Shortcuts require the packaged app"),
+            }
+        if sys.platform != "win32":
+            return {
+                "ok": False,
+                "message": t("Shortcuts are only supported on Windows"),
+            }
+        if self.shortcut_exists():
+            return {
+                "ok": True,
+                "existed": True,
+                "message": t("Shortcut already exists"),
+            }
+        script = _SHORTCUT_PS.format(
+            target=target.replace("'", "''"), name=_SHORTCUT_NAME
+        )
+        try:
+            completed = subprocess.run(  # noqa: S603 - fixed args, no user input
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    script,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "message": format_error(exc)}
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()[:200]
+            return {"ok": False, "message": format_error(RuntimeError(detail))}
+        return {
+            "ok": True,
+            "message": t("Shortcuts created on the desktop and Start menu"),
+        }
 
     # ------------------------------------------------------------------
     # search

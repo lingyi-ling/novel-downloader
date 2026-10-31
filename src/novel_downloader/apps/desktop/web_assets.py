@@ -396,6 +396,7 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
 <symbol id="i-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
 <symbol id="i-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 8L9 4l-3 8H2"/></symbol>
 <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-desktop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></symbol>
 </defs></svg>
 
 <div class="app">
@@ -413,7 +414,8 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
     </nav>
     <div class="side-foot">
       <div class="foot-row">
-        <button class="icon-btn" id="theme-btn" title="Theme"><svg class="icon"><use href="#i-moon"/></svg></button>
+        <button class="icon-btn" id="shortcut-btn" data-i18n-title="Create desktop shortcut" title="Create desktop shortcut"><svg class="icon"><use href="#i-desktop"/></svg></button>
+        <button class="icon-btn" id="theme-btn" data-i18n-title="Theme" title="Theme"><svg class="icon"><use href="#i-moon"/></svg></button>
         <div class="foot-meta"><span data-i18n="Ctrl+1-5 switch pages">Ctrl+1-5 switch pages</span><br>Ctrl+F / Ctrl+D</div>
       </div>
     </div>
@@ -529,6 +531,7 @@ function t(key) { return I18N[key] || key; }
 function applyI18n(root) {
   document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll("[data-i18n-ph]").forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
+  document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = t(el.dataset.i18nTitle); });
 }
 
 /* ================================================================ helpers */
@@ -600,6 +603,12 @@ function setTheme(mode) {
   api("save_prefs", { theme: mode }).catch(() => {});
 }
 $("#theme-btn").onclick = () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+
+/* ================================================================ shortcuts */
+$("#shortcut-btn").onclick = async () => {
+  const r = await call("create_shortcut");
+  if (r && r.message) toast(r.message, r.ok ? "ok" : "warn");
+};
 
 /* ================================================================ search */
 let searching = false;
@@ -1034,6 +1043,9 @@ function boot() {
     applyI18n();
     $("#ver").textContent = "v" + (state.version || "");
     setTheme(state.theme || store.get("theme", "light"));
+    if (state.is_frozen && !state.shortcut_exists) {
+      setTimeout(() => toast(t("Click here to create a desktop shortcut"), "info", 6000), 1200);
+    }
     if (state.sites_csv) $("#q-sites").value = state.sites_csv;
     renderTracks();
     initMusic().catch(() => {});

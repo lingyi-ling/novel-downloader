@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **desktop**: 新增「创建桌面快捷方式」——侧边栏一键在桌面和开始菜单生成 .lnk（PowerShell COM），打包版首次启动自动提示；补齐萌新从 zip 解压到桌面图标启动的最后一公里
 - **android**: 任务页新增登录凭据请求 UI——轮询 `/api/v1/login/requests`，需要登录的站点在任务页顶部显示凭据卡片，点开对话框按字段输入（password/cookie 掩码、必填校验、prefill 回填），提交后任务自动继续；含 MockWebServer 契约测试
 - **android**: 完成发布签名链路（`android/keystore.properties` + `release.jks`，git-ignored），`assembleRelease` 产出已验签的正式 APK
 - **desktop**: 桌面端重写为 pywebview + 单文件 HTML/CSS 前端（Edge WebView2 渲染）——完整 CSS 动效（页面过渡、卡片悬浮、渐变进度条、toast、模态）、暖纸色明暗双主题、SVG 图标、快捷键、平台健康检查面板、音乐实时进度；窗口几何持久化改在 `closing` 事件读取

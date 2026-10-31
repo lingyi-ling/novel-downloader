@@ -976,3 +976,79 @@ def test_absolutize_argv0_resolves_relative_paths() -> None:
         assert sys.argv[0] == str(Path("no_such_script.py"))
     finally:
         sys.argv[0] = original
+
+
+# ---------------------------------------------------------------------------
+# Desktop / Start-menu shortcuts (packaged app UX)
+# ---------------------------------------------------------------------------
+
+
+def test_shortcut_target_requires_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    assert wa._shortcut_target() is None
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(wa.sys, "executable", "C:/apps/NovelDownloader.exe")
+    assert wa._shortcut_target() == "C:/apps/NovelDownloader.exe"
+
+
+def test_shortcut_exists_false_without_shell_folders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(wa, "_shell_folder", lambda _csidl: None)
+    assert wa.ApiBridge.shortcut_exists() is False
+
+
+def test_create_shortcut_requires_packaged_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(wa, "_shortcut_target", lambda: None)
+    result = wa.ApiBridge().create_shortcut()
+    assert result["ok"] is False
+
+
+def test_create_shortcut_runs_powershell_with_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    exe = tmp_path / "NovelDownloader.exe"
+    exe.write_bytes(b"MZ")
+    monkeypatch.setattr(wa, "_shortcut_target", lambda: str(exe))
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> Any:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(wa.subprocess, "run", fake_run)
+    result = wa.ApiBridge().create_shortcut()
+    assert result["ok"] is True
+    assert calls and calls[0][0] == "powershell"
+    assert str(exe) in calls[0][-1]
+    assert "Novel Downloader.lnk" in calls[0][-1]
+
+
+def test_create_shortcut_surfaces_powershell_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    exe = tmp_path / "NovelDownloader.exe"
+    exe.write_bytes(b"MZ")
+    monkeypatch.setattr(wa, "_shortcut_target", lambda: str(exe))
+
+    def fake_run(_cmd: list[str], **_kwargs: Any) -> Any:
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(wa.subprocess, "run", fake_run)
+    result = wa.ApiBridge().create_shortcut()
+    assert result["ok"] is False
+    assert "boom" in result["message"]

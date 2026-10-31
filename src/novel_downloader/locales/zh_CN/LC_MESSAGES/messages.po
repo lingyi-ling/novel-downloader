@@ -2420,3 +2420,28 @@ msgstr "浏览器辅助搜索需要 pywebview。请重新安装本包：pip inst
 msgid "pywebview is required for the login window. Reinstall the package: pip install -U novel-downloader"
 msgstr "登录窗口需要 pywebview。请重新安装本包：pip install -U novel-downloader"
 
+
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid "Create desktop shortcut"
+msgstr "创建桌面快捷方式"
+
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid "Shortcuts created on the desktop and Start menu"
+msgstr "已在桌面和开始菜单创建快捷方式"
+
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid "Shortcut already exists"
+msgstr "快捷方式已存在"
+
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid "Shortcuts require the packaged app"
+msgstr "需要打包版（exe）才能创建快捷方式"
+
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid "Shortcuts are only supported on Windows"
+msgstr "仅支持在 Windows 上创建快捷方式"
+
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid "Click here to create a desktop shortcut"
+msgstr "点这里创建桌面快捷方式"
+
