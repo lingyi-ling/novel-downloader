@@ -16,6 +16,10 @@ from novel_downloader.infra import logger as logger_mod
         ("debug", logging.DEBUG),
         ("invalid", logging.INFO),
         (None, logging.INFO),
+        # whitespace around the level name (padded config values) is ignored
+        ("  debug  ", logging.DEBUG),
+        ("\tinfo\n", logging.INFO),
+        ("  warning ", logging.WARNING),
     ],
 )
 def test_normalize_level(inp, expected):

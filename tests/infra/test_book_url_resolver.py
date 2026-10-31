@@ -738,3 +738,71 @@ def test_resolver_returns_none_for_unmatched_paths(url):
 def test_resolver_handles_invalid_urls(url: str):
     result = resolve_book_url(url)
     assert result is None, f"{url}: expected None for invalid URL"
+
+
+# ---------------------------------------------------------------------------
+# Hand-written URL normalization boundary tests (not auto-generated).
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class EquivalentUrlCase:
+    """URLs that must resolve identically to their canonical spelling."""
+
+    url: str
+    site_key: str
+    book_id: str | None
+    chap_id: str | None = None
+
+
+EQUIVALENT_URLS = [
+    # explicit default ports (browsers keep them when copying from the bar)
+    EquivalentUrlCase(
+        "https://www.qidian.com:443/book/1010868264/", "qidian", "1010868264"
+    ),
+    EquivalentUrlCase("http://www.69shuba.com:80/book/88724.htm", "n69shuba", "88724"),
+    EquivalentUrlCase(
+        "http://www.69shuba.com:80/txt/88724/39943182", "n69shuba", "88724", "39943182"
+    ),
+    # upper-case scheme / host (scheme is case-insensitive per RFC 3986)
+    EquivalentUrlCase(
+        "HTTPS://www.qidian.com/book/1010868264/", "qidian", "1010868264"
+    ),
+    EquivalentUrlCase("HTTP://www.69shuba.com/book/88724.htm", "n69shuba", "88724"),
+    EquivalentUrlCase(
+        "https://WWW.QIDIAN.COM:443/book/1010868264/", "qidian", "1010868264"
+    ),
+    # surrounding whitespace / BOM from pasted input
+    EquivalentUrlCase(
+        "  https://www.qidian.com/book/1010868264/  ", "qidian", "1010868264"
+    ),
+    EquivalentUrlCase(
+        "\ufeffhttps://www.qidian.com/book/1010868264/", "qidian", "1010868264"
+    ),
+    # credentials are not part of the site key
+    EquivalentUrlCase(
+        "https://user:pass@www.qidian.com/book/1010868264/", "qidian", "1010868264"
+    ),
+    # protocol-relative links scraped from HTML
+    EquivalentUrlCase("//www.qidian.com/book/1010868264/", "qidian", "1010868264"),
+]
+
+
+@pytest.mark.parametrize("case", EQUIVALENT_URLS)
+def test_resolver_accepts_equivalent_url_spellings(case: EquivalentUrlCase):
+    result = resolve_book_url(case.url)
+    assert result == {
+        "site_key": case.site_key,
+        "book_id": case.book_id,
+        "chapter_id": case.chap_id,
+    }, f"{case.url!r}: expected site={case.site_key} book={case.book_id}"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # a non-default port is still meaningful and must not be guessed away
+        "https://www.qidian.com:8443/book/1010868264/",
+        "http://www.qidian.com:443/book/1010868264/",
+    ],
+)
+def test_resolver_keeps_non_default_ports(url: str):
+    assert resolve_book_url(url) is None

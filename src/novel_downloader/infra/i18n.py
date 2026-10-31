@@ -38,6 +38,7 @@ __all__ = [
 import gettext
 import logging
 import os
+import struct
 from importlib.resources import files
 
 from novel_downloader.infra.persistence.state import state_mgr
@@ -192,10 +193,12 @@ def _load_catalog(code: str) -> gettext.NullTranslations:
         )
         with mo_path.open("rb") as f:
             return gettext.GNUTranslations(f)
-    except (ModuleNotFoundError, OSError):
+    except (ModuleNotFoundError, OSError, ValueError, struct.error):
         # ``OSError`` covers a missing/unreadable ``.mo``; ``ModuleNotFoundError``
         # covers builds that ship without the ``locales`` package entirely.
-        # Both must degrade to the English source text instead of raising.
+        # ``struct.error``/``ValueError`` are raised by ``GNUTranslations`` for
+        # corrupt or truncated catalogs. All of them must degrade to the
+        # English source text instead of raising.
         if code not in _missing_catalogs_warned:
             _missing_catalogs_warned.add(code)
             logger.warning(

@@ -15,11 +15,12 @@ from pathlib import Path
 
 # Cookie pairs are normally separated by ``;``. Users frequently paste values
 # that also contain CR/LF (copied from a multi-line editor) and, less often,
-# comma-separated pairs.  Commas are ambiguous because they are legal inside a
-# cookie value (``Expires=Wed, 21 Oct ...``), so a comma is only treated as a
-# separator when it is followed by something that looks like a new ``name=``
-# pair.
-_PAIR_SEPARATORS = re.compile(r"[;\r\n]+")
+# comma-separated pairs.  The vertical tab and form feed are line-breaking
+# controls that show up in pasted page dumps, so they separate pairs as well.
+# Commas are ambiguous because they are legal inside a cookie value
+# (``Expires=Wed, 21 Oct ...``), so a comma is only treated as a separator when
+# it is followed by something that looks like a new ``name=`` pair.
+_PAIR_SEPARATORS = re.compile(r"[;\r\n\x0b\x0c]+")
 _COMMA_PAIR_START = re.compile(r",\s*(?=[^=;,\s]+=)")
 # Names must not contain whitespace, control characters, ``;`` or ``,``.
 _INVALID_NAME_CHARS = re.compile(r"[\x00-\x20\x7f;,]")

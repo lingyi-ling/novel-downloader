@@ -3,7 +3,7 @@
 novel_downloader.infra.http_defaults
 ------------------------------------
 
-Utility for normalizing cookie input from user configuration.
+Default HTTP headers and user-agent strings shared by all session backends.
 """
 
 # -----------------------------------------------------------------------------

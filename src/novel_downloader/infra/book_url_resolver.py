@@ -40,14 +40,32 @@ def register_extractor(hosts: list[str]) -> Callable[[E], E]:
 
 def _normalize_host_and_path(url: str) -> tuple[str, str, str]:
     """
-    Normalize a given URL:
-      * Apply HOST_ALIASES mapping to unify different netlocs.
-      * Return (canonical_host, path).
+    Normalize a URL into ``(canonical_host, path, query)``.
+
+      * Trim surrounding whitespace and a possible BOM (pasted input).
+      * Treat the scheme case-insensitively; a protocol-relative
+        ``//host/path`` link is read as ``http``.
+      * Lowercase the netloc, drop credentials (``user:pass@``) and strip a
+        redundant default port (``:80`` for http, ``:443`` for https) so both
+        the extractor registry and the rule-based host map see the canonical
+        host. Non-default ports are kept: they are meaningful.
     """
-    if not url.startswith(("http://", "https://")):
-        url = "http://" + url
-    parsed = urlparse(url)
-    return parsed.netloc.lower(), parsed.path or "/", parsed.query or ""
+    text = url.strip().lstrip("\ufeff").strip()
+    lowered = text.lower()
+    if lowered.startswith("//"):
+        text = "http:" + text
+    elif not lowered.startswith(("http://", "https://")):
+        text = "http://" + text
+    parsed = urlparse(text)
+    host = parsed.netloc.lower()
+    if "@" in host:
+        host = host.rpartition("@")[2]
+    scheme = parsed.scheme.lower()
+    if scheme == "http" and host.endswith(":80"):
+        host = host[:-3]
+    elif scheme == "https" and host.endswith(":443"):
+        host = host[:-4]
+    return host, parsed.path or "/", parsed.query or ""
 
 
 def _make_info(

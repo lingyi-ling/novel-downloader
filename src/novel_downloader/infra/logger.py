@@ -8,13 +8,22 @@ Provides a configurable logging setup for Python applications.
 
 from __future__ import annotations
 
-__all__ = ["setup_logging"]
+__all__ = ["setup_logging", "FILE_LOG_FORMAT", "CONSOLE_LOG_FORMAT"]
 
 import logging
+import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from novel_downloader.infra.paths import PACKAGE_NAME
+
+#: Canonical file-record format shared by every entry point that adopts this
+#: module. Kept as a module constant so the CLI/API/desktop front ends can
+#: converge on one format instead of re-declaring their own.
+FILE_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s.%(funcName)s: %(message)s"
+
+#: Canonical console-record format (short timestamp, no function name).
+CONSOLE_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
 _MUTE_LOGGERS: set[str] = {
     "fontTools.ttLib.tables._p_o_s_t",
@@ -25,7 +34,9 @@ def _normalize_level(level: int | str) -> int:
     if isinstance(level, int):
         return level
     if isinstance(level, str):
-        return logging._nameToLevel.get(level.upper(), logging.INFO)
+        # Level names may arrive padded (``general.debug.log_level`` values
+        # are used verbatim from the config file).
+        return logging._nameToLevel.get(level.strip().upper(), logging.INFO)
     return logging.INFO
 
 
@@ -95,14 +106,16 @@ def setup_logging(
         )
 
         file_formatter = logging.Formatter(
-            fmt="%(asctime)s [%(levelname)s] %(name)s.%(funcName)s: %(message)s",
+            fmt=FILE_LOG_FORMAT,
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         fh.setFormatter(file_formatter)
         fh.setLevel(file_level)
         logger.addHandler(fh)
 
-        print(f"Logging to {log_path}")
+        # Diagnostics belong on stderr so stdout stays machine readable
+        # (``doctor --json`` / ``storage --json`` pipelines).
+        print(f"Logging to {log_path}", file=sys.stderr)
 
     # Console handler
     if console:
@@ -110,7 +123,7 @@ def setup_logging(
 
         console_handler = logging.StreamHandler()
         console_formatter = logging.Formatter(
-            fmt="%(asctime)s [%(levelname)s] %(message)s",
+            fmt=CONSOLE_LOG_FORMAT,
             datefmt="%H:%M:%S",
         )
         console_handler.setFormatter(console_formatter)

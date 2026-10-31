@@ -94,6 +94,64 @@ def test_upsert_chapters_empty_list(tmp_storage: ChapterStorage):
     assert tmp_storage.existing_ids() == set()
 
 
+def test_upsert_chapters_failure_keeps_cache_consistent(tmp_storage: ChapterStorage):
+    """A failed batch write must not leave phantom chapters in the cache.
+
+    If record building or the SQL write fails, the in-memory flags must stay
+    in sync with the database: a chapter that was never stored must not be
+    reported as existing/clean (otherwise the caller skips re-fetching it).
+    """
+    good = _make_chapter(1)
+    bad = ChapterDict(
+        id="chap2",
+        title="Title 2",
+        content="Content 2",
+        extra={"unserializable": object()},
+    )
+
+    with pytest.raises(TypeError):
+        tmp_storage.upsert_chapters([good, bad])
+
+    assert tmp_storage.existing_ids() == set()
+    assert tmp_storage.clean_ids() == set()
+    assert tmp_storage.dirty_ids() == set()
+    assert tmp_storage.get_chapter("chap1") is None
+
+
+def test_upsert_chapters_partial_failure_keeps_cache_consistent(
+    tmp_storage: ChapterStorage,
+):
+    """The same guarantee must hold when the SQL write itself fails."""
+    chapters = [_make_chapter(i) for i in range(2)]
+
+    class FailingConn:
+        """Proxy whose executemany simulates a storage failure."""
+
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def executemany(self, *args: object, **kwargs: object) -> None:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._conn, name)
+
+    real_conn = tmp_storage._conn
+    assert real_conn is not None
+    tmp_storage._conn = FailingConn(real_conn)  # type: ignore[assignment]
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            tmp_storage.upsert_chapters(chapters)
+    finally:
+        tmp_storage._conn = real_conn
+
+    assert tmp_storage.existing_ids() == set()
+    assert tmp_storage.get_chapters(["chap0", "chap1"]) == {
+        "chap0": None,
+        "chap1": None,
+    }
+
+
 # ---------------------------------------------------------------------
 # Caching / flag tracking
 # ---------------------------------------------------------------------
@@ -136,10 +194,16 @@ def test_load_existing_keys(tmp_path: Path):
         ("", {}),
         ("not json", {}),
         ("null", {}),
+        # valid JSON that is not a mapping must not leak its type
+        ('[1, 2]', {}),
+        ("123", {}),
+        ('"text"', {}),
+        ("true", {}),
     ],
 )
 def test_load_dict_various_inputs(data, expected):
     assert ChapterStorage._load_dict(data) == expected
+    assert isinstance(ChapterStorage._load_dict(data), dict)
 
 
 def test_repr(tmp_path: Path):

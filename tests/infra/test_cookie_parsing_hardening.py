@@ -25,6 +25,12 @@ from novel_downloader.infra.cookies import parse_cookies
         ("a=1\r\nb=2", {"a": "1", "b": "2"}),
         ("a=1;\r\n b=2\r\n", {"a": "1", "b": "2"}),
         ("a=1\nb=2\nc=3", {"a": "1", "b": "2", "c": "3"}),
+        # vertical tab / form feed: line-breaking controls found in pasted
+        # page dumps; they must separate pairs, not merge two cookies
+        ("a=1\x0bb=2", {"a": "1", "b": "2"}),
+        ("a=1\x0cb=2", {"a": "1", "b": "2"}),
+        ("a=1\x0c\r\nb=2", {"a": "1", "b": "2"}),
+        ("a=1\x0b; b=2", {"a": "1", "b": "2"}),
         # mixed separators
         ("a=1; b=2, c=3", {"a": "1", "b": "2", "c": "3"}),
         ("a=1,b=2;c=3\r\nd=4", {"a": "1", "b": "2", "c": "3", "d": "4"}),

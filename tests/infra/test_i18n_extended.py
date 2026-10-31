@@ -213,6 +213,56 @@ def test_missing_mo_falls_back_to_msgid(monkeypatch: pytest.MonkeyPatch) -> None
     assert translation.gettext("Search") == "Search"
 
 
+# A well-formed little-endian .mo magic followed by a truncated body: this is
+# what a partially written / corrupted catalog looks like.
+_TRUNCATED_MO = b"\xde\x12\x04\x95\x01\x00\x00\x00"
+
+
+@pytest.mark.parametrize(
+    "mo_bytes",
+    [
+        _TRUNCATED_MO,
+        b"\xde\x12\x04\x95",
+        b"not a mo file at all",
+    ],
+    ids=["truncated-body", "magic-only", "bad-magic"],
+)
+def test_corrupt_mo_falls_back_to_msgid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, mo_bytes: bytes
+) -> None:
+    """A corrupt catalog must degrade to English instead of raising.
+
+    ``gettext.GNUTranslations`` raises ``struct.error`` (or ``ValueError``)
+    for malformed files; an unhandled escape would break every ``t()`` call.
+    """
+    mo_dir = tmp_path / "zh_CN" / "LC_MESSAGES"
+    mo_dir.mkdir(parents=True)
+    (mo_dir / "messages.mo").write_bytes(mo_bytes)
+    monkeypatch.setattr(i18n, "files", lambda _package: tmp_path)
+    warnings = _capture_warnings(monkeypatch)
+
+    translation = i18n.get_translation("zh_CN")
+
+    assert isinstance(translation, gettext.NullTranslations)
+    assert translation.gettext("Search") == "Search"
+    # The fallback must be reported once so operators can rebuild the .mo.
+    assert len(warnings) == 1
+
+
+def test_corrupt_mo_does_not_break_t(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The public ``t()`` path survives a corrupt catalog end to end."""
+    mo_dir = tmp_path / "zh_CN" / "LC_MESSAGES"
+    mo_dir.mkdir(parents=True)
+    (mo_dir / "messages.mo").write_bytes(_TRUNCATED_MO)
+    monkeypatch.setattr(i18n, "files", lambda _package: tmp_path)
+    _capture_warnings(monkeypatch)
+    _use_language(monkeypatch, "zh_CN")
+
+    assert i18n.t("Search") == "Search"
+
+
 def test_missing_locales_package_falls_back_to_msgid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

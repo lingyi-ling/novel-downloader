@@ -137,6 +137,8 @@ class ChapterStorage:
         if not data:
             return
 
+        # Build every record first: a serialization failure must not leave
+        # the in-memory flags updated for rows that were never written.
         records = []
         for chapter in data:
             chap_id = chapter["id"]
@@ -144,7 +146,6 @@ class ChapterStorage:
             content = chapter["content"]
             extra_json = json.dumps(chapter["extra"], ensure_ascii=False)
             records.append((chap_id, title, content, int(need_refetch), extra_json))
-            self._refetch_flags[chap_id] = need_refetch
 
         self.conn.executemany(
             """
@@ -159,6 +160,10 @@ class ChapterStorage:
             records,
         )
         self.conn.commit()
+
+        # Publish the flags only after the rows are durably written.
+        for chapter in data:
+            self._refetch_flags[chapter["id"]] = need_refetch
 
     def get_chapter(self, chap_id: str) -> ChapterDict | None:
         """
@@ -295,11 +300,15 @@ class ChapterStorage:
     def _load_dict(data: str) -> dict[str, Any]:
         """
         Parse a JSON string into a dict, returning {} on error/empty.
+
+        Valid JSON that is not a mapping (a list, a number, ...) also yields
+        ``{}``: the ``extra`` column is contracted to hold objects.
         """
         try:
-            return json.loads(data) or {}
+            result = json.loads(data)
         except Exception:
             return {}
+        return result if isinstance(result, dict) else {}
 
     def __enter__(self) -> Self:
         """
