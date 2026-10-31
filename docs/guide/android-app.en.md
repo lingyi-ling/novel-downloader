@@ -29,6 +29,27 @@ cd android
 
 You can also open `android/` in Android Studio, sync, and run it.
 
+### Release Builds
+
+Release builds require signing material. Create a **git-ignored**
+`keystore.properties` under `android/` (template in the comment at the top of
+`app/build.gradle.kts`):
+
+```properties
+storeFile=release.jks
+storePassword=...
+keyAlias=...
+keyPassword=...
+```
+
+```bash
+./gradlew assembleRelease    # produces app/build/outputs/apk/release/app-release.apk
+```
+
+When the file is missing or incomplete, release builds fall back to the debug
+signature (fine for local testing, not for distribution). **Keep
+`keystore.properties` and the keystore file local; never commit them.**
+
 ## Run the Unit Tests
 
 The app ships device-free JVM unit tests (API client, follow queueing, navigation, and more):
@@ -55,7 +76,8 @@ Bottom tabs: **Search / Tasks / History / Music / Follow**.
 
 - **Search**: keyword plus optional site filter (comma-separated; empty means all sites). Results can be added to the download queue with one tap, or followed via the "Follow" action.
 - **Follow**: maintain the follow list (list / add / remove); "Check updates" searches each book for its latest chapter, and entries with new chapters can join the download queue with one tap.
-- **Tasks**: running / queued / completed sections, progress bars and chapter counts, auto-refresh (every 2 seconds), and cancellation.
+- **Tasks**: running / queued / completed sections, progress bars and chapter counts, auto-refresh (every 2 seconds), cancellation, and one-tap retry for failed tasks.
+- **Login credential requests**: when a site requires login and no usable credential is stored, the task parks and a "Login credential requests" card appears at the top of the Tasks page. Tap "Provide credentials" to fill in the fields (password/cookie inputs are masked, required fields validated, prefill values seeded); submitting resumes the task.
 - **History**: exported files; tapping one hands it to the system DownloadManager, which saves it into the public Downloads directory.
 - **Music**: choose a platform, search songs, select multiple results, create a download job, and view progress.
 
