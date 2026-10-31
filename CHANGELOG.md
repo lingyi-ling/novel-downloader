@@ -1,3 +1,19 @@
+## Unreleased
+
+### Feat
+
+- **desktop**: 桌面端重写为 pywebview + 单文件 HTML/CSS 前端（Edge WebView2 渲染）——完整 CSS 动效（页面过渡、卡片悬浮、渐变进度条、toast、模态）、暖纸色明暗双主题、SVG 图标、快捷键、平台健康检查面板、音乐实时进度；窗口几何持久化改在 `closing` 事件读取
+- **desktop**: `ApiBridge` 暴露搜索/任务/历史/追更/音乐/偏好设置共 20+ 方法给前端，音乐下载与健康检查在后台线程运行并通过轮询状态上报
+
+### Fix
+
+- **desktop**: 修复 `sys.argv[0]` 为相对路径时 pywebview 内联 HTML 基准 URI 解析崩溃（chdir 前先绝对化）
+- **desktop**: 修复窗口关闭时几何保存读 `window.width` 抛 `TypeError`（后端已拆除）
+
+### Breaking
+
+- **desktop**: 移除 CustomTkinter 实现（`ui.py`/`theme.py`），桌面依赖由 `customtkinter` 换为 `pywebview`；功能面不变
+
 ## v1.1.0 (2026-10-24)
 
 平台整合、搜索扩展与全面加固版本。

@@ -36,7 +36,7 @@ dependencies = [
     "lxml",
     "cssselect",
     "platformdirs",
-    "customtkinter",
+    "pywebview",
 ]
 
 [project.optional-dependencies]
@@ -89,6 +89,7 @@ all = [
     "mutagen",
     "qrcode",
     "websocket-client",
+    "pywebview",
 ]
 
 docs = [
@@ -205,6 +206,11 @@ select = [
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.ruff.lint.per-file-ignores]
+# The single-file HTML front end is one embedded document; its CSS/JS lines
+# are not hand-wrapped Python.
+"src/novel_downloader/apps/desktop/web_assets.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"

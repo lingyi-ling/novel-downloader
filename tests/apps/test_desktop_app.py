@@ -3,30 +3,28 @@
 tests.apps.test_desktop_app
 ---------------------------
 
-Offline tests for the CustomTkinter desktop client.
+Offline tests for the pywebview desktop client.
 
-The bulk of the suite covers :mod:`novel_downloader.apps.desktop.formatting`
-and :mod:`novel_downloader.apps.desktop.theme`, which are deliberately free of
-Tk imports, plus the threading helpers in
-:mod:`novel_downloader.apps.desktop.engine` and the home-directory bootstrap in
-:mod:`novel_downloader.apps.desktop.main`.  Guarded smoke tests build the real
-CustomTkinter window when a display is available so that a missing widget or an
-untranslated label is caught without requiring user interaction.
+The bulk of the suite covers :mod:`novel_downloader.apps.desktop.formatting`,
+:mod:`novel_downloader.apps.desktop.preferences`,
+:mod:`novel_downloader.apps.desktop.notifications` and
+:mod:`novel_downloader.apps.desktop.window_state`, which are deliberately free
+of GUI imports, plus the threading helpers in
+:mod:`novel_downloader.apps.desktop.engine`, the home-directory bootstrap in
+:mod:`novel_downloader.apps.desktop.main`, the single-file front end in
+:mod:`novel_downloader.apps.desktop.web_assets` and the JavaScript bridge in
+:mod:`novel_downloader.apps.desktop.webview_app`.
 
-No network access and no windowed interaction happen here: the CTk window is
-created, inspected via ``update_idletasks`` (which does not run the ``after``
-poll callbacks) and destroyed again.
+No network access and no windowed interaction happen here.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import os
-import queue
+import re
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,19 +32,26 @@ from typing import Any
 
 import pytest
 
-from novel_downloader import __version__
 from novel_downloader.apps.common.history_files import FileItem
 from novel_downloader.apps.core.models import DownloadTask, Status
-from novel_downloader.apps.core.watchlist import WatchEntry, WatchlistStore
+from novel_downloader.apps.core.watchlist import WatchEntry
 from novel_downloader.apps.desktop import formatting as fmt
 from novel_downloader.apps.desktop import main as desktop_main
 from novel_downloader.apps.desktop import notifications as notif
 from novel_downloader.apps.desktop import preferences as prefs
-from novel_downloader.apps.desktop import theme as ui_palette
 from novel_downloader.apps.desktop import window_state as wstate
 from novel_downloader.apps.desktop.engine import AsyncEngine
+from novel_downloader.apps.desktop.web_assets import APP_HTML
+from novel_downloader.apps.desktop.webview_app import (
+    ApiBridge,
+    _format_health_ms,
+    _format_size,
+    _i18n_catalog,
+    _music_track_dict,
+    _result_dict,
+    _task_dict,
+)
 from novel_downloader.infra.i18n import t
-from novel_downloader.plugins import search as search_module
 from novel_downloader.schemas import SearchResult
 
 
@@ -400,10 +405,10 @@ def test_format_error_handles_typed_subclasses_and_empty_messages() -> None:
 
 def test_format_error_is_used_by_the_desktop_ui() -> None:
     """The UI must not re-implement the wrapping inline."""
-    ui_path = Path(fmt.__file__).with_name("ui.py")
-    source = ui_path.read_text(encoding="utf-8")
+    bridge_path = Path(fmt.__file__).with_name("webview_app.py")
+    source = bridge_path.read_text(encoding="utf-8")
     assert "type(exc).__name__" not in source
-    assert "format_error(exc)" in source
+    assert "format_error(" in source
 
 
 # ---------------------------------------------------------------------------
@@ -1720,1066 +1725,441 @@ def test_window_state_file_lives_in_the_music_data_dir(
 
 
 # ---------------------------------------------------------------------------
-# Window smoke test (guarded: needs a display)
+# Web front end (web_assets): single-file HTML
 # ---------------------------------------------------------------------------
-def test_desktop_window_builds_all_pages(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ctk = pytest.importorskip("customtkinter")
-    import tkinter as tk_mod
 
-    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
-    # Keep the window-state file on the private data directory as well.
-    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path / "music"))
 
-    try:
-        root = ctk.CTk()
-    except tk_mod.TclError as exc:  # pragma: no cover - headless environments
-        pytest.skip(f"Tk display unavailable: {exc}")
+@pytest.mark.parametrize(
+    ("needle",),
+    [
+        ('id="page-search"',),
+        ('id="page-download"',),
+        ('id="page-history"',),
+        ('id="page-music"',),
+        ('id="page-follow"',),
+        ("window.pywebview",),
+        ("function boot(",),
+        (':root[data-theme="dark"]',),
+        ("--accent:",),
+    ],
+)
+def test_app_html_contains_core_structures(needle: str) -> None:
+    """The single-file front end keeps its pages, bridge calls and theming."""
+    assert needle in APP_HTML
 
-    root.withdraw()
-    app: Any = None
-    try:
-        from novel_downloader.apps.desktop.ui import DesktopApp
 
-        app = DesktopApp(root)
-        # ``update_idletasks`` builds pending geometry but does not fire the
-        # ``after`` poll callback, so no engine thread is started here.
-        root.update_idletasks()
+def test_app_html_is_self_contained() -> None:
+    """No external stylesheets or scripts: everything is inlined."""
+    assert not re.search(r"<script[^>]+src=", APP_HTML)
+    assert not re.search(r"<link[^>]+stylesheet", APP_HTML)
 
-        # Sidebar navigation: five pages, five buttons.
-        assert len(app._nav_buttons) == 5
-        assert app.search_entry is not None
-        assert app.search_button is not None
-        assert app.search_last_button is not None
-        assert app.search_follow_button is not None
-        assert app.search_follow_button.cget("text") == t("Follow")
-        # Nothing is selected yet, so the follow action is unavailable.
-        assert app.search_follow_button.cget("state") == "disabled"
-        assert app.task_list is not None
-        assert app.retry_button is not None
-        assert app.open_file_button is not None
-        assert app.open_folder_button is not None
-        assert app.task_filter_menu is not None
-        assert app.task_keyword_entry is not None
-        assert app._task_file_menu is not None
-        assert str(app._status_var.get())  # status bar shows something
-        assert root.title() == f"{t('Novel Downloader')} v{__version__}"
-        assert str(app._env_var.get())  # API/data-directory information
-        assert app.task_detail_var.get() == t("Select a task to view its details.")
-        assert app.retry_button.cget("state") == "disabled"
-        assert app.open_file_button.cget("state") == "disabled"
-        assert app.open_folder_button.cget("state") == "disabled"
-        assert app.search_last_button.cget("state") == "disabled"
-        assert app.task_filter_menu.get() == t("All")
-        assert app.task_keyword_var.get() == ""
-        # Task-completion notification bookkeeping starts empty.
-        assert app._status_label is not None
-        assert app._previous_task_states == {}
-        assert app._status_highlight_after is None
-        # The dark-mode switch exists and holds a resolved position.
-        assert app._dark_mode_var is not None
-        assert app._dark_mode_var.get() in {"light", "dark"}
 
-        # Follow ("追更") page: widgets exist and the page can be raised.
-        assert app.follow_list is not None
-        assert app.follow_add_button is not None
-        assert app.follow_remove_button is not None
-        assert app.follow_check_button is not None
-        assert app.follow_download_button is not None
-        for button in (
-            app.follow_add_button,
-            app.follow_remove_button,
-            app.follow_check_button,
-            app.follow_download_button,
-        ):
-            assert button.cget("state") == "normal"
+def test_app_html_declares_five_navigation_items() -> None:
+    keys = re.findall(r'class="nav-item[^"]*" data-page="([a-z]+)"', APP_HTML)
+    assert keys == ["search", "download", "history", "music", "follow"]
 
-        app._show_page(4)
-        root.update_idletasks()
-        assert app._page_index == 4
-        # The selected navigation item carries the accent-tinted style.
-        assert app._nav_buttons[4].cget("fg_color") == ui_palette.ACCENT_SOFT
-        assert app._nav_buttons[0].cget("fg_color") == "transparent"
 
-        # Music page: it can be raised, and the health-check widgets exist
-        # whenever the optional music engine is installed.
-        app._show_page(3)
-        root.update_idletasks()
-        if app._music_ready:
-            engine = app._music_engine
-            assert engine is not None
-            assert callable(engine["health_check"])
-            assert app.music_platform_menu is not None
-            assert app.music_search_button is not None
-            assert app.music_health_button is not None
-            assert app.music_health_list is not None
-            assert app.music_health_button.cget("state") == "normal"
+def test_i18n_catalog_covers_every_html_key() -> None:
+    """Every data-i18n / data-i18n-ph key in the HTML resolves via t()."""
+    catalog = _i18n_catalog()
+    keys = set(re.findall(r'data-i18n(?:-ph)?="([^"]+)"', APP_HTML))
+    assert keys, "the front end must declare translatable strings"
+    missing = sorted(key for key in keys if key not in catalog)
+    assert not missing, f"untranslated front-end keys: {missing}"
 
-            # The note label follows the selected platform.
-            noted = [
-                key
-                for key in app._music_display_to_key.values()
-                if engine["platform_note"](key)
-            ]
-            if noted:  # the registry ships notes for some platforms
-                key = noted[0]
-                display = next(
-                    text
-                    for text, candidate in app._music_display_to_key.items()
-                    if candidate == key
-                )
-                app.music_platform_var.set(display)
-                app._refresh_music_note()
-                assert app.music_note_var.get() == engine["platform_note"](key)
-    finally:
-        if app is not None:
-            app._closing = True
-        with contextlib.suppress(tk_mod.TclError):
-            root.destroy()
+
+def test_i18n_catalog_covers_script_only_keys() -> None:
+    """JS-side t() literals are represented in the Python catalogue."""
+    catalog = _i18n_catalog()
+    for key in (
+        "Searching…",
+        "{n} results in {s}s",
+        "Search failed",
+        "No results",
+        "Best match",
+        "Open in browser",
+        "Queued: {title}",
+        "Added to follow list",
+        "Already followed",
+        "Nothing in the queue",
+        "No exported books yet",
+        "Search a song to begin",
+        "Downloading {done}/{total}",
+        "Checked {n} books, {u} updated, {f} failed",
+        "Site and book ID are required",
+        "A download is already running",
+    ):
+        assert key in catalog, key
 
 
 # ---------------------------------------------------------------------------
-# Follow page (window, guarded: needs a display)
+# Webview bridge (webview_app): serialisation helpers
 # ---------------------------------------------------------------------------
-def _open_desktop_app(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[Any, Any]:
-    """Build a hidden window on a private data directory, or skip."""
-    ctk = pytest.importorskip("customtkinter")
-    import tkinter as tk_mod
-
-    import novel_downloader.apps.desktop.ui as ui_mod
-
-    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
-    # Keep the window-state file on the private data directory as well.
-    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path / "music"))
-    try:
-        root = ctk.CTk()
-    except tk_mod.TclError as exc:  # pragma: no cover - headless environments
-        pytest.skip(f"Tk display unavailable: {exc}")
-    root.withdraw()
-    return ui_mod.DesktopApp(root), root
 
 
-def _drain_and_dispatch(
-    app: Any,
-    stop: Callable[[list[tuple[str, Any]]], bool],
-    timeout: float = 10.0,
-) -> list[tuple[str, Any]]:
-    """
-    Drain the event queue like ``_poll`` does and handle the safe kinds.
-
-    ``error`` events are recorded but not dispatched: their handler opens a
-    modal message box that would block the test.
-    """
-    events: list[tuple[str, Any]] = []
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            kind, payload = app.events.get_nowait()
-        except queue.Empty:
-            if stop(events):
-                break
-            time.sleep(0.02)
-            continue
-        events.append((kind, payload))
-        if kind in {
-            "status",
-            "follow_entries",
-            "follow_item",
-            "follow_check_done",
-            "search_follow_done",
-            "search_follow_finished",
-            "music_health_item",
-            "music_health_done",
-        }:
-            app._handle_event(kind, payload)
-    return events
+def _fake_task(**overrides: Any) -> SimpleNamespace:
+    """A duck-typed DownloadTask covering every serialised field."""
+    task = SimpleNamespace(
+        task_id="abc123",
+        title="Sample",
+        site="qidian",
+        book_id="42",
+        status=Status.RUNNING,
+        chapters_done=3,
+        chapters_total=10,
+        error=None,
+        retry_count=1,
+        export_stage=None,
+        exported_paths={},
+        created_at=1_700_000_000.0,
+        finished_at=None,
+        progress=lambda: 0.3,
+        eta=lambda: 12.4,
+    )
+    for key, value in overrides.items():
+        setattr(task, key, value)
+    return task
 
 
-def test_follow_check_updates_entries_and_reenables_buttons(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app, root = _open_desktop_app(tmp_path, monkeypatch)
-    try:
-        root.update_idletasks()
-        store = WatchlistStore()
-        store.add("site-a", "1", title="Alpha Book", last_chapter="Chapter 8")
-        store.add("site-b", "2", title="Beta")
-        store.add("site-c", "3", title="Gamma", last_chapter="Chapter 5")
-        store.add("site-d", "4", title="Delta")
-
-        async def fake_search(
-            keyword: str, sites: list[str] | None = None, **_kwargs: Any
-        ) -> list[SearchResult]:
-            # Staggered delays make the completion order deterministic while
-            # the books are still searched concurrently: each result is posted
-            # as soon as its search finishes.
-            delay = {"site-a": 0.0, "site-b": 0.02, "site-c": 0.04, "site-d": 0.06}
-            if sites and sites[0] in delay:
-                await asyncio.sleep(delay[sites[0]])
-            if sites == ["site-a"]:
-                # Different id on purpose: only the normalized title matches.
-                return [
-                    _search_result(
-                        site="site-a",
-                        book_id="999",
-                        title="Alpha  BOOK!",
-                        latest_chapter="Chapter 9",
-                    )
-                ]
-            if sites == ["site-c"]:
-                return [
-                    _search_result(
-                        site="site-c",
-                        book_id="3",
-                        title="Gamma",
-                        latest_chapter="Chapter 5",
-                    )
-                ]
-            if sites == ["site-d"]:
-                raise ValueError("network down")
-            return []
-
-        # The shared sweep resolves the search lazily through the plugin
-        # module, so the patch point is the module attribute itself.
-        monkeypatch.setattr(search_module, "search", fake_search)
-        app._follow_entries = store.entries()
-        app._start_follow_check()
-
-        assert app.follow_check_button is not None  # type: ignore[union-attr]
-        assert app.follow_check_button.cget("state") == "disabled"  # type: ignore[union-attr]
-        events = _drain_and_dispatch(
-            app,
-            stop=lambda found: any(kind == "follow_check_done" for kind, _ in found),
-        )
-
-        items = [payload for kind, payload in events if kind == "follow_item"]
-        assert [item[2] for item in items] == [
-            "updated",
-            "not_found",
-            "up_to_date",
-            "error",
-        ]
-        assert items[0] == ("site-a", "1", "updated", "Chapter 9")
-        assert items[3][3] == "ValueError: network down"
-
-        # The new chapter was persisted and the list reloaded from disk.
-        assert store.get("site-a", "1") is not None
-        assert store.get("site-a", "1").last_chapter == "Chapter 9"  # type: ignore[union-attr]
-        assert store.get("site-c", "3").last_chapter == "Chapter 5"  # type: ignore[union-attr]
-        refreshed = [payload for kind, payload in events if kind == "follow_entries"]
-        assert refreshed and len(refreshed[-1]) == 4
-        assert any(
-            entry.last_chapter == "Chapter 9" and entry.site == "site-a"
-            for entry in refreshed[-1]
-        )
-
-        assert app._follow_counts == {
-            "updated": 1,
-            "not_found": 1,
-            "up_to_date": 1,
-            "error": 1,
-        }
-        # The check finished: the action buttons are usable again.
-        assert app.follow_check_button is not None
-        assert app.follow_check_button.cget("state") == "normal"
-        assert app._follow_checking is False
-    finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(Exception):
-            root.destroy()
+def test_task_dict_serializes_core_fields() -> None:
+    data = _task_dict(_fake_task())
+    assert data["task_id"] == "abc123"
+    assert data["title"] == "Sample"
+    assert data["site"] == "qidian"
+    assert data["status"] == "running"
+    assert data["progress"] == 0.3
+    assert data["chapters_done"] == 3
+    assert data["chapters_total"] == 10
+    assert data["retry_count"] == 1
+    assert data["error"] == ""
+    assert data["exports"] == []
+    assert data["retryable"] is False
+    assert data["eta"] == 12
 
 
-def test_follow_download_queues_selected_entries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import novel_downloader.apps.desktop.ui as ui_mod
+def test_task_dict_flags_retryable_terminal_tasks() -> None:
+    failed = _fake_task(status=Status.FAILED, error="boom")
+    assert _task_dict(failed)["retryable"] is True
+    assert _task_dict(failed)["error"] == "boom"
+    done = _fake_task(status=Status.COMPLETED)
+    assert _task_dict(done)["retryable"] is False
 
-    class _StubManager:
-        """Stands in for the real task manager; 'site-b' always fails."""
+
+def test_task_dict_lists_export_paths() -> None:
+    task = _fake_task(
+        status=Status.COMPLETED,
+        exported_paths={"txt": Path("downloads/a.txt")},
+    )
+    assert _task_dict(task)["exports"] == [str(Path("downloads/a.txt"))]
+
+
+def test_task_dict_survives_mutating_export_dict() -> None:
+    class Racy:
+        task_id = "x"
+        title = "t"
+        site = "s"
+        book_id = "b"
+        status = Status.RUNNING
+        chapters_done = 0
+        chapters_total = 0
+        error = None
+        retry_count = 0
+        export_stage = None
+        created_at = None
+        finished_at = None
 
         def __init__(self) -> None:
-            self.added: list[tuple[str, str, str]] = []
+            self.exported_paths = {"txt": Path("a.txt")}
 
-        async def add_task(
-            self, *, title: str, site: str, book_id: str
-        ) -> DownloadTask:
-            self.added.append((title, site, book_id))
-            if site == "site-b":
-                raise RuntimeError("boom")
-            return DownloadTask(title=title, site=site, book_id=book_id)
+        def progress(self) -> float:
+            self.exported_paths.clear()
+            return 0.0
 
-    stub = _StubManager()
-    monkeypatch.setattr(ui_mod, "manager", stub)
+        def eta(self) -> None:
+            return None
 
-    app, root = _open_desktop_app(tmp_path, monkeypatch)
-    try:
-        root.update_idletasks()
-        # Let the initial watchlist load finish so its render cannot clobber
-        # the fixture state below.
-        _drain_and_dispatch(
-            app,
-            stop=lambda found: any(kind == "follow_entries" for kind, _ in found),
-        )
-        entries = [
-            WatchEntry(site="site-a", book_id="1", title="Book One"),
-            WatchEntry(site="site-b", book_id="2", title="Book Two"),
-        ]
-        app._follow_entries = entries
-        app._render_follow_entries(entries)
-        assert app.follow_list is not None
+    # The export dict is copied before anything can mutate it concurrently.
+    assert _task_dict(Racy())["exports"] == [str(Path("a.txt"))]
 
-        # Only the selected card is queued, and only its success is reported.
-        app._follow_selector.set_selection([0])
-        app._download_follow_selection()
-        events = _drain_and_dispatch(
-            app, stop=lambda found: sum(1 for kind, _ in found if kind == "status") >= 1
-        )
-        assert stub.added == [("Book One", "site-a", "1")]
 
-        # Nothing selected: the whole list is queued; failures are reported.
-        stub.added.clear()
-        app._follow_selector.set_selection([])
-        app._download_follow_selection()
-        events = _drain_and_dispatch(
-            app,
-            stop=lambda found: (
-                sum(1 for kind, _ in found if kind in {"status", "error"}) >= 2
-            ),
-        )
+def test_result_dict_flags_only_the_first_hit_as_best() -> None:
+    results = [{"site": "a"}, {"site": "b"}]
+    flagged = [_result_dict(r, i) for i, r in enumerate(results)]
+    assert [r["best"] for r in flagged] == [True, False]
 
-        assert sorted(stub.added) == [
-            ("Book One", "site-a", "1"),
-            ("Book Two", "site-b", "2"),
-        ]
-        statuses = [payload for kind, payload in events if kind == "status"]
-        errors = [payload for kind, payload in events if kind == "error"]
-        assert any("Book One" in message for message in statuses)
-        assert any(
-            "Book Two" in message and "RuntimeError: boom" in message
-            for message in errors
-        )
-    finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(Exception):
-            root.destroy()
 
-
-def test_follow_add_and_remove_workers_persist_entries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app, root = _open_desktop_app(tmp_path, monkeypatch)
-    try:
-        root.update_idletasks()
-        # Let the initial watchlist load finish before driving the workers.
-        _drain_and_dispatch(
-            app,
-            stop=lambda found: any(kind == "follow_entries" for kind, _ in found),
-        )
-        store = WatchlistStore()
-
-        # Adding (with a title) persists the entry and refreshes the list.
-        app._follow_add("site-a", "1", "Alpha Book")
-        _drain_and_dispatch(
-            app,
-            stop=lambda found: (
-                any(kind == "follow_entries" for kind, _ in found)
-                and len(store.entries()) == 1
-            ),
-        )
-        entry = store.get("site-a", "1")
-        assert entry is not None
-        assert entry.title == "Alpha Book"
-
-        # An empty title is stored as such (check then relies on the book id).
-        app._follow_add("site-b", "2", "")
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and len(store.entries()) < 2:
-            time.sleep(0.02)
-        second = store.get("site-b", "2")
-        assert second is not None
-        assert second.title == ""
-
-        # The rendered list mirrors the file (one card per entry).
-        _drain_and_dispatch(
-            app,
-            stop=lambda found: (
-                any(kind == "follow_entries" for kind, _ in found)
-                and app.follow_list is not None
-                and len(app.follow_list.winfo_children()) == 2
-            ),
-        )
-        assert app.follow_list is not None
-        assert len(app.follow_list.winfo_children()) == 2
-
-        # Removing the selected first card (site-a) deletes only that entry.
-        app._follow_selector.set_selection([0])
-        app._remove_follow_selected()
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and any(
-            entry.key == ("site-a", "1") for entry in store.entries()
-        ):
-            time.sleep(0.02)
-        assert [entry.key for entry in store.entries()] == [("site-b", "2")]
-
-        # Removing with nothing selected only hints at the status bar.
-        app._follow_selector.set_selection([])
-        app._remove_follow_selected()
-        assert [entry.key for entry in store.entries()] == [("site-b", "2")]
-    finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(Exception):
-            root.destroy()
-
-
-def test_search_follow_button_adds_selection_to_the_watchlist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The search page's follow button feeds the shared watchlist store."""
-    app, root = _open_desktop_app(tmp_path, monkeypatch)
-    try:
-        root.update_idletasks()
-        # Let the initial watchlist load finish so its render cannot clobber
-        # the fixture state below.
-        _drain_and_dispatch(
-            app,
-            stop=lambda found: any(kind == "follow_entries" for kind, _ in found),
-        )
-        store = WatchlistStore()
-        store.add("site-a", "1", title="Alpha Book")
-
-        results = [
-            _search_result(site="site-a", book_id="1", title="Alpha Book"),
-            _search_result(site="site-b", book_id="2", title="Beta Book"),
-            # Missing book_id: this row can never be followed.
-            _search_result(site="site-c", book_id="", title="No Id"),
-        ]
-        app._render_search_results(("kw", results))
-        assert len(app._search_cards) == 3
-
-        button = app.search_follow_button
-        assert button is not None
-
-        # No selection: the button stays down.
-        app._search_selector.set_selection([])
-        app._update_search_follow_button()
-        assert button.cget("state") == "disabled"
-
-        # Selecting only the invalid card keeps the button disabled, and a
-        # forced click explains why instead of touching the store.
-        app._search_selector.set_selection([2])
-        app._update_search_follow_button()
-        assert button.cget("state") == "disabled"
-        app._follow_selected_results()
-        assert app._status_var.get() == t(
-            "Cannot follow: site, book id and title are required."
-        )
-        assert [entry.key for entry in store.entries()] == [("site-a", "1")]
-
-        # A mixed selection (valid + invalid) enables the button; the invalid
-        # card is skipped and the valid one is persisted on a worker thread.
-        app._search_selector.set_selection([1, 2])
-        app._update_search_follow_button()
-        assert button.cget("state") == "normal"
-        app._follow_selected_results()
-        assert button.cget("state") == "disabled"  # held down while the add runs
-        _drain_and_dispatch(
-            app,
-            stop=lambda found: (
-                any(kind == "search_follow_finished" for kind, _ in found)
-                and any(kind == "follow_entries" for kind, _ in found)
-            ),
-        )
-        entry = store.get("site-b", "2")
-        assert entry is not None
-        assert entry.title == "Beta Book"
-        # The follow page was refreshed through the shared store...
-        assert app.follow_list is not None
-        assert len(app.follow_list.winfo_children()) == 2
-        # ...and the specific feedback outlives the generic count message;
-        # it ends with a pointer to the Follow page.
-        assert app._status_var.get() == (
-            t("Added to the follow list: {title}").format(title="Beta Book")
-            + f" ({t('Follow')})"
-        )
-        assert app._search_follow_pending == set()
-        # The batch is over: the button is usable for the still-selected rows.
-        assert button.cget("state") == "normal"
-
-        # While a card's add is in flight its key is guarded against a
-        # repeated click: the guard keeps the button down and swallows the
-        # re-trigger.
-        app._search_follow_pending.add(("site-b", "2"))
-        app._update_search_follow_button()
-        assert button.cget("state") == "disabled"
-        app._follow_selected_results()
-        assert app._search_follow_pending == {("site-b", "2")}
-        app._search_follow_pending.clear()
-
-        # Following a book that is already in the list changes nothing on disk
-        # and says so.
-        app._search_selector.set_selection([0])
-        app._update_search_follow_button()
-        assert button.cget("state") == "normal"
-        app._follow_selected_results()
-        _drain_and_dispatch(
-            app,
-            stop=lambda found: (
-                any(kind == "search_follow_finished" for kind, _ in found)
-                and any(kind == "follow_entries" for kind, _ in found)
-            ),
-        )
-        assert [entry.key for entry in store.entries()] == [
-            ("site-a", "1"),
-            ("site-b", "2"),
-        ]
-        assert store.get("site-a", "1") is not None
-        assert store.get("site-a", "1").title == "Alpha Book"  # type: ignore[union-attr]
-        assert app._status_var.get() == (
-            t("Already in the follow list: {title}").format(title="Alpha Book")
-            + f" ({t('Follow')})"
-        )
-    finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(Exception):
-            root.destroy()
-
-
-# ---------------------------------------------------------------------------
-# Search page context menu (window, guarded: needs a display)
-# ---------------------------------------------------------------------------
-def test_search_context_menu_offers_row_actions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Right-clicking a search result pops queue/follow/browser actions."""
-    import tkinter as tk_mod
-
-    app, root = _open_desktop_app(tmp_path, monkeypatch)
-    try:
-        root.update_idletasks()
-        # ``tk_popup`` would block until a menu entry is picked; record the
-        # popup request instead and drive the entries via ``invoke`` below.
-        popups: list[tuple[int, int]] = []
-        monkeypatch.setattr(
-            tk_mod.Menu,
-            "tk_popup",
-            lambda menu, x_root, y_root, entry="": popups.append((x_root, y_root)),
-        )
-        opened: list[str] = []
-        monkeypatch.setattr(
-            "webbrowser.open", lambda url, *args, **kwargs: opened.append(url) or True
-        )
-
-        store = WatchlistStore()
-        results = [
-            _search_result(site="site-a", book_id="1", title="Alpha Book"),
-            _search_result(
-                site="site-b",
-                book_id="2",
-                title="Beta Book",
-                book_url="https://example.invalid/book/2",
-            ),
-            # Missing book_id and book_url: this row is dead weight.
-            _search_result(site="site-c", book_id="", title="No Id", book_url=""),
-        ]
-        app._render_search_results(("kw", results))
-
-        # Right-clicking a card pops the menu with the three batch actions.
-        app._search_selector.set_selection([0, 1])
-        app._on_search_card_right_click(
-            0,
-            SimpleNamespace(x_root=123, y_root=45),  # type: ignore[arg-type]
-        )
-        assert popups == [(123, 45)]
-        menu = app._search_menu
-        assert menu is not None
-        assert menu.index("end") == 3  # add, follow, separator, open in browser
-        assert menu.entrycget(0, "label") == t("Add to download queue")
-        assert menu.entrycget(1, "label") == t("Follow")
-        assert menu.type(2) == "separator"
-        assert menu.entrycget(3, "label") == t("Open in browser")
-        for index in (0, 1, 3):
-            assert menu.entrycget(index, "state") == "normal"
-
-        # Right-clicking an unselected card first selects just that card...
-        app._search_selector.set_selection([])
-        app._on_search_card_right_click(
-            2,
-            SimpleNamespace(x_root=1, y_root=1),  # type: ignore[arg-type]
-        )
-        assert app._search_selector.selection == [2]
-        assert popups == [(123, 45), (1, 1)]
-        # ...and the dead row disables every entry.
-        assert app._search_menu is menu  # the lazy menu is reused
-        for index in (0, 1, 3):
-            assert app._search_menu.entrycget(index, "state") == "disabled"
-
-        # "Follow" feeds the shared watchlist store, like the toolbar button.
-        app._search_selector.set_selection([1])
-        app._on_search_card_right_click(
-            1,
-            SimpleNamespace(x_root=2, y_root=2),  # type: ignore[arg-type]
-        )
-        assert app._search_menu.entrycget(1, "state") == "normal"
-        app._search_menu.invoke(1)
-        _drain_and_dispatch(
-            app,
-            stop=lambda found: (
-                any(kind == "search_follow_finished" for kind, _ in found)
-                and any(kind == "follow_entries" for kind, _ in found)
-            ),
-        )
-        added = store.get("site-b", "2")
-        assert added is not None
-        assert added.title == "Beta Book"
-        assert app._search_follow_pending == set()
-
-        # "Open in browser" opens the book page of the selected rows.
-        app._search_menu.invoke(3)
-        assert opened == ["https://example.invalid/book/2"]
-    finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(Exception):
-            root.destroy()
-
-
-# ---------------------------------------------------------------------------
-# Music page (window, guarded): platform health check
-# ---------------------------------------------------------------------------
-def test_music_health_check_checks_every_platform_serially_and_reenables_button(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app, root = _open_desktop_app(tmp_path, monkeypatch)
-    try:
-        root.update_idletasks()
-        if app._music_engine is None or not app._music_ready:
-            pytest.skip("the music extras are not installed")
-
-        labels = list(app._music_engine["available_labels"]())
-        assert labels
-        first_key, last_key = labels[0][0], labels[-1][0]
-        seen: list[tuple[str, str]] = []
-
-        def fake_health(
-            platform: str,
-            keyword: str = "test",
-            *,
-            timeout: float = 15.0,
-            limit: int = 1,
-        ) -> dict[str, Any]:
-            # The worker is a single thread, so appends prove serial execution.
-            seen.append((platform, keyword))
-            if platform == first_key:
-                raise RuntimeError("worker blew up")
-            if platform == last_key:
-                return {"ok": False, "elapsed_ms": 5, "error": "down\nnow"}
-            return {"ok": True, "elapsed_ms": 10, "error": ""}
-
-        app._music_engine = dict(app._music_engine, health_check=fake_health)
-
-        # A check already in progress blocks a second start.
-        app._music_health_running = True
-        app._start_music_health_check()
-        assert seen == []
-        app._music_health_running = False
-
-        app.music_query_var.set("  周杰伦  ")
-        app._start_music_health_check()
-        button = app.music_health_button
-        assert button is not None
-        assert button.cget("state") == "disabled"  # disabled while the check runs
-        events = _drain_and_dispatch(
-            app,
-            stop=lambda found: any(kind == "music_health_done" for kind, _ in found),
-            timeout=60.0,
-        )
-
-        # Every registered platform was checked exactly once, with the query
-        # keyword (trimmed) passed through to ``health_check``.
-        assert sorted(platform for platform, _ in seen) == sorted(
-            key for key, _ in labels
-        )
-        assert {keyword for _, keyword in seen} == {"周杰伦"}
-        items = [payload for kind, payload in events if kind == "music_health_item"]
-        assert len(items) == len(labels)
-
-        # The card list renders healthy-first; the failing platforms show a
-        # one-line error summary.
-        cards = app._music_health_cards
-        assert len(cards) == len(labels)
-        titles = [card.title_label.cget("text") for card in cards]
-        metas = {
-            card.title_label.cget("text"): card.meta_label.cget("text")
-            for card in cards
-        }
-        failed_titles = [
-            title for title in titles if metas[title].startswith(t("Failed"))
-        ]
-        assert failed_titles == [first_key, last_key]
-        assert "RuntimeError: worker blew up" in metas[first_key]
-        assert "down now" in metas[last_key]
-        assert all(
-            metas[title].startswith(t("OK"))
-            for title in titles
-            if title not in {first_key, last_key}
-        )
-
-        # Summary and status; the button is usable again.
-        summary = fmt.health_summary(app._music_health_results)
-        assert app.music_health_summary_var.get() == summary
-        assert app._status_var.get() == summary
-        assert button.cget("state") == "normal"
-        assert app._music_health_running is False
-    finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(Exception):
-            root.destroy()
-
-
-# ---------------------------------------------------------------------------
-# Task notifications (window, guarded: needs a display)
-# ---------------------------------------------------------------------------
-def test_task_notification_beeps_and_highlights_when_window_is_hidden(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import novel_downloader.apps.desktop.ui as ui_mod
-
-    app, root = _open_desktop_app(tmp_path, monkeypatch)
-    try:
-        root.update_idletasks()
-        played: list[int] = []
-        monkeypatch.setattr(ui_mod, "play_notification_sound", lambda: played.append(1))
-
-        task = DownloadTask(title="Alpha", site="qidian", book_id="1", task_id="task-1")
-        task.status = Status.RUNNING
-
-        # First snapshot: baseline only, no notification of any kind.
-        app._render_tasks(_task_snapshot(running=[task]))
-        assert played == []
-        assert app._previous_task_states == {"task-1": "running"}
-        assert app._status_highlight_after is None
-
-        # The fixture withdraws the window, so the app counts as background.
-        assert app._window_in_background() is True
-
-        # running -> completed while hidden: a beep and a highlighted line.
-        task.status = Status.COMPLETED
-        app._render_tasks(_task_snapshot(completed=[task]))
-        assert played == [1]
-        assert app._status_var.get() == t("Download completed: {book}").format(
-            book="Alpha"
-        )
-        label = app._status_label
-        assert label is not None
-        assert label.cget("text_color") == ui_mod._STATUS_HIGHLIGHT_COMPLETED
-        assert app._status_highlight_after is not None
-
-        # Re-rendering the same snapshot cannot notify twice.
-        app._render_tasks(_task_snapshot(completed=[task]))
-        assert played == [1]
-
-        # Any new status message ends the highlight and restores the color.
-        app._set_status(t("Ready"))
-        assert label.cget("text_color") == ui_mod._STATUS_DEFAULT_TEXT
-        assert app._status_highlight_after is None
-    finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(Exception):
-            root.destroy()
-
-
-def test_task_notification_gates_the_beep_by_window_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import novel_downloader.apps.desktop.ui as ui_mod
-
-    app, root = _open_desktop_app(tmp_path, monkeypatch)
-    try:
-        root.update_idletasks()
-        played: list[int] = []
-        monkeypatch.setattr(ui_mod, "play_notification_sound", lambda: played.append(1))
-
-        failed = DownloadTask(title="Beta", site="b520", book_id="2", task_id="task-2")
-        failed.status = Status.RUNNING
-        done = DownloadTask(title="Gamma", site="qidian", book_id="3", task_id="task-3")
-        done.status = Status.RUNNING
-
-        # Baseline for both tasks.
-        app._render_tasks(_task_snapshot(running=[failed, done]))
-
-        # Foreground window: the transitions update the status bar but the
-        # app never beeps while the user is looking at it.
-        original = app._window_in_background
-        app._window_in_background = lambda: False
-        try:
-            failed.status = Status.FAILED
-            failed.error = "HTTPError: 500"
-            done.status = Status.COMPLETED
-            app._render_tasks(_task_snapshot(completed=[failed, done]))
-        finally:
-            app._window_in_background = original
-
-        assert played == []
-        assert app._status_var.get() == " | ".join(
-            [
-                t("Download failed for {book}: {error}").format(
-                    book="Beta", error="HTTPError: 500"
-                ),
-                t("Download completed: {book}").format(book="Gamma"),
-            ]
-        )
-        # A mixed batch highlights in the failure color.
-        label = app._status_label
-        assert label is not None
-        assert label.cget("text_color") == ui_mod._STATUS_HIGHLIGHT_FAILED
-        assert app._previous_task_states == {
-            "task-2": "failed",
-            "task-3": "completed",
-        }
-
-        # The next poll is silent: the baseline caught up.
-        app._render_tasks(_task_snapshot(completed=[failed, done]))
-        assert played == []
-    finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(Exception):
-            root.destroy()
-
-
-# ---------------------------------------------------------------------------
-# Window state persistence (window, guarded: needs a display)
-# ---------------------------------------------------------------------------
-def _open_desktop_app_with_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[Any, Any, Path]:
-    """
-    Build a hidden window whose window-state file lives in ``tmp_path``.
-
-    Returns the app, the root and the state file path; skips when Tk cannot
-    open a display.
-    """
-    ctk = pytest.importorskip("customtkinter")
-    import tkinter as tk_mod
-
-    import novel_downloader.apps.desktop.ui as ui_mod
-
-    state_dir = tmp_path / "music"
-    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
-    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(state_dir))
-    try:
-        root = ctk.CTk()
-    except tk_mod.TclError as exc:  # pragma: no cover - headless environments
-        pytest.skip(f"Tk display unavailable: {exc}")
-    root.withdraw()
-    return ui_mod.DesktopApp(root), root, state_dir / "window_state.json"
-
-
-def test_desktop_window_restores_stored_geometry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app, root, state_file = _open_desktop_app_with_state(tmp_path, monkeypatch)
-    try:
-        # Record the geometry strings the restore path applies.  The query
-        # side mirrors the last applied value: on Windows CTk's titlebar
-        # manipulation makes the live ``wm geometry`` query of a never-mapped
-        # window unreliable, and the mapping behavior itself is covered by
-        # the real-run verification, not by this unit test.
-        applied: list[str] = []
-        set_geometry = root.geometry
-
-        def geometry_spy(value: str | None = None) -> str:
-            if value is None:
-                return applied[-1] if applied else set_geometry()
-            applied.append(value)
-            return set_geometry(value)
-
-        monkeypatch.setattr(root, "geometry", geometry_spy)
-
-        # A stored geometry is applied verbatim on launch.
-        assert wstate.save_window_geometry(
-            state_file, wstate.WindowGeometry(900, 600, 22, 33)
-        )
-        app._restore_window_geometry()
-        assert applied == ["900x600+22+33"]
-
-        # A stored size below the minimum is clamped to 400x300 before it
-        # reaches the window.
-        assert wstate.save_window_geometry(
-            state_file, wstate.WindowGeometry(200, 100, 0, 0)
-        )
-        app._restore_window_geometry()
-        assert applied[-1] == "400x300+0+0"
-
-        # A corrupted file falls back to the default geometry string.
-        state_file.write_text("not json", encoding="utf-8")
-        app._restore_window_geometry()
-        assert applied[-1] == "1200x780"
-
-        # A missing file falls back to the default geometry string too.
-        state_file.unlink()
-        app._restore_window_geometry()
-        assert applied[-1] == "1200x780"
-
-        # Every applied string is a well-formed Tk geometry string.
-        for value in applied:
-            assert wstate.parse_geometry(value) is not None
-    finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(Exception):
-            root.destroy()
-
-
-def test_desktop_window_saves_geometry_on_close(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app, root, state_file = _open_desktop_app_with_state(tmp_path, monkeypatch)
-    try:
-        # Serve the geometry the window "has" through a spy: the live query
-        # of a never-mapped CTk window is unreliable on Windows (see the
-        # restore test), and the close path must persist whatever the query
-        # reports for a real mapped window.
-        current_geometry = "980x640+15+25"
-        set_geometry = root.geometry
-
-        def geometry_spy(value: str | None = None) -> str:
-            nonlocal current_geometry
-            if value is None:
-                return current_geometry
-            current_geometry = value
-            return set_geometry(value)
-
-        monkeypatch.setattr(root, "geometry", geometry_spy)
-        assert not state_file.exists()
-
-        # Closing the window persists the geometry it had.
-        app._on_close()
-        assert app._closing is True
-    except Exception:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            root.destroy()
-        raise
-    assert state_file.is_file()
-    assert wstate.load_window_geometry(state_file) == wstate.WindowGeometry(
-        980, 640, 15, 25
+def test_music_track_dict_uses_dataclass_fields() -> None:
+    base = pytest.importorskip("novel_downloader.apps.music.providers.base")
+    track = base.Track(
+        provider="netease", id="1", name="Song", artists="Artist", album="Album"
     )
+    data = _music_track_dict(track)
+    assert data["name"] == "Song"
+    assert data["vip"] is False
 
 
-def test_desktop_window_keeps_previous_state_for_degenerate_geometry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app, root, state_file = _open_desktop_app_with_state(tmp_path, monkeypatch)
-    try:
-        assert wstate.save_window_geometry(
-            state_file, wstate.WindowGeometry(980, 640, 15, 25)
-        )
-        # A degenerate geometry query (e.g. a window that was never mapped)
-        # must not overwrite the good stored geometry.
-        monkeypatch.setattr(root, "geometry", lambda value=None: "1x1+0+0")
-        app._save_window_state()
-        assert wstate.load_window_geometry(state_file) == wstate.WindowGeometry(
-            980, 640, 15, 25
-        )
-    finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(Exception):
-            root.destroy()
+def test_music_track_dict_falls_back_to_attributes() -> None:
+    data = _music_track_dict(SimpleNamespace(name="X", vip=True, duration_s=10))
+    assert data["name"] == "X"
+    assert data["vip"] is True
+    assert data["duration_s"] == 10
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [(0, "0 B"), (512, "512 B"), (2048, "2.0 KB"), (3 * 1024 * 1024, "3.0 MB")],
+)
+def test_format_size_units(size: int, expected: str) -> None:
+    assert _format_size(size) == expected
+
+
+def test_format_health_ms_units() -> None:
+    assert _format_health_ms(850) == "850ms"
+    assert _format_health_ms(1500) == "1.5s"
 
 
 # ---------------------------------------------------------------------------
-# Keyboard shortcuts (window, guarded: needs a display)
+# Webview bridge (webview_app): ApiBridge behaviour
 # ---------------------------------------------------------------------------
-def test_keyboard_shortcuts_are_registered(
+
+
+def test_bridge_initial_state_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "novel_downloader.apps.desktop.webview_app._load_prefs",
+        lambda: {"theme": "dark"},
+    )
+    state = ApiBridge().get_initial_state()
+    assert state["theme"] == "dark"
+    assert "search" in state["sites"] and "download" in state["sites"]
+    assert state["i18n"]["Search"] == t("Search")
+
+
+def test_bridge_add_task_requires_site_and_book_id() -> None:
+    bridge = ApiBridge()
+    assert bridge.add_task("", "42")["ok"] is False
+    assert bridge.add_task("qidian", "")["ok"] is False
+
+
+def test_bridge_add_task_queues_via_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_add(*, title: str, site: str, book_id: str) -> Any:
+        return SimpleNamespace(task_id="tid-1")
+
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.add_task", fake_add
+    )
+    bridge = ApiBridge()
+    try:
+        result = bridge.add_task("qidian", "42", "Sample")
+    finally:
+        bridge.shutdown()
+    assert result == {"ok": True, "task_id": "tid-1"}
+
+
+def test_bridge_get_tasks_buckets_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    running = _fake_task()
+    pending = _fake_task(status=Status.QUEUED)
+    done = _fake_task(status=Status.COMPLETED)
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.snapshot",
+        lambda: {"running": [running], "pending": [pending], "completed": [done]},
+    )
+    snap = ApiBridge().get_tasks()
+    assert [item["task_id"] for item in snap["running"]] == ["abc123"]
+    assert [item["status"] for item in snap["queued"]] == ["queued"]
+    assert [item["task_id"] for item in snap["completed"]] == ["abc123"]
+
+
+def test_bridge_cancel_task_reports_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_cancel(_task_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.cancel_task", fake_cancel
+    )
+    bridge = ApiBridge()
+    try:
+        assert bridge.cancel_task("tid")["ok"] is True
+    finally:
+        bridge.shutdown()
+
+
+def test_bridge_retry_task_requeues_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    async def fake_add(*, title: str, site: str, book_id: str) -> Any:
+        captured.update(title=title, site=site, book_id=book_id)
+        return SimpleNamespace(task_id="new")
+
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.add_task", fake_add
+    )
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.snapshot",
+        lambda: {
+            "running": [],
+            "pending": [],
+            "completed": [_fake_task(status=Status.FAILED, error="x")],
+        },
+    )
+    bridge = ApiBridge()
+    try:
+        assert bridge.retry_task("abc123")["ok"] is True
+    finally:
+        bridge.shutdown()
+    assert captured["site"] == "qidian"
+
+
+def test_bridge_retry_task_ignores_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.snapshot",
+        lambda: {"running": [], "pending": [], "completed": [_fake_task()]},
+    )
+    assert ApiBridge().retry_task("abc123") == {"ok": False}
+
+
+def test_bridge_watchlist_round_trip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ctk = pytest.importorskip("customtkinter")
-    import tkinter as tk_mod
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.watchlist.default_watchlist_path",
+        lambda: tmp_path / "watch.json",
+    )
+    bridge = ApiBridge()
+    assert bridge.get_watchlist() == []
+    added = bridge.add_watch("qidian", "42", "Sample")
+    assert added["ok"] is True and added["created"] is True
+    again = bridge.add_watch("qidian", "42", "Sample")
+    assert again["created"] is False
+    entries = bridge.get_watchlist()
+    assert len(entries) == 1
+    assert entries[0]["site"] == "qidian"
+    assert entries[0]["title"] == "Sample"
+    assert bridge.remove_watch("qidian", "42")["ok"] is True
+    assert bridge.get_watchlist() == []
 
-    import novel_downloader.apps.desktop.ui as ui_mod
 
-    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
-    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path / "music"))
+def test_bridge_check_updates_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    from novel_downloader.apps.core.watchlist import CheckResult
 
-    # Spy on ``bind_all`` while keeping the real binding alive.
-    registered: dict[str, Any] = {}
-    original = tk_mod.Tk.bind_all
+    async def fake_check_all(_store: Any, **_kwargs: Any) -> list[Any]:
+        return [
+            CheckResult(entry=WatchEntry(site="a", book_id="1"), changed=True),
+            CheckResult(entry=WatchEntry(site="b", book_id="2"), changed=False),
+            CheckResult(entry=WatchEntry(site="c", book_id="3"), error="boom"),
+        ]
 
-    def spy(
-        self: Any,
-        sequence: str | None = None,
-        func: Any = None,
-        add: Any = None,
-    ) -> str:
-        if sequence:
-            registered[sequence] = func
-        return original(self, sequence, func, add)
-
-    monkeypatch.setattr(tk_mod.Tk, "bind_all", spy)
-
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.watchlist.check_all", fake_check_all
+    )
+    bridge = ApiBridge()
     try:
-        root = ctk.CTk()
-    except tk_mod.TclError as exc:  # pragma: no cover - headless environments
-        pytest.skip(f"Tk display unavailable: {exc}")
-    root.withdraw()
-    app = ui_mod.DesktopApp(root)
-    try:
-        expected = {f"<Control-{index}>" for index in range(1, 6)} | {
-            "<Control-f>",
-            "<Control-F>",
-            "<Control-d>",
-            "<Control-D>",
-        }
-        assert expected <= set(registered)
-        assert all(callable(registered[sequence]) for sequence in expected)
-
-        # Ctrl+N raises the Nth page (Search=1 ... Follow=5).
-        registered["<Control-1>"](SimpleNamespace())
-        assert app._page_index == 0
-        registered["<Control-3>"](SimpleNamespace())
-        assert app._page_index == 2
-        registered["<Control-5>"](SimpleNamespace())
-        assert app._page_index == 4
-
-        # Ctrl+F raises the search page and focuses the keyword entry.
-        assert app.search_entry is not None
-        focused: list[int] = []
-        monkeypatch.setattr(app.search_entry, "focus_set", lambda: focused.append(1))
-        registered["<Control-f>"](SimpleNamespace())
-        registered["<Control-F>"](SimpleNamespace())
-        assert focused == [1, 1]
-        assert app._page_index == 0
-
-        # Ctrl+D queues the search selection, like the toolbar button.
-        queued: list[int] = []
-        monkeypatch.setattr(app, "_add_selected_results", lambda: queued.append(1))
-        registered["<Control-d>"](SimpleNamespace())
-        registered["<Control-D>"](SimpleNamespace())
-        assert queued == [1, 1]
+        summary = bridge.check_updates()
     finally:
-        app._closing = True
-        with contextlib.suppress(Exception):
-            app.engine.shutdown()
-        with contextlib.suppress(tk_mod.TclError):
-            root.destroy()
+        bridge.shutdown()
+    assert summary == {"checked": 3, "updated": 1, "failed": 1}
+
+
+def test_bridge_music_download_guards_concurrency() -> None:
+    bridge = ApiBridge()
+    bridge._music_active = True  # noqa: SLF001 - direct state injection
+    result = bridge.music_download("netease", [{"id": "1"}])
+    assert result["ok"] is False
+
+
+def test_bridge_music_status_and_stop_defaults() -> None:
+    bridge = ApiBridge()
+    status = bridge.get_music_status()
+    assert status["active"] is False
+    assert status["total"] == 0
+    assert bridge.music_stop() == {"ok": True}
+
+
+def test_bridge_music_settings_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.settings.settings_file",
+        lambda: tmp_path / "music_settings.json",
+    )
+    bridge = ApiBridge()
+    bridge.save_music_settings({"level": "lossless", "save_lyric": False})
+    stored = bridge.get_music_settings()
+    assert stored["level"] == "lossless"
+    assert stored["save_lyric"] is False
+
+
+def test_bridge_health_start_and_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_health(platform: str, **_kwargs: Any) -> dict[str, Any]:
+        return {"ok": platform == "a", "elapsed_ms": 120, "error": ""}
+
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.providers.health_check", fake_health
+    )
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.providers.available_labels",
+        lambda: [("a", "A"), ("b", "B")],
+    )
+    bridge = ApiBridge()
+    assert bridge.music_health_start() == {"ok": True}
+    thread = bridge._health_thread
+    assert thread is not None
+    thread.join(timeout=10)
+    rows = {row["key"]: row for row in bridge.get_music_health()}
+    assert rows["a"]["ok"] is True
+    assert rows["a"]["done"] is True
+    assert rows["a"]["elapsed_text"] == "120ms"
+    assert rows["b"]["ok"] is False
+
+
+def test_bridge_open_url_ignores_unsafe_schemes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", opened.append)
+    bridge = ApiBridge()
+    bridge.open_url("javascript:alert(1)")
+    bridge.open_url("file:///etc/passwd")
+    bridge.open_url("https://example.invalid/book")
+    assert opened == ["https://example.invalid/book"]
+
+
+def test_bridge_prefs_round_trip(tmp_path: Path) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    patcher = pytest.MonkeyPatch()
+    try:
+        patcher.setattr(wa, "_prefs_path", lambda: tmp_path / "prefs.json")
+        wa._save_prefs({"theme": "dark"})
+        assert wa._load_prefs() == {"theme": "dark"}
+        wa._save_prefs({"lang": "zh"})
+        assert wa._load_prefs() == {"theme": "dark", "lang": "zh"}
+    finally:
+        patcher.undo()
+
+
+def test_absolutize_argv0_resolves_relative_paths() -> None:
+    from novel_downloader.apps.desktop import main as desktop_main_mod
+
+    original = sys.argv[0]
+    try:
+        # A relative path that exists is made absolute before the chdir.
+        sys.argv[0] = "setup.py" if Path("setup.py").is_file() else "pyproject.toml"
+        expected = os.path.abspath(sys.argv[0])
+        desktop_main_mod._absolutize_argv0()
+        assert os.path.isabs(sys.argv[0])
+        assert sys.argv[0] == expected
+
+        # Absolute paths and missing files are left untouched.
+        sys.argv[0] = str(Path("no_such_script.py"))
+        desktop_main_mod._absolutize_argv0()
+        assert sys.argv[0] == str(Path("no_such_script.py"))
+    finally:
+        sys.argv[0] = original

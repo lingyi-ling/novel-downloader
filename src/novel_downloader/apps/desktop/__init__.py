@@ -3,7 +3,8 @@
 novel_downloader.apps.desktop
 -----------------------------
 
-Native CustomTkinter desktop client.
+Native desktop client: a pywebview window hosting the single-file HTML front
+end (:mod:`.web_assets`), driven through the :class:`.webview_app.ApiBridge`.
 """
 
 __all__ = ["desktop_main"]
