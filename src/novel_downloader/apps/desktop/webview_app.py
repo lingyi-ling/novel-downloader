@@ -56,6 +56,27 @@ _PREFS_FILENAME = "desktop_prefs.json"
 #: Name of the shortcut files created on the desktop and in the Start menu.
 _SHORTCUT_NAME = "Novel Downloader.lnk"
 
+#: GitHub endpoints used by the in-app update check.
+_RELEASES_API = (
+    "https://api.github.com/repos/lingyi-ling/novel-downloader/releases/latest"
+)
+_RELEASES_PAGE = "https://github.com/lingyi-ling/novel-downloader/releases/latest"
+#: Minimum interval between update checks (24 hours).
+_UPDATE_CHECK_INTERVAL = 24 * 3600.0
+
+
+def _version_tuple(raw: str) -> tuple[int, ...]:
+    """Parse ``"1.2.3"`` (optionally with a non-numeric suffix) for compares."""
+    head = str(raw or "").strip().split("-")[0].lstrip("vV")
+    parts: list[int] = []
+    for chunk in head.split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) or (0,)
+
+
 #: PowerShell template that writes the .lnk files via the WScript.Shell COM
 #: object.  ``{target}`` is the frozen executable path (single quotes doubled).
 _SHORTCUT_PS = """\
@@ -202,6 +223,11 @@ def _i18n_catalog() -> dict[str, str]:
         ),
         "Click here to create a desktop shortcut": t(
             "Click here to create a desktop shortcut"
+        ),
+        # updates
+        "Update available: v{ver}": t("Update available: v{ver}"),
+        "New version {ver} is out — click to download": t(
+            "New version {ver} is out — click to download"
         ),
         # subtitles
         "Search novels across all sites, ranked by quality": t(
@@ -523,6 +549,52 @@ class ApiBridge:
             play_notification_sound()
         except Exception:  # noqa: BLE001 - sound is cosmetic
             logger.debug("Notification sound failed", exc_info=True)
+
+    def check_update(self) -> dict[str, Any]:
+        """
+        Query GitHub for a newer release (throttled to once per 24 hours).
+
+        Never raises: any failure — offline, rate-limited, bad payload —
+        reports ``{"available": False}`` so the front end can stay quiet.
+
+        :return: ``{"available", "latest", "url", "message"?}``.
+        """
+        prefs = _load_prefs()
+        last = float(prefs.get("last_update_check") or 0.0)
+        now = time.time()
+        if now - last < _UPDATE_CHECK_INTERVAL:
+            return {"available": False, "throttled": True}
+        _save_prefs({"last_update_check": str(now)})
+
+        current = self._version()
+        try:
+            import json as _json
+            import urllib.request
+
+            req = urllib.request.Request(  # noqa: S310 - fixed https URL
+                _RELEASES_API,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "novel-downloader-desktop",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                payload = _json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 - offline is normal
+            logger.debug("Update check failed: %s", exc)
+            return {"available": False, "error": format_error(exc)}
+
+        latest = str(payload.get("tag_name") or "").lstrip("vV")
+        url = str(payload.get("html_url") or _RELEASES_PAGE)
+        if not latest or not _version_tuple(latest) > _version_tuple(current):
+            return {"available": False, "latest": latest, "url": url}
+        return {
+            "available": True,
+            "current": current,
+            "latest": latest,
+            "url": url,
+            "message": t("Update available: v{ver}").replace("{ver}", latest),
+        }
 
     @staticmethod
     def shortcut_exists() -> bool:

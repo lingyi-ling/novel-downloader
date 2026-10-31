@@ -493,7 +493,61 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{APP_NAME} built successfully.")
     if result.exe is not None:
         print(f'  Run it with: "{result.exe}"')
+    installer = _maybe_build_installer(root)
+    if installer is not None:
+        print(f'  Installer  : "{installer}"')
     return 0
+
+
+def _find_iscc() -> str | None:
+    """Locate the Inno Setup compiler, or ``None`` when absent."""
+    from shutil import which
+
+    found = which("iscc")
+    if found:
+        return found
+    for candidate in (
+        Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"),
+        Path(r"C:\Program Files\Inno Setup 6\ISCC.exe"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _maybe_build_installer(root: Path) -> Path | None:
+    """
+    Compile the Inno Setup installer when the toolchain is available.
+
+    A missing ISCC is a warning, not an error: the zip bundle stays the
+    baseline artifact and the installer is an optional extra.
+    """
+    version = "unknown"
+    try:
+        from novel_downloader import __version__
+
+        version = str(__version__)
+    except ImportError:
+        pass
+    iscc = _find_iscc()
+    if iscc is None:
+        print(
+            "  Installer  : skipped (Inno Setup 6 not installed; "
+            "install it or run iscc manually, see packaging/noveldl_installer.iss)",
+        )
+        return None
+    cmd = [
+        iscc,
+        f"/DAppVersion={version}",
+        str(root / "packaging" / "noveldl_installer.iss"),
+    ]
+    print("  Compiling installer:", " ".join(cmd))
+    proc = subprocess.run(cmd, cwd=root, check=False)  # noqa: S603 - fixed args
+    if proc.returncode != 0:
+        print("  Installer compilation FAILED", file=sys.stderr)
+        return None
+    out = root / "dist" / f"NovelDownloader-setup-{version}-x64.exe"
+    return out if out.is_file() else None
 
 
 if __name__ == "__main__":

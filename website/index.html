@@ -22,6 +22,7 @@
       <a href="#features">特性</a>
       <a href="#clients">四端</a>
       <a href="#start">快速开始</a>
+      <a href="#download">下载</a>
       <a href="https://github.com/lingyi-ling/novel-downloader" target="_blank" rel="noopener">GitHub</a>
     </nav>
     <button class="icon-btn" id="theme-btn" aria-label="切换主题">
@@ -190,6 +191,34 @@ cd novel-downloader/android
 <span class="c"># 安装后在本机跑 novel-api，
 # App 内设置 API 地址即连上同一套服务层</span></code></pre>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== DOWNLOAD -->
+  <section class="section section-alt" id="download">
+    <div class="section-inner">
+      <h2 class="section-title">下载</h2>
+      <p class="section-sub">打包好的成品，或从源码开始。</p>
+      <div class="grid grid-3">
+        <a class="card download-card reveal" href="https://github.com/lingyi-ling/novel-downloader/releases/latest" target="_blank" rel="noopener">
+          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></svg></div>
+          <h3>Windows 桌面</h3>
+          <p>NovelDownloader.zip 解压即用（无需 Python），应用内一键创建桌面快捷方式；附 novel-cli / novel-api 独立 exe。</p>
+          <span class="dl-link">前往 Releases →</span>
+        </a>
+        <a class="card download-card reveal" href="https://pypi.org/project/novel-downloader/" target="_blank" rel="noopener">
+          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg></div>
+          <h3>PyPI</h3>
+          <p><code>pip install -U novel-downloader</code> 得到 novel-cli / novel-api / novel-desktop 三个入口；可选 <code>[api]</code> <code>[music]</code> 扩展组。</p>
+          <span class="dl-link">PyPI 项目页 →</span>
+        </a>
+        <a class="card download-card reveal" href="https://github.com/lingyi-ling/novel-downloader/actions/workflows/build.yml" target="_blank" rel="noopener">
+          <div class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg></div>
+          <h3>Android</h3>
+          <p>CI 持续构建 debug APK（Actions 工件），或自行 <code>./gradlew assembleRelease</code> 出签名包；需配合本机 novel-api 使用。</p>
+          <span class="dl-link">构建工件 →</span>
+        </a>
       </div>
     </div>
   </section>

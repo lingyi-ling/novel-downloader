@@ -2445,3 +2445,11 @@ msgstr "仅支持在 Windows 上创建快捷方式"
 msgid "Click here to create a desktop shortcut"
 msgstr "点这里创建桌面快捷方式"
 
+
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid "Update available: v{ver}"
+msgstr "发现新版本：v{ver}"
+
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid "New version {ver} is out — click to download"
+msgstr "新版本 {ver} 已发布——点击下载"

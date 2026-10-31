@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
@@ -1052,3 +1053,104 @@ def test_create_shortcut_surfaces_powershell_failure(
     result = wa.ApiBridge().create_shortcut()
     assert result["ok"] is False
     assert "boom" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# Update check (GitHub releases, throttled)
+# ---------------------------------------------------------------------------
+
+
+def test_version_tuple_parsing() -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    assert wa._version_tuple("1.2.3") == (1, 2, 3)
+    assert wa._version_tuple("v2.0") == (2, 0)
+    assert wa._version_tuple("1.10.0-rc1") == (1, 10, 0)
+    assert wa._version_tuple("") == (0,)
+
+
+def _fake_urlopen(payload: dict[str, Any] | None, error: Exception | None = None):
+    class FakeResp:
+        def __enter__(self) -> FakeResp:
+            return self
+
+        def __exit__(self, *_args: Any) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            import json as _json
+
+            return _json.dumps(payload or {}).encode("utf-8")
+
+    def call(*_args: Any, **_kwargs: Any) -> FakeResp:
+        if error is not None:
+            raise error
+        return FakeResp()
+
+    return call
+
+
+def test_check_update_reports_newer_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(wa, "_load_prefs", lambda: {"last_update_check": "0"})
+    saved: dict[str, Any] = {}
+    monkeypatch.setattr(wa, "_save_prefs", lambda v: saved.update(v))
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen({"tag_name": "v9.9.9", "html_url": "https://example.invalid/r"}),
+    )
+    result = wa.ApiBridge().check_update()
+    assert result["available"] is True
+    assert result["latest"] == "9.9.9"
+    assert result["url"] == "https://example.invalid/r"
+    assert "last_update_check" in saved
+
+
+def test_check_update_quiet_when_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+    from novel_downloader import __version__
+
+    monkeypatch.setattr(wa, "_load_prefs", lambda: {})
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen({"tag_name": f"v{__version__}", "html_url": "u"}),
+    )
+    assert wa.ApiBridge().check_update()["available"] is False
+
+
+def test_check_update_throttled_within_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(
+        wa, "_load_prefs", lambda: {"last_update_check": str(time.time())}
+    )
+    calls: list[int] = []
+
+    def _record(*_args: Any, **_kwargs: Any) -> None:
+        calls.append(1)
+
+    monkeypatch.setattr("urllib.request.urlopen", _record)
+    result = wa.ApiBridge().check_update()
+    assert result["throttled"] is True
+    assert not calls
+
+
+def test_check_update_survives_offline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(wa, "_load_prefs", lambda: {})
+    monkeypatch.setattr(
+        "urllib.request.urlopen", _fake_urlopen(None, error=OSError("offline"))
+    )
+    result = wa.ApiBridge().check_update()
+    assert result["available"] is False
+    assert "error" in result

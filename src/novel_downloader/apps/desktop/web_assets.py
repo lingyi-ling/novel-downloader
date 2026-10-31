@@ -551,11 +551,19 @@ async function call(method, ...args) {
   catch (err) { toast((err && err.message) || String(err), "err"); throw err; }
 }
 
-function toast(msg, kind = "info", ms = 3800) {
+function toast(msg, kind = "info", ms = 3800, onclick = null) {
   const box = document.createElement("div");
   box.className = "toast " + kind;
   box.innerHTML = `<span class="bar"></span><span class="msg">${esc(msg)}</span><button class="x">✕</button>`;
   box.querySelector(".x").onclick = () => dismiss();
+  if (onclick) {
+    box.style.cursor = "pointer";
+    box.addEventListener("click", e => {
+      if (e.target.closest(".x")) return;
+      onclick();
+      dismiss();
+    });
+  }
   $("#toasts").appendChild(box);
   const timer = setTimeout(dismiss, ms);
   function dismiss() { clearTimeout(timer); box.classList.add("leaving"); setTimeout(() => box.remove(), 240); }
@@ -1046,6 +1054,12 @@ function boot() {
     if (state.is_frozen && !state.shortcut_exists) {
       setTimeout(() => toast(t("Click here to create a desktop shortcut"), "info", 6000), 1200);
     }
+    api("check_update").then(r => {
+      if (r && r.available && r.url) {
+        const msg = r.message || t("New version {ver} is out — click to download").replace("{ver}", r.latest || "");
+        toast(msg, "info", 8000, () => api("open_url", r.url).catch(() => {}));
+      }
+    }).catch(() => {});
     if (state.sites_csv) $("#q-sites").value = state.sites_csv;
     renderTracks();
     initMusic().catch(() => {});

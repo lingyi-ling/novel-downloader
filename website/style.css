@@ -198,6 +198,19 @@ svg { display: block; }
 }
 .client-card p:last-child { font-size: 13.5px; color: var(--text-2); }
 
+.download-card { display: flex; flex-direction: column; }
+.download-card p { flex: 1; }
+.download-card code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px; color: var(--accent);
+  background: var(--accent-soft); border-radius: 5px; padding: 1px 5px;
+}
+.dl-link {
+  margin-top: 14px; font-size: 13.5px; font-weight: 600; color: var(--accent);
+  transition: transform .18s ease;
+}
+.download-card:hover .dl-link { transform: translateX(4px); }
+
 /* ============================================================ tabs / code */
 .tabs {
   max-width: 780px; margin: 0 auto;

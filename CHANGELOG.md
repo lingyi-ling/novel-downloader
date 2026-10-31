@@ -2,6 +2,10 @@
 
 ### Feat
 
+- **desktop**: 应用内更新检查——每 24 小时向 GitHub Releases 查询一次，新版本以可点击 toast 提示直达下载页；离线/限流静默降级
+- **desktop**: 成熟度补全——运行日志落盘（app 目录 logs/ 下 1MB×3 轮转）、单实例锁（二次启动弹原生提示并退出，防双实例争抢下载队列）
+- **packaging**: Inno Setup 安装器脚本（`packaging/noveldl_installer.iss`，按用户安装免 UAC、自动建桌面+开始菜单图标、卸载保留用户数据），`build_desktop.py` 检测到 ISCC 时自动产出 setup exe，未安装则优雅跳过
+- **website**: 官网新增「下载」区（Windows 桌面 / PyPI / Android 工件三卡直达）
 - **desktop**: 新增「创建桌面快捷方式」——侧边栏一键在桌面和开始菜单生成 .lnk（PowerShell COM），打包版首次启动自动提示；补齐萌新从 zip 解压到桌面图标启动的最后一公里
 - **android**: 任务页新增登录凭据请求 UI——轮询 `/api/v1/login/requests`，需要登录的站点在任务页顶部显示凭据卡片，点开对话框按字段输入（password/cookie 掩码、必填校验、prefill 回填），提交后任务自动继续；含 MockWebServer 契约测试
 - **android**: 完成发布签名链路（`android/keystore.properties` + `release.jks`，git-ignored），`assembleRelease` 产出已验签的正式 APK
