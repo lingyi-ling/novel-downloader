@@ -23,7 +23,12 @@ from typing import Annotated
 from fastapi import Header, HTTPException, Request, status
 
 #: Error text used by both the dependency and the ``/downloads`` middleware.
-AUTH_ERROR_DETAIL = "Invalid or missing API token"
+#: Includes the two accepted header forms so API consumers can self-serve;
+#: both call sites import this constant as the single source.
+AUTH_ERROR_DETAIL = (
+    "Invalid or missing API token. "
+    "Send 'Authorization: Bearer <token>' or 'X-API-Key: <token>'."
+)
 
 
 def extract_token(authorization: str | None, x_api_key: str | None) -> str | None:

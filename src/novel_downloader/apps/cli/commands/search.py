@@ -220,7 +220,12 @@ class SearchCmd(Command):
                             login_cfg=adapter.get_login_config(site),
                         )
                         if not succ:
-                            ui.error(t("Login failed."))
+                            ui.error(
+                                t(
+                                    "Login failed: please check your cookies "
+                                    "or run 'novel-cli login {site}' first."
+                                ).format(site=site)
+                            )
                             raise SystemExit(EXIT_FAILURE)
 
                     for book in books:

@@ -877,7 +877,9 @@ def _load_music_components() -> _MusicComponents:
     except Exception as exc:  # noqa: BLE001 - optional dependency guard
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=MSG_MUSIC_UNAVAILABLE.format(error=f"{type(exc).__name__}: {exc}"),
+            # Only the exception class name is exposed; the message may carry
+            # internal paths/module names (same anti-leak rule as the 500).
+            detail=MSG_MUSIC_UNAVAILABLE.format(error=type(exc).__name__),
         ) from exc
 
     return _MusicComponents(
@@ -901,7 +903,10 @@ def _create_provider(components: _MusicComponents, platform: str) -> Any:
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=MSG_UNKNOWN_MUSIC_PLATFORM.format(platform=platform),
+            detail=MSG_UNKNOWN_MUSIC_PLATFORM.format(
+                platform=platform,
+                keys=", ".join(_music_platform_keys(components)),
+            ),
         ) from exc
     except Exception as exc:  # noqa: BLE001 - provider construction
         raise HTTPException(
@@ -939,10 +944,13 @@ def _music_platform_keys(components: _MusicComponents) -> list[str]:
 
 def _require_music_platform(components: _MusicComponents, platform: str) -> None:
     """Raise ``400`` for a platform that is not registered."""
-    if platform not in _music_platform_keys(components):
+    keys = _music_platform_keys(components)
+    if platform not in keys:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=MSG_UNKNOWN_MUSIC_PLATFORM.format(platform=platform),
+            detail=MSG_UNKNOWN_MUSIC_PLATFORM.format(
+                platform=platform, keys=", ".join(keys)
+            ),
         )
 
 

@@ -113,7 +113,7 @@ msgstr "清理应用日志、缓存与书籍数据"
 #: src/novel_downloader/apps/cli/commands/clean.py:40
 #: src/novel_downloader/apps/cli/commands/config.py:30
 #: src/novel_downloader/apps/cli/commands/follow.py:226
-#: src/novel_downloader/apps/cli/commands/music.py:349
+#: src/novel_downloader/apps/cli/commands/music.py:350
 #: src/novel_downloader/apps/cli/commands/sources.py:113
 msgid "Subcommands"
 msgstr "子命令"
@@ -148,7 +148,7 @@ msgstr "确定要删除内部状态吗?"
 #: src/novel_downloader/apps/cli/commands/clean.py:339
 #: src/novel_downloader/apps/cli/commands/clean.py:395
 #: src/novel_downloader/apps/cli/commands/clean.py:441
-#: src/novel_downloader/apps/cli/commands/music.py:565
+#: src/novel_downloader/apps/cli/commands/music.py:579
 #: src/novel_downloader/apps/cli/commands/storage.py:147
 #: src/novel_downloader/apps/cli/interactive.py:84
 #: src/novel_downloader/apps/cli/interactive.py:103
@@ -653,6 +653,7 @@ msgstr "导出格式：txt、epub、html。默认取配置文件。"
 #: src/novel_downloader/apps/cli/commands/download.py:68
 #: src/novel_downloader/apps/cli/commands/export.py:66
 #: src/novel_downloader/apps/cli/commands/follow.py:313
+#: src/novel_downloader/apps/cli/commands/music.py:376
 #: src/novel_downloader/apps/cli/commands/sources.py:127
 #: src/novel_downloader/apps/cli/commands/storage.py:175
 msgid "Print machine-readable JSON on stdout and exit."
@@ -679,7 +680,6 @@ msgid "Could not resolve site and book from URL: {url}"
 msgstr "无法从 URL 解析站点和书籍: {url}"
 
 #: src/novel_downloader/apps/cli/commands/download.py:118
-#: src/novel_downloader/apps/cli/interactive.py:120
 msgid "The provided URL does not contain a valid book ID."
 msgstr "提供的 URL 不包含有效的书籍 ID"
 
@@ -700,8 +700,6 @@ msgid "Failed to read book IDs from configuration: {err}"
 msgstr "从配置读取书籍 ID 失败: {err}"
 
 #: src/novel_downloader/apps/cli/commands/download.py:194
-#: src/novel_downloader/apps/cli/commands/search.py:223
-#: src/novel_downloader/apps/cli/interactive.py:153
 #: src/novel_downloader/apps/core/adapters.py:74
 #: src/novel_downloader/apps/login/main.py:592
 #: src/novel_downloader/apps/login/main.py:707
@@ -709,14 +707,14 @@ msgid "Login failed."
 msgstr "登录失败"
 
 #: src/novel_downloader/apps/cli/commands/download.py:201
-#: src/novel_downloader/apps/cli/commands/search.py:230
-#: src/novel_downloader/apps/cli/interactive.py:160
+#: src/novel_downloader/apps/cli/commands/search.py:235
+#: src/novel_downloader/apps/cli/interactive.py:180
 #, python-brace-format
 msgid "'{site}' is currently not supported: {err}"
 msgstr "暂不支持站点 '{site}': {err}"
 
 #: src/novel_downloader/apps/cli/commands/download.py:204
-#: src/novel_downloader/apps/cli/commands/search.py:236
+#: src/novel_downloader/apps/cli/commands/search.py:241
 #, python-brace-format
 msgid "Site error ({site}): {err}"
 msgstr "站点错误 ({site}): {err}"
@@ -742,12 +740,12 @@ msgid "Export stage (e.g. raw, cleaner). Defaults to last stage."
 msgstr "导出阶段 (例如 raw, cleaner) 默认使用最后阶段"
 
 #: src/novel_downloader/apps/cli/commands/export.py:103
-#: src/novel_downloader/apps/cli/interactive.py:190
+#: src/novel_downloader/apps/cli/interactive.py:210
 msgid "No site selected."
 msgstr "未选择任何站点"
 
 #: src/novel_downloader/apps/cli/commands/export.py:126
-#: src/novel_downloader/apps/cli/interactive.py:196
+#: src/novel_downloader/apps/cli/interactive.py:216
 msgid "No books selected."
 msgstr "未选择任何书籍"
 
@@ -866,8 +864,8 @@ msgid "Site"
 msgstr "站点"
 
 #: src/novel_downloader/apps/cli/commands/follow.py:346
-#: src/novel_downloader/apps/cli/commands/music.py:216
-#: src/novel_downloader/apps/cli/commands/music.py:262
+#: src/novel_downloader/apps/cli/commands/music.py:217
+#: src/novel_downloader/apps/cli/commands/music.py:263
 #: src/novel_downloader/apps/cli/prompts.py:145
 #: src/novel_downloader/apps/cli/prompts.py:202
 #: src/novel_downloader/apps/desktop/ui.py:385
@@ -1009,32 +1007,32 @@ msgstr "会话 Cookies 已保存至 {path}"
 msgid "Login was not completed; no cookies were saved."
 msgstr "登录未完成，未保存任何 Cookies。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:115
+#: src/novel_downloader/apps/cli/commands/music.py:116
 #, python-brace-format
 msgid ""
 "Music support is unavailable because optional dependencies are missing. "
 "Install them with: pip install \"novel-downloader[music]\" ({error})"
 msgstr "音乐功能不可用：缺少可选依赖。请安装：pip install \"novel-downloader[music]\"（{error}）"
 
-#: src/novel_downloader/apps/cli/commands/music.py:129
-#: src/novel_downloader/apps/cli/commands/music.py:775
+#: src/novel_downloader/apps/cli/commands/music.py:130
+#: src/novel_downloader/apps/cli/commands/music.py:789
 #, python-brace-format
 msgid "Unknown music platform: {platform}. Available: {keys}"
 msgstr "未知音乐平台：{platform}。可用平台：{keys}"
 
-#: src/novel_downloader/apps/cli/commands/music.py:136
+#: src/novel_downloader/apps/cli/commands/music.py:137
 #, python-brace-format
 msgid "Could not start this platform: {error}"
 msgstr "无法启动该平台：{error}"
 
-#: src/novel_downloader/apps/cli/commands/music.py:151
+#: src/novel_downloader/apps/cli/commands/music.py:152
 msgid ""
 "NetEase login has expired. Log in again in a browser to refresh the music"
 " session (or run 'novel-cli login fanqienovel' for novel sites), then "
 "retry."
 msgstr "网易云登录已失效。请用浏览器重新登录以刷新音乐会话（小说站点可运行 'novel-cli login fanqienovel'），然后重试。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:169
+#: src/novel_downloader/apps/cli/commands/music.py:170
 #: src/novel_downloader/apps/cli/commands/search.py:182
 #: src/novel_downloader/apps/cli/interactive.py:75
 #: src/novel_downloader/apps/desktop/ui.py:1523
@@ -1042,25 +1040,25 @@ msgstr "网易云登录已失效。请用浏览器重新登录以刷新音乐会
 msgid "Searching for '{keyword}'..."
 msgstr "正在搜索 '{keyword}'..."
 
-#: src/novel_downloader/apps/cli/commands/music.py:177
+#: src/novel_downloader/apps/cli/commands/music.py:178
 #: src/novel_downloader/apps/cli/commands/search.py:151
 #: src/novel_downloader/apps/cli/interactive.py:79
 #, python-brace-format
 msgid "Search failed: {err}"
 msgstr "搜索失败: {err}"
 
-#: src/novel_downloader/apps/cli/commands/music.py:206
-#: src/novel_downloader/apps/cli/commands/music.py:216
-#: src/novel_downloader/apps/cli/commands/music.py:262
+#: src/novel_downloader/apps/cli/commands/music.py:207
+#: src/novel_downloader/apps/cli/commands/music.py:217
+#: src/novel_downloader/apps/cli/commands/music.py:263
 msgid "VIP"
 msgstr "VIP（会员）"
 
-#: src/novel_downloader/apps/cli/commands/music.py:215
+#: src/novel_downloader/apps/cli/commands/music.py:216
 msgid "Search results"
 msgstr "搜索结果"
 
-#: src/novel_downloader/apps/cli/commands/music.py:216
-#: src/novel_downloader/apps/cli/commands/music.py:262
+#: src/novel_downloader/apps/cli/commands/music.py:217
+#: src/novel_downloader/apps/cli/commands/music.py:263
 #: src/novel_downloader/apps/cli/prompts.py:29
 #: src/novel_downloader/apps/cli/prompts.py:73
 #: src/novel_downloader/apps/cli/prompts.py:145
@@ -1068,276 +1066,276 @@ msgstr "搜索结果"
 msgid "#"
 msgstr "序号"
 
-#: src/novel_downloader/apps/cli/commands/music.py:216
-#: src/novel_downloader/apps/cli/commands/music.py:262
+#: src/novel_downloader/apps/cli/commands/music.py:217
+#: src/novel_downloader/apps/cli/commands/music.py:263
 #: src/novel_downloader/apps/desktop/ui.py:741
 msgid "Artist"
 msgstr "歌手"
 
-#: src/novel_downloader/apps/cli/commands/music.py:216
-#: src/novel_downloader/apps/cli/commands/music.py:262
+#: src/novel_downloader/apps/cli/commands/music.py:217
+#: src/novel_downloader/apps/cli/commands/music.py:263
 #: src/novel_downloader/apps/desktop/ui.py:742
 msgid "Album"
 msgstr "专辑"
 
-#: src/novel_downloader/apps/cli/commands/music.py:216
-#: src/novel_downloader/apps/cli/commands/music.py:262
+#: src/novel_downloader/apps/cli/commands/music.py:217
+#: src/novel_downloader/apps/cli/commands/music.py:263
 #: src/novel_downloader/apps/desktop/ui.py:743
 msgid "Duration"
 msgstr "时长"
 
-#: src/novel_downloader/apps/cli/commands/music.py:259
+#: src/novel_downloader/apps/cli/commands/music.py:260
 #: src/novel_downloader/apps/cli/prompts.py:229
 #, python-brace-format
 msgid "Search Results · Page {page}/{total_pages}"
 msgstr "搜索结果 · 第 {page}/{total_pages} 页"
 
-#: src/novel_downloader/apps/cli/commands/music.py:269
+#: src/novel_downloader/apps/cli/commands/music.py:270
 #: src/novel_downloader/apps/cli/prompts.py:158
 msgid ""
 "Enter numbers (e.g. 1,3,5), 'a' for all, 'n' next, 'p' previous (Enter to"
 " cancel)"
 msgstr "输入序号 (如 1,3,5), 'a' 全选, 'n' 下一页, 'p' 上一页 (回车取消)"
 
-#: src/novel_downloader/apps/cli/commands/music.py:292
+#: src/novel_downloader/apps/cli/commands/music.py:293
 #: src/novel_downloader/apps/cli/prompts.py:177
 #: src/novel_downloader/apps/login/main.py:824
 msgid "Invalid input."
 msgstr "输入无效"
 
-#: src/novel_downloader/apps/cli/commands/music.py:317
+#: src/novel_downloader/apps/cli/commands/music.py:318
 #, python-brace-format
 msgid "No search result matches --pick value '{value}'."
 msgstr "没有与 --pick 值 '{value}' 匹配的搜索结果。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:340
+#: src/novel_downloader/apps/cli/commands/music.py:341
 msgid "Search and download songs from music platforms."
 msgstr "搜索并下载来自多个音乐平台的歌曲。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:368
+#: src/novel_downloader/apps/cli/commands/music.py:369
 msgid "List available music platforms."
 msgstr "列出可用的音乐平台。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:375
-#: src/novel_downloader/apps/cli/commands/music.py:768
+#: src/novel_downloader/apps/cli/commands/music.py:389
+#: src/novel_downloader/apps/cli/commands/music.py:782
 #: src/novel_downloader/apps/desktop/ui.py:619
 #: src/novel_downloader/apps/desktop/ui.py:2417
 msgid "No music platforms are available."
 msgstr "没有可用的音乐平台。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:382
+#: src/novel_downloader/apps/cli/commands/music.py:396
 msgid "Music platforms"
 msgstr "音乐平台"
 
-#: src/novel_downloader/apps/cli/commands/music.py:383
-#: src/novel_downloader/apps/cli/commands/music.py:809
+#: src/novel_downloader/apps/cli/commands/music.py:397
+#: src/novel_downloader/apps/cli/commands/music.py:823
 #: src/novel_downloader/apps/desktop/ui.py:636
 #: src/novel_downloader/apps/desktop/ui.py:815
 msgid "Platform"
 msgstr "平台"
 
-#: src/novel_downloader/apps/cli/commands/music.py:383
+#: src/novel_downloader/apps/cli/commands/music.py:397
 #: src/novel_downloader/apps/cli/commands/sources.py:230
 msgid "Name"
 msgstr "名称"
 
-#: src/novel_downloader/apps/cli/commands/music.py:383
+#: src/novel_downloader/apps/cli/commands/music.py:397
 msgid "Note"
 msgstr "备注"
 
-#: src/novel_downloader/apps/cli/commands/music.py:390
+#: src/novel_downloader/apps/cli/commands/music.py:404
 msgid "Search songs on a music platform."
 msgstr "在指定音乐平台搜索歌曲。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:394
+#: src/novel_downloader/apps/cli/commands/music.py:408
 #: src/novel_downloader/apps/cli/commands/search.py:49
 msgid "Search keyword"
 msgstr "搜索关键词"
 
-#: src/novel_downloader/apps/cli/commands/music.py:399
-#: src/novel_downloader/apps/cli/commands/music.py:484
-#: src/novel_downloader/apps/cli/commands/music.py:671
+#: src/novel_downloader/apps/cli/commands/music.py:413
+#: src/novel_downloader/apps/cli/commands/music.py:498
+#: src/novel_downloader/apps/cli/commands/music.py:685
 msgid "Music platform key (default: netease)."
 msgstr "音乐平台标识（默认：netease）。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:407
-#: src/novel_downloader/apps/cli/commands/music.py:492
-#: src/novel_downloader/apps/cli/commands/music.py:679
+#: src/novel_downloader/apps/cli/commands/music.py:421
+#: src/novel_downloader/apps/cli/commands/music.py:506
+#: src/novel_downloader/apps/cli/commands/music.py:693
 msgid "Maximum number of results (default: 20)."
 msgstr "最大结果数（默认：20）。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:413
+#: src/novel_downloader/apps/cli/commands/music.py:427
 msgid "Print search results as JSON on stdout and exit."
 msgstr "以 JSON 输出搜索结果并退出。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:421
-#: src/novel_downloader/apps/cli/commands/music.py:526
-#: src/novel_downloader/apps/cli/commands/music.py:692
+#: src/novel_downloader/apps/cli/commands/music.py:435
+#: src/novel_downloader/apps/cli/commands/music.py:540
+#: src/novel_downloader/apps/cli/commands/music.py:706
 #: src/novel_downloader/apps/cli/interactive.py:72
 msgid "No keyword entered."
 msgstr "未输入任何关键字"
 
-#: src/novel_downloader/apps/cli/commands/music.py:452
-#: src/novel_downloader/apps/cli/commands/music.py:542
-#: src/novel_downloader/apps/cli/commands/music.py:702
+#: src/novel_downloader/apps/cli/commands/music.py:466
+#: src/novel_downloader/apps/cli/commands/music.py:556
+#: src/novel_downloader/apps/cli/commands/music.py:716
 #: src/novel_downloader/apps/cli/commands/search.py:195
 #, python-brace-format
 msgid "No results found for '{keyword}'."
 msgstr "未找到与 '{keyword}' 相关的结果。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:456
-#: src/novel_downloader/apps/cli/commands/music.py:546
-#: src/novel_downloader/apps/cli/commands/music.py:706
+#: src/novel_downloader/apps/cli/commands/music.py:470
+#: src/novel_downloader/apps/cli/commands/music.py:560
+#: src/novel_downloader/apps/cli/commands/music.py:720
 #: src/novel_downloader/apps/cli/commands/search.py:199
 #: src/novel_downloader/apps/desktop/ui.py:1582
 #, python-brace-format
 msgid "Found {count} result(s) for '{keyword}'."
 msgstr "找到 {count} 条结果（'{keyword}'）。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:465
+#: src/novel_downloader/apps/cli/commands/music.py:479
 msgid "Search and download songs from a music platform."
 msgstr "在指定音乐平台搜索并下载歌曲。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:473
+#: src/novel_downloader/apps/cli/commands/music.py:487
 msgid "Keyword to search for before downloading."
 msgstr "下载前要搜索的关键词。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:478
+#: src/novel_downloader/apps/cli/commands/music.py:492
 msgid "Keyword to search for (alternative to the positional form)."
 msgstr "要搜索的关键词（位置参数的替代写法）。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:499
+#: src/novel_downloader/apps/cli/commands/music.py:513
 msgid "Audio quality level (default: from music settings, usually exhigh)."
 msgstr "音质档位（默认取音乐设置，通常为 exhigh）。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:505
+#: src/novel_downloader/apps/cli/commands/music.py:519
 msgid "Output directory (default: from music settings)."
 msgstr "输出目录（默认取音乐设置）。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:511
+#: src/novel_downloader/apps/cli/commands/music.py:525
 msgid ""
 "Download the given search result index/indices (1-based) or song ID(s) "
 "without prompting."
 msgstr "无需确认，直接下载指定的搜索结果序号（从 1 开始）或歌曲 ID。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:518
+#: src/novel_downloader/apps/cli/commands/music.py:532
 msgid "Download every search result without prompting."
 msgstr "无需确认，直接下载全部搜索结果。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:560
+#: src/novel_downloader/apps/cli/commands/music.py:574
 msgid "Non-interactive input requires --pick N or --yes to choose songs."
 msgstr "非交互输入需要 --pick N 或 --yes 来选择歌曲。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:571
+#: src/novel_downloader/apps/cli/commands/music.py:585
 msgid ""
 "NetEase is not logged in; member-only tracks may fail. Log in via the "
 "browser to download them."
 msgstr "网易云未登录；会员曲目可能下载失败。可通过浏览器登录后再下载。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:586
+#: src/novel_downloader/apps/cli/commands/music.py:600
 #: src/novel_downloader/apps/desktop/ui.py:2202
 #, python-brace-format
 msgid "Output directory: {path}"
 msgstr "输出目录：{path}"
 
-#: src/novel_downloader/apps/cli/commands/music.py:587
+#: src/novel_downloader/apps/cli/commands/music.py:601
 #, python-brace-format
 msgid "Audio quality: {level}"
 msgstr "音质：{level}"
 
-#: src/novel_downloader/apps/cli/commands/music.py:589
+#: src/novel_downloader/apps/cli/commands/music.py:603
 msgid "Downloading"
 msgstr "下载中"
 
-#: src/novel_downloader/apps/cli/commands/music.py:589
+#: src/novel_downloader/apps/cli/commands/music.py:603
 msgid "song"
 msgstr "歌曲"
 
-#: src/novel_downloader/apps/cli/commands/music.py:603
+#: src/novel_downloader/apps/cli/commands/music.py:617
 #: src/novel_downloader/apps/desktop/ui.py:2700
 #, python-brace-format
 msgid "Download failed: {error}"
 msgstr "下载失败：{error}"
 
-#: src/novel_downloader/apps/cli/commands/music.py:609
+#: src/novel_downloader/apps/cli/commands/music.py:623
 #, python-brace-format
 msgid "Failed: {name} ({reason})"
 msgstr "失败：{name}（{reason}）"
 
-#: src/novel_downloader/apps/cli/commands/music.py:611
+#: src/novel_downloader/apps/cli/commands/music.py:625
 #: src/novel_downloader/apps/desktop/ui.py:2684
 #, python-brace-format
 msgid "Done: {ok} succeeded, {skip} skipped, {fail} failed"
 msgstr "完成：成功 {ok} 首，跳过 {skip} 首，失败 {fail} 首"
 
-#: src/novel_downloader/apps/cli/commands/music.py:656
+#: src/novel_downloader/apps/cli/commands/music.py:670
 msgid "Export search results to an M3U playlist (no downloading)."
 msgstr "将搜索结果导出为 M3U 歌单（不下载）。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:665
+#: src/novel_downloader/apps/cli/commands/music.py:679
 msgid "Keyword used to search for the tracks to add."
 msgstr "用于搜索待添加歌曲的关键词。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:684
+#: src/novel_downloader/apps/cli/commands/music.py:698
 msgid "Playlist path (default: <output directory>/<keyword>.m3u8)."
 msgstr "歌单路径（默认：<输出目录>/<关键词>.m3u8）。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:715
+#: src/novel_downloader/apps/cli/commands/music.py:729
 #, python-brace-format
 msgid ""
 "Skipped {count} track(s) without a local file path; only already "
 "downloaded tracks are written to the playlist."
 msgstr "已跳过 {count} 首没有本地路径的歌曲；歌单只包含已下载的歌曲。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:722
+#: src/novel_downloader/apps/cli/commands/music.py:736
 msgid ""
 "No matched track has a local file path; no playlist was written. Download"
 " the tracks first."
 msgstr "匹配到的歌曲都没有本地文件路径，未写入歌单。请先下载歌曲。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:735
+#: src/novel_downloader/apps/cli/commands/music.py:749
 #, python-brace-format
 msgid "Could not write playlist: {error}"
 msgstr "无法写入歌单：{error}"
 
-#: src/novel_downloader/apps/cli/commands/music.py:739
+#: src/novel_downloader/apps/cli/commands/music.py:753
 #, python-brace-format
 msgid "Exported {count} track(s) to {path}"
 msgstr "已导出 {count} 首歌曲到 {path}"
 
-#: src/novel_downloader/apps/cli/commands/music.py:747
+#: src/novel_downloader/apps/cli/commands/music.py:761
 msgid "Check whether music platforms can run a search."
 msgstr "检查音乐平台是否可执行搜索。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:754
+#: src/novel_downloader/apps/cli/commands/music.py:768
 msgid "Music platform key to check (default: every platform)."
 msgstr "要检查的音乐平台标识（默认：全部平台）。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:760
+#: src/novel_downloader/apps/cli/commands/music.py:774
 msgid "Keyword used for the connectivity probe (default: test)."
 msgstr "连通性探测使用的关键词（默认：test）。"
 
-#: src/novel_downloader/apps/cli/commands/music.py:790
+#: src/novel_downloader/apps/cli/commands/music.py:804
 #, python-brace-format
 msgid "Checking {platform}..."
 msgstr "正在检查 {platform}…"
 
-#: src/novel_downloader/apps/cli/commands/music.py:801
+#: src/novel_downloader/apps/cli/commands/music.py:815
 #: src/novel_downloader/apps/cli/commands/sources.py:207
 #: src/novel_downloader/apps/cli/commands/sources.py:250
 #: src/novel_downloader/apps/cli/commands/sources.py:272
 msgid "ok"
 msgstr "正常"
 
-#: src/novel_downloader/apps/cli/commands/music.py:801
+#: src/novel_downloader/apps/cli/commands/music.py:815
 msgid "FAIL"
 msgstr "失败"
 
-#: src/novel_downloader/apps/cli/commands/music.py:808
+#: src/novel_downloader/apps/cli/commands/music.py:822
 msgid "Music platform health"
 msgstr "音乐平台健康检查"
 
-#: src/novel_downloader/apps/cli/commands/music.py:809
+#: src/novel_downloader/apps/cli/commands/music.py:823
 #: src/novel_downloader/apps/cli/commands/sources.py:236
 #: src/novel_downloader/apps/desktop/formatting.py:484
 #: src/novel_downloader/apps/desktop/ui.py:429
@@ -1345,11 +1343,11 @@ msgstr "音乐平台健康检查"
 msgid "Status"
 msgstr "状态"
 
-#: src/novel_downloader/apps/cli/commands/music.py:809
+#: src/novel_downloader/apps/cli/commands/music.py:823
 msgid "Time (ms)"
 msgstr "耗时（毫秒）"
 
-#: src/novel_downloader/apps/cli/commands/music.py:809
+#: src/novel_downloader/apps/cli/commands/music.py:823
 #: src/novel_downloader/apps/desktop/formatting.py:488
 #: src/novel_downloader/apps/desktop/ui.py:507
 #: src/novel_downloader/apps/desktop/ui.py:818
@@ -1411,6 +1409,14 @@ msgstr "跳过（浏览器辅助站点）"
 #, python-brace-format
 msgid "{done} site(s) completed / {failed} failed / {skipped} skipped"
 msgstr "{done} 个站点完成 / {failed} 个失败 / {skipped} 个跳过"
+
+#: src/novel_downloader/apps/cli/commands/search.py:225
+#: src/novel_downloader/apps/cli/interactive.py:170
+#, python-brace-format
+msgid ""
+"Login failed: please check your cookies or run 'novel-cli login {site}' "
+"first."
+msgstr "登录失败：请检查 Cookie 或先运行 'novel-cli login {site}'。"
 
 #: src/novel_downloader/apps/cli/commands/sources.py:82
 #, python-brace-format
@@ -1684,45 +1690,55 @@ msgstr "请输入书籍 URL"
 msgid "No URL provided."
 msgstr "未提供 URL"
 
-#: src/novel_downloader/apps/cli/interactive.py:113
-msgid "Failed to recognize or parse the provided URL."
-msgstr "无法识别或解析提供的 URL"
+#: src/novel_downloader/apps/cli/interactive.py:115
+msgid ""
+"Could not recognize the URL. Paste a book page URL from a supported site "
+"(see 'novel-cli sources list')."
+msgstr "无法识别 URL。请粘贴受支持站点的书籍页面链接（参见 'novel-cli sources list'）。"
 
-#: src/novel_downloader/apps/cli/interactive.py:125
+#: src/novel_downloader/apps/cli/interactive.py:127
+msgid ""
+"Could not extract a valid book ID from the URL. Open the book's page and "
+"copy its URL."
+msgstr "无法从 URL 中提取有效的书籍 ID。请打开书籍页面并复制其 URL。"
+
+#: src/novel_downloader/apps/cli/interactive.py:135
 msgid "Enter site key"
 msgstr "请输入站点键值"
 
-#: src/novel_downloader/apps/cli/interactive.py:126
+#: src/novel_downloader/apps/cli/interactive.py:136
 msgid "Enter book ID"
 msgstr "请输入书籍 ID"
 
-#: src/novel_downloader/apps/cli/interactive.py:128
+#: src/novel_downloader/apps/cli/interactive.py:138
 msgid "Incomplete information."
 msgstr "信息不完整"
 
-#: src/novel_downloader/apps/cli/interactive.py:133
-msgid "Failed to initialize download parameters."
-msgstr "下载参数初始化失败"
+#: src/novel_downloader/apps/cli/interactive.py:145
+msgid ""
+"Failed to initialize download parameters. Check settings.toml or run "
+"'novel-cli doctor'."
+msgstr "初始化下载参数失败。请检查 settings.toml 或运行 'novel-cli doctor'。"
 
-#: src/novel_downloader/apps/cli/interactive.py:165
+#: src/novel_downloader/apps/cli/interactive.py:185
 #, python-brace-format
 msgid "Error while downloading from {site}: {err}"
 msgstr "从站点 {site} 下载时出错: {err}"
 
-#: src/novel_downloader/apps/cli/interactive.py:176
+#: src/novel_downloader/apps/cli/interactive.py:196
 msgid "Do you want to export this book now?"
 msgstr "是否立即导出此书？"
 
-#: src/novel_downloader/apps/cli/interactive.py:205
+#: src/novel_downloader/apps/cli/interactive.py:225
 #, python-brace-format
 msgid "Exporting book '{book_id}' in formats: {fmt}"
 msgstr "正在导出书籍 '{book_id}', 格式: {fmt}"
 
-#: src/novel_downloader/apps/cli/interactive.py:217
+#: src/novel_downloader/apps/cli/interactive.py:237
 msgid "Export completed successfully."
 msgstr "导出完成"
 
-#: src/novel_downloader/apps/cli/interactive.py:219
+#: src/novel_downloader/apps/cli/interactive.py:239
 #, python-brace-format
 msgid "Export failed: {err}"
 msgstr "导出失败: {err}"

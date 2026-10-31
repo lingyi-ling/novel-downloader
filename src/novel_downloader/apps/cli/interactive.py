@@ -110,14 +110,24 @@ async def _interactive_download(adapter: ConfigAdapter) -> None:
             return
         info = resolve_book_url(url)
         if not info:
-            ui.error(t("Failed to recognize or parse the provided URL."))
+            ui.error(
+                t(
+                    "Could not recognize the URL. Paste a book page URL "
+                    "from a supported site (see 'novel-cli sources list')."
+                )
+            )
             return
 
         book_id = info.get("book_id")
         site = info.get("site_key")
 
         if not book_id:
-            ui.error(t("The provided URL does not contain a valid book ID."))
+            ui.error(
+                t(
+                    "Could not extract a valid book ID from the URL. "
+                    "Open the book's page and copy its URL."
+                )
+            )
             return
 
         book = BookConfig(book_id=book_id)
@@ -130,7 +140,12 @@ async def _interactive_download(adapter: ConfigAdapter) -> None:
         book = BookConfig(book_id=book_id)
 
     if not site or not book:
-        ui.error(t("Failed to initialize download parameters."))
+        ui.error(
+            t(
+                "Failed to initialize download parameters. "
+                "Check settings.toml or run 'novel-cli doctor'."
+            )
+        )
         return
 
     await _do_download(adapter, site, book)
@@ -150,7 +165,12 @@ async def _do_download(adapter: ConfigAdapter, site: str, book: BookConfig) -> N
                     login_cfg=adapter.get_login_config(site),
                 )
                 if not success:
-                    ui.warn(t("Login failed."))
+                    ui.warn(
+                        t(
+                            "Login failed: please check your cookies "
+                            "or run 'novel-cli login {site}' first."
+                        ).format(site=site)
+                    )
                     return
 
             await client.download_book(book, ui=download_ui)

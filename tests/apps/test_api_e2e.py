@@ -1013,6 +1013,8 @@ async def test_music_export_unknown_platform_returns_400(
     client: httpx.AsyncClient,
     tmp_path: Path,
 ) -> None:
+    from novel_downloader.apps.music.providers import available_labels
+
     response = await client.post(
         f"{API}/music/export",
         json={
@@ -1022,8 +1024,9 @@ async def test_music_export_unknown_platform_returns_400(
     )
 
     assert response.status_code == 400
-    assert (
-        response.json()["detail"] == "Unknown music platform: definitely-not-a-platform"
+    assert response.json()["detail"] == (
+        "Unknown music platform: definitely-not-a-platform. "
+        f"Available: {', '.join(key for key, _label in available_labels())}"
     )
 
 
@@ -1065,10 +1068,15 @@ async def test_music_health_probes_platform(
 async def test_music_health_unknown_platform_returns_400(
     client: httpx.AsyncClient,
 ) -> None:
+    from novel_downloader.apps.music.providers import available_labels
+
     response = await client.get(f"{API}/music/health", params={"platform": "nope"})
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Unknown music platform: nope"
+    assert response.json()["detail"] == (
+        "Unknown music platform: nope. "
+        f"Available: {', '.join(key for key, _label in available_labels())}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1090,7 +1098,10 @@ async def test_token_missing_header_returns_401(
     response = await auth_client.get(f"{API}/health")
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid or missing API token"
+    assert response.json()["detail"] == (
+        "Invalid or missing API token. "
+        "Send 'Authorization: Bearer <token>' or 'X-API-Key: <token>'."
+    )
     assert response.headers["www-authenticate"] == "Bearer"
 
 

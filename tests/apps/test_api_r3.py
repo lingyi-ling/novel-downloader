@@ -445,7 +445,7 @@ async def test_music_export_rejects_unknown_platform(
 
     assert response.status_code == 400
     assert response.json() == {
-        "detail": MSG_UNKNOWN_MUSIC_PLATFORM.format(platform="nope")
+        "detail": MSG_UNKNOWN_MUSIC_PLATFORM.format(platform="nope", keys="demo")
     }
 
 
@@ -488,7 +488,7 @@ async def test_music_health_single_and_all_platforms(
     assert all_platforms.json()[1]["ok"] is False
     assert unknown.status_code == 400
     assert unknown.json() == {
-        "detail": MSG_UNKNOWN_MUSIC_PLATFORM.format(platform="nope")
+        "detail": MSG_UNKNOWN_MUSIC_PLATFORM.format(platform="nope", keys="demo, bad")
     }
     assert calls == [("demo", 5.0), ("demo", 1.5), ("bad", 1.5)]
 

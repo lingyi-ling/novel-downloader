@@ -63,13 +63,17 @@ MSG_BOOK_NOT_IN_WATCHLIST = "Book not in watchlist: {site}/{book_id}"
 # ---------------------------------------------------------------------------
 
 #: ``detail`` of the 503 response when the ``music`` extras are missing.
+#: ``error`` carries only the exception class name — internal error details
+#: must not leak to clients (same anti-leak rule as the generic 500 handler).
 MSG_MUSIC_UNAVAILABLE = (
     "Music support is not available: {error}. "
     'Install it with: pip install "novel-downloader[music]"'
 )
 
 #: ``detail`` of the 400 responses for a platform that is not registered.
-MSG_UNKNOWN_MUSIC_PLATFORM = "Unknown music platform: {platform}"
+#: ``keys`` is filled in at the call site with the comma-joined registered
+#: platform keys, mirroring the CLI's message for the same condition.
+MSG_UNKNOWN_MUSIC_PLATFORM = "Unknown music platform: {platform}. Available: {keys}"
 
 #: ``detail`` of the 400 response when a known platform cannot be constructed.
 MSG_MUSIC_PLATFORM_INIT_FAILED = (

@@ -92,6 +92,13 @@ async def test_no_token_configured_means_no_auth(make_app: Any) -> None:
     assert response.status_code == 200
 
 
+def test_auth_error_detail_includes_usage_instructions() -> None:
+    """The 401 detail must tell clients how to authenticate, not just fail."""
+    assert "Invalid or missing API token" in AUTH_ERROR_DETAIL
+    assert "Authorization: Bearer <token>" in AUTH_ERROR_DETAIL
+    assert "X-API-Key: <token>" in AUTH_ERROR_DETAIL
+
+
 @pytest.mark.asyncio
 async def test_auth_accepts_non_ascii_token(make_app: Any) -> None:
     """
@@ -502,6 +509,16 @@ async def test_track_count_at_limit_passes_validation(
         response = await client.post(path, json={"platform": "demo", "tracks": tracks})
 
     assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert "Music support is not available" in detail
+    # Only the exception class name is exposed between the prefix and the
+    # install hint; the internal import-error message (e.g. "None in
+    # sys.modules") must not leak to clients.
+    reason = detail.removeprefix("Music support is not available: ").removesuffix(
+        '. Install it with: pip install "novel-downloader[music]"'
+    )
+    assert reason.isidentifier()
+    assert "sys.modules" not in detail
 
 
 # ---------------------------------------------------------------------------
