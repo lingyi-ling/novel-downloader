@@ -45,6 +45,15 @@ class WebLoginUI:
             await complete_request(req.req_id, None)
             cleanup_request(req.req_id)
             return prefill
+        except asyncio.CancelledError:
+            # The download task was cancelled while waiting for credentials
+            # (TaskManager.cancel_task cancels the download asyncio task).
+            # Resolve and drop the request so no zombie login form for a dead
+            # task is left behind in the broker, then let the cancellation
+            # propagate to the site worker.
+            await complete_request(req.req_id, None)
+            cleanup_request(req.req_id)
+            raise
 
         if self.task.status == Status.CANCELLED:
             await complete_request(req.req_id, None)
@@ -133,6 +142,12 @@ class WebExportUI:
         self.export_stage: str | None = None
 
     def on_start(self, book: BookConfig, fmt: str | None = None) -> None:
+        if self.task.status is Status.CANCELLED:
+            # The callbacks run inside the export worker thread while
+            # ``TaskManager.cancel_task`` runs on the event loop: a task the
+            # user already cancelled must never be flipped back to EXPORTING
+            # (the export worker would then complete it).
+            return
         self.task.status = Status.EXPORTING
         self.export_stage = fmt
         self.task.export_stage = fmt
@@ -143,11 +158,15 @@ class WebExportUI:
         self.exported_count += 1
 
     def on_error(self, book: BookConfig, fmt: str | None, error: Exception) -> None:
+        if self.task.status is Status.CANCELLED:
+            return
         self.task.status = Status.FAILED
         self.task.error = str(error)
 
     def on_unsupported(self, book: BookConfig, fmt: str) -> None:
         self.unsupported_any = True
+        if self.task.status is Status.CANCELLED:
+            return
         self.task.error = f"Export format '{fmt}' is not supported."
 
 
@@ -156,6 +175,11 @@ class WebProcessUI:
         self.task = task
 
     def on_stage_start(self, book: BookConfig, stage: str) -> None:
+        if self.task.status is Status.CANCELLED:
+            # Like the export callbacks, these run inside the process worker
+            # thread and must not overwrite a cancellation decided on the
+            # event loop.
+            return
         self.task.status = Status.PROCESSING
         self.task.chapters_done = 0
 
@@ -171,5 +195,7 @@ class WebProcessUI:
         pass
 
     def on_missing(self, book: BookConfig, what: str, path: Path) -> None:
+        if self.task.status is Status.CANCELLED:
+            return
         self.task.status = Status.FAILED
         self.task.error = f"Missing required data ({what}): {path}"

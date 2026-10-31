@@ -143,6 +143,9 @@ class TaskManager:
         self.pending: dict[str, list[DownloadTask]] = defaultdict(list)
         self.running: dict[str, DownloadTask] = {}
         self.completed: deque[DownloadTask] = deque(maxlen=MAX_COMPLETED_TASKS)
+        #: Task ids currently held by :attr:`completed`; kept in sync by
+        #: :meth:`_append_completed` so recording a task stays O(1).
+        self._completed_ids: set[str] = set()
 
         self._worker_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -287,9 +290,27 @@ class TaskManager:
 
     # ---------- internals ----------
     def _append_completed(self, task: DownloadTask) -> None:
-        """Record a finished task once, without duplicating a re-appended object."""
-        if not any(existing is task for existing in self.completed):
-            self.completed.append(task)
+        """
+        Record a finished task once, without duplicating a re-appended object.
+
+        Membership is tracked in a set of task ids, so recording is O(1)
+        instead of scanning the whole bounded deque. Task ids are unique per
+        object (``uuid4``), which makes id-based dedup equivalent to the
+        object-identity check it replaces. The set is rebuilt from the deque
+        whenever their sizes disagree, so direct deque mutations (tests,
+        future callers bypassing this helper) cannot desynchronise it.
+        """
+        completed = self.completed
+        if len(self._completed_ids) != len(completed):
+            self._completed_ids = {item.task_id for item in completed}
+        if task.task_id in self._completed_ids:
+            return
+        maxlen = completed.maxlen
+        if maxlen is not None and len(completed) >= maxlen:
+            # The oldest entry is about to be evicted by the bounded deque.
+            self._completed_ids.discard(completed[0].task_id)
+        self._completed_ids.add(task.task_id)
+        completed.append(task)
 
     def _get_client(self, site: str) -> ClientProtocol:
         """Get or create a client instance for a site."""
@@ -309,7 +330,15 @@ class TaskManager:
             setattr(self, name, asyncio.create_task(worker_fn()))
 
     def _queue_for_export(self, task: DownloadTask) -> None:
-        """Enqueue a task for export and start the export worker if needed."""
+        """
+        Enqueue a task for export and start the export worker if needed.
+
+        A task that was cancelled in the meantime is refused: the export
+        stage must never resurrect a cancellation, and the caller's own
+        bookkeeping drops the stage registration.
+        """
+        if _is_cancelled(task):
+            return
         task.status = Status.EXPORTING
         self._stage_tasks[task.task_id] = task
         self._export_waiting.put_nowait(task)
@@ -392,6 +421,13 @@ class TaskManager:
         )
         await task.asyncio_task
 
+        if _is_cancelled(task):
+            # The user cancelled while the download was finishing: the
+            # download asyncio task had already completed, so cancelling it
+            # was a no-op. Keep the cancellation instead of overwriting it
+            # with PROCESSING/EXPORTING and exporting a cancelled book.
+            return
+
         if adapter.get_processor_configs(task.site):
             task.status = Status.PROCESSING
             self._stage_tasks[task.task_id] = task
@@ -456,7 +492,19 @@ class TaskManager:
                     processors=processors,
                     ui=WebProcessUI(current_task),
                 )
-                if not _is_cancelled(current_task):
+                if _is_cancelled(current_task):
+                    # Cancellation owns the bookkeeping: ``cancel_task`` has
+                    # already recorded the outcome; the stage registration is
+                    # dropped by the ``finally`` below.
+                    pass
+                elif current_task.status is Status.FAILED:
+                    # The processing stage reported a terminal failure through
+                    # its UI (missing raw data, a broken stage): clients swallow
+                    # such errors internally, so the FAILED status set by the
+                    # callback is the only signal. Keep it instead of handing
+                    # a half-processed book to the export stage.
+                    current_task.finished_at = time.time()
+                else:
                     self._queue_for_export(current_task)
 
             except asyncio.CancelledError:

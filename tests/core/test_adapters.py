@@ -41,6 +41,7 @@ from novel_downloader.apps.core.cred_broker import (
     complete_request,
     create_cred_request,
     get_req_state,
+    list_requests,
     refresh_claim,
 )
 from novel_downloader.apps.core.models import DownloadTask, Status
@@ -270,6 +271,53 @@ def test_process_ui_missing_data_fails_task() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cancellation is terminal: thread-side callbacks never resurrect a task
+# ---------------------------------------------------------------------------
+
+
+def test_export_ui_callbacks_never_overwrite_cancelled() -> None:
+    """
+    Export callbacks run inside the export worker *thread* while
+    ``TaskManager.cancel_task`` runs on the event loop, so a callback fired
+    after a cancellation must not flip the task back to EXPORTING/FAILED.
+    """
+    task = _task()
+    task.status = Status.CANCELLED
+    task.error = "Cancelled by user"
+    ui = WebExportUI(task)
+
+    ui.on_start(BOOK, "txt")
+    assert task.status is Status.CANCELLED
+
+    ui.on_error(BOOK, "txt", RuntimeError("disk full"))
+    assert task.status is Status.CANCELLED
+    assert task.error == "Cancelled by user"
+
+    ui.on_unsupported(BOOK, "pdf")
+    assert task.error == "Cancelled by user"
+
+    # Factual bookkeeping (a file that was really written) is still recorded.
+    ui.on_success(BOOK, "txt", Path("out/42.txt"))
+    assert task.exported_paths == {"txt": Path("out/42.txt")}
+    assert task.status is Status.CANCELLED
+
+
+def test_process_ui_callbacks_never_overwrite_cancelled() -> None:
+    """Same guarantee for the process worker's thread-side callbacks."""
+    task = _task()
+    task.status = Status.CANCELLED
+    task.error = "Cancelled by user"
+    ui = WebProcessUI(task)
+
+    ui.on_stage_start(BOOK, "merge")
+    assert task.status is Status.CANCELLED
+
+    ui.on_missing(BOOK, "raw chapters", Path("raw_data/42"))
+    assert task.status is Status.CANCELLED
+    assert task.error == "Cancelled by user"
+
+
+# ---------------------------------------------------------------------------
 # Callback order across the whole pipeline
 # ---------------------------------------------------------------------------
 
@@ -428,6 +476,30 @@ async def test_prompt_returns_prefill_when_task_cancelled() -> None:
     # Submitted credentials are discarded once the task is cancelled.
     assert result == {"username": "pre"}
     assert await claim_next_request("frontend") is None
+
+
+@pytest.mark.asyncio
+async def test_prompt_cancellation_releases_the_request() -> None:
+    """
+    Cancelling the waiter must not leak the credential request.
+
+    The download task is cancelled while ``prompt`` waits for the frontend
+    (``TaskManager.cancel_task`` cancels the download asyncio task). The
+    abandoned request used to stay in the broker forever: claimable and
+    listed, a zombie login form for a dead task.
+    """
+    task = _task()
+    ui = WebLoginUI(task)
+
+    prompt_task = asyncio.create_task(ui.prompt([_field("username")]))
+    req = await _claim_any("frontend")
+
+    prompt_task.cancel()
+    await asyncio.gather(prompt_task, return_exceptions=True)
+
+    assert await get_req_state(req.req_id) == (False, False)
+    assert await list_requests() == []
+    assert await claim_next_request("other-client") is None
 
 
 def test_login_callbacks_move_status() -> None:
@@ -737,5 +809,31 @@ async def test_manager_login_flow_completes_via_cred_broker() -> None:
         await _wait_until(lambda: task.status is Status.COMPLETED)
         assert list(manager.completed) == [task]
         assert task.error is None
+    finally:
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_manager_cancel_of_login_task_releases_cred_request() -> None:
+    """
+    Cancelling a task parked in the login prompt resolves its request.
+
+    The end-to-end path for the leak: ``cancel_task`` cancels the download
+    asyncio task, the CancelledError unwinds ``prompt`` -- which must complete
+    and remove the request instead of leaving a zombie behind.
+    """
+    manager = _seeded_manager(_LoginClient(), _LoginRequiredAdapter())
+    try:
+        task = await manager.add_task(title="Demo Book", site="demo", book_id="42")
+
+        req = await _claim_any("frontend", timeout=5.0)
+
+        assert await manager.cancel_task(task.task_id) is True
+
+        await _wait_until(lambda: not manager._worker_tasks)
+        assert task.status is Status.CANCELLED
+        assert task.error == "Cancelled by user"
+        assert await get_req_state(req.req_id) == (False, False)
+        assert await list_requests() == []
     finally:
         await manager.close()

@@ -28,6 +28,7 @@ Three layers are exercised without touching the network:
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -458,6 +459,48 @@ async def test_cancelled_during_export_is_not_overridden() -> None:
     await _wait_export_queue_done(manager)
 
     assert task.status is Status.CANCELLED  # never flipped to COMPLETED
+    assert task.error == "Cancelled by user"
+    assert task.task_id not in manager._stage_tasks
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_landing_mid_export_is_not_resurrected() -> None:
+    """
+    A cancel landing while the export *thread* runs survives the callbacks
+    fired afterwards.
+
+    ``cancel_task`` runs on the event loop while ``export_book`` runs in
+    ``asyncio.to_thread``; the export UI callbacks therefore race with the
+    cancellation. Callbacks fired after the cancel used to flip CANCELLED back
+    to EXPORTING/FAILED, and the worker's final decision then completed the
+    task despite the user's cancellation.
+    """
+    export_reached = threading.Event()
+    release_export = threading.Event()
+
+    def export(book: Any, ui: Any) -> None:
+        ui.on_start(book, "txt")
+        ui.on_success(book, "txt", OUT_DIR / "42.txt")
+        export_reached.set()
+        # Park the export thread until the loop has cancelled the task.
+        release_export.wait(timeout=2.0)
+        # Everything below runs *after* cancel_task marked the task CANCELLED.
+        ui.on_start(book, "epub")
+        ui.on_success(book, "epub", OUT_DIR / "42.epub")
+        ui.on_error(book, "epub", RuntimeError("late failure"))
+
+    manager = _manager(_ExportClient(export))
+    task = await manager.add_task(title="Demo Book", site="demo", book_id="42")
+
+    await _wait_until(export_reached.is_set)
+    assert await manager.cancel_task(task.task_id) is True
+    assert task.status is Status.CANCELLED
+    release_export.set()
+
+    await _wait_export_queue_done(manager)
+
+    assert task.status is Status.CANCELLED  # never resurrected to COMPLETED
     assert task.error == "Cancelled by user"
     assert task.task_id not in manager._stage_tasks
     await manager.close()

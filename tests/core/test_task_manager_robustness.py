@@ -14,6 +14,7 @@ ever calling the plugin registrar). No real download is performed.
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -98,7 +99,8 @@ class FakeClient:
     Async client double.
 
     ``download`` is an optional async callable invoked by ``download_book``;
-    ``export`` is an optional sync callable invoked by ``export_book``.
+    ``export`` / ``process`` are optional sync callables invoked by
+    ``export_book`` / ``process_book``.
     """
 
     def __init__(
@@ -106,12 +108,16 @@ class FakeClient:
         *,
         download: Any = None,
         export: Any = None,
+        process: Any = None,
         login_result: bool = True,
     ) -> None:
         self._download = download
         self._export = export
+        self._process = process
         self.login_result = login_result
         self.download_calls: list[str] = []
+        self.export_calls: list[str] = []
+        self.process_calls: list[str] = []
         self.login_calls = 0
 
     async def __aenter__(self) -> FakeClient:
@@ -129,11 +135,19 @@ class FakeClient:
         if self._download is not None:
             await self._download(book, ui)
 
+    def process_book(
+        self, book: Any, processors: Any = None, *, ui: Any = None, **kwargs: Any
+    ) -> None:
+        self.process_calls.append(book.book_id)
+        if self._process is not None:
+            self._process(book, ui)
+
     def export_book(
         self, book: Any, cfg: Any = None, *, ui: Any = None, **kwargs: Any
     ) -> dict[str, Any]:
+        self.export_calls.append(book.book_id)
         if self._export is not None:
-            self._export(book)
+            self._export(book, ui)
         return {}
 
 
@@ -508,6 +522,45 @@ async def test_repeated_cancel_of_pending_task_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_landing_after_download_is_not_overwritten() -> None:
+    """
+    A cancel that lands between download completion and staging wins.
+
+    The fake download schedules ``cancel_task`` right before returning, so it
+    runs while the download asyncio task is already finished but the site
+    worker has not resumed yet -- exactly the gap where the staging code used
+    to overwrite CANCELLED with PROCESSING/EXPORTING and the task ended up
+    COMPLETED despite the user's cancellation.
+    """
+    manager = _manager()
+
+    async def download(book: Any, ui: Any) -> None:
+        # The created coroutine is queued before the download task completes,
+        # so it runs before the site worker resumes from ``await task.asyncio_task``.
+        asyncio.create_task(manager.cancel_task(ui.task.task_id))
+
+    client = FakeClient(download=download)
+    manager._clients["a"] = client  # type: ignore[assignment]
+
+    task = await manager.add_task(title="T", site="a", book_id="1")
+
+    # Settle: the site worker must exit first (the regression enqueues the
+    # export before it does); joining the export queue afterwards guarantees
+    # the export worker -- if it ever got the item -- has applied its decision.
+    await _wait_until(lambda: not manager._worker_tasks)
+    await asyncio.wait_for(manager._export_waiting.join(), timeout=1.0)
+
+    assert task.status is Status.CANCELLED
+    assert task.error == "Cancelled by user"
+    assert isinstance(task.finished_at, float)
+    assert client.export_calls == []  # never handed to the export stage
+    assert manager._export_waiting.empty()
+    assert task.task_id not in manager._stage_tasks
+    assert list(manager.completed) == [task]
+    await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_cancel_task_waiting_for_export_is_idempotent() -> None:
     manager = _manager()
     task = _task("a", "1")
@@ -564,6 +617,121 @@ async def test_cancel_unknown_task_is_false() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Processing stage: failures reported through the UI must not be masked
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_stage_failure_is_not_masked_by_export() -> None:
+    """
+    A processing failure (``on_missing``) fails the task instead of being
+    exported away.
+
+    ``CommonClient.process_book`` swallows stage exceptions and reports missing
+    input only through ``ProcessUI.on_missing`` (which marks the task FAILED).
+    The process worker used to hand the task to the export stage anyway, which
+    reset the status to EXPORTING and could end the task COMPLETED.
+    """
+    missing = Path("raw_data") / "1" / "chapter.raw.sqlite"
+
+    def process(book: Any, ui: Any) -> None:
+        ui.on_missing(book, "raw chapters", missing)
+
+    client = FakeClient(process=process)
+    adapter = FakeAdapter(processors=[object()])
+    manager = _manager(client, adapter=adapter)
+
+    task = await manager.add_task(title="T", site="a", book_id="1")
+    await _wait_until(lambda: task.finished_at is not None)
+    await asyncio.wait_for(manager._process_waiting.join(), timeout=1.0)
+
+    assert task.status is Status.FAILED
+    assert task.error == f"Missing required data (raw chapters): {missing}"
+    assert client.process_calls == ["1"]
+    assert client.export_calls == []  # never handed to the export stage
+    assert manager._export_waiting.empty()
+    assert task.task_id not in manager._stage_tasks
+    assert list(manager.completed) == [task]
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_landing_mid_process_is_not_exported() -> None:
+    """
+    A cancel landing while the process *thread* runs wins over the stage.
+
+    ``cancel_task`` runs on the event loop while ``process_book`` runs in
+    ``asyncio.to_thread``; the process UI callbacks therefore race with the
+    cancellation, exactly like the export ones. Callbacks fired after the
+    cancel must not flip CANCELLED back to PROCESSING/FAILED, and the
+    worker's post-thread decision must not hand the cancelled book to the
+    export stage.
+    """
+    process_reached = threading.Event()
+    release_process = threading.Event()
+
+    def process(book: Any, ui: Any) -> None:
+        ui.on_stage_start(book, "merge")
+        process_reached.set()
+        # Park the process thread until the loop has cancelled the task.
+        release_process.wait(timeout=2.0)
+        # Everything below runs *after* cancel_task marked the task CANCELLED.
+        ui.on_stage_start(book, "merge")
+        ui.on_missing(book, "raw chapters", Path("raw_data") / "1")
+
+    client = FakeClient(process=process)
+    adapter = FakeAdapter(processors=[object()])
+    manager = _manager(client, adapter=adapter)
+
+    task = await manager.add_task(title="T", site="a", book_id="1")
+
+    await _wait_until(process_reached.is_set)
+    assert await manager.cancel_task(task.task_id) is True
+    assert task.status is Status.CANCELLED
+    release_process.set()
+
+    # The process worker consumes the entry and applies its decision.
+    await asyncio.wait_for(manager._process_waiting.join(), timeout=1.0)
+
+    assert task.status is Status.CANCELLED  # never resurrected
+    assert task.error == "Cancelled by user"
+    assert client.export_calls == []  # never handed to the export stage
+    assert manager._export_waiting.empty()
+    assert task.task_id not in manager._stage_tasks
+    assert list(manager.completed) == [task]
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_for_export_refuses_cancelled_task() -> None:
+    """
+    The export queue helper refuses a cancelled task outright.
+
+    Callers check the cancellation themselves before staging, but the helper
+    is the choke point every hand-off goes through, so the invariant is
+    enforced (and locked in) here: a refused task keeps its CANCELLED
+    status, is not registered for any stage and never reaches the queue.
+    """
+    manager = _manager()
+    cancelled = _task("a", "1")
+    cancelled.status = Status.CANCELLED
+
+    manager._queue_for_export(cancelled)
+
+    assert cancelled.status is Status.CANCELLED  # not flipped to EXPORTING
+    assert manager._export_waiting.empty()
+    assert cancelled.task_id not in manager._stage_tasks
+    assert manager._export_worker_task is None  # the worker never started
+
+    # A healthy task staged right after it is still queued normally.
+    healthy = _task("a", "2")
+    manager._queue_for_export(healthy)
+    assert healthy.status is Status.EXPORTING
+    assert manager._export_waiting.qsize() == 1
+    await manager.close()
+
+
+# ---------------------------------------------------------------------------
 # Completed queue upper bound
 # ---------------------------------------------------------------------------
 
@@ -586,6 +754,60 @@ def test_completed_truncation_never_touches_running_or_pending() -> None:
     assert running in snapshot["running"]
     assert pending in snapshot["pending"]
     assert len(snapshot["completed"]) == MAX_COMPLETED_TASKS
+
+
+# ---------------------------------------------------------------------------
+# _append_completed: dedup semantics with O(1) membership tracking
+# ---------------------------------------------------------------------------
+
+
+def test_append_completed_dedups_repeated_objects() -> None:
+    """Recording the same task twice keeps a single history entry."""
+    manager = _manager()
+    task = _task("a", "1")
+    other = _task("a", "2")
+
+    manager._append_completed(task)
+    manager._append_completed(task)
+    assert list(manager.completed) == [task]
+
+    manager._append_completed(other)
+    assert list(manager.completed) == [task, other]
+    manager._append_completed(other)
+    assert list(manager.completed) == [task, other]
+
+
+def test_append_completed_survives_direct_deque_mutation() -> None:
+    """A deque mutated outside the helper self-heals instead of duplicating."""
+    manager = _manager()
+    direct = _task("a", "1")
+
+    manager.completed.append(direct)  # bypasses the helper entirely
+    manager._append_completed(direct)  # must not record it a second time
+
+    assert list(manager.completed) == [direct]
+
+
+def test_append_completed_re_records_after_eviction() -> None:
+    """
+    An object evicted by the bounded deque is recorded again on re-append,
+    while an object still inside the deque is deduped (is-scan semantics).
+    """
+    manager = _manager()
+    first = _task("a", "first")
+    manager._append_completed(first)
+    for index in range(MAX_COMPLETED_TASKS + 10):
+        manager._append_completed(_task("a", str(index)))
+
+    assert len(manager.completed) == MAX_COMPLETED_TASKS
+    assert first not in manager.completed  # evicted by the overflow
+
+    manager._append_completed(first)
+    assert manager.completed[-1] is first
+    assert len(manager.completed) == MAX_COMPLETED_TASKS
+
+    manager._append_completed(first)  # inside the deque again: deduped
+    assert list(manager.completed).count(first) == 1
 
 
 # ---------------------------------------------------------------------------
