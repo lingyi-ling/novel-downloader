@@ -30,6 +30,12 @@ SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExe}
 CloseApplications=yes
+; The app creates this mutex at start-up. With it, Setup uses the Restart
+; Manager to close a running instance deterministically before replacing the
+; binaries -- which is what the in-app updater relies on after launching us
+; with /CLOSEAPPLICATIONS.
+AppMutex=NovelDownloader-UpdateMutex
+RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; \

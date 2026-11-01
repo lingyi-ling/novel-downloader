@@ -28,14 +28,21 @@ import sys
 import threading
 import time
 import webbrowser
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from novel_downloader.apps.common.updater import (
+    DEFAULT_REPO,
+    DEFAULT_TIMEOUT,
+    UpdateInfo,
+    check_for_update,
     detect_platform,
+    download_asset,
     parse_manifest,
     parse_version,
+    verify_sha256,
 )
 from novel_downloader.apps.constants import DOWNLOAD_SUPPORT_SITES, SEARCH_SUPPORT_SITES
 from novel_downloader.apps.desktop.engine import AsyncEngine
@@ -68,6 +75,31 @@ _RELEASES_API = (
 _RELEASES_PAGE = "https://github.com/lingyi-ling/novel-downloader/releases/latest"
 #: Minimum interval between update checks (24 hours).
 _UPDATE_CHECK_INTERVAL = 24 * 3600.0
+#: Network timeout for an update check (kept at the shared default, 8 s).
+_UPDATE_TIMEOUT = DEFAULT_TIMEOUT
+#: Directory under :func:`app_home` holding downloaded update files.
+_UPDATES_DIRNAME = "updates"
+#: Timeout for an asset transfer, in seconds.  Downloads are much larger than
+#: the release document, so they get their own (generous) budget.
+_UPDATE_DOWNLOAD_TIMEOUT = 300.0
+#: Named mutex mirrored by ``AppMutex`` in ``packaging/noveldl_installer.iss``:
+#: holding it lets the installer's Restart Manager identify this process.
+_UPDATE_MUTEX_NAME = "NovelDownloader-UpdateMutex"
+#: Arguments for the Inno Setup installer: no wizard, no message boxes, and a
+#: Restart-Manager request to close (then restart) a running instance.
+_INSTALLER_ARGS = (
+    "/SILENT",
+    "/SUPPRESSMSGBOXES",
+    "/CLOSEAPPLICATIONS",
+    "/RESTARTAPPLICATIONS",
+)
+#: Delay before closing the window after the installer starts.  Only long
+#: enough for the ``install_update`` reply to cross the JS bridge; the process
+#: never waits for the installer itself.
+_INSTALL_EXIT_DELAY = 0.25
+#: Grace period before retrying a window close that raised, so a GUI thread
+#: still delivering the bridge reply cannot make us give up too early.
+_INSTALL_EXIT_RETRY_DELAY = 1.0
 
 # ``_version_tuple`` is the pre-existing name used by the bridge tests; the
 # implementation lives in :mod:`apps.common.updater` so the update logic has a
@@ -257,6 +289,13 @@ def _i18n_catalog() -> dict[str, str]:
         "New version {ver} is out — click to download": t(
             "New version {ver} is out — click to download"
         ),
+        "Download and install": t("Download and install"),
+        "Release notes": t("Release notes"),
+        "Later": t("Later"),
+        "Downloading…": t("Downloading…"),
+        "Installing…": t("Installing…"),
+        "Update download failed": t("Update download failed"),
+        "Could not start the installer": t("Could not start the installer"),
         # subtitles
         "Search novels across all sites, ranked by quality": t(
             "Search novels across all sites, ranked by quality"
@@ -429,6 +468,137 @@ def _format_health_ms(elapsed_ms: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# update bookkeeping
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _UpdateCache:
+    """One interpreted update check, as served by ``update_state``."""
+
+    info: UpdateInfo | None
+    error: str | None
+    checked_at: float
+    current: str
+    platform: str
+
+
+@dataclass(frozen=True)
+class _DownloadedUpdate:
+    """A downloaded asset whose checksum was verified by us."""
+
+    path: Path
+    sha256: str
+    name: str
+
+
+#: Handle of the process-lifetime update mutex (Windows only).  Kept at module
+#: level so the handle outlives the call; the kernel releases it when the
+#: process exits.
+_MUTEX_HANDLE: int | None = None
+
+
+def _hold_update_mutex() -> None:
+    """
+    Create the named mutex named by the installer's ``AppMutex`` setting.
+
+    Held for the lifetime of the process, it lets Inno Setup's Restart Manager
+    find this instance deterministically before replacing the binaries.
+
+    Windows only and strictly best effort: a missing ``ctypes``/kernel API, or
+    any failure at all, simply skips the mutex instead of breaking startup.
+    """
+    global _MUTEX_HANDLE
+    if sys.platform != "win32" or _MUTEX_HANDLE is not None:
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        # Declare the prototype instead of relying on ctypes' defaults: the
+        # return value is a 64-bit HANDLE (a default ``c_int`` would truncate
+        # it) and the mutex name is a wide string (a default narrow ``c_char_p``
+        # conversion would pass the wrong pointer).
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_bool,
+            ctypes.c_wchar_p,
+        )
+        handle = int(kernel32.CreateMutexW(None, False, _UPDATE_MUTEX_NAME) or 0)
+    except Exception:  # noqa: BLE001 - the mutex is an optimisation, not a need
+        logger.debug("Could not create the update mutex", exc_info=True)
+        return
+    if handle:
+        _MUTEX_HANDLE = handle
+
+
+def _updates_dir() -> Path:
+    """
+    Directory receiving downloaded updates (``app_home()/updates``).
+
+    Created on demand so :func:`download_asset` always has a root to stay
+    inside.
+
+    :return: The resolved update directory.
+    """
+    from novel_downloader.infra.paths import app_home
+
+    path = Path(app_home()) / _UPDATES_DIRNAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _inside_dir(path: Path, root: Path) -> bool:
+    """Whether ``path`` resolves inside ``root`` (``False`` on I/O errors)."""
+    try:
+        return Path(path).resolve().is_relative_to(Path(root).resolve())
+    except OSError:
+        return False
+
+
+def _is_https_asset_url(url: str) -> bool:
+    """
+    Whether an asset URL uses the only scheme the desktop updater fetches.
+
+    Unlike the CLI's :func:`novel_downloader.apps.common.updater.download_asset`
+    (which accepts plain HTTP so local mirrors keep working), the GUI download
+    path is restricted to HTTPS: the file it writes is later *executed*, so a
+    plaintext transfer that could be rewritten in flight is not acceptable.
+    """
+    return str(url or "").strip().lower().startswith("https://")
+
+
+def _prefs_flag(prefs: Mapping[str, Any], key: str, default: bool) -> bool:
+    """Read a boolean preference, tolerating strings written by hand."""
+    value = prefs.get(key, default)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _update_due(prefs: Mapping[str, Any], now: float) -> bool:
+    """Whether the 24-hour throttle allows a new check."""
+    try:
+        last = float(prefs.get("last_update_check") or 0.0)
+    except (TypeError, ValueError):
+        # A hand-edited preference file must not break the check.
+        last = 0.0
+    return (now - last) >= _UPDATE_CHECK_INTERVAL
+
+
+def _safe_platform_tag() -> str:
+    """``detect_platform()`` that degrades to ``""`` instead of raising."""
+    try:
+        return detect_platform()
+    except Exception:  # noqa: BLE001 - a probe failure is not fatal
+        logger.debug("Could not detect the platform tag", exc_info=True)
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # preferences
 # ---------------------------------------------------------------------------
 
@@ -492,6 +662,14 @@ class ApiBridge:
         # health check state
         self._health_rows: dict[str, dict[str, Any]] = {}
         self._health_thread: threading.Thread | None = None
+        # update check cache / download bookkeeping
+        self._update_guard = threading.Lock()
+        self._update_cache: _UpdateCache | None = None
+        self._update_thread: threading.Thread | None = None
+        self._download_guard = threading.Lock()
+        self._download_active = False
+        self._downloaded: _DownloadedUpdate | None = None
+        self._exit_callback: Callable[[], None] | None = None
 
     # ------------------------------------------------------------------
     # system
@@ -512,6 +690,7 @@ class ApiBridge:
             "data_dir": str(Path.cwd()),
             "is_frozen": bool(getattr(sys, "frozen", False)),
             "shortcut_exists": self.shortcut_exists(),
+            "auto_check_updates": _prefs_flag(prefs, "auto_check_updates", True),
             "sites": {
                 "search": dict(SEARCH_SUPPORT_SITES),
                 "download": dict(DOWNLOAD_SUPPORT_SITES),
@@ -643,15 +822,32 @@ class ApiBridge:
             info = parse_manifest(payload, current=current, platform_tag=platform_tag)
         except Exception as exc:  # noqa: BLE001 - offline is normal
             logger.debug("Update check failed: %s", exc)
+            error = format_error(exc)
+            self._remember_check(
+                None,
+                current=current,
+                platform=platform_tag,
+                checked_at=now,
+                error=error,
+            )
             return {
                 "available": False,
                 "current": current,
                 "latest": "",
                 "url": _RELEASES_PAGE,
                 "message": "",
-                "error": format_error(exc),
+                "error": error,
                 "platform": platform_tag,
             }
+
+        # Keep the new ``update_state`` view in step with this legacy call.
+        self._remember_check(
+            info,
+            current=current,
+            platform=platform_tag,
+            checked_at=now,
+            error=None,
+        )
 
         url = info.notes_url or _RELEASES_PAGE
         if not info.available:
@@ -675,6 +871,495 @@ class ApiBridge:
             "sha256": asset.sha256 if asset is not None else None,
             "message": t("Update available: v{ver}").replace("{ver}", info.latest),
         }
+
+    # ------------------------------------------------------------------
+    # updates: cached state, background check, download, install
+    # ------------------------------------------------------------------
+
+    def update_state(self) -> dict[str, Any]:
+        """
+        Return the cached update check, never touching the UI thread.
+
+        When no check is recent enough and ``auto_check_updates`` allows it, a
+        background check is kicked off; the (possibly empty) cache is returned
+        immediately so the front end can render without waiting.  Turn the
+        preference off with ``save_prefs({"auto_check_updates": false})`` to
+        get cache-only behaviour with no network access.
+
+        Never raises: a broken cache or platform probe degrades to an
+        all-``None`` payload carrying the ``error`` text.
+
+        :return: ``{"current", "latest", "available", "notes_url",
+                 "asset_name", "asset_size", "platform", "checked_at",
+                 "error", "pending", "auto_check"}``.
+        """
+        try:
+            prefs = _load_prefs()
+            now = time.time()
+            with self._update_guard:
+                cache = self._update_cache
+                inflight = (
+                    self._update_thread is not None and self._update_thread.is_alive()
+                )
+            auto = _prefs_flag(prefs, "auto_check_updates", True)
+            if auto and not inflight and _update_due(prefs, now):
+                self._start_update_check()
+            return self._update_payload(cache, prefs)
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Could not serve the update state", exc_info=True)
+            return self._empty_update_payload(format_error(exc))
+
+    def check_update_async(self, force: bool = False) -> dict[str, Any]:
+        """
+        Start an update check on a background thread and return the cache.
+
+        The throttle (24 h) and ``auto_check_updates`` preference are honoured
+        unless ``force`` is set, so an automatic DOM-ready call can never
+        hammer the release feed; ``force`` is for an explicit user action.
+
+        Never raises, and never blocks: the caller polls :meth:`update_state`
+        (``pending`` tells it when the result has landed).
+
+        :param force: Ignore the throttle and the auto-check preference.
+        :return: The :meth:`update_state` payload plus ``{"started", "reason"}``.
+        """
+        try:
+            prefs = _load_prefs()
+            now = time.time()
+            with self._update_guard:
+                cache = self._update_cache
+                inflight = (
+                    self._update_thread is not None and self._update_thread.is_alive()
+                )
+            payload = self._update_payload(cache, prefs)
+            if inflight:
+                return {**payload, "started": False, "reason": "pending"}
+            if not force and not _prefs_flag(prefs, "auto_check_updates", True):
+                return {**payload, "started": False, "reason": "disabled"}
+            if not force and not _update_due(prefs, now):
+                return {**payload, "started": False, "reason": "throttled"}
+            started = self._start_update_check()
+            if started:
+                # The payload was built before the thread existed; report the
+                # fresh state so the page knows it has to poll.
+                payload = {**payload, "pending": True}
+            return {
+                **payload,
+                "started": started,
+                "reason": "" if started else "pending",
+            }
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Could not start the update check", exc_info=True)
+            return {
+                **self._empty_update_payload(format_error(exc)),
+                "started": False,
+                "reason": "error",
+            }
+
+    def download_update(self) -> dict[str, Any]:
+        """
+        Download this platform's asset into the update folder.
+
+        The file is fetched over HTTP(S) only, must match the digest published
+        by the release, and is verified again once written.  A mismatch (or a
+        file landing outside the update folder) deletes the file and reports a
+        failure, so nothing unverified is ever left behind.
+
+        Only one download may run at a time; a second concurrent call gets a
+        friendly error instead of racing.
+
+        Never raises.
+
+        :return: ``{"ok", "path", "error"}`` plus ``asset_name`` on success.
+        """
+        try:
+            return self._download_update()
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Update download failed", exc_info=True)
+            return self._download_error(format_error(exc))
+
+    def install_update(self) -> dict[str, Any]:
+        """
+        Launch the downloaded installer and close the app.
+
+        Only a file this bridge downloaded *and* verified is accepted; the
+        digest is checked again just before launch, so a tampered file is
+        deleted rather than executed.  Windows only: elsewhere (and for a zip
+        asset) the user is told to install manually — nothing is unpacked over
+        a running program.
+
+        Never raises.
+
+        :return: ``{"ok", "error"}``; ``restarting`` is set when the installer
+            was launched.
+        """
+        try:
+            return self._install_update()
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Update install failed", exc_info=True)
+            return {"ok": False, "error": format_error(exc)}
+
+    def _attach_window(self, window: Any) -> None:
+        """
+        Register the pywebview window so an update can close the app.
+
+        :param window: The object returned by ``webview.create_window``.
+        """
+
+        def request_exit() -> None:
+            logger.info("Closing the window so the installer can replace files")
+            window.destroy()
+
+        self._exit_callback = request_exit
+
+    def _remember_check(
+        self,
+        info: UpdateInfo | None,
+        *,
+        current: str,
+        platform: str,
+        checked_at: float,
+        error: str | None,
+    ) -> None:
+        """Store one interpreted check for :meth:`update_state` to serve."""
+        with self._update_guard:
+            self._update_cache = _UpdateCache(
+                info=info,
+                error=error,
+                checked_at=checked_at,
+                current=current,
+                platform=platform,
+            )
+
+    def _empty_update_payload(self, error: str | None) -> dict[str, Any]:
+        """The all-empty :meth:`update_state` payload for a failed read."""
+        try:
+            auto = _prefs_flag(_load_prefs(), "auto_check_updates", True)
+        except Exception:  # noqa: BLE001 - this payload must never raise
+            auto = True
+        return {
+            "current": self._version(),
+            "latest": "",
+            "available": False,
+            "notes_url": _RELEASES_PAGE,
+            "asset_name": None,
+            "asset_size": None,
+            "platform": "",
+            "checked_at": 0.0,
+            "error": error,
+            "pending": False,
+            "auto_check": auto,
+        }
+
+    def _update_payload(
+        self,
+        cache: _UpdateCache | None,
+        prefs: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Serialise a cache entry (or the empty state) for the page."""
+        stored = _load_prefs() if prefs is None else prefs
+        info = cache.info if cache is not None else None
+        asset = info.asset if info is not None else None
+        with self._update_guard:
+            inflight = (
+                self._update_thread is not None and self._update_thread.is_alive()
+            )
+        return {
+            "current": cache.current if cache is not None else self._version(),
+            "latest": info.latest if info is not None else "",
+            "available": bool(info is not None and info.available),
+            "notes_url": (
+                info.notes_url
+                if info is not None and info.notes_url
+                else _RELEASES_PAGE
+            ),
+            "asset_name": asset.name if asset is not None else None,
+            "asset_size": asset.size if asset is not None else None,
+            "platform": (cache.platform if cache is not None else _safe_platform_tag()),
+            "checked_at": float(cache.checked_at) if cache is not None else 0.0,
+            "error": cache.error if cache is not None else None,
+            "pending": inflight,
+            "auto_check": _prefs_flag(stored, "auto_check_updates", True),
+        }
+
+    def _start_update_check(self) -> bool:
+        """
+        Spawn the check thread unless one is already running.
+
+        :return: ``True`` when a new thread was started.
+        """
+        with self._update_guard:
+            if self._update_thread is not None and self._update_thread.is_alive():
+                return False
+            # Stamped before the request: an offline machine must not retry the
+            # (up to 8 s) fetch on every poll of ``update_state``.
+            _save_prefs({"last_update_check": str(time.time())})
+            thread = threading.Thread(
+                target=self._update_worker,
+                name="novel-desktop-update",
+                daemon=True,
+            )
+            self._update_thread = thread
+        thread.start()
+        return True
+
+    def _update_worker(self) -> None:
+        """Run one throttled check and publish the result to the cache."""
+        current = self._version()
+        platform_tag = _safe_platform_tag()
+        try:
+            check = check_for_update(
+                current,
+                slug=DEFAULT_REPO,
+                platform_tag=platform_tag,
+                timeout=_UPDATE_TIMEOUT,
+            )
+            cache = _UpdateCache(
+                info=check.info,
+                error=check.error,
+                checked_at=check.checked_at,
+                current=current,
+                platform=platform_tag,
+            )
+        except Exception as exc:  # noqa: BLE001 - the worker must never die loudly
+            logger.debug("Update check failed: %s", exc)
+            cache = _UpdateCache(
+                info=None,
+                error=format_error(exc),
+                checked_at=time.time(),
+                current=current,
+                platform=platform_tag,
+            )
+        with self._update_guard:
+            self._update_cache = cache
+            self._update_thread = None
+
+    def _download_update(self) -> dict[str, Any]:
+        """Implementation of :meth:`download_update` (may raise)."""
+        with self._download_guard:
+            if self._download_active:
+                return self._download_error(t("An update download is already running"))
+            self._download_active = True
+        try:
+            with self._update_guard:
+                cache = self._update_cache
+            info = cache.info if cache is not None else None
+            if info is None or not info.available:
+                return self._download_error(t("No update is available to download"))
+            asset = info.asset
+            if asset is None:
+                return self._download_error(
+                    t("This release has no download for your platform")
+                )
+            if not _is_https_asset_url(asset.url):
+                return self._download_error(
+                    t("Refusing to download an update from an insecure source")
+                )
+            digest = str(asset.sha256 or "").strip()
+            if not digest:
+                return self._download_error(
+                    t(
+                        "The release does not publish a checksum; "
+                        "refusing to download it"
+                    )
+                )
+
+            updates_dir = _updates_dir()
+            name = Path(str(asset.name).replace("\\", "/")).name or "update.bin"
+            try:
+                written = download_asset(
+                    asset.url,
+                    Path(name),
+                    expected_sha256=digest,
+                    root=updates_dir,
+                    timeout=_UPDATE_DOWNLOAD_TIMEOUT,
+                )
+            except (ValueError, OSError) as exc:
+                logger.debug("Asset transfer failed: %s", exc)
+                return self._download_error(format_error(exc))
+
+            final = Path(written)
+            if not _inside_dir(final, updates_dir):
+                # Defensive: the shared helper already enforces this.
+                try:
+                    final.unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("Could not remove %s", final, exc_info=True)
+                return self._download_error(
+                    t("The download landed outside the update folder")
+                )
+            if not verify_sha256(final, digest):
+                try:
+                    final.unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("Could not remove %s", final, exc_info=True)
+                return self._download_error(
+                    t("The downloaded update failed its checksum check and was deleted")
+                )
+
+            with self._download_guard:
+                self._downloaded = _DownloadedUpdate(
+                    path=final, sha256=digest, name=final.name
+                )
+            return {
+                "ok": True,
+                "path": str(final),
+                "error": None,
+                "asset_name": final.name,
+            }
+        finally:
+            with self._download_guard:
+                self._download_active = False
+
+    @staticmethod
+    def _download_error(message: str) -> dict[str, Any]:
+        """A failed :meth:`download_update` reply."""
+        return {"ok": False, "path": None, "error": message}
+
+    def _install_update(self) -> dict[str, Any]:
+        """Implementation of :meth:`install_update` (may raise)."""
+        # Claim the verified record atomically.  The page disables its buttons
+        # while installing, but any script in the window can call the bridge
+        # twice; without the claim both calls would reach ``Popen`` and start
+        # two installers.  Every failure that leaves the file usable gives the
+        # claim back (see :meth:`_release_claim`).
+        with self._download_guard:
+            record = self._downloaded
+            self._downloaded = None
+        if record is None:
+            return {"ok": False, "error": t("No update has been downloaded yet")}
+        try:
+            return self._launch_update(record)
+        except Exception:  # noqa: BLE001 - re-raised; the claim is returned first
+            self._release_claim(record)
+            raise
+
+    def _launch_update(self, record: _DownloadedUpdate) -> dict[str, Any]:
+        """Verify an already-claimed download and launch its installer."""
+        if sys.platform != "win32":
+            self._release_claim(record)
+            return {
+                "ok": False,
+                "error": t(
+                    "Automatic installation is only supported on Windows; "
+                    "please extract the downloaded file manually"
+                ),
+            }
+        target = record.path
+        if target.suffix.lower() != ".exe":
+            self._release_claim(record)
+            return {
+                "ok": False,
+                "error": t(
+                    "This update is not an installer; please extract it manually"
+                ),
+            }
+        updates_dir = _updates_dir()
+        if not _inside_dir(target, updates_dir):
+            self._release_claim(record)
+            return {
+                "ok": False,
+                "error": t("Refusing to run an update from outside the update folder"),
+            }
+        if not target.is_file():
+            self._release_claim(record)
+            return {
+                "ok": False,
+                "error": t(
+                    "The downloaded installer is missing; please download it again"
+                ),
+            }
+        if not verify_sha256(target, record.sha256):
+            # The file changed after verification: never launch it.
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("Could not remove %s", target, exc_info=True)
+            return {
+                "ok": False,
+                "error": t(
+                    "The downloaded installer failed its checksum check; "
+                    "please download it again"
+                ),
+            }
+
+        try:
+            # Fixed argument vector: no shell, no user-supplied text.  A list
+            # argument keeps an installer path containing spaces intact
+            # (``list2cmdline`` quotes it).
+            process = subprocess.Popen(  # noqa: S603
+                [str(target), *_INSTALLER_ARGS],
+                close_fds=True,
+                shell=False,
+            )
+        except OSError as exc:
+            logger.debug("Could not start the installer: %s", exc)
+            self._release_claim(record)
+            return {"ok": False, "error": format_error(exc)}
+
+        pid = getattr(process, "pid", None)
+        logger.info("Launched the update installer (pid=%s)", pid)
+        # One install per download: the claim taken above stays consumed.
+        self._schedule_exit()
+        return {
+            "ok": True,
+            "error": None,
+            "restarting": True,
+            "pid": pid if isinstance(pid, int) else None,
+        }
+
+    def _release_claim(self, record: _DownloadedUpdate) -> None:
+        """Give a claimed download back when no installer was launched."""
+        with self._download_guard:
+            if self._downloaded is None:
+                self._downloaded = record
+
+    def _schedule_exit(self) -> None:
+        """
+        Close the window shortly after the installer has been launched.
+
+        The short delay exists only so the ``install_update`` reply can cross
+        the JS bridge; we never wait for (or inspect) the installer itself.
+        Without a registered window (unit tests, headless use) nothing happens.
+
+        pywebview runs every ``js_api`` method on a worker thread, so
+        ``window.destroy()`` is called off the GUI thread on purpose.  The
+        WinForms backend marshals it back through ``Control.Invoke``, which is
+        the supported way to ask the UI thread to close a window.
+
+        A close that raises is retried once; if it still fails the installer is
+        already running while this process keeps its files open, so the failure
+        is logged at warning level with an explicit "close the app manually"
+        instruction instead of being swallowed.
+        """
+        callback = self._exit_callback
+        if callback is None:
+            return
+
+        def close_once() -> bool:
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 - the process may be going away
+                logger.debug("Could not close the window", exc_info=True)
+                return False
+            return True
+
+        def run() -> None:
+            time.sleep(_INSTALL_EXIT_DELAY)
+            if close_once():
+                return
+            time.sleep(_INSTALL_EXIT_RETRY_DELAY)
+            if close_once():
+                return
+            logger.warning(
+                "The update installer was launched but the window could not be "
+                "closed; please close the application manually so the installer "
+                "can replace its files"
+            )
+
+        threading.Thread(
+            target=run, name="novel-desktop-update-exit", daemon=True
+        ).start()
 
     @staticmethod
     def shortcut_exists() -> bool:
@@ -1256,6 +1941,10 @@ def run_webview_app() -> int:
         window_state_file,
     )
 
+    # Held until the process exits so the installer's Restart Manager can see
+    # (and close) this instance deterministically.
+    _hold_update_mutex()
+
     bridge = ApiBridge()
     geometry = load_window_geometry(window_state_file())
     kwargs: dict[str, Any] = {
@@ -1279,6 +1968,7 @@ def run_webview_app() -> int:
         **kwargs,
     )
     assert window is not None  # nb: pywebview types this as Optional[Window]
+    bridge._attach_window(window)
 
     def on_closing() -> None:
         # Geometry must be read on ``closing``: by the ``closed`` event the

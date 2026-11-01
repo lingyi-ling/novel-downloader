@@ -33,6 +33,7 @@
 | `trust_env`          | `bool`  | `false`           | 是否读取系统代理等环境变量                     |
 | `verify_ssl`         | `bool`  | `true`            | 是否校验 TLS 证书 (排查代理问题时才考虑关闭)   |
 | `locale_style`       | `str`   | `"simplified"`    | 站点简/繁体镜像选择, 可选 `"simplified"` / `"traditional"` (仅对提供双镜像的站点生效) |
+| `update_check`       | `str`   | `"auto"`          | 更新检查策略: `"auto"` (命令结束后静默检查, 每天最多一次) / `"manual"` (仅运行 `novel-cli update` 时检查) / `"off"` (从不检查) |
 | `user_agent`         | `str/None` | `None`         | 自定义请求 User-Agent (覆盖默认值)             |
 | `headers`            | `dict/None` | `None`        | 附加自定义请求头 (键值对)                      |
 

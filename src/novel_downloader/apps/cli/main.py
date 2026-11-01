@@ -34,12 +34,50 @@ def _preparse_language(argv: list[str] | None = None) -> str:
     return code
 
 
+def _notify_update(args: argparse.Namespace) -> None:
+    """
+    Offer the quiet "newer version" hint after a successful command.
+
+    Failure paths never reach here (see :func:`cli_main`), and ``update``
+    itself is skipped because the hint would only repeat what it printed. The
+    helper swallows its own errors; the outer guard also keeps an import
+    problem from turning a successful command into a failed one.
+    """
+    if getattr(args, "command", None) == "update":
+        return
+    try:
+        from novel_downloader.apps.cli import ui
+        from novel_downloader.apps.cli.update_notice import maybe_notify
+
+        # ``config=None`` lets the helper load the configuration lazily: it is
+        # only needed once the cheap gates (JSON, TTY) have passed.
+        maybe_notify(
+            __version__,
+            config=None,
+            ui=ui,
+            # ``music platforms --json`` is the one subcommand that keeps the
+            # default ``json`` dest instead of ``as_json``; both mean "stdout
+            # is a machine-readable document", so both suppress the hint.
+            as_json=bool(
+                getattr(args, "as_json", False) or getattr(args, "json", False)
+            ),
+        )
+    except KeyboardInterrupt as err:
+        # Ctrl+C landing inside the (short) hint wait: same contract as an
+        # interrupted command -- "Aborted." on stderr, exit 1, no traceback.
+        print("\n" + t("Aborted."), file=sys.stderr)
+        raise SystemExit(1) from err
+    except Exception:  # noqa: BLE001 - a hint must never break a command
+        return
+
+
 def cli_main() -> None:
     _preparse_language()
 
     # Imported lazily so localized ``help`` strings pick up ``--lang``.
     from novel_downloader.apps.cli.commands import commands
     from novel_downloader.apps.cli.commands.batch import BatchCmd
+    from novel_downloader.apps.cli.commands.update import UpdateCmd
 
     parser = argparse.ArgumentParser(
         prog="novel-cli",
@@ -86,6 +124,8 @@ def cli_main() -> None:
     # ``cli_main()`` calls (tests, embedders) from registering it twice.
     if BatchCmd not in commands:
         commands.append(BatchCmd)
+    if UpdateCmd not in commands:
+        commands.append(UpdateCmd)
     for cmd in commands:
         cmd.register(subparsers)
 
@@ -111,6 +151,11 @@ def cli_main() -> None:
             # (``search --json``, ``login --list``, ...).
             print("\n" + t("Aborted."), file=sys.stderr)
             raise SystemExit(1) from err
+        else:
+            # Only a command that returned normally earns the hint: a failed
+            # one already printed its own diagnostics, and ``SystemExit``
+            # (usage errors, ``--check`` results) deliberately skips it too.
+            _notify_update(args)
     else:
         parser.print_help()
 

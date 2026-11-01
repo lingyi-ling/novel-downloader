@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -18,6 +19,8 @@ internal val baseUrlKey = stringPreferencesKey("base_url")
 internal val apiKeyKey = stringPreferencesKey("api_key")
 internal val downloadTreeUriKey = stringPreferencesKey("download_tree_uri")
 internal val standaloneKey = booleanPreferencesKey("standalone_engine")
+internal val autoCheckUpdatesKey = booleanPreferencesKey("auto_check_updates")
+internal val lastUpdateCheckKey = longPreferencesKey("last_update_check")
 
 data class ApiSettings(
     val baseUrl: String = Api.DEFAULT_BASE_URL,
@@ -33,6 +36,10 @@ data class ApiSettings(
      * computer running novel-api.
      */
     val standalone: Boolean = false,
+    /** Whether to look for a new APK once per [UpdateSchedule.CHECK_INTERVAL_MS]. */
+    val autoCheckUpdates: Boolean = true,
+    /** Epoch millis of the last successful update check, 0 when never. */
+    val lastUpdateCheck: Long = 0L,
 ) {
     /** The base URL the app should talk to given the current mode. */
     val effectiveBaseUrl: String
@@ -55,6 +62,17 @@ fun standaloneTargetUrl(enabled: Boolean, settings: ApiSettings): String =
     if (enabled) EmbeddedEngine.BASE_URL else settings.baseUrl
 
 /**
+ * Typed read that tolerates a value stored under a different type (a corrupted
+ * or downgraded preferences file). [Preferences.get] returns the raw object and
+ * the cast only happens at the call site, so a `String` under the `Long` key
+ * would throw `ClassCastException` there — outside any `runCatching` — and take
+ * the whole settings flow (and with it the UI) down. Checking the runtime type
+ * falls back to the caller's default instead.
+ */
+private inline fun <reified T : Any> Preferences.readOrNull(key: Preferences.Key<T>): T? =
+    asMap()[key] as? T
+
+/**
  * Maps the persisted preferences onto [ApiSettings]. A read failure (disk
  * error, corrupted file — both surface as [IOException]) falls back to
  * defaults instead of killing the flow: MainActivity reads the first value
@@ -64,10 +82,12 @@ internal fun Flow<Preferences>.toApiSettings(): Flow<ApiSettings> = catch { e ->
     if (e is IOException) emit(emptyPreferences()) else throw e
 }.map { prefs ->
     ApiSettings(
-        baseUrl = prefs[baseUrlKey] ?: Api.DEFAULT_BASE_URL,
-        apiKey = prefs[apiKeyKey].orEmpty(),
-        downloadTreeUri = prefs[downloadTreeUriKey].orEmpty(),
-        standalone = prefs[standaloneKey] ?: false,
+        baseUrl = prefs.readOrNull(baseUrlKey) ?: Api.DEFAULT_BASE_URL,
+        apiKey = prefs.readOrNull(apiKeyKey).orEmpty(),
+        downloadTreeUri = prefs.readOrNull(downloadTreeUriKey).orEmpty(),
+        standalone = prefs.readOrNull(standaloneKey) ?: false,
+        autoCheckUpdates = prefs.readOrNull(autoCheckUpdatesKey) ?: true,
+        lastUpdateCheck = prefs.readOrNull(lastUpdateCheckKey) ?: 0L,
     )
 }
 
@@ -101,6 +121,20 @@ class SettingsStore(private val context: Context) {
             } else {
                 prefs[downloadTreeUriKey] = trimmed
             }
+        }
+    }
+
+    /** Toggles the automatic startup update check. */
+    suspend fun saveAutoCheckUpdates(enabled: Boolean) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[autoCheckUpdatesKey] = enabled
+        }
+    }
+
+    /** Records when an update check last completed successfully. */
+    suspend fun recordUpdateCheck(atMillis: Long) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[lastUpdateCheckKey] = atMillis
         }
     }
 }

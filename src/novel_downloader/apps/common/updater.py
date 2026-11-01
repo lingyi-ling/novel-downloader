@@ -31,19 +31,30 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import platform
 import re
 import shutil
+import time
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "DEFAULT_CHECK_INTERVAL",
+    "DEFAULT_REPO",
     "DEFAULT_TIMEOUT",
     "ReleaseAsset",
+    "UpdateCheck",
     "UpdateInfo",
+    "check_due",
+    "check_for_update",
+    "fetch_latest_release",
+    "load_update_state",
+    "release_api_url",
+    "save_update_state",
     "detect_platform",
     "download_asset",
     "is_newer",
@@ -560,3 +571,141 @@ def download_asset(
 
     part.replace(final)
     return final
+
+
+# ---------------------------------------------------------------------------
+# remote check + throttle cache
+# ---------------------------------------------------------------------------
+
+#: Release feed used by every client when no repository is configured.
+DEFAULT_REPO = "lingyi-ling/novel-downloader"
+
+#: How often an automatic check may run, in seconds (24 h).
+DEFAULT_CHECK_INTERVAL = 24 * 3600
+
+#: Upper bound on the release document we are willing to download.  A hostile
+#: or broken mirror could otherwise stream forever.
+_MAX_API_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class UpdateCheck:
+    """Outcome of one update check, including the failure case."""
+
+    info: UpdateInfo | None
+    error: str | None
+    checked_at: float
+
+    @property
+    def available(self) -> bool:
+        """Whether a newer release was found."""
+        return bool(self.info and self.info.available)
+
+
+def release_api_url(slug: str = DEFAULT_REPO) -> str:
+    """The ``releases/latest`` endpoint for *slug*."""
+    cleaned = slug.strip().strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", cleaned):
+        raise ValueError(f"not an owner/name repository slug: {slug!r}")
+    return f"https://api.github.com/repos/{cleaned}/releases/latest"
+
+
+def _fetch_json(url: str, timeout: float) -> Any:
+    """GET *url* and decode JSON, reading at most :data:`_MAX_API_BYTES`."""
+    request = urllib.request.Request(  # noqa: S310 - https URL built above
+        url,
+        headers={"User-Agent": _USER_AGENT, "Accept": "application/vnd.github+json"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        raw = response.read(_MAX_API_BYTES + 1)
+    if len(raw) > _MAX_API_BYTES:
+        raise ValueError("release document is unexpectedly large")
+    return json.loads(raw.decode("utf-8"))
+
+
+def fetch_latest_release(
+    slug: str = DEFAULT_REPO,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    opener: Callable[[str, float], Any] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Fetch the latest release document, returning ``None`` on any failure.
+
+    An update check must never break the command that triggered it: offline
+    machines, rate limits and malformed payloads all collapse to ``None``.
+    """
+    try:
+        payload = (opener or _fetch_json)(release_api_url(slug), timeout)
+    except Exception:  # noqa: BLE001 - a failed check is not an error path
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def check_for_update(
+    current: str,
+    *,
+    slug: str = DEFAULT_REPO,
+    platform_tag: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    opener: Callable[[str, float], Any] | None = None,
+    now: float | None = None,
+) -> UpdateCheck:
+    """Check the release feed once and interpret it for *current*."""
+    stamp = time.time() if now is None else now
+    payload = fetch_latest_release(slug, timeout=timeout, opener=opener)
+    if payload is None:
+        return UpdateCheck(info=None, error="unreachable", checked_at=stamp)
+    try:
+        info = parse_manifest(payload, current=current, platform_tag=platform_tag)
+    except Exception:  # noqa: BLE001 - parse_manifest is defensive already
+        return UpdateCheck(info=None, error="malformed", checked_at=stamp)
+    return UpdateCheck(info=info, error=None, checked_at=stamp)
+
+
+def load_update_state(path: Path) -> dict[str, Any]:
+    """Read the throttle file; a missing or corrupt file reads as empty."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_update_state(
+    path: Path, info: UpdateInfo | None, *, now: float | None = None
+) -> None:
+    """Record that a check ran, atomically; failures are ignored."""
+    stamp = time.time() if now is None else now
+    payload = {
+        "checked_at": stamp,
+        "latest": info.latest if info else "",
+    }
+    target = Path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_name(f"{target.name}.tmp")
+        temp.write_text(json.dumps(payload), encoding="utf-8")
+        temp.replace(target)
+    except OSError:
+        return
+
+
+def check_due(
+    path: Path,
+    *,
+    interval: float = DEFAULT_CHECK_INTERVAL,
+    now: float | None = None,
+) -> bool:
+    """Whether an automatic check should run, per the throttle file."""
+    state = load_update_state(path)
+    if "checked_at" not in state:
+        # No usable record (first run, deleted file, corrupt JSON): a missing
+        # timestamp means "never checked", not "checked at the epoch".
+        return True
+    try:
+        last = float(state["checked_at"])
+    except (TypeError, ValueError):
+        return True
+    stamp = time.time() if now is None else now
+    return (stamp - last) >= interval

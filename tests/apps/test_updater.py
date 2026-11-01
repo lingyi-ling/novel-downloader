@@ -746,3 +746,116 @@ def test_check_update_records_the_throttle_before_fetching(
     wa.ApiBridge().check_update()
 
     assert "last_update_check" in saved
+
+
+# ---------------------------------------------------------------------------
+# remote check + throttle cache
+# ---------------------------------------------------------------------------
+
+
+class TestReleaseApiUrl:
+    def test_builds_the_latest_endpoint(self) -> None:
+        assert updater.release_api_url("owner/name") == (
+            "https://api.github.com/repos/owner/name/releases/latest"
+        )
+
+    def test_tolerates_surrounding_slashes(self) -> None:
+        assert "/repos/owner/name/" in updater.release_api_url("/owner/name/")
+
+    @pytest.mark.parametrize("slug", ["", "owner", "a/b/c", "owner name/repo"])
+    def test_rejects_bad_slugs(self, slug: str) -> None:
+        with pytest.raises(ValueError):
+            updater.release_api_url(slug)
+
+
+class TestFetchLatestRelease:
+    def test_returns_the_payload(self) -> None:
+        payload = {"tag_name": "v9.9.9", "assets": []}
+
+        assert (
+            updater.fetch_latest_release(opener=lambda url, timeout: payload) == payload
+        )
+
+    def test_none_on_transport_error(self) -> None:
+        def boom(url: str, timeout: float) -> object:
+            raise OSError("offline")
+
+        assert updater.fetch_latest_release(opener=boom) is None
+
+    def test_none_when_the_document_is_not_an_object(self) -> None:
+        assert updater.fetch_latest_release(opener=lambda url, t: []) is None
+
+
+class TestCheckForUpdate:
+    def test_reports_an_available_update(self) -> None:
+        payload = {
+            "tag_name": "v9.9.9",
+            "html_url": "https://example.invalid/r",
+            "assets": [
+                {
+                    "name": "novel-downloader-9.9.9-android.apk",
+                    "browser_download_url": "https://example.invalid/a.apk",
+                    "size": 10,
+                    "digest": "sha256:" + "a" * 64,
+                }
+            ],
+        }
+
+        result = updater.check_for_update(
+            "1.0.0",
+            platform_tag="android",
+            opener=lambda url, t: payload,
+            now=100.0,
+        )
+
+        assert result.info is not None
+        assert result.info.latest == "9.9.9"
+        assert result.available is True
+        assert result.error is None
+        assert result.checked_at == 100.0
+
+    def test_unreachable_feed_is_reported_not_raised(self) -> None:
+        def boom(url: str, timeout: float) -> object:
+            raise OSError("offline")
+
+        result = updater.check_for_update("1.0.0", opener=boom)
+
+        assert result.info is None
+        assert result.error == "unreachable"
+        assert result.available is False
+
+
+class TestUpdateState:
+    def test_round_trip_and_due(self, tmp_path: Path) -> None:
+        state = tmp_path / "update.json"
+        info = updater.UpdateInfo(
+            current="1.0.0",
+            latest="1.4.0",
+            available=True,
+            notes_url=None,
+            asset=None,
+            assets=(),
+        )
+
+        updater.save_update_state(state, info, now=1000.0)
+
+        assert updater.load_update_state(state)["latest"] == "1.4.0"
+        assert updater.check_due(state, interval=3600, now=2000.0) is False
+        assert updater.check_due(state, interval=3600, now=5000.0) is True
+
+    def test_missing_or_corrupt_state_is_treated_as_due(self, tmp_path: Path) -> None:
+        state = tmp_path / "update.json"
+
+        assert updater.check_due(state, now=100.0) is True
+        assert updater.load_update_state(state) == {}
+
+        state.write_text("{not json", encoding="utf-8")
+        assert updater.load_update_state(state) == {}
+        assert updater.check_due(state, now=100.0) is True
+
+    def test_save_never_raises_on_an_unwritable_path(self, tmp_path: Path) -> None:
+        blocker = tmp_path / "file"
+        blocker.write_text("x", encoding="utf-8")
+
+        # ``blocker / "child"`` cannot be a directory: the save must swallow it.
+        updater.save_update_state(blocker / "update.json", None, now=1.0)

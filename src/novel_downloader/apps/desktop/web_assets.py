@@ -155,6 +155,18 @@ input, select, textarea { font: inherit; color: inherit; }
 .icon-btn:hover { background: var(--hover); color: var(--text); }
 .foot-meta { margin-left: auto; text-align: right; font-size: 11px; color: var(--text-3); line-height: 1.35; }
 
+/* update bar (only rendered when a newer release is known) */
+.update-bar {
+  display: flex; flex-direction: column; gap: 7px;
+  background: var(--accent-soft); border: 1px solid var(--accent-soft-2);
+  border-radius: 11px; padding: 10px 11px;
+}
+.update-bar .u-text { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--accent); }
+.update-bar .u-text svg.icon { width: 15px; height: 15px; }
+.update-bar .u-size { margin-left: auto; font-size: 11px; font-weight: 500; color: var(--text-2); white-space: nowrap; }
+.update-bar .u-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.update-bar .u-acts .btn { flex: 1 1 auto; height: 28px; padding: 0 9px; font-size: 12px; }
+
 /* ============================================================ main */
 .main { min-width: 0; display: flex; flex-direction: column; }
 .page { display: none; flex-direction: column; min-height: 0; height: 100vh; animation: pageIn .28s cubic-bezier(.2,.7,.3,1); }
@@ -425,6 +437,18 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
       <button class="nav-item" data-page="follow"><svg class="icon"><use href="#i-heart"/></svg><span data-i18n="Follow">Follow</span><kbd>5</kbd></button>
     </nav>
     <div class="side-foot">
+      <div class="update-bar" id="update-bar" hidden>
+        <div class="u-text">
+          <svg class="icon"><use href="#i-down"/></svg>
+          <span id="update-text" data-i18n="Update available: v{ver}">Update available: v{ver}</span>
+          <span class="u-size" id="update-size"></span>
+        </div>
+        <div class="u-acts">
+          <button class="btn btn-primary btn-sm" id="update-install" data-i18n="Download and install">Download and install</button>
+          <button class="btn btn-ghost btn-sm" id="update-notes" data-i18n="Release notes">Release notes</button>
+          <button class="btn btn-ghost btn-sm" id="update-later" data-i18n="Later">Later</button>
+        </div>
+      </div>
       <div class="foot-row">
         <button class="icon-btn" id="shortcut-btn" data-i18n-title="Create desktop shortcut" title="Create desktop shortcut"><svg class="icon"><use href="#i-desktop"/></svg></button>
         <button class="icon-btn" id="theme-btn" data-i18n-title="Theme" title="Theme"><svg class="icon"><use href="#i-moon"/></svg></button>
@@ -637,6 +661,102 @@ $("#theme-btn").onclick = () => setTheme(document.documentElement.dataset.theme 
 $("#shortcut-btn").onclick = async () => {
   const r = await call("create_shortcut");
   if (r && r.message) toast(r.message, r.ok ? "ok" : "warn");
+};
+
+/* ================================================================ updates */
+// Low-key bar in the sidebar: it only exists while a newer release is known.
+// "Later" hides it for this session (localStorage is never touched).
+const updates = { busy: false, dismissed: false, finished: false, state: null };
+let updatePollTimer = null;
+
+function applyUpdateState(st) {
+  if (!st) return;
+  updates.state = st;
+  const bar = $("#update-bar");
+  const show = !!st.available && !updates.dismissed;
+  bar.hidden = !show;
+  if (!show) return;
+  $("#update-text").textContent = t("Update available: v{ver}").replace("{ver}", st.latest || "");
+  $("#update-size").textContent = st.asset_size ? fmtSize(st.asset_size) : "";
+  $("#update-notes").hidden = !(st.notes_url || st.url);
+  // A release without an asset for this platform can only be opened manually.
+  $("#update-install").hidden = !st.asset_name;
+}
+
+function setUpdateBusy(busy) {
+  updates.busy = busy;
+  for (const id of ["#update-install", "#update-notes", "#update-later"]) $(id).disabled = busy;
+}
+
+function pollUpdateState() {
+  if (updatePollTimer) clearInterval(updatePollTimer);
+  // The check runs on a background thread; poll until it lands. A bounded
+  // number of attempts keeps an offline machine from poking the bridge forever.
+  let left = 10;
+  updatePollTimer = setInterval(async () => {
+    let st = null;
+    try { st = await api("update_state"); } catch { st = null; }
+    applyUpdateState(st);
+    if (!st || !st.pending || --left <= 0) {
+      clearInterval(updatePollTimer);
+      updatePollTimer = null;
+    }
+  }, 1200);
+}
+
+function bootUpdateCheck() {
+  // Prefer the non-blocking bridge; the legacy blocking ``check_update`` call
+  // stays for a backend that predates ``check_update_async``.
+  const bridge = (window.pywebview && window.pywebview.api) || {};
+  if (typeof bridge.check_update_async === "function") {
+    api("check_update_async").then(r => { applyUpdateState(r); pollUpdateState(); }).catch(() => {});
+  } else {
+    api("check_update").then(r => {
+      if (r && r.available) applyUpdateState(r);
+    }).catch(() => {});
+  }
+}
+
+$("#update-later").onclick = () => {
+  updates.dismissed = true;
+  $("#update-bar").hidden = true;
+};
+
+$("#update-notes").onclick = () => {
+  const st = updates.state || {};
+  const url = st.notes_url || st.url;
+  if (url) api("open_url", url).catch(() => {});
+};
+
+$("#update-install").onclick = async () => {
+  if (updates.busy) return;
+  const btn = $("#update-install");
+  // Disable synchronously (before the await): a double click must not start
+  // two downloads or two installer launches.
+  setUpdateBusy(true);
+  btn.textContent = t("Downloading…");
+  try {
+    const dl = await api("download_update");
+    if (!dl || !dl.ok || !dl.path) {
+      toast((dl && dl.error) || t("Update download failed"), "err", 9000);
+      return;
+    }
+    btn.textContent = t("Installing…");
+    const res = await api("install_update");
+    if (!res || !res.ok) {
+      toast((res && res.error) || t("Could not start the installer"), "err", 12000);
+      return;
+    }
+    // The backend closes the window right after launching the installer.
+    updates.finished = true;
+  } catch (e) {
+    toast(String((e && e.message) || e), "err", 9000);
+  } finally {
+    if (!updates.finished) {
+      setUpdateBusy(false);
+      btn.textContent = t("Download and install");
+    }
+  }
 };
 
 /* ================================================================ search */
@@ -1123,12 +1243,9 @@ function boot() {
     if (state.is_frozen && !state.shortcut_exists) {
       setTimeout(() => toast(t("Click here to create a desktop shortcut"), "info", 6000), 1200);
     }
-    api("check_update").then(r => {
-      if (r && r.available && r.url) {
-        const msg = r.message || t("New version {ver} is out — click to download").replace("{ver}", r.latest || "");
-        toast(msg, "info", 8000, () => api("open_url", r.url).catch(() => {}));
-      }
-    }).catch(() => {});
+    // Update checks start after the page is ready and never block it: the
+    // bar appears on its own once the background check reports a release.
+    bootUpdateCheck();
     renderTracks();
     initMusic().catch(() => {});
     refreshTasks();
@@ -1141,7 +1258,7 @@ if (window.pywebview && window.pywebview.api) boot();
 else window.addEventListener("pywebviewready", boot);
 
 taskTimer = setInterval(refreshTasks, 1200);
-window.addEventListener("beforeunload", () => { clearInterval(taskTimer); clearInterval(healthPoll); if (musicPoll) clearInterval(musicPoll); });
+window.addEventListener("beforeunload", () => { clearInterval(taskTimer); clearInterval(healthPoll); if (musicPoll) clearInterval(musicPoll); if (updatePollTimer) clearInterval(updatePollTimer); });
 </script>
 </body>
 </html>

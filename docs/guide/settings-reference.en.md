@@ -33,6 +33,7 @@ Global runtime settings for downloads / concurrency / rate limits / directories 
 | `trust_env`          | `bool`    | `false`            | Whether to read system proxy and other environment variables |
 | `verify_ssl`         | `bool`    | `true`             | Whether to verify TLS certificates (disable only when diagnosing proxy issues) |
 | `locale_style`       | `str`     | `"simplified"`     | Site simplified/traditional mirror selection: `"simplified"` / `"traditional"` (only applies to sites offering both mirrors) |
+| `update_check`       | `str`     | `"auto"`           | Update-check policy: `"auto"` (silent check after a command, at most once a day) / `"manual"` (only when running `novel-cli update`) / `"off"` (never) |
 | `user_agent`         | `str/None` | `None`            | Custom request User-Agent (overrides the default) |
 | `headers`            | `dict/None` | `None`           | Extra custom request headers (key-value pairs) |
 

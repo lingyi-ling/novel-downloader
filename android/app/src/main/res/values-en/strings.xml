@@ -156,4 +156,31 @@
     <string name="settings_standalone_on">Standalone engine on — starting locally…</string>
     <string name="settings_standalone_off">Switched back to remote API mode</string>
     <string name="settings_standalone_error">Embedded engine failed to start: %1$s</string>
+
+    <!-- Updates -->
+    <string name="update_dialog_title">Update available</string>
+    <string name="update_dialog_message">Version v%1$s is available (current v%2$s)</string>
+    <string name="update_dialog_notes">Release notes</string>
+    <string name="update_dialog_downloading">Downloading the installer…</string>
+    <string name="update_action_download">Download update</string>
+    <string name="update_action_downloading">Downloading…</string>
+    <string name="update_action_install">Install</string>
+    <string name="update_action_later">Later</string>
+    <string name="update_install_hint">The download passed its SHA-256 check; tap Install to open the system installer</string>
+    <string name="update_state_checking">Checking for updates…</string>
+    <string name="update_failed_check">Could not check for updates, try again later</string>
+    <string name="update_failed_no_asset">This release has no installer; update manually from the releases page</string>
+    <string name="update_failed_no_checksum">This release publishes no checksum, so the update cannot be verified; update manually from the releases page</string>
+    <string name="update_failed_checksum">Checksum verification failed; the file was deleted, please retry</string>
+    <string name="update_failed_insecure">The download URL is not HTTPS, so the update was cancelled</string>
+    <string name="update_failed_download">Download failed: %1$s</string>
+    <string name="update_failed_install">Could not start the system installer</string>
+    <string name="settings_section_update">Updates</string>
+    <string name="settings_current_version">Current version: v%1$s</string>
+    <string name="settings_last_check">Last checked: %1$s</string>
+    <string name="settings_last_check_never">Last checked: never</string>
+    <string name="settings_auto_check">Check for updates on launch</string>
+    <string name="settings_check_now">Check now</string>
+    <string name="settings_update_latest">You are on the latest version (v%1$s)</string>
+    <string name="settings_update_available">Version v%1$s is available</string>
 </resources>

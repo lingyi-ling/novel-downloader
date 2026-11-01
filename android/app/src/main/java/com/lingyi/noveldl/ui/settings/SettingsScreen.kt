@@ -40,6 +40,10 @@ import com.lingyi.noveldl.data.ApiSettings
 import com.lingyi.noveldl.data.DownloadTarget
 import com.lingyi.noveldl.data.EmbeddedEngine
 import com.lingyi.noveldl.data.SettingsStore
+import com.lingyi.noveldl.data.UpdateCenter
+import com.lingyi.noveldl.data.UpdateFailure
+import com.lingyi.noveldl.data.UpdatePhase
+import com.lingyi.noveldl.data.appVersionName
 import com.lingyi.noveldl.data.configureTargetUrl
 import com.lingyi.noveldl.data.SitesSummary
 import com.lingyi.noveldl.data.resolveDownloadTarget
@@ -48,12 +52,16 @@ import com.lingyi.noveldl.data.toSitesSummary
 import com.lingyi.noveldl.data.treeUriDisplayName
 import com.lingyi.noveldl.ui.healthSummary
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings by store.settings.collectAsState(initial = ApiSettings())
+    val updatePhase by UpdateCenter.phase.collectAsState()
     // Keyed on the saved URL/key only: picking a download directory re-emits
     // `settings` and must not wipe unsaved text-field edits.
     var baseUrl by remember(settings.baseUrl, settings.apiKey) { mutableStateOf(settings.baseUrl) }
@@ -364,5 +372,136 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        // ----- Updates -----
+        Text(
+            stringResource(R.string.settings_section_update),
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        val versionName = appVersionName(context)
+        Text(
+            stringResource(R.string.settings_current_version, versionName),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            if (settings.lastUpdateCheck > 0L) {
+                stringResource(
+                    R.string.settings_last_check,
+                    formatUpdateTime(settings.lastUpdateCheck),
+                )
+            } else {
+                stringResource(R.string.settings_last_check_never)
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                stringResource(R.string.settings_auto_check),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Switch(
+                checked = settings.autoCheckUpdates,
+                onCheckedChange = { enabled ->
+                    scope.launch { store.saveAutoCheckUpdates(enabled) }
+                },
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val busy = updatePhase is UpdatePhase.Checking ||
+                updatePhase is UpdatePhase.Downloading
+            Button(
+                onClick = {
+                    UpdateCenter.check(versionName, notifyDialog = false) { info ->
+                        if (info != null) {
+                            scope.launch {
+                                store.recordUpdateCheck(System.currentTimeMillis())
+                            }
+                        }
+                    }
+                },
+                enabled = !busy,
+            ) {
+                Text(stringResource(R.string.settings_check_now))
+            }
+            // The download action only makes sense once a release payload is
+            // known; a failed check carries no asset to fetch.
+            val pendingUpdate = when (val phase = updatePhase) {
+                is UpdatePhase.Available -> phase.info
+                is UpdatePhase.Failed -> phase.info
+                else -> null
+            }
+            when {
+                updatePhase is UpdatePhase.Ready -> TextButton(
+                    onClick = { UpdateCenter.install(context) },
+                ) {
+                    Text(stringResource(R.string.update_action_install))
+                }
+                pendingUpdate != null -> TextButton(
+                    onClick = { UpdateCenter.download() },
+                ) {
+                    Text(stringResource(R.string.update_action_download))
+                }
+                else -> Unit
+            }
+        }
+        val updateStatus = when (val phase = updatePhase) {
+            is UpdatePhase.Checking -> stringResource(R.string.update_state_checking)
+            is UpdatePhase.UpToDate -> stringResource(
+                R.string.settings_update_latest,
+                phase.info.current,
+            )
+            is UpdatePhase.Available -> stringResource(
+                R.string.settings_update_available,
+                phase.info.latest,
+            )
+            is UpdatePhase.Downloading -> stringResource(R.string.update_dialog_downloading)
+            is UpdatePhase.Ready -> stringResource(R.string.update_install_hint)
+            is UpdatePhase.Failed -> updateFailureText(phase)
+            UpdatePhase.Idle -> null
+        }
+        if (updateStatus != null) {
+            Text(
+                updateStatus,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (updatePhase is UpdatePhase.Failed) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
     }
 }
+
+/** Human-readable text of an update failure, shared by the dialog and settings. */
+@Composable
+internal fun updateFailureText(failed: UpdatePhase.Failed): String = when (failed.reason) {
+    UpdateFailure.CHECK_FAILED -> stringResource(R.string.update_failed_check)
+    UpdateFailure.NO_ASSET -> stringResource(R.string.update_failed_no_asset)
+    UpdateFailure.NO_CHECKSUM -> stringResource(R.string.update_failed_no_checksum)
+    UpdateFailure.CHECKSUM_MISMATCH -> stringResource(R.string.update_failed_checksum)
+    UpdateFailure.INSECURE_URL -> stringResource(R.string.update_failed_insecure)
+    UpdateFailure.INSTALL_FAILED -> stringResource(R.string.update_failed_install)
+    UpdateFailure.DOWNLOAD_FAILED -> stringResource(
+        R.string.update_failed_download,
+        failed.detail.orEmpty(),
+    )
+}
+
+internal fun formatUpdateTime(millis: Long): String =
+    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(millis))

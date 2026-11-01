@@ -82,6 +82,8 @@ _GENERAL_KEYS = frozenset(
         "backend",
         "locale_style",
         "login_required",
+        # Read by apps/cli/update_notice.py (auto | manual | off).
+        "update_check",
         "http2",
         "impersonate",
         "verify_ssl",
@@ -180,6 +182,9 @@ _LOCALE_STYLES = ("simplified", "traditional")
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 _FORMATS = ("epub", "html", "txt")
 _SPLIT_MODES = ("book", "volume", "chapter")
+#: ``general.update_check``: ``auto`` = hint after a command (throttled),
+#: ``manual`` = only ``novel-cli update``, ``off`` = never check.
+_UPDATE_CHECK_MODES = ("auto", "manual", "off")
 _BOOK_KEYS = frozenset({"book_id", "start_id", "end_id", "ignore_ids"})
 
 #: Options read by each built-in processor, keyed by the name used in
@@ -1119,6 +1124,7 @@ def _validate_general(
     _check_headers(general, "headers", prefix, problems)
     _check_enum(general, "backend", prefix, problems, _BACKENDS)
     _check_enum(general, "locale_style", prefix, problems, _LOCALE_STYLES)
+    _check_enum(general, "update_check", prefix, problems, _UPDATE_CHECK_MODES)
 
     parser = general.get("parser")
     if "parser" in general:

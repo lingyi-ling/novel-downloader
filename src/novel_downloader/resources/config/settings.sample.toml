@@ -27,6 +27,10 @@ fetch_inaccessible = false         # 是否尝试获取未订阅章节
 
 backend = "aiohttp"                # aiohttp / httpx / curl_cffi
 locale_style = "simplified"        # simplified / traditional
+# 更新检查: auto = 命令结束后静默检查并提示 (每天最多一次)
+#           manual = 只在你运行 novel-cli update 时检查
+#           off = 从不检查
+update_check = "auto"
 login_required = false
 # 需要借助真实浏览器搜索的站点 (其搜索请求由站点自身 JS 签名, 纯 HTTP 拿不到结果);
 # 使用前先 novel-cli login <site> 建立登录会话; 设为 [] 可禁用
