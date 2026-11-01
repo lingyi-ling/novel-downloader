@@ -490,7 +490,10 @@ async def test_music_health_single_and_all_platforms(
     assert unknown.json() == {
         "detail": MSG_UNKNOWN_MUSIC_PLATFORM.format(platform="nope", keys="demo, bad")
     }
-    assert calls == [("demo", 5.0), ("demo", 1.5), ("bad", 1.5)]
+    # The "all platforms" probe runs concurrently in a thread pool, so the
+    # relative order of the two ``fake_health`` calls is not part of the
+    # contract -- asserting it made this test flaky on slower interpreters.
+    assert sorted(calls) == sorted([("demo", 5.0), ("demo", 1.5), ("bad", 1.5)])
 
 
 # ---------------------------------------------------------------------------
