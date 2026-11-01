@@ -274,14 +274,20 @@ class SourcesCmd(Command):
     # ------------------------------------------------------------------ #
     @classmethod
     def _check(cls, path_str: str) -> None:
-        from novel_downloader.plugins.rule.model import RuleError, parse_rule
+        from novel_downloader.plugins.rule.model import (
+            RuleError,
+            loads_rule_json,
+            parse_rule,
+        )
 
         path = Path(path_str)
         if not path.is_file():
             fail(t("Rule file not found: {path}").format(path=path_str))
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
+            data = loads_rule_json(
+                path.read_text(encoding="utf-8-sig"), source=path.name
+            )
+        except RuleError as e:
             fail(t("Invalid JSON in {path}: {err}").format(path=path_str, err=e))
 
         try:
@@ -334,7 +340,7 @@ class SourcesCmd(Command):
     def _add_remote(cls, url: str, *, name: str | None, force: bool) -> None:
         """Download, validate and install a rule hosted at ``url``."""
         from novel_downloader.plugins.rule import RuleError, install_rule
-        from novel_downloader.plugins.rule.model import parse_rule
+        from novel_downloader.plugins.rule.model import loads_rule_json, parse_rule
 
         try:
             raw = _download_rule(url)
@@ -353,12 +359,12 @@ class SourcesCmd(Command):
         except UnicodeDecodeError as e:
             fail(t("The remote rule is not valid UTF-8: {err}").format(err=e))
 
+        source = _rule_name(name, url) or "remote-rule"
         try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as e:
+            payload = loads_rule_json(text, source=source)
+        except RuleError as e:
             fail(t("Invalid JSON in {path}: {err}").format(path=url, err=e))
 
-        source = _rule_name(name, url) or "remote-rule"
         try:
             rule = parse_rule(payload, source=source)
         except RuleError as e:

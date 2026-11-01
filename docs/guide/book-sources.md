@@ -47,7 +47,20 @@ novel-cli search "斗破苍穹" --first
 
 `--json` 会关闭交互提示, 并把机器可读的结果输出到 stdout; 表格、日志等诊断信息一律走 stderr, 因此可以直接管道给 `jq`。`--json` 与 `--first` 不能同时使用。
 
-文件解析失败 (JSON 语法错误、缺少必填键、正则非法等) 时会在加载阶段被跳过并记录日志, 不会影响其它书源。
+校验失败的后果取决于入口: 自动加载 (搜索、下载、`sources list`) 时, 解析失败的文件 (JSON 语法错误、重复键、未知键、缺少必填键、正则非法等) 会在加载阶段被跳过并记录一条警告日志, 不影响其它书源; `sources check` 与 `sources add` 面对同样的错误则直接报错并以非零退出码结束, 便于在安装前发现问题。具体的校验规则见下一节。
+
+---
+
+### 严格校验
+
+规则在解析时会经过一层防呆校验, 命中任何一条都会判定为解析失败:
+
+- **重复键**: 同一 JSON 对象中出现重复键名直接报错, 而不是静默地“后值覆盖前值”。重复键几乎总是复制粘贴或合并冲突的产物, 放过它会掩盖真实意图;
+- **未知键**: 顶层与各节 (`search` / `book` / `chapters` / `chapter` / `pages` / `resolve` / field) 只接受本文档列出的键, 出现未列出的键 (通常是拼写错误, 如 `prioroty`) 会报错, 而不是静默忽略;
+- **字段名**: `search.fields` 与 `book.fields` 只接受引擎实际消费的字段名, 其余同样报错;
+- **其余检查**: 缺少必填键、类型不符、非法正则、请求头含控制字符等均在解析时报错, 而不是等到抓取阶段才以晦涩的方式崩溃。
+
+JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 是注释, 在任何层级都被忽略、不参与校验, 可用来存放备注; 仓库的示例模板 [`rules/_example-template.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-template.json) 就用 `_comment` 保存使用说明。注意与文件名约定区分: 键名以 `_` 开头表示该键被忽略; 文件名以 `_` 开头表示整个文件不加载。
 
 ---
 
@@ -87,7 +100,7 @@ novel-cli search "斗破苍穹" --first
 | `book_id_group` | int | `1` | `book_id_regex` 的捕获组序号 |
 | `priority` | int | `200` | 该结果的排序权重, 第 N 个结果加 N |
 
-`fields` 中可用的键: `title` / `url` / `cover` / `author` / `latest` / `update` / `word`。其中 `url` 为必填, 缺失该字段的条目会被丢弃。
+`fields` 中可用的键: `title` / `url` / `cover` / `author` / `latest` / `update` / `word`; 其余键名会在校验时被拒绝 (前缀 `_` 的注释键除外)。其中 `url` 为必填, 缺失该字段的条目会被丢弃。
 
 ---
 
@@ -96,7 +109,7 @@ novel-cli search "斗破苍穹" --first
 | 字段 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `url` | string | — | 详情页地址模板, 必填 |
-| `fields` | object | `{}` | 详情字段, 支持 `book_name` / `author` / `cover_url` / `summary` / `tags` 等 |
+| `fields` | object | `{}` | 详情字段; 可用字段名: `book_name` / `author` / `cover_url` / `update_time` / `summary` / `summary_brief` / `serial_status` / `word_count` / `tags`, 其余会被拒绝 |
 | `chapters` | object | — | 目录规则, 必填 |
 | `pages` | object \| string | 空 | 目录分页规则 |
 | `format` | string | 继承 | 本节响应格式, 覆盖顶层 `format` |
@@ -225,8 +238,7 @@ novel-cli search "斗破苍穹" --first
       "title": {"selector": "name", "attr": "text"},
       "url": {"selector": "url", "attr": "text"},
       "author": {"selector": "author", "attr": "text"},
-      "cover": {"selector": "coverUrl", "attr": "text"},
-      "tags": {"selector": "tags[*]", "attr": "text", "multi": true}
+      "cover": {"selector": "coverUrl", "attr": "text"}
     }
   },
 

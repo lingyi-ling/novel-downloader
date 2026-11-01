@@ -114,6 +114,68 @@ def test_check_rejects_invalid_json(tmp_path: Path, recorder: _Recorder) -> None
     assert "invalid json" in recorder.errors[0].lower()
 
 
+def test_check_rejects_duplicate_keys(tmp_path: Path, recorder: _Recorder) -> None:
+    # ``json.loads`` silently keeps the last duplicate; ``sources check`` must
+    # reject the file (aligned with the rule loader) instead of validating the
+    # last-wins value.
+    path = tmp_path / "dup.json"
+    path.write_text(
+        '{"site_key": "dupsite", "site_key": "othersite",'
+        ' "chapter": {"url": "{base_url}/{book_id}/{chapter_id}.html"}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        SourcesCmd._check(str(path))
+
+    assert excinfo.value.code == 1
+    assert recorder.errors
+    assert not recorder.success
+    assert "duplicate key" in recorder.errors[0]
+    assert "site_key" in recorder.errors[0]
+
+
+def test_check_rejects_duplicate_keys_in_a_nested_section(
+    tmp_path: Path, recorder: _Recorder
+) -> None:
+    # Duplicate keys are rejected at every nesting level, not only at the root.
+    path = tmp_path / "dup-nested.json"
+    path.write_text(
+        '{"site_key": "dupsite",'
+        ' "chapter": {"url": "u1", "url": "u2",'
+        ' "content": {"selector": "div#content"}}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        SourcesCmd._check(str(path))
+
+    assert excinfo.value.code == 1
+    assert recorder.errors
+    assert not recorder.success
+    assert "duplicate key" in recorder.errors[0]
+    assert "'url'" in recorder.errors[0]
+
+
+def test_check_accepts_underscore_comment_keys(
+    tmp_path: Path, recorder: _Recorder
+) -> None:
+    # Keys prefixed with ``_`` are the comment convention and never validated.
+    payload = _valid_rule("commentsite")
+    payload["_comment"] = "kept as an annotation, ignored by validation"
+    payload["chapter"] = {
+        "_note": "section-level comment",
+        "url": "{base_url}/{book_id}/{chapter_id}.html",
+    }
+    path = _write(tmp_path / "commented.json", payload)
+
+    SourcesCmd._check(str(path))
+
+    assert not recorder.errors
+    assert len(recorder.success) == 1
+    assert "commentsite" in recorder.success[0]
+
+
 def test_check_rejects_a_structurally_invalid_rule(
     tmp_path: Path, recorder: _Recorder
 ) -> None:

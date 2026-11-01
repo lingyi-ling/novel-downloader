@@ -47,7 +47,20 @@ novel-cli search "斗破苍穹" --first
 
 `--json` disables interactive prompts and writes machine-readable results to stdout. Diagnostics such as tables and logs always go to stderr, so the output can be piped directly into `jq`. `--json` and `--first` cannot be used together.
 
-If a file fails to parse (JSON syntax error, missing required key, invalid regular expression, and so on), it is skipped during loading and a log entry is written; other sources are unaffected.
+What happens on a validation failure depends on the entry point: during automatic loading (search, download, `sources list`) a file that fails to parse (JSON syntax error, duplicate keys, unknown keys, missing required key, invalid regex, and so on) is skipped and a warning is logged; other sources are unaffected. `sources check` and `sources add` instead fail immediately with an error message and a non-zero exit code, so problems surface before installation. The exact validation rules are covered in the next section.
+
+---
+
+### Strict Validation
+
+Rules go through a typo-guard validation pass at parse time; failing any check marks the document as invalid:
+
+- **Duplicate keys**: a duplicate key within the same JSON object is an error instead of silently keeping the last value. A duplicate key is almost always a copy/paste or merge artifact, and keeping the last value hides the conflict from the author.
+- **Unknown keys**: the top level and every section (`search` / `book` / `chapters` / `chapter` / `pages` / `resolve` / field) only accept the keys listed in this document; an unlisted key (typically a typo such as `prioroty`) is an error rather than being silently ignored.
+- **Field names**: `search.fields` and `book.fields` only accept the field names the engine actually consumes; anything else is rejected.
+- **Other checks**: missing required keys, type mismatches, invalid regular expressions, and control characters in headers are all reported at parse time instead of failing obscurely during a fetch.
+
+JSON itself has no comment syntax. By convention, **keys starting with `_`** (such as `_comment`) are comments: they are ignored at any nesting level and exempt from validation, so they can hold notes; the repository's example template [`rules/_example-template.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-template.json) uses `_comment` for its usage notes. Do not confuse the two underscore conventions: a *key* starting with `_` means that key is ignored, while a *file name* starting with `_` means the whole file is not loaded.
 
 ---
 
@@ -87,7 +100,7 @@ If the whole site uses AJAX/JSON endpoints, set `"format": "json"` at the top le
 | `book_id_group` | int | `1` | Capture group index for `book_id_regex` |
 | `priority` | int | `200` | Ranking weight for this result; the N-th result gets N added |
 
-Available keys in `fields`: `title` / `url` / `cover` / `author` / `latest` / `update` / `word`. `url` is required; entries missing it are discarded.
+Available keys in `fields`: `title` / `url` / `cover` / `author` / `latest` / `update` / `word`; any other name is rejected at validation time (except `_`-prefixed comment keys). `url` is required; entries missing it are discarded.
 
 ---
 
@@ -96,7 +109,7 @@ Available keys in `fields`: `title` / `url` / `cover` / `author` / `latest` / `u
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `url` | string | — | Book detail page URL template, required |
-| `fields` | object | `{}` | Detail fields; supports `book_name` / `author` / `cover_url` / `summary` / `tags`, etc. |
+| `fields` | object | `{}` | Detail fields; allowed names: `book_name` / `author` / `cover_url` / `update_time` / `summary` / `summary_brief` / `serial_status` / `word_count` / `tags`; anything else is rejected |
 | `chapters` | object | — | Table-of-contents rules, required |
 | `pages` | object \| string | empty | Table-of-contents pagination rules |
 | `format` | string | inherited | Response format for this section, overriding the top-level `format` |
@@ -225,8 +238,7 @@ Example (search via a POST JSON endpoint; details and body remain HTML):
       "title": {"selector": "name", "attr": "text"},
       "url": {"selector": "url", "attr": "text"},
       "author": {"selector": "author", "attr": "text"},
-      "cover": {"selector": "coverUrl", "attr": "text"},
-      "tags": {"selector": "tags[*]", "attr": "text", "multi": true}
+      "cover": {"selector": "coverUrl", "attr": "text"}
     }
   },
 
