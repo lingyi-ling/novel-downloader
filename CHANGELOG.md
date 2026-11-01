@@ -48,6 +48,8 @@
 - **packaging**: Inno Setup 安装器脚本（`packaging/noveldl_installer.iss`，按用户安装免 UAC、自动建桌面+开始菜单图标、卸载保留用户数据），`build_desktop.py` 检测到 ISCC 时自动产出 setup exe，未安装则优雅跳过
 - **website**: 官网新增「下载」区（Windows 桌面 / PyPI / Android 工件三卡直达）
 - **desktop**: 新增「创建桌面快捷方式」——侧边栏一键在桌面和开始菜单生成 .lnk（PowerShell COM），打包版首次启动自动提示；补齐萌新从 zip 解压到桌面图标启动的最后一公里
+- **android**: UI 审计——退后台暂停 2 秒轮询（此前永久烧电耗流量；取舍：任务完成通知改为回到前台时浮现，完整后台通知需前台服务/WorkManager）；`ACTION_DOWNLOAD_COMPLETE` 接收器改 NOT_EXPORTED 防伪造广播消费下载 id；登录对话框输入 4096 截断+提交防重+提交中禁关闭；导出文件行 48dp 触控目标；文件大小补 GB 档；分区标题走复数安全资源
+- **sources**: `check`/`add` 改用严格规则 JSON 解析——重复键从静默 last-wins 变为早期本地化报错，check 读取加 BOM 容忍（可加载的带 BOM 文件此前必然 check 失败）
 - **android**: 任务页新增登录凭据请求 UI——轮询 `/api/v1/login/requests`，需要登录的站点在任务页顶部显示凭据卡片，点开对话框按字段输入（password/cookie 掩码、必填校验、prefill 回填），提交后任务自动继续；含 MockWebServer 契约测试
 - **android**: 完成发布签名链路（`android/keystore.properties` + `release.jks`，git-ignored），`assembleRelease` 产出已验签的正式 APK
 - **desktop**: 桌面端重写为 pywebview + 单文件 HTML/CSS 前端（Edge WebView2 渲染）——完整 CSS 动效（页面过渡、卡片悬浮、渐变进度条、toast、模态）、暖纸色明暗双主题、SVG 图标、快捷键、平台健康检查面板、音乐实时进度；窗口几何持久化改在 `closing` 事件读取
