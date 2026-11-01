@@ -25,6 +25,19 @@ _SANITIZE_PATTERN_WIN = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
 _SANITIZE_PATTERN_POSIX = re.compile(r"[/\x00]")
 _WHITESPACE_RUN = re.compile(r"\s+")
 
+#: POSIX caps a single path component at 255 *bytes*; Windows caps the whole
+#: path at 260 UTF-16 units.  A CJK name has three bytes per character, so a
+#: character-only limit still overflows on Linux (255 chars = 765 bytes).
+_MAX_NAME_BYTES = 255
+
+
+def _truncate_bytes(text: str, limit: int) -> str:
+    """Cut ``text`` to at most ``limit`` UTF-8 bytes without splitting a char."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", "ignore")
+
 
 def sanitize_filename(
     filename: str,
@@ -78,6 +91,16 @@ def sanitize_filename(
         else:
             cleaned = cleaned[:max_length]
         # Truncation may expose trailing spaces/dots (invalid on Windows).
+        cleaned = cleaned.rstrip(" .") or fallback
+
+    # A character limit is not enough on POSIX, where the per-component cap is
+    # counted in bytes.  Enforce both so the same name is writable everywhere.
+    if len(cleaned.encode("utf-8")) > _MAX_NAME_BYTES:
+        if ext:
+            room = _MAX_NAME_BYTES - len(ext.encode("utf-8")) - 1
+            cleaned = _truncate_bytes(stem, max(room, 1)) + f".{ext}"
+        else:
+            cleaned = _truncate_bytes(cleaned, _MAX_NAME_BYTES)
         cleaned = cleaned.rstrip(" .") or fallback
 
     return cleaned or fallback

@@ -719,8 +719,13 @@ def _not_found_path(override: str | None, site: str | None) -> Path:
     """Resolve ``--not-found`` or the default ``logs/not_found_<site>.txt``."""
     if override:
         return Path(override).expanduser()
+    # Both separators are stripped on every platform, not just the one the
+    # running OS treats as a separator: a site key is untrusted input and a
+    # name that is safe on POSIX today must not escape when the log directory
+    # is later copied to Windows (or read by a Windows tool).
+    safe_site = (site or "all").replace("/", "_").replace("\\", "_")
     stem = sanitize_filename(
-        f"not_found_{site or 'all'}",
+        f"not_found_{safe_site}",
         max_length=120,
         collapse_whitespace=True,
         fallback="not_found",

@@ -189,7 +189,11 @@ class TestLengthAndUnicode:
 
     def test_max_length_none_and_non_positive_keep_full_name(self):
         name = "a" * 300
-        assert sanitize_filename(name, max_length=None) == name
+        # ``max_length=None`` disables the *character* limit, but the 255-byte
+        # per-component limit of the filesystem still applies: writing 300
+        # ASCII characters would fail with ENAMETOOLONG on every platform.
+        assert sanitize_filename(name, max_length=None) == "a" * 255
+        assert sanitize_filename("a" * 200, max_length=None) == "a" * 200
         assert sanitize_filename("abcdef", max_length=0) == "abcdef"
         # Regression: a negative limit used to silently cut one character.
         assert sanitize_filename("abcdef", max_length=-1) == "abcdef"
@@ -219,3 +223,15 @@ class TestLengthAndUnicode:
         name = "a" * 10 + ".txt"
         assert sanitize_filename(name, max_length=14) == name
         assert len(sanitize_filename(name, max_length=13)) == 13
+
+
+def test_cjk_name_is_capped_in_bytes_not_characters() -> None:
+    """POSIX allows 255 bytes per component; three bytes per CJK character."""
+    name = sanitize_filename("长" * 200 + ".txt")
+
+    assert len(name.encode("utf-8")) <= 255
+    assert name.endswith(".txt")
+
+    plain = sanitize_filename("长" * 200)
+
+    assert len(plain.encode("utf-8")) <= 255

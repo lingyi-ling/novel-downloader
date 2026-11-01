@@ -608,3 +608,20 @@ def test_xp_txt_chapter_tolerates_none_title_and_content(
     text = scenario.client._xp_txt_chapter(None, chapter)  # type: ignore[arg-type]
 
     assert text == "\n\n\n\n"
+
+
+def test_fit_name_respects_the_posix_byte_limit() -> None:
+    """POSIX limits a path component to 255 bytes, not 255 characters.
+
+    A 400-character CJK title is 1,200 bytes; a character-only budget still
+    produced ``ENAMETOOLONG`` on Linux while passing on Windows.
+    """
+    from pathlib import Path
+
+    from novel_downloader.plugins.mixins.export_txt import _fit_name
+
+    fitted = _fit_name("长" * 400 + ".txt", Path("/tmp/out"))
+
+    assert len(fitted.encode("utf-8")) <= 200
+    assert fitted.endswith(".txt")
+    assert fitted != "长" * 400 + ".txt"

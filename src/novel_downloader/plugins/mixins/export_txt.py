@@ -32,10 +32,30 @@ logger = logging.getLogger(__name__)
 # atomic writer, which adds ~13 characters next to the destination.
 _MAX_PATH_LEN = 240
 
+#: POSIX caps a single path component at 255 **bytes**, while Windows caps the
+#: whole path at 260 UTF-16 units.  A 400-character CJK title is 1,200 bytes,
+#: so a character-only budget still produces ``ENAMETOOLONG`` on Linux.
+_MAX_COMPONENT_BYTES = 200
+
+
+def _truncate_utf8(text: str, limit_bytes: int) -> str:
+    """Cut ``text`` to at most ``limit_bytes`` of UTF-8 without splitting a char."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit_bytes:
+        return text
+    return encoded[:limit_bytes].decode("utf-8", "ignore")
+
 
 def _fit_name(name: str, parent: Path, limit: int = _MAX_PATH_LEN) -> str:
     """
-    Shorten ``name`` so that ``parent / name`` fits within ``limit`` chars.
+    Shorten ``name`` so that ``parent / name`` fits the platform limits.
+
+    Two independent budgets apply and the stricter one wins:
+
+    * ``limit`` characters for the whole path (the Windows 260-unit limit, with
+      a margin);
+    * ``_MAX_COMPONENT_BYTES`` bytes for the name alone (the POSIX per-entry
+      limit, which counts bytes rather than characters).
 
     Only the name shrinks; the extension is preserved and a short digest of
     the original name is appended so two long titles that share a prefix do
@@ -44,10 +64,10 @@ def _fit_name(name: str, parent: Path, limit: int = _MAX_PATH_LEN) -> str:
     own and would otherwise erase the part that distinguishes the two.
     """
     total = len(str(parent)) + 1 + len(name)
-    if total <= limit:
+    too_long = total > limit
+    too_many_bytes = len(name.encode("utf-8")) > _MAX_COMPONENT_BYTES
+    if not too_long and not too_many_bytes:
         return name
-
-    budget = max(len(name) - (total - limit), 8)
 
     stem, dot, ext = name.rpartition(".")
     if not dot:
@@ -55,8 +75,14 @@ def _fit_name(name: str, parent: Path, limit: int = _MAX_PATH_LEN) -> str:
 
     digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
     tail = f"~{digest}" + (f".{ext}" if ext else "")
-    keep = max(budget - len(tail), 1)
-    return f"{stem[:keep]}{tail}"
+
+    char_budget = len(stem)
+    if too_long:
+        char_budget = max(len(name) - (total - limit) - len(tail), 1)
+    byte_budget = max(_MAX_COMPONENT_BYTES - len(tail.encode("utf-8")), 1)
+
+    kept = _truncate_utf8(stem, byte_budget)[:char_budget]
+    return f"{kept}{tail}"
 
 
 def _discard_temp(path: str | Path) -> None:
