@@ -12,7 +12,16 @@ from typing import Any, Unpack
 
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import (
+    ChunkedEncodingError as CurlChunkedEncodingError,
+)
+from curl_cffi.requests.exceptions import (
     ConnectionError as CurlConnectionError,
+)
+from curl_cffi.requests.exceptions import (
+    ContentDecodingError as CurlContentDecodingError,
+)
+from curl_cffi.requests.exceptions import (
+    HTTPError as CurlHTTPError,
 )
 from curl_cffi.requests.exceptions import (
     IncompleteRead as CurlIncompleteRead,
@@ -23,14 +32,19 @@ from curl_cffi.requests.exceptions import (
 from curl_cffi.requests.exceptions import (
     Timeout as CurlTimeout,
 )
+from curl_cffi.requests.exceptions import (
+    TooManyRedirects as CurlTooManyRedirects,
+)
 
 from .base import (
     DEFAULT_ALLOW_REDIRECTS,
+    DEFAULT_MAX_REDIRECTS,
     BaseSession,
     GetRequestKwargs,
     PostRequestKwargs,
     as_connection_error,
     as_timeout_error,
+    as_too_many_redirects_error,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -62,6 +76,9 @@ class CurlCffiSession(BaseSession):
             timeout=self._timeout,
             impersonate=self._impersonate,  # type: ignore[arg-type]
             verify=self._verify_ssl,
+            # curl_cffi defaults to 30 redirects; pin it to the unified
+            # ceiling so a long chain behaves like on the other backends.
+            max_redirects=DEFAULT_MAX_REDIRECTS,
             proxy=self._proxy,
             proxy_auth=proxy_auth,
             trust_env=self._trust_env,
@@ -98,8 +115,23 @@ class CurlCffiSession(BaseSession):
         try:
             r = await self.session.get(url, **kwargs)
         except CurlTimeout as exc:
+            # Must precede the connection clause: ConnectTimeout inherits
+            # from both ConnectionError and Timeout, and the timeout
+            # classification wins.
             raise as_timeout_error(exc) from exc
-        except (CurlConnectionError, CurlProxyError, CurlIncompleteRead) as exc:
+        except CurlTooManyRedirects as exc:
+            raise as_too_many_redirects_error(exc) from exc
+        except (
+            CurlConnectionError,
+            CurlProxyError,
+            CurlIncompleteRead,
+            CurlHTTPError,
+            CurlContentDecodingError,
+            CurlChunkedEncodingError,
+        ) as exc:
+            # CurlHTTPError is how curl reports a corrupt Content-Encoding
+            # (CURLE_BAD_CONTENT_ENCODING), which aiohttp and httpx classify
+            # as a payload/connection failure.
             raise as_connection_error(exc) from exc
         return BaseResponse(
             content=r.content,
@@ -127,8 +159,20 @@ class CurlCffiSession(BaseSession):
         try:
             r = await self.session.post(url, **kwargs)
         except CurlTimeout as exc:
+            # Must precede the connection clause: ConnectTimeout inherits
+            # from both ConnectionError and Timeout, and the timeout
+            # classification wins.
             raise as_timeout_error(exc) from exc
-        except (CurlConnectionError, CurlProxyError, CurlIncompleteRead) as exc:
+        except CurlTooManyRedirects as exc:
+            raise as_too_many_redirects_error(exc) from exc
+        except (
+            CurlConnectionError,
+            CurlProxyError,
+            CurlIncompleteRead,
+            CurlHTTPError,
+            CurlContentDecodingError,
+            CurlChunkedEncodingError,
+        ) as exc:
             raise as_connection_error(exc) from exc
         return BaseResponse(
             content=r.content,

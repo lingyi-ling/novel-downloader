@@ -12,11 +12,13 @@ import httpx
 
 from .base import (
     DEFAULT_ALLOW_REDIRECTS,
+    DEFAULT_MAX_REDIRECTS,
     BaseSession,
     GetRequestKwargs,
     PostRequestKwargs,
     as_connection_error,
     as_timeout_error,
+    as_too_many_redirects_error,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -54,6 +56,9 @@ class HttpxSession(BaseSession):
             headers=self._headers,
             cookies=self._cookies,
             limits=limits,
+            # httpx defaults to 20 redirects; pin it to the unified ceiling
+            # so a long chain behaves like on the other backends.
+            max_redirects=DEFAULT_MAX_REDIRECTS,
             proxy=proxy,
             trust_env=self._trust_env,
         )
@@ -78,6 +83,7 @@ class HttpxSession(BaseSession):
         encoding: str = "utf-8",
         **kwargs: Unpack[GetRequestKwargs],
     ) -> BaseResponse:
+        self._check_verify_override(verify)
         redirect = (
             DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
         )
@@ -87,7 +93,17 @@ class HttpxSession(BaseSession):
             r = await self.session.get(url, **kwargs)
         except httpx.TimeoutException as exc:
             raise as_timeout_error(exc) from exc
-        except (httpx.NetworkError, httpx.ProxyError, httpx.RemoteProtocolError) as exc:
+        except httpx.TooManyRedirects as exc:
+            raise as_too_many_redirects_error(exc) from exc
+        except (
+            httpx.NetworkError,
+            httpx.ProxyError,
+            httpx.RemoteProtocolError,
+            httpx.DecodingError,
+        ) as exc:
+            # DecodingError covers a body whose Content-Encoding is corrupt;
+            # aiohttp classifies the same failure as a payload/connection
+            # error, so it is translated here too.
             raise as_connection_error(exc) from exc
         return BaseResponse(
             content=r.content,
@@ -105,6 +121,7 @@ class HttpxSession(BaseSession):
         encoding: str = "utf-8",
         **kwargs: Unpack[PostRequestKwargs],
     ) -> BaseResponse:
+        self._check_verify_override(verify)
         redirect = (
             DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
         )
@@ -114,7 +131,14 @@ class HttpxSession(BaseSession):
             r = await self.session.post(url, **kwargs)
         except httpx.TimeoutException as exc:
             raise as_timeout_error(exc) from exc
-        except (httpx.NetworkError, httpx.ProxyError, httpx.RemoteProtocolError) as exc:
+        except httpx.TooManyRedirects as exc:
+            raise as_too_many_redirects_error(exc) from exc
+        except (
+            httpx.NetworkError,
+            httpx.ProxyError,
+            httpx.RemoteProtocolError,
+            httpx.DecodingError,
+        ) as exc:
             raise as_connection_error(exc) from exc
         return BaseResponse(
             content=r.content,
@@ -224,6 +248,25 @@ class HttpxSession(BaseSession):
         if self._session is None:
             raise RuntimeError("Session is not initialized or has been shut down.")
         return self._session
+
+    def _check_verify_override(self, verify: bool | None) -> None:
+        """
+        Reject a per-request TLS override that cannot be honoured.
+
+        httpx owns verification at the client level and has no per-request
+        switch, while the aiohttp and curl_cffi backends do honour one.  A
+        conflicting value therefore fails loudly here instead of being
+        silently dropped (which would let a caller who explicitly asked for
+        verification keep downloading over an unverified connection).
+        """
+        if verify is not None and verify != self._verify_ssl:
+            raise RuntimeError(
+                "The httpx backend cannot override SSL verification per "
+                f"request: got verify={verify} while the session was created "
+                f"with verify_ssl={self._verify_ssl}. Configure verify_ssl "
+                "on the session instead, or use the aiohttp/curl_cffi "
+                "backend."
+            )
 
     @staticmethod
     def _build_proxy_config(

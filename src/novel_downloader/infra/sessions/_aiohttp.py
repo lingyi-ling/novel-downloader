@@ -16,6 +16,8 @@ from .base import (
     GetRequestKwargs,
     PostRequestKwargs,
     as_connection_error,
+    as_timeout_error,
+    as_too_many_redirects_error,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -23,12 +25,6 @@ from .cookie_io import (
     write_cookie_items,
 )
 from .response import BaseResponse
-
-
-def _is_ip_address(host: str) -> bool:
-    """Call aiohttp's IP check, going through the module so patches apply."""
-    checker: Any = getattr(aiohttp.cookiejar, "is_ip_address", None)
-    return bool(checker and checker(host))
 
 
 class AiohttpSession(BaseSession):
@@ -45,6 +41,11 @@ class AiohttpSession(BaseSession):
 
         proxy_auth: aiohttp.BasicAuth | None = None
         if self._proxy_user and self._proxy_pass:
+            # Deprecation warning is accepted for now: the recommended
+            # per-request ``proxy_headers`` replacement does not deliver
+            # credentials for plain-HTTP targets on aiohttp 3.14 (it only
+            # feeds the CONNECT tunnel), so ``proxy_auth`` stays until the
+            # replacement actually works.
             proxy_auth = aiohttp.BasicAuth(self._proxy_user, self._proxy_pass)
 
         timeout = aiohttp.ClientTimeout(total=self._timeout)
@@ -55,6 +56,12 @@ class AiohttpSession(BaseSession):
 
         self._session = aiohttp.ClientSession(
             connector=connector,
+            # httpx and curl_cffi accept and send cookies for IP-host
+            # origins; aiohttp's default jar silently drops them, which
+            # loses logins on sites served from bare IPs.  ``unsafe`` only
+            # relaxes that IP handling — cross-domain cookies are still
+            # rejected, so site A's cookies never reach site B.
+            cookie_jar=aiohttp.CookieJar(unsafe=True),
             timeout=timeout,
             headers=self._headers,
             cookies=self._cookies,
@@ -99,11 +106,18 @@ class AiohttpSession(BaseSession):
                     status=r.status,
                     encoding=r.charset or encoding,
                 )
-        except TimeoutError:
-            # ServerTimeoutError is also a ClientConnectionError; keep the
-            # timeout classification instead of rewriting it.
-            raise
-        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
+        except TimeoutError as exc:
+            # aiohttp's ServerTimeoutError family is both a TimeoutError and
+            # a ClientConnectionError; normalise to the builtin type (the
+            # timeout classification wins, as on the other backends).
+            raise as_timeout_error(exc) from exc
+        except aiohttp.TooManyRedirects as exc:
+            raise as_too_many_redirects_error(exc) from exc
+        except (
+            aiohttp.ClientConnectionError,
+            aiohttp.ClientPayloadError,
+            aiohttp.ClientHttpProxyError,
+        ) as exc:
             raise as_connection_error(exc) from exc
 
     async def post(
@@ -131,11 +145,18 @@ class AiohttpSession(BaseSession):
                     status=r.status,
                     encoding=r.charset or encoding,
                 )
-        except TimeoutError:
-            # ServerTimeoutError is also a ClientConnectionError; keep the
-            # timeout classification instead of rewriting it.
-            raise
-        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
+        except TimeoutError as exc:
+            # aiohttp's ServerTimeoutError family is both a TimeoutError and
+            # a ClientConnectionError; normalise to the builtin type (the
+            # timeout classification wins, as on the other backends).
+            raise as_timeout_error(exc) from exc
+        except aiohttp.TooManyRedirects as exc:
+            raise as_too_many_redirects_error(exc) from exc
+        except (
+            aiohttp.ClientConnectionError,
+            aiohttp.ClientPayloadError,
+            aiohttp.ClientHttpProxyError,
+        ) as exc:
             raise as_connection_error(exc) from exc
 
     def load_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:
@@ -171,14 +192,12 @@ class AiohttpSession(BaseSession):
 
         cookies: list[dict[str, str]] = []
         for cookie in self._session.cookie_jar:
-            domain = cookie["domain"]
-            # aiohttp only sends domain-scoped cookies to IP hosts when the
-            # jar is "unsafe"; keep legacy shared behaviour for IP cookies.
-            if domain and _is_ip_address(domain):
-                domain = ""
             item = {"name": cookie.key, "value": cookie.value}
-            if domain:
-                item["domain"] = domain
+            # The domain is kept even for IP hosts: the session jar is
+            # created with unsafe=True, so an IP-scoped cookie round-trips
+            # scoped instead of being widened to every host.
+            if cookie["domain"]:
+                item["domain"] = cookie["domain"]
             if cookie["path"]:
                 item["path"] = cookie["path"]
             cookies.append(item)

@@ -81,6 +81,32 @@ async def test_close_is_idempotent(backend: str, cfg: FetcherConfig) -> None:
 
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.asyncio
+async def test_nested_context_managers_keep_outer_session_alive(
+    backend: str, cfg: FetcherConfig, echo_server: Any
+) -> None:
+    """Inner ``async with`` blocks must not close the shared session.
+
+    Helpers wrapped in ``async with session:`` are routinely called from
+    code that already holds the same context, so the session is only
+    released when the outermost block exits.
+    """
+    url = str(echo_server.make_url("/echo"))
+    session = _create(backend, cfg, cookies={"account": "nested"})
+
+    async with session:
+        async with session:
+            response = await session.get(url)
+        assert response.json()["q"] == ""
+
+        # The inner exit must not have torn down the connection pool.
+        response = await session.get(url, params={"q": "still-alive"})
+        assert response.json()["q"] == "still-alive"
+
+    assert session._session is None
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.asyncio
 async def test_close_without_init_is_safe(backend: str, cfg: FetcherConfig) -> None:
     session = _create(backend, cfg)
     await session.close()
