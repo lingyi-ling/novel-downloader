@@ -188,8 +188,13 @@ def _load_catalog(code: str) -> gettext.NullTranslations:
         return gettext.NullTranslations()
 
     try:
-        mo_path = files("novel_downloader.locales").joinpath(
-            code, "LC_MESSAGES", "messages.mo"
+        # Chained single-segment joins: MultiplexedPath (editable installs
+        # on Python 3.11) only accepts one argument.
+        mo_path = (
+            files("novel_downloader.locales")
+            .joinpath(code)
+            .joinpath("LC_MESSAGES")
+            .joinpath("messages.mo")
         )
         with mo_path.open("rb") as f:
             return gettext.GNUTranslations(f)
