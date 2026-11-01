@@ -12,6 +12,9 @@ class FakePath:
     def __init__(self, exists: bool):
         self.exists = exists
 
+    def joinpath(self, *_parts):
+        return self
+
     def open(self, mode="rb"):
         if not self.exists:
             raise FileNotFoundError("no mo file")
