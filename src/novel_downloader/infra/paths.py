@@ -7,6 +7,7 @@ novel_downloader.infra.paths
 
 import os
 from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
 from platformdirs import user_data_path
@@ -39,25 +40,39 @@ STATE_PATH = app_home() / "state.json"
 
 RES = files("novel_downloader.resources")
 
+
+def _res(*parts: str) -> Traversable:
+    """Join resource segments one at a time.
+
+    With editable installs on Python 3.11/3.13 ``files()`` can hand back
+    a ``MultiplexedPath`` whose ``joinpath`` takes exactly one argument,
+    so multi-segment calls must be chained.
+    """
+    target: Traversable = RES
+    for part in parts:
+        target = target.joinpath(part)
+    return target
+
+
 # Config
-DEFAULT_CONFIG_FILE = RES.joinpath("config", "settings.sample.toml")
+DEFAULT_CONFIG_FILE = _res("config", "settings.sample.toml")
 
 # Default config filename (used when copying embedded template)
 DEFAULT_CONFIG_FILENAME = "settings.toml"
 
 # Brand assets used by the desktop window / favicon
-APP_ICON_PATH = RES.joinpath("icons", "app.ico")
-APP_FAVICON_PATH = RES.joinpath("icons", "app.png")
+APP_ICON_PATH = _res("icons", "app.ico")
+APP_FAVICON_PATH = _res("icons", "app.png")
 
 # CSS Styles
-EPUB_CSS_STYLE_PATH = RES.joinpath("styles", "epub_style.css")
-HTML_CSS_INDEX_PATH = RES.joinpath("styles", "html_index.css")
-HTML_CSS_CHAPTER_PATH = RES.joinpath("styles", "html_chapter.css")
+EPUB_CSS_STYLE_PATH = _res("styles", "epub_style.css")
+HTML_CSS_INDEX_PATH = _res("styles", "html_index.css")
+HTML_CSS_CHAPTER_PATH = _res("styles", "html_chapter.css")
 
 # JSON
-FANQIENOVEL_MAP_PATH = RES.joinpath("json", "fanqienovel.json")
-HONGXIUZHAO_MAP_PATH = RES.joinpath("json", "hongxiuzhao.json")
-LINOVELIB_MAP_PATH = RES.joinpath("json", "linovelib.json")
+FANQIENOVEL_MAP_PATH = _res("json", "fanqienovel.json")
+HONGXIUZHAO_MAP_PATH = _res("json", "hongxiuzhao.json")
+LINOVELIB_MAP_PATH = _res("json", "linovelib.json")
 N69YUE_MAP_PATH = RES.joinpath("json", "n69yue.json")
 XIGUASHUWU_MAP_PATH = RES.joinpath("json", "xiguashuwu.json")
 YODU_MAP_PATH = RES.joinpath("json", "yodu.json")
