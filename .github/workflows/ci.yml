@@ -69,6 +69,7 @@ jobs:
           mypy packaging
           scripts/build_cli.py scripts/build_desktop.py scripts/build_release.py
           scripts/update_pot.py scripts/update_po.py scripts/compile_mo.py
+          scripts/release.py
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
