@@ -867,13 +867,27 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
                 timeout=GRADLE_TIMEOUT,
                 check=False,
             )
+            apks = find_release_apks(repo_root)
             if proc.returncode != 0:
-                detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-                raise ReleaseError(
-                    f"gradlew assembleRelease exited with {proc.returncode}: "
-                    + " | ".join(detail[-8:])
+                # Windows gradlew.bat can surface a stale ERRORLEVEL (1)
+                # even on BUILD SUCCESSFUL, so a produced APK plus the
+                # success marker beats the exit code.
+                succeeded = "BUILD SUCCESSFUL" in (proc.stdout or "") + (
+                    proc.stderr or ""
                 )
-            if not find_release_apks(repo_root):
+                if apks and succeeded:
+                    print(
+                        "warning: gradlew reported exit "
+                        f"{proc.returncode} but printed BUILD SUCCESSFUL and "
+                        "produced the APK; continuing"
+                    )
+                else:
+                    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+                    raise ReleaseError(
+                        f"gradlew assembleRelease exited with {proc.returncode}: "
+                        + " | ".join(detail[-8:])
+                    )
+            if not apks:
                 raise ReleaseError(
                     "assembleRelease finished but no APK found under "
                     f"android/{_APK_GLOB}"
