@@ -807,7 +807,8 @@ class DoctorCmd(Command):
             if check.fatal:
                 ui.error(line)
             else:
-                ui.warn(f"{line} ({t('optional')})")
+                optional_label = t("optional")
+                ui.warn(f"{line} ({optional_label})")
             if check.suggestion:
                 ui.info(f"  -> {check.suggestion}")
 

@@ -81,9 +81,11 @@ class CLILoginUI:
         for field in fields:
             ui.info(f"\n{t(field.label)} ({field.name})")
             if field.description:
-                ui.info(f"{t('Description')}: {t(field.description)}")
+                description_label = t("Description")
+                ui.info(f"{description_label}: {t(field.description)}")
             if field.placeholder:
-                ui.info(f"{t('Hint')}: {t(field.placeholder)}")
+                hint_label = t("Hint")
+                ui.info(f"{hint_label}: {t(field.placeholder)}")
 
             existing_value = prefill.get(field.name, "").strip()
             if existing_value:
@@ -138,8 +140,9 @@ class CLIProcessUI:
                 stage=stage, book_id=book.book_id
             )
         )
+        stage_label = t("Stage")
         self._progress = ui.ProgressUI(
-            prefix=f"{t('Stage')} {stage}", unit=t("chapters")
+            prefix=f"{stage_label} {stage}", unit=t("chapters")
         )
         self._progress.start()
 
