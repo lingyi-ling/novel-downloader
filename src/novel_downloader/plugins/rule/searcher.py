@@ -145,6 +145,8 @@ class RuleSearcher(BaseSearcher):
         if id_rx is not None:
             m = id_rx.search(book_url)
             if m:
-                return m.group(group) if group <= len(m.groups()) else m.group(0)
+                # ``group`` is validated >= 0 at parse time; a negative index
+                # would raise a raw ``IndexError`` here, so stay defensive.
+                return m.group(group) if 0 < group <= len(m.groups()) else m.group(0)
         path = urlsplit(book_url).path.rstrip("/")
         return path.split("/")[-1] if path else book_url

@@ -22,7 +22,6 @@ with :func:`~.model.parse_rule` and install it with
 
 from __future__ import annotations
 
-import json
 import logging
 from http.client import HTTPException
 from typing import Any
@@ -30,7 +29,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from .model import RuleError
+from .model import RuleError, loads_rule_json
 
 logger = logging.getLogger(__name__)
 
@@ -230,12 +229,6 @@ def fetch_rule(
         if callable(closer):
             closer()
 
-    try:
-        data = json.loads(raw)
-    except (ValueError, UnicodeDecodeError) as e:
-        raise RuleError(f"invalid JSON in rule response from {target}: {e}") from e
-
-    if not isinstance(data, dict):
-        raise RuleError(f"rule response from {target} must be a JSON object")
+    data = loads_rule_json(raw, source=target)
     logger.debug("Fetched %d-byte rule document from %s", len(raw), target)
     return data

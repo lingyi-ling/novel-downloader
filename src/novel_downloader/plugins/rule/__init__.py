@@ -39,6 +39,7 @@ from .model import (
     Field,
     Rule,
     RuleError,
+    loads_rule_json,
     parse_rule,
 )
 from .parser import RuleParser
@@ -109,9 +110,9 @@ def _normalize_key(site_key: str) -> str:
 
 def _load_payload(text: str, origin: str, filename: str) -> None:
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        logger.warning("Skip rule '%s' (%s): invalid JSON: %s", filename, origin, e)
+        data = loads_rule_json(text, source=filename)
+    except RuleError as e:
+        logger.warning("Skip rule '%s' (%s): %s", filename, origin, e)
         return
 
     try:
@@ -251,19 +252,6 @@ def _serialize_rule(data: Mapping[str, Any]) -> str:
     return text + "\n"
 
 
-def _load_json_text(text: str, source: str) -> dict[str, Any]:
-    """Parse rule text, requiring a JSON object as the document root."""
-    try:
-        data: Any = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise RuleError(
-            t("{path}: invalid JSON: {err}").format(path=source, err=e)
-        ) from e
-    if not isinstance(data, dict):
-        raise RuleError(t("{source}: rule must be a JSON object").format(source=source))
-    return data
-
-
 def install_rule(
     data: Mapping[str, Any] | str | Path,
     name: str | None = None,
@@ -297,7 +285,7 @@ def install_rule(
             raise RuleError(
                 t("cannot read {path}: {err}").format(path=path, err=e)
             ) from e
-        payload = _load_json_text(text, path.name)
+        payload = loads_rule_json(text, source=path.name)
         rule = parse_rule(payload, source=path.name)
         default_name = path.stem
     else:
@@ -378,8 +366,8 @@ def _builtin_keys() -> set[str]:
             if not entry.name.endswith(".json") or _is_ignored(entry.name):
                 continue
             try:
-                data = _load_json_text(
-                    entry.read_text(encoding="utf-8-sig"), entry.name
+                data = loads_rule_json(
+                    entry.read_text(encoding="utf-8-sig"), source=entry.name
                 )
                 keys.add(_normalize_key(parse_rule(data, source=entry.name).site_key))
             except (OSError, ValueError):
@@ -461,7 +449,7 @@ def refresh_rules(names: Sequence[str] | None = None) -> RefreshResult:
                 continue
 
             try:
-                data = _load_json_text(text, path.name)
+                data = loads_rule_json(text, source=path.name)
                 rule = parse_rule(data, source=path.name)
             except ValueError as e:
                 if _selected(wanted, path.name, stem):

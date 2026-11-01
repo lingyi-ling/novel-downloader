@@ -14,6 +14,7 @@ pagination pages (``book.pages`` / ``chapter.pages``).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, ClassVar
 
 from novel_downloader.plugins.base.fetcher import BaseFetcher
@@ -26,6 +27,9 @@ logger = logging.getLogger(__name__)
 __all__ = ["RuleFetcher"]
 
 _MAX_EXTRA_PAGES = 50
+
+#: Control characters never valid in a rendered header value (CRLF injection).
+_HEADER_CTRL_RE = re.compile(r"[\r\n\x00]")
 
 
 class RuleFetcher(BaseFetcher):
@@ -49,8 +53,23 @@ class RuleFetcher(BaseFetcher):
     def _render_headers(
         self, headers: dict[str, str], base: str, **fmt: Any
     ) -> dict[str, str]:
-        """Render ``{base_url}`` / ``{book_id}`` ... placeholders inside headers."""
-        return {k: render(v, base_url=base, **fmt) for k, v in headers.items()}
+        """
+        Render ``{base_url}`` / ``{book_id}`` ... placeholders inside headers.
+
+        Rendered values come partly from page data (``book_id``), so any CR/LF
+        or NUL they carry is stripped: passing them through would make the HTTP
+        client raise a raw ``ValueError`` on header injection.
+        """
+        out: dict[str, str] = {}
+        for key, value in headers.items():
+            rendered = render(value, base_url=base, **fmt)
+            clean = _HEADER_CTRL_RE.sub("", rendered)
+            if clean != rendered:
+                logger.warning(
+                    "Stripped control characters from rendered header %r", key
+                )
+            out[key] = clean
+        return out
 
     async def fetch_book_info(self, book_id: str, **kwargs: Any) -> list[str]:
         rule = self._rule
@@ -69,6 +88,7 @@ class RuleFetcher(BaseFetcher):
                     pages[-1],
                     base,
                     headers,
+                    first_url=url,
                     book_id=book_id,
                     **kwargs,
                 )
@@ -98,6 +118,7 @@ class RuleFetcher(BaseFetcher):
                     pages[-1],
                     base,
                     headers,
+                    first_url=url,
                     book_id=book_id,
                     chapter_id=chapter_id,
                     **kwargs,
@@ -111,6 +132,7 @@ class RuleFetcher(BaseFetcher):
         current: str,
         base: str,
         extra_headers: dict[str, str] | None,
+        first_url: str = "",
         **fmt: Any,
     ) -> list[str]:
         """
@@ -123,16 +145,24 @@ class RuleFetcher(BaseFetcher):
         HTML (mirrors the base ``should_continue_pagination`` heuristic) and
         stops naturally on the last page, where the link is absent.
 
+        A rendered URL that was already collected (a pages template without
+        ``{page}``, or one that points back at the entry URL) is never fetched
+        again -- re-collecting it would duplicate the parser's output.
+
         :param current: payload of the page fetched just before this call.
+        :param first_url: URL of that first page, used to seed the seen-set.
         :return: the additional pages, in fetch order (never includes ``current``).
         """
         extra: list[str] = []
         origin = base
         page = pages_rule.start
         last = pages_rule.max_pages
+        seen: set[str] = {first_url} if first_url else set()
 
         while len(extra) < _MAX_EXTRA_PAGES and (last is None or page <= last):
             next_url = render(pages_rule.url, base_url=base, page=page, **fmt)
+            if next_url in seen:
+                break  # the template rendered an already-collected page
             if last is None:
                 suffix = (
                     next_url[len(origin) :] if next_url.startswith(origin) else next_url
@@ -151,5 +181,6 @@ class RuleFetcher(BaseFetcher):
                 )
                 break
             extra.append(current)
+            seen.add(next_url)
             page += 1
         return extra

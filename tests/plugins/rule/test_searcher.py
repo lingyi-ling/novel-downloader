@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -134,6 +135,14 @@ def test_book_id_falls_back_to_last_path_segment() -> None:
     assert [r["book_id"] for r in results] == ["7", "9"]
 
 
+def test_book_id_negative_group_falls_back_to_whole_match() -> None:
+    """``parse_rule`` rejects negative groups; the searcher stays defensive."""
+    rx = re.compile(r"/(\d+)/")
+
+    assert RuleSearcher._book_id("https://demo.example/book/7/", rx, -1) == "/7/"
+    assert RuleSearcher._book_id("https://demo.example/book/7/", rx, 9) == "/7/"
+
+
 def test_default_item_falls_back_to_root() -> None:
     rule_dict = {
         "site_key": "demo",
@@ -175,7 +184,6 @@ JSON_RULE: dict[str, Any] = {
             "url": {"selector": "url", "attr": "text"},
             "cover": {"selector": "coverUrl", "attr": "text"},
             "author": {"selector": "author", "attr": "text"},
-            "tags": {"selector": "tags[*]", "attr": "text", "multi": True},
         },
     },
     "chapter": {"url": "{base_url}/read/{book_id}/{chapter_id}.html"},

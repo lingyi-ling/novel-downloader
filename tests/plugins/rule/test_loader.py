@@ -154,6 +154,46 @@ def test_invalid_rule_files_are_skipped(
     assert "incomplete" not in rules
 
 
+def test_rule_file_with_duplicate_keys_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ``json.loads`` silently keeps the last duplicate; the loader must treat a
+    # duplicate key as a malformed file instead of loading a surprise config.
+    (tmp_path / "dup.json").write_text(
+        '{"site_key": "dup", "site_key": "dup2",'
+        ' "chapter": {"url": "{base_url}/{book_id}/{chapter_id}.html"},'
+        ' "base_url": "https://demo.example"}',
+        encoding="utf-8",
+    )
+    _write_rule(tmp_path, "ok.json", _demo_rule("ok"))
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(tmp_path))
+
+    rules = reload_rules()
+
+    assert "dup" not in rules
+    assert "dup2" not in rules  # last-wins merging must not sneak the rule in
+    assert "ok" in rules
+
+
+def test_install_rule_rejects_duplicate_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_dir = tmp_path / "installed"
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(install_dir))
+    dup = tmp_path / "dup.json"
+    dup.write_text(
+        '{"site_key": "dup", "site_key": "dup2",'
+        ' "chapter": {"url": "{base_url}/{book_id}/{chapter_id}.html"},'
+        ' "base_url": "https://demo.example"}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuleError, match=r"duplicate key 'site_key'"):
+        install_rule(dup)
+
+    assert not (install_dir / "dup.json").exists()
+
+
 # --------------------------------------------------------------------------- #
 # installing / removing user rules
 # --------------------------------------------------------------------------- #

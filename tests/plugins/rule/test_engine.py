@@ -142,6 +142,17 @@ def test_extract_falls_back_to_whole_match_when_group_missing() -> None:
     assert extract(tree, fld) == "作者：天蚕土豆"
 
 
+def test_extract_regex_without_match_leaves_value_unchanged() -> None:
+    """Documented lenient behaviour: a non-matching regex is a no-op.
+
+    (Rules such as ``author`` with ``regex: "作者：(\\S+)"`` rely on this to
+    keep plain values that simply lack the prefix.)
+    """
+    tree = parse_page("<div>天蚕土豆</div>")
+    fld = Field(selector="div", regex=r"作者：(\S+)", group=1)
+    assert extract(tree, fld) == "天蚕土豆"
+
+
 def test_extract_uses_default_when_nothing_matches() -> None:
     tree = parse_page(PAGE)
     fld = Field(selector="div.nope", default="  n/a  ")
@@ -166,6 +177,19 @@ def test_extract_multi_skips_empty_values() -> None:
     assert extract_multi(tree, fld) == ["ok"]
 
 
+def test_select_on_bare_string_root_returns_no_matches() -> None:
+    """Bare string nodes (XPath ``@attr``/``text()``) cannot be descended."""
+    assert select("/book/7/", "div.item", "html") == []
+    assert select("/book/7/", "//div", "html") == []
+
+
+def test_extract_negative_group_falls_back_to_whole_match() -> None:
+    """A negative ``group`` used to leak a raw ``IndexError``."""
+    tree = parse_page(PAGE)
+    fld = Field(selector="span.author", regex=r"作者：(\S+)", group=-1)
+    assert extract(tree, fld) == "作者：天蚕土豆"
+
+
 # --------------------------------------------------------------------------- #
 # render / abs_url
 # --------------------------------------------------------------------------- #
@@ -183,6 +207,36 @@ def test_render_substitutes_known_placeholders_only() -> None:
 def test_render_leaves_unknown_braces_untouched() -> None:
     assert render("a {b} c", c=1) == "a {b} c"
     assert render("a {b} c", b=1) == "a 1 c"
+
+
+def test_render_does_not_rescan_substituted_values() -> None:
+    """A value containing ``{placeholder}`` text must stay literal.
+
+    ``book_id`` / ``chapter_id`` come from (possibly hostile) page URLs; the
+    old sequential ``str.replace`` let a value smuggle another variable's
+    expansion (``chapter_id="{page}"`` produced ``.../2_2.html``).
+    """
+    out = render(
+        "{base_url}/{book_id}/{chapter_id}_{page}.html",
+        base_url="https://demo.example",
+        book_id="0_1",
+        chapter_id="{page}",
+        page=2,
+    )
+    assert out == "https://demo.example/0_1/{page}_2.html"
+
+
+def test_render_expansion_is_order_independent() -> None:
+    """No variable may feed another, regardless of insertion order."""
+    out = render(
+        "https://demo.example/s?q={keyword}&p={page}",
+        keyword="{page}",
+        page=3,
+    )
+    assert out == "https://demo.example/s?q={page}&p=3"
+
+    out2 = render("{base_url}/book/{book_id}/", book_id="{base_url}/x")
+    assert out2 == "{base_url}/book/{base_url}/x/"
 
 
 def test_abs_url_variants() -> None:

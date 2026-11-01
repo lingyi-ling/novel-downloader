@@ -48,6 +48,9 @@ __all__ = [
 
 _NESTED_HTML_RE = re.compile(r"<!DOCTYPE.*?>", re.I | re.S)
 
+# a ``{name}`` placeholder used by :func:`render` (single pass)
+_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
 # a single dot-path segment: ``key``, ``key[2]``, ``key[*]`` or ``[0]``
 _SEGMENT_RE = re.compile(r"^([^\[\]]*)(?:\[([^\]]*)\])?$")
 
@@ -100,6 +103,11 @@ def select(root: Any, selector: str, fmt: str = "html") -> list[Any]:
         return select_json(root, selector)
     if not selector:
         return [root]
+    if isinstance(root, str):
+        # Bare string nodes (an XPath ``@attr`` / ``text()`` item selector)
+        # cannot be descended into further; report "no match" instead of
+        # leaking an ``AttributeError``.
+        return []
     if selector.startswith(("/", "(", "./")):
         try:
             return list(root.xpath(selector))
@@ -254,7 +262,9 @@ def _postprocess(value: str, fld: Field) -> str:
         m = fld._pattern.search(value)
         if m:
             group = fld.group
-            value = m.group(group) if group and group <= len(m.groups()) else m.group(0)
+            # ``group`` is validated >= 0 at load time; stay defensive anyway
+            # because a negative index raises a raw ``IndexError``.
+            value = m.group(group) if 0 < group <= len(m.groups()) else m.group(0)
     return fld.apply_replace(value).strip()
 
 
@@ -284,11 +294,22 @@ def extract_multi(root: Any, fld: Field, fmt: str = "html") -> list[str]:
 
 
 def render(template: str, **kv: Any) -> str:
-    """Substitute ``{name}`` placeholders without touching other braces."""
-    out = template
-    for key, value in kv.items():
-        out = out.replace("{" + key + "}", str(value))
-    return out
+    """
+    Substitute ``{name}`` placeholders without touching other braces.
+
+    The substitution is a *single pass* over the template: inserted values are
+    never rescanned, so a value that itself contains placeholder text (e.g. a
+    ``book_id`` scraped from a hostile page URL) cannot smuggle in another
+    variable's expansion.  Unknown braces are left untouched.
+    """
+    if not kv:
+        return template
+
+    def _sub(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return str(kv[key]) if key in kv else match.group(0)
+
+    return _PLACEHOLDER_RE.sub(_sub, template)
 
 
 def abs_url(base: str, url: str) -> str:

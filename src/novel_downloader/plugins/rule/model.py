@@ -42,6 +42,7 @@ A JSON request body can be sent by adding ``"json_body": {...}`` to the
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -59,11 +60,44 @@ __all__ = [
     "Rule",
     "RuleError",
     "parse_rule",
+    "loads_rule_json",
 ]
 
 
 class RuleError(ValueError):
     """Raised when a rule document is structurally invalid."""
+
+
+# --------------------------------------------------------------------------- #
+# JSON decoding (used by the loader, installer and remote fetcher)
+# --------------------------------------------------------------------------- #
+def _pairs_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``json.loads`` hook that rejects duplicate keys instead of last-wins."""
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate key {key!r}")
+        obj[key] = value
+    return obj
+
+
+def loads_rule_json(text: str | bytes, *, source: str = "<memory>") -> dict[str, Any]:
+    """
+    Decode a rule document, requiring a JSON object as the root.
+
+    Unlike a plain ``json.loads``, duplicate object keys are rejected: for a
+    rule document a duplicate key is a copy/paste error, and silently keeping
+    the last value hides the conflict from the author.
+
+    :raises RuleError: on invalid JSON, a non-object root, or duplicate keys.
+    """
+    try:
+        data: Any = json.loads(text, object_pairs_hook=_pairs_without_duplicates)
+    except ValueError as e:
+        raise RuleError(f"{source}: invalid JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise RuleError(f"{source}: rule must be a JSON object")
+    return data
 
 
 # --------------------------------------------------------------------------- #
@@ -86,11 +120,24 @@ def _as_replace(value: Any) -> list[tuple[str, str]]:
     return out
 
 
+#: Control characters that must never appear in a header name or value.
+_HEADER_CTRL_RE = re.compile(r"[\r\n\x00]")
+
+
 def _as_headers(value: Any) -> dict[str, str]:
     """Normalize a request header mapping into ``{str: str}``."""
     if not isinstance(value, dict):
         return {}
-    return {str(k): _as_str(v) for k, v in value.items()}
+    out: dict[str, str] = {}
+    for k, v in value.items():
+        key, val = str(k), _as_str(v)
+        if _HEADER_CTRL_RE.search(key) or _HEADER_CTRL_RE.search(val):
+            raise RuleError(
+                f"header {key!r} must not contain control characters "
+                "(CR/LF/NUL are rejected to prevent header injection)"
+            )
+        out[key] = val
+    return out
 
 
 def _as_int(value: Any, default: int, *, where: str) -> int:
@@ -162,6 +209,98 @@ def _section_format(data: Any) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
+# schema keys (typo guard: unknown keys fail at load time, not silently)
+# --------------------------------------------------------------------------- #
+# Keys starting with ``_`` are a comment/annotation convention (see the
+# shipped ``_example-template.json``) and are always ignored.
+_TOP_LEVEL_KEYS = {
+    "site_key",
+    "site_name",
+    "priority",
+    "base_url",
+    "encoding",
+    "format",
+    "hosts",
+    "headers",
+    "resolve",
+    "search",
+    "book",
+    "chapter",
+}
+_SEARCH_KEYS = {
+    "url",
+    "method",
+    "data",
+    "json_body",
+    "headers",
+    "format",
+    "item",
+    "fields",
+    "book_id_regex",
+    "book_id_group",
+    "priority",
+}
+_BOOK_KEYS = {"url", "fields", "chapters", "pages", "headers", "format"}
+_CHAPTERS_KEYS = {"item", "title", "url", "id_regex", "id_group", "volume_name"}
+_PAGES_KEYS = {"url", "start", "max_pages"}
+_CHAPTER_KEYS = {
+    "url",
+    "content",
+    "title",
+    "replace",
+    "drop",
+    "pages",
+    "headers",
+    "format",
+}
+_FIELD_KEYS = {"selector", "attr", "regex", "group", "multi", "replace", "default"}
+_RESOLVE_KEYS = {"book", "chapter"}
+#: Field names actually consumed by the searcher / parser.
+_SEARCH_FIELD_NAMES = {"url", "cover", "title", "author", "latest", "update", "word"}
+_BOOK_FIELD_NAMES = {
+    "book_name",
+    "author",
+    "cover_url",
+    "update_time",
+    "summary",
+    "summary_brief",
+    "serial_status",
+    "word_count",
+    "tags",
+}
+
+
+def _reject_unknown(data: dict[str, Any], allowed: set[str], *, where: str) -> None:
+    """Reject keys outside ``allowed`` (typos) unless prefixed with ``_``."""
+    unknown = sorted(k for k in data if k not in allowed and not k.startswith("_"))
+    if unknown:
+        raise RuleError(
+            f"{where}: unknown key {unknown[0]!r} "
+            f"(possible typo; allowed keys: {', '.join(sorted(allowed))})"
+        )
+
+
+def _check_field_names(
+    fields: dict[str, Any], allowed: set[str], *, where: str
+) -> None:
+    """Reject field names the engine would silently ignore."""
+    unknown = sorted(k for k in fields if k not in allowed and not k.startswith("_"))
+    if unknown:
+        raise RuleError(
+            f"{where}: unknown field {unknown[0]!r} "
+            f"(possible typo; consumed fields: {', '.join(sorted(allowed))}; "
+            "prefix custom keys with '_' to keep them as a comment)"
+        )
+
+
+def _non_negative(value: int, *, where: str) -> int:
+    """Reject negative capture-group indices (they raise ``IndexError``)."""
+    if value < 0:
+        raise RuleError(f"{where} must be a non-negative integer, got {value}")
+    return value
+
+
+# --------------------------------------------------------------------------- #
 # field
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -200,6 +339,7 @@ class Field:
                     type=type(data)
                 )
             )
+        _reject_unknown(data, _FIELD_KEYS, where="field")
         selector = data.get("selector")
         if selector is not None and not isinstance(selector, str):
             raise RuleError(
@@ -214,7 +354,10 @@ class Field:
             selector=selector,
             attr=_as_str(raw_attr, "text"),
             regex=data.get("regex"),
-            group=_as_int(data.get("group"), 1, where="field 'group'"),
+            group=_non_negative(
+                _as_int(data.get("group"), 1, where="field 'group'"),
+                where="field 'group'",
+            ),
             multi=bool(data.get("multi", False)),
             replace=_as_replace(data.get("replace")),
             default=_as_str(data.get("default")),
@@ -247,7 +390,14 @@ class SearchRule:
     def from_dict(cls, data: Any) -> SearchRule:
         if not isinstance(data, dict) or not data.get("url"):
             raise RuleError(t("search section requires a 'url'"))
-        fields = {k: Field.from_dict(v) for k, v in (data.get("fields") or {}).items()}
+        _reject_unknown(data, _SEARCH_KEYS, where="search")
+        raw_fields = data.get("fields")
+        if raw_fields is None:
+            raw_fields = {}
+        elif not isinstance(raw_fields, dict):
+            raise RuleError("search.fields must be an object")
+        _check_field_names(raw_fields, _SEARCH_FIELD_NAMES, where="search.fields")
+        fields = {k: Field.from_dict(v) for k, v in raw_fields.items()}
         json_body = data.get("json_body")
         if json_body is not None and not isinstance(json_body, dict):
             raise RuleError(t("search.json_body must be an object"))
@@ -269,8 +419,9 @@ class SearchRule:
             book_id_regex=_check_regex(
                 data.get("book_id_regex"), where="search.book_id_regex"
             ),
-            book_id_group=_as_int(
-                data.get("book_id_group"), 1, where="search.book_id_group"
+            book_id_group=_non_negative(
+                _as_int(data.get("book_id_group"), 1, where="search.book_id_group"),
+                where="search.book_id_group",
             ),
             priority=_as_int(data.get("priority"), 200, where="search.priority"),
         )
@@ -292,12 +443,16 @@ class ChaptersRule:
     def from_dict(cls, data: Any) -> ChaptersRule:
         if not isinstance(data, dict) or not data.get("item"):
             raise RuleError(t("book.chapters requires an 'item' selector"))
+        _reject_unknown(data, _CHAPTERS_KEYS, where="book.chapters")
         return cls(
             item=_as_str(data["item"]),
             title=Field.from_dict(data.get("title", {"attr": "text"})),
             url=Field.from_dict(data.get("url", {"attr": "href"})),
             id_regex=_check_regex(data.get("id_regex"), where="book.chapters.id_regex"),
-            id_group=_as_int(data.get("id_group"), 1, where="book.chapters.id_group"),
+            id_group=_non_negative(
+                _as_int(data.get("id_group"), 1, where="book.chapters.id_group"),
+                where="book.chapters.id_group",
+            ),
             volume_name=_as_str(data.get("volume_name"), "正文"),
         )
 
@@ -322,6 +477,7 @@ class PagesRule:
             return cls(url=data)
         if not isinstance(data, dict) or not data.get("url"):
             raise RuleError(t("pages rule requires a 'url'"))
+        _reject_unknown(data, _PAGES_KEYS, where="pages")
         raw_max = data.get("max_pages")
         return cls(
             url=_as_str(data["url"]),
@@ -347,12 +503,17 @@ class BookRule:
     def from_dict(cls, data: Any) -> BookRule:
         if not isinstance(data, dict) or not data.get("url"):
             raise RuleError(t("book section requires a 'url'"))
+        _reject_unknown(data, _BOOK_KEYS, where="book")
         pages = data.get("pages")
+        raw_fields = data.get("fields")
+        if raw_fields is None:
+            raw_fields = {}
+        elif not isinstance(raw_fields, dict):
+            raise RuleError("book.fields must be an object")
+        _check_field_names(raw_fields, _BOOK_FIELD_NAMES, where="book.fields")
         return cls(
             url=_as_str(data["url"]),
-            fields={
-                k: Field.from_dict(v) for k, v in (data.get("fields") or {}).items()
-            },
+            fields={k: Field.from_dict(v) for k, v in raw_fields.items()},
             chapters=ChaptersRule.from_dict(data.get("chapters") or {}),
             pages=PagesRule.from_dict(pages) if pages else None,
             headers=_as_headers(data.get("headers")),
@@ -378,6 +539,7 @@ class ChapterRule:
     def from_dict(cls, data: Any) -> ChapterRule:
         if not isinstance(data, dict) or not data.get("url"):
             raise RuleError(t("chapter section requires a 'url'"))
+        _reject_unknown(data, _CHAPTER_KEYS, where="chapter")
         pages = data.get("pages")
         drop = [
             _check_regex(p, where="chapter.drop") or ""
@@ -446,18 +608,22 @@ class Rule:
 _VALID_ATTRS = {"text", "inner_text", "html"}
 
 
+def _validate_field(fld: Field, where: str) -> None:
+    """An empty ``attr`` is always a copy/paste bug (silently empty output)."""
+    if fld.attr not in _VALID_ATTRS and not fld.attr:
+        raise RuleError(t("{where}: empty 'attr'").format(where=where))
+
+
 def _validate_fields(fields: dict[str, Field], where: str) -> None:
     for name, fld in fields.items():
-        if fld.attr not in _VALID_ATTRS and not fld.attr:
-            raise RuleError(
-                t("{where}.{name}: empty 'attr'").format(where=where, name=name)
-            )
+        _validate_field(fld, f"{where}.{name}")
 
 
 def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
     """Validate a raw rule mapping and return a :class:`Rule`."""
     if not isinstance(data, dict):
         raise RuleError(t("{source}: rule must be a JSON object").format(source=source))
+    _reject_unknown(data, _TOP_LEVEL_KEYS, where=source)
 
     site_key = _as_str(data.get("site_key"))
     if not site_key:
@@ -468,6 +634,7 @@ def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
     if resolve_raw is not None:
         if not isinstance(resolve_raw, dict):
             raise RuleError(f"{source}: 'resolve' must be an object")
+        _reject_unknown(resolve_raw, _RESOLVE_KEYS, where="resolve")
         resolve = ResolveRule(
             book=_check_regex(resolve_raw.get("book"), where="resolve.book"),
             chapter=_check_regex(resolve_raw.get("chapter"), where="resolve.chapter"),
@@ -485,8 +652,14 @@ def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
         )
     if book is not None:
         _validate_fields(book.fields, "book.fields")
+        _validate_field(book.chapters.title, "book.chapters.title")
+        _validate_field(book.chapters.url, "book.chapters.url")
     if search is not None:
         _validate_fields(search.fields, "search.fields")
+    if chapter is not None:
+        _validate_field(chapter.content, "chapter.content")
+        if chapter.title is not None:
+            _validate_field(chapter.title, "chapter.title")
 
     return Rule(
         site_key=site_key,

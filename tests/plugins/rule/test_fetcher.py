@@ -54,8 +54,10 @@ class _StubFetcher(RuleFetcher):
         self.pages = pages
         self.failing = failing or set()
         self.sent_headers: list[dict[str, str]] = []
+        self.fetched: list[str] = []
 
     async def fetch(self, url: str, encoding: str = "utf-8", **kwargs: Any) -> str:
+        self.fetched.append(url)
         self.sent_headers.append(dict(kwargs.get("headers") or {}))
         if url in self.failing:
             raise RuntimeError("boom")
@@ -187,6 +189,103 @@ async def test_failed_extra_page_stops_walking() -> None:
 
     fetcher = make_fetcher(pages, failing={f"{BASE}/book/7/index_2.html"})
     assert await fetcher.fetch_book_info("7") == [_pager(2)]
+
+
+# --------------------------------------------------------------------------- #
+# duplicate collection regression
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_pages_template_without_page_placeholder_is_fetched_once() -> None:
+    """A pages URL that never changes must not be collected over and over.
+
+    Regression: a template without ``{page}`` rendered the same URL on every
+    iteration and the walker happily collected it up to 50 times, so the
+    parser joined the same body into the chapter text 50 times.
+    """
+    rule_dict = {
+        **RULE_DICT,
+        "chapter": {
+            **RULE_DICT["chapter"],
+            "pages": {"url": f"{BASE}/book/{{book_id}}/all.html", "start": 2},
+        },
+    }
+    all_url = f"{BASE}/book/7/all.html"
+    pages = {
+        CHAPTER_URL: '<article>第一页</article><a href="all.html">全部</a>',
+        all_url: '<article>全部章节</article><a href="all.html">全部</a>',
+    }
+
+    fetcher = _StubFetcher(parse_rule(rule_dict), pages)
+    fetched = await fetcher.fetch_chapter_content("7", "5")
+
+    assert fetcher.fetched.count(all_url) == 1
+    assert fetched == [
+        '<article>第一页</article><a href="all.html">全部</a>',
+        '<article>全部章节</article><a href="all.html">全部</a>',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pages_url_equal_to_the_first_page_is_not_refetched() -> None:
+    """A pages template pointing at the entry URL itself duplicates content."""
+    rule_dict = {
+        **RULE_DICT,
+        "chapter": {
+            **RULE_DICT["chapter"],
+            "pages": {
+                "url": "{base_url}/book/{book_id}/{chapter_id}.html",
+                "start": 2,
+            },
+        },
+    }
+    pages = {CHAPTER_URL: '<article>正文</article><a href="5.html">self</a>'}
+
+    fetcher = _StubFetcher(parse_rule(rule_dict), pages)
+    fetched = await fetcher.fetch_chapter_content("7", "5")
+
+    assert fetcher.fetched == [CHAPTER_URL]
+    assert fetched == ['<article>正文</article><a href="5.html">self</a>']
+
+
+@pytest.mark.asyncio
+async def test_book_pages_url_equal_to_the_book_url_is_not_refetched() -> None:
+    rule_dict = {
+        **RULE_DICT,
+        "book": {
+            **RULE_DICT["book"],
+            "pages": {"url": "{base_url}/book/{book_id}/", "start": 2},
+        },
+    }
+    pages = {BOOK_URL: '<div class="list"><a href="/book/7/1.html">第1章</a></div>'}
+
+    fetcher = _StubFetcher(parse_rule(rule_dict), pages)
+    fetched = await fetcher.fetch_book_info("7")
+
+    assert fetcher.fetched == [BOOK_URL]
+    assert fetched == [pages[BOOK_URL]]
+
+
+# --------------------------------------------------------------------------- #
+# rendered header sanitization
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_rendered_header_values_drop_control_characters() -> None:
+    """``{book_id}`` comes from page data; it must not smuggle CRLF headers."""
+    rule_dict = {
+        **RULE_DICT,
+        "chapter": {
+            "url": f"{BASE}/book/5.html",
+            "headers": {"X-Book": "{book_id}", "Referer": "{base_url}/"},
+        },
+    }
+    pages = {f"{BASE}/book/5.html": "<article>正文</article>"}
+
+    fetcher = _StubFetcher(parse_rule(rule_dict), pages)
+    await fetcher.fetch_chapter_content("7\r\nX-Evil: 1", "5")
+
+    sent = fetcher.sent_headers[0]
+    assert sent["X-Book"] == "7X-Evil: 1"
+    assert sent["Referer"] == f"{BASE}/"
 
 
 @pytest.mark.asyncio

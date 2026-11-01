@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from novel_downloader.plugins.rule.model import Rule, parse_rule
@@ -136,6 +137,14 @@ def test_parse_book_info_without_book_section() -> None:
 # --------------------------------------------------------------------------- #
 # chapter ids
 # --------------------------------------------------------------------------- #
+def test_chapter_id_negative_group_falls_back_to_whole_match() -> None:
+    """``parse_rule`` rejects negative groups; the parser stays defensive."""
+    rx = re.compile(r"/(\d+)\.html")
+
+    assert RuleParser._chapter_id("/book/7/1.html", rx, -1) == "/1.html"
+    assert RuleParser._chapter_id("/book/7/1.html", rx, 9) == "/1.html"
+
+
 def test_chapter_id_falls_back_to_filename() -> None:
     rule = parse_rule(
         {
