@@ -292,14 +292,17 @@ novel-desktop
 # Ctrl+1-5 切换五个页面</span></code></pre>
         </div>
         <div class="tab-panel" id="panel-android" role="tabpanel" aria-labelledby="tab-android" tabindex="0" data-panel="android">
-          <pre><code><span class="c" data-en="# Build from source (JDK 17 + Android SDK 35)"># 从源码构建（JDK 17 + Android SDK 35）</span>
+          <pre><code><span class="c" data-en="# 1. Download the signed APK from Releases (no build needed)"># 1. 直接下载签名 APK（无需自行打包）</span>
+https://github.com/lingyi-ling/novel-downloader/releases/latest
+
+<span class="c" data-en="# Install it, then choose a mode in Settings:"># 2. 安装后到设置页选择模式：</span>
+<span class="c" data-en="#   standalone engine -> everything runs on the phone, no PC">#   独立引擎 → 全部跑在手机本地，无需电脑</span>
+<span class="c" data-en="#   remote API        -> point at a PC running novel-api">#   远程 API → 填写电脑端 novel-api 地址</span>
+
+<span class="c" data-en="# Prefer building from source? JDK 17 + Android SDK 35:"># 想从源码构建也可以（JDK 17 + Android SDK 35）：</span>
 git clone https://github.com/lingyi-ling/novel-downloader
 cd novel-downloader/android
-./gradlew assembleDebug
-
-<span class="c" data-en="# Run novel-api on your PC, then point the app at
-# its API address to share the same service layer"># 安装后在本机跑 novel-api，
-# App 内设置 API 地址即连上同一套服务层</span>
+./gradlew assembleRelease
 <span class="c" data-en="# — or flip on the standalone engine in the app: embedded Python, full service layer on the phone"># ——或在 App 内开启「独立引擎」，内嵌 Python，手机单机直跑全套服务层</span></code></pre>
         </div>
         <div class="tab-panel" id="panel-engine" role="tabpanel" aria-labelledby="tab-engine" tabindex="0" data-panel="engine">
@@ -333,11 +336,11 @@ cd novel-downloader/android
           <p><code>pip install -U novel-downloader</code><span data-en=" gives you novel-cli / novel-api / novel-desktop, with optional [api] and [music] extras."> 得到 novel-cli / novel-api / novel-desktop 三个入口；可选 <code>[api]</code> <code>[music]</code> 扩展组。</span></p>
           <span class="dl-link" data-en="PyPI page →">PyPI 项目页 →</span>
         </a>
-        <a class="card download-card reveal" href="https://github.com/lingyi-ling/novel-downloader/actions/workflows/build.yml" target="_blank" rel="noopener">
+        <a class="card download-card reveal" href="https://github.com/lingyi-ling/novel-downloader/releases/latest" target="_blank" rel="noopener">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg></div>
           <h3>Android</h3>
-          <p data-en="CI builds a debug APK on every push (Actions artifacts), or run ./gradlew assembleRelease for a signed build; the ~68 MB APK embeds the Python runtime, so the standalone engine runs the full service layer on your phone — no PC-side novel-api needed (music is an empty state in this mode for now).">CI 持续构建 debug APK（Actions 工件），或自行 <code>./gradlew assembleRelease</code> 出签名包；APK 约 68 MB（内嵌 Python 运行时），开启「独立引擎」即可手机单机下载、无需电脑端 novel-api（独立模式下音乐暂为空态）。</p>
-          <span class="dl-link" data-en="Build artifacts →">构建工件 →</span>
+          <p data-en="Download the signed APK (≈ 62 MB, Python runtime embedded). Turn on the standalone engine and the full service layer runs on your phone — no PC-side novel-api needed (music is an empty state in this mode for now); turn it off to drive a PC instead.">下载签名 APK（约 62 MB，内嵌 Python 运行时）。开启「独立引擎」即可手机单机下载、无需电脑端 novel-api（独立模式下音乐暂为空态）；关闭则回到遥控电脑端的模式。</p>
+          <span class="dl-link" data-en="Download APK →">下载 APK →</span>
         </a>
       </div>
     </div>
