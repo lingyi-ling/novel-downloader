@@ -31,7 +31,7 @@ msgstr "密码"
 msgid "Enter your username"
 msgstr "请输入用户名"
 
-#: scripts/i18n_strings.py:19 src/novel_downloader/apps/cli/ui_adapters.py:97
+#: scripts/i18n_strings.py:19 src/novel_downloader/apps/cli/ui_adapters.py:99
 msgid "Enter your password"
 msgstr "请输入密码"
 
@@ -440,7 +440,7 @@ msgstr "已完成所有选定书籍的清理"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:423
 #: src/novel_downloader/apps/cli/ui_adapters.py:23
-#: src/novel_downloader/apps/cli/ui_adapters.py:142
+#: src/novel_downloader/apps/cli/ui_adapters.py:145
 msgid "chapters"
 msgstr "章节"
 
@@ -809,12 +809,12 @@ msgstr "同时用短超时请求探测网络出口（不会导致命令失败）
 msgid "optional"
 msgstr "可选"
 
-#: src/novel_downloader/apps/cli/commands/doctor.py:815
+#: src/novel_downloader/apps/cli/commands/doctor.py:816
 #, python-brace-format
 msgid "{count} check(s) failed."
 msgstr "{count} 项检查失败。"
 
-#: src/novel_downloader/apps/cli/commands/doctor.py:818
+#: src/novel_downloader/apps/cli/commands/doctor.py:819
 msgid "All checks passed."
 msgstr "全部检查通过。"
 
@@ -2065,51 +2065,51 @@ msgstr "书籍 {book_id} 不支持导出格式 '{format}'"
 msgid "Description"
 msgstr "描述"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:86
+#: src/novel_downloader/apps/cli/ui_adapters.py:87
 msgid "Hint"
 msgstr "提示"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:91
+#: src/novel_downloader/apps/cli/ui_adapters.py:93
 msgid "Using configured value."
 msgstr "使用已配置的值"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:99
+#: src/novel_downloader/apps/cli/ui_adapters.py:101
 msgid "Enter your cookies"
 msgstr "请输入 Cookies"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:102
+#: src/novel_downloader/apps/cli/ui_adapters.py:104
 msgid "Enter a value"
 msgstr "请输入值"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:108
+#: src/novel_downloader/apps/cli/ui_adapters.py:110
 msgid "This field is required. Please provide a value."
 msgstr "该字段为必填项, 请输入值"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:119
+#: src/novel_downloader/apps/cli/ui_adapters.py:121
 msgid ""
 "Login failed: please check your cookies or account credentials and try "
 "again."
 msgstr "登录失败: 请检查您的 Cookies 或账户凭据后重试"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:124
+#: src/novel_downloader/apps/cli/ui_adapters.py:126
 msgid "Login successful."
 msgstr "登录成功"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:137
+#: src/novel_downloader/apps/cli/ui_adapters.py:139
 #, python-brace-format
 msgid "Stage '{stage}' started for {book_id}."
 msgstr "开始阶段 '{stage}' (书籍 {book_id})"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:142
+#: src/novel_downloader/apps/cli/ui_adapters.py:143
 msgid "Stage"
 msgstr "阶段"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:157
+#: src/novel_downloader/apps/cli/ui_adapters.py:160
 #, python-brace-format
 msgid "Stage '{stage}' completed for {book_id}"
 msgstr "完成阶段 '{stage}' (书籍 {book_id})"
 
-#: src/novel_downloader/apps/cli/ui_adapters.py:164
+#: src/novel_downloader/apps/cli/ui_adapters.py:167
 #, python-brace-format
 msgid "Missing data ({what}) for {book_id}: {path}"
 msgstr "书籍 {book_id} 缺少数据 ({what}): {path}"
