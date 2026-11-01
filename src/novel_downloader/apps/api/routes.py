@@ -227,6 +227,12 @@ async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
     none (matching the SSE endpoint's ``sites=`` empty-value semantics) instead
     of silently fanning out to every site.
 
+    ``group: true`` folds same-book results into one merged entry per book:
+    each entry is the book's best source plus a ``sources`` key listing every
+    site carrying it (best first).  The envelope stays the same
+    ``{"total", "results"}`` shape in both modes, so clients that ignore
+    ``group`` (the default) see no change at all.
+
     The aggregate search is bounded by an overall deadline (in addition to the
     per-site ``timeout``); exceeding it returns ``504``.
     """
@@ -245,6 +251,7 @@ async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
             timeout=body.timeout,
             sort=body.sort,
             order=body.order,
+            group=body.group,
         ),
         timeout,
         "Search",

@@ -703,6 +703,7 @@ class ApiBridge:
         self,
         keyword: str,
         sites_csv: str = "",
+        group: bool = False,
         per_site_limit: int = 4,
     ) -> dict[str, Any]:
         """
@@ -710,6 +711,8 @@ class ApiBridge:
 
         :param keyword: The search term.
         :param sites_csv: Optional comma-separated site filter.
+        :param group: Merge same-book results into one entry per book, each
+            carrying the ``sources`` capsules (best source first).
         :param per_site_limit: Results kept per site before ranking.
         """
         text = str(keyword or "").strip()
@@ -727,6 +730,7 @@ class ApiBridge:
                 sites=sites,
                 per_site_limit=per_site_limit,
                 timeout=SEARCH_SITE_TIMEOUT,
+                group=bool(group),
             )
             elapsed = time.perf_counter() - started
             return [_result_dict(r, i) for i, r in enumerate(results)], elapsed

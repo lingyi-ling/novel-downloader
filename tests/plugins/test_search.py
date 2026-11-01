@@ -252,9 +252,10 @@ async def test_stream_duplicate_site_selection_searches_site_once(
         registrar, "get_searcher_classes", _mirror_registry([_RecordingSearcher])
     )
 
-    chunks = [chunk async for chunk in search_stream(
-        "keyword", sites=["recorder", "recorder"]
-    )]
+    chunks = [
+        chunk
+        async for chunk in search_stream("keyword", sites=["recorder", "recorder"])
+    ]
 
     assert _RecordingSearcher.calls == 1
     assert chunks == [[_stub_result("recorder", "1")]]
@@ -313,9 +314,7 @@ async def test_stream_invalid_site_payload_is_isolated_and_reported(
     )
     events: list[SearchEvent] = []
 
-    chunks = [
-        chunk async for chunk in search_stream("keyword", on_event=events.append)
-    ]
+    chunks = [chunk async for chunk in search_stream("keyword", on_event=events.append)]
 
     assert chunks == [[_stub_result("recorder", "1")]]
     kinds = {(event.site, event.kind) for event in events}
@@ -342,3 +341,222 @@ async def test_cache_hit_ranks_and_slices_per_call(
 
     asc = await search("keyword", sort="words", order="asc", limit=1)
     assert [r["book_id"] for r in asc] == ["weak"]
+
+
+# --------------------------------------------------------------------------- #
+# same-book grouping (group=True)
+# --------------------------------------------------------------------------- #
+
+_RESULT_KEYS = frozenset(
+    {
+        "site",
+        "book_id",
+        "book_url",
+        "cover_url",
+        "title",
+        "author",
+        "latest_chapter",
+        "update_date",
+        "word_count",
+        "priority",
+    }
+)
+
+
+class _BookCopySearcher(BaseSearcher):
+    """Searcher offering one copy of a configurable book on its own site."""
+
+    site_name = "alpha"
+    book_title = "三体"
+    book_author = "刘慈欣"
+    word_count = "10万字"
+    fetches = 0
+
+    async def _fetch_html(self, keyword: str) -> str:
+        type(self).fetches += 1
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [
+            {
+                "site": self.site_name,
+                "book_id": f"{self.site_name}-1",
+                "book_url": f"https://example.com/{self.site_name}/1",
+                "cover_url": "",
+                "title": self.book_title,
+                "author": self.book_author,
+                "latest_chapter": "",
+                "update_date": "",
+                "word_count": self.word_count,
+                "priority": 100,
+            }
+        ]
+
+
+class _StrongCopySearcher(_BookCopySearcher):
+    """A second site carrying a (ranked) better copy of the same book."""
+
+    site_name = "beta"
+    word_count = "300万字"
+
+
+class _NamesakeSearcher(_BookCopySearcher):
+    """A second site with the same title but a different author."""
+
+    site_name = "delta"
+    book_author = "天蚕土豆"
+
+
+class _OtherBookSearcher(_BookCopySearcher):
+    """A second, distinct book (used to check the limit counts books)."""
+
+    site_name = "gamma"
+    book_title = "球状闪电"
+    word_count = "50万字"
+
+
+class _DuplicateSiteSearcher(_BookCopySearcher):
+    """One site returning the same book twice (two book ids)."""
+
+    site_name = "alpha"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        first = dict(super()._parse_html(html_str, limit)[0])
+        duplicate = dict(first)
+        duplicate["book_id"] = "alpha-2"
+        duplicate["book_url"] = "https://example.com/alpha/2"
+        return [first, duplicate]
+
+
+@pytest.mark.asyncio
+async def test_group_merges_same_book_across_sites(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BookCopySearcher, _StrongCopySearcher]),
+    )
+
+    merged = await search("三体", group=True)
+
+    assert len(merged) == 1
+    entry = merged[0]
+    # The merged entry is the group's best copy (higher word count), enriched
+    # with the source capsules, best first.
+    assert entry["site"] == "beta"
+    assert entry["book_id"] == "beta-1"
+    assert entry["book_url"] == "https://example.com/beta/1"
+    assert entry["title"] == "三体"
+    assert entry["sources"] == ["beta", "alpha"]
+    # A merged entry is still a complete SearchResult.
+    assert set(entry) >= _RESULT_KEYS
+
+
+@pytest.mark.asyncio
+async def test_search_stays_flat_without_group(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BookCopySearcher, _StrongCopySearcher]),
+    )
+
+    results = await search("三体")
+
+    assert sorted(r["site"] for r in results) == ["alpha", "beta"]
+    assert all("sources" not in r for r in results)
+
+
+@pytest.mark.asyncio
+async def test_group_dedupes_capsules_of_one_site(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_DuplicateSiteSearcher])
+    )
+
+    merged = await search("三体", group=True)
+
+    assert len(merged) == 1
+    # Two copies of the book from the same site collapse to one capsule.
+    assert merged[0]["sources"] == ["alpha"]
+    assert merged[0]["book_id"] == "alpha-1"
+
+
+@pytest.mark.asyncio
+async def test_group_keeps_distinct_authors_separate(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BookCopySearcher, _NamesakeSearcher]),
+    )
+
+    merged = await search("三体", group=True)
+
+    # Two books that merely share a title must not be fused into one group.
+    assert sorted(entry["author"] for entry in merged) == ["刘慈欣", "天蚕土豆"]
+    assert all(entry["sources"] == [entry["site"]] for entry in merged)
+
+
+@pytest.mark.asyncio
+async def test_group_applies_limit_after_merging(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BookCopySearcher, _StrongCopySearcher, _OtherBookSearcher]),
+    )
+
+    merged = await search("三体", group=True, limit=1)
+
+    # With grouping the limit counts books, not raw rows: the top book (the
+    # one with the strongest copy) survives, the other is dropped whole.
+    assert len(merged) == 1
+    assert merged[0]["title"] == "三体"
+    assert merged[0]["sources"] == ["beta", "alpha"]
+
+
+@pytest.mark.asyncio
+async def test_group_on_cache_hit_merges_cached_snapshot(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # The flat call writes the cache entry; the grouped call is served from
+    # it without re-searching, and grouping is applied per call.
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BookCopySearcher, _StrongCopySearcher]),
+    )
+    _BookCopySearcher.fetches = 0
+    _StrongCopySearcher.fetches = 0
+
+    flat = await search("三体")
+    merged = await search("三体", group=True)
+
+    assert len(flat) == 2
+    assert len(merged) == 1
+    assert merged[0]["sources"] == ["beta", "alpha"]
+    assert _BookCopySearcher.fetches == 1
+    assert _StrongCopySearcher.fetches == 1
+    # The cached snapshot itself stays flat and pristine.
+    cached = _cache_snapshot("三体")
+    assert all("sources" not in r for r in cached)
+
+
+def _cache_snapshot(keyword: str) -> list[SearchResult]:
+    """Read the shared cache's entry for ``keyword`` (test introspection)."""
+    import novel_downloader.plugins.search as search_module
+    from novel_downloader.plugins.search_cache import build_key
+
+    cached = search_module._CACHE.get(build_key(keyword, None, 5, False, 5.0))
+    assert cached is not None
+    return cached

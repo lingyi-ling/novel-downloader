@@ -590,11 +590,37 @@ def test_window_state_file_lives_in_the_music_data_dir(
         ("function boot(",),
         (':root[data-theme="dark"]',),
         ("--accent:",),
+        # same-book merge: the search filter row exposes the toggle and the
+        # result cards render the source capsules (best source marked).
+        ('id="q-group"',),
+        ('class="merge-toggle"',),
+        ("Merge same book",),
+        ("function sourceCaps(",),
+        ("cap-best",),
+        ("cap-more",),
+        ("src-caps",),
     ],
 )
 def test_app_html_contains_core_structures(needle: str) -> None:
     """The single-file front end keeps its pages, bridge calls and theming."""
     assert needle in APP_HTML
+
+
+def test_app_html_mergetoggle_is_not_registered_as_i18n_key_yet() -> None:
+    """
+    The merge toggle label is a plain literal until the ``.po`` catalog gains
+    its msgid (a concurrent catalog sync owns that file).
+
+    This lock prevents someone from half-wiring ``data-i18n`` without adding
+    the catalog entry: a key the bridge does not publish would fall back to
+    English silently, which is exactly what the i18n coverage suite guards.
+    """
+    label = next(
+        line
+        for line in APP_HTML.splitlines()
+        if "merge-toggle" in line and "q-group" in line
+    )
+    assert "data-i18n" not in label
 
 
 def test_app_html_is_self_contained() -> None:
@@ -737,6 +763,17 @@ def test_result_dict_flags_only_the_first_hit_as_best() -> None:
     assert [r["best"] for r in flagged] == [True, False]
 
 
+def test_result_dict_keeps_merged_source_capsules() -> None:
+    # Grouped entries (the "Merge same book" toggle) reach the front end with
+    # their capsule list intact, next to the best flag.
+    merged = {**_search_result(), "sources": ["beta", "alpha"]}
+    data = _result_dict(merged, 0)
+    assert data["sources"] == ["beta", "alpha"]
+    assert data["best"] is True
+    flat = _result_dict(_search_result(), 1)
+    assert "sources" not in flat
+
+
 def test_music_track_dict_uses_dataclass_fields() -> None:
     base = pytest.importorskip("novel_downloader.apps.music.providers.base")
     track = base.Track(
@@ -768,6 +805,78 @@ def test_bridge_add_task_requires_site_and_book_id() -> None:
     bridge = ApiBridge()
     assert bridge.add_task("", "42")["ok"] is False
     assert bridge.add_task("qidian", "")["ok"] is False
+
+
+def test_bridge_search_merges_when_group_is_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        calls["keyword"] = keyword
+        calls.update(kwargs)
+        return [
+            {
+                "site": "beta",
+                "book_id": "7",
+                "book_url": "https://example.invalid/7",
+                "cover_url": "",
+                "title": "三体",
+                "author": "刘慈欣",
+                "latest_chapter": "",
+                "update_date": "",
+                "word_count": "300万字",
+                "priority": 1,
+                "sources": ["beta", "alpha"],
+            }
+        ]
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+    bridge = ApiBridge()
+    try:
+        payload = bridge.search("三体", "", True)
+    finally:
+        bridge.shutdown()
+
+    # The third positional argument (the front end's toggle state) selects the
+    # merged mode; the capsules and the best flag reach the page together.
+    assert calls["keyword"] == "三体"
+    assert calls["group"] is True
+    assert payload["results"][0]["sources"] == ["beta", "alpha"]
+    assert payload["results"][0]["best"] is True
+
+
+def test_bridge_search_stays_flat_without_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        calls.update(kwargs)
+        return [
+            {
+                "site": "beta",
+                "book_id": "7",
+                "book_url": "https://example.invalid/7",
+                "cover_url": "",
+                "title": "三体",
+                "author": "刘慈欣",
+                "latest_chapter": "",
+                "update_date": "",
+                "word_count": "300万字",
+                "priority": 1,
+            }
+        ]
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+    bridge = ApiBridge()
+    try:
+        payload = bridge.search("三体")
+    finally:
+        bridge.shutdown()
+
+    assert calls["group"] is False
+    assert "sources" not in payload["results"][0]
 
 
 def test_bridge_add_task_queues_via_manager(

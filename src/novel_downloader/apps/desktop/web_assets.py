@@ -292,6 +292,18 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
   color: var(--green); background: var(--green-bg); border-radius: 6px; padding: 2px 7px;
 }
 mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3px; padding: 0 2px; }
+.merge-toggle {
+  display: flex; align-items: center; gap: 7px; flex: none;
+  font-size: 12.5px; color: var(--text-2); cursor: pointer; user-select: none;
+}
+.merge-toggle:hover { color: var(--text); }
+.src-caps {
+  display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end;
+  flex: none; max-width: 46%;
+}
+.src-caps .site-tag { background: transparent; color: var(--text-3); border: 1px solid var(--border); padding: 1px 7px; }
+.src-caps .site-tag.cap-best { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.src-caps .site-tag.cap-more { border-style: dashed; }
 
 .empty { text-align: center; color: var(--text-3); padding: 60px 20px; }
 .empty svg.icon { width: 44px; height: 44px; opacity: .4; margin-bottom: 12px; }
@@ -437,6 +449,10 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
           </div>
           <div class="filters">
             <div class="field"><svg class="icon"><use href="#i-pulse"/></svg><input id="q-sites" data-i18n-ph="Site filter, comma separated (blank = all)" placeholder="Site filter, comma separated (blank = all)"></div>
+            <!-- i18n: plain literal on purpose -- the zh_CN catalog is being
+                 re-synced by a concurrent change, so the msgid cannot land
+                 yet; wire this label through the i18n attributes once it does. -->
+            <label class="merge-toggle" for="q-group"><input type="checkbox" class="cb" id="q-group"><span>Merge same book</span></label>
             <span class="hint" id="search-hint"></span>
           </div>
         </div>
@@ -634,7 +650,7 @@ async function doSearch() {
   $("#search-hint").textContent = t("Searching…");
   $("#results").innerHTML = "";
   try {
-    const data = await api("search", kw, $("#q-sites").value.trim());
+    const data = await api("search", kw, $("#q-sites").value.trim(), $("#q-group").checked);
     // The bridge reports aggregate search failures inside the payload (site
     // timeouts, engine errors), not as exceptions: surface them instead of
     // letting them render as "No results".
@@ -669,7 +685,7 @@ function renderResults(results, kw) {
           <div class="row-sub">${sub}</div>
           ${r.latest_chapter ? `<div class="row-meta">${esc(r.latest_chapter)}</div>` : ""}
         </div>
-        <span class="site-tag">${esc(r.site)}</span>
+        ${sourceCaps(r)}
       </div>
       <div class="row-actions" style="margin-top:11px">
         <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
@@ -678,6 +694,19 @@ function renderResults(results, kw) {
       </div>
     </div>`;
   }).join("");
+}
+function sourceCaps(r) {
+  // Merged rows ("Merge same book" on) carry ``sources``: every site holding
+  // the book, best first. The first capsule (the best source, the row's own
+  // site) is highlighted; alternates render as quiet outline pills.
+  const sources = Array.isArray(r.sources) ? r.sources.filter(Boolean) : null;
+  if (!sources || sources.length < 2) return `<span class="site-tag">${esc(r.site)}</span>`;
+  const shown = sources.slice(0, 6);
+  const rest = sources.length - shown.length;
+  return `<div class="src-caps">` +
+    shown.map((s, i) => `<span class="site-tag${i === 0 ? " cap-best" : ""}">${esc(s)}</span>`).join("") +
+    (rest > 0 ? `<span class="site-tag cap-more">+${rest}</span>` : "") +
+    `</div>`;
 }
 $("#results").addEventListener("click", async e => {
   const add = e.target.closest("[data-add]");

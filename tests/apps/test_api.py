@@ -250,6 +250,69 @@ async def test_search_returns_plugin_results(
     assert calls["keyword"] == "斗破"
     assert calls["kwargs"]["per_site_limit"] == 3
     assert calls["kwargs"]["timeout"] == 2.5
+    # Default response shape: the flat envelope, no grouping requested.
+    assert calls["kwargs"]["group"] is False
+    assert set(payload) == {"total", "results"}
+    assert "sources" not in payload["results"][0]
+
+
+@pytest.mark.asyncio
+async def test_search_group_returns_merged_entries(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        calls["keyword"] = keyword
+        calls["kwargs"] = kwargs
+        return [
+            {
+                "site": "beta",
+                "book_id": "7",
+                "book_url": "https://example.invalid/7",
+                "cover_url": "",
+                "title": "Book",
+                "author": "Author",
+                "latest_chapter": "1",
+                "update_date": "",
+                "word_count": "",
+                "priority": 1,
+                "sources": ["beta", "alpha"],
+            }
+        ]
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search",
+        json={"keyword": "三体", "sites": ["beta", "alpha"], "group": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    # Same envelope as the flat mode; merged entries carry the capsules.
+    assert set(payload) == {"total", "results"}
+    assert payload["total"] == 1
+    entry = payload["results"][0]
+    assert entry["book_id"] == "7"
+    assert entry["site"] == "beta"
+    assert entry["sources"] == ["beta", "alpha"]
+    assert calls["kwargs"]["group"] is True
+    assert list(calls["kwargs"]["sites"]) == ["beta", "alpha"]
+
+
+@pytest.mark.asyncio
+async def test_search_group_must_be_a_boolean(
+    client: httpx.AsyncClient,
+) -> None:
+    # Pydantic's lax booleans accept the usual spellings ("true", "0", "on"),
+    # but a word like "maybe" is rejected before the endpoint body runs.
+    response = await client.post(
+        "/api/v1/search", json={"keyword": "x", "group": "maybe"}
+    )
+
+    assert response.status_code == 422
 
 
 def _parse_sse(raw: str) -> list[tuple[str, Any]]:

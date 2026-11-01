@@ -8,7 +8,7 @@ novel_downloader.apps.cli.commands.search
 from __future__ import annotations
 
 import json
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser, BooleanOptionalAction, Namespace
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -94,6 +94,19 @@ class SearchCmd(Command):
             default="quality",
             help=t("Result ordering (default: quality)."),
         )
+        parser.add_argument(
+            "--group",
+            action=BooleanOptionalAction,
+            default=False,
+            # Plain literal on purpose: wrapping it in t() requires a zh_CN
+            # entry in messages.po, which is being re-synced by a concurrent
+            # change -- localize this msgid when the catalog is regenerated.
+            help=(
+                "Merge same-book results across sites: one row per book, the "
+                "site column lists every source (* marks the best source). "
+                "Default: no grouping."
+            ),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
@@ -110,6 +123,7 @@ class SearchCmd(Command):
         per_site_limit = max(1, args.site_limit)
         timeout = max(0.1, float(args.timeout))
         result_sort: str = args.sort
+        group_results_flag: bool = bool(args.group)
         config_path: Path | None = Path(args.config) if args.config else None
 
         config_data = load_or_init_config(config_path)
@@ -174,6 +188,7 @@ class SearchCmd(Command):
                     timeout=timeout,
                     sort=result_sort,
                     on_event=_on_event,
+                    group=group_results_flag,
                 )
                 _print_search_summary()
                 ui.emit(json.dumps(list(results), ensure_ascii=False, indent=2))
@@ -188,6 +203,7 @@ class SearchCmd(Command):
                     timeout=timeout,
                     sort=result_sort,
                     on_event=_on_event,
+                    group=group_results_flag,
                 )
             _print_search_summary()
 

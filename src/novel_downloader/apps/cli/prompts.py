@@ -13,10 +13,12 @@ __all__ = [
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from novel_downloader.apps.cli import ui
 from novel_downloader.apps.constants import DOWNLOAD_SUPPORT_SITES, SEARCH_SUPPORT_SITES
 from novel_downloader.infra.i18n import t
+from novel_downloader.plugins.search import GroupedSearchResult
 from novel_downloader.schemas import SearchResult
 
 
@@ -185,6 +187,25 @@ def select_books(raw_dir: Path, site: str, per_page: int = 10) -> list[str]:
         ui.warn(t("Invalid input."))
 
 
+def _site_cell(result: SearchResult) -> str:
+    """
+    The ``Site Name`` cell of one search-result row.
+
+    A merged (grouped) entry -- ``search --group`` -- lists every source site
+    of the book, best first, with the best source starred (``*``); a flat
+    entry keeps its single site label.  Selecting the row downloads from the
+    best source, whose ``site``/``book_id`` the entry itself carries.
+    """
+    sources = cast("GroupedSearchResult", result).get("sources") or []
+    if not sources:
+        return SEARCH_SUPPORT_SITES.get(result["site"], result["site"])
+    labels: list[str] = []
+    for index, site in enumerate(sources):
+        label = SEARCH_SUPPORT_SITES.get(site, site)
+        labels.append(f"*{label}" if index == 0 else label)
+    return " · ".join(labels)
+
+
 def select_search_result(
     results: Sequence[SearchResult],
     per_page: int = 10,
@@ -216,7 +237,7 @@ def select_search_result(
             r["author"],
             r["latest_chapter"],
             r["update_date"],
-            SEARCH_SUPPORT_SITES.get(r["site"], r["site"]),
+            _site_cell(r),
             r["book_id"],
         ]
         for i, r in enumerate(results, 1)

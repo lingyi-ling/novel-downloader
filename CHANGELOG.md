@@ -2,6 +2,7 @@
 
 ### Feat
 
+- **search**: 同书多源合并正式接线四端——`search` 新增 `group=True`（CLI `--group`、API `group` 参数、桌面「合并同书」开关）：跨站同书结果折叠为每书一条，主条目即组内最优来源，附 `sources` 胶囊（最优置前去重，桌面最优高亮、超 6 折叠 +N）；limit 按书本数计；缓存存扁平快照、命中后现分组（同关键词换视图不重搜）；默认路径响应形状不变（Android 兼容锁定测试）——v1.1.0 承诺的功能至此兑现
 - **doctor**: 深度诊断——新增依赖、缓存目录、站点插件抽样、网络出口探测（`--online` 触发、非致命）、日志目录可写性与磁盘剩余空间检查，支持结构化 `--json` 输出；`storage` 子命令按 raw/cache/downloads/logs 分桶统计占用、列出最大子目录、报告可回收总量与磁盘剩余空间
 - **embedded**: 独立引擎环回服务全面对齐 FastAPI 的 REST 契约——同款 422（带 errors 列表）与 `{"detail": ...}` 错误体、405 附 `Allow` 头、409/413/501/503/504 语义、HEAD 按无体 GET 响应、keep-alive 请求体排干、并发信号量与 1MB 请求体上限（与 API 中间件共享）；端口绑定失败显式报错而非静默漂移到 Kotlin 端无从得知的端口，停止服务保留引擎事件循环便于重启复用（凭据 broker 状态存活）；嵌入式服务器测试 8→42
 - **website**: 官网无障碍与 SEO——修复九组未达 WCAG AA 的对比度（新增 `--accent-ink` 令牌、加深 text-3、大字号与按钮加深强调色，焦点环加背景晕在强调色表面仍可见），选项卡补全 tablist/tab/tabpanel ARIA 与方向键漫游、装饰性 SVG aria-hidden、Esc 关闭移动端菜单并归还焦点；新增 JSON-LD SoftwareApplication、canonical、中英 hreflang、og:image 等元数据；快速上手新增独立引擎第五页签与两条 FAQ，页签记忆跨刷新/切语言、GitHub API 缓存 30 分钟 TTL、`?lang=` 深链直达、主题切换同步 theme-color

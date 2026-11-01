@@ -238,3 +238,65 @@ def test_select_search_result_unknown_site_falls_back_to_key(
     answers.append("1")
     prompts.select_search_result(results)
     assert seen["rows"][0][5] == "site0"
+
+
+# --------------------------------------------------------------------------- #
+# select_search_result: merged (grouped) rows render source capsules
+# --------------------------------------------------------------------------- #
+
+
+def _capture_rows(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+
+    def _fake_table(*args: Any, **kwargs: Any) -> None:
+        seen["rows"] = args[2] if len(args) > 2 else kwargs.get("rows")
+
+    monkeypatch.setattr(
+        "novel_downloader.apps.cli.prompts.ui.render_table", _fake_table
+    )
+    return seen
+
+
+def test_select_search_result_merged_row_lists_capsules_best_first(
+    answers: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _capture_rows(monkeypatch)
+    merged = dict(_search_result(0))
+    merged["sources"] = ["site0", "site2", "site1"]
+    answers.append("1")
+
+    chosen = prompts.select_search_result([merged])
+
+    assert chosen is not None
+    # Best source first (starred), the remaining capsules in rank order.
+    assert seen["rows"][0][5] == "*site0 · site2 · site1"
+
+
+def test_select_search_result_flat_row_without_sources_stays_single(
+    answers: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _capture_rows(monkeypatch)
+    answers.append("1")
+
+    prompts.select_search_result([_search_result(0)])
+
+    assert seen["rows"][0][5] == "site0"
+
+
+def test_select_search_result_merged_row_maps_known_site_labels(
+    answers: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from novel_downloader.apps.constants import SEARCH_SUPPORT_SITES
+
+    seen = _capture_rows(monkeypatch)
+    merged = dict(_search_result(0))
+    merged["site"] = "n23qb"
+    merged["sources"] = ["n23qb", "alicesw"]
+    answers.append("1")
+
+    prompts.select_search_result([merged])
+
+    # Capsules use the same display-name mapping as flat rows.
+    best = SEARCH_SUPPORT_SITES["n23qb"]
+    other = SEARCH_SUPPORT_SITES["alicesw"]
+    assert seen["rows"][0][5] == f"*{best} · {other}"

@@ -7,24 +7,50 @@ novel_downloader.plugins.search
 
 from __future__ import annotations
 
-__all__ = ["SearchEvent", "search", "search_stream"]
+__all__ = [
+    "GroupedSearchResult",
+    "SearchEvent",
+    "search",
+    "search_stream",
+]
 
 import asyncio
 import logging
 from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 import aiohttp
 
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.grouping import group_results
 from novel_downloader.plugins.ranking import sort_results
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.plugins.search_cache import SearchCache, build_key
 from novel_downloader.schemas import SearchResult
 
 logger = logging.getLogger(__name__)
+
+
+class GroupedSearchResult(SearchResult, total=False):
+    """
+    A merged same-book entry returned by :func:`search` with ``group=True``.
+
+    The entry is the group's best source verbatim -- its ``site``/``book_id``/
+    ``book_url`` fields already point at the best place to get the book -- plus
+    one extra key:
+
+    * ``sources`` -- every site key carrying the book, best first, duplicates
+      dropped.  UIs render it as the row's source-site capsules and mark the
+      first (best) one.
+
+    The type stays assignment-compatible with :class:`SearchResult`, so a
+    grouped list flows through every existing ``SearchResult`` consumer.
+    """
+
+    sources: list[str]
+
 
 #: Process-wide short-lived cache shared by ``search`` and ``search_stream``.
 _CACHE = SearchCache()
@@ -236,6 +262,57 @@ def _report_completion(
     )
 
 
+def _merged_results(
+    results: Sequence[SearchResult], keyword: str
+) -> list[GroupedSearchResult]:
+    """
+    Fold ranked ``results`` into one merged entry per book.
+
+    Each group collapses onto its best entry (highest rank, earliest position
+    on ties) enriched with ``sources``: the site keys of every source of the
+    book, best first, duplicates dropped.  The input sequence is only read,
+    so cached snapshots stay pristine.
+    """
+    merged: list[GroupedSearchResult] = []
+    for group in group_results(results, keyword=keyword):
+        sites: list[str] = []
+        for entry in group.sources:
+            site = str(entry.get("site") or "")
+            if site and site not in sites:
+                sites.append(site)
+        merged.append({**group.primary, "sources": sites})
+    return merged
+
+
+def _finalize(
+    results: list[SearchResult],
+    *,
+    keyword: str,
+    sort: str,
+    order: str | None,
+    limit: int | None,
+    group: bool,
+) -> list[SearchResult]:
+    """
+    Rank ``results`` for this caller, then group and/or slice as requested.
+
+    Grouping happens after ranking (merged entries inherit the ranked order)
+    and before ``limit``, so with ``group=True`` the limit counts books rather
+    than raw rows.  The flat branch keeps the historical contract of returning
+    the ranked input list itself; the grouped branch always builds fresh
+    entries, which keeps the search cache shareable between both modes.
+    """
+    sort_results(results, by=sort, order=order, keyword=keyword)
+    if group:
+        merged = _merged_results(results, keyword)
+        if limit is not None:
+            merged = merged[:limit]
+        return cast("list[SearchResult]", merged)
+    if limit is not None:
+        return results[:limit]
+    return results
+
+
 async def search(
     keyword: str,
     sites: Sequence[str] | None = None,
@@ -247,6 +324,7 @@ async def search(
     order: str | None = None,
     *,
     on_event: Callable[[SearchEvent], None] | None = None,
+    group: bool = False,
 ) -> list[SearchResult]:
     """
     Perform a search for the given keyword across one or more registered sites,
@@ -261,7 +339,7 @@ async def search(
         ``None`` means all registered sites; an empty sequence searches no
         site at all.
     :param limit: Maximum total number of results to return (applied after
-        ranking); if None, return all.
+        ranking, and after grouping when ``group=True``); if None, return all.
     :param per_site_limit: Maximum number of search results per site.
     :param timeout: Per-request time budget (seconds)
     :param nsfw: Whether to include NSFW searchers.
@@ -269,6 +347,9 @@ async def search(
     :param order: ``"asc"``/``"desc"``; defaults to the key's natural direction.
     :param on_event: Optional observer for per-site search states (browser
         assistance, completion, failure).  Exceptions it raises are ignored.
+    :param group: Fold same-book results into one merged entry per book (see
+        :class:`GroupedSearchResult`); off by default, and never applied to
+        :func:`search_stream`, whose per-site chunks stay flat.
     :return: A flat list of `SearchResult` objects.
     """
     if sites is not None and not sites:
@@ -280,10 +361,17 @@ async def search(
     key = build_key(keyword, sites, per_site_limit, nsfw, timeout)
     cached = _CACHE.get(key)
     if cached is not None:
-        # Cache holds the merged, unranked snapshot: rank/slice per call so a
-        # different sort order or limit still honours this client's request.
-        sort_results(cached, by=sort, order=order, keyword=keyword)
-        return cached[:limit] if limit is not None else cached
+        # Cache holds the merged, unranked snapshot: rank/group/slice per call
+        # so a different sort order, grouping or limit still honours this
+        # client's request.
+        return _finalize(
+            cached,
+            keyword=keyword,
+            sort=sort,
+            order=order,
+            limit=limit,
+            group=group,
+        )
 
     classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
 
@@ -322,13 +410,19 @@ async def search(
         results.extend(item)
         _report_completion(site, len(item), plan.browser_sites, on_event)
 
-    # Cache the unranked merged results; callers rank/slice their own copy.
-    # Empty aggregates are not cached: they often stem from transient site
-    # failures and should not be pinned for the whole TTL.
+    # Cache the unranked merged results; callers rank/group/slice their own
+    # copy.  Empty aggregates are not cached: they often stem from transient
+    # site failures and should not be pinned for the whole TTL.
     if results:
         _CACHE.put(key, results)
-    sort_results(results, by=sort, order=order, keyword=keyword)
-    return results[:limit] if limit is not None else results
+    return _finalize(
+        results,
+        keyword=keyword,
+        sort=sort,
+        order=order,
+        limit=limit,
+        group=group,
+    )
 
 
 async def search_stream(
@@ -421,9 +515,7 @@ async def search_stream(
                         )
                         continue
 
-                    _report_completion(
-                        site, len(payload), plan.browser_sites, on_event
-                    )
+                    _report_completion(site, len(payload), plan.browser_sites, on_event)
                     if payload:
                         accumulated.extend(payload)
                         yield payload
