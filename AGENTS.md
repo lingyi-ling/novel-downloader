@@ -41,9 +41,9 @@ git push origin main
 - 站点目录：`website/`（纯静态，无构建步骤）
 - 线上地址：<http://43.165.170.43/noveldl/>
 - 服务器路径：`/var/www/noveldl`（root 所有，deploy 用户有免密 sudo）
+- 认证：本机 `~/.ssh/id_ed25519` 已加入服务器的 `authorized_keys`，部署**无需密码**
 - 部署脚本：`scripts/deploy_site.py`
-  - 凭据只从 `NOVELDL_DEPLOY_PASSWORD` 环境变量读取，**绝不写入文件、日志或命令行**
-  - 优先使用 SSH key/agent；没有 key 时才用密码
+  - 优先使用 SSH key/agent；仅在无 key 时才读 `NOVELDL_DEPLOY_PASSWORD`，且**绝不写入文件、日志或命令行**
   - `--dry-run` 只打印将要上传的文件
   - 上传到 `/tmp` 暂存并校验齐全后才 `sudo -n cp` 到线上，不会留下半个站点
 
