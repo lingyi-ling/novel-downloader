@@ -48,7 +48,7 @@ repos:
           # the `api`, `music`, `image-utils` and `httpx` extras in
           # pyproject.toml; `nicegui` was dropped (no longer imported).
           - aiohttp
-          - brotli
+          - brotli>=1.2.1
           - cssselect
           - fastapi
           - fonttools
@@ -57,7 +57,7 @@ repos:
           - mutagen
           - numpy
           - pathvalidate
-          - pillow
+          - pillow>=13.0
           - platformdirs
           - pycryptodome
           - qrcode

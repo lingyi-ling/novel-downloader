@@ -31,6 +31,10 @@ dynamic = ["version"]
 dependencies = [
     "rich",
     "requests",
+    # Security floor: certifi ships the TLS root store used by the HTTP
+    # backends (requests/aiohttp/httpx). Not imported directly; it is a
+    # transitive dependency pinned so pip-audit can gate known CVEs.
+    "certifi>=2026.10.18",
     "pycryptodome",
     "aiohttp",
     "lxml",
@@ -47,7 +51,7 @@ api = [
 music = [
     "mutagen",
     "pathvalidate",
-    "pillow",
+    "pillow>=13.0",
     "qrcode",
     "websocket-client",
 ]
@@ -57,15 +61,15 @@ music-desktop = [
     "customtkinter",
     "mutagen",
     "pathvalidate",
-    "pillow",
+    "pillow>=13.0",
     "qrcode",
     "websocket-client",
 ]
 image-utils = [
-    "brotli",
+    "brotli>=1.2.1",
     "numpy",
     "fonttools",
-    "pillow",
+    "pillow>=13.0",
 ]
 httpx = [
     "httpx[http2]",
@@ -80,10 +84,10 @@ all-backends = [
 all = [
     "fastapi",
     "uvicorn",
-    "brotli",
+    "brotli>=1.2.1",
     "numpy",
     "fonttools",
-    "pillow",
+    "pillow>=13.0",
     "httpx[http2]",
     "curl_cffi",
     "mutagen",
@@ -100,10 +104,10 @@ docs = [
 ]
 tests = [
     "babel",
-    "brotli",
+    "brotli>=1.2.1",
     "numpy",
     "fonttools",
-    "pillow",
+    "pillow>=13.0",
     "fastapi",
     "httpx[http2]",
     "pytest",
@@ -116,10 +120,10 @@ tests = [
 ]
 ci = [
     "babel",
-    "brotli",
+    "brotli>=1.2.1",
     "numpy",
     "fonttools",
-    "pillow",
+    "pillow>=13.0",
     "curl_cffi",
     "httpx[http2]",
     "fastapi",
