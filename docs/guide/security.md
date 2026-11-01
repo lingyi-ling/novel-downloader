@@ -8,7 +8,7 @@
 
 !!! warning "先记住三条"
     1. 默认只把 API 绑定在 `127.0.0.1`，不要在没有额外防护时改成 `0.0.0.0`。
-    2. 设置 `--token` 后，`/api/v1/*` 与 `/downloads/*` 都需要鉴权；未设置 token 时两者均对可达网络开放。
+    2. 设置 `--token` 后，`/api/v1/*` 与 `/downloads/*` 都需要鉴权；未设置 token 时两者均对可达网络开放，但非回环来源的浏览器请求会被 Origin 门禁拒绝（见下文），除非你显式开启 `--cors`。
     3. Cookie、平台凭据和 `settings.toml` 都是明文；不要提交、同步或分享。
 
 ---
@@ -32,7 +32,7 @@
 | --- | --- |
 | 本地 REST API | 绑定到 `0.0.0.0` 时，同局域网（甚至公网，取决于防火墙）可访问；无 token 时可控制下载 |
 | `/downloads` 静态目录 | 设置 token 时受同一鉴权保护；未设置 token 时只靠端口可达性保护 |
-| `--cors` | 开启后任意网站都能从浏览器调用本机 API |
+| 浏览器跨源请求 | 默认有 Origin 门禁兜底（见下文）；`--cors` 开启后任意网站都能从浏览器调用本机 API |
 | 目标站点返回内容 | HTML、JS、字体、图片均来自第三方；解析器和插件按不可信输入处理 |
 | 本地插件 | `[plugins] enable_local_plugins = true` 时会加载并执行本地插件代码 |
 | 第三方依赖 | 依赖漏洞不在本审计脚本范围内，需另行使用 `pip-audit` 等工具 |
@@ -76,6 +76,28 @@ X-API-Key: <token>
 实现细节：token 比较使用 `secrets.compare_digest`，避免时序侧信道；token
 为空时直接放行。
 
+#### 浏览器来源门禁（Origin gate）
+
+"只绑定 `127.0.0.1`" 能挡住远程客户端，却挡不住浏览器：你访问的任意网页都可以
+向 `http://127.0.0.1:<port>` 发起跨源请求（浏览器对跨源 POST 一定会带
+`Origin` 头）。因此 API 默认安装一道 Origin 门禁
+（`apps/api/middleware.py` 的 `OriginCheckMiddleware`）：
+
+- 带有**非回环** `Origin` 的请求一律返回 `403`——包括形如
+  `127.0.0.1.evil.com` 的仿冒主机、`Origin: null`（沙箱 iframe）等；
+- 非浏览器客户端（CLI、SDK、curl）不发 `Origin` 头，完全不受影响；
+- 回环来源（`http://127.0.0.1:任意端口`、`http://localhost`、`http://[::1]`）
+  放行，本机网页工具继续可用；
+- `--cors` 是跨源浏览器访问的显式开关：加上该参数后**门禁不安装**，由 CORS
+  策略约束浏览器能做什么。
+
+已知残余风险：同源 DNS rebinding 页面（攻击者域名先解析到公网加载页面、再
+rebind 到 `127.0.0.1`）发出的请求是"同源"的，**不带 `Origin` 头**，门禁无法
+识别。要完整防御这类读取/驱动攻击，请配置 `--token`——这也是文档反复建议
+"暴露即加 token" 的原因。另一个相关输入校验：任务与追更请求中的 `book_id`
+会成为 `raw_data/<site>/<book_id>` 目录名，API 会拒绝含路径分隔符、`..`、
+盘符冒号等字符的取值（`422`），防止把章节缓存写到原始数据目录之外。
+
 #### 绑定到 `0.0.0.0` 时
 
 `--host 0.0.0.0` 会监听所有网卡。启动时如果未设置 token，程序会向 stderr
@@ -95,6 +117,11 @@ X-API-Key: <token>
 
 设置 `NOVEL_API_WEBHOOK` 后，任务完成时会把任务信息（标题、站点、导出路径
 等）POST 到该地址。请只指向你信任的服务，避免把阅读记录发送到第三方。
+
+Webhook URL 常在查询串里携带共享密钥（`?token=...`）。投递失败写入日志时，
+URL 会先脱敏（只保留 `scheme://host[:port]/path`），urllib3 异常文本里内嵌的
+查询串也会被同样抹掉——日志里永远不会出现查询串或基本认证信息，与访问日志
+"只记路径、不记查询串"的策略一致。
 
 ---
 
@@ -233,10 +260,12 @@ python scripts/security_audit.py --scan-tests
 ### 加固清单
 
 - [ ] API 保持默认 `127.0.0.1`；确需远程访问时设置 token、防火墙和反向代理。
-- [ ] 不在 `0.0.0.0` 上使用 `--cors`。
+- [ ] 不在 `0.0.0.0` 上使用 `--cors`；仅在确实需要浏览器跨源调用时才开启
+      `--cors`（开启即关闭 Origin 门禁）。
 - [ ] `settings.toml` 权限设为 `600`（POSIX）或仅当前用户可读（Windows ACL）。
 - [ ] `novel_cache/`、`downloads/`、`logs/` 不进入云同步、备份共享或 Git。
 - [ ] 定期删除不再需要的 `*.cookies`、`session.json`、`platform_creds.json`。
 - [ ] 怀疑泄露时立即在站点侧注销会话并重新登录。
 - [ ] 运行 `python scripts/security_audit.py`，确认没有高优先级问题。
-- [ ] 关注依赖安全公告，必要时使用 `pip-audit` 等工具补充 CVE 检查。
+- [ ] 关注依赖安全公告，必要时使用 `pip-audit` 等工具补充 CVE 检查
+      （`pip-audit` 对本仓库的 editable 安装需配合 `--skip-editable`）。

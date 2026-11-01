@@ -21,6 +21,13 @@ a token configured when the server is exposed beyond ``127.0.0.1``.
 
 Additional hardening
 --------------------
+* Requests whose ``Origin`` header is not a loopback origin are answered with
+  ``403`` before they reach the router
+  (:class:`novel_downloader.apps.api.middleware.OriginCheckMiddleware`): a
+  website the user visits must not be able to drive the tokenless local API
+  with cross-origin browser requests. Non-browser clients (CLI, SDK, curl)
+  send no ``Origin`` and are unaffected; ``--cors`` removes the gate and lets
+  CORS govern browsers.
 * Request bodies of the JSON endpoints are capped (see
   :class:`novel_downloader.apps.api.middleware.BodySizeLimitMiddleware`).
 * Requests are rate limited per client IP with a sliding window (default 120
@@ -75,6 +82,7 @@ from .middleware import (
     BodySizeLimitMiddleware,
     CacheControlMiddleware,
     DownloadsAuthMiddleware,
+    OriginCheckMiddleware,
     RateLimitMiddleware,
     RequestLoggingMiddleware,
     register_error_handlers,
@@ -164,7 +172,9 @@ def create_app(
         that send the trimmed token; an empty (or whitespace-only) value
         disables authentication (suitable for localhost-only use). When set,
         the token protects both ``/api/v1/*`` and ``/downloads/*``.
-    :param cors: Add a permissive CORS middleware (see module docstring).
+    :param cors: Add a permissive CORS middleware (see module docstring) and
+        skip the browser-origin gate: ``--cors`` is the explicit opt-in for
+        cross-origin browser access.
     :param output_dir: Override ``general.output_dir`` for ``/downloads``;
         mainly useful in tests.
     :param max_body_bytes: Request-body ceiling for the JSON endpoints
@@ -218,7 +228,17 @@ def create_app(
     # minimal 500 body and gives validation errors a readable ``detail``.
     register_error_handlers(application)
 
-    # Added first so it ends up *inside* the CORS layer: the size check runs
+    # Added first, so it ends up innermost (directly above the router) and
+    # *inside* every other custom layer: the body-size ``413`` keeps priority
+    # over the gate's ``403``, while the gate still runs before the router's
+    # token dependency — a forged browser origin is rejected even when a token
+    # is configured. See OriginCheckMiddleware for the threat model. ``--cors``
+    # is the explicit opt-in for cross-origin browser access: the gate is not
+    # installed at all and CORS governs what browsers may do.
+    if not cors:
+        application.add_middleware(OriginCheckMiddleware)
+
+    # Added second so it sits *inside* the CORS layer: the size check runs
     # before FastAPI buffers the body, while its 413 response still passes back
     # out through CORSMiddleware and therefore keeps the CORS headers.
     application.add_middleware(BodySizeLimitMiddleware, max_bytes=max_body_bytes)

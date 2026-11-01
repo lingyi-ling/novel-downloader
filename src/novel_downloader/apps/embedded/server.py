@@ -51,6 +51,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -205,6 +206,48 @@ def _required_str(
             name, "String should have at least 1 character", "string_too_short"
         )
     return value, None
+
+
+#: ``book_id`` becomes the cache directory ``raw_data/<site>/<book_id>``.
+#: Path separators, a drive-letter colon, other Windows-reserved characters
+#: and control characters would let a crafted request place the chapter cache
+#: and media files outside that tree, so such values are rejected. Mirrors
+#: ``apps.api.schemas.validate_book_id`` — keep the two in sync (this module
+#: is stdlib-only and cannot import the pydantic layer).
+_BOOK_ID_INVALID_CHARS = re.compile(r'[/\\<>:"|?*\x00-\x1F]')
+
+#: Length ceiling, mirroring ``apps.api.schemas``.
+_MAX_BOOK_ID_LENGTH = 128
+
+
+def _book_id_field(body: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    """Validate ``book_id`` like the REST API's ``BookId`` field type."""
+    book_id, error = _required_str(body, "book_id")
+    if error is not None or book_id is None:
+        return book_id, error
+    cleaned = book_id.strip()
+    if not cleaned:
+        return None, _err(
+            "book_id", "book_id must not be empty or whitespace-only", "value_error"
+        )
+    if len(cleaned) > _MAX_BOOK_ID_LENGTH:
+        return None, _err(
+            "book_id",
+            f"book_id must be at most {_MAX_BOOK_ID_LENGTH} characters long",
+            "value_error",
+        )
+    if _BOOK_ID_INVALID_CHARS.search(cleaned):
+        return None, _err(
+            "book_id",
+            "book_id must not contain path separators, ':' or other "
+            "Windows-reserved characters",
+            "value_error",
+        )
+    if cleaned in {".", ".."} or cleaned.endswith("."):
+        return None, _err(
+            "book_id", "book_id must be a usable directory name", "value_error"
+        )
+    return cleaned, None
 
 
 def _int_field(
@@ -615,7 +658,7 @@ def _handle_tasks_post(
     from novel_downloader.apps.core.task_manager import manager
 
     site, site_err = _required_str(body, "site")
-    book_id, book_id_err = _required_str(body, "book_id")
+    book_id, book_id_err = _book_id_field(body)
     title = body.get("title")
     entries: list[dict[str, Any]] = []
     if site_err is not None:
@@ -713,7 +756,7 @@ def _handle_watchlist_post(
     body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
     site, site_err = _required_str(body, "site")
-    book_id, book_id_err = _required_str(body, "book_id")
+    book_id, book_id_err = _book_id_field(body)
     title = body.get("title")
     entries: list[dict[str, Any]] = []
     if site_err is not None:

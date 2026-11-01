@@ -6,7 +6,7 @@ This page describes the project's threat model, where sensitive data lives, how 
 
 !!! warning "Three things to remember"
     1. The API binds to `127.0.0.1` by default; do not change it to `0.0.0.0` without extra protections.
-    2. When `--token` is set, both `/api/v1/*` and `/downloads/*` require authentication; without a token, both are open to any reachable network.
+    2. When `--token` is set, both `/api/v1/*` and `/downloads/*` require authentication; without a token, both are open to any reachable network — but browser requests with a non-loopback origin are rejected by the origin gate (see below) unless you explicitly enable `--cors`.
     3. Cookies, platform credentials, and `settings.toml` are all stored in plaintext; do not commit, sync, or share them.
 
 ---
@@ -30,7 +30,7 @@ This page describes the project's threat model, where sensitive data lives, how 
 | --- | --- |
 | Local REST API | When bound to `0.0.0.0`, reachable from the same LAN (or even the internet, depending on the firewall); without a token, downloads can be controlled |
 | `/downloads` static directory | Protected by the same authentication when a token is set; without a token, only port reachability protects it |
-| `--cors` | Once enabled, any website can call your local API from a browser |
+| Cross-origin browser requests | Backstopped by the origin gate by default (see below); with `--cors` enabled, any website can call your local API from a browser |
 | Content returned by target sites | HTML, JS, fonts, and images all come from third parties; parsers and plugins treat it as untrusted input |
 | Local plugins | With `[plugins] enable_local_plugins = true`, local plugin code is loaded and executed |
 | Third-party dependencies | Dependency vulnerabilities are out of scope for the audit script; use tools such as `pip-audit` separately |
@@ -72,6 +72,32 @@ X-API-Key: <token>
 
 Implementation detail: tokens are compared with `secrets.compare_digest` to avoid timing side channels; an empty token is allowed through.
 
+#### The browser-origin gate (Origin gate)
+
+Binding to `127.0.0.1` only stops *remote* clients, not *browser* ones: any website
+you visit can fire cross-origin requests at `http://127.0.0.1:<port>` (browsers
+always attach an `Origin` header to cross-origin POSTs). The API therefore installs
+an origin gate by default (`OriginCheckMiddleware` in `apps/api/middleware.py`):
+
+- Requests with a **non-loopback** `Origin` are answered with `403` — including
+  look-alike hosts such as `127.0.0.1.evil.com` and `Origin: null` (sandboxed
+  iframes);
+- Non-browser clients (CLI, SDK, curl) send no `Origin` header and are unaffected;
+- Loopback origins (`http://127.0.0.1:any-port`, `http://localhost`,
+  `http://[::1]`) pass, so locally served pages keep working;
+- `--cors` is the explicit opt-in for cross-origin browser access: with the flag
+  the gate is **not installed** and CORS governs what browsers may do.
+
+Known residual risk: a same-origin DNS-rebinding page (the attacker's domain
+resolves to the public internet to load, then rebinds to `127.0.0.1`) issues
+same-origin requests that carry **no `Origin` header**, which the gate cannot
+recognize. For complete defense against that read/drive scenario, configure
+`--token` — the reason this documentation keeps repeating "exposed means
+tokened". A related input check: the `book_id` in task and watchlist requests
+becomes the directory `raw_data/<site>/<book_id>`, so the API rejects values
+containing path separators, `..`, a drive-letter colon and similar characters
+(`422`), keeping the chapter cache inside the raw-data tree.
+
 #### When bound to `0.0.0.0`
 
 `--host 0.0.0.0` listens on every interface. If no token is set at startup, the program prints a warning to stderr. More importantly:
@@ -89,6 +115,13 @@ So when you truly need cross-device access, open the port with a token configure
 #### Webhook outbound data
 
 When `NOVEL_API_WEBHOOK` is set, task information (title, site, export paths, etc.) is POSTed to that address when a task finishes. Point it only at services you trust, so your reading history is not sent to a third party.
+
+Webhook URLs often carry a shared secret in the query string (`?token=...`). When a
+failed delivery is logged, the URL is redacted first (only
+`scheme://host[:port]/path` remains) and the query string urllib3 embeds in its
+exception text is scrubbed the same way — no query string or basic-auth
+credentials ever reach the log, matching the access-log policy of recording the
+path but never the query string.
 
 ---
 
@@ -223,10 +256,13 @@ Once a report is confirmed we will assess the impact and ship a fix as soon as p
 ### Hardening checklist
 
 - [ ] Keep the API on the default `127.0.0.1`; for remote access set a token plus firewall and reverse proxy.
-- [ ] Do not use `--cors` on `0.0.0.0`.
+- [ ] Do not use `--cors` on `0.0.0.0`; enable `--cors` only when you really need
+      cross-origin browser calls (it turns the origin gate off).
 - [ ] Set `settings.toml` permissions to `600` (POSIX) or readable only by the current user (Windows ACL).
 - [ ] Keep `novel_cache/`, `downloads/`, and `logs/` out of cloud sync, shared backups, and Git.
 - [ ] Periodically delete `*.cookies`, `session.json`, and `platform_creds.json` you no longer need.
 - [ ] On suspected leakage, sign out all sessions on the site immediately and log in again.
 - [ ] Run `python scripts/security_audit.py` and confirm there are no high-priority findings.
-- [ ] Watch dependency security advisories and supplement CVE checks with tools like `pip-audit` when needed.
+- [ ] Watch dependency security advisories and supplement CVE checks with tools like
+      `pip-audit` when needed (for this repo's editable install, run it with
+      `--skip-editable`).

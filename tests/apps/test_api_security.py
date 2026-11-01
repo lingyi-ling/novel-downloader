@@ -269,6 +269,280 @@ async def test_downloads_401_keeps_cors_headers(tmp_path: Path, make_app: Any) -
 
 
 # ---------------------------------------------------------------------------
+# Browser-origin gate: layering with the other guards
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_oversized_body_from_foreign_origin_gets_413(
+    tmp_path: Path, make_app: Any
+) -> None:
+    """
+    The origin gate sits *inside* the body-size limit.
+
+    A forged-origin request with an oversized body is answered with the
+    specific ``413`` (the body is rejected before the origin is even
+    consulted), keeping the error contract of the size limit intact.
+    """
+    app = make_app(max_body_bytes=64)
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/search",
+            content=b"x" * 500,
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "http://evil.example",
+            },
+        )
+
+    assert response.status_code == 413
+    assert "too large" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_downloads_with_token_rejects_foreign_origin(
+    tmp_path: Path, make_app: Any
+) -> None:
+    """
+    A forged origin never reads exported files — with a token configured the
+    ``/downloads`` token guard (outside the gate) answers ``401``; the request
+    is denied either way and the error is never cacheable.
+    """
+    _prepare_downloads(tmp_path)
+    app = make_app(token="secret-token")
+
+    async with _client(app) as client:
+        forged = await client.get(
+            "/downloads/visible.txt", headers={"Origin": "http://evil.example"}
+        )
+
+    assert forged.status_code == 401
+    assert "public" not in forged.text
+    assert "no-store" in forged.headers.get("cache-control", "")
+
+
+@pytest.mark.asyncio
+async def test_no_store_on_origin_gate_rejections(make_app: Any) -> None:
+    """The gate's own 403 carries ``no-store`` even outside the cache policy."""
+    app = make_app()
+    async with _client(app) as client:
+        on_api = await client.get(
+            "/api/v1/health", headers={"Origin": "http://evil.com"}
+        )
+        outside_policy = await client.get(
+            "/openapi.json", headers={"Origin": "http://evil.com"}
+        )
+
+    assert on_api.status_code == 403
+    assert "no-store" in on_api.headers.get("cache-control", "")
+    # /openapi.json is outside the cache-policy prefixes; the 403 must still
+    # be marked no-store by the gate itself.
+    assert outside_policy.status_code == 403
+    assert "no-store" in outside_policy.headers.get("cache-control", "")
+
+
+# ---------------------------------------------------------------------------
+# book_id path traversal (raw-data cache directories)
+# ---------------------------------------------------------------------------
+
+
+class _NoTaskManager:
+    """Manager stand-in that records tasks; a queued task is a finding."""
+
+    def __init__(self) -> None:
+        self.pending: list[tuple[str, str]] = []
+
+    async def add_task(self, *, title: str, site: str, book_id: str) -> Any:
+        self.pending.append((site, book_id))
+        return SimpleNamespace(
+            task_id="t1",
+            title=title,
+            site=site,
+            book_id=book_id,
+            status=SimpleNamespace(value="pending"),
+            chapters_done=0,
+            chapters_total=0,
+            progress=lambda: 0.0,
+            created_at=None,
+            finished_at=None,
+            error=None,
+            export_stage=None,
+            exported_paths={},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "book_id",
+    [
+        "../escape",
+        "..\\..\\escape",
+        "a/b",
+        "a\\b",
+        "C:evil",
+        "..",
+        ".",
+        "id\x00",
+    ],
+)
+async def test_task_creation_rejects_path_like_book_id(
+    make_app: Any, monkeypatch: pytest.MonkeyPatch, book_id: str
+) -> None:
+    """
+    ``book_id`` becomes the cache directory ``raw_data/<site>/<book_id>``; a
+    path-like value would place the chapter cache and media files outside the
+    raw-data tree, so the request itself is rejected with ``422`` and the task
+    is never queued.
+    """
+    from novel_downloader.apps.api.routes import get_manager
+
+    fake_manager = _NoTaskManager()
+    app = make_app()
+    app.dependency_overrides[get_manager] = lambda: fake_manager
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/tasks", json={"site": "demo", "book_id": book_id}
+        )
+
+    assert response.status_code == 422, response.text
+    payload = response.json()
+    assert "book_id" in payload["detail"], payload
+    assert fake_manager.pending == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "book_id",
+    ["../escape", "a/b", "C:evil", ".."],
+)
+async def test_watchlist_add_rejects_path_like_book_id(
+    tmp_path: Path, make_app: Any, monkeypatch: pytest.MonkeyPatch, book_id: str
+) -> None:
+    """Watchlist entries are re-downloaded later; the same rule applies."""
+    from novel_downloader.apps.api.routes import get_watchlist_store
+    from novel_downloader.apps.core.watchlist import WatchlistStore
+
+    store = WatchlistStore(path=tmp_path / "watchlist.json")
+    app = make_app()
+    app.dependency_overrides[get_watchlist_store] = lambda: store
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/watchlist",
+            json={"site": "demo", "book_id": book_id, "title": "x"},
+        )
+
+    assert response.status_code == 422, response.text
+    assert "book_id" in response.json()["detail"]
+    assert list(store.entries()) == []
+
+
+@pytest.mark.asyncio
+async def test_task_creation_accepts_ordinary_book_ids(
+    make_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control: ordinary identifiers keep flowing through unchanged."""
+    from novel_downloader.apps.api.routes import get_manager
+
+    fake_manager = _NoTaskManager()
+    app = make_app()
+    app.dependency_overrides[get_manager] = lambda: fake_manager
+
+    async with _client(app) as client:
+        ok = await client.post(
+            "/api/v1/tasks", json={"site": "demo", "book_id": "1234567"}
+        )
+        unicode_id = await client.post(
+            "/api/v1/tasks", json={"site": "demo", "book_id": "书号.12"}
+        )
+
+    assert ok.status_code == 200
+    assert unicode_id.status_code == 200
+    assert fake_manager.pending == [("demo", "1234567"), ("demo", "书号.12")]
+
+
+# ---------------------------------------------------------------------------
+# Webhook failures must not leak the URL's credentials into the log
+# ---------------------------------------------------------------------------
+
+_WEBHOOK_SECRET_URL = "https://hooks.example/push?token=super-secret-value"
+
+
+@pytest.mark.asyncio
+async def test_webhook_failure_log_omits_url_secret(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    Webhook URLs routinely carry a token in the query string. Both the logged
+    URL and the logged exception text (urllib3 embeds ``?token=...`` in its
+    connection errors) must keep the secret out of the log file, mirroring the
+    access-log policy of never recording query strings.
+    """
+    import logging
+
+    from novel_downloader.apps.api import webhook as api_webhook
+
+    def failing_post(url: str, **_kwargs: Any) -> Any:
+        # Mimics urllib3's message shape, which embeds the full path + query.
+        raise api_webhook.requests.ConnectionError(
+            "HTTPSConnectionPool(host='hooks.example', port=443): "
+            "Max retries exceeded with url: /push?token=super-secret-value"
+        )
+
+    monkeypatch.setattr(api_webhook.requests, "post", failing_post)
+
+    with caplog.at_level(logging.WARNING, logger="novel_downloader.apps.api.webhook"):
+        delivered = api_webhook.post_task_finished(
+            _WEBHOOK_SECRET_URL, {"event": "task_finished", "task": {}}
+        )
+
+    assert delivered is False
+    assert "super-secret-value" not in caplog.text
+    assert "?token=" not in caplog.text
+    # The target stays identifiable for debugging: origin + path are kept.
+    assert "hooks.example/push" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_webhook_notifier_log_omits_url_secret(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The notifier's own warnings obey the same rule."""
+    import logging
+
+    from novel_downloader.apps.api import webhook as api_webhook
+
+    def broken_sender(url: str, payload: Any, timeout: float) -> bool:
+        raise RuntimeError(f"boom while posting {_WEBHOOK_SECRET_URL}")
+
+    monkeypatch.setattr(api_webhook.requests, "post", lambda *a, **k: None)
+    notifier = api_webhook.WebhookNotifier(_WEBHOOK_SECRET_URL, sender=broken_sender)
+
+    with caplog.at_level(logging.WARNING, logger="novel_downloader.apps.api.webhook"):
+        notifier.notify_task_finished({"event": "task_finished", "task": {}})
+        notifier.wait(timeout=2.0)
+
+    assert "super-secret-value" not in caplog.text
+    assert "?token=" not in caplog.text
+    assert "hooks.example/push" in caplog.text
+
+
+def test_webhook_redaction_keeps_plain_urls() -> None:
+    """Control: URLs without credentials are logged unchanged."""
+    from novel_downloader.apps.api.webhook import _redact_url
+
+    assert _redact_url("http://127.0.0.1:9000/hook") == "http://127.0.0.1:9000/hook"
+    assert (
+        _redact_url("https://hooks.example/push?token=x")
+        == "https://hooks.example/push"
+    )
+    assert _redact_url("https://user:pw@hooks.example/push") == (
+        "https://hooks.example/push"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Static files: no directory traversal
 # ---------------------------------------------------------------------------
 

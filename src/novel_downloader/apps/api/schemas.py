@@ -12,9 +12,10 @@ extra translation layer.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import re
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 SearchSortKey = Literal[
     "quality",
@@ -31,6 +32,53 @@ SearchSortKey = Literal[
 #: the in-memory job table meaningful.
 MAX_MUSIC_TRACKS = 200
 
+#: Characters a ``book_id`` may never contain. ``book_id`` is joined onto the
+#: raw-data directory to place the chapter cache and media files
+#: (``raw_data/<site>/<book_id>``); path separators, the Windows drive colon
+#: and the other Windows-reserved characters would let a crafted request write
+#: outside that tree, and control characters are never part of a real id.
+_BOOK_ID_INVALID_CHARS = re.compile(r'[/\\<>:"|?*\x00-\x1F]')
+
+#: Length ceiling for ``book_id``: identifiers are short; anything huge is
+#: hostile, and it keeps the resulting directory name sane.
+_MAX_BOOK_ID_LENGTH = 128
+
+
+def validate_book_id(value: str) -> str:
+    """
+    Reject ``book_id`` values that cannot safely name a cache directory.
+
+    ``book_id`` arrives in request bodies (task creation, watchlist) and later
+    becomes the directory ``raw_data/<site>/<book_id>`` that holds the chapter
+    SQLite cache and the media files. Values containing path separators, a
+    drive-letter colon, other Windows-reserved characters or control
+    characters — or the dot-only names ``.`` / ``..`` — would place those
+    writes outside the raw-data tree, so they are rejected with ``422``. The
+    value is stripped, mirroring how titles are normalized.
+
+    Shared with the embedded server, whose task and watchlist endpoints feed
+    the same download pipeline.
+    """
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("book_id must not be empty or whitespace-only")
+    if len(cleaned) > _MAX_BOOK_ID_LENGTH:
+        raise ValueError(
+            f"book_id must be at most {_MAX_BOOK_ID_LENGTH} characters long"
+        )
+    if _BOOK_ID_INVALID_CHARS.search(cleaned):
+        raise ValueError(
+            "book_id must not contain path separators, ':' or other "
+            "Windows-reserved characters"
+        )
+    if cleaned in {".", ".."} or cleaned.endswith("."):
+        raise ValueError("book_id must be a usable directory name")
+    return cleaned
+
+
+#: Request field type for ``book_id`` values.
+BookId = Annotated[str, AfterValidator(validate_book_id)]
+
 
 class SearchRequest(BaseModel):
     """Body of ``POST /api/v1/search``."""
@@ -42,6 +90,11 @@ class SearchRequest(BaseModel):
     sort: SearchSortKey = "quality"
     order: Literal["asc", "desc"] | None = None
     limit: int | None = Field(default=None, ge=1)
+    #: Fold same-book results into one merged entry per book: each entry is
+    #: the book's best source plus a ``sources`` list of every site carrying
+    #: it (best first).  Off by default so the response shape stays the flat
+    #: one existing clients (Android) expect.
+    group: bool = False
 
 
 class TaskCreateRequest(BaseModel):
@@ -49,7 +102,7 @@ class TaskCreateRequest(BaseModel):
 
     title: str | None = None
     site: str = Field(min_length=1)
-    book_id: str = Field(min_length=1)
+    book_id: BookId = Field(min_length=1)
 
 
 class LoginSubmitRequest(BaseModel):
@@ -68,7 +121,7 @@ class WatchlistAddRequest(BaseModel):
     """Body of ``POST /api/v1/watchlist``."""
 
     site: str = Field(min_length=1)
-    book_id: str = Field(min_length=1)
+    book_id: BookId = Field(min_length=1)
     title: str | None = None
 
 

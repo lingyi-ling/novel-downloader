@@ -16,6 +16,13 @@ endpoint (connection error, timeout, non-2xx) is logged and otherwise ignored:
 it must never slow down or break the task manager. With no URL configured the
 API installs no notifier and performs no polling.
 
+Log hygiene: webhook URLs routinely carry a shared secret in the query string
+(``https://hooks.example/push?token=...``). Everything this module logs about
+a delivery — the URL and the exception text, which urllib3 renders with the
+full path and query — goes through :func:`_redact_url` /
+:func:`_redact_text`, mirroring the access-log policy of never recording
+query strings or credentials.
+
 The API has no hook into :class:`~novel_downloader.apps.core.task_manager.
 TaskManager` (it only observes snapshots), so a small watcher polls the
 manager's ``completed`` list and notifies for each task id it has not seen
@@ -30,6 +37,7 @@ import os
 import threading
 from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -68,6 +76,54 @@ def webhook_url_from_env() -> str | None:
     return url or None
 
 
+def _redact_url(url: str) -> str:
+    """
+    Reduce ``url`` to ``scheme://host[:port]/path`` for logging.
+
+    Userinfo (basic-auth credentials) and the query string (shared tokens)
+    are dropped; a URL without credentials is returned unchanged apart from
+    that. Unparseable values collapse to a fixed placeholder.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if not host:
+            return "<unparseable webhook url>"
+        port: int | None
+        try:
+            port = parts.port
+        except ValueError:  # malformed port in the URL
+            port = None
+        port_part = f":{port}" if port is not None else ""
+        return f"{parts.scheme}://{host}{port_part}{parts.path}"
+    except ValueError:
+        return "<unparseable webhook url>"
+
+
+def _redact_text(text: str, url: str) -> str:
+    """
+    Scrub ``url``'s credentials (userinfo, query string) from ``text``.
+
+    urllib3 renders connection errors with the request's full path and query
+    (``... with url: /push?token=... ``), so the exception message is redacted
+    with the URL it came from before it reaches the log.
+    """
+    cleaned = text
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return cleaned
+    if parts.query:
+        cleaned = cleaned.replace(f"?{parts.query}", "?<redacted>")
+        cleaned = cleaned.replace(parts.query, "<redacted>")
+    if "@" in parts.netloc:
+        userinfo, _, _ = parts.netloc.rpartition("@")
+        if userinfo:
+            cleaned = cleaned.replace(f"{userinfo}@", "<redacted>@")
+            cleaned = cleaned.replace(userinfo, "<redacted>")
+    return cleaned
+
+
 def build_task_finished_payload(task: Mapping[str, Any]) -> dict[str, Any]:
     """Wrap a serialised task in the webhook envelope."""
     return {"event": "task_finished", "task": dict(task)}
@@ -89,7 +145,11 @@ def post_task_finished(
         response = requests.post(url, json=dict(payload), timeout=timeout)
         response.raise_for_status()
     except Exception as exc:  # noqa: BLE001 - delivery must never raise
-        logger.warning("Webhook delivery to %s failed: %s", url, exc)
+        logger.warning(
+            "Webhook delivery to %s failed: %s",
+            _redact_url(url),
+            _redact_text(str(exc), url),
+        )
         return False
     return True
 
@@ -145,11 +205,15 @@ class WebhookNotifier:
             if not delivered:
                 logger.warning(
                     "Webhook %s did not accept event %r",
-                    self.url,
+                    _redact_url(self.url),
                     payload.get("event"),
                 )
         except Exception as exc:  # noqa: BLE001 - a sender must not crash us
-            logger.warning("Webhook delivery to %s raised: %s", self.url, exc)
+            logger.warning(
+                "Webhook delivery to %s raised: %s",
+                _redact_url(self.url),
+                _redact_text(str(exc), self.url),
+            )
         finally:
             current = threading.current_thread()
             with self._lock:

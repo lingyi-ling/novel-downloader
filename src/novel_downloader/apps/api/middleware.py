@@ -5,6 +5,13 @@ novel_downloader.apps.api.middleware
 
 Request-hardening helpers shared by the REST API application.
 
+* :class:`OriginCheckMiddleware` answers requests whose ``Origin`` header is
+  not a loopback origin with ``403``. By default the API binds to
+  ``127.0.0.1`` without a token: that stops *remote* clients, but not
+  *browser* ones — a website the user visits can fire cross-origin requests
+  at the local port (browsers always attach ``Origin`` to cross-origin
+  POSTs). Non-browser clients (CLI, SDK, curl) send no ``Origin`` and pass
+  unchanged; ``--cors`` removes the gate and lets CORS govern browsers.
 * :class:`BodySizeLimitMiddleware` rejects oversized JSON bodies with ``413``
   *before* FastAPI parses them, so a huge payload cannot be turned into a
   memory/CPU burden by the JSON decoder.
@@ -36,18 +43,20 @@ through ``httpx.ASGITransport`` without starting a server.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import math
 import time
 from collections import deque
 from collections.abc import Iterable
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.datastructures import Headers, MutableHeaders
-from starlette.status import HTTP_401_UNAUTHORIZED
+from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import AUTH_ERROR_DETAIL, is_authorized
@@ -134,6 +143,111 @@ def _content_length(scope: Scope) -> int | None:
             except ValueError:
                 return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Browser-origin gate
+# ---------------------------------------------------------------------------
+
+#: Error text for requests whose ``Origin`` is not a loopback origin.
+ORIGIN_ERROR_DETAIL = (
+    "Forbidden: cross-origin browser requests are not allowed on this local "
+    "API. Non-browser clients (CLI, SDK, curl) are unaffected. Start the "
+    "server with --cors to allow browser access from other origins."
+)
+
+#: Host name that browsers may resolve to a loopback address.
+_LOCAL_HOSTNAME = "localhost"
+
+
+def _is_loopback_origin(origin: str) -> bool:
+    """
+    Whether an ``Origin`` header value names a local (loopback) origin.
+
+    The value must be a well-formed ``http``/``https`` origin whose host is
+    ``localhost`` (case-insensitive) or a loopback IP (IPv4 ``127.0.0.0/8``
+    or IPv6 ``::1``); the port is irrelevant because any local port may serve
+    a helper page. Everything else — foreign hosts, look-alikes such as
+    ``127.0.0.1.evil.com``, the literal ``null`` (sandboxed frames), an empty
+    value and anything unparseable — is not local. Userinfo
+    (``http://evil.com@127.0.0.1``) is rejected outright so the host cannot
+    be smuggled past the check.
+    """
+    try:
+        parsed = urlsplit(origin.strip())
+    except ValueError:  # e.g. an IPv6 literal with invalid brackets
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    if parsed.username or parsed.password:
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    if host == _LOCAL_HOSTNAME:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class OriginCheckMiddleware:
+    """
+    Answer requests with a non-loopback ``Origin`` header with ``403``.
+
+    Threat model: by default the API binds to ``127.0.0.1`` without a token.
+    That stops *remote* clients, but not *browser* ones — a website the user
+    visits can still fire cross-origin requests at ``http://127.0.0.1:<port>``
+    (browsers always attach ``Origin`` to cross-origin POSTs, so state-changing
+    endpoints can be driven as CSRF). This gate runs closest to the router and
+    closes that hole:
+
+    * non-browser clients (CLI, SDK, curl) send no ``Origin`` and pass;
+    * loopback origins (``http://127.0.0.1:any``, ``http://localhost``,
+      ``http://[::1]``) pass, so locally served pages keep working;
+    * every other ``Origin`` — including look-alike hosts
+      (``127.0.0.1.evil.com``), userinfo tricks and the literal ``null`` —
+      is answered with ``403 {"detail": ...}`` marked ``no-store``.
+
+    Layering: it is the innermost custom layer, directly above the router.
+    That keeps it *inside* the body-size limit (an oversized body keeps its
+    specific ``413``), the rate limiter and the ``/downloads`` token guard,
+    while still running before the router's token dependency — a forged
+    origin is rejected with ``403`` even when a token is configured. Its
+    ``403`` flows back out through the cache/logging layers, so it is stamped
+    ``no-store`` and access-logged like every other response. ``create_app``
+    does not install the gate when ``--cors`` was requested: the flag is the
+    explicit opt-in for cross-origin browser access, and then CORS itself
+    governs what browsers may do.
+
+    Residual risk, by design: a same-origin DNS-rebinding page sends no
+    ``Origin`` at all and is not caught by this header check; running the API
+    with a token (``--token`` / ``NOVEL_API_TOKEN``) is the complete defense.
+
+    :param app: The wrapped ASGI application.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        origin = Headers(scope=scope).get("origin")
+        if origin is None or _is_loopback_origin(origin):
+            await self.app(scope, receive, send)
+            return
+
+        response = JSONResponse(
+            status_code=HTTP_403_FORBIDDEN,
+            content={"detail": ORIGIN_ERROR_DETAIL},
+            # Errors must never be cached, on this layer's own authority.
+            headers={"Cache-Control": CACHE_CONTROL_NO_STORE},
+        )
+        await response(scope, receive, send)
 
 
 class BodySizeLimitMiddleware:
@@ -625,11 +739,13 @@ __all__ = [
     "DEFAULT_RATE_LIMIT",
     "DEFAULT_RATE_LIMIT_WINDOW",
     "DOWNLOADS_PREFIX",
+    "ORIGIN_ERROR_DETAIL",
     "RATE_LIMIT_EXEMPT_PATHS",
     "SLOW_REQUEST_SECONDS",
     "BodySizeLimitMiddleware",
     "CacheControlMiddleware",
     "DownloadsAuthMiddleware",
+    "OriginCheckMiddleware",
     "RateLimitMiddleware",
     "RequestLoggingMiddleware",
     "register_error_handlers",
