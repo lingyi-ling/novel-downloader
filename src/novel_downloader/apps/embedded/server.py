@@ -131,6 +131,7 @@ _MSG_MUSIC_UNAVAILABLE = (
     "Music support is not available: {error}. "
     'Install it with: pip install "novel-downloader[music]"'
 )
+_MSG_MUSIC_JOB_NOT_FOUND = "Music job not found: {job_id}"
 _MSG_TIMED_OUT = "{label} timed out after {timeout:g}s"
 
 _server: ThreadingHTTPServer | None = None
@@ -364,18 +365,46 @@ def _parse_paging(query: dict[str, list[str]]) -> tuple[int | None, int | None]:
     return parsed.get("offset"), parsed.get("limit")
 
 
+#: Truthy/falsy string literals pydantic's lax bool mode accepts verbatim
+#: (case-insensitive, no whitespace stripping — " true " is a 422 there).
+_BOOL_TRUTHY = frozenset({"true", "1", "on", "yes", "t", "y"})
+_BOOL_FALSY = frozenset({"false", "0", "off", "no", "f", "n"})
+
+
 def _parse_bool(body: dict[str, Any], name: str) -> bool:
-    """Parse an optional boolean the way pydantic's lax mode does."""
-    value = body.get(name)
-    if value is None:
+    """Parse an optional boolean the way pydantic's lax mode does.
+
+    Mirrors the probed FastAPI behaviour exactly: missing key defaults
+    False; an explicit JSON null is a type error (not the default); ints
+    and floats accept only 0/1 (and 0.0/1.0); strings are matched without
+    stripping, so " true " is invalid here just as it is there.
+    """
+    if name not in body:
         return False
+    value = body[name]
+    if value is None:
+        # Explicit null: pydantic reports bool_type, matching a missing key
+        # is a silent contract change the guard tests forbid.
+        raise _validation_error(
+            [
+                _err(
+                    name,
+                    "Input should be a valid boolean, unable to interpret input",
+                    "bool_type",
+                )
+            ]
+        )
     if isinstance(value, bool):
         return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, float) and value in (0.0, 1.0):
+        return value == 1.0
     if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"true", "1", "on", "yes"}:
+        lowered = value.lower()
+        if lowered in _BOOL_TRUTHY:
             return True
-        if lowered in {"false", "0", "off", "no"}:
+        if lowered in _BOOL_FALSY:
             return False
     raise _validation_error(
         [
@@ -604,6 +633,10 @@ def _handle_search(
         entries.append(keyword_err)
     if entries:
         raise _validation_error(entries)
+    # ``group`` mirrors ``SearchRequest.group`` (validated last, like the
+    # pydantic field order, so field errors above take precedence) and is
+    # forwarded so ``group=true`` folds results here exactly like the REST API.
+    group = _parse_bool(body, "group")
     # keyword / per_site_limit / sort always resolve: their defaults are
     # non-None and any invalid input appended a validation entry above.
     assert keyword is not None
@@ -619,6 +652,7 @@ def _handle_search(
             timeout=timeout,
             sort=sort,
             order=order,
+            group=group,
         ),
         timeout=_SEARCH_TIMEOUT,
         label="Search",
@@ -849,6 +883,16 @@ def _handle_music_unavailable(
     raise _ApiError(503, _MSG_MUSIC_UNAVAILABLE.format(error="ModuleNotFoundError"))
 
 
+def _handle_music_job_status(
+    _body: dict[str, Any], params: dict[str, str], _query: dict[str, list[str]]
+) -> dict[str, Any]:
+    # No job can ever exist here (``POST /api/v1/music/jobs`` is a 503 stub),
+    # so every lookup answers with the REST API's unknown-job 404 instead of
+    # the generic route-miss one.
+    job_id = params.get("job_id", "")
+    raise _ApiError(404, _MSG_MUSIC_JOB_NOT_FOUND.format(job_id=job_id))
+
+
 ROUTES: dict[tuple[str, str], Handler] = {
     ("GET", "/api/v1/health"): _handle_health,
     ("GET", "/api/v1/sites"): _handle_sites,
@@ -866,7 +910,11 @@ ROUTES: dict[tuple[str, str], Handler] = {
     ("POST", "/api/v1/watchlist/check"): _handle_watchlist_check,
     ("GET", "/api/v1/music/platforms"): _handle_music_platforms,
     ("POST", "/api/v1/music/search"): _handle_music_unavailable,
+    ("POST", "/api/v1/music/export"): _handle_music_unavailable,
+    ("POST", "/api/v1/music/download"): _handle_music_unavailable,
+    ("GET", "/api/v1/music/health"): _handle_music_unavailable,
     ("POST", "/api/v1/music/jobs"): _handle_music_unavailable,
+    ("GET", "/api/v1/music/jobs/{job_id}"): _handle_music_job_status,
 }
 
 
