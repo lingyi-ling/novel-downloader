@@ -1,5 +1,6 @@
 package com.lingyi.noveldl.ui.tasks
 
+import androidx.compose.runtime.saveable.listSaver
 import com.lingyi.noveldl.data.AddTaskRequest
 import com.lingyi.noveldl.data.HistoryFile
 import com.lingyi.noveldl.data.Task
@@ -27,6 +28,23 @@ fun Task.isRetryable(): Boolean = isRetryableTaskStatus(status)
 /** Adds [taskId] to [expanded] or removes it; returns a new set. */
 fun toggleTaskExpanded(expanded: Set<String>, taskId: String): Set<String> =
     if (taskId in expanded) expanded - taskId else expanded + taskId
+
+/**
+ * Persists the set of task ids re-enqueued this session, so navigating to
+ * another tab and back (or a config change) does not re-enable the retry
+ * button of a task whose fresh copy is already queued — the state behind
+ * "one re-queue per task id".
+ */
+val retriedIdsSaver = listSaver<Set<String>, String>(
+    save = { saveRetriedIds(it) },
+    restore = { restoreRetriedIds(it) },
+)
+
+/** The list form [retriedIdsSaver] stores in the saved-instance state. */
+fun saveRetriedIds(ids: Set<String>): List<String> = ids.toList()
+
+/** Rebuilds the retried set from its stored list form. */
+fun restoreRetriedIds(saved: List<String>): Set<String> = saved.toSet()
 
 /** Whether the retry button reacts to taps for [taskId] right now. */
 fun retryEnabled(taskId: String, retriedIds: Set<String>, retryingIds: Set<String>): Boolean =

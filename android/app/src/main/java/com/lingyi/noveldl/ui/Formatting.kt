@@ -36,9 +36,15 @@ fun progressPercent(done: Int, total: Int): Int =
 
 private const val KB = 1024.0
 private const val MB = KB * 1024.0
+private const val GB = MB * 1024.0
 
-/** Human readable byte size, e.g. 1536 -> "2 KB", 1572864 -> "1.5 MB". */
+/**
+ * Human readable byte size, e.g. 1536 -> "2 KB", 1572864 -> "1.5 MB",
+ * 3221225472 -> "3.0 GB". `Locale.US` keeps the decimal separator stable
+ * across the app's locales (and across the JVM tests).
+ */
 fun humanSize(bytes: Long): String = when {
+    bytes >= GB.toLong() -> String.format(Locale.US, "%.1f GB", bytes / GB)
     bytes >= MB.toLong() -> String.format(Locale.US, "%.1f MB", bytes / MB)
     bytes >= 1024 -> String.format(Locale.US, "%.0f KB", bytes / KB)
     else -> "$bytes B"

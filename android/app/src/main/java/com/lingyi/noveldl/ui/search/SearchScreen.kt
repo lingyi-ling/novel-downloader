@@ -48,6 +48,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.AddTaskRequest
@@ -225,11 +227,16 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             )
             // The text field is read-only; a transparent overlay makes the whole
-            // field open the multi-select dialog instead of the keyboard.
+            // field open the multi-select dialog instead of the keyboard. It
+            // carries the field's description and an action label so screen
+            // readers announce a labeled control instead of a bare clickable.
+            val sitesFieldDescription = stringResource(R.string.search_sites_hint)
+            val openSitesAction = stringResource(R.string.search_sites_dialog_title)
             Box(
                 Modifier
                     .matchParentSize()
-                    .clickable { showSiteDialog = true },
+                    .semantics { contentDescription = sitesFieldDescription }
+                    .clickable(onClickLabel = openSitesAction) { showSiteDialog = true },
             )
         }
         Spacer(Modifier.height(8.dp))

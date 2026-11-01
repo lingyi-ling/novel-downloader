@@ -103,6 +103,18 @@ class TaskActionsTest {
     }
 
     @Test
+    fun retriedIdsSurviveSaveAndRestoreAcrossPageSwitches() {
+        // The retried set persists (rememberSaveable) so a page switch cannot
+        // re-enable retry on a task whose fresh copy is already queued.
+        val saved = saveRetriedIds(setOf("t1", "t2"))
+        assertEquals(listOf("t1", "t2"), saved)
+        assertEquals(setOf("t1", "t2"), restoreRetriedIds(saved))
+        // Degenerate cases round-trip too.
+        assertEquals(emptyList<String>(), saveRetriedIds(emptySet()))
+        assertEquals(emptySet<String>(), restoreRetriedIds(emptyList()))
+    }
+
+    @Test
     fun retryAvailableCombinesStatusIdentityAndDisableState() {
         assertTrue(task(status = "failed").retryAvailable(emptySet(), emptySet()))
         assertFalse(task(status = "failed").retryAvailable(setOf("t1"), emptySet()))

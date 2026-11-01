@@ -73,7 +73,14 @@ class FormattingTest {
         assertEquals("1024 KB", humanSize(1024 * 1024 - 1))
         assertEquals("1.0 MB", humanSize(1024L * 1024))
         assertEquals("1.5 MB", humanSize(1024L * 1024 * 3 / 2))
-        assertEquals("1024.0 MB", humanSize(1024L * 1024 * 1024))
+        assertEquals("1024.0 MB", humanSize(1024L * 1024 * 1024 - 1))
+    }
+
+    @Test
+    fun humanSizeFormatsGigabytesOnceTheMBWouldOverflow() {
+        assertEquals("1.0 GB", humanSize(1024L * 1024 * 1024))
+        assertEquals("1.5 GB", humanSize(1024L * 1024 * 1024 * 3 / 2))
+        assertEquals("4.0 GB", humanSize(4L * 1024 * 1024 * 1024))
     }
 
     @Test

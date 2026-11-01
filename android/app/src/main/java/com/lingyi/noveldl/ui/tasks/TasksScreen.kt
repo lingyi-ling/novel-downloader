@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -34,17 +35,20 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.HistoryDownloader
@@ -56,8 +60,10 @@ import com.lingyi.noveldl.data.Task
 import com.lingyi.noveldl.data.TasksResponse
 import com.lingyi.noveldl.data.downloadFileName
 import com.lingyi.noveldl.notifications.TaskNotifier
+import com.lingyi.noveldl.ui.TASKS_POLL_INTERVAL_MS
+import com.lingyi.noveldl.ui.awaitResumed
+import com.lingyi.noveldl.ui.pollWhileComposed
 import com.lingyi.noveldl.ui.taskStatusLabelRes
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -79,12 +85,29 @@ fun TasksScreen(onMessage: (String) -> Unit) {
     // Task ids whose detail panel is open.
     var expandedIds by remember { mutableStateOf(setOf<String>()) }
     // Task ids re-enqueued this session (retry stays disabled for them) and
-    // the ones with a retry request currently in flight.
-    var retriedIds by remember { mutableStateOf(setOf<String>()) }
+    // the ones with a retry request currently in flight. The retried set is
+    // saved: navigating to another tab and back must not re-enable retry on
+    // a task whose fresh copy is already queued (plain `remember` would
+    // forget it and allow a duplicate re-queue). In-flight ids stay
+    // volatile: the request dies with the screen's scope anyway.
+    var retriedIds by rememberSaveable(stateSaver = retriedIdsSaver) {
+        mutableStateOf(setOf<String>())
+    }
     var retryingIds by remember { mutableStateOf(setOf<String>()) }
+    // Credential submission currently in flight; the dialog's button waits.
+    var submittingLogin by remember { mutableStateOf(false) }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(refreshKey) {
-        while (true) {
+        // Navigating away cancels this effect (Api.call rethrows
+        // CancellationException, so cancellation stays clean). Composition
+        // alone survives the activity being STOPPED, so the loop also parks
+        // in the foreground gate while the app sits in the background
+        // instead of polling every 2 s forever.
+        pollWhileComposed(
+            intervalMs = TASKS_POLL_INTERVAL_MS,
+            awaitForeground = { lifecycleOwner.lifecycle.awaitResumed() },
+        ) {
             Api.call { Api.service().tasks() }
                 .onSuccess { response ->
                     val tasks = response.allTasks()
@@ -103,7 +126,6 @@ fun TasksScreen(onMessage: (String) -> Unit) {
             Api.call { Api.service().loginRequests() }
                 .onSuccess { loginReqs = it }
             refreshing = false
-            delay(2000)
         }
     }
 
@@ -179,6 +201,10 @@ fun TasksScreen(onMessage: (String) -> Unit) {
 
     /** Submits credential values for [req] and closes the dialog on success. */
     fun submitLogin(req: LoginRequestDto, values: Map<String, String>) {
+        // Guarded like every other screen action so a double-tap on the
+        // dialog's submit button cannot fire two POSTs.
+        if (submittingLogin) return
+        submittingLogin = true
         scope.launch {
             Api.call { Api.service().submitLogin(req.req_id, LoginSubmitRequest(values)) }
                 .onSuccess {
@@ -194,6 +220,7 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                         ),
                     )
                 }
+            submittingLogin = false
         }
     }
 
@@ -310,7 +337,8 @@ fun TasksScreen(onMessage: (String) -> Unit) {
     editingLogin?.let { req ->
         LoginRequestDialog(
             req = req,
-            onDismiss = { editingLogin = null },
+            submitting = submittingLogin,
+            onDismiss = { if (!submittingLogin) editingLogin = null },
             onSubmit = ::submitLogin,
         )
     }
@@ -344,15 +372,17 @@ private fun LoginRequestCard(
 @Composable
 private fun LoginRequestDialog(
     req: LoginRequestDto,
+    submitting: Boolean,
     onDismiss: () -> Unit,
     onSubmit: (LoginRequestDto, Map<String, String>) -> Unit,
 ) {
     val context = LocalContext.current
-    // One observable buffer per field, seeded with prefill/default values.
+    // One observable buffer per field, seeded with prefill/default values
+    // clamped to a layout-safe length (server input is untrusted).
     val buffers = remember(req.req_id) {
         mutableStateMapOf<String, String>().apply {
             req.fields.forEach { field ->
-                put(field.name, req.prefill[field.name] ?: field.default)
+                put(field.name, initialLoginFieldValue(field, req.prefill))
             }
         }
     }
@@ -374,7 +404,7 @@ private fun LoginRequestDialog(
                     }
                     OutlinedTextField(
                         value = buffers[field.name].orEmpty(),
-                        onValueChange = { buffers[field.name] = it },
+                        onValueChange = { buffers[field.name] = clampLoginFieldValue(it) },
                         label = { Text(field.label.ifBlank { field.name }) },
                         placeholder = {
                             if (field.placeholder.isNotBlank()) Text(field.placeholder)
@@ -395,12 +425,11 @@ private fun LoginRequestDialog(
             }
         },
         confirmButton = {
-            val complete = req.fields
-                .filter { it.required }
-                .all { !buffers[it.name].isNullOrBlank() }
             TextButton(
-                enabled = complete,
-                onClick = { onSubmit(req, buffers.toMap()) },
+                enabled = loginSubmitReady(req.fields, buffers.toMap()) && !submitting,
+                onClick = {
+                    onSubmit(req, loginSubmitValues(req.fields, buffers.toMap()))
+                },
             ) {
                 Text(stringResource(R.string.login_submit))
             }
@@ -416,7 +445,7 @@ private fun LoginRequestDialog(
 @Composable
 private fun SectionHeader(title: String, count: Int) {
     Text(
-        "$title ($count)",
+        stringResource(R.string.section_count, title, count),
         style = MaterialTheme.typography.titleMedium,
         modifier = Modifier.padding(top = 8.dp),
     )
@@ -575,7 +604,10 @@ private fun ExportFileRow(file: HistoryFile, onDownload: (HistoryFile) -> Unit) 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onDownload(file) }
+            // 48 dp minimum so the row clears the recommended touch-target
+            // size; the labelSmall text alone is far shorter.
+            .heightIn(min = 48.dp)
+            .clickable(role = Role.Button) { onDownload(file) }
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

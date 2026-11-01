@@ -50,6 +50,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.MusicHealthItem
@@ -59,6 +60,8 @@ import com.lingyi.noveldl.data.MusicPlatform
 import com.lingyi.noveldl.data.MusicSearchRequest
 import com.lingyi.noveldl.data.MusicTrack
 import com.lingyi.noveldl.data.SelectionStore
+import com.lingyi.noveldl.ui.MUSIC_JOB_POLL_INTERVAL_MS
+import com.lingyi.noveldl.ui.awaitResumed
 import com.lingyi.noveldl.ui.progressFraction
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -76,6 +79,7 @@ private val HealthOkColor: Color = Color(0xFF388E3C)
 fun MusicScreen(onMessage: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
     val selectionStore = remember(context) { SelectionStore(context) }
     var platforms by remember { mutableStateOf<List<MusicPlatform>>(emptyList()) }
     // Restored from the last session; the API list refreshes it if needed.
@@ -261,7 +265,11 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                 return@launch
             }
             while (true) {
-                delay(1500)
+                delay(MUSIC_JOB_POLL_INTERVAL_MS)
+                // Composition survives the activity being STOPPED, so this
+                // scope alone would keep polling in the background; the gate
+                // parks the watch until the app is foregrounded again.
+                lifecycleOwner.lifecycle.awaitResumed()
                 val job = Api.call { Api.service().musicJob(created.job_id) }
                     .getOrElse {
                         error = it.message

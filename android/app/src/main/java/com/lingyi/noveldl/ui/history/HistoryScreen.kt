@@ -102,7 +102,11 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
             appContext,
             receiver,
             IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
-            ContextCompat.RECEIVER_EXPORTED,
+            // ACTION_DOWNLOAD_COMPLETE is a protected system broadcast: it is
+            // still delivered to a NOT_EXPORTED receiver, while a hostile app
+            // cannot spoof the action to consume one of our pending ids
+            // (which would swallow the real completion message).
+            ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         onDispose { runCatching { appContext.unregisterReceiver(receiver) } }
     }
