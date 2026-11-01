@@ -35,6 +35,10 @@ class LaoyaoxsParser(BaseParser):
         if len(raw_pages) < 2:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if len(raw_pages) < 2:
+            return None
+
         info_tree = html.fromstring(raw_pages[0])
         catalog_tree = html.fromstring(raw_pages[1])
 
@@ -106,6 +110,10 @@ class LaoyaoxsParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        if not raw_pages:
+            return None
+
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 

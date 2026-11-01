@@ -90,8 +90,19 @@ class QqbookParser(YuewenQDFontMixin, BaseParser):
         if len(raw_pages) < 2:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if len(raw_pages) < 2:
+            return None
+
         info_tree = html.fromstring(raw_pages[0])
-        catalog_dict = json.loads(raw_pages[1])
+        try:
+            catalog_dict = json.loads(raw_pages[1])
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("QQbook book_info :: catalog page is not valid JSON")
+            return None
+        if not isinstance(catalog_dict, dict):
+            logger.warning("QQbook book_info :: catalog JSON is not an object")
+            return None
 
         book_name = self._first_str(
             info_tree.xpath('//meta[@property="og:novel:book_name"]/@content')
@@ -150,10 +161,14 @@ class QqbookParser(YuewenQDFontMixin, BaseParser):
 
         # Chapters from the book_list
         data = catalog_dict.get("data") or []
+        if not isinstance(data, list):
+            data = []
         chapters: list[ChapterInfoDict] = []
         for item in data:
-            cid = str(item.get("cid"))
-            title = str(item.get("chapterName", "")).strip()
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("cid") or "")
+            title = str(item.get("chapterName") or "").strip()
             accessible = bool(item.get("free") or item.get("purchased"))
             chap: ChapterInfoDict = {
                 "title": title,
@@ -197,6 +212,11 @@ class QqbookParser(YuewenQDFontMixin, BaseParser):
             if not data_list:
                 return None
             data_block = data_list[0]
+            if not isinstance(data_block, dict):
+                logger.warning(
+                    "QQbook chapter %s :: NUXT data entry is not an object", chapter_id
+                )
+                return None
         except Exception as e:
             logger.warning(
                 "QQbook chapter %s :: failed to locate Nuxt block: %s",

@@ -44,6 +44,10 @@ class LinovelibParser(BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         tree = html.fromstring(raw_pages[0])
 
         book_name = (
@@ -203,7 +207,7 @@ class LinovelibParser(BaseParser):
         resources: list[MediaResource] = []
         curr_paragraph_idx = 0
 
-        for curr_html in raw_pages:
+        for curr_html in self._usable_pages(raw_pages):
             tree = html.fromstring(curr_html)
 
             if not title:

@@ -79,6 +79,10 @@ class QidianParser(YuewenQDFontMixin, BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         doc = html.fromstring(raw_pages[0])
 
         # --- Book name ---
@@ -101,8 +105,16 @@ class QidianParser(YuewenQDFontMixin, BaseParser):
             )
 
         # --- Book ID + cover ---
-        book_id = doc.xpath('//a[@id="bookImg"]/@data-bid')[0]
-        cover_url = f"https://bookcover.yuewen.com/qdbimg/349573/{book_id}/600.webp"
+        book_id = self._first_str(doc.xpath('//a[@id="bookImg"]/@data-bid'))
+        if not book_id:
+            book_id = self._first_str(
+                doc.xpath('//meta[@property="og:novel:book_id"]/@content')
+            )
+        cover_url = (
+            f"https://bookcover.yuewen.com/qdbimg/349573/{book_id}/600.webp"
+            if book_id
+            else ""
+        )
 
         # --- Update time ---
         update_time = self._first_str(
@@ -214,14 +226,14 @@ class QidianParser(YuewenQDFontMixin, BaseParser):
         duplicated = self._is_duplicated(chapter_info)
         encrypted = self._is_encrypted(chapter_info)
 
-        title = chapter_info.get("chapterName", "Untitled")
-        raw_html = chapter_info.get("content", "")
+        title = chapter_info.get("chapterName") or "Untitled"
+        raw_html = chapter_info.get("content") or ""
         cid = str(chapter_info.get("chapterId") or chapter_id)
-        fkp = chapter_info.get("fkp", "")
+        fkp = chapter_info.get("fkp") or ""
         fuid = self._fuid or self._cookie_store.get("ywguid")
-        author_say = chapter_info.get("authorSay", "").strip()
-        modify_time = chapter_info.get("modifyTime", 0)
-        word_count = chapter_info.get("actualWords", 0)
+        author_say = (chapter_info.get("authorSay") or "").strip()
+        modify_time = chapter_info.get("modifyTime") or 0
+        word_count = chapter_info.get("actualWords") or 0
 
         if self._is_vip(chapter_info):
             raw_html = self._decryptor.decrypt(raw_html, cid, fkp, fuid)
@@ -445,4 +457,7 @@ class QidianParser(YuewenQDFontMixin, BaseParser):
           * 0: 内容是'明文'
           * 2: 字体加密
         """
-        return int(chapter_info.get("cES", 0)) == 2
+        try:
+            return int(chapter_info.get("cES") or 0) == 2
+        except (TypeError, ValueError):
+            return False

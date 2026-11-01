@@ -42,8 +42,19 @@ class HetushuParser(BaseParser):
         if len(raw_pages) < 2:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if len(raw_pages) < 2:
+            return None
+
         tree = html.fromstring(raw_pages[0])
-        catalog_data: list[list[str]] = json.loads(raw_pages[1])
+        try:
+            catalog_data = json.loads(raw_pages[1])
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("hetushu book_info: catalog page is not valid JSON")
+            return None
+        if not isinstance(catalog_data, list):
+            logger.warning("hetushu book_info: catalog data is not a list")
+            return None
 
         # --- Metadata ---
         book_name = self._first_str(
@@ -76,9 +87,9 @@ class HetushuParser(BaseParser):
         curr_vol: VolumeInfoDict = {"volume_name": "未命名卷", "chapters": []}
 
         for elem in catalog_data:
-            if not elem:
+            if not elem or not isinstance(elem, list) or len(elem) < 2:
                 logger.warning(
-                    "hetushu book_info: empty element in catalog data: %s", elem
+                    "hetushu book_info: malformed element in catalog data: %s", elem
                 )
                 continue
 
@@ -87,13 +98,15 @@ class HetushuParser(BaseParser):
                     if curr_vol["chapters"]:
                         volumes.append(curr_vol)
                     curr_vol = {
-                        "volume_name": elem[1].strip(),
+                        "volume_name": str(elem[1] or "").strip(),
                         "chapters": [],
                     }
 
                 case "dd":
-                    title = elem[1].strip()
-                    chapter_id = elem[2] if len(elem) > 2 else ""
+                    title = str(elem[1] or "").strip()
+                    chapter_id = (
+                        str(elem[2]) if len(elem) > 2 and elem[2] is not None else ""
+                    )
                     curr_vol["chapters"].append(
                         {"title": title, "url": "", "chapterId": chapter_id}
                     )
@@ -126,7 +139,7 @@ class HetushuParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if len(raw_pages) < 2 or not raw_pages[1]:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -162,8 +175,25 @@ class HetushuParser(BaseParser):
 
         offset = 0
         reordered: list[str] = [""] * len(paragraphs)
+        if not paragraphs or not orders:
+            return None
         for i, order in enumerate(orders):
+            if i >= len(paragraphs):
+                logger.warning(
+                    "hetushu chapter %s: more orders than paragraphs, ignoring extra",
+                    chapter_id,
+                )
+                break
             target = order if order < 5 else order - offset
+            if not 0 <= target < len(paragraphs):
+                logger.warning(
+                    "hetushu chapter %s: order %d out of range, skipping",
+                    chapter_id,
+                    order,
+                )
+                if order < 5:
+                    offset += 1
+                continue
             reordered[target] = paragraphs[i]
             if order < 5:
                 offset += 1
@@ -185,7 +215,11 @@ class HetushuParser(BaseParser):
 
     @classmethod
     def _parse_chapter_order(cls, s: str) -> list[int]:
-        decoded = base64.b64decode(s)
-        decoded_str = decoded.decode(errors="ignore")
-        parts = cls._RE_CHAPTER_SPLIT.split(decoded_str)
-        return [int(i) for i in parts]
+        try:
+            decoded = base64.b64decode(s)
+            decoded_str = decoded.decode(errors="ignore")
+            parts = cls._RE_CHAPTER_SPLIT.split(decoded_str)
+            return [int(i) for i in parts]
+        except (ValueError, TypeError) as e:
+            logger.warning("hetushu: failed to parse chapter order data: %s", e)
+            return []

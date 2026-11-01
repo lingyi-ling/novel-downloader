@@ -40,6 +40,10 @@ class ShuhaigeParser(BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         tree = html.fromstring(raw_pages[0])
 
         book_name = self._first_str(tree.xpath('//div[@id="info"]/h1/text()'))
@@ -90,6 +94,10 @@ class ShuhaigeParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        if not raw_pages:
+            return None
+
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 

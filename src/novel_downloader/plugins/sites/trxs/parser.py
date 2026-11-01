@@ -36,6 +36,10 @@ class TrxsParser(BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         tree = html.fromstring(raw_pages[0])
 
         # Metadata
@@ -85,6 +89,10 @@ class TrxsParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        if not raw_pages:
+            return None
+
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 

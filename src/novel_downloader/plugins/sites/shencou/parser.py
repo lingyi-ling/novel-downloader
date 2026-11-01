@@ -35,6 +35,10 @@ class ShencouParser(BaseParser):
         if len(raw_pages) < 2:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if len(raw_pages) < 2:
+            return None
+
         info_tree = html.fromstring(raw_pages[0])
         catalog_tree = html.fromstring(raw_pages[1])
 
@@ -92,12 +96,12 @@ class ShencouParser(BaseParser):
                 if curr_vol["chapters"]:
                     volumes.append(curr_vol)
                 # start a new volume
-                vol_name = elem.xpath(".//h2/text()")[0].strip()
+                vol_name = self._first_str(elem.xpath(".//h2/text()"))
                 curr_vol = {"volume_name": vol_name, "chapters": []}
             elif "zjlist4" in cls_attr:
                 # collect all <li><a> entries under this list
                 for a in elem.xpath(".//ol/li/a"):
-                    url = a.get("href").strip()
+                    url = (a.get("href") or "").strip()
                     title = a.text_content().strip()
                     # '203740.html' -> '203740'
                     chap_id = url.split(".")[0]
@@ -134,6 +138,10 @@ class ShencouParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        if not raw_pages:
+            return None
+
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 

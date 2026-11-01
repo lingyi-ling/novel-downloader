@@ -8,6 +8,7 @@ import json
 import logging
 from base64 import b64decode
 from collections import defaultdict
+from contextlib import suppress
 from typing import Any
 
 from Crypto.Cipher import DES
@@ -44,6 +45,10 @@ class CiyuanjiParser(BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         data = self._find_next_data(raw_pages[0])
         if not data:
             logger.warning("ciyuanji book_info: __NEXT_DATA__ not found")
@@ -52,19 +57,22 @@ class CiyuanjiParser(BaseParser):
         book_data = self._extract_book_data(data)
         raw_chapters = self._extract_chapter_list(data)
         volumes = self._build_volumes(raw_chapters)
-        tags = [t["tagName"] for t in book_data.get("tagList", []) if "tagName" in t]
+        tag_list = book_data.get("tagList") or []
+        tags = [
+            t["tagName"] for t in tag_list if isinstance(t, dict) and t.get("tagName")
+        ]
 
         if not volumes:
             return None
 
         return {
-            "book_name": book_data.get("bookName", ""),
-            "author": book_data.get("authorName", ""),
-            "cover_url": book_data.get("imgUrl", ""),
-            "update_time": book_data.get("latestUpdateTime", ""),
-            "word_count": str(book_data.get("wordCount", "")),
+            "book_name": book_data.get("bookName") or "",
+            "author": book_data.get("authorName") or "",
+            "cover_url": book_data.get("imgUrl") or "",
+            "update_time": book_data.get("latestUpdateTime") or "",
+            "word_count": str(book_data.get("wordCount") or ""),
             "serial_status": self._map_serial_status(book_data.get("endState")),
-            "summary": book_data.get("notes", ""),
+            "summary": book_data.get("notes") or "",
             "tags": tags,
             "volumes": volumes,
             "extra": {},
@@ -78,6 +86,11 @@ class CiyuanjiParser(BaseParser):
     ) -> ChapterDict | None:
         if not raw_pages:
             logger.warning("ciyuanji chapter %s: raw_pages is empty", chapter_id)
+            return None
+
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            logger.warning("ciyuanji chapter %s: raw page is blank", chapter_id)
             return None
 
         if self._check_login(raw_pages[0]):
@@ -105,8 +118,8 @@ class CiyuanjiParser(BaseParser):
 
         # Build result
         return {
-            "id": str(chapter_content.get("chapterId", chapter_id)),
-            "title": chapter_content.get("chapterName", ""),
+            "id": str(chapter_content.get("chapterId") or chapter_id),
+            "title": chapter_content.get("chapterName") or "",
             "content": self._decrypt_chapter(enc_content),
             "extra": {
                 "site": self.site_name,
@@ -130,17 +143,24 @@ class CiyuanjiParser(BaseParser):
         grouped: dict[int, dict[str, Any]] = defaultdict(lambda: {"chapters": []})
 
         for ch in chapter_list:
+            if not isinstance(ch, dict):
+                continue
             volume_id = ch.get("volumeId")
             if not volume_id:
                 continue
-            volume_title = ch.get("title", f"卷 {volume_id}")
-            volume_sort = ch.get("volumeSortNum", 0)
+            volume_title = ch.get("title") or f"卷 {volume_id}"
+            volume_sort = ch.get("volumeSortNum")
+            if not isinstance(volume_sort, (int, float)):
+                volume_sort = 0
+            sort_num = ch.get("sortNum")
+            if not isinstance(sort_num, (int, float)):
+                sort_num = 0
 
             # Build individual chapter entry
             chapter_info: ChapterInfoDict = {
-                "title": ch.get("chapterName", ""),
+                "title": ch.get("chapterName") or "",
                 "url": f"/chapter/{ch.get('bookId')}_{ch.get('chapterId')}.html",
-                "chapterId": str(ch.get("chapterId")),
+                "chapterId": str(ch.get("chapterId") or ""),
                 "accessible": ch.get("isFee", "0") == "0"
                 or ch.get("isBuy", "0") == "1",
             }
@@ -148,7 +168,7 @@ class CiyuanjiParser(BaseParser):
             vol = grouped[volume_id]
             vol["volume_name"] = volume_title
             vol["volumeSortNum"] = volume_sort
-            vol["chapters"].append((ch.get("sortNum", 0), chapter_info))
+            vol["chapters"].append((sort_num, chapter_info))
 
         # Sort volumes by volumeSortNum
         sorted_volumes = sorted(
@@ -191,28 +211,48 @@ class CiyuanjiParser(BaseParser):
         """
         tree = html.fromstring(html_str)
         script = tree.xpath('//script[@id="__NEXT_DATA__"]/text()')
-        return json.loads(script[0].strip()) if script else {}
+        if not script:
+            return {}
+        try:
+            data = json.loads(script[0].strip())
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     @staticmethod
     def _extract_book_data(data: dict[str, Any]) -> dict[str, Any]:
-        props = data.get("props", {})
-        page_props = props.get("pageProps", {})
-        book_data = page_props.get("book", {})
+        props = data.get("props") or {}
+        if not isinstance(props, dict):
+            return {}
+        page_props = props.get("pageProps") or {}
+        if not isinstance(page_props, dict):
+            return {}
+        book_data = page_props.get("book") or {}
         return book_data if isinstance(book_data, dict) else {}
 
     @staticmethod
     def _extract_chapter_list(data: dict[str, Any]) -> list[dict[str, Any]]:
-        props = data.get("props", {})
-        page_props = props.get("pageProps", {})
-        book_chapter = page_props.get("bookChapter", {})
-        chapter_list = book_chapter.get("chapterList", [])
+        props = data.get("props") or {}
+        if not isinstance(props, dict):
+            return []
+        page_props = props.get("pageProps") or {}
+        if not isinstance(page_props, dict):
+            return []
+        book_chapter = page_props.get("bookChapter") or {}
+        if not isinstance(book_chapter, dict):
+            return []
+        chapter_list = book_chapter.get("chapterList") or []
         return chapter_list if isinstance(chapter_list, list) else []
 
     @staticmethod
     def _extract_chapter_content(data: dict[str, Any]) -> dict[str, Any]:
-        props = data.get("props", {})
-        page_props = props.get("pageProps", {})
-        chapter_content = page_props.get("chapterContent", {})
+        props = data.get("props") or {}
+        if not isinstance(props, dict):
+            return {}
+        page_props = props.get("pageProps") or {}
+        if not isinstance(page_props, dict):
+            return {}
+        chapter_content = page_props.get("chapterContent") or {}
         return chapter_content if isinstance(chapter_content, dict) else {}
 
     @staticmethod
@@ -240,40 +280,54 @@ class CiyuanjiParser(BaseParser):
         """Build unified resources list from Ciyuanji chapter_content."""
         resources: list[dict[str, Any]] = []
 
-        for img in chapter_content.get("imgList", []) or []:
+        for img in chapter_content.get("imgList") or []:
+            if not isinstance(img, dict):
+                continue
             pidx = img.get("paragraphIndex")
             url = img.get("imgUrl")
 
             if pidx is None or not url:
                 continue
+            try:
+                pidx_int = int(pidx)
+            except (TypeError, ValueError):
+                continue
 
             entry: dict[str, Any] = {
                 "type": "image",
-                "paragraph_index": int(pidx),
+                "paragraph_index": pidx_int,
                 "url": url,
             }
 
             # Optional fields
             if img.get("width"):
-                entry["width"] = int(img["width"])
+                with suppress(TypeError, ValueError):
+                    entry["width"] = int(img["width"])
             if img.get("height"):
-                entry["height"] = int(img["height"])
+                with suppress(TypeError, ValueError):
+                    entry["height"] = int(img["height"])
             if img.get("imgName"):
                 entry["alt"] = img["imgName"]
 
             resources.append(entry)
 
-        for w in chapter_content.get("wordList", []) or []:
+        for w in chapter_content.get("wordList") or []:
+            if not isinstance(w, dict):
+                continue
             pidx = w.get("paragraphIndex")
             img_url = w.get("imgUrl")
             text_alt = w.get("content")
 
             if pidx is None or not img_url:
                 continue
+            try:
+                pidx_int = int(pidx)
+            except (TypeError, ValueError):
+                continue
 
             entry = {
                 "type": "image",
-                "paragraph_index": int(pidx),
+                "paragraph_index": pidx_int,
                 "url": img_url,
             }
 

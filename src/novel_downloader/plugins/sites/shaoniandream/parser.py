@@ -6,6 +6,7 @@ novel_downloader.plugins.sites.shaoniandream.parser
 
 import base64
 import json
+import logging
 import re
 from typing import Any
 
@@ -22,6 +23,8 @@ from novel_downloader.schemas import (
     MediaResource,
     VolumeInfoDict,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @registrar.register_parser()
@@ -42,10 +45,27 @@ class ShaoniandreamParser(BaseParser):
         if len(raw_pages) < 2:
             return None
 
+        if not raw_pages[0].strip():
+            return None
+
         info_tree = html.fromstring(raw_pages[0])
-        catalog_data = json.loads(raw_pages[1])
-        data = catalog_data.get("data", {})
-        readdir = data.get("readdir", [])
+        try:
+            catalog_data = json.loads(raw_pages[1])
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("shaoniandream book_info: catalog page is not valid JSON")
+            return None
+        if not isinstance(catalog_data, dict):
+            logger.warning("shaoniandream book_info: catalog JSON is not an object")
+            return None
+
+        data = catalog_data.get("data") or {}
+        if not isinstance(data, dict):
+            logger.warning("shaoniandream book_info: catalog data is not an object")
+            return None
+        readdir = data.get("readdir") or []
+        if not isinstance(readdir, list):
+            logger.warning("shaoniandream book_info: readdir is not a list")
+            readdir = []
 
         # --- parse main info ---
         book_name = self._first_str(
@@ -77,21 +97,28 @@ class ShaoniandreamParser(BaseParser):
         # --- parse volumes & chapters ---
         volumes: list[VolumeInfoDict] = []
         for v in readdir:
-            volume_name = v.get("title", "")
+            if not isinstance(v, dict):
+                continue
+            volume_name = v.get("title") or ""
+            vol_list = v.get("list") or []
+            if not isinstance(vol_list, list):
+                vol_list = []
             chapters: list[ChapterInfoDict] = []
-            for c in v.get("list", []):
+            for c in vol_list:
+                if not isinstance(c, dict):
+                    continue
                 chapters.append(
                     {
-                        "title": c.get("title", ""),
-                        "url": c.get("url", ""),
-                        "chapterId": str(c.get("id", "")),
-                        "accessible": "lock_fill" not in c.get("class", ""),
+                        "title": c.get("title") or "",
+                        "url": c.get("url") or "",
+                        "chapterId": str(c.get("id") or ""),
+                        "accessible": "lock_fill" not in (c.get("class") or ""),
                     }
                 )
             volumes.append(
                 {
                     "volume_name": volume_name,
-                    "volume_intro": v.get("miaoshu", ""),
+                    "volume_intro": v.get("miaoshu") or "",
                     "chapters": chapters,
                 }
             )
@@ -121,20 +148,38 @@ class ShaoniandreamParser(BaseParser):
         if not raw_pages:
             return None
 
-        raw_json = json.loads(raw_pages[0])
+        try:
+            raw_json = json.loads(raw_pages[0])
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("shaoniandream chapter: response is not valid JSON")
+            return None
+        if not isinstance(raw_json, dict):
+            logger.warning("shaoniandream chapter: response is not a JSON object")
+            return None
         if raw_json.get("status") != 1:
             raise ValueError("Invalid chapter response")
 
-        data = raw_json["data"]
-        title = data.get("title", "")
-        img_prefix = data.get("imgPrefix", "")
-        encryt_keys = data.get("encryt_keys", [])
-        show_content = data.get("show_content", [])
-        chapter_pics = data.get("chapterpic", [])
+        data = raw_json.get("data")
+        if not isinstance(data, dict):
+            logger.warning("shaoniandream chapter: data missing or not an object")
+            return None
+        title = data.get("title") or ""
+        img_prefix = data.get("imgPrefix") or ""
+        encryt_keys = data.get("encryt_keys") or []
+        show_content = data.get("show_content") or []
+        chapter_pics = data.get("chapterpic") or []
 
         # --- decode AES key/iv ---
-        key = base64.b64decode(encryt_keys[0])
-        iv = base64.b64decode(encryt_keys[1])
+        if not isinstance(encryt_keys, list) or len(encryt_keys) < 2:
+            logger.warning("shaoniandream chapter: encryt_keys missing or incomplete")
+            return None
+        try:
+            key = base64.b64decode(encryt_keys[0])
+            iv = base64.b64decode(encryt_keys[1])
+            AES.new(key, AES.MODE_CBC, iv)
+        except (ValueError, TypeError):
+            logger.warning("shaoniandream chapter: failed to decode AES key/iv")
+            return None
 
         def decrypt(cipher_b64: str) -> str:
             cipher_bytes = base64.b64decode(cipher_b64)
@@ -147,11 +192,17 @@ class ShaoniandreamParser(BaseParser):
             return res
 
         paragraphs: list[str] = []
-        for p in show_content:
-            para_enc = p.get("content", "")
+        for p in show_content if isinstance(show_content, list) else []:
+            if not isinstance(p, dict):
+                continue
+            para_enc = p.get("content")
             if not para_enc:
                 continue
-            text = self._RE_TAG_I.sub("", decrypt(para_enc)).strip()
+            try:
+                text = self._RE_TAG_I.sub("", decrypt(para_enc)).strip()
+            except (ValueError, TypeError):
+                logger.warning("shaoniandream chapter: failed to decrypt paragraph")
+                continue
             if text:
                 paragraphs.append(text)
 
@@ -168,8 +219,10 @@ class ShaoniandreamParser(BaseParser):
         resources: list[MediaResource] = []
         curr_paragraph_idx = len(paragraphs)
 
-        if chapter_pics:
+        if isinstance(chapter_pics, list):
             for pic in chapter_pics:
+                if not isinstance(pic, dict):
+                    continue
                 url = pic.get("url")
                 if not url:
                     continue
