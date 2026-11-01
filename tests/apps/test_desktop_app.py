@@ -362,6 +362,7 @@ def _task_snapshot(
     }
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="winsound is Windows-only")
 def test_play_notification_sound_uses_the_system_beep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -372,6 +373,7 @@ def test_play_notification_sound_uses_the_system_beep(
     assert calls == [()]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="winsound is Windows-only")
 def test_play_notification_sound_swallows_audio_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -434,9 +434,9 @@ def sort_results(
         if updated.tzinfo is None:
             try:
                 return updated.timestamp()
-            except (OSError, OverflowError):
-                # 一个 naive ``timestamp()`` 会查平台时区库，Windows 上
-                # 会拒绝库范围之外的日期（如 0001 / 9999 年）。把这种
+            except (OSError, OverflowError, ValueError):
+                # 一个 naive ``timestamp()`` 会查平台时区库：Windows 上
+                # 拒绝范围外的日期（OSError），Linux 上拒绝（ValueError）。
                 # 极端值按 UTC 解释是纯算术，既不炸也能正确排在两端。
                 updated = updated.replace(tzinfo=UTC)
         return updated.timestamp()
