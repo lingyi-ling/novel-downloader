@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 
 from novel_downloader.plugins.rule.engine import parse_page, select
-from novel_downloader.plugins.rule.model import Field, RuleError, parse_rule
+from novel_downloader.plugins.rule.model import (
+    Field,
+    RuleError,
+    loads_rule_json,
+    parse_rule,
+)
 
 BASE: dict[str, Any] = {
     "site_key": "demo",
@@ -242,6 +247,144 @@ def test_invalid_xpath_selector_raises_rule_error() -> None:
     tree = parse_page("<div><a href='/x'>t</a></div>")
     with pytest.raises(RuleError, match="invalid selector"):
         select(tree, "//div[")
+
+
+# --------------------------------------------------------------------------- #
+# unknown / duplicate keys (typo guard, validation moved to load time)
+# --------------------------------------------------------------------------- #
+def test_unknown_top_level_key_is_rejected() -> None:
+    with pytest.raises(RuleError, match=r"unknown key 'prioroty'"):
+        parse_rule(rule(prioroty=45))  # typo of 'priority'
+
+
+def test_unknown_section_keys_are_rejected() -> None:
+    with pytest.raises(RuleError, match=r"search: unknown key 'fomrat'"):
+        parse_rule(rule(search={"url": "u", "fomrat": "json"}))
+    with pytest.raises(RuleError, match=r"book: unknown key 'chapterss'"):
+        parse_rule(rule(book={"url": "u", "chapterss": {"item": "a"}}))
+    with pytest.raises(RuleError, match=r"book.chapters: unknown key 'idregex'"):
+        parse_rule(rule(book={"url": "u", "chapters": {"item": "a", "idregex": "x"}}))
+    with pytest.raises(RuleError, match=r"pages: unknown key 'strat'"):
+        parse_rule(
+            rule(
+                book={
+                    "url": "u",
+                    "pages": {"url": "p", "strat": 2},
+                    "chapters": {"item": "a"},
+                }
+            )
+        )
+    with pytest.raises(RuleError, match=r"resolve: unknown key 'bookk'"):
+        parse_rule(rule(resolve={"bookk": "^/x/"}))
+
+
+def test_unknown_field_spec_keys_are_rejected() -> None:
+    with pytest.raises(RuleError, match=r"unknown key 'selectr'"):
+        Field.from_dict({"selectr": "div"})
+
+
+def test_underscore_prefixed_keys_are_allowed_as_comments() -> None:
+    parsed = parse_rule(
+        rule(
+            _comment=["a note"],
+            chapter={"url": "u", "_note": "chapter level comment"},
+            search={"url": "u", "_hint": "x"},
+        )
+    )
+
+    assert parsed.chapter is not None
+    assert parsed.search is not None
+
+
+def test_unknown_search_field_names_are_rejected() -> None:
+    with pytest.raises(RuleError, match=r"search\.fields: unknown field 'tital'"):
+        parse_rule(rule(search={"url": "u", "fields": {"tital": "h3"}}))
+
+
+def test_unknown_book_field_names_are_rejected() -> None:
+    with pytest.raises(RuleError, match=r"book\.fields: unknown field 'book_nme'"):
+        parse_rule(
+            rule(
+                book={
+                    "url": "u",
+                    "fields": {"book_nme": "h1"},
+                    "chapters": {"item": "a"},
+                }
+            )
+        )
+
+
+def test_underscore_prefixed_field_names_are_allowed() -> None:
+    parsed = parse_rule(
+        rule(
+            search={"url": "u", "fields": {"_note": "x", "url": {"attr": "href"}}},
+        )
+    )
+    assert parsed.search is not None
+
+
+def test_duplicate_json_keys_are_rejected_at_load_time() -> None:
+    # ``json.loads`` silently keeps the last duplicate; for rule documents a
+    # duplicate key is a copy/paste error and must be reported.
+    text = '{"site_key": "dup", "site_key": "dup2", "chapter": {"url": "u"}}'
+
+    with pytest.raises(RuleError, match=r"duplicate key 'site_key'"):
+        loads_rule_json(text, source="dup.json")
+
+
+def test_loads_rule_json_rejects_invalid_json_and_non_object_root() -> None:
+    with pytest.raises(RuleError, match="invalid JSON"):
+        loads_rule_json("{ not json", source="x.json")
+    with pytest.raises(RuleError, match="JSON object"):
+        loads_rule_json("[1, 2]", source="x.json")
+
+
+def test_loads_rule_json_accepts_nested_documents() -> None:
+    data = loads_rule_json(
+        '{"site_key": "x", "chapter": {"url": "u", "headers": {"A": "b"}}}',
+        source="x.json",
+    )
+    assert data["chapter"]["headers"] == {"A": "b"}
+
+
+# --------------------------------------------------------------------------- #
+# negative regex groups must be rejected at parse time
+# --------------------------------------------------------------------------- #
+def test_negative_group_is_rejected() -> None:
+    with pytest.raises(RuleError, match=r"'group' must be a non-negative integer"):
+        Field.from_dict({"selector": "a", "regex": r"(\d+)", "group": -1})
+    with pytest.raises(RuleError, match=r"book_id_group must be a non-negative"):
+        parse_rule(rule(search={"url": "u", "book_id_group": -1}))
+    with pytest.raises(RuleError, match=r"id_group must be a non-negative"):
+        parse_rule(rule(book={"url": "u", "chapters": {"item": "a", "id_group": -1}}))
+
+
+# --------------------------------------------------------------------------- #
+# empty attr outside the top field maps
+# --------------------------------------------------------------------------- #
+def test_empty_attr_on_chapters_and_chapter_fields_is_rejected() -> None:
+    with pytest.raises(RuleError, match=r"book\.chapters\.url: empty 'attr'"):
+        parse_rule(
+            rule(book={"url": "u", "chapters": {"item": "a", "url": {"attr": ""}}})
+        )
+    with pytest.raises(RuleError, match=r"book\.chapters\.title: empty 'attr'"):
+        parse_rule(
+            rule(book={"url": "u", "chapters": {"item": "a", "title": {"attr": ""}}})
+        )
+    with pytest.raises(RuleError, match=r"chapter\.content: empty 'attr'"):
+        parse_rule(rule(chapter={"url": "u", "content": {"attr": ""}}))
+    with pytest.raises(RuleError, match=r"chapter\.title: empty 'attr'"):
+        parse_rule(rule(chapter={"url": "u", "title": {"attr": ""}}))
+
+
+# --------------------------------------------------------------------------- #
+# header values are request input: no control characters allowed
+# --------------------------------------------------------------------------- #
+def test_headers_with_control_characters_are_rejected() -> None:
+    with pytest.raises(RuleError, match="must not contain control characters"):
+        parse_rule(rule(headers={"X-Custom": "a\r\nX-Evil: 1"}))
+    with pytest.raises(RuleError, match="must not contain control characters"):
+        parse_rule(rule(search={"url": "u", "headers": {"X-Custom": "a\x00b"}}))
 
 
 def test_invalid_css_selector_raises_rule_error() -> None:

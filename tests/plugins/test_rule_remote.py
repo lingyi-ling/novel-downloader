@@ -316,6 +316,20 @@ def test_fetch_rule_requires_a_json_object_root(
         fetch_rule("https://rules.example/list.json")
 
 
+def test_fetch_rule_rejects_duplicate_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = (
+        b'{"site_key": "dup", "site_key": "dup2",'
+        b' "chapter": {"url": "{base_url}/{book_id}/{chapter_id}.html"},'
+        b' "base_url": "https://demo.example"}'
+    )
+    monkeypatch.setattr(rule_remote, "urlopen", _Opener(_FakeResponse(body)))
+
+    with pytest.raises(RuleError, match=r"duplicate key 'site_key'"):
+        fetch_rule("https://rules.example/dup.json")
+
+
 @pytest.mark.parametrize(
     "url",
     ["file:///etc/passwd", "ftp://rules.example/a.json", "data:application/json,{}"],
@@ -504,8 +518,12 @@ def test_install_rejects_a_non_mapping_or_path() -> None:
 
 
 def test_install_reports_an_unserializable_mapping(_isolated_rules: Path) -> None:
+    # ``json_body`` is the one schema section that carries arbitrary values.
     payload = _rule("unserializable")
-    payload["extra"] = {"object": object()}
+    payload["search"] = {
+        "url": "https://demo.example/s",
+        "json_body": {"x": object()},
+    }
 
     with pytest.raises(RuleError, match="not JSON-serializable"):
         install_rule(payload)
