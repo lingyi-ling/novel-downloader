@@ -1167,7 +1167,7 @@ def test_sources_defaults_to_list_without_a_subcommand(
     assert any("No rule-based sources" in message for message in messages.warn)
 
 
-def test_sources_check_missing_file_exits_one(
+def test_sources_check_missing_file_is_usage_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1179,5 +1179,23 @@ def test_sources_check_missing_file_exits_one(
     with pytest.raises(SystemExit) as excinfo:
         args.func(args)
 
-    assert excinfo.value.code == 1
+    # A nonexistent rule path is a bad argument (usage error, exit 2), not a
+    # runtime failure -- aligned with ``sources add`` and the CLI contract.
+    assert excinfo.value.code == 2
+    assert any("not found" in message for message in messages.error)
+
+
+def test_sources_add_missing_file_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    messages = _capture_ui(monkeypatch, sources)
+
+    args = _parser(SourcesCmd).parse_args(
+        ["sources", "add", str(tmp_path / "missing.json")]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    assert excinfo.value.code == 2
     assert any("not found" in message for message in messages.error)

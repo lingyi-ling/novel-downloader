@@ -20,8 +20,17 @@ commands the way a real user does, still fully offline:
 * the completion scripts emitted by ``completion`` are actually valid shell
   input: the Bash script passes ``bash -n`` and sources cleanly (when a Bash
   exists), the Zsh script passes ``zsh -n`` (when a Zsh exists) and is
-  structurally checked otherwise;
-* usage-error contracts (exit 2) for missing keywords / subcommands.
+  structurally checked otherwise, and every script is written with LF line
+  endings only (raw bytes, so the Windows CRLF regression cannot hide behind
+  text-mode decoding);
+* usage-error contracts (exit 2) for missing keywords / subcommands, and for
+  ``sources check/add`` pointing at a rule file that does not exist;
+* the ``python -m`` entry paths stay clean: running the CLI module directly
+  must not emit runpy's double-import ``RuntimeWarning``, and
+  ``python -m novel_downloader`` (the package ``__main__``) must keep working
+  through the same lazy attribute;
+* ``doctor`` reports ``novel_downloader.__version__`` (what ``--version``
+  prints) instead of possibly stale installed-distribution metadata.
 
 Harness reuse: the subprocess runner, the in-process runner and the port
 helper come from ``tests.apps.test_cli_e2e`` so both modules stay byte
@@ -45,14 +54,19 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from novel_downloader import __version__
+from novel_downloader.apps.cli.commands.completion import SHELLS
 from tests.apps.test_cli_e2e import (
     ALL_COMMANDS,
+    CLI_MODULE,
     _bindable_port,
+    _child_env,
     _seed_config,
     run_cli,
     run_cli_inproc,
@@ -168,7 +182,11 @@ def test_container_command_without_subcommand_is_usage_error(
 
 def test_sources_bare_command_defaults_to_list(tmp_path: Path) -> None:
     # Unlike config/clean/follow, a bare ``sources`` runs the list action
-    # instead of erroring out.
+    # instead of erroring out. This is the *documented* contract, not drift
+    # (see the SourcesCmd module docstring): the other containers only have
+    # state-changing actions, so a bare invocation must refuse to guess;
+    # ``sources`` has a read-only, idempotent default (git-remote style) and
+    # exiting 2 would break users and scripts for no safety gain.
     result = run_cli("sources", cwd=tmp_path, home=tmp_path / "home")
 
     assert result.returncode == 0, result.stderr
@@ -238,12 +256,24 @@ def test_sources_list_check_reports_rules_as_loadable(
     assert by_key["biquge5r"]["status"] == "ok"
 
 
-def test_sources_check_missing_file_fails(tmp_path: Path) -> None:
+def test_sources_check_missing_file_is_usage_error(tmp_path: Path) -> None:
+    # A rule path the user typed that does not exist is a bad argument:
+    # usage-error exit code 2, aligned with the missing-keyword/subcommand
+    # contract (and with ``sources add`` below), not a runtime failure (1).
     result = run_cli(
         "sources", "check", "does-not-exist.json", cwd=tmp_path, home=tmp_path / "home"
     )
 
-    assert result.returncode == 1, result.stderr
+    assert result.returncode == 2, result.stderr
+    assert "Rule file not found" in result.stderr
+
+
+def test_sources_add_missing_file_is_usage_error(tmp_path: Path) -> None:
+    result = run_cli(
+        "sources", "add", "does-not-exist.json", cwd=tmp_path, home=tmp_path / "home"
+    )
+
+    assert result.returncode == 2, result.stderr
     assert "Rule file not found" in result.stderr
 
 
@@ -341,6 +371,30 @@ def test_completion_zsh_script_static_structure(tmp_path: Path) -> None:
             assert line.rstrip().endswith(")"), line
 
 
+@pytest.mark.parametrize("shell", sorted(SHELLS))
+def test_completion_script_emits_lf_line_endings(shell: str, tmp_path: Path) -> None:
+    """Every completion script must be written with LF-only line endings.
+
+    The child is run with ``text=False`` on purpose: universal-newline
+    decoding would translate CRLF back to LF and hide exactly the Windows
+    regression this guards against. A user redirecting the script on Windows
+    (``novel-cli completion --shell bash > x.bash``) gets raw bytes, and
+    Bash/Zsh cannot source a CRLF script (``$'\\r': command not found``).
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", CLI_MODULE, "completion", "--shell", shell],
+        capture_output=True,
+        cwd=str(tmp_path),
+        env=_child_env(tmp_path / "home"),
+        timeout=240.0,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout, f"empty completion script for {shell}"
+    assert b"\r" not in result.stdout, f"CRLF found in the {shell} script"
+
+
 @pytest.mark.skipif(
     shutil.which("zsh") is None,
     reason="zsh is not installed; only static validation is possible",
@@ -420,6 +474,30 @@ def test_doctor_json_after_config_init_exits_zero(tmp_path: Path) -> None:
     assert checks["settings"]["ok"] is True
     assert str(tmp_path / "settings.toml") in checks["settings"]["detail"]
     assert checks["api_port"]["ok"] is True
+
+
+def test_doctor_reports_module_version_not_stale_metadata(tmp_path: Path) -> None:
+    """The package check must report ``__version__``, like ``--version``.
+
+    An editable install can carry stale distribution metadata (the dev tree
+    at 1.2.0 while the installed wheel metadata still says 1.0.0). Doctor
+    used to print the metadata number and silently disagree with
+    ``novel-cli --version``; now the source-of-truth module version is the
+    reported value (a disagreeing metadata number, if any, is only a note).
+    """
+    result = run_cli("doctor", "--json", cwd=tmp_path, home=tmp_path / "home")
+
+    # Exit 1 is expected (no settings.toml in the fresh home); the JSON
+    # document is still emitted, and the package check is not the failure.
+    assert result.returncode == 1, result.stderr
+    payload = json.loads(result.stdout)
+    checks = {check["key"]: check for check in payload["checks"]}
+    package = checks["package"]
+    assert package["ok"] is True
+    assert __version__ in package["detail"]
+    if package.get("data") and "installed_metadata" in package["data"]:
+        # Drift is reported as a note, with the module version first.
+        assert package["data"]["version"] == __version__
 
 
 # ---------------------------------------------------------------------------
@@ -504,3 +582,52 @@ def test_music_subcommand_help_lists_key_options(
     assert f"usage: novel-cli music {subcommand}" in result.stdout
     for token in tokens:
         assert token in result.stdout, f"music {subcommand}: missing {token!r}"
+
+
+# ---------------------------------------------------------------------------
+# python -m entry paths: single execution, no runpy warning
+# ---------------------------------------------------------------------------
+
+
+def test_python_m_cli_module_runs_without_runpy_warning(tmp_path: Path) -> None:
+    """``python -m novel_downloader.apps.cli.main`` must not warn on stderr.
+
+    runpy imports the package ``novel_downloader.apps.cli`` before executing
+    the module. When that package eagerly imported ``.main``, the module was
+    executed twice (once as itself, once as ``__main__``) and every run
+    printed ``RuntimeWarning: ... found in sys.modules after import of
+    package ...`` -- polluting scripts that parse stderr. The package now
+    resolves ``cli_main`` lazily (PEP 562), so the ``-m`` run executes the
+    module exactly once.
+    """
+    result = run_cli("--version", cwd=tmp_path, home=tmp_path / "home")
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == f"NovelDownloader {__version__}"
+    assert "RuntimeWarning" not in result.stderr
+    assert result.stderr.strip() == "", result.stderr
+
+
+def test_python_m_package_entry_point_still_runs(tmp_path: Path) -> None:
+    """``python -m novel_downloader`` keeps working through the lazy import.
+
+    ``novel_downloader/__main__.py`` fetches ``cli_main`` from the
+    ``novel_downloader.apps.cli`` package; the lazy attribute must keep
+    serving that path, otherwise the warning fix would have traded one entry
+    point for another.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "novel_downloader", "--version"],
+        capture_output=True,
+        cwd=str(tmp_path),
+        env=_child_env(tmp_path / "home"),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=240.0,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"NovelDownloader {__version__}"
+    assert "RuntimeWarning" not in result.stderr

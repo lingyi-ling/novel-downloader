@@ -97,7 +97,7 @@ def test_check_rejects_a_missing_file(tmp_path: Path, recorder: _Recorder) -> No
     with pytest.raises(SystemExit) as excinfo:
         SourcesCmd._check(str(tmp_path / "nope.json"))
 
-    assert excinfo.value.code == 1
+    assert excinfo.value.code == 2
     assert recorder.errors and not recorder.success
     assert "not found" in recorder.errors[0].lower()
 
@@ -309,7 +309,7 @@ def test_add_reports_a_missing_file(tmp_path: Path, recorder: _Recorder) -> None
     with pytest.raises(SystemExit) as excinfo:
         SourcesCmd._add(str(tmp_path / "ghost.json"), force=False)
 
-    assert excinfo.value.code == 1
+    assert excinfo.value.code == 2
     assert recorder.errors
     assert "not found" in recorder.errors[0].lower()
 

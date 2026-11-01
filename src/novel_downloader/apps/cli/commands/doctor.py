@@ -181,16 +181,35 @@ def _check_python() -> Check:
 
 
 def _check_package() -> Check:
-    """Report the installed package version."""
-    try:
-        version = dist_version("novel-downloader")
-    except PackageNotFoundError:
-        from novel_downloader import __version__
+    """Report the package version.
 
-        version = __version__
+    ``novel_downloader.__version__`` is the source of truth: it is what
+    ``novel-cli --version`` prints, and it always reflects the running code.
+    The installed distribution metadata is only a secondary signal -- an
+    editable install can carry stale metadata (e.g. 1.0.0 while the source
+    tree is at 1.2.0), which used to make ``doctor`` disagree with
+    ``--version``. When the two disagree, both numbers are reported so the
+    drift is visible instead of silently masked.
+    """
+    from novel_downloader import __version__
+
+    try:
+        installed = dist_version("novel-downloader")
+    except PackageNotFoundError:
+        return Check(t("Package version"), True, __version__, key="package")
     except Exception as exc:
         return Check(t("Package version"), False, str(exc), key="package")
-    return Check(t("Package version"), True, version, key="package")
+    if installed == __version__:
+        return Check(t("Package version"), True, __version__, key="package")
+    return Check(
+        t("Package version"),
+        True,
+        t("{version} (installed metadata: {installed})").format(
+            version=__version__, installed=installed
+        ),
+        key="package",
+        data={"version": __version__, "installed_metadata": installed},
+    )
 
 
 def _check_settings_file() -> Check:

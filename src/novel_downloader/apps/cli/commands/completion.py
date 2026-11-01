@@ -14,6 +14,8 @@ portable between Bash, Zsh and PowerShell.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 from argparse import ArgumentParser, Namespace, _SubParsersAction
@@ -242,4 +244,25 @@ class CompletionCmd(Command):
 
         shell = str(args.shell or detect_shell())
         node = build_completion_tree(commands)
-        ui.emit(render_completion(node, shell))
+        _emit_lf(render_completion(node, shell))
+
+
+def _emit_lf(script: str) -> None:
+    """Write ``script`` to stdout with LF line endings on every platform.
+
+    Windows text-mode stdout translates ``"\\n"`` to ``"\\r\\n"``, and the
+    completion script is shell *source code*: Bash and Zsh choke on CRLF
+    (``$'\\r': command not found``) when a redirected script is sourced.
+    Switching the stream's newline mode to ``"\\n"`` keeps the emitted bytes
+    shell-clean on Windows; POSIX platforms are unaffected, and PowerShell
+    accepts LF-only scripts, so all three generators share this path.
+    """
+    # ``TextIO`` (the declared type of ``sys.stdout``) has no ``reconfigure``;
+    # only the real ``TextIOWrapper`` does. Streams without it (an embedder's
+    # or a test's replacement) keep the platform default. A closed or locked
+    # stream raises, and is suppressed: emit un-reconfigured rather than fail
+    # a command whose content is already correct.
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        with contextlib.suppress(ValueError, OSError):
+            sys.stdout.reconfigure(newline="\n")
+    ui.emit(script)

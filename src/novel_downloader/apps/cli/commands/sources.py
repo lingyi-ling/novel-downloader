@@ -5,6 +5,15 @@ novel_downloader.apps.cli.commands.sources
 
 Inspect the rule-driven ("book source") plugins: list what is available and
 validate a rule file without touching any network.
+
+Design note -- bare ``sources`` defaults to ``list`` while ``config``,
+``clean`` and ``follow`` exit 2 without a subcommand. This is intentional,
+not drift: those containers only have state-changing actions (no safe
+default to guess), while ``sources`` has a read-only, idempotent one whose
+loss on a bare invocation would serve nobody (the ``git remote`` /
+``pip list`` convention). ``sources`` bare printing the table is also the
+documented contract in the e2e suite; changing it to exit 2 would break
+existing users and scripts for no safety gain.
 """
 
 from __future__ import annotations
@@ -172,6 +181,10 @@ class SourcesCmd(Command):
 
     @classmethod
     def run(cls, args: Namespace) -> None:
+        # Bare ``sources`` intentionally falls through to the read-only list
+        # action (see the module docstring for the rationale); config/clean/
+        # follow instead require an explicit subcommand because none of their
+        # actions is a safe default.
         action = getattr(args, "action", None) or "list"
         if action == "check":
             cls._check(args.path)
@@ -282,7 +295,10 @@ class SourcesCmd(Command):
 
         path = Path(path_str)
         if not path.is_file():
-            fail(t("Rule file not found: {path}").format(path=path_str))
+            # A path the user typed that does not exist is a usage error
+            # (bad argument), not a runtime failure -- align with the
+            # missing-argument contract (exit 2) shared by the rest of the CLI.
+            fail(t("Rule file not found: {path}").format(path=path_str), EXIT_USAGE)
         try:
             data = loads_rule_json(
                 path.read_text(encoding="utf-8-sig"), source=path.name
@@ -327,7 +343,9 @@ class SourcesCmd(Command):
         assert path_str is not None  # narrowed by the check above
         path = Path(path_str)
         if not path.is_file():
-            fail(t("Rule file not found: {path}").format(path=path_str))
+            # Same contract as ``sources check``: a nonexistent path is a
+            # usage error (exit 2), not a runtime failure.
+            fail(t("Rule file not found: {path}").format(path=path_str), EXIT_USAGE)
 
         try:
             target = install_rule(path, force=force)
