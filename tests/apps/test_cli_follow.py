@@ -15,6 +15,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -686,6 +689,313 @@ def test_doctor_exit_codes(monkeypatch: pytest.MonkeyPatch) -> None:
     args.func(args)  # all pass
 
 
+def test_doctor_check_to_dict_shape() -> None:
+    payload = Check("Python", True, "3.11", key="python").to_dict()
+    assert payload == {
+        "key": "python",
+        "name": "Python",
+        "ok": True,
+        "fatal": True,
+        "detail": "3.11",
+    }
+
+    # Without a key the name is used; optional fields are omitted when empty.
+    payload = Check("Music", False, "missing", fatal=False).to_dict()
+    assert payload == {
+        "key": "Music",
+        "name": "Music",
+        "ok": False,
+        "fatal": False,
+        "detail": "missing",
+    }
+
+    payload = Check("Cache", True, data={"files": 2}).to_dict()
+    assert payload["data"] == {"files": 2}
+
+
+def test_doctor_dependencies_matrix() -> None:
+    result = doctor._check_dependencies(
+        core=[("json", "dist-without-metadata"), ("nope_module", "nope-dist")],
+        optional=[("nope_optional_module", "nope-optional-dist")],
+    )
+    assert result.ok is False
+    assert result.fatal is True
+    assert "nope-dist" in result.detail
+    data = result.data
+    assert data is not None
+    rows = {row["module"]: row for row in data["dependencies"]}
+    # Importable stdlib module without installed metadata: present, no version.
+    assert rows["json"]["installed"] is True
+    assert rows["json"]["version"] is None
+    assert rows["json"]["optional"] is False
+    assert rows["nope_module"]["installed"] is False
+    assert rows["nope_optional_module"]["optional"] is True
+    assert data["python"]["minimum"] == "3.11"
+
+    result = doctor._check_dependencies(
+        core=[("json", "dist-without-metadata")], optional=[]
+    )
+    assert result.ok is True
+    assert result.fatal is True
+    assert "1/1" in result.detail
+    assert "0/0" in result.detail
+
+
+def test_doctor_cache_dir_reports_usage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "a.bin").write_bytes(b"12345")
+    (cache / "b.bin").write_bytes(b"1234567")
+    monkeypatch.setattr(doctor, "_cache_dir", lambda: cache)
+
+    result = doctor._check_cache_dir()
+    assert result.ok is True
+    assert result.fatal is False
+    assert result.data == {"path": str(cache), "files": 2, "bytes": 12}
+    assert "2" in result.detail
+    assert "clean cache" in result.suggestion
+
+    # An empty (or missing) cache directory has nothing to reclaim.
+    monkeypatch.setattr(doctor, "_cache_dir", lambda: tmp_path / "missing")
+    result = doctor._check_cache_dir()
+    assert result.ok is True
+    assert result.suggestion == ""
+    assert result.data == {"path": str(tmp_path / "missing"), "files": 0, "bytes": 0}
+
+
+def test_doctor_log_dir_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    blocked = tmp_path / "blocked"
+    blocked.write_text("i am a file", encoding="utf-8")
+    monkeypatch.setattr(doctor, "_log_dir", lambda: blocked)
+
+    result = doctor._check_log_dir()
+    assert result.ok is False
+    assert result.fatal is True
+    assert "log_dir" in result.suggestion
+
+
+def test_doctor_log_dir_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "logs"
+    monkeypatch.setattr(doctor, "_log_dir", lambda: target)
+
+    result = doctor._check_log_dir()
+    assert result.ok is True
+    assert target.is_dir()  # the probe creates the directory like the app would
+
+
+def test_doctor_disk_space(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(doctor, "disk_free", lambda _path: 10 * 1024**3)
+    result = doctor._check_disk_space(path=tmp_path)
+    assert result.ok is True
+    assert result.fatal is False
+    assert "10.0 GiB" in result.detail
+    assert result.data == {
+        "path": str(tmp_path),
+        "free_bytes": 10 * 1024**3,
+        "minimum_bytes": doctor.LOW_DISK_FREE_BYTES,
+    }
+
+    monkeypatch.setattr(doctor, "disk_free", lambda _path: 1024)
+    result = doctor._check_disk_space(minimum=2048, path=tmp_path)
+    assert result.ok is False
+    assert result.fatal is False  # advisory: a full disk is not a broken install
+    assert "1.0 KiB" in result.detail
+    assert "Free up disk space" in result.suggestion
+    assert result.data["minimum_bytes"] == 2048
+
+    # An unmeasurable volume (platform call failed) stays green.
+    monkeypatch.setattr(doctor, "disk_free", lambda _path: None)
+    result = doctor._check_disk_space(path=tmp_path)
+    assert result.ok is True
+    assert result.detail == "unknown"
+
+
+def test_doctor_site_sample_is_deterministic() -> None:
+    sites = [f"site_{index}" for index in range(20)]
+    first = doctor._site_sample(sites, 8)
+    assert first == doctor._site_sample(sites, 8)
+    assert len(first) == 8
+    assert set(first) <= set(sites)
+    assert doctor._site_sample(sites, 0) == []
+    assert doctor._site_sample(sites[:2], 5) == sites[:2]
+
+
+def test_doctor_site_plugins_all_loadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    sites = ("site_a", "site_b", "site_c")
+    imported: list[str] = []
+    monkeypatch.setattr(doctor, "DOWNLOAD_SUPPORT_SITES", sites)
+    monkeypatch.setattr(doctor, "_import_site_plugin", imported.append)
+
+    result = doctor._check_site_plugins()
+    assert result.ok is True
+    assert result.fatal is False
+    assert result.data == {
+        "sampled": list(sites),
+        "failed": [],
+    }
+    assert sorted(imported) == [
+        "novel_downloader.plugins.sites.site_a.fetcher",
+        "novel_downloader.plugins.sites.site_a.parser",
+        "novel_downloader.plugins.sites.site_b.fetcher",
+        "novel_downloader.plugins.sites.site_b.parser",
+        "novel_downloader.plugins.sites.site_c.fetcher",
+        "novel_downloader.plugins.sites.site_c.parser",
+    ]
+
+
+def test_doctor_site_plugins_partial_failure_is_advisory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sites = ("site_a", "site_b", "site_c")
+    monkeypatch.setattr(doctor, "DOWNLOAD_SUPPORT_SITES", sites)
+
+    def broken(module_name: str) -> None:
+        if ".site_b." in module_name:
+            raise ImportError("cannot import")
+
+    monkeypatch.setattr(doctor, "_import_site_plugin", broken)
+
+    result = doctor._check_site_plugins()
+    assert result.ok is False
+    assert result.fatal is False  # one broken site does not break the install
+    assert result.detail.startswith("2 import failure")
+    failed = result.data["failed"]
+    assert failed == [
+        "site_b/fetcher: cannot import",
+        "site_b/parser: cannot import",
+    ]
+
+
+def test_doctor_site_plugins_total_failure_is_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(doctor, "DOWNLOAD_SUPPORT_SITES", ("site_a",))
+
+    def broken(_module_name: str) -> None:
+        raise ImportError("nope")
+
+    monkeypatch.setattr(doctor, "_import_site_plugin", broken)
+
+    result = doctor._check_site_plugins()
+    assert result.ok is False
+    assert result.fatal is True
+    assert "Reinstall" in result.suggestion
+
+
+class _ProbeHandler(BaseHTTPRequestHandler):
+    """Answers every HEAD with 200; keeps request logging quiet."""
+
+    def do_HEAD(self) -> None:  # noqa: N802 - http.server API name
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        return
+
+
+def test_doctor_network_probe_reachable() -> None:
+    server = HTTPServer(("127.0.0.1", 0), _ProbeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        result = doctor._check_network([url], timeout=5.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+    assert result.ok is True
+    assert result.fatal is False
+    assert result.data is not None
+    assert result.data["endpoints"][url] == {"ok": True, "status": "HTTP 200"}
+    assert result.data["timeout"] == 5.0
+    assert "1/1" in result.detail
+
+
+def test_doctor_network_probe_unreachable() -> None:
+    # Reserve a port, then close it so nothing is listening there.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserve:
+        reserve.bind(("127.0.0.1", 0))
+        port = reserve.getsockname()[1]
+    url = f"http://127.0.0.1:{port}"
+
+    result = doctor._check_network([url], timeout=1.0)
+
+    assert result.ok is False
+    assert result.fatal is False
+    assert result.data is not None
+    assert result.data["endpoints"][url]["ok"] is False
+    assert "firewall" in result.suggestion
+
+
+def test_doctor_collect_checks_online_adds_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(doctor, "_port_is_free", lambda _port: True)
+    monkeypatch.setattr(
+        doctor,
+        "_check_network",
+        lambda: Check("network", True, fatal=False, key="network"),
+    )
+
+    offline = doctor.collect_checks(65530)
+    online = doctor.collect_checks(65530, online=True)
+
+    assert all(check.key != "network" for check in offline)
+    assert online[-1].key == "api_port"  # the port check always closes the list
+    assert online[-2].key == "network"
+
+
+def test_doctor_json_output(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _capture_ui(monkeypatch, doctor)
+    monkeypatch.setattr(
+        doctor,
+        "collect_checks",
+        lambda _port=8081, *, online=False: [
+            Check("Python", True, "3.11.0", key="python"),
+            Check("Music", False, "missing", fatal=False, key="music"),
+        ],
+    )
+    parser = _parser(DoctorCmd)
+
+    args = parser.parse_args(["doctor", "--json"])
+    args.func(args)  # only an optional failure: exit 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"] == {
+        "total": 2,
+        "failures": 0,
+        "optional_failures": 1,
+        "ok": True,
+    }
+    assert [check["key"] for check in payload["checks"]] == ["python", "music"]
+    assert payload["checks"][0]["detail"] == "3.11.0"
+    assert payload["checks"][1]["fatal"] is False
+
+    monkeypatch.setattr(
+        doctor,
+        "collect_checks",
+        lambda _port=8081, *, online=False: [Check("config", False, key="config")],
+    )
+    args = parser.parse_args(["doctor", "--json"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+    assert exc_info.value.code == 1
+
+
 # ---------------------------------------------------------------------------
 # storage
 # ---------------------------------------------------------------------------
@@ -726,8 +1036,18 @@ def test_storage_json_reports_sizes(
     assert payload["cache"]["bytes"] == 7
     assert payload["downloads"]["files"] == 0
     assert payload["logs"]["files"] == 0
-    assert payload["total"] == {"files": 3, "bytes": 15}
+    assert payload["total"] == {
+        "files": 3,
+        "bytes": 15,
+        "reclaimable_bytes": 7,
+        "reclaimable_files": 1,
+    }
     assert payload["raw"]["path"] == str(paths["raw"])
+    assert payload["raw"]["free_bytes"] is not None
+    # ``nested`` is the only non-empty immediate subdirectory of ``raw``.
+    assert payload["raw"]["top"] == [
+        {"name": "nested", "files": 1, "bytes": 5}
+    ]
 
 
 def test_storage_renders_table(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

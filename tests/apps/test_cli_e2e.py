@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tomllib
@@ -66,7 +67,15 @@ ALL_COMMANDS = (
 #: Key option/subcommand names each ``<cmd> --help`` page must mention.
 HELP_TOKENS: dict[str, tuple[str, ...]] = {
     "download": ("--site", "--start", "--end", "--no-export", "--format", "--json"),
-    "search": ("--site", "--limit", "--site-limit", "--timeout", "--json", "--sort"),
+    "search": (
+        "--site",
+        "--limit",
+        "--site-limit",
+        "--timeout",
+        "--json",
+        "--sort",
+        "--group",
+    ),
     "follow": ("add", "remove", "list", "check"),
     "export": ("--format", "--site", "--stage", "--json"),
     "login": ("--timeout", "--list"),
@@ -322,8 +331,99 @@ def test_search_json_outputs_valid_json_with_stubbed_search(
     assert captured["keyword"] == "test"
     assert captured["per_site_limit"] == 10
     assert captured["sort"] == "quality"
+    # Grouping is opt-in: without ``--group`` the search stays flat.
+    assert captured["group"] is False
     assert callable(captured["on_event"])
     assert "0 site(s) completed / 0 failed / 0 skipped" in err
+
+
+def test_search_group_flag_merges_results_in_json_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _seed_config(tmp_path)
+    captured: dict[str, Any] = {}
+
+    async def fake_search(**kwargs: Any) -> list[dict[str, Any]]:
+        captured.update(kwargs)
+        return [
+            {
+                "site": "beta",
+                "book_id": "beta-1",
+                "book_url": "https://example.invalid/beta/1",
+                "cover_url": "",
+                "title": "三体",
+                "author": "刘慈欣",
+                "latest_chapter": "",
+                "update_date": "",
+                "word_count": "300万字",
+                "priority": 100,
+                "sources": ["beta", "alpha"],
+            }
+        ]
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    code = run_cli_inproc(
+        monkeypatch,
+        ["search", "--json", "--group", "三体"],
+        cwd=tmp_path,
+        home=tmp_path / "home",
+    )
+
+    assert code == 0
+    out, _err = capsys.readouterr()
+    payload = json.loads(out)
+    # ``--group`` reaches the aggregate search and the merged entries (with
+    # their source capsules) survive the JSON round trip unchanged.
+    assert captured["group"] is True
+    assert payload[0]["site"] == "beta"
+    assert payload[0]["sources"] == ["beta", "alpha"]
+
+
+def test_search_no_group_flag_keeps_flat_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _seed_config(tmp_path)
+    captured: dict[str, Any] = {}
+
+    async def fake_search(**kwargs: Any) -> list[dict[str, Any]]:
+        captured.update(kwargs)
+        return [
+            {
+                "site": "beta",
+                "book_id": "beta-1",
+                "book_url": "https://example.invalid/beta/1",
+                "cover_url": "",
+                "title": "三体",
+                "author": "刘慈欣",
+                "latest_chapter": "",
+                "update_date": "",
+                "word_count": "300万字",
+                "priority": 100,
+            }
+        ]
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    code = run_cli_inproc(
+        monkeypatch,
+        ["search", "--json", "三体"],
+        cwd=tmp_path,
+        home=tmp_path / "home",
+    )
+
+    assert code == 0
+    out, _err = capsys.readouterr()
+    payload = json.loads(out)
+    # The default output stays the historical flat shape: one row per result,
+    # no grouping parameter, no capsule key.
+    assert captured["group"] is False
+    assert len(payload) == 1
+    assert "sources" not in payload[0]
 
 
 # ---------------------------------------------------------------------------
@@ -379,14 +479,29 @@ def test_follow_remove_unknown_book_is_idempotent(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_port_65530_all_checks_pass(tmp_path: Path) -> None:
-    _seed_config(tmp_path)
+def _bindable_port() -> int:
+    """Return a loopback port that can be bound right now.
 
-    result = run_cli("doctor", "--port", "65530", cwd=tmp_path, home=tmp_path / "home")
+    A fixed port is unreliable on a busy machine: an unrelated outbound
+    connection can hold it (Windows then refuses the bind with 10013), which
+    has nothing to do with the doctor command under test.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def test_doctor_all_checks_pass(tmp_path: Path) -> None:
+    _seed_config(tmp_path)
+    port = _bindable_port()
+
+    result = run_cli(
+        "doctor", "--port", str(port), cwd=tmp_path, home=tmp_path / "home"
+    )
 
     assert result.returncode == 0, result.stderr
     assert "All checks passed." in result.stderr
-    assert "API port 65530" in result.stderr
+    assert f"API port {port}" in result.stderr
     assert "✗" not in result.stderr
 
 

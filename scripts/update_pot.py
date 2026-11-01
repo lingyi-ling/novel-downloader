@@ -9,6 +9,7 @@ runs are reproducible (safe for CI freshness checks).
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,16 +31,32 @@ _SOURCES = (
 )
 _FALLBACK_DATE = datetime(2025, 1, 1, tzinfo=UTC)
 
+#: Matches the header line a template must carry to declare its creation date.
+_DATE_DECLARED_RE = re.compile(r'^"POT-Creation-Date:', re.MULTILINE)
+
 
 def _previous_creation_date() -> datetime:
-    """Reuse the existing template date, keeping regenerated output stable."""
+    """Reuse the creation date the template itself declares, if any.
+
+    Babel substitutes ``datetime.now()`` when the header block carries no
+    ``POT-Creation-Date`` at all (e.g. hand-made templates), raises on a
+    malformed one, and may store other non-datetime values as-is. Only a date
+    the file actually declares, parsed into a real ``datetime``, is reused;
+    everything else falls back so repeated runs stay byte-identical.
+    """
     if not OUT_FILE.is_file():
         return _FALLBACK_DATE
     try:
+        declared = _DATE_DECLARED_RE.search(
+            OUT_FILE.read_text("utf-8", errors="replace")
+        )
         with OUT_FILE.open("rb") as f:
-            return read_po(f).creation_date or _FALLBACK_DATE
+            raw = read_po(f).creation_date
     except Exception:
         return _FALLBACK_DATE
+    if declared and isinstance(raw, datetime):
+        return raw
+    return _FALLBACK_DATE
 
 
 def _location(prefix: str, filename: str, lineno: int) -> tuple[str, int]:
