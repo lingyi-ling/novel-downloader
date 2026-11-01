@@ -102,6 +102,11 @@ docs = [
     "mkdocstrings",
     "mkdocstrings-python",
 ]
+# Website deployment (scripts/deploy_site.py).  Kept out of the runtime
+# dependencies: end users never need SSH.
+deploy = [
+    "paramiko",
+]
 tests = [
     "babel",
     "brotli>=1.2.1",
