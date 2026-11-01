@@ -1305,3 +1305,81 @@ class TestVerifyAssets:
     ) -> None:
         with pytest.raises(release.ReleaseError, match="vanished"):
             release.verify_assets(_ReleaseClient(None), TAG, _specs(release, tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# installer build step
+# ---------------------------------------------------------------------------
+
+
+def _build_prefix(module: Any, script: str) -> tuple[str, ...]:
+    """The argv prefix release.py uses to invoke a script in ``scripts/``."""
+    scripts = Path(module.__file__).resolve().parent
+    return (module.sys.executable, str(scripts / script))
+
+
+class TestInstallerStep:
+    def test_builds_the_installer_when_desktop_is_targeted(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root, sub, http = harness
+        _route_tag_steps(sub, local=False, remote=False)
+        _route_publish(http, (*ZIP_NAMES, "SHA256SUMS.txt", "manifest.json"))
+        sub.route(_build_prefix(release, "build_release.py"))
+        sub.route(_build_prefix(release, "build_desktop.py"))
+        monkeypatch.setattr(release.sys, "platform", "win32")
+
+        rc = release.main(["--repo", SLUG, "--skip-android"])
+
+        assert rc == 0
+        joined = [" ".join(command) for command in sub.commands()]
+        assert any("build_release.py" in line for line in joined)
+        assert any("build_desktop.py" in line for line in joined)
+
+    def test_installer_build_is_skipped_without_the_desktop_target(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root, sub, http = harness
+        _route_tag_steps(sub, local=False, remote=False)
+        _route_publish(http, (*ZIP_NAMES, "SHA256SUMS.txt", "manifest.json"))
+        sub.route(_build_prefix(release, "build_release.py"))
+        sub.route(_build_prefix(release, "build_desktop.py"))
+        monkeypatch.setattr(release.sys, "platform", "win32")
+
+        rc = release.main(["--repo", SLUG, "--skip-android", "--targets", "cli"])
+
+        assert rc == 0
+        joined = [" ".join(command) for command in sub.commands()]
+        assert not any("build_desktop.py" in line for line in joined)
+
+    def test_a_failed_installer_build_aborts_the_release(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root, sub, http = harness
+        _route_tag_steps(sub, local=False, remote=False)
+        _route_publish(http, (*ZIP_NAMES, "SHA256SUMS.txt", "manifest.json"))
+        sub.route(_build_prefix(release, "build_release.py"))
+        sub.route(
+            _build_prefix(release, "build_desktop.py"),
+            returncode=1,
+            stdout="ISCC failed\n",
+        )
+        monkeypatch.setattr(release.sys, "platform", "win32")
+
+        rc = release.main(["--repo", SLUG, "--skip-android"])
+
+        assert rc == 2
+        assert "build_desktop.py exited with 1" in capsys.readouterr().err
+        # Nothing was tagged or published.
+        assert not any(command[:2] == ["git", "tag"] for command in sub.commands())
+        assert http.requests == []

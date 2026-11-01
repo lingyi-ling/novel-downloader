@@ -883,6 +883,25 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
                 f"build_release.py exited with {proc.returncode}: "
                 + " | ".join(detail[-8:])
             )
+        # The Inno Setup installer is produced by build_desktop.py, not by
+        # build_release.py.  Without this step a "one command" release quietly
+        # ships the portable zip only, and the installer has to be built and
+        # uploaded by hand afterwards.
+        if "desktop" in targets and sys.platform == "win32":
+            installer_cmd = [
+                sys.executable,
+                str(SCRIPTS_DIR / "build_desktop.py"),
+            ]
+            _announce(installer_cmd)
+            proc = _run(
+                installer_cmd, cwd=repo_root, timeout=BUILD_TIMEOUT, check=False
+            )
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+                raise ReleaseError(
+                    f"build_desktop.py exited with {proc.returncode}: "
+                    + " | ".join(detail[-8:])
+                )
 
     release_dir = find_release_dir(repo_root, version)
     if release_dir is None:
