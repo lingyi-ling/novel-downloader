@@ -195,7 +195,7 @@ def test_load_existing_keys(tmp_path: Path):
         ("not json", {}),
         ("null", {}),
         # valid JSON that is not a mapping must not leak its type
-        ('[1, 2]', {}),
+        ("[1, 2]", {}),
         ("123", {}),
         ('"text"', {}),
         ("true", {}),

@@ -103,9 +103,7 @@ class FakeClient:
     def process_book(self, book: BookConfig, *, processors: Any, ui: Any) -> None:
         self.process_calls.append((book, processors))
 
-    def export_book(
-        self, book: BookConfig, *, cfg: Any, formats: Any, ui: Any
-    ) -> None:
+    def export_book(self, book: BookConfig, *, cfg: Any, formats: Any, ui: Any) -> None:
         self.export_calls.append(book)
 
 
@@ -132,9 +130,7 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(
         interactive.ui, "error", lambda msg, **k: calls["error"].append(msg)
     )
-    monkeypatch.setattr(
-        interactive.ui, "setup_logging", lambda *a, **k: None
-    )
+    monkeypatch.setattr(interactive.ui, "setup_logging", lambda *a, **k: None)
 
     state: dict[str, Any] = {
         "confirm_result": True,
@@ -201,9 +197,7 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         interactive.prompts, "select_books", lambda raw_dir, site: state["books"]
     )
 
-    async def fake_do_download(
-        adapter: Any, site: str, book: BookConfig
-    ) -> None:
+    async def fake_do_download(adapter: Any, site: str, book: BookConfig) -> None:
         calls["download"].append((site, book))
 
     monkeypatch.setattr(interactive, "_do_download", fake_do_download)
@@ -238,9 +232,7 @@ def test_start_interactive_dispatches_menu_actions(
 ) -> None:
     adapter = FakeAdapter()
     monkeypatch.setattr(interactive, "load_or_init_config", lambda: {"general": {}})
-    monkeypatch.setattr(
-        interactive, "ConfigAdapter", lambda config: adapter
-    )
+    monkeypatch.setattr(interactive, "ConfigAdapter", lambda config: adapter)
 
     ran: list[Any] = []
 
@@ -273,11 +265,13 @@ def test_start_interactive_enables_local_plugins_when_configured(
     monkeypatch.setattr(
         interactive,
         "ConfigAdapter",
-        lambda config: FakeAdapter(plugins_config={
-            "enable_local_plugins": True,
-            "local_plugins_path": "D:/plugins",
-            "override_builtins": True,
-        }),
+        lambda config: FakeAdapter(
+            plugins_config={
+                "enable_local_plugins": True,
+                "local_plugins_path": "D:/plugins",
+                "override_builtins": True,
+            }
+        ),
     )
 
     interactive.start_interactive()
@@ -610,9 +604,7 @@ def test_export_failure_is_reported(
         interactive.registrar, "get_client", lambda site, config=None: FailingClient()
     )
 
-    _REAL_EXPORT(
-        FakeAdapter(), site="qidian", book=BookConfig(book_id="1")
-    )
+    _REAL_EXPORT(FakeAdapter(), site="qidian", book=BookConfig(book_id="1"))
 
     assert rec["calls"]["error"]
 
@@ -625,8 +617,6 @@ def test_export_explicit_site_and_book_skips_prompts(
         interactive.registrar, "get_client", lambda site, config=None: client
     )
 
-    _REAL_EXPORT(
-        FakeAdapter(), site="qidian", book=BookConfig(book_id="7")
-    )
+    _REAL_EXPORT(FakeAdapter(), site="qidian", book=BookConfig(book_id="7"))
 
     assert client.export_calls == [BookConfig(book_id="7")]

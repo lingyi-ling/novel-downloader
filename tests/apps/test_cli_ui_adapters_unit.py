@@ -185,9 +185,7 @@ async def test_login_ui_prompt_asks_for_missing_fields(
 async def test_login_ui_prompt_cookie_field_is_parsed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        ui, "prompt", lambda message, **k: "sessionid=abc; token=xyz"
-    )
+    monkeypatch.setattr(ui, "prompt", lambda message, **k: "sessionid=abc; token=xyz")
 
     login_ui = ui_adapters.CLILoginUI()
     result = await login_ui.prompt([_field("cookies", type="cookie")])
@@ -200,9 +198,7 @@ async def test_login_ui_prompt_falls_back_to_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(ui, "prompt", lambda message, **k: "")
-    monkeypatch.setattr(
-        ui, "prompt_password", lambda message: "fallback-pw"
-    )
+    monkeypatch.setattr(ui, "prompt_password", lambda message: "fallback-pw")
 
     login_ui = ui_adapters.CLILoginUI()
     result = await login_ui.prompt(

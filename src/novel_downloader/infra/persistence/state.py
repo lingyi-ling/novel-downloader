@@ -74,9 +74,7 @@ class StateManager:
         (possibly hand-edited or partially written) file.
         """
         with contextlib.suppress(OSError):
-            os.replace(
-                self._path, self._path.with_name(self._path.name + ".corrupt")
-            )
+            os.replace(self._path, self._path.with_name(self._path.name + ".corrupt"))
 
     def _save(self) -> None:
         """

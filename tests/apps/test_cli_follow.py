@@ -789,9 +789,7 @@ def test_doctor_log_dir_success(
     assert target.is_dir()  # the probe creates the directory like the app would
 
 
-def test_doctor_disk_space(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_doctor_disk_space(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(doctor, "disk_free", lambda _path: 10 * 1024**3)
     result = doctor._check_disk_space(path=tmp_path)
     assert result.ok is True
@@ -1045,9 +1043,7 @@ def test_storage_json_reports_sizes(
     assert payload["raw"]["path"] == str(paths["raw"])
     assert payload["raw"]["free_bytes"] is not None
     # ``nested`` is the only non-empty immediate subdirectory of ``raw``.
-    assert payload["raw"]["top"] == [
-        {"name": "nested", "files": 1, "bytes": 5}
-    ]
+    assert payload["raw"]["top"] == [{"name": "nested", "files": 1, "bytes": 5}]
 
 
 def test_storage_renders_table(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

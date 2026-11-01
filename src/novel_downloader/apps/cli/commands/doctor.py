@@ -262,9 +262,7 @@ def _check_config() -> Check:
         return Check(
             t("Configuration"),
             False,
-            t("{count} error(s): {preview}").format(
-                count=len(errors), preview=preview
-            ),
+            t("{count} error(s): {preview}").format(count=len(errors), preview=preview),
             t("Fix the listed keys or recreate it with 'novel-cli config init'."),
             key="config",
             data=data,
@@ -316,8 +314,7 @@ def _check_dependencies(
     own check) are reported without failing the command.
     """
     rows = [
-        _dependency_row(module_name, dist, optional=False)
-        for module_name, dist in core
+        _dependency_row(module_name, dist, optional=False) for module_name, dist in core
     ]
     rows.extend(
         _dependency_row(module_name, dist, optional=True)
