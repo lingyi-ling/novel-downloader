@@ -70,9 +70,7 @@ class FakeEngine:
         self._note = note
         self._settings = settings if settings is not None else {}
         # The real engine exposes the settings module object directly.
-        self.settings = SimpleNamespace(
-            load_settings=lambda: dict(self._settings)
-        )
+        self.settings = SimpleNamespace(load_settings=lambda: dict(self._settings))
         self.download_result = download_result or (0, 0, 0, [], None)
         self.download_error = download_error
         self.export_result = export_result or ""
@@ -127,9 +125,7 @@ class FakeEngine:
 
     def health_check(self, key: str, keyword: str) -> dict[str, Any]:
         self.health_calls.append((key, keyword))
-        return self.health_results.get(
-            key, {"ok": True, "elapsed_ms": 5, "error": ""}
-        )
+        return self.health_results.get(key, {"ok": True, "elapsed_ms": 5, "error": ""})
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -184,12 +180,8 @@ def test_format_duration(seconds: int, expected: str) -> None:
 
 def test_track_rows_render_vip_and_missing_duration() -> None:
     tracks = [
-        SimpleNamespace(
-            name="A", artists="X", album="Al", duration_s=0, vip=True
-        ),
-        SimpleNamespace(
-            name="B", artists="Y", album="Al", duration_s=61, vip=False
-        ),
+        SimpleNamespace(name="A", artists="X", album="Al", duration_s=0, vip=True),
+        SimpleNamespace(name="B", artists="Y", album="Al", duration_s=61, vip=False),
     ]
 
     rows = music._track_rows(tracks)
@@ -326,9 +318,7 @@ def test_split_playable_separates_local_and_missing_paths() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _install_prompts(
-    monkeypatch: pytest.MonkeyPatch, answers: list[str]
-) -> list[str]:
+def _install_prompts(monkeypatch: pytest.MonkeyPatch, answers: list[str]) -> list[str]:
     asked: list[str] = []
 
     def fake_prompt(message: str, **kwargs: Any) -> str:
@@ -612,9 +602,7 @@ def test_health_without_platforms_warns(monkeypatch, capsys) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_create_provider_generic_failure_exits_one(
-    monkeypatch, capsys
-) -> None:
+def test_create_provider_generic_failure_exits_one(monkeypatch, capsys) -> None:
     class _BrokenCreate(FakeEngine):
         def create(self, platform: str) -> Any:
             raise RuntimeError("provider exploded")
@@ -628,9 +616,7 @@ def test_create_provider_generic_failure_exits_one(
     assert "Could not start this platform" in capsys.readouterr().err
 
 
-def test_require_engine_exits_with_install_hint(
-    monkeypatch, capsys
-) -> None:
+def test_require_engine_exits_with_install_hint(monkeypatch, capsys) -> None:
     def _raise() -> None:
         raise music._MusicUnavailable("mutagen not installed")
 

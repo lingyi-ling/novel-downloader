@@ -28,6 +28,19 @@ class Status(str, Enum):  # noqa: UP042 - keep the explicit ``str`` mixin
     FAILED = "failed"
 
 
+def error_text(error: BaseException) -> str:
+    """
+    Return ``str(error)``, falling back to the exception type name.
+
+    Several transport errors (a bare ``TimeoutError``,
+    ``ConnectionResetError`` without arguments, ...) stringify to ``""``;
+    recording that on a task would blank out the failure detail shown to
+    the user.
+    """
+    text = str(error)
+    return text if text else type(error).__name__
+
+
 class TaskError(Exception):
     """Base class for a failure surfaced while running a download task."""
 

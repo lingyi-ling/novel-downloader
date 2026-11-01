@@ -26,11 +26,14 @@ from novel_downloader.apps.core.models import (
     NonRetryableTaskError,
     RetryableTaskError,
     Status,
+    error_text,
 )
 from novel_downloader.apps.core.task_manager import (
     DEFAULT_MAX_DOWNLOAD_RETRIES,
     MAX_COMPLETED_TASKS,
     TaskManager,
+    _failure_message,
+    _retry_message,
     is_retryable_error,
 )
 
@@ -866,3 +869,34 @@ async def test_close_stops_busy_worker_without_draining_queue() -> None:
     assert len(manager.pending["a"]) == 2
     assert tasks[0].status is Status.CANCELLED
     assert manager._worker_tasks == {}
+
+
+# ---------------------------------------------------------------------------
+# error detail formatting (bare exceptions must not blank the task error)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (RuntimeError("disk full"), "disk full"),
+        (TimeoutError(), "TimeoutError"),
+        (ConnectionResetError(), "ConnectionResetError"),
+        (KeyError(), "KeyError"),
+    ],
+)
+def test_error_text_keeps_a_detail_for_bare_exceptions(
+    error: BaseException, expected: str
+) -> None:
+    assert error_text(error) == expected
+
+
+def test_failure_message_preserves_type_name_for_bare_exception() -> None:
+    """``TimeoutError()`` str 出来是空串：最终错误消息不能因此变空。"""
+    message = _failure_message(TimeoutError(), retries=2)
+    assert message == "TimeoutError (after 2 retries)"
+
+
+def test_retry_message_uses_type_name_for_bare_exception() -> None:
+    message = _retry_message(TimeoutError(), spent=1, budget=2)
+    assert message == "[retry 1/2] TimeoutError"
