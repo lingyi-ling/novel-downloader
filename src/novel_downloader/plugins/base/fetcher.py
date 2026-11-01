@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS, IMAGE_HEADERS
+from novel_downloader.infra.i18n import t
 from novel_downloader.infra.sessions import create_session
 from novel_downloader.libs.filesystem import font_filename, image_filename, write_file
 from novel_downloader.libs.time_utils import async_jitter_sleep
@@ -324,7 +325,10 @@ class BaseFetcher(abc.ABC):
                 type="cookie",
                 required=True,
                 placeholder="Paste your login cookies here",
-                description="Copy the cookies from your browser's developer tools while logged in.",  # noqa: E501
+                description=t(
+                    "Copy the cookies from your browser's developer tools "
+                    "while logged in."
+                ),
             ),
         ]
 

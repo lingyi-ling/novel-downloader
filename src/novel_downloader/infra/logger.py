@@ -15,6 +15,7 @@ import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
+from novel_downloader.infra.i18n import t
 from novel_downloader.infra.paths import PACKAGE_NAME
 
 #: Canonical file-record format shared by every entry point that adopts this
@@ -115,7 +116,7 @@ def setup_logging(
 
         # Diagnostics belong on stderr so stdout stays machine readable
         # (``doctor --json`` / ``storage --json`` pipelines).
-        print(f"Logging to {log_path}", file=sys.stderr)
+        print(t("Logging to {path}").format(path=log_path), file=sys.stderr)
 
     # Console handler
     if console:

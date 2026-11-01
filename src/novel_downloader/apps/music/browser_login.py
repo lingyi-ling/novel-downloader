@@ -20,6 +20,8 @@ import time
 import requests
 import websocket
 
+from novel_downloader.infra.i18n import t
+
 PORT = 9333
 LOGIN_URL = "https://music.163.com/"
 COOKIE_DOMAIN_URL = "https://music.163.com"
@@ -42,7 +44,7 @@ def find_browser():
     for p in _CANDIDATES:
         if p and os.path.exists(p):
             return p
-    raise BrowserLoginError("没找到 Edge 或 Chrome，请先安装其中之一")
+    raise BrowserLoginError(t("No Edge or Chrome found; install one of them first"))
 
 
 class BrowserLogin:
@@ -104,7 +106,9 @@ class BrowserLogin:
             if v:
                 return v.get("Browser")
             time.sleep(1)
-        raise BrowserLoginError("浏览器启动超时，调试端口没起来")
+        raise BrowserLoginError(
+            t("Browser start timed out; the debug port never came up")
+        )
 
     def _connect(self, url):
         target = None
@@ -162,7 +166,7 @@ class BrowserLogin:
         last_note = 0
         while time.time() < deadline:
             if should_stop and should_stop():
-                raise BrowserLoginError("已取消")
+                raise BrowserLoginError(t("Cancelled"))
             try:
                 ck = self.read_cookies()
             except Exception:

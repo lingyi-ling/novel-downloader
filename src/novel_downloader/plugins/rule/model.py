@@ -94,9 +94,11 @@ def loads_rule_json(text: str | bytes, *, source: str = "<memory>") -> dict[str,
     try:
         data: Any = json.loads(text, object_pairs_hook=_pairs_without_duplicates)
     except ValueError as e:
-        raise RuleError(f"{source}: invalid JSON: {e}") from e
+        raise RuleError(
+            t("{source}: invalid JSON: {error}").format(source=source, error=e)
+        ) from e
     if not isinstance(data, dict):
-        raise RuleError(f"{source}: rule must be a JSON object")
+        raise RuleError(t("{source}: rule must be a JSON object").format(source=source))
     return data
 
 

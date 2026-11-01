@@ -79,22 +79,38 @@ def _bulleted(items: list[str]) -> str:
 
 
 @pytest.fixture(scope="module")
-def source_msgids() -> set[str]:
-    """Every literal msgid the extractor finds in the source tree."""
-    msgids: set[str] = set()
+def source_msgids_by_file() -> dict[str, set[str]]:
+    """Repo-relative source path -> msgids the extractor finds in that file.
+
+    Locations are read from a fresh scan of the working tree (not from the
+    ``.po`` headers), so the site-pin guard below notices a removed ``t()``
+    call immediately, even before the catalogs are regenerated.
+    """
+    mapping: dict[str, set[str]] = {}
     for directory, method_map in _SOURCES:
         if not directory.is_dir():
             continue
+        prefix = directory.relative_to(ROOT).as_posix()
         extracted = extract_from_dir(
             directory,
             method_map=method_map,
             options_map=_OPTIONS_MAP,
             keywords=_KEYWORDS,
         )
-        for _filename, _lineno, message, _comments, _context in extracted:
+        for filename, _lineno, message, _comments, _context in extracted:
             msgid = message[0] if isinstance(message, tuple) else message
             if msgid:
-                msgids.add(msgid)
+                # ``extract_from_dir`` yields OS-native separators on Windows.
+                rel_path = f"{prefix}/{filename}".replace("\\", "/")
+                mapping.setdefault(rel_path, set()).add(msgid)
+    assert mapping, "the extractor found no msgids; check the extraction config"
+    return mapping
+
+
+@pytest.fixture(scope="module")
+def source_msgids(source_msgids_by_file: dict[str, set[str]]) -> set[str]:
+    """Every literal msgid the extractor finds in the source tree."""
+    msgids: set[str] = set().union(*source_msgids_by_file.values())
     assert msgids, "the extractor found no msgids; check the extraction config"
     return msgids
 
@@ -203,4 +219,110 @@ def test_frontend_keys_are_covered_by_bridge_catalog() -> None:
         f"{len(missing)} front-end i18n key(s) are not published by "
         f"_i18n_catalog() in {_BRIDGE_FILE.name}, so the desktop UI shows "
         f"English even with a complete catalog:\n{_bulleted(missing)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bypass-list pin: the audit's t() call sites must never regress
+# ---------------------------------------------------------------------------
+#: Message ids that were handed to ``t()`` when the i18n audit's bypass list
+#: was landed, pinned to the source file that must keep calling ``t()`` with
+#: them. The catalog only keeps an entry while the extractor still sees a
+#: matching ``t()`` call, so dropping the wrapper (hard-coding the text
+#: again) silently deletes the catalog entry -- this guard turns that into a
+#: test failure and forces an explicit decision.
+_BYPASS_MSGID_SITES: dict[str, str] = {
+    # infra/logger.py
+    "Logging to {path}": "src/novel_downloader/infra/logger.py",
+    # apps/api/main.py -- startup warnings
+    (
+        "WARNING: no API token configured while binding to {host!r}. "
+        "Anyone who can reach this port can control downloads and read "
+        "the exported files under /downloads. Set --token or {env_var}."
+    ): "src/novel_downloader/apps/api/main.py",
+    (
+        "WARNING: --cors enables Access-Control-Allow-Origin: * on the "
+        "non-local bind {host!r}; any website the user visits could then "
+        "call this API. Use --cors only on 127.0.0.1."
+    ): "src/novel_downloader/apps/api/main.py",
+    # apps/api/main.py -- argparse help
+    "Novel Downloader local REST API.": "src/novel_downloader/apps/api/main.py",
+    (
+        "Address to bind to. Keep 127.0.0.1 unless you configure a token."
+    ): "src/novel_downloader/apps/api/main.py",
+    "TCP port to serve the API on.": "src/novel_downloader/apps/api/main.py",
+    (
+        "Require this token in 'Authorization: Bearer <token>' or "
+        "'X-API-Key'. Defaults to NOVEL_API_TOKEN; empty disables auth."
+    ): "src/novel_downloader/apps/api/main.py",
+    (
+        "Enable permissive CORS (Access-Control-Allow-Origin: *). "
+        "Only for local use; do not combine with a public bind."
+    ): "src/novel_downloader/apps/api/main.py",
+    (
+        "Max requests accepted per client IP per sliding window "
+        "(429 + Retry-After above it). 0 disables rate limiting."
+    ): "src/novel_downloader/apps/api/main.py",
+    (
+        "Length of the --rate-limit sliding window in seconds."
+    ): "src/novel_downloader/apps/api/main.py",
+    # apps/core/task_manager.py
+    "Login failed.": "src/novel_downloader/apps/core/task_manager.py",
+    # plugins/base/fetcher.py
+    (
+        "Copy the cookies from your browser's developer tools while logged in."
+    ): "src/novel_downloader/plugins/base/fetcher.py",
+    # apps/music/weapi.py
+    (
+        "Failed to get the QR-code key; a proxy may be needed, or retry later"
+    ): "src/novel_downloader/apps/music/weapi.py",
+    (
+        "QR-code status query failed (neither endpoint returned a valid result)"
+    ): "src/novel_downloader/apps/music/weapi.py",
+    (
+        "Authorization reported success but MUSIC_U was missing; scan again"
+    ): "src/novel_downloader/apps/music/weapi.py",
+    "Cookie is empty": "src/novel_downloader/apps/music/weapi.py",
+    (
+        "Could not parse MUSIC_U from the input"
+    ): "src/novel_downloader/apps/music/weapi.py",
+    (
+        "Cookie is invalid or expired; make sure it was copied while logged in"
+    ): "src/novel_downloader/apps/music/weapi.py",
+    # apps/music/browser_login.py
+    "No Edge or Chrome found; install one of them first": (
+        "src/novel_downloader/apps/music/browser_login.py"
+    ),
+    "Browser start timed out; the debug port never came up": (
+        "src/novel_downloader/apps/music/browser_login.py"
+    ),
+    "Cancelled": "src/novel_downloader/apps/music/browser_login.py",
+    # apps/music/downloader.py
+    "Cancelled by user": "src/novel_downloader/apps/music/downloader.py",
+    # plugins/rule/model.py
+    "{source}: invalid JSON: {error}": "src/novel_downloader/plugins/rule/model.py",
+    (
+        "{source}: rule must be a JSON object"
+    ): "src/novel_downloader/plugins/rule/model.py",
+}
+
+
+def test_bypass_list_msgids_are_pinned_to_their_sites(
+    source_msgids_by_file: dict[str, set[str]], translated_msgids: set[str]
+) -> None:
+    """Every bypass-list msgid must stay extracted, located and translated."""
+    problems: list[str] = []
+    for msgid, expected_file in _BYPASS_MSGID_SITES.items():
+        file_msgids = source_msgids_by_file.get(expected_file, set())
+        if msgid not in file_msgids:
+            problems.append(
+                f"{msgid!r}: no t() call left in {expected_file} -- the site "
+                "hard-codes its text again (or the call moved); restore the "
+                "wrapper or update the pin"
+            )
+        if msgid not in translated_msgids:
+            problems.append(f"{msgid!r}: lost its usable zh_CN translation")
+    assert not problems, (
+        f"{len(problems)} bypass-list regression(s) in the i18n surface:\n"
+        f"{_bulleted(problems)}"
     )

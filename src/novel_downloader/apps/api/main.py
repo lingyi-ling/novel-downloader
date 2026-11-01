@@ -25,6 +25,8 @@ from collections.abc import Sequence
 
 import uvicorn
 
+from novel_downloader.infra.i18n import t
+
 from .app import create_app
 from .middleware import DEFAULT_RATE_LIMIT, DEFAULT_RATE_LIMIT_WINDOW
 
@@ -54,16 +56,20 @@ def warn_if_insecure_bind(host: str, token: str | None, cors: bool) -> list[str]
     if not is_local_host(host):
         if not token:
             warnings.append(
-                f"WARNING: no API token configured while binding to {host!r}. "
-                "Anyone who can reach this port can control downloads and read "
-                "the exported files under /downloads. Set --token or "
-                f"{TOKEN_ENV_VAR}."
+                t(
+                    "WARNING: no API token configured while binding to {host!r}. "
+                    "Anyone who can reach this port can control downloads and "
+                    "read the exported files under /downloads. Set --token or "
+                    "{env_var}."
+                ).format(host=host, env_var=TOKEN_ENV_VAR)
             )
         if cors:
             warnings.append(
-                f"WARNING: --cors enables Access-Control-Allow-Origin: * on the "
-                f"non-local bind {host!r}; any website the user visits could "
-                "then call this API. Use --cors only on 127.0.0.1."
+                t(
+                    "WARNING: --cors enables Access-Control-Allow-Origin: * on "
+                    "the non-local bind {host!r}; any website the user visits "
+                    "could then call this API. Use --cors only on 127.0.0.1."
+                ).format(host=host)
             )
     for message in warnings:
         print(message, file=sys.stderr, flush=True)
@@ -72,24 +78,24 @@ def warn_if_insecure_bind(host: str, token: str | None, cors: bool) -> list[str]
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Novel Downloader local REST API.",
+        description=t("Novel Downloader local REST API."),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--host",
         default="127.0.0.1",
-        help="Address to bind to. Keep 127.0.0.1 unless you configure a token.",
+        help=t("Address to bind to. Keep 127.0.0.1 unless you configure a token."),
     )
     parser.add_argument(
         "--port",
         type=int,
         default=8081,
-        help="TCP port to serve the API on.",
+        help=t("TCP port to serve the API on."),
     )
     parser.add_argument(
         "--token",
         default=None,
-        help=(
+        help=t(
             "Require this token in 'Authorization: Bearer <token>' or "
             "'X-API-Key'. Defaults to NOVEL_API_TOKEN; empty disables auth."
         ),
@@ -97,7 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cors",
         action="store_true",
-        help=(
+        help=t(
             "Enable permissive CORS (Access-Control-Allow-Origin: *). "
             "Only for local use; do not combine with a public bind."
         ),
@@ -106,7 +112,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rate-limit",
         type=int,
         default=DEFAULT_RATE_LIMIT,
-        help=(
+        help=t(
             "Max requests accepted per client IP per sliding window "
             "(429 + Retry-After above it). 0 disables rate limiting."
         ),
@@ -115,7 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rate-limit-window",
         type=float,
         default=DEFAULT_RATE_LIMIT_WINDOW,
-        help="Length of the --rate-limit sliding window in seconds.",
+        help=t("Length of the --rate-limit sliding window in seconds."),
     )
     return parser
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import requests
 
+from novel_downloader.infra.i18n import t
 from novel_downloader.libs.filesystem import sanitize_filename
 
 from .weapi import UA, LoginExpired
@@ -176,7 +177,7 @@ def _download_file(
         with open(tmp, "ab" if start else "wb") as f:
             for chunk in r.iter_content(_CHUNK):
                 if stop_flag and stop_flag():
-                    raise InterruptedError("用户取消")
+                    raise InterruptedError(t("Cancelled by user"))
                 if not chunk:
                     continue
                 f.write(chunk)
@@ -526,6 +527,11 @@ def _write_text(path, text):
         f.write(text.rstrip() + "\n")
 
 
+def _normalize_lrc(text):
+    """LRC 文本统一换行为 ``\\n``（部分来源是 CRLF，很多播放器解析不了）。"""
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
 def save_lyric(audio_path, lyric, translated=""):
     """把歌词写到音频旁，返回实际写入的文件列表。
 
@@ -538,8 +544,8 @@ def save_lyric(audio_path, lyric, translated=""):
     空白文本会被忽略；换行统一为 ``\\n``，文件编码 UTF-8。
     """
     original_path, translation_path = lyric_paths(audio_path)
-    text = (lyric or "").strip()
-    translation = (translated or "").strip()
+    text = _normalize_lrc(lyric)
+    translation = _normalize_lrc(translated)
     written = []
     if text:
         _write_text(original_path, text)

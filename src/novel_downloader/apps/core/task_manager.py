@@ -14,6 +14,7 @@ from typing import Any
 import aiohttp
 
 from novel_downloader.infra.config import ConfigAdapter, load_config
+from novel_downloader.infra.i18n import t
 from novel_downloader.plugins import ClientProtocol, registrar
 from novel_downloader.schemas import BookConfig
 
@@ -23,6 +24,7 @@ from .models import (
     NonRetryableTaskError,
     RetryableTaskError,
     Status,
+    error_text,
 )
 
 MAX_COMPLETED_TASKS = 100
@@ -110,12 +112,16 @@ def _is_cancelled(task: DownloadTask) -> bool:
 
 def _retry_message(error: BaseException, spent: int, budget: int) -> str:
     """Describe an attempt that is about to be retried."""
-    return f"[retry {spent}/{budget}] {error}"
+    return f"[retry {spent}/{budget}] {error_text(error)}"
 
 
 def _failure_message(error: BaseException, retries: int) -> str:
-    """Build the final task error, preserving ``str(error)`` as a prefix."""
-    message = str(error)
+    """Build the final task error, preserving ``str(error)`` as a prefix.
+
+    无参异常（裸 ``TimeoutError()`` 等）str 出来是空串，会抹掉任务的
+    失败详情：退回异常类型名（见 ``models.error_text``）。
+    """
+    message = error_text(error)
     if retries > 0:
         noun = "retry" if retries == 1 else "retries"
         message = f"{message} (after {retries} {noun})"
@@ -411,7 +417,7 @@ class TaskManager:
                     )
                     if not success:
                         # Auth failure is permanent: never retry it.
-                        raise NonRetryableTaskError("Login failed.")
+                        raise NonRetryableTaskError(t("Login failed."))
                 await client.download_book(
                     BookConfig(book_id=task.book_id), ui=download_ui
                 )
@@ -514,7 +520,7 @@ class TaskManager:
             except Exception as e:
                 current_task.status = Status.FAILED
                 current_task.finished_at = time.time()
-                current_task.error = str(e)
+                current_task.error = error_text(e)
             finally:
                 # A task handed off to the export stage stays registered there.
                 if current_task.status is not Status.EXPORTING:
@@ -574,7 +580,7 @@ class TaskManager:
             except Exception as e:
                 current_task.status = Status.FAILED
                 current_task.finished_at = time.time()
-                current_task.error = str(e)
+                current_task.error = error_text(e)
             finally:
                 self._stage_tasks.pop(current_task.task_id, None)
                 self._export_waiting.task_done()

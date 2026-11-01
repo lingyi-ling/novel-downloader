@@ -22,6 +22,8 @@ import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
+from novel_downloader.infra.i18n import t
+
 BASE = "https://music.163.com"
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -113,17 +115,27 @@ class NeteaseClient:
                 pass
 
     def save_cookies(self):
+        """把会话 Cookie 落盘（含 MUSIC_U 登录凭证）。
+
+        写入失败时清掉 ``.tmp`` 残留，避免半截明文留在盘上。
+        """
         if not self.cookie_file:
             return
         data = {c.name: c.value for c in self.s.cookies}
         tmp = self.cookie_file + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        # 里面存着 MUSIC_U 登录凭证，落盘前收紧到仅属主可读写
-        # （Windows 上 chmod 只能尽力而为，失败不影响保存）
-        with contextlib.suppress(OSError):
-            os.chmod(tmp, 0o600)
-        os.replace(tmp, self.cookie_file)
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            # 里面存着 MUSIC_U 登录凭证，落盘前收紧到仅属主可读写
+            # （Windows 上 chmod 只能尽力而为，失败不影响保存）
+            with contextlib.suppress(OSError):
+                os.chmod(tmp, 0o600)
+            os.replace(tmp, self.cookie_file)
+        finally:
+            # os.replace 成功后 tmp 已不存在；失败时把半截明文清掉
+            with contextlib.suppress(OSError):
+                if os.path.exists(tmp):
+                    os.remove(tmp)
 
     def clear_cookies(self):
         self.s.cookies.clear()
@@ -203,7 +215,12 @@ class NeteaseClient:
             j = self.post_api("login/qrcode/unikey", {"type": 1})
             key = j.get("unikey")
         if not key:
-            raise NeteaseError("获取二维码 key 失败，可能需要挂代理或稍后重试")
+            raise NeteaseError(
+                t(
+                    "Failed to get the QR-code key; a proxy may be needed, "
+                    "or retry later"
+                )
+            )
         return key, f"{BASE}/login?codekey={key}"
 
     def _absorb_cookies(self, r):
@@ -239,7 +256,12 @@ class NeteaseClient:
                 break
             j, r = None, None
         if j is None:
-            raise NeteaseError("扫码状态查询失败（两个端点都没返回有效结果）")
+            raise NeteaseError(
+                t(
+                    "QR-code status query failed (neither endpoint returned "
+                    "a valid result)"
+                )
+            )
 
         code = j.get("code")
         if code == 803:
@@ -247,7 +269,12 @@ class NeteaseClient:
             self.save_cookies()
             # 关键校验：拿不到 MUSIC_U 就等于没登录，必须显式报错而不是假装成功
             if not self.s.cookies.get("MUSIC_U"):
-                raise NeteaseError("显示授权成功，但未取到 MUSIC_U，请重新扫码")
+                raise NeteaseError(
+                    t(
+                        "Authorization reported success but MUSIC_U was "
+                        "missing; scan again"
+                    )
+                )
         msg = {
             800: "二维码已过期",
             801: "等待扫码",
@@ -284,7 +311,7 @@ class NeteaseClient:
         """
         text = (text or "").strip()
         if not text:
-            raise NeteaseError("Cookie 为空")
+            raise NeteaseError(t("Cookie is empty"))
         if "MUSIC_U" not in text:
             # 只给了 MUSIC_U 的值
             text = "MUSIC_U=" + text
@@ -299,7 +326,7 @@ class NeteaseClient:
                 self.s.cookies.set(k, v, domain=".music.163.com")
                 n += 1
         if not self.s.cookies.get("MUSIC_U"):
-            raise NeteaseError("没能从输入里解析出 MUSIC_U")
+            raise NeteaseError(t("Could not parse MUSIC_U from the input"))
         try:
             account, profile = self.account()
         except Exception as e:
@@ -307,7 +334,12 @@ class NeteaseClient:
             raise NeteaseError(f"校验登录态失败：{e}") from e
         if not account:
             self.clear_cookies()
-            raise NeteaseError("Cookie 无效或已过期，请确认是在已登录状态下复制")
+            raise NeteaseError(
+                t(
+                    "Cookie is invalid or expired; make sure it was copied "
+                    "while logged in"
+                )
+            )
         self.save_cookies()
         return account, profile, n
 
@@ -328,7 +360,13 @@ class NeteaseClient:
         _guard(j)
         pl = j.get("playlist") or {}
         tracks = pl.get("tracks") or []
-        track_ids = [t["id"] for t in (pl.get("trackIds") or [])]
+        track_ids = []
+        for t in pl.get("trackIds") or []:
+            # 个别条目缺 id 或本身就是裸 id（接口抖动/历史版本），
+            # 跳过缺 id 的而不是让整个歌单失败
+            tid = t.get("id") if isinstance(t, dict) else t
+            if tid is not None:
+                track_ids.append(tid)
         if len(track_ids) > len(tracks):
             tracks = self.song_detail(track_ids)
         return tracks
@@ -432,7 +470,12 @@ def track_duration(t):
 
 def track_no(t):
     no = t.get("no")
-    return int(no) if no else 0
+    try:
+        return int(no) if no else 0
+    except (TypeError, ValueError):
+        # 接口偶尔给出不可直接转 int 的曲目号（如 "3.5"）：
+        # 归 0，不让单曲转换炸掉整个列表渲染
+        return 0
 
 
 if __name__ == "__main__":

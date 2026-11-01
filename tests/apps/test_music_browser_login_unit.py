@@ -136,7 +136,7 @@ def test_find_browser_raises_when_none_exists(tmp_path: Any) -> None:
     monkeypatch = pytest.MonkeyPatch()
     try:
         monkeypatch.setattr(bl_mod, "_CANDIDATES", [str(tmp_path / "nope.exe")])
-        with pytest.raises(BrowserLoginError, match="Edge 或 Chrome"):
+        with pytest.raises(BrowserLoginError, match="Edge or Chrome"):
             find_browser()
     finally:
         monkeypatch.undo()
@@ -206,7 +206,7 @@ def test_start_timeout_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) ->
     login = BrowserLogin(profile_dir=str(tmp_path / "profile"))
     monkeypatch.setattr(login, "_version", lambda: None)
 
-    with pytest.raises(BrowserLoginError, match="超时"):
+    with pytest.raises(BrowserLoginError, match="timed out"):
         login.start(timeout=2)
 
 
@@ -325,7 +325,7 @@ def test_wait_for_login_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
     login.read_cookies = lambda: {}  # type: ignore[method-assign]
     clock = _fake_time()
     monkeypatch.setattr(bl, "time", clock)
-    with pytest.raises(BrowserLoginError, match="已取消"):
+    with pytest.raises(BrowserLoginError, match="Cancelled"):
         login.wait_for_login(timeout=60, should_stop=lambda: True)
 
 

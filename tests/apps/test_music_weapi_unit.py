@@ -234,6 +234,29 @@ def test_save_cookies_without_file_is_noop() -> None:
     client.save_cookies()  # no cookie_file configured
 
 
+def test_save_cookies_cleans_tmp_residue_when_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cookie 文件存的是 MUSIC_U 登录凭证：原子替换失败时不能留半截明文。"""
+    cookie_file = tmp_path / "cookies.json"
+    client = NeteaseClient(cookie_file=str(cookie_file))
+    client.s.cookies.set("MUSIC_U", "secret", domain=".music.163.com")
+    client.save_cookies()
+    before = cookie_file.read_text(encoding="utf-8")
+
+    def failing_replace(src: object, dst: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(weapi.os, "replace", failing_replace)
+    client.s.cookies.set("MUSIC_U", "rotated", domain=".music.163.com")
+
+    with pytest.raises(OSError, match="disk full"):
+        client.save_cookies()
+
+    assert not Path(str(cookie_file) + ".tmp").exists()
+    assert cookie_file.read_text(encoding="utf-8") == before
+
+
 def test_csrf_and_logged_in_helpers() -> None:
     session = FakeSession()
     client = _client(session)
@@ -330,7 +353,7 @@ def test_qr_start_prefers_weapi_then_falls_back() -> None:
 def test_qr_start_raises_when_both_channels_fail() -> None:
     session = FakeSession([FakeResponse({}), FakeResponse({})])
     client = _client(session)
-    with pytest.raises(NeteaseError, match="获取二维码 key 失败"):
+    with pytest.raises(NeteaseError, match="Failed to get the QR-code key"):
         client.qr_start()
 
 
@@ -373,7 +396,7 @@ def test_qr_check_falls_back_to_weapi_then_raises() -> None:
         [FakeResponse({}, status_code=500), FakeResponse({"nocode": 1})]
     )
     client = _client(session)
-    with pytest.raises(NeteaseError, match="扫码状态查询失败"):
+    with pytest.raises(NeteaseError, match="QR-code status query failed"):
         client.qr_check("KEY")
 
 
@@ -469,7 +492,7 @@ def test_login_by_cookie_accepts_bare_music_u_value() -> None:
 def test_login_by_cookie_rejects_empty_input() -> None:
     client = NeteaseClient()
     client.s = FakeSession()  # type: ignore[assignment]
-    with pytest.raises(NeteaseError, match="Cookie 为空"):
+    with pytest.raises(NeteaseError, match="Cookie is empty"):
         client.login_by_cookie("   ")
 
 
@@ -477,7 +500,7 @@ def test_login_by_cookie_rejects_missing_music_u() -> None:
     client = NeteaseClient()
     client.s = FakeSession()  # type: ignore[assignment]
     # "MUSIC_U" without a '=' separator cannot be parsed into the jar.
-    with pytest.raises(NeteaseError, match="没能从输入里解析出 MUSIC_U"):
+    with pytest.raises(NeteaseError, match="Could not parse MUSIC_U"):
         client.login_by_cookie("MUSIC_U")
 
 
@@ -499,7 +522,7 @@ def test_login_by_cookie_clears_state_when_account_is_none() -> None:
         ]
     )
     client = _client(session)
-    with pytest.raises(NeteaseError, match="Cookie 无效"):
+    with pytest.raises(NeteaseError, match="Cookie is invalid or expired"):
         client.login_by_cookie("MUSIC_U=abc")
     assert client.logged_in is False
 
@@ -542,6 +565,42 @@ def test_playlist_tracks_short_circuits_when_complete() -> None:
     tracks = client.playlist_tracks(42)
     assert len(tracks) == 2
     assert len(session.calls) == 1
+
+
+def test_playlist_tracks_tolerates_bare_and_missing_track_ids() -> None:
+    """个别 trackIds 条目是裸 id 或缺 id（接口抖动/历史版本）。
+
+    旧实现对每个条目取 ``t["id"]``，一个坏条目就 KeyError 炸掉整个歌单。
+    """
+    pl = {
+        "playlist": {
+            "tracks": [{"id": 1}, {"id": 2}],
+            # 裸 id / 缺 id 的字典混在一起
+            "trackIds": [{"id": 1}, 2, {}, {"no_id": True}, None],
+        }
+    }
+    session = FakeSession([FakeResponse(pl)])
+    client = _client(session)
+    tracks = client.playlist_tracks(42)
+
+    assert [t["id"] for t in tracks] == [1, 2]
+    # 跳过后 id 数与 tracks 数一致：不需要 song_detail 补齐
+    assert len(session.calls) == 1
+
+
+def test_playlist_tracks_bare_ids_still_trigger_song_detail_backfill() -> None:
+    pl = {
+        "playlist": {
+            "tracks": [{"id": 1}],
+            "trackIds": [{"id": 1}, 2, 3],
+        }
+    }
+    detail = {"songs": [{"id": 1, "name": "one"}, {"id": 2}, {"id": 3}]}
+    session = FakeSession([FakeResponse(pl), FakeResponse(detail)])
+    client = _client(session)
+    tracks = client.playlist_tracks(42)
+    assert [t["id"] for t in tracks] == [1, 2, 3]
+    assert session.calls[1]["url"].endswith("/weapi/v3/song/detail")
 
 
 def test_playlist_tracks_raises_login_expired_when_song_detail_returns_301() -> None:
