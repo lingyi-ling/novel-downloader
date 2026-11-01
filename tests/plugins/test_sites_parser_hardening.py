@@ -8,16 +8,27 @@ asserts the parser degrades to ``None``/default instead of raising.
 """
 
 import base64
+import contextlib
 import json
+from importlib import import_module
 from typing import Any
 
 import pytest
 
+from novel_downloader.plugins.common.parser.biquge1 import Biquge1Parser
+from novel_downloader.plugins.sites.biquge5.parser import Biquge5Parser
 from novel_downloader.plugins.sites.biquge345.parser import Biquge345Parser
+from novel_downloader.plugins.sites.biquguo.parser import BiquguoParser
+from novel_downloader.plugins.sites.bxwx9.parser import Bxwx9Parser
+from novel_downloader.plugins.sites.ciluke.parser import CilukeParser
 from novel_downloader.plugins.sites.ciyuanji.parser import CiyuanjiParser
+from novel_downloader.plugins.sites.fsshu.parser import FsshuParser
 from novel_downloader.plugins.sites.hetushu.parser import HetushuParser
+from novel_downloader.plugins.sites.ktshu.parser import KtshuParser
 from novel_downloader.plugins.sites.laoyaoxs.parser import LaoyaoxsParser
 from novel_downloader.plugins.sites.linovelib.parser import LinovelibParser
+from novel_downloader.plugins.sites.mangg_net.parser import ManggNetParser
+from novel_downloader.plugins.sites.n37yue.parser import N37yueParser
 from novel_downloader.plugins.sites.qidian.parser import QidianParser
 from novel_downloader.plugins.sites.qqbook.parser import QqbookParser
 from novel_downloader.plugins.sites.shaoniandream.parser import ShaoniandreamParser
@@ -641,3 +652,141 @@ def test_golden_book_info_for_defensive_sites(cfg: ParserConfig) -> None:
     assert LinovelibParser(cfg).parse_book_info([LN_INFO, LN_INFO]) is not None
     assert LaoyaoxsParser(cfg).parse_book_info([LY_INFO, LY_CATALOG]) is not None
     assert ShencouParser(cfg).parse_book_info([SC_INFO, SC_CATALOG]) is not None
+
+
+# --------------------------------------------------------------------------
+# biquge1 family: empty document shells crash the common chapter parser
+# --------------------------------------------------------------------------
+# ``Biquge1Parser._strip_nested_html`` removes the html/body wrappers, so a
+# shell page like ``<html></html>`` is non-blank as fetched but empty after
+# stripping, and ``html.fromstring("")`` raised ParserError. The guard added
+# in ``parse_chapter_content`` must skip shell pages for every subclass.
+BQ1_FAMILY = [
+    Biquge5Parser,
+    BiquguoParser,
+    Bxwx9Parser,
+    CilukeParser,
+    FsshuParser,
+    KtshuParser,
+    ManggNetParser,
+    N37yueParser,
+]
+BQ1_FAMILY_IDS = [
+    "biquge5",
+    "biquguo",
+    "bxwx9",
+    "ciluke",
+    "fsshu",
+    "ktshu",
+    "mangg_net",
+    "n37yue",
+]
+
+BQ1_SHELL_PAGES = [
+    "<html></html>",
+    "<html><head></head><body></body></html>",
+    "<html>   </html>",
+]
+
+BQ1_BOOK = """
+<html><head>
+<meta property="og:novel:book_name" content="测试书名">
+<meta property="og:novel:author" content="测试作者">
+</head><body>
+<div class="book_list2"><a href="/book/1/1.html" title="第一章">第一章</a></div>
+</body></html>
+"""
+
+BQ1_CHAPTER = """
+<html><head><meta charset="utf-8"></head><body>
+<h1>第一章</h1>
+<article><p>第一段。</p><p>第二段。</p></article>
+</body></html>
+"""
+
+
+@pytest.mark.parametrize("parser_cls", BQ1_FAMILY, ids=BQ1_FAMILY_IDS)
+def test_biquge1_family_shell_pages_return_none(
+    cfg: ParserConfig, parser_cls: Any
+) -> None:
+    """Document shells must degrade to None, never raise ParserError."""
+    parser = parser_cls(cfg)
+    for shell in BQ1_SHELL_PAGES:
+        assert parser.parse_chapter_content([shell], "1") is None
+        assert parser.parse_book_info([shell]) is None
+    # every page empty after stripping -> still None, no raise
+    assert parser.parse_chapter_content(BQ1_SHELL_PAGES, "1") is None
+
+
+@pytest.mark.parametrize("parser_cls", BQ1_FAMILY, ids=BQ1_FAMILY_IDS)
+def test_biquge1_family_shell_page_skipped_when_mixed(
+    cfg: ParserConfig, parser_cls: Any
+) -> None:
+    """A shell page among good pages is skipped, not fatal."""
+    parser = parser_cls(cfg)
+    result = parser.parse_chapter_content([BQ1_SHELL_PAGES[0], BQ1_CHAPTER], "1")
+    assert result is not None
+    assert result["title"] == "第一章"
+    assert result["content"] == "第一段。\n第二段。"
+
+
+@pytest.mark.parametrize("parser_cls", BQ1_FAMILY, ids=BQ1_FAMILY_IDS)
+def test_biquge1_family_golden_book_info(cfg: ParserConfig, parser_cls: Any) -> None:
+    """Golden catalogue page still parses after the shell-page guard."""
+    parser = parser_cls(cfg)
+    info = parser.parse_book_info([BQ1_BOOK])
+    assert info is not None
+    assert info["book_name"] == "测试书名"
+    assert info["author"] == "测试作者"
+    chapters = info["volumes"][0]["chapters"]
+    assert [c["title"] for c in chapters] == ["第一章"]
+    assert chapters[0]["chapterId"] == "1"
+
+
+@pytest.mark.parametrize("parser_cls", BQ1_FAMILY, ids=BQ1_FAMILY_IDS)
+def test_biquge1_family_golden_chapter(cfg: ParserConfig, parser_cls: Any) -> None:
+    """Golden chapter page still parses after the shell-page guard."""
+    parser = parser_cls(cfg)
+    result = parser.parse_chapter_content([BQ1_CHAPTER], "1")
+    assert result is not None
+    assert result["title"] == "第一章"
+    assert result["content"] == "第一段。\n第二段。"
+
+
+def test_all_biquge1_subclass_sites_heal_on_shell_pages(
+    cfg: ParserConfig,
+) -> None:
+    """Every Biquge1Parser subclass in the sites package heals via the common
+    fix, including subclasses added after this regression test was written.
+
+    Imports every ``sites.<site>.parser`` module (the registry's own loading
+    mechanism), collects Biquge1Parser subclasses, then feeds each one a
+    document shell. The audited site names are asserted to be present so a
+    silently broken enumeration cannot pass vacuously.
+    """
+    import importlib.resources as res
+
+    from novel_downloader.plugins import sites as sites_pkg
+
+    for name in res.contents(sites_pkg):
+        if name.startswith("_"):
+            continue
+        with contextlib.suppress(ModuleNotFoundError):
+            import_module(f"{sites_pkg.__name__}.{name}.parser")
+
+    found: set[type[Biquge1Parser]] = set()
+
+    def collect(cls: type[Biquge1Parser]) -> None:
+        for sub in cls.__subclasses__():
+            if sub not in found:
+                found.add(sub)
+                collect(sub)
+
+    collect(Biquge1Parser)
+
+    site_names = {cls.site_name for cls in found}
+    assert site_names >= set(BQ1_FAMILY_IDS)
+    for cls in sorted(found, key=lambda c: c.site_name):
+        parser = cls(cfg)
+        assert parser.parse_chapter_content(["<html></html>"], "1") is None
+        assert parser.parse_book_info(["<html></html>"]) is None

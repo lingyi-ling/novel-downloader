@@ -116,8 +116,14 @@ class Biquge1Parser(BaseParser):
         title: str = ""
         paragraphs: list[str] = []
 
-        for curr_html in raw_pages:
-            curr_html = self._strip_nested_html(curr_html)
+        # A document shell (e.g. ``<html></html>``) is non-blank as fetched
+        # but empty once the wrappers are stripped, and ``fromstring("")``
+        # raises ParserError. Re-apply the blank-page guard to the stripped
+        # payloads so shell pages are skipped like any other empty page.
+        stripped_pages = self._usable_pages(
+            [self._strip_nested_html(page) for page in raw_pages]
+        )
+        for curr_html in stripped_pages:
             tree = html.fromstring(curr_html)
             if not title:
                 title = self._clean_title(self._first_str(tree.xpath("//h1//text()")))
