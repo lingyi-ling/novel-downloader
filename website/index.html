@@ -258,8 +258,11 @@ pip install -U novel-downloader
 <span class="c" data-en="# Aggregate search"># 聚合搜索</span>
 novel-cli search "凡人修仙传"
 
-<span class="c" data-en="# One-command download (resumable)"># 一键下载（支持断点续传）</span>
-novel-cli download --site qidian 107580
+<span class="c" data-en="# One-command download (resumable, strict completeness check)"># 一键下载（断点续传 + 缺章校验）</span>
+novel-cli download --site qidian 107580 --strict
+
+<span class="c" data-en="# Batch a whole reading list by title + author"># 按「书名 作者」书单批量下载</span>
+novel-cli batch --file books.txt --download
 
 <span class="c" data-en="# Follow updates + music"># 追更 + 音乐</span>
 novel-cli follow add qidian 107580

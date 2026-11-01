@@ -4,16 +4,20 @@ name: Release
 #   1. extract the tag's section from CHANGELOG.md as release notes,
 #   2. build the three PyInstaller bundles (build_release.py),
 #   3. merge checksums into SHA256SUMS.txt,
-#   4. (tag/push are no-ops here: the tag already exists on the remote —
-#      that is what triggered this workflow),
+#   4. (tag/push are no-ops here: the tag already exists on the remote),
 #   5. create the GitHub release and upload the assets with GITHUB_TOKEN.
 # The Android release APK is signed locally with a git-ignored keystore, so
 # on the runner scripts/release.py warns and skips it; publish the APK by
 # re-running the script locally (it is idempotent: re-uploading only
 # replaces assets whose digests changed).
+#
+# Deliberately **not** triggered by pushing a tag.  ``scripts/release.py``
+# pushes the tag itself and then publishes the release; a tag-triggered run
+# would start at the same moment, build a second set of bundles (without the
+# signed APK or the Inno Setup installer) and overwrite the assets the local
+# run had just uploaded -- which is exactly what happened for v1.4.0.
+# Publish from a machine that has the signing material, or dispatch manually.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:

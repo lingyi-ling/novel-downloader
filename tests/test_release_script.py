@@ -240,6 +240,10 @@ class FakeHTTP:
     def route(self, method: str, fragment: str, reply: Any) -> None:
         self._routes.append((method, fragment, reply))
 
+    def route_dynamic(self, method: str, fragment: str, reply: Any) -> None:
+        """Register a route whose reply is computed when the request arrives."""
+        self.route(method, fragment, reply)
+
     def route_json(self, method: str, fragment: str, status: int, payload: Any) -> None:
         body = b"" if payload is None else json.dumps(payload).encode("utf-8")
         self.route(method, fragment, (status, body))
@@ -274,6 +278,8 @@ class FakeHTTP:
         )
         for route_method, fragment, reply in self._routes:
             if route_method == method and fragment in url:
+                if callable(reply):
+                    reply = reply()
                 if isinstance(reply, Exception):
                     raise reply
                 status, body = reply
@@ -311,7 +317,27 @@ def _route_tag_steps(sub: FakeSubprocess, *, local: bool, remote: bool) -> None:
 
 
 def _route_publish(http: FakeHTTP, upload_names: tuple[str, ...]) -> None:
-    http.route_404(f"/releases/tags/{TAG}")
+    """Model a release that does not exist yet and gains assets as they upload."""
+
+    def _tag_state() -> tuple[int, bytes]:
+        created = any(
+            request["method"] == "POST"
+            and request["url"].rstrip("/").endswith("/releases")
+            for request in http.requests
+        )
+        if not created:
+            return 404, b'{"message": "Not Found"}'
+        assets = [
+            {
+                "name": request["url"].split("?name=", 1)[1],
+                "digest": "sha256:" + sha256(request["data"] or b"").hexdigest(),
+            }
+            for request in http.requests
+            if request["method"] == "POST" and "?name=" in request["url"]
+        ]
+        return 200, json.dumps({**RELEASE_JSON, "assets": assets}).encode()
+
+    http.route_dynamic("GET", f"/releases/tags/{TAG}", _tag_state)
     for index, name in enumerate(upload_names):
         http.route_json("POST", f"?name={name}", 201, {"id": 100 + index})
     http.route_json("POST", f"{SLUG}/releases", 201, RELEASE_JSON)
@@ -990,9 +1016,8 @@ class TestMainIdempotent:
         rc = release.main(["--skip-build", "--skip-android", "--repo", SLUG])
 
         assert rc == 0
-        # Exactly one API call (the lookup) and zero writes.
-        assert len(http.requests) == 1
-        assert http.requests[0]["method"] == "GET"
+        # Two reads (the lookup plus post-upload verification), zero writes.
+        assert [request["method"] for request in http.requests] == ["GET", "GET"]
         # Tags exist on both sides: no tag or push commands.
         commands = sub.commands()
         assert not any(cmd[:2] == ["git", "tag"] for cmd in commands)
@@ -1011,7 +1036,25 @@ class TestMainIdempotent:
         assets = self._assets_payload(release_dir, stale=stale_zip)
         payload = {**RELEASE_JSON, "body": "old notes", "assets": assets}
         _route_tag_steps(sub, local=True, remote=True)
-        http.route_json("GET", f"/releases/tags/{TAG}", 200, payload)
+
+        def _current_release() -> tuple[int, bytes]:
+            # After the replacement upload the server reports the new digest;
+            # until then it still reports the stale one.
+            replaced = any(
+                request["method"] == "POST"
+                and request["url"].endswith(f"?name={stale_zip}")
+                for request in http.requests
+            )
+            body = {
+                **RELEASE_JSON,
+                "body": NOTES if replaced else "old notes",
+                "assets": self._assets_payload(
+                    release_dir, stale=None if replaced else stale_zip
+                ),
+            }
+            return 200, json.dumps(body).encode("utf-8")
+
+        http.route_dynamic("GET", f"/releases/tags/{TAG}", _current_release)
         http.route_json("PATCH", "/releases/7", 200, payload)
         http.route("DELETE", "/releases/assets/101", (204, b""))
         http.route_json("POST", f"?name={stale_zip}", 201, {})
@@ -1161,8 +1204,18 @@ class TestReleaseWorkflowContract:
     def test_workflow_exists(self, workflow_text: str) -> None:
         assert workflow_text
 
-    def test_triggers_on_version_tags(self, workflow_text: str) -> None:
-        assert 'tags: ["v*"]' in workflow_text
+    def test_is_not_triggered_by_tags(self, workflow_text: str) -> None:
+        """A tag push must not start a second, conflicting publish.
+
+        ``scripts/release.py`` pushes the tag itself and then uploads the
+        assets.  A tag-triggered run starts at the same moment, builds its own
+        bundles (without the signed APK or the installer) and overwrites them.
+        """
+        assert 'tags: ["v*"]' not in workflow_text
+        assert "push:" not in workflow_text
+
+    def test_can_be_dispatched_manually(self, workflow_text: str) -> None:
+        assert "workflow_dispatch:" in workflow_text
 
     def test_needs_contents_write_permission(self, workflow_text: str) -> None:
         assert "contents: write" in workflow_text
@@ -1175,3 +1228,80 @@ class TestReleaseWorkflowContract:
 
     def test_uses_a_full_checkout(self, workflow_text: str) -> None:
         assert "fetch-depth: 0" in workflow_text
+
+
+# ---------------------------------------------------------------------------
+# post-upload verification
+# ---------------------------------------------------------------------------
+
+
+class _Asset:
+    def __init__(self, name: str, digest: str) -> None:
+        self.name = name
+        self.digest = digest
+
+
+class _ReleaseClient:
+    """Minimal stand-in exposing only what ``verify_assets`` needs."""
+
+    def __init__(self, assets: list[_Asset] | None) -> None:
+        self._assets = assets
+        self.calls = 0
+
+    def get_release_by_tag(self, tag: str) -> dict[str, Any] | None:
+        self.calls += 1
+        if self._assets is None:
+            return None
+        return {
+            "tag_name": tag,
+            "assets": [
+                {"name": a.name, "digest": f"sha256:{a.digest}"} for a in self._assets
+            ],
+        }
+
+
+def _specs(module: Any, tmp_path: Path) -> list[Any]:
+    specs = []
+    for name in ("a.zip", "b.apk"):
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        digest = sha256(name.encode()).hexdigest()
+        specs.append(module.AssetSpec(path, name, digest))
+    return specs
+
+
+class TestVerifyAssets:
+    def test_passes_when_every_asset_is_present(
+        self, release: Any, tmp_path: Path
+    ) -> None:
+        specs = _specs(release, tmp_path)
+        client = _ReleaseClient([_Asset(s.name, s.sha256) for s in specs])
+
+        release.verify_assets(client, TAG, specs)
+
+        assert client.calls == 1
+
+    def test_fails_when_an_asset_is_missing(self, release: Any, tmp_path: Path) -> None:
+        specs = _specs(release, tmp_path)
+        client = _ReleaseClient([_Asset(specs[0].name, specs[0].sha256)])
+
+        with pytest.raises(release.ReleaseError, match="missing 1 asset"):
+            release.verify_assets(client, TAG, specs)
+
+    def test_fails_when_content_is_stale(self, release: Any, tmp_path: Path) -> None:
+        specs = _specs(release, tmp_path)
+        client = _ReleaseClient(
+            [
+                _Asset(specs[0].name, specs[0].sha256),
+                _Asset(specs[1].name, "0" * 64),
+            ]
+        )
+
+        with pytest.raises(release.ReleaseError, match="stale content"):
+            release.verify_assets(client, TAG, specs)
+
+    def test_fails_when_the_release_disappeared(
+        self, release: Any, tmp_path: Path
+    ) -> None:
+        with pytest.raises(release.ReleaseError, match="vanished"):
+            release.verify_assets(_ReleaseClient(None), TAG, _specs(release, tmp_path))

@@ -637,6 +637,51 @@ def sync_assets(
         client.upload_asset(str(release.get("upload_url", "")), asset)
 
 
+def verify_assets(client: GitHubClient, tag: str, assets: list[AssetSpec]) -> None:
+    """
+    Re-read the release and assert every intended asset is actually present.
+
+    Uploading is the one step whose failure used to be invisible: a release
+    published by a concurrent run (or a partially failed upload) left the
+    release looking complete while a bundle or the APK was missing.  Checking
+    the final state costs one request and turns that into a hard error.
+    """
+    current = client.get_release_by_tag(tag)
+    if current is None:
+        raise ReleaseError(f"release {tag} vanished right after publishing")
+
+    present = {
+        str(item["name"])
+        for item in current.get("assets") or []
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    missing = sorted(asset.name for asset in assets if asset.name not in present)
+    if missing:
+        raise ReleaseError(
+            f"release {tag} is missing {len(missing)} asset(s): " + ", ".join(missing)
+        )
+
+    mismatched = [
+        asset.name
+        for asset in assets
+        if (remote_digest := _remote_digest_by_name(current, asset.name)) is not None
+        and remote_digest != asset.sha256
+    ]
+    if mismatched:
+        raise ReleaseError(
+            f"release {tag} has stale content for: " + ", ".join(sorted(mismatched))
+        )
+    print(f"==> Verified {len(assets)} asset(s) on release {tag}")
+
+
+def _remote_digest_by_name(release: dict[str, Any], name: str) -> str | None:
+    """The remote digest of the asset called *name*, if GitHub reports one."""
+    for item in release.get("assets") or []:
+        if isinstance(item, dict) and item.get("name") == name:
+            return _remote_digest(item)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Tags
 # ---------------------------------------------------------------------------
@@ -941,6 +986,7 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
 
     print(f"==> Uploading {len(upload_assets)} asset(s)")
     sync_assets(client, release, upload_assets)
+    verify_assets(client, tag, upload_assets)
 
     url = release.get("html_url")
     print()
