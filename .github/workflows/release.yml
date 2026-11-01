@@ -1,0 +1,53 @@
+name: Release
+
+# One-stop publishing, driven by scripts/release.py:
+#   1. extract the tag's section from CHANGELOG.md as release notes,
+#   2. build the three PyInstaller bundles (build_release.py),
+#   3. merge checksums into SHA256SUMS.txt,
+#   4. (tag/push are no-ops here: the tag already exists on the remote —
+#      that is what triggered this workflow),
+#   5. create the GitHub release and upload the assets with GITHUB_TOKEN.
+# The Android release APK is signed locally with a git-ignored keystore, so
+# on the runner scripts/release.py warns and skips it; publish the APK by
+# re-running the script locally (it is idempotent: re-uploading only
+# replaces assets whose digests changed).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build & publish (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full checkout so scripts/release.py sees the pushed tag (and any
+          # earlier tags); a shallow checkout may miss refs/tags/*.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install build dependencies
+        # Mirrors build.yml: `api` pulls fastapi/uvicorn for the novel-api
+        # spec, `music` keeps the music modules available to the bundler.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[api,music]" "pyinstaller>=6.10"
+      - name: Publish release
+        # scripts/release.py never prints the token: GITHUB_TOKEN is read
+        # from the environment and any authenticated push URL is redacted.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/release.py

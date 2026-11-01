@@ -24,7 +24,11 @@ services:
       - noveldl-data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8081/api/v1/health')"]
+      # Mirror the Dockerfile HEALTHCHECK: /api/v1/health sits behind the
+      # token dependency, so the probe must send NOVEL_API_TOKEN when one is
+      # configured (otherwise the check 401s and the container is flagged
+      # unhealthy even though the API works).
+      test: ["CMD", "python", "-c", "import os, urllib.request; token = os.environ.get('NOVEL_API_TOKEN', ''); headers = {'Authorization': 'Bearer ' + token} if token else {}; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8081/api/v1/health', headers=headers), timeout=3).read()"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -81,7 +81,17 @@ EXCLUDES: tuple[str, ...] = (
     "jupyter",
     # Not reachable from the registry (kept in-tree for reference only)
     f"{PACKAGE}.plugins.archived",
+    # Android-only adapter: the embedded loopback server is loaded by name
+    # from Kotlin via Chaquopy (which ships the source tree directly, see
+    # android/app/build.gradle.kts), never from a PyInstaller bundle.
+    f"{PACKAGE}.apps.embedded",
 )
+
+#: Console-bundle-only guards.  The desktop UI is reachable only through
+#: ``packaging/desktop_entry.py``; nothing under ``apps.cli``/``apps.api``
+#: imports it, and excluding it keeps a future accidental cross-import from
+#: dragging pywebview into the CLI/API bundles.
+CONSOLE_EXCLUDES: tuple[str, ...] = (f"{PACKAGE}.apps.desktop",)
 
 
 def modules_from_tree(package_dir: Path, package_name: str) -> list[str]:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -487,15 +488,21 @@ def main(argv: list[str] | None = None) -> int:
     if not result.ok:
         print()
         print(f"Build FAILED for {APP_NAME}: {result.message}")
+        # 2: prepare (toolchain/spec), 3: PyInstaller, 4: validation,
+        # 5: installer compilation (set below).
         return {"prepare": 2, "pyinstaller": 3}.get(result.stage, 4)
 
     print()
     print(f"{APP_NAME} built successfully.")
     if result.exe is not None:
         print(f'  Run it with: "{result.exe}"')
-    installer = _maybe_build_installer(root)
+    installer, installer_error = _maybe_build_installer(root)
     if installer is not None:
         print(f'  Installer  : "{installer}"')
+    if installer_error is not None:
+        # Exit code 5: the bundle is fine but the installer step failed.
+        print(f"  Installer  : {installer_error}", file=sys.stderr)
+        return 5
     return 0
 
 
@@ -518,27 +525,61 @@ def _find_iscc() -> str | None:
     return None
 
 
-def _maybe_build_installer(root: Path) -> Path | None:
+def _app_version(root: Path) -> str:
+    """
+    Return the version of the ``novel_downloader`` package being packaged.
+
+    Reads ``src/novel_downloader/__init__.py`` directly first: the source
+    tree is what the spec bundles, so it is the authority even when the
+    running interpreter has a different (e.g. non-editable) install.  Falls
+    back to importing the package, and finally to ``"unknown"``.
+    """
+    init_py = root / "src" / "novel_downloader" / "__init__.py"
+    if init_py.is_file():
+        match = re.search(
+            r'^__version__\s*=\s*["\']([^"\']+)["\']',
+            init_py.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        if match:
+            return match.group(1)
+    try:
+        src_dir = str(root / "src")
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
+        from novel_downloader import __version__  # noqa: PLC0415 - local fallback
+
+        return str(__version__)
+    except ImportError:
+        print(
+            "  WARNING: could not determine the app version; the installer "
+            "would be named NovelDownloader-setup-unknown-x64.exe.",
+            file=sys.stderr,
+        )
+        return "unknown"
+
+
+def _maybe_build_installer(root: Path) -> tuple[Path | None, str | None]:
     """
     Compile the Inno Setup installer when the toolchain is available.
 
     A missing ISCC is a warning, not an error: the zip bundle stays the
-    baseline artifact and the installer is an optional extra.
-    """
-    version = "unknown"
-    try:
-        from novel_downloader import __version__
+    baseline artifact and the installer is an optional extra.  A failing
+    compilation, on the other hand, is an error and is reported through the
+    second tuple element so :func:`main` can exit non-zero.
 
-        version = str(__version__)
-    except ImportError:
-        pass
+    :return: ``(installer_path, error)`` — the path when compiled, and an
+        error message when the compilation failed (both ``None`` when the
+        step was skipped or succeeded).
+    """
+    version = _app_version(root)
     iscc = _find_iscc()
     if iscc is None:
         print(
             "  Installer  : skipped (Inno Setup 6 not installed; "
             "install it or run iscc manually, see packaging/noveldl_installer.iss)",
         )
-        return None
+        return None, None
     cmd = [
         iscc,
         f"/DAppVersion={version}",
@@ -548,9 +589,14 @@ def _maybe_build_installer(root: Path) -> Path | None:
     proc = subprocess.run(cmd, cwd=root, check=False)  # noqa: S603 - fixed args
     if proc.returncode != 0:
         print("  Installer compilation FAILED", file=sys.stderr)
-        return None
+        return None, f"installer compilation exited with status {proc.returncode}"
     out = root / "dist" / f"NovelDownloader-setup-{version}-x64.exe"
-    return out if out.is_file() else None
+    if not out.is_file():
+        return (
+            None,
+            f"ISCC reported success but the installer is missing: {out}",
+        )
+    return out, None
 
 
 if __name__ == "__main__":

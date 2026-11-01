@@ -21,8 +21,10 @@ collected in::
         manifest.json
 
 ``SHA256SUMS.txt`` uses the standard ``<sha256>  <filename>`` format and can be
-verified with ``sha256sum -c`` (or ``Get-FileHash`` on Windows).  The script
-exits non-zero if any requested target fails to build.
+verified with ``sha256sum -c`` (or ``Get-FileHash`` on Windows).  Every archive
+is opened and CRC-checked before it is hashed, so a truncated or corrupt zip
+never receives a checksum.  The script exits non-zero if any requested target
+fails to build.
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ import platform
 import shutil
 import sys
 import time
+import zipfile
+import zlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -174,6 +178,46 @@ def _archive_bundle(bundle_dir: Path, archive_path: Path) -> None:
         produced_path.replace(archive_path)
 
 
+def _verify_archive(archive_path: Path, bundle_name: str) -> None:
+    """
+    Fully validate a produced archive before it is hashed and published.
+
+    Runs the zip CRC check over every entry (the same thing
+    ``python -m zipfile -t`` / ``packaging/verify.ps1`` do) and confirms the
+    archive really contains the onedir bundle, so a truncated write or an
+    empty archive can never reach ``SHA256SUMS.txt``.
+
+    :raises RuntimeError: when the archive is corrupt or has the wrong layout.
+    """
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            bad_entry = archive.testzip()
+            if bad_entry is not None:
+                raise RuntimeError(
+                    f"corrupt zip entry {bad_entry!r} in {archive_path.name}"
+                )
+            names = archive.namelist()
+    except (
+        zipfile.BadZipFile,
+        zlib.error,
+        OSError,
+    ) as exc:
+        # zlib.error/OSError escape testzip() on damaged EOCD tails; a
+        # traceback here would skip the caller's orphan-zip cleanup.
+        raise RuntimeError(f"{archive_path.name} is not a readable zip: {exc}") from exc
+
+    top = f"{bundle_name}/"
+    if not any(name.startswith(top) for name in names):
+        raise RuntimeError(
+            f"{archive_path.name} has no top-level '{bundle_name}/' folder "
+            f"(found {len(names)} entries)"
+        )
+    launcher = f"{top}{bundle_name}.exe"
+    launcher_posix = f"{top}{bundle_name}"
+    if not any(name in (launcher, launcher_posix) for name in names):
+        raise RuntimeError(f"{archive_path.name} does not contain {bundle_name}.exe")
+
+
 def _timestamp() -> str:
     """Current UTC time as an ISO-8601 string with a ``Z`` suffix."""
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -199,6 +243,13 @@ def _build_artifact(
     archive_path = release_dir / archive_name
     bundle_size, file_count = _bundle_stats(bundle_dir)
     _archive_bundle(bundle_dir, archive_path)
+    try:
+        _verify_archive(archive_path, spec.bundle)
+    except RuntimeError:
+        # Never leave a corrupt archive behind: anything that is not listed
+        # in SHA256SUMS.txt must not sit in the release directory either.
+        archive_path.unlink(missing_ok=True)
+        raise
 
     elapsed = time.monotonic() - started
     return {
@@ -217,9 +268,22 @@ def _build_artifact(
 def _write_checksums(release_dir: Path, artifacts: Sequence[dict[str, Any]]) -> Path:
     """Write ``SHA256SUMS.txt`` in the conventional two-space format."""
     lines = [f"{item['sha256']}  {item['file']}" for item in artifacts]
+    content = "\n".join(lines) + "\n" if lines else ""
     path = release_dir / "SHA256SUMS.txt"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    path.write_text(content, encoding="utf-8", newline="\n")
     return path
+
+
+def _pyinstaller_version() -> str | None:
+    """Return the PyInstaller version in use, or ``None`` when absent."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except ImportError:  # pragma: no cover - Python < 3.8
+        return None
+    try:
+        return version("pyinstaller")
+    except PackageNotFoundError:
+        return None
 
 
 def _write_manifest(
@@ -239,9 +303,11 @@ def _write_manifest(
         "platform": platform_tag,
         "created_at": created_at,
         "python": platform.python_version(),
+        "pyinstaller": _pyinstaller_version(),
         "targets": list(requested),
         "artifacts": list(artifacts),
         "failures": list(failures),
+        "checksums_file": "SHA256SUMS.txt",
     }
     path = release_dir / "manifest.json"
     path.write_text(
@@ -265,7 +331,7 @@ def _print_table(artifacts: Sequence[dict[str, Any]]) -> None:
         for item in artifacts
     ]
     widths = [
-        max(len(headers[column]), *(len(row[column]) for row in rows))
+        max([len(headers[column]), *(len(row[column]) for row in rows)])
         for column in range(len(headers))
     ]
 
@@ -275,6 +341,11 @@ def _print_table(artifacts: Sequence[dict[str, Any]]) -> None:
         ).rstrip()
 
     print()
+    if not rows:
+        # Every requested target failed: print the header row alone instead
+        # of crashing on an empty sequence of rows.
+        print(render(headers))
+        return
     print(render(headers))
     print(render(tuple("-" * width for width in widths)))
     for row in rows:

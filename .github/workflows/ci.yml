@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Keep these in sync with .pre-commit-config.yaml
+  # (ruff-pre-commit / mirrors-mypy) and with the local toolchain.
+  RUFF_VERSION: "0.17.1"
+  MYPY_VERSION: "2.4.0"
+  # Python sources only. `ruff check .` / `ruff format .` would also walk
+  # legacy/ (an archived snapshot that predates these gates) and, since ruff
+  # 0.17, Python code blocks inside README/docs markdown files.
+  LINT_PATHS: "src tests scripts packaging setup.py"
+
+jobs:
+  lint:
+    name: Lint & format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install "ruff==${RUFF_VERSION}"
+      - name: ruff check
+        run: ruff check $LINT_PATHS
+      - name: ruff format --check
+        run: ruff format --check $LINT_PATHS
+
+  typecheck:
+    name: Type check (mypy strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[ci]" "mypy==${MYPY_VERSION}"
+      - name: mypy (package sources)
+        run: mypy src
+      - name: mypy (build chain + packaging specs)
+        # The build/release scripts and the PyInstaller specs run on every
+        # release, so they are held to the same strict gate as src/.  The rest
+        # of scripts/ (one-off data tools) and tests/ predate the gate and are
+        # not type-checked yet.
+        run: >-
+          mypy packaging
+          scripts/build_cli.py scripts/build_desktop.py scripts/build_release.py
+          scripts/update_pot.py scripts/update_po.py scripts/compile_mo.py
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[ci]"
+      - name: pytest
+        run: pytest -q
+
+  translations:
+    name: Translations up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install babel
+        run: |
+          python -m pip install --upgrade pip
+          pip install "babel>=2.12"
+      - name: Regenerate catalogs
+        run: |
+          python scripts/update_pot.py
+          python scripts/update_po.py
+      - name: Fail if catalogs are stale
+        run: git diff --exit-code -- src/novel_downloader/locales

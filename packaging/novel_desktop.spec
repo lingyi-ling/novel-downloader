@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for the native Tkinter desktop client (onedir, windowed).
+PyInstaller spec for the pywebview desktop client (onedir, windowed).
 
 Build via the wrapper (recommended)::
 

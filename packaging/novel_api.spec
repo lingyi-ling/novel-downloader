@@ -31,7 +31,7 @@ for extra_path in (SPEC_DIR, SRC_DIR):
     if str(extra_path) not in sys.path:
         sys.path.insert(0, str(extra_path))
 
-from _spec_common import EXCLUDES, collect_common  # noqa: E402
+from _spec_common import CONSOLE_EXCLUDES, EXCLUDES, collect_common  # noqa: E402
 
 ICON_PATH = SRC_DIR / "novel_downloader" / "resources" / "icons" / "app.ico"
 
@@ -50,7 +50,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=list(EXCLUDES),
+    excludes=[*EXCLUDES, *CONSOLE_EXCLUDES],
     noarchive=False,
     optimize=0,
 )

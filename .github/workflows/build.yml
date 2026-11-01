@@ -1,0 +1,136 @@
+name: Build
+
+# Artifacts are produced on version tags and on demand.  Nothing is published
+# automatically: download the bundles from the workflow run's "Artifacts"
+# section, or attach them to a release manually.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  python-bundles:
+    name: PyInstaller bundles (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install build dependencies
+        # `api` pulls fastapi/uvicorn (required by the novel-api spec);
+        # `music` makes the optional music modules available to the bundler.
+        # Both specs are onedir builds validated by scripts/build_cli.py.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[api,music]" "pyinstaller>=6.10"
+      - name: Build novel-cli and novel-api
+        run: python scripts/build_cli.py --target both
+      - name: Upload novel-cli
+        uses: actions/upload-artifact@v4
+        with:
+          name: novel-cli-windows-x64
+          path: dist/novel-cli
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload novel-api
+        uses: actions/upload-artifact@v4
+        with:
+          name: novel-api-windows-x64
+          path: dist/novel-api
+          if-no-files-found: error
+          retention-days: 14
+
+  desktop-bundle:
+    name: Desktop bundle (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install build dependencies
+        # Core dependencies already include pywebview (the desktop window);
+        # the `music` extra keeps the music tab fully functional in the bundle.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[music]" "pyinstaller>=6.10"
+      - name: Build NovelDownloader desktop bundle
+        # No Inno Setup on the runner: scripts/build_desktop.py detects the
+        # missing ISCC and skips the installer with a warning, so the onedir
+        # bundle remains the artifact produced (and validated) here.
+        run: python scripts/build_desktop.py
+      - name: Upload NovelDownloader
+        uses: actions/upload-artifact@v4
+        with:
+          name: novel-desktop-windows-x64
+          path: dist/NovelDownloader
+          if-no-files-found: error
+          retention-days: 14
+
+  android-apk:
+    name: Android debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Non-blocking on purpose.  This job is the most fragile part of the
+    # pipeline: it depends on the Android SDK/NDK mirror, build-tools
+    # availability, licence acceptance and the runner image's JDK.  Keeping
+    # `continue-on-error` means a broken SDK mirror cannot block a release
+    # build of the Python bundles.  Remove it once the job has been green for
+    # a few runs.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        # Chaquopy targets Python 3.12 (android/app/build.gradle.kts) and its
+        # buildPython must be a matching host interpreter. Locally that is
+        # the repo venv (.venv/Scripts/python.exe, 3.12); on the runner the
+        # venv does not exist, so Chaquopy falls back to PATH python3 — pin
+        # it explicitly instead of relying on the image's default.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          # compileSdk = 35 in android/app/build.gradle.kts; AGP 8.6.1 still
+          # defaults to build-tools 34.0.0, so install both to be safe.
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0 build-tools;34.0.0"
+          accept-android-sdk-licenses: "yes"
+          log-accepted-android-sdk-licenses: "false"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Make gradlew executable
+        # The wrapper is tracked as 100644; GitHub's Linux runners require +x.
+        run: chmod +x android/gradlew
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace --console=plain
+      - name: Upload debug APK
+        # `always()` so a partial APK is still collected when the build fails;
+        # the hashFiles guard skips the upload when nothing was produced.
+        if: always() && hashFiles('android/app/build/outputs/apk/debug/*.apk') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: novel-downloader-android-debug
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+          retention-days: 14
