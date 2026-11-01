@@ -57,7 +57,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[ci]" "mypy==${MYPY_VERSION}"
+          pip install -e ".[ci,api,music]" "mypy==${MYPY_VERSION}"
       - name: mypy (package sources)
         run: mypy src
       - name: mypy (build chain + packaging specs)
@@ -87,7 +87,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[ci]"
+          pip install -e ".[ci,api,music]"
       - name: pytest
         run: pytest -q
 

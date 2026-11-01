@@ -423,7 +423,8 @@ def capture_search_json(
 
 def _popen_kwargs() -> dict[str, Any]:
     """Extra Popen options that make the child process killable as a tree."""
-    if os.name == "nt":
+    # sys.platform (not os.name) so mypy narrows the win32-only constant.
+    if sys.platform == "win32":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
 
