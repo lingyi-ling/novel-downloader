@@ -35,7 +35,7 @@ class FakeState:
 class MissingPath:
     """``Traversable``-like object whose ``open`` always reports a missing file."""
 
-    def joinpath(self, *_parts: Any) -> "MissingPath":
+    def joinpath(self, *_parts: Any) -> MissingPath:
         return self
 
     def open(self, mode: str = "rb") -> Any:
