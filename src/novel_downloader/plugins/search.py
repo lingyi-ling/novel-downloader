@@ -82,7 +82,8 @@ class SearchEvent:
       skipped to keep the search fast and window-free;
     * ``"completed"`` — the site's search task finished (``result_count`` is
       the number of results, possibly zero);
-    * ``"failed"`` — the site's search task raised.
+    * ``"failed"`` — the site's search task raised, returned a malformed
+      payload, or could not even be prepared (constructor / ``nsfw`` flag);
 
     :param site: Site key.
     :param kind: Event kind (see above).
@@ -158,6 +159,10 @@ def _prepare_searchers(
 
     A class that appears more than once (the registry repeats it when the
     same site key is requested twice) is instantiated and searched once.
+
+    A class that cannot even be instantiated -- or whose ``nsfw`` flag raises
+    -- is reported as a per-site ``"failed"`` event instead of aborting the
+    whole aggregate.
     """
     browser_sites = _browser_assisted_sites()
     explicit = sites is not None
@@ -190,8 +195,20 @@ def _prepare_searchers(
             )
             continue
 
-        instance = cls(session)
-        if not explicit and instance.nsfw != nsfw:
+        try:
+            instance = cls(session)
+            nsfw_mismatch = instance.nsfw != nsfw
+        except Exception as exc:
+            # 一个连实例化都失败的 searcher（含 ``nsfw`` 属性抛异常）是
+            # 单站故障：按 per-site "failed" 事件上报，而不是让整个聚合
+            # 搜索在准备阶段就崩掉。
+            logger.warning(
+                "search: failed to prepare searcher for site %s: %s", site, exc
+            )
+            _emit(on_event, SearchEvent(site, "failed", str(exc)))
+            continue
+
+        if not explicit and nsfw_mismatch:
             continue
 
         if explicit:
@@ -397,6 +414,13 @@ async def search(
 
     for (site, _), item in zip(plan.entries, site_lists, strict=False):
         if isinstance(item, BaseException):
+            if isinstance(
+                item, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)
+            ):
+                # 取消和解释器级退出必须向上传播（与 search_stream 的
+                # 逐站路径一致）：把它们吞成 per-site 失败会偷走调用方的
+                # 取消语义。
+                raise item
             _report_failure(site, item, plan.browser_sites, on_event)
             continue
         if not isinstance(item, list):

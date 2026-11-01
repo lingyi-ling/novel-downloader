@@ -765,3 +765,11 @@ def test_track_accessors() -> None:
     assert track_no(web) == 3
     assert track_no({}) == 0
     assert track_no({"no": "7"}) == 7
+
+
+def test_track_no_tolerates_unparsable_values() -> None:
+    """曲目号偶尔是不可直接 int() 的形态（如 "3.5"）：归 0 而不是炸。"""
+    assert track_no({"no": "3.5"}) == 0
+    assert track_no({"no": "1e3"}) == 0  # int() 拒绝指数记法字符串
+    assert track_no({"no": object()}) == 0
+    assert track_no({"no": float("nan")}) == 0

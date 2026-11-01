@@ -78,3 +78,64 @@ def test_file_contents_are_valid_json_with_utf8() -> None:
     assert json.loads(target.read_text(encoding="utf-8")) == {
         "netease": {"token": "令牌"}
     }
+
+
+def test_set_restricts_file_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """platform_creds.json holds login secrets (TIDAL tokens, site cookies).
+
+    Like the NetEase session file (weapi.save_cookies) and the login cookie
+    store (cookie_io.write_cookie_items), the file must be tightened to
+    owner-only before it lands on disk. Windows ignores POSIX permission
+    bits, so the guarantee is asserted on the ``chmod`` call itself.
+    """
+    chmod_calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        creds.os, "chmod", lambda path, mode: chmod_calls.append((str(path), mode))
+    )
+
+    creds.set("tidal", {"token": "secret"})
+
+    assert (creds._FILE + ".tmp", 0o600) in chmod_calls
+    assert Path(creds._FILE).exists()
+
+
+def test_set_cleans_tmp_residue_when_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """凭据是明文敏感数据：原子替换失败时不能把半截 .tmp 留在盘上。"""
+    creds.set("tidal", {"token": "old"})
+    target = Path(creds._FILE)
+    before = target.read_text(encoding="utf-8")
+
+    def failing_replace(src: object, dst: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(creds.os, "replace", failing_replace)
+
+    with pytest.raises(OSError, match="disk full"):
+        creds.set("tidal", {"token": "secret"})
+
+    # 半截明文 .tmp 被清掉，旧文件原样保留
+    assert not Path(creds._FILE + ".tmp").exists()
+    assert target.read_text(encoding="utf-8") == before
+
+
+def test_set_cleans_tmp_residue_when_dump_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """json 序列化中途抛错同样不能留下半截 .tmp。"""
+    real_dump = creds.json.dump
+
+    def failing_dump(obj: object, fh: object, **kwargs: object) -> None:
+        real_dump(obj, fh, **kwargs)  # type: ignore[arg-type]
+        raise ValueError("unserialisable credential payload")
+
+    monkeypatch.setattr(creds.json, "dump", failing_dump)
+
+    with pytest.raises(ValueError, match="unserialisable"):
+        creds.set("tidal", {"token": "secret"})
+
+    assert not Path(creds._FILE + ".tmp").exists()
+    assert not Path(creds._FILE).exists()

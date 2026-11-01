@@ -191,6 +191,21 @@ def test_export_ui_error_marks_task_failed() -> None:
     assert task.error == "disk full"
 
 
+def test_export_ui_error_falls_back_to_type_name_for_bare_exception() -> None:
+    """无参异常（裸 ``TimeoutError()``）str 出来是空串。
+
+    直接 ``str(error)`` 会把任务的失败详情抹成空；应退回异常类型名。
+    """
+    task = _task()
+    ui = WebExportUI(task)
+    ui.on_start(BOOK)
+
+    ui.on_error(BOOK, "epub", TimeoutError())
+
+    assert task.status is Status.FAILED
+    assert task.error == "TimeoutError"
+
+
 def test_export_ui_unsupported_format_sets_error_only() -> None:
     task = _task()
     ui = WebExportUI(task)

@@ -290,6 +290,27 @@ def test_resolve_defaults_to_exhigh_level() -> None:
     assert client.song_url_calls == [(["42"], "exhigh")]
 
 
+def test_resolve_tolerates_missing_extra() -> None:
+    # 与 musicdl 的同名修复对齐：外部手工构造的 Track 可能 extra=None，
+    # resolve 不该在 ``track.extra.get`` 上直接炸。
+    client = FakeClient()
+    client.song_url_results = [[{"url": "http://a/1.mp3", "type": "mp3"}]]
+    provider = _provider(client)
+    bare = Track(provider="netease", id="42", extra=None)
+
+    result = provider.resolve(bare, level="standard")
+
+    assert result.ok is True
+    assert client.song_url_calls == [(["42"], "standard")]
+
+    # 无 url 的失败路径也走 extra-or-{} 而不崩
+    empty = FakeClient()
+    empty.song_url_results = [[{}]]
+    failed = _provider(empty).resolve(bare, level="standard")
+    assert failed.ok is False
+    assert failed.reason == "无版权或已下架"
+
+
 # --------------------------------------------------------------------------- #
 # module import hygiene
 # --------------------------------------------------------------------------- #

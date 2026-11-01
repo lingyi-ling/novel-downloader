@@ -328,6 +328,24 @@ def test_missing_and_malformed_fields_do_not_crash() -> None:
     assert len(results) == 2
 
 
+def test_sort_results_update_survives_out_of_platform_dates() -> None:
+    """平台时区库范围之外的日期（如 0001 / 9999 年）。
+
+    Windows 上 naive ``timestamp()`` 会为此抛 OSError，旧实现让整个
+    ``by="update"`` 排序一起崩；极端值按 UTC 解释后仍可正确排在两端。
+    """
+    results = [
+        _result(book_id="mid", update_date="2024-06-14"),
+        _result(book_id="oldest", update_date="0001-01-01"),
+        _result(book_id="newest", update_date="9999-12-31"),
+    ]
+    sort_results(results, by="update", now=NOW)
+    assert [r["book_id"] for r in results] == ["newest", "mid", "oldest"]
+
+    sort_results(results, by="update", order="asc", now=NOW)
+    assert [r["book_id"] for r in results] == ["oldest", "mid", "newest"]
+
+
 # --------------------------------------------------------------------------- #
 # snapshots (lock behaviour while optimising internals)
 # --------------------------------------------------------------------------- #

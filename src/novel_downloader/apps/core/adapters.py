@@ -19,7 +19,7 @@ from .cred_broker import (
     complete_request,
     create_cred_request,
 )
-from .models import DownloadTask, Status
+from .models import DownloadTask, Status, error_text
 
 
 class WebLoginUI:
@@ -161,7 +161,9 @@ class WebExportUI:
         if self.task.status is Status.CANCELLED:
             return
         self.task.status = Status.FAILED
-        self.task.error = str(error)
+        # 无参异常（裸 ``TimeoutError()`` 等）str 出来是空串，会抹掉
+        # 任务的失败详情：退回异常类型名
+        self.task.error = error_text(error)
 
     def on_unsupported(self, book: BookConfig, fmt: str) -> None:
         self.unsupported_any = True

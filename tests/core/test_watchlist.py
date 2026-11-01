@@ -338,6 +338,60 @@ def test_check_all_swallows_progress_callback_errors(
     assert all(result.changed for result in results)
 
 
+def test_check_all_slow_store_write_does_not_block_the_sweep(
+    monkeypatch: pytest.MonkeyPatch, store: WatchlistStore
+) -> None:
+    """慢盘上的 store 写入（含 fsync）不能阻塞事件循环。
+
+    写入必须丢到 worker 线程：否则一个卡住的 fsync 会把整个 sweep 乃至
+    同一循环上的其它请求一起挂住。
+    """
+    _seed_books(store, ["A", "B", "C"])
+
+    write_started = threading.Event()
+    release_write = threading.Event()
+    searched: list[str] = []
+
+    async def fake_search(keyword: str, **_kwargs: Any) -> list[dict[str, str]]:
+        searched.append(keyword)
+        return [_hit("site", "", keyword, f"{keyword} chapter")]
+
+    def slow_update(
+        site: str,
+        book_id: str,
+        last_chapter: str,
+        *,
+        title: str | None = None,
+    ) -> bool:
+        write_started.set()
+        # 有界等待：阻塞式实现会让测试失败而不是死锁
+        release_write.wait(timeout=2.0)
+        return True
+
+    _patched_search(monkeypatch, fake_search)
+    monkeypatch.setattr(store, "update_latest", slow_update)
+
+    async def scenario() -> list[CheckResult]:
+        sweep = asyncio.create_task(
+            watchlist.check_all(store, timeout=1.0, max_concurrency=1)
+        )
+        # 等第一笔（停住的）写入开始
+        await asyncio.wait_for(asyncio.to_thread(write_started.wait, 2.0), 3.0)
+        # 写入停住期间，剩余搜索必须照常完成（事件循环没被卡住）
+        deadline = asyncio.get_running_loop().time() + 0.5
+        while len(searched) < 3 and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.005)
+        release_write.set()
+        return await asyncio.wait_for(sweep, timeout=3.0)
+
+    results = asyncio.run(scenario())
+
+    assert len(searched) == 3
+    assert [result.entry.title for result in results] == ["A", "B", "C"]
+    assert all(result.changed for result in results)
+    assert all(result.error is None for result in results)
+
+
 # ---------------------------------------------------------------------------
 # Concurrent store mutations (desktop worker threads share one store)
 # ---------------------------------------------------------------------------

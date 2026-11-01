@@ -196,6 +196,30 @@ def test_save_lyric_normalizes_trailing_newlines_and_creates_dirs(
     )
 
 
+def test_save_lyric_normalizes_interior_crlf_and_lone_cr(tmp_path: Path) -> None:
+    """docstring 承诺「换行统一为 \n」：中间的 CRLF / 裸 CR 也要归一。
+
+    部分来源的歌词整段是 CRLF，很多播放器解析不了；行中间的换行
+    strip() 够不着，必须显式替换。
+    """
+    audio = tmp_path / "song.mp3"
+
+    save_lyric(
+        str(audio),
+        "[00:01.00]a\r\n[00:02.00]b\r[00:03.00]c",
+        "[00:01.00]甲\r\n[00:02.00]乙",
+    )
+
+    # read_bytes 而不是 read_text：文本模式的通用换行转换会把 CRLF
+    # 也显示成 \n，掩盖回归
+    assert (tmp_path / "song.lrc").read_bytes().decode("utf-8") == (
+        "[00:01.00]a\n[00:02.00]b\n[00:03.00]c\n"
+    )
+    assert (tmp_path / "song.zh.lrc").read_bytes().decode("utf-8") == (
+        "[00:01.00]甲\n[00:02.00]乙\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tag / cover embedding
 # ---------------------------------------------------------------------------

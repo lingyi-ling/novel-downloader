@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
@@ -429,7 +429,17 @@ def sort_results(
 
     def _update_key(result: SearchResult) -> float:
         updated = parse_update_date(result.get("update_date"), now=current)
-        return -1.0 if updated is None else updated.timestamp()
+        if updated is None:
+            return -1.0
+        if updated.tzinfo is None:
+            try:
+                return updated.timestamp()
+            except (OSError, OverflowError):
+                # 一个 naive ``timestamp()`` 会查平台时区库，Windows 上
+                # 会拒绝库范围之外的日期（如 0001 / 9999 年）。把这种
+                # 极端值按 UTC 解释是纯算术，既不炸也能正确排在两端。
+                updated = updated.replace(tzinfo=UTC)
+        return updated.timestamp()
 
     def _priority_key(result: SearchResult) -> float:
         try:

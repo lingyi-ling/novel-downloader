@@ -86,8 +86,10 @@ class NeteaseProvider(MusicProvider):
         return [self._to_track(s) for s in songs], total
 
     def resolve(self, track, level=None):
-        sid = track.extra.get("tid") or track.id
-        raw = track.extra.get("raw") or {}
+        # extra 可能为 None（如外部手工构造的 Track），别让 .get 直接炸
+        extra = track.extra or {}
+        sid = extra.get("tid") or track.id
+        raw = extra.get("raw") or {}
         res, used = {}, ""
         for lv in _levels_to_try(level or "exhigh"):
             lst = self.client.song_urls([sid], level=lv)

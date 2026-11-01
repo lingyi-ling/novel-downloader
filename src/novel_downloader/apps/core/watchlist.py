@@ -497,19 +497,26 @@ async def check_entry(
     )
 
 
-def _record_latest(
+async def _record_latest(
     store: WatchlistStore, entry: WatchEntry, result: CheckResult
 ) -> CheckResult:
     """
     Persist a found chapter, turning a storage failure into an error result.
 
-    Unchanged chapters and not-found results pass through untouched.
+    Unchanged chapters and not-found results pass through untouched. The
+    write itself runs in a worker thread (the store is thread-safe): the
+    atomic write includes an ``fsync``, which on a slow disk must neither
+    block the event loop nor withhold a search slot from the remaining books.
     """
     if not result.found or result.latest == entry.last_chapter:
         return result
     try:
-        changed = store.update_latest(
-            entry.site, entry.book_id, result.latest, title=result.matched_title
+        changed = await asyncio.to_thread(
+            store.update_latest,
+            entry.site,
+            entry.book_id,
+            result.latest,
+            title=result.matched_title,
         )
     except Exception as exc:  # disk failures are per-book, not fatal
         logger.warning("Could not update %s/%s: %s", entry.site, entry.book_id, exc)
@@ -549,9 +556,10 @@ async def check_all(
     async def worker(index: int, entry: WatchEntry) -> None:
         async with semaphore:
             result = await check_entry(entry, timeout)
-        # Persist (and report) outside the semaphore: storage must not
-        # withhold a search slot from the remaining books.
-        result = _record_latest(store, entry, result)
+        # Persist (and report) outside the semaphore and off the event loop:
+        # a slow disk write must neither withhold a search slot from the
+        # remaining books nor block the loop serving other requests.
+        result = await _record_latest(store, entry, result)
         slots[index] = result
         if progress_cb is not None:
             try:

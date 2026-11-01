@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the cross-site search orchestration."""
 
+import asyncio
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
@@ -321,6 +322,101 @@ async def test_stream_invalid_site_payload_is_isolated_and_reported(
     assert ("recorder", "completed") in kinds
     assert ("nonepayload", "failed") in kinds
     assert ("raising", "failed") in kinds
+
+
+# --------------------------------------------------------------------------- #
+# prepare-time searcher failures and cancellation propagation
+# --------------------------------------------------------------------------- #
+
+
+class _BrokenInitSearcher(_RecordingSearcher):
+    """Searcher whose constructor always fails (a broken site plugin)."""
+
+    site_name = "broken_init"
+
+    def __init__(self, session: Any) -> None:
+        raise RuntimeError("constructor boom")
+
+
+class _BrokenNsfwSearcher(_RecordingSearcher):
+    """Searcher whose ``nsfw`` property always fails."""
+
+    site_name = "broken_nsfw"
+
+    @property
+    def nsfw(self) -> bool:
+        raise RuntimeError("nsfw boom")
+
+
+class _CancellingSearcher(_RecordingSearcher):
+    """Searcher whose search task raises CancelledError."""
+
+    site_name = "cancelling"
+
+    async def search(
+        self, keyword: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        raise asyncio.CancelledError()
+
+
+@pytest.mark.asyncio
+async def test_broken_constructor_is_isolated_per_site(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # A searcher that cannot even be instantiated is one site's failure: the
+    # aggregate must still return the other sites' results.
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BrokenInitSearcher, _RecordingSearcher]),
+    )
+    events: list[SearchEvent] = []
+
+    results = await search("keyword", on_event=events.append)
+
+    assert results == [_stub_result("recorder", "1")]
+    kinds = {(event.site, event.kind) for event in events}
+    assert ("broken_init", "failed") in kinds
+    assert ("recorder", "completed") in kinds
+
+
+@pytest.mark.asyncio
+async def test_broken_nsfw_property_is_isolated_per_site(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BrokenNsfwSearcher, _RecordingSearcher]),
+    )
+    events: list[SearchEvent] = []
+
+    results = await search("keyword", on_event=events.append)
+
+    assert results == [_stub_result("recorder", "1")]
+    kinds = {(event.site, event.kind) for event in events}
+    assert ("broken_nsfw", "failed") in kinds
+    assert ("recorder", "completed") in kinds
+
+
+@pytest.mark.asyncio
+async def test_cancelled_searcher_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # Cancellation must reach the caller (matching the streaming path): the
+    # aggregate path used to swallow it as a per-site "failed" event.
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_RecordingSearcher, _CancellingSearcher]),
+    )
+    events: list[SearchEvent] = []
+
+    with pytest.raises(asyncio.CancelledError):
+        await search("keyword", on_event=events.append)
+
+    # No per-site failure event was fabricated for the cancellation itself.
+    assert ("cancelling", "failed") not in {(e.site, e.kind) for e in events}
 
 
 @pytest.mark.asyncio
