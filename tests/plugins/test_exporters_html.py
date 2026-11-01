@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import re
+import sys
 from typing import Any
 
 from novel_downloader.libs.filesystem import (
@@ -190,7 +191,9 @@ def test_export_book_html_illegal_book_name_sanitized(scenario: Scenario) -> Non
 
     folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
     assert folder.name == sanitize_filename(folder.name)
-    for ch in '<>:"/\\|?*':
+    # sanitize_filename filters the platform-specific set only.
+    invalid = '<>:"/\|?*' if sys.platform == "win32" else "/"
+    for ch in invalid:
         assert ch not in folder.name
 
 

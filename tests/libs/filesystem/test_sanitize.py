@@ -1,4 +1,5 @@
 import os
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -199,7 +200,12 @@ class TestLengthAndUnicode:
         assert sanitize_filename("表情😀.txt") == "表情😀.txt"
 
     def test_unicode_illegal_chars_still_replaced(self):
-        assert sanitize_filename("书/名?.txt") == "书_名_.txt"
+        # sanitize_filename is platform-aware by design: Windows filters
+        # <>:"/\|?*, POSIX only the forward slash.
+        if sys.platform == "win32":
+            assert sanitize_filename("书/名?.txt") == "书_名_.txt"
+        else:
+            assert sanitize_filename("书/名?.txt") == "书_名?.txt"
 
     def test_unicode_truncation_counts_code_points(self):
         out = sanitize_filename("😀" * 300, max_length=10)

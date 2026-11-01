@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 from novel_downloader.libs.filesystem import sanitize_filename
@@ -147,7 +148,9 @@ def test_export_book_txt_illegal_book_name_is_sanitized(scenario: Scenario) -> N
     path = scenario.export("txt", ExporterConfig(append_timestamp=False))["txt"][0]
     name = path.name
     assert name == sanitize_filename(name)
-    for ch in '<>:"/\\|?*':
+    # sanitize_filename filters the platform-specific set only.
+    invalid = '<>:"/\|?*' if sys.platform == "win32" else "/"
+    for ch in invalid:
         assert ch not in name
 
 
@@ -338,7 +341,9 @@ def test_export_chapter_txt_illegal_title_sanitized(scenario: Scenario) -> None:
     path = result["txt"]
     assert path is not None
     assert path.name == sanitize_filename("a/b:c*d?e_Unknown.txt")
-    for ch in '<>:"/\\|?*':
+    # sanitize_filename filters the platform-specific set only.
+    invalid = '<>:"/\|?*' if sys.platform == "win32" else "/"
+    for ch in invalid:
         assert ch not in path.name
 
 

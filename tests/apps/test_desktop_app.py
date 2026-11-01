@@ -1124,6 +1124,7 @@ def test_create_shortcut_requires_packaged_app(
     assert result["ok"] is False
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="shortcut paths are Windows-only")
 def test_create_shortcut_runs_powershell_with_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1147,6 +1148,7 @@ def test_create_shortcut_runs_powershell_with_target(
     assert "Novel Downloader.lnk" in calls[0][-1]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="shortcut paths are Windows-only")
 def test_create_shortcut_surfaces_powershell_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1514,6 +1516,9 @@ def test_run_webview_app_restores_negative_window_origins() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="PowerShell quoting is Windows-only"
+)
 def test_create_shortcut_doubles_single_quotes_in_the_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
