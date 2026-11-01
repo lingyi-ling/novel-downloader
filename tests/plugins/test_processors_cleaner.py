@@ -459,3 +459,431 @@ def test_deeply_nested_structures_are_copied_not_shared(tmp_path: Path) -> None:
     assert processed is not book_info
     processed["volumes"][0]["chapters"][0]["title"] = "改过的"
     assert book_info["volumes"][0]["chapters"][0]["title"] == "第1章 开始"
+
+
+# --------------------------------------------------------------------------- #
+# format characters (Cf / Co) via unicodedata
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "char",
+    [
+        "\ue000",  # private use, BMP start
+        "\uf8ff",  # private use, BMP end
+        "\u200b",  # zero width space (Cf)
+        "\u200e",  # left-to-right mark (Cf)
+        "\u202e",  # right-to-left override (Cf)
+        "\ufeff",  # BOM / zero width no-break space (Cf)
+        "\U000e0001",  # language tag (Cf, outside the BMP)
+    ],
+)
+def test_format_chars_are_removed_by_default(char: str) -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(make_chapter(content=f"前{char}后"))
+    assert chapter["content"] == "前后"
+    assert proc.process_chapter(make_chapter(title=f"前{char}后"))["title"] == "前后"
+
+
+def test_remove_format_chars_can_be_disabled_without_disabling_invisible() -> None:
+    proc = CleanerProcessor({"remove_invisible": True, "remove_format_chars": False})
+
+    # The legacy fixed set is still stripped ...
+    assert proc.process_chapter(make_chapter(content="前\u200b后"))["content"] == "前后"
+    # ... but private-use glyphs survive.
+    cleaned = proc.process_chapter(make_chapter(content="前\ue000后"))
+    assert cleaned["content"] == "前\ue000后"
+
+
+def test_remove_format_chars_inherits_remove_invisible_false() -> None:
+    """``remove_format_chars`` defaults to the value of ``remove_invisible``."""
+    proc = CleanerProcessor({"remove_invisible": False})
+
+    chapter = proc.process_chapter(make_chapter(content="a\ue000b\u200bc"))
+    assert chapter["content"] == "a\ue000b\u200bc"
+
+
+def test_remove_format_chars_can_be_enabled_on_its_own() -> None:
+    proc = CleanerProcessor({"remove_invisible": False, "remove_format_chars": True})
+
+    chapter = proc.process_chapter(make_chapter(content="a\ue000b\u200bc"))
+    assert chapter["content"] == "abc"
+
+
+def test_format_removal_leaves_normal_text_untouched() -> None:
+    proc = CleanerProcessor({})
+
+    text = "中文，标点！emoji 🐉 组合 e\u0301cole\t带空格 world"
+    assert proc.process_chapter(make_chapter(content=text))["content"] == text
+
+
+def test_format_removal_keeps_newlines_and_tabs() -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(make_chapter(content="一\n\t二\r\n三"))
+    assert chapter["content"] == "一\n\t二\r\n三"
+
+
+# --------------------------------------------------------------------------- #
+# duplicated leading chapter title
+# --------------------------------------------------------------------------- #
+def test_leading_duplicate_title_is_stripped_by_default() -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(
+        make_chapter(
+            title="第1章 开始",
+            content="第1章 开始\n\n正文第一段。",
+        )
+    )
+    assert chapter["content"] == "正文第一段。"
+
+
+def test_leading_title_strip_allows_leading_whitespace() -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(
+        make_chapter(title="第1章 开始", content="\n\n  第1章 开始\n正文")
+    )
+    assert chapter["content"] == "正文"
+
+
+def test_leading_title_strip_matches_whitespace_removed_variant() -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(
+        make_chapter(title="第1章 开始", content="第1章开始\n正文")
+    )
+    assert chapter["content"] == "正文"
+
+
+def test_leading_title_strip_escapes_regex_metacharacters() -> None:
+    proc = CleanerProcessor({})
+
+    title = "第1章 (上)[序] *"
+    chapter = proc.process_chapter(make_chapter(title=title, content=f"{title}\n正文"))
+    assert chapter["content"] == "正文"
+
+
+def test_leading_title_strip_removes_following_colon() -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(
+        make_chapter(title="第1章 开始", content="第1章 开始：正文")
+    )
+    assert chapter["content"] == "正文"
+
+
+def test_leading_title_strip_only_touches_the_start() -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(
+        make_chapter(title="第1章 开始", content="前面\n第1章 开始\n后面")
+    )
+    assert chapter["content"] == "前面\n第1章 开始\n后面"
+
+
+def test_leading_title_strip_requires_a_boundary() -> None:
+    """Prose starting with the title word must not lose its opening."""
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(
+        make_chapter(title="开始", content="开始的时候，他还不知道。")
+    )
+    assert chapter["content"] == "开始的时候，他还不知道。"
+
+
+def test_short_title_followed_by_punctuation_is_kept() -> None:
+    """A 2-character title + comma is probably the first sentence, not a heading."""
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(
+        make_chapter(title="开始", content="开始，他还不知道。")
+    )
+    assert chapter["content"] == "开始，他还不知道。"
+
+
+@pytest.mark.parametrize(
+    ("title", "content"),
+    [
+        ("第一次相遇", "第一次相遇，他紧张得说不出话。"),
+        ("第一次相遇", "第一次相遇。他推开门。"),
+        ("第1章 开始", "第1章 开始，他推开门。"),
+        ("第1章 开始", "第1章 开始！他推开门。"),
+        ("第1章 开始", "第1章 开始；然后。"),
+    ],
+)
+def test_long_title_followed_by_sentence_punctuation_is_kept(
+    title: str, content: str
+) -> None:
+    """Sentence punctuation means the title text opens the first sentence."""
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(make_chapter(title=title, content=content))
+    assert chapter["content"] == content
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["第一章 相遇", "第一章 相遇：", "第一章 相遇\n\n", "第一章 相遇：\n"],
+)
+def test_title_only_chapter_is_never_emptied(content: str) -> None:
+    """Stripping the duplicate heading must not produce an empty body."""
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(make_chapter(title="第一章 相遇", content=content))
+    assert chapter["content"] != ""
+    assert chapter["content"] == content.strip()
+
+
+@pytest.mark.parametrize(
+    ("title", "content"),
+    [
+        ("第1章\u3000相遇", "第1章 相遇\n正文"),
+        ("第1章 相遇", "第1章\u3000相遇\n正文"),
+        ("第1章  相遇", "第1章 相遇\n正文"),
+        ("第1章 相遇", "第1章相遇\n正文"),
+    ],
+)
+def test_leading_title_strip_ignores_whitespace_variants(
+    title: str, content: str
+) -> None:
+    """Heading spacing is not stable across a site's own pages."""
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(make_chapter(title=title, content=content))
+    assert chapter["content"] == "正文"
+
+
+def test_short_title_followed_by_newline_is_still_stripped() -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(make_chapter(title="序", content="序\n正文"))
+    assert chapter["content"] == "正文"
+
+
+def test_leading_title_strip_keeps_title_suffix_brackets() -> None:
+    """``（上）`` after the title means the heading continues; keep it."""
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(
+        make_chapter(title="第1章 开始", content="第1章 开始（上）\n正文")
+    )
+    assert chapter["content"] == "第1章 开始（上）\n正文"
+
+
+def test_leading_title_strip_can_be_disabled() -> None:
+    proc = CleanerProcessor({"strip_leading_title": False})
+
+    chapter = proc.process_chapter(
+        make_chapter(title="第1章 开始", content="第1章 开始\n正文")
+    )
+    assert chapter["content"] == "第1章 开始\n正文"
+
+
+def test_strip_leading_title_helper_is_callable_directly() -> None:
+    assert (
+        CleanerProcessor.strip_leading_title("第1章 开始\n正文", "第1章 开始") == "正文"
+    )
+    assert CleanerProcessor.strip_leading_title("正文", "第1章 开始") == "正文"
+    assert CleanerProcessor.strip_leading_title("正文", "") == "正文"
+
+
+# --------------------------------------------------------------------------- #
+# chapter title normalization (off by default)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1. 名字", "第1章 名字"),
+        ("1、名字", "第1章 名字"),
+        ("12.名字", "第12章 名字"),
+        ("一、名字", "第一章 名字"),
+        ("十二、名字", "第十二章 名字"),
+        ("第1章名字", "第1章 名字"),
+        ("第一章名字", "第一章 名字"),
+    ],
+)
+def test_normalize_chapter_title_forms(raw: str, expected: str) -> None:
+    proc = CleanerProcessor({"normalize_chapter_title": True})
+
+    chapter = proc.process_chapter(make_chapter(title=raw))
+    assert chapter["title"] == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "第1章 名字",
+        "第一章 名字",
+        "第1章：名字",
+        "3.14 圆周率",
+        "1.2.3 版本",
+        "名字",
+    ],
+)
+def test_normalize_chapter_title_leaves_non_matches_alone(raw: str) -> None:
+    proc = CleanerProcessor({"normalize_chapter_title": True})
+
+    chapter = proc.process_chapter(make_chapter(title=raw))
+    assert chapter["title"] == raw
+
+
+def test_normalize_chapter_title_is_off_by_default() -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(make_chapter(title="1. 名字"))
+    assert chapter["title"] == "1. 名字"
+
+
+def test_normalize_chapter_title_is_idempotent() -> None:
+    proc = CleanerProcessor({"normalize_chapter_title": True})
+
+    once = proc.process_chapter(make_chapter(title="1、名字"))
+    twice = proc.process_chapter(once)
+    assert once["title"] == twice["title"] == "第1章 名字"
+
+
+def test_normalize_chapter_title_applies_to_chapter_list() -> None:
+    proc = CleanerProcessor({"normalize_chapter_title": True})
+
+    book_info = proc.process_book_info(
+        make_book_info(
+            volumes=[
+                {
+                    "volume_name": "1. 第一卷",
+                    "volume_intro": "简介",
+                    "chapters": [
+                        {
+                            "title": "2、名字",
+                            "url": "https://example.com/2",
+                            "chapterId": "2",
+                        }
+                    ],
+                }
+            ]
+        )
+    )
+
+    assert book_info["volumes"][0]["chapters"][0]["title"] == "第2章 名字"
+    # Volume names are not chapter titles and must be left alone.
+    assert book_info["volumes"][0]["volume_name"] == "1. 第一卷"
+
+
+# --------------------------------------------------------------------------- #
+# whitespace fidelity (regression: no collapsing / no removal)
+# --------------------------------------------------------------------------- #
+def test_mixed_cjk_and_english_keeps_word_spaces() -> None:
+    proc = CleanerProcessor({})
+
+    text = "hello world 世界"
+    assert proc.process_chapter(make_chapter(content=text))["content"] == text
+
+
+def test_internal_whitespace_is_not_collapsed() -> None:
+    proc = CleanerProcessor({})
+
+    text = "a  b\t\tc\n\n\nd"
+    chapter = proc.process_chapter(make_chapter(content=text))
+    assert chapter["content"] == text
+
+
+def test_only_surrounding_whitespace_is_stripped() -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(make_chapter(content="  hello world 世界  "))
+    assert chapter["content"] == "hello world 世界"
+
+
+# --------------------------------------------------------------------------- #
+# HTML entities (regression: never delete ``&...;`` wholesale)
+# --------------------------------------------------------------------------- #
+def test_html_entities_are_preserved() -> None:
+    proc = CleanerProcessor({})
+
+    text = "A &amp; B &lt;tag&gt; &quot;q&quot; &#39;s&#39; &bogus;"
+    chapter = proc.process_chapter(make_chapter(content=text))
+    assert chapter["content"] == text
+
+
+def test_html_entity_in_title_is_preserved() -> None:
+    proc = CleanerProcessor({})
+
+    chapter = proc.process_chapter(make_chapter(title="A &amp; B"))
+    assert chapter["title"] == "A &amp; B"
+
+
+# --------------------------------------------------------------------------- #
+# empty tag cleanup (opt-in; content is plain text at this stage)
+# --------------------------------------------------------------------------- #
+def test_empty_tag_cleanup_is_off_by_default() -> None:
+    """By default, literal tags in prose/code samples must survive."""
+    proc = CleanerProcessor({})
+
+    text = "源码里写 <p></p>，换行写 <br><br>。"
+    chapter = proc.process_chapter(make_chapter(content=text))
+    assert chapter["content"] == text
+
+
+def test_empty_paragraph_tags_are_removed() -> None:
+    proc = CleanerProcessor({"remove_empty_tags": True})
+
+    chapter = proc.process_chapter(
+        make_chapter(content="<p></p><p>第一段</p><p> </p><p><br/></p>结尾")
+    )
+    assert chapter["content"] == "<p>第一段</p>结尾"
+
+
+def test_empty_self_closing_paragraph_is_removed() -> None:
+    proc = CleanerProcessor({"remove_empty_tags": True})
+
+    chapter = proc.process_chapter(make_chapter(content="甲<p/>乙"))
+    assert chapter["content"] == "甲乙"
+
+
+def test_single_line_break_is_kept() -> None:
+    proc = CleanerProcessor({"remove_empty_tags": True})
+
+    chapter = proc.process_chapter(make_chapter(content="第一行<br/>第二行"))
+    assert chapter["content"] == "第一行<br/>第二行"
+
+
+def test_repeated_line_breaks_collapse_to_one_newline() -> None:
+    proc = CleanerProcessor({"remove_empty_tags": True})
+
+    chapter = proc.process_chapter(make_chapter(content="第一行<br/><br/>第二行"))
+    assert chapter["content"] == "第一行\n第二行"
+
+
+def test_paragraph_with_content_is_never_touched() -> None:
+    text = "<p>有内容的段落</p><p>另一段</p>"
+    for proc in (
+        CleanerProcessor({}),
+        CleanerProcessor({"remove_empty_tags": True}),
+    ):
+        chapter = proc.process_chapter(make_chapter(content=text))
+        assert chapter["content"] == text
+
+
+def test_empty_tag_cleanup_handles_pathological_unterminated_tags() -> None:
+    """A body full of ``<p`` prefixes must stay linear, not rescan repeatedly."""
+    proc = CleanerProcessor({"remove_empty_tags": True})
+
+    text = "<p" * 10_000
+    chapter = proc.process_chapter(make_chapter(content=text))
+    assert chapter["content"] == text
+
+
+def test_empty_paragraph_with_attributes_is_removed() -> None:
+    proc = CleanerProcessor({"remove_empty_tags": True})
+
+    chapter = proc.process_chapter(
+        make_chapter(content='甲<p class="x" data-y="1"> </p>乙')
+    )
+    assert chapter["content"] == "甲乙"
+
+
+def test_empty_tag_cleanup_can_be_disabled() -> None:
+    proc = CleanerProcessor({"remove_empty_tags": False})
+
+    chapter = proc.process_chapter(make_chapter(content="甲<p></p>乙<br/><br/>丙"))
+    assert chapter["content"] == "甲<p></p>乙<br/><br/>丙"

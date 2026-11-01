@@ -5,6 +5,7 @@ novel_downloader.plugins.mixins.export_html
 """
 
 import base64
+import hashlib
 import logging
 from dataclasses import replace
 from html import escape
@@ -19,14 +20,118 @@ from novel_downloader.libs.filesystem import (
     sanitize_filename,
 )
 from novel_downloader.libs.html_builder import HtmlBuilder, HtmlChapter, HtmlVolume
+from novel_downloader.libs.html_builder.constants import CHAPTER_DIR as _CHAPTER_DIR
 from novel_downloader.schemas import (
     BookConfig,
     ChapterDict,
     ExporterConfig,
     MediaResource,
+    VolumeInfoDict,
 )
 
 logger = logging.getLogger(__name__)
+
+# Windows still caps most paths at 260 characters (unless long-path support is
+# enabled). Chapters live at ``<folder>/chapters/<name>``, so the folder gets a
+# tighter budget: the extra directory level, the chapter filename and the
+# temporary-file suffix used by the atomic writer must all fit under the
+# limit. ``_chapter_name_limit`` shrinks the chapter filename further when the
+# output directory itself is already deep.
+_MAX_PATH_LEN = 240
+_MAX_DIR_PATH_LEN = 150
+_MAX_CHAPTER_NAME_LEN = 72
+
+# Extra characters added by the writer while building the export:
+#   * the staging directory name is ``.<folder>.XXXXXXXX.tmp`` (+14)
+#   * each file is written through ``.<name>.XXXXXXXX.tmp`` (+13)
+_STAGING_SUFFIX_LEN = 14
+_TMP_SUFFIX_LEN = 13
+
+
+def _fit_name(name: str, parent: Path, limit: int = _MAX_PATH_LEN) -> str:
+    """
+    Shorten ``name`` so that ``parent / name`` fits within ``limit`` chars.
+
+    Only the name shrinks; the extension is preserved and a short digest of
+    the original name is appended so two long titles that share a prefix do
+    not collapse onto the same output folder. The digest is taken from the raw
+    (pre-sanitization) name, because ``sanitize_filename`` truncates on its
+    own and would otherwise erase the part that distinguishes the two.
+    """
+    total = len(str(parent)) + 1 + len(name)
+    if total <= limit:
+        return name
+
+    budget = max(len(name) - (total - limit), 8)
+
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
+    tail = f"~{digest}" + (f".{ext}" if ext else "")
+    keep = max(budget - len(tail), 1)
+    return f"{stem[:keep]}{tail}"
+
+
+def _chapter_name_limit(output_dir: Path, folder: str) -> int:
+    """
+    Longest chapter filename that keeps ``<output>/<folder>/chapters/<name>``
+    within :data:`_MAX_PATH_LEN`, even before the atomic writer's ``.tmp``
+    suffix.
+
+    The fixed :data:`_MAX_CHAPTER_NAME_LEN` is only safe while the output
+    folder is shallow. With a deep output directory the chapter files (not
+    just the folder) can cross the Windows limit, so the remaining budget is
+    computed from the real destination.
+    """
+    prefix = len(str(output_dir)) + 1 + len(folder) + 1 + len(_CHAPTER_DIR) + 1
+    reserve = _STAGING_SUFFIX_LEN + _TMP_SUFFIX_LEN
+    return max(8, min(_MAX_CHAPTER_NAME_LEN, _MAX_PATH_LEN - prefix - reserve))
+
+
+def _count_unique_cids(vols: list[VolumeInfoDict]) -> int:
+    """Number of distinct chapter ids across the (already filtered) volumes."""
+    cids = {
+        cid
+        for vol in vols
+        for chap in vol.get("chapters", [])
+        if (cid := chap.get("chapterId"))
+    }
+    return len(cids)
+
+
+def _check_export_consistency(
+    *,
+    fmt: str,
+    site: str,
+    book_id: str,
+    planned: int,
+    rendered: int,
+    skipped: int,
+) -> None:
+    """
+    Warn when the folder does not account for every planned chapter.
+
+    ``rendered + skipped`` must equal the number of distinct chapters the
+    filtered book metadata promised. A mismatch means the builder dropped a
+    chapter that was handed to it; the folder is still usable, so this is
+    logged rather than raised (``CommonClient.export_book`` would otherwise
+    discard the whole export and leave the user with nothing).
+    """
+    if planned == rendered + skipped:
+        return
+
+    logger.warning(
+        "Export consistency mismatch (%s, site=%s, book=%s): planned=%d, "
+        "rendered=%d, skipped=%d",
+        fmt,
+        site,
+        book_id,
+        planned,
+        rendered,
+        skipped,
+    )
 
 
 def _unique_chapter_filename(filename: str, used: set[str]) -> str:
@@ -68,6 +173,8 @@ if TYPE_CHECKING:
             chap_title: str | None,
             chap: ChapterDict,
             media_dir: Path | None = None,
+            include_picture: bool = True,
+            max_name_length: int = _MAX_CHAPTER_NAME_LEN,
         ) -> HtmlChapter: ...
 
         def _xp_html_missing_chapter(
@@ -75,6 +182,7 @@ if TYPE_CHECKING:
             *,
             cid: str,
             chap_title: str | None,
+            max_name_length: int = _MAX_CHAPTER_NAME_LEN,
         ) -> HtmlChapter: ...
 
         def _xp_html_extras(self, extras: dict[str, Any]) -> str: ...
@@ -143,6 +251,20 @@ class ExportHtmlMixin:
 
         # --- Compile columes ---
         seen_cids: set[str] = set()
+        skipped = 0
+        # The output folder is known before the chapters are rendered, so the
+        # per-chapter filename budget can be derived from the real destination
+        # (a deep output directory leaves less room under the Windows limit).
+        raw_name = format_filename(
+            cfg.filename_template,
+            title=name,
+            author=author,
+            append_timestamp=cfg.append_timestamp,
+        )
+        folder = sanitize_filename(
+            _fit_name(raw_name, self._output_dir, _MAX_DIR_PATH_LEN)
+        )
+        chapter_name_limit = _chapter_name_limit(self._output_dir, folder)
         # Chapter filenames are derived from cids; distinct cids can collide
         # after sanitization ("a/b" vs "a_b"), so reserve them book-wide.
         used_chapter_files: set[str] = set()
@@ -181,6 +303,7 @@ class ExportHtmlMixin:
                             chapter_obj = self._xp_html_missing_chapter(
                                 cid=cid,
                                 chap_title=ch_title,
+                                max_name_length=chapter_name_limit,
                             )
                             chapter_obj = replace(
                                 chapter_obj,
@@ -189,6 +312,8 @@ class ExportHtmlMixin:
                                 ),
                             )
                             curr_vol.chapters.append(chapter_obj)
+                        else:
+                            skipped += 1
                         continue
 
                     chapter_obj = self._xp_html_chapter(
@@ -197,6 +322,8 @@ class ExportHtmlMixin:
                         chap_title=ch_title,
                         chap=ch,
                         media_dir=media_dir,
+                        include_picture=cfg.include_picture,
+                        max_name_length=chapter_name_limit,
                     )
                     chapter_obj = replace(
                         chapter_obj,
@@ -210,13 +337,16 @@ class ExportHtmlMixin:
                 if curr_vol.chapters:
                     builder.add_volume(curr_vol)
 
-        out_name = format_filename(
-            cfg.filename_template,
-            title=name,
-            author=author,
-            append_timestamp=cfg.append_timestamp,
+        _check_export_consistency(
+            fmt="HTML",
+            site=self._site,
+            book_id=book_id,
+            planned=_count_unique_cids(vols),
+            rendered=builder.chapter_count,
+            skipped=skipped,
         )
-        out_path = builder.export(self._output_dir, folder=out_name)
+
+        out_path = builder.export(self._output_dir, folder=folder)
         logger.info(
             "Exported HTML (site=%s, book=%s): %s", self._site, book_id, out_path
         )
@@ -266,25 +396,29 @@ class ExportHtmlMixin:
         )
 
         # ---- build a chapter ----
+        raw_name = format_filename(
+            cfg.filename_template,
+            title=chap_title,
+            author="Unknown",
+            append_timestamp=cfg.append_timestamp,
+        )
+        folder = sanitize_filename(
+            _fit_name(raw_name, self._output_dir, _MAX_DIR_PATH_LEN)
+        )
         chapter_obj = self._xp_html_chapter(
             builder=builder,
             cid=chapter_id,
             chap_title=chap_title,
             chap=chap,
             media_dir=media_dir,
+            include_picture=cfg.include_picture,
+            max_name_length=_chapter_name_limit(self._output_dir, folder),
         )
 
         builder.add_chapter(chapter_obj)
 
         # ---- output file/folder name ----
-        out_name = format_filename(
-            cfg.filename_template,
-            title=chap_title,
-            author="Unknown",
-            append_timestamp=cfg.append_timestamp,
-        )
-
-        out_path = builder.export(self._output_dir, folder=out_name)
+        out_path = builder.export(self._output_dir, folder=folder)
 
         logger.info(
             "Exported HTML chapter (site=%s, book=%s, chapter=%s): %s",
@@ -304,6 +438,8 @@ class ExportHtmlMixin:
         chap_title: str | None,
         chap: ChapterDict,
         media_dir: Path,
+        include_picture: bool = True,
+        max_name_length: int = _MAX_CHAPTER_NAME_LEN,
     ) -> HtmlChapter:
         """
         Build a Chapter object with HTML content and optionally place images / font.
@@ -366,7 +502,7 @@ class ExportHtmlMixin:
                 except Exception as e:
                     logger.debug("EPUB font add failed: %s", e)
 
-            elif typ == "image":
+            elif typ == "image" and include_picture:
                 idx = r.get("paragraph_index", max_i)
 
                 if idx == 0:
@@ -389,7 +525,7 @@ class ExportHtmlMixin:
         extras_part = self._xp_html_extras(chap.get("extra") or {})
 
         return HtmlChapter(
-            filename=f"{sanitize_filename(f'c{cid}')}.html",
+            filename=sanitize_filename(f"c{cid}.html", max_length=max_name_length),
             title=title,
             content=html_str,
             extra_content=extras_part,
@@ -401,6 +537,7 @@ class ExportHtmlMixin:
         *,
         cid: str,
         chap_title: str | None,
+        max_name_length: int = _MAX_CHAPTER_NAME_LEN,
     ) -> HtmlChapter:
         """
         Build a placeholder HTML chapter when content is missing
@@ -411,7 +548,7 @@ class ExportHtmlMixin:
         html_str = "<p>本章内容暂不可用</p>"
 
         return HtmlChapter(
-            filename=f"{sanitize_filename(f'c{cid}')}.html",
+            filename=sanitize_filename(f"c{cid}.html", max_length=max_name_length),
             title=title,
             content=html_str,
             extra_content="",

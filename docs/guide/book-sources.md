@@ -24,8 +24,17 @@
 ### 校验与管理
 
 ```bash
-# 列出所有规则书源 (--check 会额外校验能否成功注册)
+# 列出所有规则书源 (--check 会额外校验能否成功注册, 纯离线)
 novel-cli sources list --check
+
+# 真实网络健康探测: 并发 HEAD 取延迟与状态码 (需要联网, 比 --check 慢)
+novel-cli sources list --probe
+
+# 按延迟从低到高排序 (隐含 --probe; 不可达站点排在最后)
+novel-cli sources list --probe --by-latency
+
+# 探测节奏: 单站超时 (秒) 与并发数
+novel-cli sources list --probe --probe-timeout 3 --probe-concurrency 8
 
 # 校验单个规则文件
 novel-cli sources check ./rules/_example-template.json
@@ -168,7 +177,7 @@ JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 
 | `selector` | string | 空 | 选择器; 留空表示直接使用当前节点 |
 | `attr` | string | `text` | 取值方式, 见下 |
 | `regex` | string | 空 | 对取到的值再做一次正则提取 (跨行匹配) |
-| `group` | int | `0` | 正则捕获组; 组号越界时回退到整段匹配 |
+| `group` | int | `1` | 正则捕获组; 组号越界时回退到整段匹配 |
 | `multi` | bool | `false` | 是否收集全部匹配项 (返回数组) |
 | `replace` | `[string, string][]` | `[]` | 逐条替换 |
 | `default` | string | 空 | 未匹配到任何节点时的兜底值 |
@@ -185,7 +194,7 @@ JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 
 | 值 | 含义 |
 | --- | --- |
 | `text` | 节点内所有文本拼接 (不含分隔符); JSON 下即“值本身” |
-| `inner_text` | 节点内文本按行拼接 (适合正文, 保留段落); JSON 下数组会按 `\n` 拼接 |
+| `inner_text` | 节点内文本按行拼接 (适合正文, 保留段落); JSON 下仅当整个匹配结果就是数组时才按 `\n` 拼接 —— 路径末段的数组会先展开, 此时只取第一个元素 |
 | `html` | 节点的 HTML 源码; JSON 下等价于 `text` |
 | 其它任意字符串 | 作为 HTML 属性名读取, 如 `href` / `src` / `content`; JSON 下作为对象的键读取 |
 
@@ -195,14 +204,16 @@ JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 
 
 | 变量 | 可用位置 | 说明 |
 | --- | --- | --- |
-| `{base_url}` | URL、`data` / `json_body` 值、`headers` 值 | 站点根地址 (已去掉末尾 `/`) |
-| `{book_id}` | URL、`data` / `json_body` 值、`headers` 值 | 书籍 ID |
-| `{chapter_id}` | URL、`data` / `json_body` 值、`headers` 值 | 章节 ID |
+| `{base_url}` | URL、book/chapter 段的 `headers` 值 | 站点根地址 (已去掉末尾 `/`) |
+| `{book_id}` | URL、book/chapter 段的 `headers` 值 | 书籍 ID |
+| `{chapter_id}` | URL、book/chapter 段的 `headers` 值 | 章节 ID |
 | `{page}` | 分页 URL、`data` / `json_body` 值 | 分页页码 |
 | `{keyword}` | 搜索 URL、`data` / `json_body` 值 | 搜索关键词, 已 URL 编码 |
 | `{raw_keyword}` | 搜索 URL、`data` / `json_body` 值 | 搜索关键词原样 |
 
 未识别的 `{...}` 会原样保留, 不会被替换。`json_body` 中的模板只作用于字符串值。
+顶层 `headers` 原样发送, 不做模板替换; 只有 book / chapter 段自己的 `headers` 会渲染。
+搜索请求的 `data` / `json_body` 只认 `{keyword}` / `{raw_keyword}` / `{page}`, 其余占位符保持原样。
 
 ---
 
@@ -272,13 +283,15 @@ JSON 接口分页时, 由于响应体通常不回链下一页, 请在 `pages` �
 
 ### 内置示例
 
-`biquge5r.json` 是一个完整可用的内置书源, 可作为编写新规则的起点; `rules/_example-template.json` 覆盖了全部字段 (含 JSON 模式写法)。
+`biquge5r.json` 是一个完整可用的内置书源, 可作为编写新规则的起点; `rules/_example-template.json` 覆盖了基础字段 (含 JSON 模式写法)。
+
+进阶能力 (字段后处理 `steps`、选择器回退 `fallback`、HTML 重写 `preprocess`、分页守卫 `stop_when` / `loop_guard`、规则级 `limits`、搜索单结果回退) 的字段级说明与示例见 [规则 DSL 参考](./rule-dsl.md)。
 
 ---
 
 ### 已知限制
 
 - 规则书源的 JSON 模式只做**取值**, 不含逻辑与脚本; 需要签名、加密或复杂计算的接口仍建议编写 Python 插件
-- 请求频率由客户端配置统一控制 (见 [配置说明](./configuration.md)), 规则内不提供独立的节流参数
+- 请求频率默认由客户端配置统一控制 (见 [配置说明](./configuration.md)); 单个源可在规则顶层用 `limits` 覆盖并发 / 间隔 / 重试 (见 [规则 DSL 参考](./rule-dsl.md))
 - 目录与正文分页最多额外抓取 50 页 (`max_pages` 同样受此上限约束)
 - 部分镜像站点可用性会波动, 搜索无结果时可换其它书源重试

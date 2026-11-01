@@ -25,7 +25,7 @@ import aiohttp
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
 from novel_downloader.plugins.base.searcher import BaseSearcher
 from novel_downloader.plugins.grouping import group_results
-from novel_downloader.plugins.ranking import sort_results
+from novel_downloader.plugins.ranking import detect_query_intent, sort_results
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.plugins.search_cache import SearchCache, build_key
 from novel_downloader.schemas import SearchResult
@@ -318,8 +318,17 @@ def _finalize(
     than raw rows.  The flat branch keeps the historical contract of returning
     the ranked input list itself; the grouped branch always builds fresh
     entries, which keeps the search cache shareable between both modes.
+
+    Ranking is intent-aware: before scoring we decide whether the keyword
+    looks more like a title or an author (see
+    :func:`~novel_downloader.plugins.ranking.detect_query_intent`).  For
+    ``by="quality"`` this stops a book whose *title* merely contains an
+    author's name from outranking that author's own books.  The intent is
+    resolved to ``"either"`` — the historical behaviour — whenever the
+    evidence is too weak, and other sort keys ignore it entirely.
     """
-    sort_results(results, by=sort, order=order, keyword=keyword)
+    intent = detect_query_intent(keyword, results) if sort == "quality" else "either"
+    sort_results(results, by=sort, order=order, keyword=keyword, intent=intent)
     if group:
         merged = _merged_results(results, keyword)
         if limit is not None:

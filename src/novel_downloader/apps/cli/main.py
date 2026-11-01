@@ -39,6 +39,7 @@ def cli_main() -> None:
 
     # Imported lazily so localized ``help`` strings pick up ``--lang``.
     from novel_downloader.apps.cli.commands import commands
+    from novel_downloader.apps.cli.commands.batch import BatchCmd
 
     parser = argparse.ArgumentParser(
         prog="novel-cli",
@@ -78,6 +79,13 @@ def cli_main() -> None:
 
     subparsers = parser.add_subparsers(dest="command", title=t("Commands"))
 
+    # ``batch`` is appended here rather than in ``commands/__init__.py`` so the
+    # change stays in the entry point. Appending to the shared list (instead of
+    # building a local one) also lets ``novel-cli completion`` -- which reads
+    # that list -- offer the new subcommand. The guard keeps repeated
+    # ``cli_main()`` calls (tests, embedders) from registering it twice.
+    if BatchCmd not in commands:
+        commands.append(BatchCmd)
     for cmd in commands:
         cmd.register(subparsers)
 

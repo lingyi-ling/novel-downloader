@@ -23,8 +23,8 @@ from novel_downloader.schemas import (
     VolumeInfoDict,
 )
 
-from .engine import abs_url, extract, extract_multi, parse_page, select
-from .model import Rule, RuleError
+from .engine import abs_url, extract, extract_multi, parse_page, preprocess, select
+from .model import Rule, RuleError, Step
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,33 @@ class RuleParser(BaseParser):
 
     _rule: ClassVar[Rule]
     site_name: str = "rule"
+
+    # ------------------------------------------------------------------ #
+    # shared helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _preprocessed_tree(
+        raw: str,
+        steps: list[Step],
+        container: str | None,
+        fmt: str,
+        where: str,
+    ) -> Any:
+        """
+        Parse ``raw``, first rewriting it through the section's ``preprocess``.
+
+        Without ``preprocess`` this is exactly :func:`parse_page` (an empty or
+        degenerate page raises :class:`RuleError` so callers keep their
+        existing handling).  With ``preprocess`` any failure is a hard error:
+        a rewrite that silently produced nothing would yield an empty catalog.
+        """
+        if not steps:
+            return parse_page(raw, fmt)
+        if fmt != "html":
+            raise RuleError(f"{where}: preprocess requires 'format': 'html'")
+        return parse_page(
+            preprocess(raw, steps, container=container, where=where), "html"
+        )
 
     # ------------------------------------------------------------------ #
     # book info
@@ -84,6 +111,16 @@ class RuleParser(BaseParser):
         return info
 
     def _parse_chapters(self, raw_pages: list[str], base: str) -> list[ChapterInfoDict]:
+        """
+        Collect the catalog from every fetched page, in page order.
+
+        ``book.chapters.is_desc`` sites list the newest chapter first, so the
+        concatenated list is reversed **once, at the end**.  Reversing per page
+        would scramble a multi-page catalog (page order must stay 1..N while
+        the chapters inside the book run newest-first).  The chapter dicts
+        carry no ordinal field, so there is no index to renumber; ordering is
+        purely positional, which is what downstream consumers use.
+        """
         rule = self._rule
         book_rule = rule.book
         if book_rule is None:
@@ -97,7 +134,13 @@ class RuleParser(BaseParser):
         seen: set[str] = set()
 
         for raw in raw_pages:
-            tree = parse_page(raw, fmt)
+            tree = self._preprocessed_tree(
+                raw,
+                chapters_rule.preprocess,
+                chapters_rule.container,
+                fmt,
+                "book.chapters.preprocess",
+            )
             for node in select(tree, chapters_rule.item, fmt):
                 href = extract(node, chapters_rule.url, fmt)
                 if not href:
@@ -110,6 +153,8 @@ class RuleParser(BaseParser):
                 title = extract(node, chapters_rule.title, fmt)
                 cid = self._chapter_id(href, id_rx, chapters_rule.id_group)
                 out.append({"title": title, "url": book_url, "chapterId": cid})
+        if chapters_rule.is_desc:
+            out.reverse()
         return out
 
     @staticmethod
@@ -139,12 +184,22 @@ class RuleParser(BaseParser):
         fmt = rule.chapter_format
 
         for raw in raw_pages:
-            try:
-                tree = parse_page(raw, fmt)
-            except RuleError:
-                # Blank / degenerate responses (interstitials, empty extra
-                # pages) simply contribute nothing instead of aborting.
-                continue
+            if chapter_rule.preprocess:
+                # A broken rewrite is reported, not skipped.
+                tree = self._preprocessed_tree(
+                    raw,
+                    chapter_rule.preprocess,
+                    chapter_rule.container,
+                    fmt,
+                    "chapter.preprocess",
+                )
+            else:
+                try:
+                    tree = parse_page(raw, fmt)
+                except RuleError:
+                    # Blank / degenerate responses (interstitials, empty extra
+                    # pages) simply contribute nothing instead of aborting.
+                    continue
             if chapter_rule.title is not None and not title:
                 title = extract(tree, chapter_rule.title, fmt)
             body = extract(tree, chapter_rule.content, fmt)

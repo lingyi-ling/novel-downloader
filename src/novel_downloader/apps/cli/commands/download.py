@@ -8,13 +8,16 @@ novel_downloader.apps.cli.commands.download
 import json
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
+from typing import cast
 
 from novel_downloader.apps.cli import ui
 from novel_downloader.apps.utils import load_or_init_config
 from novel_downloader.infra.config import ConfigAdapter
 from novel_downloader.infra.i18n import t
 from novel_downloader.plugins import registrar
+from novel_downloader.plugins.mixins.download import IncompleteDownloadError
 from novel_downloader.schemas import BookConfig
+from novel_downloader.schemas.book import DownloadSummary
 
 from ..ui_adapters import (
     CLIDownloadUI,
@@ -23,6 +26,76 @@ from ..ui_adapters import (
     CLIProcessUI,
 )
 from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail, parse_book_args
+
+#: Failure lines shown by the default (warning-only) report.
+_MAX_LISTED_FAILURES = 5
+#: Failure lines shown by ``--strict`` before pointing at the ledger.
+_MAX_LISTED_FAILURES_STRICT = 20
+
+
+def _collect_failures(raw: object, out: list[DownloadSummary]) -> None:
+    """
+    Append ``raw`` to ``out`` when it is a download summary with failures.
+
+    Clients are typed through :class:`ClientProtocol`, whose ``download_book``
+    is declared to return ``None``, and third-party clients may return nothing
+    at all; the check is therefore structural rather than an ``isinstance`` on
+    a :class:`~typing.TypedDict`.
+
+    :param raw: Whatever ``client.download_book`` returned.
+    :param out: Accumulator for summaries that report failures.
+    """
+    if not isinstance(raw, dict):
+        return
+    if not raw.get("failed"):
+        return
+    out.append(cast(DownloadSummary, raw))
+
+
+def _report_incomplete(summaries: list[DownloadSummary], *, strict: bool) -> None:
+    """
+    Print the failure report for books that ended an incomplete download.
+
+    ``--strict`` uses the error style and lists up to
+    :data:`_MAX_LISTED_FAILURES_STRICT` chapters; the default only warns with
+    the first :data:`_MAX_LISTED_FAILURES` chapters.  Both point at the failure
+    ledger, which holds every record.
+
+    :param summaries: Summaries with ``failed > 0``.
+    :param strict: Whether the caller is running in strict mode.
+    """
+    limit = _MAX_LISTED_FAILURES_STRICT if strict else _MAX_LISTED_FAILURES
+    report = ui.error if strict else ui.warn
+
+    for summary in summaries:
+        report(
+            t(
+                "Download incomplete for book {book_id}: "
+                "{failed} of {total} chapter(s) failed."
+            ).format(
+                book_id=summary["book_id"],
+                failed=summary["failed"],
+                total=summary["total"],
+            )
+        )
+
+        failures = summary["failures"]
+        for failure in failures[:limit]:
+            report(
+                t("Failed: {name} ({reason})").format(
+                    name=failure["chapter_title"] or failure["chapter_id"],
+                    reason=failure["reason"],
+                )
+            )
+
+        if len(failures) > limit:
+            report(
+                t("{count} more failure(s) not listed; see {path} for details.").format(
+                    count=len(failures) - limit, path=summary["ledger_path"]
+                )
+            )
+        else:
+            report(t("Failure ledger: {path}").format(path=summary["ledger_path"]))
 
 
 class DownloadCmd(Command):
@@ -67,10 +140,18 @@ class DownloadCmd(Command):
             action="store_true",
             help=t("Print machine-readable JSON on stdout and exit."),
         )
+        parser.add_argument(
+            "--strict",
+            action="store_true",
+            help=t(
+                "Exit with a non-zero status if any chapter could not be downloaded."
+            ),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
         as_json = bool(getattr(args, "as_json", False))
+        strict = bool(getattr(args, "strict", False))
         config_path: Path | None = Path(args.config) if args.config else None
         site: str | None = args.site
         formats: list[str] | None = args.format
@@ -182,6 +263,10 @@ class DownloadCmd(Command):
         # gets a machine-readable summary before the non-zero exit code.
         download_error: str | None = None
         unsupported_error: str | None = None
+        # Books whose download ended with missing chapters.  Populated either
+        # from the summary (default mode) or from ``IncompleteDownloadError``
+        # (``--strict``).
+        incomplete: list[DownloadSummary] = []
 
         async def download_books() -> None:
             nonlocal download_error, unsupported_error
@@ -197,7 +282,24 @@ class DownloadCmd(Command):
                             return
 
                     for book in books:
-                        await client.download_book(book, ui=download_ui)
+                        # Typed as ``object``: older/third-party clients may
+                        # still return ``None`` instead of a summary.
+                        raw_summary: object
+                        try:
+                            # ``strict`` is only forwarded when requested, so
+                            # clients without the parameter keep working.
+                            if strict:
+                                raw_summary = await client.download_book(
+                                    book, ui=download_ui, strict=True
+                                )
+                            else:
+                                raw_summary = await client.download_book(
+                                    book, ui=download_ui
+                                )
+                        except IncompleteDownloadError as exc:
+                            incomplete.append(exc.summary)
+                            continue
+                        _collect_failures(raw_summary, incomplete)
             except ValueError as e:
                 unsupported_error = t(
                     "'{site}' is currently not supported: {err}"
@@ -209,6 +311,15 @@ class DownloadCmd(Command):
 
         asyncio.run(download_books())
 
+        # Report missing chapters before the (potentially slow) export so the
+        # failure list is not buried under export output.
+        if incomplete:
+            _report_incomplete(incomplete, strict=strict)
+
+        # In strict mode an incomplete book must not be exported: the caller
+        # asked to fail rather than to produce a file with holes.
+        failed_book_ids = {summary["book_id"] for summary in incomplete}
+
         # export
         exported: dict[str, dict[str, list[str]]] = {}
         export_failed = False
@@ -217,6 +328,8 @@ class DownloadCmd(Command):
             export_ui = CLIExportUI()
 
             for book in download_ui.completed_books:
+                if strict and book.book_id in failed_book_ids:
+                    continue
                 client.process_book(
                     book,
                     processors=adapter.get_processor_configs(site),
@@ -238,6 +351,12 @@ class DownloadCmd(Command):
             ui.info(t("Export skipped (--no-export)"))
 
         if as_json:
+            # ``downloaded`` means "the run finished", not "the book is whole".
+            # Machine consumers need the gap size to tell the two apart, so
+            # every book also reports how many chapters are missing.
+            failed_by_book = {
+                summary["book_id"]: int(summary["failed"]) for summary in incomplete
+            }
             ui.emit(
                 json.dumps(
                     {
@@ -246,6 +365,7 @@ class DownloadCmd(Command):
                             {
                                 "book_id": book.book_id,
                                 "downloaded": book in download_ui.completed_books,
+                                "failed": failed_by_book.get(book.book_id, 0),
                                 "exported": (
                                     None
                                     if args.no_export
@@ -267,6 +387,9 @@ class DownloadCmd(Command):
             raise SystemExit(EXIT_FAILURE)
         if download_error:
             ui.error(download_error)
+            raise SystemExit(EXIT_FAILURE)
+        if strict and incomplete:
+            # The failure list was already printed by ``_report_incomplete``.
             raise SystemExit(EXIT_FAILURE)
         if not download_ui.completed_books:
             raise SystemExit(EXIT_FAILURE)

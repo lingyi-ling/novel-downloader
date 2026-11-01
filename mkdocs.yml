@@ -130,6 +130,7 @@ nav:
     - 本地 API 服务: guide/api.md
     - Android 客户端: guide/android-app.md
     - 书源: guide/book-sources.md
+    - 规则 DSL 参考: guide/rule-dsl.md
     - 文件保存: guide/file-saving.md
     - 复制 Cookies: guide/copy-cookies.md
     - 架构说明: guide/architecture.md
@@ -153,6 +154,7 @@ nav:
     - 起点 App 笔记: notes/qidian_app.md
     - 起点 Web 笔记: notes/qidian_web.md
     - 西瓜书屋笔记: notes/xiguashuwu.md
+    - so-novel 代码审计: notes/so-novel-audit.md
 
   - 其他:
     - 待办: misc/todo.md

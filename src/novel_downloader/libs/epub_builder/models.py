@@ -386,6 +386,12 @@ class NavDocument(EpubResource):
         """
         label = escape_label(label)
 
+        if not chapters:
+            # A volume with no chapters is a leaf entry. Emitting an empty
+            # <ol> would be rejected by strict EPUB validators.
+            self.lines.append(f'<li><a href="{escape_text(src)}">{label}</a></li>')
+            return
+
         self.lines.append(f'<li><a href="{escape_text(src)}">{label}</a>\n<ol>')
 
         for _, clabel, csrc in chapters:
@@ -432,6 +438,15 @@ class NCXDocument(EpubResource):
         label = escape_label(label)
         order = self._order
         self._order += 1
+
+        if not chapters:
+            # Leaf volume (no chapters): a single, closed navPoint.
+            self.lines.append(
+                f'<navPoint id="{escape_text(id)}" playOrder="{order}">'
+                f"<navLabel><text>{label}</text></navLabel>"
+                f'<content src="{escape_text(src)}"/></navPoint>'
+            )
+            return
 
         self.lines.append(
             f'<navPoint id="{escape_text(id)}" playOrder="{order}">'

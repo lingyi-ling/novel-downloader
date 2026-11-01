@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import os
+import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -565,6 +567,295 @@ def test_processor_validation():
 
 
 # ---------------------------------------------------------------------------
+# Unknown processor options
+# ---------------------------------------------------------------------------
+
+#: A de-commented TOML statement or table header from the sample config.
+_SAMPLE_ASSIGNMENT_RE = re.compile(r"^(?:\[\[[^\]]+\]\]|[A-Za-z_][\w-]*\s*=)")
+
+
+def _sample_cleaner_processors() -> list[dict[str, object]]:
+    """Parse the (commented-out) cleaner block of the shipped sample config.
+
+    Reading the real sample keeps the "no warnings" guard honest: if the
+    sample gains a cleaner option the validator does not know about, the test
+    fails instead of silently checking a stale copy.
+    """
+    sample = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "novel_downloader"
+        / "resources"
+        / "config"
+        / "settings.sample.toml"
+    )
+    lines = sample.read_text(encoding="utf-8").splitlines()
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if line.strip() == "# [[general.processors]]"
+    )
+    body: list[str] = []
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            break
+        uncommented = stripped[1:].strip()
+        # Skip the prose comments that document individual options; some of
+        # them quote an assignment (``attr = "html"``).
+        if not _SAMPLE_ASSIGNMENT_RE.match(uncommented):
+            continue
+        body.append(uncommented)
+
+    parsed = tomllib.loads("\n".join(body))
+    processors = parsed["general"]["processors"]
+    assert isinstance(processors, list)
+    return processors
+
+
+def test_unknown_processor_option_is_a_warning():
+    problems = validate_config(
+        {"general": {"processors": [{"name": "cleaner", "remove_formt_chars": True}]}}
+    )
+
+    warnings = [problem for problem in problems if problem.level == "warning"]
+    assert len(warnings) == 1
+    problem = warnings[0]
+    assert problem.path == "general.processors[0].remove_formt_chars"
+    assert "remove_formt_chars" in problem.message
+    assert "did you mean 'remove_format_chars'" in problem.message
+    assert "remove_format_chars" in problem.fix_hint
+    assert "Known options" in problem.fix_hint
+
+
+def test_load_config_warns_about_unknown_processor_option(tmp_path, caplog):
+    cfg = tmp_path / "settings.json"
+    cfg.write_text(
+        '{"general": {"processors": '
+        '[{"name": "cleaner", "remove_formt_chars": true}]}}',
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING"):
+        data = load_config(None)
+
+    # The configuration still loads; the typo is only reported.
+    assert data["general"]["processors"][0]["remove_formt_chars"] is True
+    assert "remove_formt_chars" in caplog.text
+    assert "Known options" in caplog.text
+
+
+def test_strict_config_raises_for_unknown_processor_option():
+    with pytest.raises(validation_module.ConfigError) as excinfo:
+        validate_config(
+            {
+                "general": {
+                    "strict_config": True,
+                    "processors": [{"name": "cleaner", "remove_formt_chars": True}],
+                }
+            }
+        )
+
+    message = str(excinfo.value)
+    assert "general.processors[0].remove_formt_chars" in message
+    assert "remove_formt_chars" in message
+    assert "remove_format_chars" in message
+    assert "Known options" in message
+
+
+def test_strict_config_must_be_a_boolean():
+    problems = validate_config(
+        {
+            "general": {
+                "strict_config": "yes",
+                "processors": [{"name": "cleaner", "remove_formt_chars": True}],
+            }
+        }
+    )
+
+    assert _paths(problems, "error") == {"general.strict_config"}
+    # A non-``true`` value does not enable strict mode.
+    assert _paths(problems, "warning") == {"general.processors[0].remove_formt_chars"}
+
+
+def test_strict_config_is_off_by_default():
+    problems = validate_config(
+        {"general": {"processors": [{"name": "cleaner", "remove_formt_chars": True}]}}
+    )
+
+    assert _paths(problems, "error") == set()
+    assert _paths(problems, "warning") == {"general.processors[0].remove_formt_chars"}
+
+
+def test_strict_config_applies_to_site_processors():
+    with pytest.raises(validation_module.ConfigError):
+        validate_config(
+            {
+                "general": {"strict_config": True},
+                "sites": {
+                    "s": {"processors": [{"name": "zh_convert", "directon": "t2s"}]}
+                },
+            }
+        )
+
+    problems = validate_config(
+        {"sites": {"s": {"processors": [{"name": "zh_convert", "directon": "t2s"}]}}}
+    )
+    assert _paths(problems, "warning") == {"sites.s.processors[0].directon"}
+
+
+def test_unknown_processor_name_is_not_validated():
+    # A third-party processor's option set is unknowable: never report it.
+    row = {"name": "vendor.custom", "any_key": 1}
+    assert validate_config({"general": {"processors": [row]}}) == []
+    assert (
+        validate_config({"general": {"strict_config": True, "processors": [row]}}) == []
+    )
+
+
+def test_processor_option_lookup_is_case_insensitive():
+    problems = validate_config(
+        {"general": {"processors": [{"name": " Cleaner ", "remove_formt_chars": True}]}}
+    )
+
+    assert _paths(problems, "warning") == {"general.processors[0].remove_formt_chars"}
+
+
+def test_unknown_options_are_checked_per_instance():
+    problems = validate_config(
+        {
+            "general": {
+                "processors": [
+                    {"name": "cleaner", "remove_invisible": False},
+                    {"name": "cleaner", "remove_formt_chars": True},
+                    {
+                        "name": "cleaner",
+                        "overwrite": True,
+                        "remove_format_chars": True,
+                    },
+                ]
+            }
+        }
+    )
+
+    assert _paths(problems, "warning") == {"general.processors[1].remove_formt_chars"}
+
+
+def test_strict_config_reports_every_offending_instance():
+    with pytest.raises(validation_module.ConfigError) as excinfo:
+        validate_config(
+            {
+                "general": {
+                    "strict_config": True,
+                    "processors": [
+                        {"name": "cleaner", "remove_formt_chars": True},
+                        {"name": "translator.google", "sleap": 1},
+                    ],
+                }
+            }
+        )
+
+    message = str(excinfo.value)
+    assert "general.processors[0].remove_formt_chars" in message
+    assert "general.processors[1].sleap" in message
+
+
+def test_sample_settings_cleaner_block_has_no_warnings():
+    processors = _sample_cleaner_processors()
+    assert processors, "the sample cleaner block should not be empty"
+    assert any("remove_format_chars" in row for row in processors)
+
+    problems = validate_config({"general": {"processors": processors}})
+
+    assert [problem for problem in problems if problem.level == "warning"] == []
+    assert problems == []
+
+    # Strict mode must not reject a configuration that only uses known options.
+    assert (
+        validate_config({"general": {"strict_config": True, "processors": processors}})
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {
+            "name": "cleaner",
+            "remove_invisible": True,
+            "remove_format_chars": True,
+            "remove_empty_tags": False,
+            "strip_leading_title": True,
+            "normalize_chapter_title": False,
+            "title_removes": "a.json",
+            "title_replace": "b.json",
+            "content_removes": "c.json",
+            "content_replace": "d.json",
+        },
+        {
+            "name": "corrector",
+            "engine": "kenlm",
+            "apply_title": True,
+            "apply_content": True,
+            "apply_author": False,
+            "apply_tags": False,
+            "skip_if_len_le": 3,
+            "language_model_path": "m",
+            "custom_confusion_path_or_dict": "c",
+            "proper_name_path": "p",
+            "common_char_path": "cc",
+            "same_pinyin_path": "sp",
+            "same_stroke_path": "ss",
+            "model_name_or_path": "x",
+            "model_type": "chatglm",
+            "peft_name": "peft",
+        },
+        {
+            "name": "zh_convert",
+            "direction": "t2s",
+            "apply_title": True,
+            "apply_content": True,
+            "apply_author": False,
+            "apply_tags": False,
+        },
+        {
+            "name": "translator.google",
+            "source": "auto",
+            "target": "zh-CN",
+            "sleep": 2.0,
+            "cache_size": 1024,
+            "cache_ttl": 60,
+            "cache_max_text_length": 1000,
+        },
+        {
+            "name": "translator.edge",
+            "source": "auto",
+            "target": "zh-Hans",
+            "sleep": 1.0,
+            "cache_size": 1024,
+            "cache_ttl": 60,
+            "cache_max_text_length": 1000,
+            "dedupe": True,
+            "dedupe_max_length": 1000,
+        },
+        {
+            "name": "translator.youdao",
+            "source": "auto",
+            "target": "zh-CHS",
+            "sleep": 1.0,
+            "cache_size": 1024,
+            "cache_ttl": 60,
+            "cache_max_text_length": 1000,
+            "dedupe": True,
+            "dedupe_max_length": 1000,
+        },
+    ],
+)
+def test_builtin_processors_accept_their_known_options(row):
+    assert validate_config({"general": {"processors": [row]}}) == []
+
+
+# ---------------------------------------------------------------------------
 # Path input and purity
 # ---------------------------------------------------------------------------
 
@@ -623,6 +914,22 @@ def test_load_config_logs_validation_problems_but_returns_data(
     assert data == {"generall": {}, "general": {"timeout": "oops"}}
     assert "unknown configuration key" in caplog.text
     assert "expected number" in caplog.text
+
+
+def test_load_config_propagates_strict_config_errors(tmp_path, monkeypatch):
+    """Strict mode must not be swallowed by the advisory-validation wrapper."""
+    cfg = tmp_path / "settings.json"
+    cfg.write_text(
+        '{"general": {"strict_config": true, "processors": '
+        '[{"name": "cleaner", "remove_formt_chars": true}]}}',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(validation_module.ConfigError) as excinfo:
+        load_config(None)
+
+    assert "remove_formt_chars" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

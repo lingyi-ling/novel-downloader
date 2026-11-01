@@ -156,7 +156,7 @@ class FakeUI:
     async def on_progress(self, done: int, total: int) -> None:
         self.progress.append((done, total))
 
-    async def on_complete(self, book: Any) -> None:
+    async def on_complete(self, book: Any, *, failed: int = 0) -> None:
         self.completed.append(book.book_id)
 
 

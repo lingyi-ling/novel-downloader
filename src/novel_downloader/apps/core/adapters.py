@@ -6,6 +6,7 @@ novel_downloader.apps.core.adapters
 
 import asyncio
 import contextlib
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ from .cred_broker import (
     create_cred_request,
 )
 from .models import DownloadTask, Status, error_text
+
+logger = logging.getLogger(__name__)
 
 
 class WebLoginUI:
@@ -98,7 +101,11 @@ class WebDownloadUI:
         self.task.chapters_done = done
         self.task.record_chapter_time()
 
-    async def on_complete(self, book: BookConfig) -> None:
+    async def on_complete(self, book: BookConfig, *, failed: int = 0) -> None:
+        if failed:
+            logger.warning(
+                "Book %s finished with %d missing chapter(s)", book.book_id, failed
+            )
         self.task.status = Status.EXPORTING
 
 

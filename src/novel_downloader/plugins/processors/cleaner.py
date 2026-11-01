@@ -13,6 +13,7 @@ import copy
 import json
 import logging
 import re
+import unicodedata
 from re import Match, Pattern
 from typing import Any
 
@@ -20,6 +21,52 @@ from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import BookInfoDict, ChapterDict
 
 logger = logging.getLogger(__name__)
+
+#: Unicode general categories removed by ``remove_format_chars``:
+#: ``Cf`` (format characters: zero-width joiners, bidi controls, BOM, ...) and
+#: ``Co`` (private-use glyphs, which pirate sites abuse as watermarks).
+#: Python's :mod:`re` has no ``\p{Cf}`` support, so this must be done per
+#: character through :func:`unicodedata.category`.
+_FORMAT_CATEGORIES: frozenset[str] = frozenset({"Cf", "Co"})
+
+#: Characters that may legitimately follow a repeated leading chapter title.
+#: A match only counts when the title is followed by whitespace, a colon or the
+#: end of the text. Sentence punctuation (``，。！？；、``) is deliberately *not*
+#: a boundary: a body that opens with the title text as part of its first
+#: sentence ("第一次相遇，他紧张得说不出话。") must keep that sentence. Brackets
+#: are excluded for the same reason: ``(上)``/``（续）`` after a title means the
+#: heading continues and must not be cut off.
+_TITLE_BOUNDARY: frozenset[str] = frozenset(" \t\r\n\u3000：:")
+
+#: Empty paragraph tags (``<p></p>``, ``<p> </p>``, ``<p><br/></p>``, ...).
+#: ``[^>]`` is bounded: an unbounded run makes every ``<p`` prefix in a body
+#: rescan the whole remainder (a 160 KB string of ``<p`` took ~29 s), so a tag
+#: whose attributes exceed the bound is simply left untouched (still safe).
+_ATTR_RUN = r"[^>]{0,512}"
+_EMPTY_PARAGRAPH_RE: Pattern[str] = re.compile(
+    rf"<p\b{_ATTR_RUN}>(?:\s|&nbsp;|&#160;|<br\b{_ATTR_RUN}>)*</p\s*>",
+    re.IGNORECASE,
+)
+#: Self-closing empty paragraph tags (``<p/>``).
+_EMPTY_SELF_CLOSING_RE: Pattern[str] = re.compile(
+    rf"<p\b{_ATTR_RUN}/\s*>", re.IGNORECASE
+)
+#: Two or more consecutive line breaks: artifacts left by empty paragraphs.
+_BR_RUN_RE: Pattern[str] = re.compile(rf"(?:<br\b{_ATTR_RUN}>\s*){{2,}}", re.IGNORECASE)
+
+#: Characters accepted as Chinese/Arabic chapter numbers.
+_CHAPTER_DIGITS = "0-9零〇一二三四五六七八九十百千万两"
+
+#: ``第1章`` / ``第一章`` style heads, optionally already followed by a name.
+_CHAPTER_HEAD_RE: Pattern[str] = re.compile(
+    rf"(?P<head>第\s*[{_CHAPTER_DIGITS}]+\s*[章节回卷])(?P<rest>.*)"
+)
+#: ``1. 名字`` / ``12、名字`` / ``一、名字`` style titles. The lookahead rejects
+#: decimal numbers such as ``3.14 圆周率`` and version-like strings.
+_NUMBER_SEP_RE: Pattern[str] = re.compile(
+    rf"(?P<num>[0-9]{{1,4}}|[{_CHAPTER_DIGITS}]+)"
+    r"\s*[.．、，,]\s*(?=\D)(?P<name>\S.*)"
+)
 
 
 @registrar.register_processor()
@@ -32,6 +79,24 @@ class CleanerProcessor:
 
     def __init__(self, config: dict[str, Any]) -> None:
         self._remove_invisible: bool = bool(config.get("remove_invisible", True))
+
+        # ``remove_format_chars`` defaults to whatever ``remove_invisible`` is:
+        # enabling it is a strict superset of the old behaviour, so existing
+        # configs keep their semantics while new installs get the full cleanup.
+        format_setting = config.get("remove_format_chars")
+        self._remove_format_chars: bool = (
+            self._remove_invisible if format_setting is None else bool(format_setting)
+        )
+        # Off by default: by the time content reaches a processor it is plain
+        # text extracted from the page, so ``<p></p>`` is almost always a
+        # literal quote (a technical book, a novel about programming) rather
+        # than markup. Enable it only for an HTML-preserving parser.
+        self._remove_empty_tags: bool = bool(config.get("remove_empty_tags", False))
+        self._strip_leading_title: bool = bool(config.get("strip_leading_title", True))
+        # Off by default: renaming what the reader sees is a user-visible change.
+        self._normalize_chapter_title: bool = bool(
+            config.get("normalize_chapter_title", False)
+        )
 
         # --- load JSON files ---
         title_remove_patterns = self._load_str_list(
@@ -91,20 +156,26 @@ class CleanerProcessor:
                 if isinstance(chapters := vol.get("chapters"), list):
                     for cinfo in chapters:
                         if isinstance(ctitle := cinfo.get("title"), str):
-                            cinfo["title"] = self._clean_title(ctitle)
+                            cinfo["title"] = self._clean_chapter_title(ctitle)
 
         return bi
 
     def process_chapter(self, chapter: ChapterDict) -> ChapterDict:
         """
         Apply cleaning rules to a single chapter (title + content).
+
+        The cleaned title is passed to the content cleaner so that a title
+        repeated at the start of the body can be stripped (see
+        :meth:`strip_leading_title`).
         """
         ch = copy.deepcopy(chapter)
 
+        cleaned_title: str | None = None
         if isinstance(title := ch.get("title"), str):
-            ch["title"] = self._clean_title(title)
+            cleaned_title = self._clean_chapter_title(title)
+            ch["title"] = cleaned_title
         if isinstance(content := ch.get("content"), str):
-            ch["content"] = self._clean_content(content)
+            ch["content"] = self._clean_content(content, title=cleaned_title)
 
         return ch
 
@@ -112,26 +183,174 @@ class CleanerProcessor:
     def _remove_bom_and_invisible(cls, text: str) -> str:
         return cls._INVISIBLE_PATTERN.sub("", text)
 
+    @staticmethod
+    def _strip_format_chars(text: str) -> str:
+        """
+        Remove Unicode format (``Cf``) and private-use (``Co``) characters.
+
+        This is the Unicode-property-aware counterpart to
+        :attr:`_INVISIBLE_PATTERN`: pirate sites sprinkle private-use glyphs
+        (U+E000..U+F8FF), bidi controls, zero-width characters and stray BOMs
+        through the body as watermarking. :mod:`re` cannot express these
+        classes portably, so the check is done per character.
+        """
+        return "".join(
+            ch for ch in text if unicodedata.category(ch) not in _FORMAT_CATEGORIES
+        )
+
+    @staticmethod
+    def _strip_empty_tags(text: str) -> str:
+        """
+        Drop empty markup only: ``<p></p>`` and runs of two or more ``<br>``.
+
+        A single line break and any tag with real text inside are preserved.
+        """
+        text = _EMPTY_PARAGRAPH_RE.sub("", text)
+        text = _EMPTY_SELF_CLOSING_RE.sub("", text)
+        return _BR_RUN_RE.sub("\n", text)
+
+    @staticmethod
+    def strip_leading_title(text: str, title: str) -> str:
+        """
+        Remove a chapter title repeated at the very start of ``text``.
+
+        Only the beginning is considered (leading whitespace/newlines are
+        allowed). The title is matched literally, with all internal whitespace
+        removed, and whitespace-insensitively (any run of whitespace in the
+        heading may be absent or differently sized in the body). A match
+        additionally requires a boundary after the title -- whitespace, a colon
+        or the end of the text -- so prose that merely starts with the title is
+        left untouched. If the whole body is the repeated title, the text is
+        returned unchanged instead of becoming empty.
+
+        :param text: Chapter body.
+        :param title: Chapter title (already cleaned is fine).
+        :return: ``text`` without the leading duplicated title.
+        """
+        if not isinstance(text, str) or not isinstance(title, str):
+            return text
+
+        base = title.strip()
+        if not base:
+            return text
+
+        compact = re.sub(r"\s+", "", base)
+        # Exact candidates first (longest first so a full heading wins over its
+        # compact form), plus a whitespace-flexible pattern: headings are
+        # copied with inconsistent spacing (``第1章 相遇`` vs ``第1章相遇``), and
+        # requiring the body to use exactly the title's spacing would miss
+        # real repeated headings.
+        candidates = sorted(dict.fromkeys([base, compact]), key=len, reverse=True)
+        parts = base.split()
+        ws_rx = (
+            re.compile(r"\s*".join(re.escape(part) for part in parts))
+            if len(parts) > 1
+            else None
+        )
+        # A very short title ("开始", "序") followed by punctuation is far more
+        # likely to be the first word of a sentence than a repeated heading, so
+        # it only counts when separated by whitespace or the end of the text.
+        short_title = len(compact) < 4
+
+        start = len(text) - len(text.lstrip())
+        ends = {
+            start + len(candidate)
+            for candidate in candidates
+            if text.startswith(candidate, start)
+        }
+        if ws_rx is not None and (match := ws_rx.match(text, start)):
+            ends.add(match.end())
+
+        for end in sorted(ends, reverse=True):
+            if end < len(text):
+                following = text[end]
+                if following not in _TITLE_BOUNDARY:
+                    continue
+                if short_title and not following.isspace():
+                    continue
+            rest = text[end:].lstrip()
+            if rest[:1] in {":", "："}:
+                rest = rest[1:].lstrip()
+            # Never turn a title-only chapter into an empty one: keeping the
+            # repeated heading is strictly better than shipping an empty body.
+            if not rest:
+                return text
+            return rest
+        return text
+
+    @staticmethod
+    def normalize_chapter_title(text: str) -> str:
+        """
+        Normalize ``1. 名字`` / ``1、名字`` / ``第1章名字`` to ``第1章 名字``.
+
+        Only unambiguous numeric prefixes are rewritten; already-normalized
+        headings are left alone and the function is idempotent.
+        """
+        if not isinstance(text, str):
+            return text
+
+        head = _CHAPTER_HEAD_RE.fullmatch(text)
+        if head:
+            head_text = head.group("head")
+            rest = head.group("rest")
+            if not rest or rest[0].isspace() or rest[0] in _TITLE_BOUNDARY:
+                return text
+            return f"{head_text} {rest}"
+
+        numbered = _NUMBER_SEP_RE.fullmatch(text)
+        if not numbered:
+            return text
+        name = numbered.group("name").strip()
+        if not name:
+            return text
+        return f"第{numbered.group('num')}章 {name}"
+
     def _clean_title(self, text: str) -> str:
         return self._do_clean(text, self._title_combined_rx, self._title_repl_map)
 
-    def _clean_content(self, text: str) -> str:
-        return self._do_clean(text, self._content_combined_rx, self._content_repl_map)
+    def _clean_chapter_title(self, text: str) -> str:
+        cleaned = self._clean_title(text)
+        if self._normalize_chapter_title:
+            cleaned = self.normalize_chapter_title(cleaned)
+        return cleaned
+
+    def _clean_content(self, text: str, *, title: str | None = None) -> str:
+        return self._do_clean(
+            text,
+            self._content_combined_rx,
+            self._content_repl_map,
+            title=title,
+        )
 
     def _do_clean(
         self,
         text: str,
         combined_rx: Pattern[str] | None,
         repl_map: dict[str, str],
+        *,
+        title: str | None = None,
     ) -> str:
         if not isinstance(text, str):
             return text  # defensive
 
-        if not self._remove_invisible and not combined_rx:
+        strip_title = self._strip_leading_title and bool(title)
+        if (
+            not self._remove_invisible
+            and not self._remove_format_chars
+            and not self._remove_empty_tags
+            and not combined_rx
+            and not strip_title
+        ):
             return text.strip()
 
         if self._remove_invisible:
             text = self._remove_bom_and_invisible(text)
+
+        if self._remove_format_chars:
+            text = self._strip_format_chars(text)
+
+        if self._remove_empty_tags:
+            text = self._strip_empty_tags(text)
 
         if combined_rx:
 
@@ -139,6 +358,9 @@ class CleanerProcessor:
                 return repl_map.get(match.group(0), "")
 
             text = combined_rx.sub(_sub, text)
+
+        if strip_title and title is not None:
+            text = self.strip_leading_title(text, title)
 
         return text.strip()
 

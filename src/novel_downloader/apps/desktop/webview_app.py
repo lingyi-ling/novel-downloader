@@ -32,6 +32,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from novel_downloader.apps.common.updater import (
+    detect_platform,
+    parse_manifest,
+    parse_version,
+)
 from novel_downloader.apps.constants import DOWNLOAD_SUPPORT_SITES, SEARCH_SUPPORT_SITES
 from novel_downloader.apps.desktop.engine import AsyncEngine
 from novel_downloader.apps.desktop.formatting import format_error, status_label
@@ -64,17 +69,10 @@ _RELEASES_PAGE = "https://github.com/lingyi-ling/novel-downloader/releases/lates
 #: Minimum interval between update checks (24 hours).
 _UPDATE_CHECK_INTERVAL = 24 * 3600.0
 
-
-def _version_tuple(raw: str) -> tuple[int, ...]:
-    """Parse ``"1.2.3"`` (optionally with a non-numeric suffix) for compares."""
-    head = str(raw or "").strip().split("-")[0].lstrip("vV")
-    parts: list[int] = []
-    for chunk in head.split("."):
-        digits = "".join(c for c in chunk if c.isdigit())
-        if not digits:
-            break
-        parts.append(int(digits))
-    return tuple(parts) or (0,)
+# ``_version_tuple`` is the pre-existing name used by the bridge tests; the
+# implementation lives in :mod:`apps.common.updater` so the update logic has a
+# single source of truth (and the common module stays GUI-free).
+_version_tuple = parse_version
 
 
 #: PowerShell template that writes the .lnk files via the WScript.Shell COM
@@ -595,7 +593,15 @@ class ApiBridge:
         Never raises: any failure — offline, rate-limited, bad payload —
         reports ``{"available": False}`` so the front end can stay quiet.
 
-        :return: ``{"available", "latest", "url", "message"?}``.
+        The payload is interpreted by
+        :func:`novel_downloader.apps.common.updater.parse_manifest`, which also
+        selects this platform's asset.  Nothing is downloaded or executed
+        here.
+
+        :return: ``{"available", "latest", "url", "current", "message",
+                 "platform", "asset_name"?, "asset_size"?, "sha256"?,
+                 "throttled"?, "error"?}``.  The first five keys are always
+                 present, whatever branch produced the answer.
         """
         prefs = _load_prefs()
         try:
@@ -603,12 +609,22 @@ class ApiBridge:
         except (TypeError, ValueError):
             # A hand-edited preference file must not break the check.
             last = 0.0
+        current = self._version()
         now = time.time()
         if now - last < _UPDATE_CHECK_INTERVAL:
-            return {"available": False, "throttled": True}
+            return {
+                "available": False,
+                "current": current,
+                "latest": "",
+                "url": _RELEASES_PAGE,
+                "message": "",
+                "throttled": True,
+            }
+        # The timestamp is written before the request: an offline machine must
+        # not retry the (up to 8 s) fetch every time the panel is opened.
         _save_prefs({"last_update_check": str(now)})
 
-        current = self._version()
+        platform_tag = detect_platform()
         try:
             import json as _json
             import urllib.request
@@ -622,20 +638,42 @@ class ApiBridge:
             )
             with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
                 payload = _json.loads(resp.read().decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("release payload is not a JSON object")
+            info = parse_manifest(payload, current=current, platform_tag=platform_tag)
         except Exception as exc:  # noqa: BLE001 - offline is normal
             logger.debug("Update check failed: %s", exc)
-            return {"available": False, "error": format_error(exc)}
+            return {
+                "available": False,
+                "current": current,
+                "latest": "",
+                "url": _RELEASES_PAGE,
+                "message": "",
+                "error": format_error(exc),
+                "platform": platform_tag,
+            }
 
-        latest = str(payload.get("tag_name") or "").lstrip("vV")
-        url = str(payload.get("html_url") or _RELEASES_PAGE)
-        if not latest or not _version_tuple(latest) > _version_tuple(current):
-            return {"available": False, "latest": latest, "url": url}
+        url = info.notes_url or _RELEASES_PAGE
+        if not info.available:
+            return {
+                "available": False,
+                "current": current,
+                "latest": info.latest,
+                "url": url,
+                "message": "",
+                "platform": platform_tag,
+            }
+        asset = info.asset
         return {
             "available": True,
             "current": current,
-            "latest": latest,
+            "latest": info.latest,
             "url": url,
-            "message": t("Update available: v{ver}").replace("{ver}", latest),
+            "platform": platform_tag,
+            "asset_name": asset.name if asset is not None else None,
+            "asset_size": asset.size if asset is not None else None,
+            "sha256": asset.sha256 if asset is not None else None,
+            "message": t("Update available: v{ver}").replace("{ver}", info.latest),
         }
 
     @staticmethod

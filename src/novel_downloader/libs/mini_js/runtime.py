@@ -155,6 +155,26 @@ class MiniJS:
     def __init__(self) -> None:
         self._env: Env = Env()
 
+    def bind(self, name: str, value: Any) -> None:
+        """
+        Expose ``value`` to subsequently evaluated code as the global ``name``.
+
+        This is the supported way for a host (the rule engine, a test, ...) to
+        inject variables or helper functions: it does not depend on the private
+        ``_env`` attribute, so the storage may change without breaking callers.
+        Binding an existing name replaces it; use :meth:`clean_env` to start
+        over.
+
+        :raises TypeError: when ``name`` is not a non-empty string.
+        :raises ValueError: when ``name`` is not a valid identifier (a name the
+            tokenizer could never resolve back to this binding).
+        """
+        if not isinstance(name, str) or not name:
+            raise TypeError(f"name must be a non-empty string, got {name!r}")
+        if not name.isidentifier():
+            raise ValueError(f"name must be a valid identifier, got {name!r}")
+        self._env.define(name, value)
+
     def env(self) -> dict[str, Any]:
         return dict(self._env.data)
 

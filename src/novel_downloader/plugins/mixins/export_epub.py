@@ -5,6 +5,7 @@ novel_downloader.plugins.mixins.export_epub
 """
 
 import base64
+import hashlib
 import logging
 from html import escape
 from pathlib import Path
@@ -23,9 +24,90 @@ from novel_downloader.schemas import (
     ChapterDict,
     ExporterConfig,
     MediaResource,
+    VolumeInfoDict,
 )
 
 logger = logging.getLogger(__name__)
+
+# Windows still caps most paths at 260 characters (unless long-path support is
+# enabled). ``_build_epub`` writes into a ``.{name}.XXXXXXXX.tmp`` sibling, so
+# leave a margin for that suffix.
+_MAX_PATH_LEN = 240
+
+# Chapters are stored as ``Text/<name>.xhtml`` inside the archive; keep the
+# component short so extracting the EPUB on Windows cannot exceed the limit,
+# whatever directory the reading app unpacks to.
+_MAX_CHAPTER_NAME_LEN = 72
+
+
+def _fit_name(name: str, parent: Path, limit: int = _MAX_PATH_LEN) -> str:
+    """
+    Shorten ``name`` so that ``parent / name`` fits within ``limit`` chars.
+
+    Only the name shrinks; the extension is preserved and a short digest of
+    the original name is appended so two long titles that share a prefix do
+    not collapse onto the same output file. The digest is taken from the raw
+    (pre-sanitization) name, because ``sanitize_filename`` truncates on its
+    own and would otherwise erase the part that distinguishes the two.
+    """
+    total = len(str(parent)) + 1 + len(name)
+    if total <= limit:
+        return name
+
+    budget = max(len(name) - (total - limit), 8)
+
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
+    tail = f"~{digest}" + (f".{ext}" if ext else "")
+    keep = max(budget - len(tail), 1)
+    return f"{stem[:keep]}{tail}"
+
+
+def _count_unique_cids(vols: list[VolumeInfoDict]) -> int:
+    """Number of distinct chapter ids across the (already filtered) volumes."""
+    cids = {
+        cid
+        for vol in vols
+        for chap in vol.get("chapters", [])
+        if (cid := chap.get("chapterId"))
+    }
+    return len(cids)
+
+
+def _check_export_consistency(
+    *,
+    fmt: str,
+    site: str,
+    book_id: str,
+    planned: int,
+    rendered: int,
+    skipped: int,
+) -> None:
+    """
+    Warn when the archive does not account for every planned chapter.
+
+    ``rendered + skipped`` must equal the number of distinct chapters the
+    filtered book metadata promised. A mismatch means the builder dropped a
+    chapter that was handed to it; the archive is still usable, so this is
+    logged rather than raised (``CommonClient.export_book`` would otherwise
+    discard the whole export and leave the user with nothing).
+    """
+    if planned == rendered + skipped:
+        return
+
+    logger.warning(
+        "Export consistency mismatch (%s, site=%s, book=%s): planned=%d, "
+        "rendered=%d, skipped=%d",
+        fmt,
+        site,
+        book_id,
+        planned,
+        rendered,
+        skipped,
+    )
 
 
 if TYPE_CHECKING:
@@ -144,11 +226,13 @@ class ExportEpubMixin:
 
                 # Append each chapter
                 seen_cids: set[str] = set()
+                skipped = 0
                 for ch_info in vol.get("chapters", []):
                     cid = ch_info.get("chapterId")
                     ch_title = ch_info.get("title")
                     if not cid or cid in seen_cids:
                         continue
+                    seen_cids.add(cid)
 
                     ch = chap_map.get(cid)
                     if not ch:
@@ -158,7 +242,8 @@ class ExportEpubMixin:
                                 chap_title=ch_title,
                             )
                             builder.add_chapter(chapter_obj)
-                            seen_cids.add(cid)
+                        else:
+                            skipped += 1
                         continue
 
                     chapter_obj = self._xp_epub_chapter(
@@ -170,18 +255,29 @@ class ExportEpubMixin:
                         include_picture=cfg.include_picture,
                     )
                     builder.add_chapter(chapter_obj)
-                    seen_cids.add(cid)
 
-                out_name = format_filename(
+                _check_export_consistency(
+                    fmt="EPUB",
+                    site=self._site,
+                    book_id=book_id,
+                    planned=_count_unique_cids([vol]),
+                    rendered=sum(
+                        1 for item in builder.items if isinstance(item, EpubChapter)
+                    ),
+                    skipped=skipped,
+                )
+
+                raw_name = format_filename(
                     cfg.filename_template,
                     title=vol_title,
                     author=author,
                     append_timestamp=cfg.append_timestamp,
                     ext="epub",
                 )
-                out_path = self._unique_output_path(
-                    self._output_dir / sanitize_filename(out_name), used_paths
+                out_path = self._output_dir / sanitize_filename(
+                    _fit_name(raw_name, self._output_dir)
                 )
+                out_path = self._unique_output_path(out_path, used_paths)
 
                 try:
                     outputs.append(builder.export(out_path))
@@ -259,6 +355,7 @@ class ExportEpubMixin:
 
         # --- Compile columes ---
         seen_cids: set[str] = set()
+        skipped = 0
         with ChapterStorage(raw_base, filename=f"chapter.{stage}.sqlite") as storage:
             for v_idx, vol in enumerate(vols, start=1):
                 vol_title = vol.get("volume_name") or f"卷 {v_idx}"
@@ -289,6 +386,7 @@ class ExportEpubMixin:
                     ch_title = ch_info.get("title")
                     if not cid or cid in seen_cids:
                         continue
+                    seen_cids.add(cid)
 
                     ch = chap_map.get(cid)
                     if not ch:
@@ -298,7 +396,8 @@ class ExportEpubMixin:
                                 chap_title=ch_title,
                             )
                             curr_vol.chapters.append(chapter_obj)
-                            seen_cids.add(cid)
+                        else:
+                            skipped += 1
                         continue
 
                     chapter_obj = self._xp_epub_chapter(
@@ -311,20 +410,30 @@ class ExportEpubMixin:
                     )
 
                     curr_vol.chapters.append(chapter_obj)
-                    seen_cids.add(cid)
 
                 if curr_vol.chapters:
                     builder.add_volume(curr_vol)
 
+        _check_export_consistency(
+            fmt="EPUB",
+            site=self._site,
+            book_id=book_id,
+            planned=_count_unique_cids(vols),
+            rendered=sum(1 for item in builder.items if isinstance(item, EpubChapter)),
+            skipped=skipped,
+        )
+
         # --- Finalize EPUB ---
-        out_name = format_filename(
+        raw_name = format_filename(
             cfg.filename_template,
             title=name,
             author=author,
             append_timestamp=cfg.append_timestamp,
             ext="epub",
         )
-        out_path = self._output_dir / sanitize_filename(out_name)
+        out_path = self._output_dir / sanitize_filename(
+            _fit_name(raw_name, self._output_dir)
+        )
 
         builder.export(out_path)
         logger.info(
@@ -388,15 +497,16 @@ class ExportEpubMixin:
         builder.add_chapter(chapter_obj)
 
         # --- filename pattern ---
-        out_name = format_filename(
+        raw_name = format_filename(
             cfg.filename_template,
             title=chap_title,
             author="Unknown",
             append_timestamp=cfg.append_timestamp,
             ext="epub",
         )
-
-        out_path = self._output_dir / sanitize_filename(out_name)
+        out_path = self._output_dir / sanitize_filename(
+            _fit_name(raw_name, self._output_dir)
+        )
 
         # --- export epub ---
         builder.export(out_path)
@@ -498,10 +608,14 @@ class ExportEpubMixin:
         xhtml_str = "\n".join(html_parts)
         extra_content = self._xp_epub_extras(chap.get("extra") or {})
 
-        safe_name = sanitize_filename(f"c{cid}")
+        # Sanitize the *whole* filename (extension included): sanitizing only
+        # the stem and then appending ".xhtml" can push the component past the
+        # 255-character limit that Windows enforces on extraction.
+        safe_name = sanitize_filename(f"c{cid}.xhtml", max_length=_MAX_CHAPTER_NAME_LEN)
+        safe_id = safe_name.removesuffix(".xhtml")
         return EpubChapter(
-            id=f"c_{safe_name}",
-            filename=f"{safe_name}.xhtml",
+            id=f"c_{safe_id}",
+            filename=safe_name,
             title=title,
             fonts=added_fonts,
             content=xhtml_str,
@@ -522,10 +636,11 @@ class ExportEpubMixin:
 
         xhtml_str = "<p>本章内容暂不可用</p>"
 
-        safe_name = sanitize_filename(f"c{cid}")
+        safe_name = sanitize_filename(f"c{cid}.xhtml", max_length=_MAX_CHAPTER_NAME_LEN)
+        safe_id = safe_name.removesuffix(".xhtml")
         return EpubChapter(
-            id=f"c_{safe_name}",
-            filename=f"{safe_name}.xhtml",
+            id=f"c_{safe_id}",
+            filename=safe_name,
             title=title,
             fonts=[],
             content=xhtml_str,

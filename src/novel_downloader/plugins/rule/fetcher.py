@@ -19,7 +19,12 @@ from typing import Any, ClassVar
 
 from novel_downloader.plugins.base.fetcher import BaseFetcher
 
-from .engine import render
+from .engine import (
+    body_fingerprint,
+    matches_stop_when,
+    render,
+    should_stop_pagination,
+)
 from .model import PagesRule, Rule
 
 logger = logging.getLogger(__name__)
@@ -158,6 +163,12 @@ class RuleFetcher(BaseFetcher):
         page = pages_rule.start
         last = pages_rule.max_pages
         seen: set[str] = {first_url} if first_url else set()
+        seen_bodies: set[str] = {body_fingerprint(current)}
+
+        # ``stop_when`` on the entry page means "this is the last one": do not
+        # even ask for a follow-up.
+        if matches_stop_when(pages_rule, current):
+            return []
 
         while len(extra) < _MAX_EXTRA_PAGES and (last is None or page <= last):
             next_url = render(pages_rule.url, base_url=base, page=page, **fmt)
@@ -181,6 +192,8 @@ class RuleFetcher(BaseFetcher):
                 )
                 break
             extra.append(current)
+            if should_stop_pagination(pages_rule, current, next_url, seen, seen_bodies):
+                break
             seen.add(next_url)
             page += 1
         return extra

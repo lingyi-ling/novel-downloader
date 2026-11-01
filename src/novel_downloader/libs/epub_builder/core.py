@@ -16,6 +16,7 @@ Provides:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
@@ -60,6 +61,18 @@ from .models import (
 # manifest id: path separators (both flavours), parent-directory markers
 # (".."), Windows drive letters (":"), and other Windows-illegal characters.
 _UNSAFE_ENTRY_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+logger = logging.getLogger(__name__)
+
+
+def _discard_temp(path: str | Path) -> None:
+    """Remove a staging file, warning instead of hiding a failed cleanup."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning("Could not remove temporary file %s: %s", path, exc)
 
 
 def _sanitize_entry_name(name: str, fallback: str) -> str:
@@ -547,76 +560,122 @@ class EpubBuilder:
         """
         Write out the .epub ZIP file.
 
-        The archive is assembled in a temporary file next to the target and
-        then atomically replaced, so a failure mid-write can never truncate
-        or corrupt an already exported EPUB.
+        The archive is assembled in a temporary file next to the target, synced
+        to disk and then atomically replaced, so a failure mid-write can never
+        truncate or corrupt an already exported EPUB. When the platform refuses
+        the temporary file or the atomic rename (locked target, unsupported
+        filesystem) the error is raised and the existing archive is left
+        untouched: writing directly would truncate it before the new archive is
+        complete, which is strictly worse than failing.
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        fd, tmp_name = tempfile.mkstemp(
-            dir=output_path.parent,
-            prefix=f".{output_path.name}.",
-            suffix=".tmp",
-        )
-        os.close(fd)
-        tmp_path = Path(tmp_name)
-
         try:
-            with zipfile.ZipFile(tmp_path, "w") as epub:
-                # must be first and uncompressed
-                epub.writestr(
-                    "mimetype",
-                    "application/epub+zip",
-                    compress_type=ZIP_STORED,
-                )
+            fd, tmp_name = tempfile.mkstemp(
+                dir=output_path.parent,
+                prefix=f".{output_path.name}.",
+                suffix=".tmp",
+            )
+        except OSError as exc:
+            raise OSError(
+                f"Cannot create a temporary file next to {output_path} ({exc}); "
+                "refusing to write the EPUB directly because that would "
+                "truncate an existing archive"
+            ) from exc
 
-                # container.xml
-                epub.writestr(
-                    "META-INF/container.xml",
-                    CONTAINER_TEMPLATE,
-                    compress_type=ZIP_DEFLATED,
-                )
-
-                # core documents
-                epub.writestr(
-                    f"{ROOT_PATH}/nav.xhtml",
-                    self.nav.to_xhtml(),
-                    compress_type=ZIP_DEFLATED,
-                )
-                epub.writestr(
-                    f"{ROOT_PATH}/toc.ncx",
-                    self.ncx.to_xml(),
-                    compress_type=ZIP_DEFLATED,
-                )
-                epub.writestr(
-                    f"{ROOT_PATH}/content.opf",
-                    self.opf.to_xml(),
-                    compress_type=ZIP_DEFLATED,
-                )
-
-                # stylesheets
-                style_text = EPUB_CSS_STYLE_PATH.read_text("utf-8")
-                path = f"{ROOT_PATH}/{CSS_DIR}/style.css"
-                epub.writestr(path, style_text, compress_type=ZIP_DEFLATED)
-
-                # items
-                for item in self.items:
-                    path = f"{ROOT_PATH}/{TEXT_DIR}/{item.filename}"
-                    epub.writestr(path, item.to_xhtml(), compress_type=ZIP_DEFLATED)
-
-                # images
-                for img in self.images:
-                    path = f"{ROOT_PATH}/{IMAGE_DIR}/{img.filename}"
-                    epub.writestr(path, img.data, compress_type=ZIP_DEFLATED)
-
-                # fonts
-                for font in self.fonts:
-                    path = f"{ROOT_PATH}/{FONT_DIR}/{font.filename}"
-                    epub.writestr(path, font.data, compress_type=ZIP_DEFLATED)
-
-            os.replace(tmp_path, output_path)
+        tmp_path = Path(tmp_name)
+        try:
+            # The descriptor is not needed: ``ZipFile`` opens the temp path
+            # itself. A close failure still falls through to the cleanup.
+            os.close(fd)
+            self._write_archive(tmp_path)
+            _fsync_file(tmp_path)
+            try:
+                os.replace(tmp_path, output_path)
+            except OSError as exc:
+                raise OSError(
+                    f"Atomic replace failed for {output_path} ({exc}); the "
+                    "previous archive was left untouched"
+                ) from exc
         except BaseException:
-            tmp_path.unlink(missing_ok=True)
+            # Also clean up on KeyboardInterrupt/SystemExit so an interrupted
+            # export cannot leave a stray temporary file behind.
+            _discard_temp(tmp_path)
             raise
 
         return output_path
+
+    def _write_archive(self, target: Path) -> None:
+        """Serialise the whole book into the ZIP file at ``target``."""
+        with zipfile.ZipFile(target, "w") as epub:
+            # must be first and uncompressed
+            epub.writestr(
+                "mimetype",
+                "application/epub+zip",
+                compress_type=ZIP_STORED,
+            )
+
+            # container.xml
+            epub.writestr(
+                "META-INF/container.xml",
+                CONTAINER_TEMPLATE,
+                compress_type=ZIP_DEFLATED,
+            )
+
+            # core documents
+            epub.writestr(
+                f"{ROOT_PATH}/nav.xhtml",
+                self.nav.to_xhtml(),
+                compress_type=ZIP_DEFLATED,
+            )
+            epub.writestr(
+                f"{ROOT_PATH}/toc.ncx",
+                self.ncx.to_xml(),
+                compress_type=ZIP_DEFLATED,
+            )
+            epub.writestr(
+                f"{ROOT_PATH}/content.opf",
+                self.opf.to_xml(),
+                compress_type=ZIP_DEFLATED,
+            )
+
+            # stylesheets
+            style_text = EPUB_CSS_STYLE_PATH.read_text("utf-8")
+            path = f"{ROOT_PATH}/{CSS_DIR}/style.css"
+            epub.writestr(path, style_text, compress_type=ZIP_DEFLATED)
+
+            # items
+            for item in self.items:
+                path = f"{ROOT_PATH}/{TEXT_DIR}/{item.filename}"
+                epub.writestr(path, item.to_xhtml(), compress_type=ZIP_DEFLATED)
+
+            # images
+            for img in self.images:
+                path = f"{ROOT_PATH}/{IMAGE_DIR}/{img.filename}"
+                epub.writestr(path, img.data, compress_type=ZIP_DEFLATED)
+
+            # fonts
+            for font in self.fonts:
+                path = f"{ROOT_PATH}/{FONT_DIR}/{font.filename}"
+                epub.writestr(path, font.data, compress_type=ZIP_DEFLATED)
+
+
+def _fsync_file(path: Path) -> None:
+    """
+    Flush a finished file to stable storage.
+
+    Best effort: durability is a bonus, an unsupported ``fsync`` (some network
+    shares, or a platform without the syscall) must not fail the export.
+    Windows requires a writable handle for ``FlushFileBuffers``, hence
+    ``O_WRONLY`` rather than a read-only open.
+    """
+    try:
+        fd = os.open(path, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)

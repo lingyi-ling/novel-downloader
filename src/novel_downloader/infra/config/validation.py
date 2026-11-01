@@ -11,6 +11,11 @@ out-of-range values are reported as :class:`Problem` objects instead of raising
 exceptions.  ``load_config`` consumes these problems and only logs them, which
 keeps existing configuration files working after upgrades.
 
+The one exception is opt-in: when ``general.strict_config = true``, a
+processor option that the built-in processor does not read (usually a typo
+such as ``remove_formt_chars``) raises :class:`ConfigError` instead of a
+warning.  Everything else stays advisory in strict mode as well.
+
 The rules below are derived from the documented contract in
 ``docs/guide/settings-reference.md`` and from the keys actually read by
 ``ConfigAdapter`` (``infra/config/adapter.py``).
@@ -28,14 +33,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from novel_downloader.infra.i18n import t
 from novel_downloader.schemas.config import default_cache_dir
 
 __all__ = [
     "DEFAULT_DOWNLOAD_RETRY_TIMES",
+    "ConfigError",
     "Problem",
     "migrate_config",
     "validate_config",
 ]
+
+
+#: Raised by :func:`validate_config` when ``general.strict_config`` is enabled
+#: and a processor table contains an option the built-in processor does not
+#: read.  Default (non-strict) validation reports such options as ``warning``
+#: problems instead, so a typo never prevents an existing configuration from
+#: starting.
+class ConfigError(Exception):
+    """A configuration error that must abort loading in strict mode."""
+
 
 ProblemLevel = Literal["error", "warning", "info"]
 
@@ -83,6 +100,9 @@ _GENERAL_KEYS = frozenset(
         "processors",
         # Read by apps/core/task_manager.py (undocumented, but supported).
         "download_retry_times",
+        # Read by this module: turns unknown processor options into a fatal
+        # ConfigError instead of a warning (see ``_validate_processors``).
+        "strict_config",
     }
 )
 
@@ -161,6 +181,113 @@ _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 _FORMATS = ("epub", "html", "txt")
 _SPLIT_MODES = ("book", "volume", "chapter")
 _BOOK_KEYS = frozenset({"book_id", "start_id", "end_id", "ignore_ids"})
+
+#: Options read by each built-in processor, keyed by the name used in
+#: ``[[general.processors]]`` / ``[[sites.<site>.processors]]``.
+#:
+#: The processor classes declare no option schema today: every option is read
+#: ad hoc with ``config.get(<key>)`` (and, for ``corrector``, forwarded to
+#: pycorrector through ``_subset(cfg, ...)``), so this table is maintained by
+#: hand.  **When a built-in processor gains a new option, add it here.**  The
+#: processor source is the authority; ``docs/guide/processors-reference.md``
+#: does not list every option (e.g. the translator cache options are missing).
+#: ``name`` and ``overwrite`` are table fields, not options, and are handled
+#: separately.
+#:
+#: ``corrector`` lists the union of every engine's keys: validation cannot tell
+#: which keys a given ``engine`` reads, and flagging keys that another engine
+#: accepts would be a false positive.  Unknown *names* (third-party or
+#: registered-later plugins) are never checked, because their option set is
+#: unknowable here.
+_BUILTIN_PROCESSOR_OPTIONS: dict[str, frozenset[str]] = {
+    # plugins/processors/cleaner.py
+    "cleaner": frozenset(
+        {
+            "remove_invisible",
+            "remove_format_chars",
+            "remove_empty_tags",
+            "strip_leading_title",
+            "normalize_chapter_title",
+            "title_removes",
+            "content_removes",
+            "title_replace",
+            "content_replace",
+        }
+    ),
+    # plugins/processors/corrector.py -- union over kenlm, macbert, t5,
+    # ernie_csc, gpt and mucgec_bart engines.
+    "corrector": frozenset(
+        {
+            "apply_title",
+            "apply_content",
+            "apply_author",
+            "apply_tags",
+            "skip_if_len_le",
+            "engine",
+            "language_model_path",
+            "custom_confusion_path_or_dict",
+            "proper_name_path",
+            "common_char_path",
+            "same_pinyin_path",
+            "same_stroke_path",
+            "model_name_or_path",
+            "model_type",
+            "peft_name",
+        }
+    ),
+    # plugins/processors/zh_convert.py
+    "zh_convert": frozenset(
+        {
+            "apply_title",
+            "apply_content",
+            "apply_author",
+            "apply_tags",
+            "direction",
+        }
+    ),
+    # plugins/processors/translator/google.py (no dedupe: it translates whole
+    # fields, not paragraph chunks).
+    "translator.google": frozenset(
+        {
+            "source",
+            "target",
+            "sleep",
+            "cache_size",
+            "cache_ttl",
+            "cache_max_text_length",
+        }
+    ),
+    # plugins/processors/translator/edge.py
+    "translator.edge": frozenset(
+        {
+            "source",
+            "target",
+            "sleep",
+            "cache_size",
+            "cache_ttl",
+            "cache_max_text_length",
+            "dedupe",
+            "dedupe_max_length",
+        }
+    ),
+    # plugins/processors/translator/youdao.py
+    "translator.youdao": frozenset(
+        {
+            "source",
+            "target",
+            "sleep",
+            "cache_size",
+            "cache_ttl",
+            "cache_max_text_length",
+            "dedupe",
+            "dedupe_max_length",
+        }
+    ),
+}
+
+#: Processor table fields that are not processor options: ``ConfigAdapter``
+#: strips them before the remaining mapping is passed to the processor.
+_PROCESSOR_TABLE_KEYS = frozenset({"name", "overwrite"})
 
 #: Name of the cache directory written by releases whose default
 #: ``general.cache_dir`` was the workspace-relative ``"./novel_cache"``.
@@ -268,6 +395,32 @@ def _validate_unknown_keys(
             continue
         if key not in allowed and key not in extra_allowed:
             _unknown_key(problems, _join(prefix, key), key, allowed)
+
+
+def _unknown_processor_option(
+    processor: str,
+    option: str,
+    known: frozenset[str],
+    path: str,
+) -> Problem:
+    """Describe an option that a built-in processor never reads.
+
+    The message names the option and the processor (with a "did you mean"
+    suggestion when one is close enough) and the fix hint lists every option
+    the processor does understand, so the finding is actionable on its own.
+    """
+    matches = difflib.get_close_matches(option, sorted(known), n=1, cutoff=0.6)
+    if matches:
+        message = t(
+            "Unknown option '{option}' for processor '{processor}' "
+            "(possible typo); did you mean '{suggestion}'?"
+        ).format(option=option, processor=processor, suggestion=matches[0])
+    else:
+        message = t("Unknown option '{option}' for processor '{processor}'.").format(
+            option=option, processor=processor
+        )
+    hint = t("Known options: {options}.").format(options=", ".join(sorted(known)))
+    return Problem("warning", path, message, hint)
 
 
 def _check_bool(
@@ -601,10 +754,17 @@ def _validate_debug(
     _check_directory(debug, "log_dir", prefix, problems)
 
 
-def _validate_processors(value: Any, path: str, problems: list[Problem]) -> None:
+def _validate_processors(
+    value: Any,
+    path: str,
+    problems: list[Problem],
+    *,
+    strict: bool = False,
+) -> None:
     if not isinstance(value, list):
         _type_problem(problems, path, "list of processor tables", value)
         return
+    strict_problems: list[Problem] = []
     for index, row in enumerate(value):
         row_path = _join(path, index)
         if not isinstance(row, Mapping):
@@ -636,6 +796,35 @@ def _validate_processors(value: Any, path: str, problems: list[Problem]) -> None
                 "boolean (true/false)",
                 row["overwrite"],
             )
+        if not isinstance(name, str) or not name.strip():
+            continue
+        # Detection runs per table, so the same processor listed several times
+        # (staged cleaning, two translator passes, ...) is checked instance by
+        # instance against the same option set.
+        known = _BUILTIN_PROCESSOR_OPTIONS.get(name.strip().lower())
+        if known is None:
+            # Third-party or not-yet-registered processor: its option set is
+            # unknowable here, so it is left untouched (same as before).
+            continue
+        for option in row:
+            if not isinstance(option, str):
+                continue
+            if option in _PROCESSOR_TABLE_KEYS or option in known:
+                continue
+            problem = _unknown_processor_option(
+                name.strip(), option, known, _join(row_path, option)
+            )
+            if strict:
+                strict_problems.append(problem)
+            else:
+                problems.append(problem)
+    if strict_problems:
+        raise ConfigError(
+            "\n".join(
+                f"{problem.path}: {problem.message} {problem.fix_hint}".strip()
+                for problem in strict_problems
+            )
+        )
 
 
 def _validate_book_entry(
@@ -746,7 +935,11 @@ def _validate_book_ids(value: Any, path: str, problems: list[Problem]) -> None:
 
 
 def _validate_site(
-    site: Mapping[str, Any], prefix: str, problems: list[Problem]
+    site: Mapping[str, Any],
+    prefix: str,
+    problems: list[Problem],
+    *,
+    strict: bool = False,
 ) -> None:
     _validate_unknown_keys(
         site,
@@ -827,7 +1020,12 @@ def _validate_site(
             _type_problem(problems, _join(prefix, "output"), "table", output)
 
     if "processors" in site:
-        _validate_processors(site["processors"], _join(prefix, "processors"), problems)
+        _validate_processors(
+            site["processors"],
+            _join(prefix, "processors"),
+            problems,
+            strict=strict,
+        )
 
     if "book_ids" in site:
         _validate_book_ids(site["book_ids"], _join(prefix, "book_ids"), problems)
@@ -874,9 +1072,19 @@ def _check_legacy_cache_dir(
     )
 
 
-def _validate_general(general: Mapping[str, Any], problems: list[Problem]) -> None:
+def _validate_general(
+    general: Mapping[str, Any],
+    problems: list[Problem],
+    *,
+    strict: bool = False,
+) -> None:
     prefix = "general"
     _validate_unknown_keys(general, _GENERAL_KEYS, prefix, problems)
+
+    # ``strict_config`` only tightens processor-option validation; every other
+    # rule keeps its advisory behaviour so strict mode cannot reject a
+    # configuration that merely uses deprecated keys.
+    _check_bool(general, "strict_config", prefix, problems)
 
     _check_directory(general, "raw_data_dir", prefix, problems)
     _check_directory(general, "output_dir", prefix, problems)
@@ -941,7 +1149,10 @@ def _validate_general(general: Mapping[str, Any], problems: list[Problem]) -> No
 
     if "processors" in general:
         _validate_processors(
-            general["processors"], _join(prefix, "processors"), problems
+            general["processors"],
+            _join(prefix, "processors"),
+            problems,
+            strict=strict,
         )
 
 
@@ -960,9 +1171,14 @@ def _validate_root(data: Mapping[str, Any], problems: list[Problem]) -> None:
     _validate_unknown_keys(data, _ROOT_KEYS, "", problems)
 
     general = data.get("general")
+    # ``general.strict_config`` is a document-wide switch: it also governs the
+    # processor tables under ``[sites.<site>]``. Only an explicit ``true``
+    # enables it; a non-boolean value is reported as a type error and ignored.
+    strict = isinstance(general, Mapping) and general.get("strict_config") is True
+
     if "general" in data:
         if isinstance(general, Mapping):
-            _validate_general(cast(Mapping[str, Any], general), problems)
+            _validate_general(cast(Mapping[str, Any], general), problems, strict=strict)
         else:
             _type_problem(problems, "general", "table", general)
 
@@ -983,7 +1199,10 @@ def _validate_root(data: Mapping[str, Any], problems: list[Problem]) -> None:
                 site_path = _join("sites", site_name)
                 if isinstance(site_cfg, Mapping):
                     _validate_site(
-                        cast(Mapping[str, Any], site_cfg), site_path, problems
+                        cast(Mapping[str, Any], site_cfg),
+                        site_path,
+                        problems,
+                        strict=strict,
                     )
                 else:
                     _type_problem(problems, site_path, "table", site_cfg)
@@ -1019,6 +1238,12 @@ def validate_config(
     Returns:
         A list of :class:`Problem` objects.  An empty list means the
         configuration is valid.
+
+    Raises:
+        ConfigError: Only when ``general.strict_config`` is ``true`` and a
+            processor table uses an option the built-in processor does not
+            read.  The message lists every offending path, the unknown option
+            and the options that are accepted.
     """
     if isinstance(path_or_dict, (str, Path)):
         path = Path(path_or_dict).expanduser()

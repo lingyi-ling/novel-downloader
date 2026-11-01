@@ -656,3 +656,53 @@ def _cache_snapshot(keyword: str) -> list[SearchResult]:
     cached = search_module._CACHE.get(build_key(keyword, None, 5, False, 5.0))
     assert cached is not None
     return cached
+
+
+# ---------------------------------------------------------------------------
+# intent-aware ranking is wired into the search pipeline
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_ranks_an_author_query_by_author() -> None:
+    """Searching an author's name must not be outranked by a title that contains it."""
+    from novel_downloader.plugins.search import _finalize
+
+    results: list[SearchResult] = [
+        {
+            "site": "a",
+            "title": "天蚕土豆",
+            "author": "路人甲",
+            "url": "https://a/1",
+        },
+        {
+            "site": "a",
+            "title": "斗破苍穹",
+            "author": "天蚕土豆",
+            "url": "https://a/2",
+        },
+    ]
+
+    _finalize(
+        results,
+        keyword="天蚕土豆",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=False,
+    )
+
+    assert results[0]["title"] == "斗破苍穹"
+
+
+def test_finalize_non_quality_sorts_ignore_query_intent() -> None:
+    """``by`` other than ``quality`` keeps its own key, unchanged by intent."""
+    from novel_downloader.plugins.search import _finalize
+
+    results: list[SearchResult] = [
+        {"site": "a", "title": "短", "author": "x", "url": "https://a/1"},
+        {"site": "a", "title": "长很多的书名", "author": "x", "url": "https://a/2"},
+    ]
+
+    _finalize(results, keyword="x", sort="title", order="asc", limit=None, group=False)
+
+    assert [r["title"] for r in results] == ["短", "长很多的书名"]

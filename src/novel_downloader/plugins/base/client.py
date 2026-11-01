@@ -35,6 +35,7 @@ from novel_downloader.schemas import (
     ProcessorConfig,
     VolumeInfoDict,
 )
+from novel_downloader.schemas.book import DownloadSummary
 
 logger = logging.getLogger(__name__)
 
@@ -155,12 +156,13 @@ class AbstractClient(abc.ABC):
         *,
         ui: DownloadUI | None = None,
         **kwargs: Any,
-    ) -> None:
+    ) -> DownloadSummary:
         """
         Download a single book.
 
         :param book: BookConfig with at least ``book_id``.
         :param ui: Optional DownloadUI to report progress or messages.
+        :returns: Structured summary of the run (chapter counts + failures).
         """
         ...
 
@@ -474,6 +476,11 @@ class BaseClient(AbstractClient, abc.ABC):
     ) -> list[str]:
         seen_start = start_id is None
         out: list[str] = []
+        # Some tables of contents list the same chapter twice (a volume header
+        # repeats it, or a site renders both a "latest" and a full listing).
+        # Keeping the duplicate would download it twice, inflate ``total`` and
+        # report one gap as two, so every id is emitted at most once.
+        seen: set[str] = set()
         for vol in vols:
             for chap in vol["chapters"]:
                 cid = chap.get("chapterId")
@@ -484,9 +491,12 @@ class BaseClient(AbstractClient, abc.ABC):
                         seen_start = True
                     else:
                         continue
+                if cid in seen:
+                    continue
                 if cid not in ignore:
                     accessible = chap.get("accessible", True)
                     if accessible or self._fetch_inaccessible:
+                        seen.add(cid)
                         out.append(cid)
                 if end_id is not None and cid == end_id:
                     return out

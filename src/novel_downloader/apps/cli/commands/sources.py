@@ -4,7 +4,14 @@ novel_downloader.apps.cli.commands.sources
 ------------------------------------------
 
 Inspect the rule-driven ("book source") plugins: list what is available and
-validate a rule file without touching any network.
+validate a rule file.  Listing and validation are offline.
+
+``list --check`` verifies that each source can be constructed
+(fetcher/parser/searcher); it never touches the network, so it stays the
+fast, CI-safe command it has always been.  Network reachability is a
+separate, explicit opt-in: ``list --probe`` performs a bounded, concurrent
+probe (see :mod:`novel_downloader.plugins.utils.site_probe`) and adds
+``Latency``/``HTTP`` columns.  ``--by-latency`` implies ``--probe``.
 
 Design note -- bare ``sources`` defaults to ``list`` while ``config``,
 ``clean`` and ``follow`` exit 2 without a subcommand. This is intentional,
@@ -14,20 +21,36 @@ loss on a bare invocation would serve nobody (the ``git remote`` /
 ``pip list`` convention). ``sources`` bare printing the table is also the
 documented contract in the e2e suite; changing it to exit 2 would break
 existing users and scripts for no safety gain.
+
+Exit code note -- ``--check`` exits non-zero only when a source cannot be
+instantiated, exactly as before the probe existed.  ``--probe`` (and
+``--by-latency``, which implies it) never changes the exit code on its own:
+network unreachability is reported (``-`` latency, blank status) but is not
+fatal, because a large share of book sources are unreachable from any single
+machine.  When ``--probe`` is used without ``--check`` the command therefore
+always exits 0.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import math
 import re
 import tempfile
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from pathlib import Path
+from typing import Any
 from urllib import request as urllib_request
 from urllib.parse import urlsplit
 
 from novel_downloader.apps.cli import ui
 from novel_downloader.infra.i18n import t
+from novel_downloader.plugins.utils.site_probe import (
+    ProbeResult,
+    probe_sites,
+    sort_by_latency,
+)
 
 from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail, localize_help
 
@@ -36,6 +59,12 @@ _MAX_RULE_BYTES = 1024 * 1024
 
 #: Timeout for the remote rule download, in seconds.
 _RULE_TIMEOUT = 15.0
+
+#: Default per-site timeout for the ``sources list --probe`` network probe.
+_PROBE_TIMEOUT = 3.0
+
+#: Default number of simultaneous network probes.
+_PROBE_CONCURRENCY = 8
 
 #: User agent sent when fetching a rule (some hosts reject the default).
 _RULE_USER_AGENT = "novel-cli/rule-downloader"
@@ -113,6 +142,68 @@ def _rule_name(name: str | None, url: str) -> str:
     return stem[:120]
 
 
+def _probe_target(rule: Any) -> str | None:
+    """
+    Return the URL used to health-check *rule*, if it has one.
+
+    ``base_url`` is the source's canonical origin; rules that only declare
+    ``hosts`` are probed over HTTPS on their first host.
+
+    :param rule: A rule object (``base_url`` / ``hosts`` are read defensively
+        so lightweight test doubles work too).
+    :return: Absolute HTTP(S) URL, or ``None`` when the rule declares neither.
+    """
+    base = str(getattr(rule, "base_url", "") or "").strip()
+    if base:
+        return base
+    hosts = getattr(rule, "hosts", ()) or ()
+    if hosts:
+        return f"https://{hosts[0]}"
+    return None
+
+
+def _run_probes(
+    items: list[tuple[str, str]],
+    *,
+    timeout: float,
+    concurrency: int,
+) -> dict[str, ProbeResult]:
+    """Run the network probes once and index the results by ``site_key``."""
+    results = asyncio.run(probe_sites(items, timeout=timeout, concurrency=concurrency))
+    return {result.site_key: result for result in results}
+
+
+def _format_latency(result: ProbeResult | None) -> str:
+    """Render the ``Latency`` cell (``123 ms`` or ``-``)."""
+    if result is None or result.latency_ms is None:
+        return "-"
+    return f"{result.latency_ms:.0f} ms"
+
+
+def _format_http(result: ProbeResult | None) -> str:
+    """Render the ``HTTP`` cell (the status code, or ``-``)."""
+    if result is None or result.status is None:
+        return "-"
+    return str(result.status)
+
+
+def _order_by_latency(
+    rules: list[tuple[str, Any, dict[str, str]]],
+    probes: dict[str, ProbeResult],
+) -> list[tuple[str, Any, dict[str, str]]]:
+    """Order *rules* by measured latency, unreachable rows last."""
+    ordered = sort_by_latency(
+        [probes[key] for key, _rule, _meta in rules if key in probes]
+    )
+    rank = {result.site_key: index for index, result in enumerate(ordered)}
+    # Rows without a probe result (no URL, or instantiation failed) have no
+    # rank and sort after every measured row; ``site_key`` keeps ties stable.
+    return sorted(
+        rules,
+        key=lambda item: (rank.get(item[0], len(rank)), item[0]),
+    )
+
+
 class SourcesCmd(Command):
     name = "sources"
     help = t("List, validate, install and remove rule-based book sources.")
@@ -130,10 +221,39 @@ class SourcesCmd(Command):
             help=t("Also verify that each source can be registered."),
         )
         p_list.add_argument(
+            "--probe",
+            action="store_true",
+            help=(
+                "Also probe each source over the network and report latency "
+                "and HTTP status (opt-in; --check stays offline)."
+            ),
+        )
+        p_list.add_argument(
             "--json",
             dest="as_json",
             action="store_true",
             help=t("Print machine-readable JSON on stdout and exit."),
+        )
+        p_list.add_argument(
+            "--by-latency",
+            action="store_true",
+            help=(
+                "Sort sources by network latency (unreachable last); implies --probe."
+            ),
+        )
+        p_list.add_argument(
+            "--probe-timeout",
+            metavar="SECONDS",
+            type=float,
+            default=_PROBE_TIMEOUT,
+            help="Per-site network probe timeout in seconds (default: 3.0).",
+        )
+        p_list.add_argument(
+            "--probe-concurrency",
+            metavar="N",
+            type=int,
+            default=_PROBE_CONCURRENCY,
+            help="Maximum simultaneous network probes (default: 8).",
         )
 
         p_check = cls._add_subparser(sub, "check", t("Validate a single rule file."))
@@ -200,35 +320,110 @@ class SourcesCmd(Command):
         else:
             cls._list(
                 check=bool(getattr(args, "check", False)),
+                probe=bool(getattr(args, "probe", False)),
                 as_json=bool(getattr(args, "as_json", False)),
+                by_latency=bool(getattr(args, "by_latency", False)),
+                probe_timeout=float(getattr(args, "probe_timeout", _PROBE_TIMEOUT)),
+                probe_concurrency=int(
+                    getattr(args, "probe_concurrency", _PROBE_CONCURRENCY)
+                ),
             )
 
     # ------------------------------------------------------------------ #
     @classmethod
-    def _list(cls, *, check: bool, as_json: bool = False) -> None:
+    def _list(
+        cls,
+        *,
+        check: bool = False,
+        probe: bool = False,
+        as_json: bool = False,
+        by_latency: bool = False,
+        probe_timeout: float = _PROBE_TIMEOUT,
+        probe_concurrency: int = _PROBE_CONCURRENCY,
+    ) -> None:
         from novel_downloader.plugins.rule import iter_rules
 
+        # Ordering by latency is only meaningful after probing, so the flag
+        # implies ``--probe`` (never ``--check``: it must not silently start
+        # validating registrations the user did not ask about).
+        if by_latency:
+            probe = True
+
+        # A probe is the only thing here that touches the network, so bad
+        # probe knobs are a usage error -- but only when a probe will run.
+        # ``Semaphore(0)`` and a non-finite timeout would otherwise deadlock
+        # or hang the command.
+        if probe:
+            if not math.isfinite(probe_timeout) or probe_timeout <= 0:
+                fail(
+                    f"--probe-timeout must be a positive number of seconds "
+                    f"(got {probe_timeout}).",
+                    EXIT_USAGE,
+                )
+            if probe_concurrency < 1:
+                fail(
+                    f"--probe-concurrency must be at least 1 "
+                    f"(got {probe_concurrency}).",
+                    EXIT_USAGE,
+                )
+
         rules = sorted(iter_rules(), key=lambda item: item[0])
+
+        # 1) The original, offline "can this source be instantiated?" check.
+        #    ``--check`` stops here: no network I/O, ever.
+        statuses: dict[str, str] = {}
+        probes: dict[str, ProbeResult] = {}
+        if check:
+            for key, rule, _meta in rules:
+                statuses[key] = cls._probe(key, rule.search is not None)
+
+        # 2) The explicit, opt-in network probe.  When ``--check`` is also
+        #    requested, only sources that instantiated cleanly are probed: a
+        #    broken registration is already reported by the Status column, and
+        #    probing it would just add a second failure.
+        if probe:
+            targets = [
+                (key, target)
+                for key, rule, _meta in rules
+                if (not check or statuses.get(key) == t("ok"))
+                and (target := _probe_target(rule))
+            ]
+            if targets:
+                probes = _run_probes(
+                    targets,
+                    timeout=probe_timeout,
+                    concurrency=probe_concurrency,
+                )
+
+        ordered = _order_by_latency(rules, probes) if by_latency else rules
 
         if as_json:
             payload: list[dict[str, object]] = []
             failed = False
-            for key, rule, meta in rules:
+            for key, rule, meta in ordered:
                 status: str | None = None
+                result = probes.get(key)
                 if check:
-                    status = cls._probe(key, rule.search is not None)
+                    status = statuses.get(key)
                     if status != t("ok"):
                         failed = True
-                payload.append(
-                    {
-                        "site_key": key,
-                        "name": rule.display_name,
-                        "search": rule.search is not None,
-                        "hosts": list(rule.hosts),
-                        "origin": meta.get("origin", "-"),
-                        "status": status,
-                    }
-                )
+                item: dict[str, object] = {
+                    "site_key": key,
+                    "name": rule.display_name,
+                    "search": rule.search is not None,
+                    "hosts": list(rule.hosts),
+                    "origin": meta.get("origin", "-"),
+                    "status": status,
+                }
+                # Network fields only exist when a probe ran.  Omitting them
+                # otherwise keeps the offline JSON payload byte-compatible
+                # with pre-probe consumers.
+                if probe:
+                    item["latency_ms"] = (
+                        result.latency_ms if result is not None else None
+                    )
+                    item["http_status"] = result.status if result is not None else None
+                payload.append(item)
             ui.emit(json.dumps(payload, ensure_ascii=False, indent=2))
             if failed:
                 raise SystemExit(EXIT_FAILURE)
@@ -247,10 +442,12 @@ class SourcesCmd(Command):
         ]
         if check:
             columns.append(t("Status"))
+        if probe:
+            columns.extend(["Latency", "HTTP"])
 
         rows: list[list[str]] = []
-        probe_failed = False
-        for key, rule, meta in rules:
+        check_failed = False
+        for key, rule, meta in ordered:
             row = [
                 key,
                 rule.display_name,
@@ -259,15 +456,24 @@ class SourcesCmd(Command):
                 meta.get("origin", "-"),
             ]
             if check:
-                status = cls._probe(key, rule.search is not None)
+                status = statuses[key]
                 if status != t("ok"):
-                    probe_failed = True
+                    check_failed = True
                 row.append(status)
+            if probe:
+                result = probes.get(key)
+                row.extend([_format_latency(result), _format_http(result)])
             rows.append(row)
 
         ui.render_table(t("Rule-based sources"), columns, rows)
 
-        if probe_failed:
+        # Exit-code contract: a source that cannot be instantiated fails the
+        # command (and only ``--check`` can discover that).  Network
+        # reachability is reported in the Latency/HTTP columns but is not
+        # fatal -- dozens of book sources are unreachable from any given
+        # machine, and making that a hard failure would break the documented
+        # offline ``--check`` contract.
+        if check_failed:
             raise SystemExit(EXIT_FAILURE)
 
     @classmethod

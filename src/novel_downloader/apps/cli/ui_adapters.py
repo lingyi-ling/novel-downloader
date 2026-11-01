@@ -28,12 +28,24 @@ class CLIDownloadUI:
         if self._progress is not None:
             await self._progress.update(done, total)
 
-    async def on_complete(self, book: BookConfig) -> None:
+    async def on_complete(self, book: BookConfig, *, failed: int = 0) -> None:
+        # The book is still handed to the export stage: a partly missing book
+        # is better than nothing, and `--strict` is what refuses to export.
+        # The *message*, however, must not claim success — a green
+        # "downloaded." followed by "Download incomplete" is exactly the
+        # misleading order this parameter exists to prevent.
         self.completed_books.add(book)
         if self._progress:
             self._progress.stop()
             self._progress = None
-        ui.success(t("Book {book_id} downloaded.").format(book_id=book.book_id))
+        if failed:
+            ui.warn(
+                t("Book {book_id} downloaded with {failed} missing chapter(s).").format(
+                    book_id=book.book_id, failed=failed
+                )
+            )
+        else:
+            ui.success(t("Book {book_id} downloaded.").format(book_id=book.book_id))
 
 
 class CLIExportUI:

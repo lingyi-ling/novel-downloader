@@ -4,9 +4,14 @@
 from __future__ import annotations
 
 import base64
+import logging
+import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from novel_downloader.libs.filesystem import (
     font_filename,
@@ -15,9 +20,10 @@ from novel_downloader.libs.filesystem import (
 )
 from novel_downloader.libs.html_builder import HtmlBuilder
 from novel_downloader.plugins.mixins.export_html import _unique_chapter_filename
-from novel_downloader.schemas import ExporterConfig
+from novel_downloader.schemas import ClientConfig, ExporterConfig
 from tests.plugins.exporters_helpers import (
     PNG_BYTES,
+    HarnessClient,
     Scenario,
     make_book_info,
     make_chapter,
@@ -192,13 +198,13 @@ def test_export_book_html_illegal_book_name_sanitized(scenario: Scenario) -> Non
     folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
     assert folder.name == sanitize_filename(folder.name)
     # sanitize_filename filters the platform-specific set only.
-    invalid = '<>:"/\|?*' if sys.platform == "win32" else "/"
+    invalid = r'<>:"/\|?*' if sys.platform == "win32" else "/"
     for ch in invalid:
         assert ch not in folder.name
 
 
 def test_export_book_html_overlong_title_folder_truncated(
-    scenario: Scenario, monkeypatch
+    scenario: Scenario, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     long_name = "长" * 400
     scenario.write_book_info(
@@ -684,6 +690,32 @@ def test_export_book_html_image_resource_written(scenario: Scenario) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Consistency diagnostics
+# ---------------------------------------------------------------------------
+
+
+def test_html_consistency_mismatch_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from novel_downloader.plugins.mixins.export_html import _check_export_consistency
+
+    with caplog.at_level(logging.WARNING):
+        _check_export_consistency(
+            fmt="HTML",
+            site="site",
+            book_id="b1",
+            planned=3,
+            rendered=2,
+            skipped=0,
+        )
+
+    assert any(
+        "planned=3" in record.getMessage() and "rendered=2" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+# ---------------------------------------------------------------------------
 # Early-return boundaries
 # ---------------------------------------------------------------------------
 
@@ -748,3 +780,398 @@ def test_unique_chapter_filename_first_use_unchanged() -> None:
     used: set[str] = set()
     assert _unique_chapter_filename("a.html", used) == "a.html"
     assert _unique_chapter_filename("a.html", used) == "a_2.html"
+
+
+# ---------------------------------------------------------------------------
+# Offline usability: no CDN assets, relative navigation
+# ---------------------------------------------------------------------------
+
+# Any resource the browser would fetch from another host when the folder is
+# opened via file://. Only link/script/img-like tags are considered; plain
+# text mentions of a URL in the novel body are not network requests.
+_EXTERNAL_RESOURCE = re.compile(
+    r"<(?:link|script|img|source|video|audio|iframe)\b[^>]*\b(?:href|src)\s*=\s*"
+    r"[\"'](?:https?:)?//",
+    re.IGNORECASE,
+)
+_EXTERNAL_CSS = re.compile(r"url\(\s*[\"']?(?:https?:)?//|@import\s", re.IGNORECASE)
+
+
+def _html_files(folder: Any) -> list[Any]:
+    return sorted(folder.rglob("*.html"))
+
+
+def test_export_book_html_has_no_external_css_or_js(scenario: Scenario) -> None:
+    _stage_book(scenario)
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+
+    html_files = _html_files(folder)
+    assert html_files
+
+    for path in html_files:
+        text = path.read_text("utf-8")
+        assert _EXTERNAL_RESOURCE.search(text) is None, f"external resource in {path}"
+
+    for path in sorted(folder.rglob("*.css")) + sorted(folder.rglob("*.js")):
+        text = path.read_text("utf-8")
+        assert _EXTERNAL_RESOURCE.search(text) is None, f"external resource in {path}"
+        assert _EXTERNAL_CSS.search(text) is None, f"external CSS in {path}"
+
+
+def test_export_book_html_local_assets_are_present(scenario: Scenario) -> None:
+    _stage_book(scenario)
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+
+    for path in _html_files(folder):
+        text = path.read_text("utf-8")
+        for href in re.findall(r'<link[^>]+href="([^"]+)"', text):
+            assert (path.parent / href).is_file(), f"missing stylesheet {href}"
+        for src in re.findall(r'<script[^>]+src="([^"]+)"', text):
+            assert (path.parent / src).is_file(), f"missing script {src}"
+
+
+def test_export_book_html_chapter_navigation_is_relative(
+    scenario: Scenario,
+) -> None:
+    _stage_book(scenario)
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+    chap_dir = folder / "chapters"
+
+    first = (chap_dir / "c1.html").read_text("utf-8")
+    second = (chap_dir / "c2.html").read_text("utf-8")
+
+    # c1 has no previous chapter; its next chapter is a sibling file.
+    assert 'data-next="c2.html"' in first
+    assert 'data-prev=""' in first
+    assert 'data-prev="c1.html"' in second
+    assert 'data-next=""' in second
+
+    for chapter, prev_link, next_link in (
+        ("c1.html", None, "c2.html"),
+        ("c2.html", "c1.html", None),
+    ):
+        assert (chap_dir / chapter).is_file()
+        if prev_link:
+            assert (chap_dir / prev_link).is_file()
+        if next_link:
+            assert (chap_dir / next_link).is_file()
+
+    # "Back to index" resolves from inside chapters/.
+    assert (chap_dir / "../index.html").resolve() == (folder / "index.html").resolve()
+
+
+def test_export_book_html_index_links_resolve(scenario: Scenario) -> None:
+    _stage_book(scenario)
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+
+    index = (folder / "index.html").read_text("utf-8")
+    hrefs = re.findall(r'href="(chapters/[^"]+)"', index)
+    assert hrefs
+    for href in hrefs:
+        assert (folder / href).is_file()
+
+
+# ---------------------------------------------------------------------------
+# Ordering and long paths
+# ---------------------------------------------------------------------------
+
+
+def test_export_book_html_preserves_book_order(scenario: Scenario) -> None:
+    scenario.write_book_info(
+        make_book_info(
+            volumes=[
+                make_volume(
+                    "卷",
+                    [
+                        make_chapter_info("10", "第十章"),
+                        make_chapter_info("2", "第二章"),
+                        make_chapter_info("1", "第一章"),
+                    ],
+                )
+            ]
+        )
+    )
+    scenario.write_chapters(
+        [
+            make_chapter("10", "内容十", title="第十章"),
+            make_chapter("2", "内容二", title="第二章"),
+            make_chapter("1", "内容一", title="第一章"),
+        ]
+    )
+
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+    index = (folder / "index.html").read_text("utf-8")
+
+    assert index.index("第十章") < index.index("第二章") < index.index("第一章")
+    # prev/next follow the book order, not the id order.
+    assert 'data-next="c2.html"' in (folder / "chapters" / "c10.html").read_text(
+        "utf-8"
+    )
+
+
+def test_export_book_html_long_cid_export_succeeds(scenario: Scenario) -> None:
+    # A 400-character chapter id used to produce a >255-character filename and
+    # abort the export with a Windows path error.
+    cid = "9" * 400
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info(cid, "长id")])])
+    )
+    scenario.write_chapters([make_chapter(cid, "长id内容", title="长id")])
+
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+    files = sorted(p.name for p in (folder / "chapters").iterdir())
+    assert len(files) == 1
+    assert len(files[0]) <= 72
+    assert files[0].endswith(".html")
+    assert "长id内容" in (folder / "chapters" / files[0]).read_text("utf-8")
+
+
+def test_export_book_html_long_title_export_succeeds(scenario: Scenario) -> None:
+    # A long book title must not push the folder (or the chapter paths inside
+    # it) past the Windows limit.
+    long_name = "长" * 400
+    scenario.write_book_info(
+        make_book_info(
+            name=long_name,
+            volumes=[make_volume("卷", [make_chapter_info("1", "章")])],
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容", title="章")])
+
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+    assert folder.is_dir()
+    assert (folder / "index.html").is_file()
+    assert (folder / "chapters" / "c1.html").is_file()
+    assert len(str(folder)) <= 150
+
+
+# ---------------------------------------------------------------------------
+# Atomic writes: degradation path
+# ---------------------------------------------------------------------------
+
+
+def test_html_export_replace_failure_keeps_previous_export(
+    scenario: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _stage_book(scenario)
+    cfg = ExporterConfig(append_timestamp=False)
+    folder = scenario.export("html", cfg)["html"][0]
+    chapter = folder / "chapters" / "c1.html"
+    index = folder / "index.html"
+    chapter_before = chapter.read_bytes()
+    index_before = index.read_bytes()
+
+    # New content, but the platform refuses every atomic rename (locked
+    # target / read-only filesystem). Writing directly would truncate the
+    # existing files, so the export must fail and leave them untouched.
+    scenario.write_chapters([make_chapter("1", "更新后的内容", title="第一章")])
+
+    def no_replace(src: object, dst: object) -> None:
+        raise PermissionError("target locked")
+
+    monkeypatch.setattr(os, "replace", no_replace)
+
+    with caplog.at_level(logging.WARNING):
+        result = scenario.export("html", cfg)
+
+    assert result["html"] == []
+    assert chapter.read_bytes() == chapter_before
+    assert index.read_bytes() == index_before
+    assert not list(scenario.output_dir.rglob("*.tmp"))
+    assert not list(scenario.output_dir.glob(".*"))  # no staging/backup left
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Atomic replace failed" in message for message in messages)
+
+
+def test_html_export_removes_stale_chapter_and_media_files(
+    scenario: Scenario,
+) -> None:
+    # First export has three chapters and a stale media file added later.
+    scenario.write_book_info(
+        make_book_info(
+            name="我的书",
+            author="张三",
+            volumes=[
+                make_volume(
+                    "第一卷",
+                    [
+                        make_chapter_info("1", "第一章"),
+                        make_chapter_info("2", "第二章"),
+                        make_chapter_info("3", "第三章"),
+                    ],
+                )
+            ],
+        )
+    )
+    scenario.write_chapters(
+        [
+            make_chapter("1", "内容一", title="第一章"),
+            make_chapter("2", "内容二", title="第二章"),
+            make_chapter("3", "内容三", title="第三章"),
+        ]
+    )
+    cfg = ExporterConfig(append_timestamp=False)
+    folder = scenario.export("html", cfg)["html"][0]
+    (folder / "media").mkdir(exist_ok=True)
+    (folder / "media" / "stale.png").write_bytes(PNG_BYTES)
+    assert (folder / "chapters" / "c3.html").is_file()
+
+    # The book loses a chapter: the third file must not survive as a ghost.
+    scenario.write_book_info(
+        make_book_info(
+            name="我的书",
+            author="张三",
+            volumes=[
+                make_volume(
+                    "第一卷",
+                    [
+                        make_chapter_info("1", "第一章"),
+                        make_chapter_info("2", "第二章"),
+                    ],
+                )
+            ],
+        )
+    )
+    scenario.write_chapters(
+        [
+            make_chapter("1", "内容一", title="第一章"),
+            make_chapter("2", "内容二", title="第二章"),
+        ]
+    )
+    folder2 = scenario.export("html", cfg)["html"][0]
+
+    assert sorted(p.name for p in (folder2 / "chapters").iterdir()) == [
+        "c1.html",
+        "c2.html",
+    ]
+    assert not (folder2 / "media" / "stale.png").exists()
+    index = (folder2 / "index.html").read_text("utf-8")
+    assert "c3.html" not in index
+    # The export folder is replaced as a whole: no hidden staging/backup dirs.
+    assert [p.name for p in scenario.output_dir.iterdir()] == [folder2.name]
+
+
+def test_html_export_directory_swap_failure_restores_previous_export(
+    scenario: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stage_book(scenario)
+    cfg = ExporterConfig(append_timestamp=False)
+    folder = scenario.export("html", cfg)["html"][0]
+    index_before = (folder / "index.html").read_bytes()
+    chapter_before = (folder / "chapters" / "c1.html").read_bytes()
+
+    scenario.write_chapters([make_chapter("1", "更新后的内容", title="第一章")])
+
+    # Every internal file write succeeds; only the final staging -> folder
+    # rename is refused. The old export must be restored into place.
+    real_replace = os.replace
+
+    def fail_final_swap(src: object, dst: object) -> None:
+        # Fail only the staging -> export-folder rename; the restore rename
+        # (backup -> export folder) must still work.
+        if str(dst) == str(folder) and str(src).endswith(".tmp"):
+            raise PermissionError("destination locked")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_final_swap)
+
+    result = scenario.export("html", cfg)
+
+    assert result["html"] == []
+    assert folder.is_dir()
+    assert (folder / "index.html").read_bytes() == index_before
+    assert (folder / "chapters" / "c1.html").read_bytes() == chapter_before
+    assert [p.name for p in scenario.output_dir.iterdir()] == [folder.name]
+
+
+def test_html_export_honours_include_picture_false(scenario: Scenario) -> None:
+    resource = {
+        "type": "image",
+        "paragraph_index": 0,
+        "base64": base64.b64encode(PNG_BYTES).decode("ascii"),
+        "mime": "image/png",
+        "alt": "插图",
+    }
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "图章")])])
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", title="图章", extra={"resources": [resource]})]
+    )
+
+    folder = scenario.export(
+        "html", ExporterConfig(append_timestamp=False, include_picture=False)
+    )["html"][0]
+
+    chapter = (folder / "chapters" / "c1.html").read_text("utf-8")
+    assert "<img" not in chapter
+    media = folder / "media"
+    assert not media.exists() or not any(media.iterdir())
+
+    # Sanity check: with pictures enabled the same input does emit the image.
+    folder2 = scenario.export(
+        "html", ExporterConfig(append_timestamp=False, include_picture=True)
+    )["html"][0]
+    assert "<img" in (folder2 / "chapters" / "c1.html").read_text("utf-8")
+    assert list((folder2 / "media").glob("img_*"))
+
+
+def test_html_export_deep_output_dir_keeps_chapter_paths_short(
+    tmp_path: Path,
+) -> None:
+    # The output directory itself is ~200 characters deep, leaving far less
+    # room under the Windows 260-character limit than a normal export. The
+    # chapter filename budget must shrink accordingly so the files are really
+    # written instead of raising FileNotFoundError.
+    deep = tmp_path / ("d" * (200 - len(str(tmp_path)) - 1))
+    assert len(str(deep)) == 200
+    deep.mkdir(parents=True, exist_ok=True)
+
+    raw = tmp_path / "raw"
+    client = HarnessClient(
+        "site", ClientConfig(raw_data_dir=str(raw), output_dir=str(deep))
+    )
+    sc = Scenario(client=client, raw_dir=raw / "site", output_dir=deep)
+    cid = "9" * 400
+    sc.write_book_info(
+        make_book_info(
+            name="书",
+            volumes=[make_volume("卷", [make_chapter_info(cid, "长id")])],
+        )
+    )
+    sc.write_chapters([make_chapter(cid, "长id内容", title="长id")])
+
+    folder = sc.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+
+    files = sorted((folder / "chapters").iterdir())
+    assert len(files) == 1
+    assert files[0].name.endswith(".html")
+    assert "长id内容" in files[0].read_text("utf-8")
+    for path in folder.rglob("*"):
+        assert len(str(path)) <= 240
+
+
+def test_html_export_interrupted_write_keeps_previous_files(
+    scenario: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stage_book(scenario)
+    cfg = ExporterConfig(append_timestamp=False)
+    folder = scenario.export("html", cfg)["html"][0]
+    index_before = (folder / "index.html").read_bytes()
+    chapter_before = (folder / "chapters" / "c1.html").read_bytes()
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(os, "fsync", boom)
+
+    result = scenario.export("html", cfg)
+
+    assert result["html"] == []
+    assert (folder / "index.html").read_bytes() == index_before
+    assert (folder / "chapters" / "c1.html").read_bytes() == chapter_before
+    assert not list(folder.rglob(".*.tmp"))

@@ -12,16 +12,22 @@ Typical uses: **regex cleanup**, **Simplified/Traditional Chinese conversion (Op
 
 Removes invisible characters, deletes unwanted text fragments, and performs literal replacements (optionally on titles and body text).
 
-| Parameter          | Type   | Default | Description |
-| ------------------ | ------ | ------- | ----------- |
-| `remove_invisible` | `bool` | true    | Remove common invisible characters (such as zero-width characters) |
-| `title_removes`    | `str`  | -       | **Optional**; path to a JSON file containing a **string array** (regex patterns) to remove one by one |
-| `title_replace`    | `str`  | -       | **Optional**; path to a JSON file containing an **object** (`{"old": "new"}`) of replacements |
-| `content_removes`  | `str`  | -       | Same as above, applied to body text |
-| `content_replace`  | `str`  | -       | Same as above, applied to body text |
-| `overwrite`        | `bool` | false   | Whether to force rebuilding when a stage with the same name already exists |
+| Parameter                 | Type   | Default | Description |
+| ------------------------- | ------ | ------- | ----------- |
+| `remove_invisible`        | `bool` | true    | Remove common invisible characters (such as zero-width characters) |
+| `remove_format_chars`     | `bool` | follows `remove_invisible` | Remove Unicode format characters (Cf) and private-use characters (Co), i.e. site watermarks |
+| `strip_leading_title`     | `bool` | true    | Strip a chapter title repeated at the start of the body (only when followed by whitespace, a colon, or end of text) |
+| `remove_empty_tags`       | `bool` | false   | Remove empty `<p></p>` and repeated `<br/>`; only safe when the body still carries real HTML (`attr = "html"`), otherwise it deletes literal markup from plain text |
+| `normalize_chapter_title` | `bool` | false   | Normalize `1. Name` / `1、Name` / `第一章Name` into `第1章 Name` |
+| `title_removes`           | `str`  | -       | **Optional**; path to a JSON file containing a **string array** (regex patterns) to remove one by one |
+| `title_replace`           | `str`  | -       | **Optional**; path to a JSON file containing an **object** (`{"old": "new"}`) of replacements |
+| `content_removes`         | `str`  | -       | Same as above, applied to body text |
+| `content_replace`         | `str`  | -       | Same as above, applied to body text |
+| `overwrite`               | `bool` | false   | Whether to force rebuilding when a stage with the same name already exists |
 
 > `*_removes`: JSON array; `*_replace`: JSON object.
+>
+> `remove_format_chars` only drops `Cf`/`Co` characters. Newlines, tabs, combining marks (Mn) and ideographic spaces (Zs) are preserved, so CJK indentation and accented Latin text stay intact.
 
 **Example**
 

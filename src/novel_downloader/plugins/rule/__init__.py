@@ -33,12 +33,16 @@ from typing import Any, TypedDict
 
 from novel_downloader.infra.i18n import t
 from novel_downloader.plugins.registry import registrar
+from novel_downloader.schemas import FetcherConfig
 
 from .fetcher import RuleFetcher
 from .model import (
     Field,
+    Limits,
     Rule,
     RuleError,
+    Step,
+    apply_limits,
     loads_rule_json,
     parse_rule,
 )
@@ -52,6 +56,9 @@ __all__ = [
     "Rule",
     "RuleError",
     "Field",
+    "Step",
+    "Limits",
+    "apply_limits",
     "RefreshResult",
     "fetch_rule",
     "load_rules",
@@ -492,11 +499,27 @@ def refresh_rules(names: Sequence[str] | None = None) -> RefreshResult:
 # registration into the plugin registry
 # --------------------------------------------------------------------------- #
 def _make_fetcher(rule: Rule, key: str) -> type[RuleFetcher]:
-    return type(
-        f"RuleFetcher_{key}",
-        (RuleFetcher,),
-        {"_rule": rule, "site_name": key, "DEFAULT_BASE_URL": rule.base_url},
-    )
+    attrs: dict[str, Any] = {
+        "_rule": rule,
+        "site_name": key,
+        "DEFAULT_BASE_URL": rule.base_url,
+    }
+    if rule.limits is not None:
+        # Per-source limits are merged here, at the one place a rule fetcher is
+        # constructed, as a *copy* of the caller's config.  ``apply_limits`` is
+        # pure, so the globally shared ``FetcherConfig`` is never mutated.
+        def _init_with_limits(
+            self: RuleFetcher,
+            config: FetcherConfig,
+            cookies: dict[str, str] | None = None,
+            **kwargs: Any,
+        ) -> None:
+            RuleFetcher.__init__(
+                self, apply_limits(config, rule.limits), cookies, **kwargs
+            )
+
+        attrs["__init__"] = _init_with_limits
+    return type(f"RuleFetcher_{key}", (RuleFetcher,), attrs)
 
 
 def _make_parser(rule: Rule, key: str) -> type[RuleParser]:

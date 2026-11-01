@@ -12,16 +12,22 @@
 
 用于移除不可见字符、删除不需要的文本片段、进行字面替换 (可作用于标题与正文)。
 
-| 参数名             | 类型    | 默认值   | 说明                                               |
-| ------------------ | ------ | ----- | ------------------------------------------------ |
-| `remove_invisible` | `bool` | true  | 移除常见不可见字符 (如零宽字符等)                       |
-| `title_removes`    | `str`  | -     | **可选**; JSON 文件路径, 内容为**字符串数组** (正则), 逐条删除           |
-| `title_replace`    | `str`  | -     | **可选**; JSON 文件路径, 内容为**字典** (`{"old": "new"}`) 逐条替换 |
-| `content_removes`  | `str`  | -     | 同上, 作用于正文                                         |
-| `content_replace`  | `str`  | -     | 同上, 作用于正文                                         |
-| `overwrite`        | `bool` | false | 若同名阶段已存在, 是否强制重建                                  |
+| 参数名                    | 类型    | 默认值   | 说明                                               |
+| ------------------------- | ------ | ----- | ------------------------------------------------ |
+| `remove_invisible`        | `bool` | true  | 移除常见不可见字符 (如零宽字符等)                       |
+| `remove_format_chars`     | `bool` | 跟随 `remove_invisible` | 移除 Unicode 格式字符 (Cf) 与私用区字符 (Co)，即站点水印 |
+| `strip_leading_title`     | `bool` | true  | 删除正文开头重复的章节名 (只在空白、冒号或文末边界命中时删除) |
+| `remove_empty_tags`       | `bool` | false | 删除空 `<p></p>` 与连续 `<br/>`；正文为纯文本时开启会误删字面量，仅当解析使用 `attr = "html"` 时建议开启 |
+| `normalize_chapter_title` | `bool` | false | 把 `1. 名字` / `1、名字` / `第一章名字` 规范成 `第1章 名字` |
+| `title_removes`           | `str`  | -     | **可选**; JSON 文件路径, 内容为**字符串数组** (正则), 逐条删除           |
+| `title_replace`           | `str`  | -     | **可选**; JSON 文件路径, 内容为**字典** (`{"old": "new"}`) 逐条替换 |
+| `content_removes`         | `str`  | -     | 同上, 作用于正文                                         |
+| `content_replace`         | `str`  | -     | 同上, 作用于正文                                         |
+| `overwrite`               | `bool` | false | 若同名阶段已存在, 是否强制重建                                  |
 
 > `*_removes`: JSON 数组; `*_replace`: JSON 对象。
+>
+> `remove_format_chars` 只删 `Cf`/`Co` 类别字符, 保留换行、制表符、组合字符 (Mn) 与全角空格 (Zs), 因此不会破坏中文缩进与英文变音符号。
 
 **示例**
 

@@ -16,7 +16,7 @@ from typing import Any
 from novel_downloader.infra.i18n import t
 from novel_downloader.infra.paths import DEFAULT_CONFIG_FILE, app_home
 
-from .validation import validate_config
+from .validation import ConfigError, validate_config
 
 logger = logging.getLogger(__name__)
 
@@ -146,9 +146,15 @@ def _log_validation_problems(data: dict[str, Any]) -> None:
     files must keep loading even when they contain unknown or deprecated
     keys.  Any unexpected validator error is therefore swallowed and only
     reported at debug level.
+
+    :class:`~.validation.ConfigError` is the one exception.  It is raised only
+    when the user opted into ``general.strict_config``; swallowing it here
+    would silently disable the mode they just asked for.
     """
     try:
         problems = validate_config(data)
+    except ConfigError:
+        raise
     except Exception:  # pragma: no cover - defensive: never break loading
         logger.debug("Configuration validation failed", exc_info=True)
         return

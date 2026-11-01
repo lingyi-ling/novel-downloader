@@ -24,8 +24,17 @@ The repository's [`rules/_example-template.json`](https://github.com/lingyi-ling
 ### Validation and Management
 
 ```bash
-# List every rule source (--check also verifies that each one registers)
+# List every rule source (--check also verifies that each one registers; fully offline)
 novel-cli sources list --check
+
+# Real network health probe: concurrent HEAD requests reporting latency and status
+novel-cli sources list --probe
+
+# Sort by latency, fastest first (implies --probe; unreachable sites go last)
+novel-cli sources list --probe --by-latency
+
+# Probe pacing: per-site timeout in seconds and concurrency
+novel-cli sources list --probe --probe-timeout 3 --probe-concurrency 8
 
 # Validate a single rule file
 novel-cli sources check ./rules/_example-template.json
@@ -185,7 +194,7 @@ The `selector` syntax depends on the section's `format`:
 | Value | Meaning |
 | --- | --- |
 | `text` | Concatenate all text inside the node (no separator); in JSON mode, the value itself |
-| `inner_text` | Join the node's text by line (suitable for body text, preserving paragraphs); in JSON mode, arrays are joined with `\n` |
+| `inner_text` | Join the node's text by line (suitable for body text, preserving paragraphs); in JSON mode, arrays are joined with `\n` only when the whole match is an array — an array in the last path segment is expanded first, and only its first element is used |
 | `html` | The node's HTML source; in JSON mode, equivalent to `text` |
 | Any other string | Read as an HTML attribute name, such as `href` / `src` / `content`; in JSON mode, read as an object key |
 
@@ -195,14 +204,16 @@ The `selector` syntax depends on the section's `format`:
 
 | Variable | Available in | Description |
 | --- | --- | --- |
-| `{base_url}` | URLs, `data` / `json_body` values, `headers` values | Site root URL (trailing `/` removed) |
-| `{book_id}` | URLs, `data` / `json_body` values, `headers` values | Book ID |
-| `{chapter_id}` | URLs, `data` / `json_body` values, `headers` values | Chapter ID |
+| `{base_url}` | URLs, `headers` values of the book/chapter sections | Site root URL (trailing `/` removed) |
+| `{book_id}` | URLs, `headers` values of the book/chapter sections | Book ID |
+| `{chapter_id}` | URLs, `headers` values of the book/chapter sections | Chapter ID |
 | `{page}` | Pagination URLs, `data` / `json_body` values | Page number |
 | `{keyword}` | Search URLs, `data` / `json_body` values | Search keyword, URL-encoded |
 | `{raw_keyword}` | Search URLs, `data` / `json_body` values | Search keyword as-is |
 
 Unrecognized `{...}` placeholders are kept as-is and are not replaced. In `json_body`, templates only apply to string values.
+Top-level `headers` are sent verbatim without rendering; only the `headers` of the book/chapter sections are rendered.
+Search `data` / `json_body` only understand `{keyword}` / `{raw_keyword}` / `{page}`; other placeholders are left untouched.
 
 ---
 

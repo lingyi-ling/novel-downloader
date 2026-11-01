@@ -1,3 +1,41 @@
+## Unreleased
+
+### Feat
+
+- **rule**: 规则 DSL 表达力对齐并超过同期竞品——`Field.steps` 后处理链（`js` 走 mini_js、`py` 走 11 个白名单纯函数，按 regex → replace → steps 顺序执行且空值跳过；未用上游那种 `selector@js:code` 字符串 DSL，因为 `@` 会截断 XPath 属性谓词 `//div[@class=...]`）、`Field.fallback` 选择器回退链（字符串项继承主字段的 attr/regex/steps，dict 项独立）、`book.chapters` / `chapter` 的 `preprocess` + `container`（先按 display:none 裁诱饵、把 onclick 改写成 href，再重新解析）、`pages.stop_when`（正则命中即停）与 `pages.loop_guard`（重复 URL/正文指纹即停，默认开启且实测 6 种真实分页形状不漏页）、`book.chapters.is_desc`（按新→旧排列的站点：先跨页拼装去重再整体反转一次）、`limits`（每源并发/间隔/重试，`dataclasses.replace` 不可变合并，`concurrency=0` 拒绝以防信号量死锁）、`search.single_result_fallback`（整站精确匹配 302 到详情页时合成一条结果），全部为可选字段且缺省行为不变
+- **rule**: ReDoS 静态拒绝——`(a+)+$` 这类形状此前在 28 字符输入上耗时 48 秒、5000 字符等同永久挂起，现于规则解析期拒绝「被无界量词修饰且可匹配空串/单原子重复」的组，覆盖 `stop_when` / `drop` / `id_regex` / `book_id_regex` / `field.regex`（此前字段正则完全绕过校验）与运行期 `regex_replace`；20 个真实模式零误报
+- **search**: 查询意图判定——先判断关键词更像书名还是作者（按 ≤4 / 5–9 / ≥10 字分档加权，差距不足 15% 判为证据不足），再决定排序主键；搜作者名时不再被「书名恰好含该字」的书压过去，默认与证据不足时行为与旧版逐分数一致（5000 组随机输入零漂移），`--json` / CLI / API / 桌面共用同一条聚合路径
+- **download**: 缺章账本——进度 100% 不再等于章节完整：抓取重试耗尽、空解析、访问受限、存储失败都会写入 `<raw>/chapter.failures.jsonl` 并计入 `DownloadSummary`（`total == succeeded + failed`、`skipped <= succeeded`），账本是**本次运行**的诊断文件（开跑即清空，避免上次的陈旧失败冒充本次缺口，且成功不写任何东西时账本不存在即代表零失败）
+- **cli**: `download --strict`——有缺章时拒绝导出并以非零退出；默认模式仍导出但明确告警（前 5 条 + 账本路径），且不再先打绿色 `downloaded.` 再打缺章告警（`on_complete` 携带 `failed`，有缺章时直接显示 `downloaded with N missing chapter(s)`）；`--json` 每本书新增 `failed` 字段，机器消费者可区分「跑完」与「完整」
+- **cli**: 新命令 `batch`——按「书名 作者」书单批量搜索下载，未匹配项写回 `logs/not_found_<site>.txt`（保持同格式并以 `#` 结尾，可直接作为下一次 `--file` 或换源 `--from-not-found` 的输入）；书名含空格时用 Tab 显式分隔；`--strict-match` 要求作者也精确；`--out` 同时重定向原始缓存到 `<out>/raw_data`；单本失败不中断整批，缺章计入退出码；`--interval` 可选限速
+- **cli**: 进度条与日志的自动仲裁——TTY 下动态进度条、非 TTY（重定向/CI/管道）自动降级为每 10% 一行的纯文本且无 ANSI，进度条初始化失败同样降级；进度条激活期间控制台日志按原 Handler 格式缓冲，结束后分组补发（上限 500 条并报告丢弃数），不再出现「警告只在磁盘上、终端看不见」，异常路径与嵌套也保证恢复
+- **sources**: 真实健康探测 `sources list --probe`——并发 HEAD（405/501 退化 GET）取延迟与状态码，`--by-latency` 按延迟排序且不可达排最后，`--probe-timeout` / `--probe-concurrency` 可控；`--check` 保持纯离线结构校验（此前曾被改成联网，现已恢复契约，退出码语义不变）
+- **processors**: cleaner 新增 PUA/格式字符水印清除（按 `unicodedata.category` 删 `Cf`/`Co`，保留换行、制表符、组合字符与全角空格）、正文开头重复章节名剔除（收缩到空白/冒号/文末边界，短标题另加保护）、空标签清理（默认关闭：默认链路正文是纯文本，开启会误删字面量）、章节名规范化（默认关闭）
+- **config**: 处理器未知选项不再静默忽略——拼错的键（如 `remove_formt_chars`）会产生可操作告警并给出最接近的已知项，`general.strict_config = true` 时直接报错；`ConfigError` 现在会穿透 `load_config` 的兼容性兜底，否则严格模式等于没开
+- **updater**: 更新检查补全平台资产解析（Windows 安装包优先、桌面 zip、Android 单/多 APK 两种命名）、镜像前缀回退（自动补尾斜杠、已是完整前缀不重复拼接）、SHA256 流式校验；仍只提示不自动安装
+
+### Fix
+
+- **exporters**: 原子写「失败降级为直接写」会把旧成品截断成半个——三处导出全部改为**失败即抛错、旧成品保留**（宁可失败不可损坏），并修掉 Windows 上 `fdopen` 失败时 fd 未关闭导致临时文件无法删除的泄漏；HTML 导出改为 staging 目录构建后整体换入，重导出不再残留上次多出的章节/媒体文件；`include_picture` 在 HTML 导出中被忽略的问题已修
+- **exporters**: 长文件名/长路径在 Windows 上直接让整本导出失败——超长章节 id（400+ 字符）触发 `WinError 3`、400 字书名使 txt/html/epub 全部失败、截断后只差尾部的长标题互相覆盖；现按真实输出目录深度动态计算预算并追加 `~<hash>` 区分后缀（保留扩展名），EPUB 空卷不再输出空的 `<ol>`
+- **download**: 目录里重复出现的 `chapterId` 会让同一章被抓两次、`total` 虚增、一个缺口报两遍——章节计划现在按首次出现去重
+- **ledger**: 账本跨运行累积陈旧失败（第一轮缺 5 章、第二轮全成功后 `read_all()` 仍报 5 章）——改为 per-run；同时修掉 `attempts` 一个坏字段吞掉整条缺章记录、10 万层嵌套 JSON 让 `read_all` 直接抛、两个账本实例写同一文件时行交错
+- **batch**: 三个会丢数据的缺陷——第 3 本下载失败会中断第 4–10 本（现逐本隔离）、Ctrl+C 会丢掉已匹配但尚未写盘的未找到结果（现匹配完成即写盘）、`--not-found` 指向输入书单时会把它截断（现拒绝并提示换路径）；`--not-found` 目标若不是本命令产出的文件也会被拒，需显式 `--force`
+- **cli**: 进度仲裁期间 `WARNING`/`INFO` 在终端消失——旧测试甚至把这个回归当成契约锁死；现改为缓冲后在结束后按原格式补发，`ERROR` 不入缓冲以免重复，`--json` 的 stdout 不受进度输出污染
+- **sources**: 探测错误信息泄漏凭据——`Authorization: Basic <base64>` 只被吃掉了 scheme 单词、`Cookie` 只脱敏了第一对键值；现已修正并调整脱敏顺序（先 Cookie 后 Authorization，否则标记会被二次吞掉），会话初始化失败时也不再泄漏
+- **updater**: Windows 保留设备名会让下载挂死——目标名为 `con` 时打开 CON 设备阻塞 15 秒；`NUL`/`COM1` 报权限或找不到路径；镜像无尾斜杠会拼成 `ghproxy.comhttps://...`；探测误用下载用的 30 秒超时导致多镜像最坏卡 90 秒；桌面端 5 个返回分支里有 4 个缺少文档承诺的契约键
+- **cleaner**: 正文只有标题时会被清空、长标题后跟句读会削掉正常首句——标题剔除现在只在空白/冒号/文末命中，且删除后为空则保留原文；病理输入 `<p` 序列的 O(n²) 回溯（160KB 耗时 28 秒）已限定属性段长度
+
+### Test
+
+- 新增 `tests/plugins/rule/test_rule_hardening.py`（129 例）、`test_extended_features.py`、`test_rule_docs.py`（文档字段与 `model.py` 真实集合逐字段比对，防止文档漂移）、`test_download_failures_adversarial.py`（并发失败归属、ContextVar 任务隔离、fail→success 两轮序列）、`test_site_probe.py`、`test_cli_batch.py`（64 例）、`test_cli_ui_progress.py`、`test_updater.py`，以及各导出器的原子写/长路径/目录换入/离线可用性断言；全仓 7,900+ 项测试在此次改动后全绿
+
+### Docs
+
+- 新增 `docs/guide/rule-dsl.md`（字段参考 + 新能力示例 + mini_js 真实能力边界 + 三层转义说明）与两份可执行示例规则，并修正 `book-sources.md` 中模板变量可用位置、`priority` 实际语义、JSON 数组展开规则等 15 处与代码不符的表述
+- 新增 `docs/notes/so-novel-audit.md`——竞品 so-novel v1.12.0 的完整代码审计：架构、规则 DSL、并发模型、清洗管线、导出实现，以及「静默缺章」「每线程 sleep 当限流」「共享可变配置」「设备指纹上报」等反面教材与取舍理由
+- `processors-reference` 补齐四个新增清洗开关（中英双语），`cli-examples` 修正 `sources list --check` 退出码语义，`book-sources` 补充 `--probe` 用法
+
 ## v1.3.0 (2026-11-01)
 
 ### Feat

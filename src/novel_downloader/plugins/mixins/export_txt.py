@@ -4,7 +4,11 @@ novel_downloader.plugins.mixins.export_txt
 ------------------------------------------
 """
 
+import contextlib
+import hashlib
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -12,7 +16,6 @@ from novel_downloader.infra.persistence.chapter_storage import ChapterStorage
 from novel_downloader.libs.filesystem import (
     format_filename,
     sanitize_filename,
-    write_file,
 )
 from novel_downloader.schemas import (
     BookConfig,
@@ -23,6 +26,154 @@ from novel_downloader.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Windows still caps most paths at 260 characters (unless long-path support is
+# enabled). Keep a margin for the ``.{name}.XXXXXXXX.tmp`` file used by the
+# atomic writer, which adds ~13 characters next to the destination.
+_MAX_PATH_LEN = 240
+
+
+def _fit_name(name: str, parent: Path, limit: int = _MAX_PATH_LEN) -> str:
+    """
+    Shorten ``name`` so that ``parent / name`` fits within ``limit`` chars.
+
+    Only the name shrinks; the extension is preserved and a short digest of
+    the original name is appended so two long titles that share a prefix do
+    not collapse onto the same output file. The digest is taken from the raw
+    (pre-sanitization) name, because ``sanitize_filename`` truncates on its
+    own and would otherwise erase the part that distinguishes the two.
+    """
+    total = len(str(parent)) + 1 + len(name)
+    if total <= limit:
+        return name
+
+    budget = max(len(name) - (total - limit), 8)
+
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
+    tail = f"~{digest}" + (f".{ext}" if ext else "")
+    keep = max(budget - len(tail), 1)
+    return f"{stem[:keep]}{tail}"
+
+
+def _discard_temp(path: str | Path) -> None:
+    """Remove a staging file, warning instead of hiding a failed cleanup."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning("Could not remove temporary file %s: %s", path, exc)
+
+
+def _atomic_write_text(path: Path, text: str) -> Path:
+    """
+    Write ``text`` to ``path`` through a temporary file in the same directory.
+
+    The temporary file is flushed and fsynced before ``os.replace`` moves it
+    into place, so an interrupted export cannot leave a half-written TXT file
+    and never destroys an already exported one.
+
+    There is deliberately no "write directly instead" fallback: opening the
+    destination for writing truncates it, so a failure halfway through the
+    fallback would leave the user with neither the previous export nor a
+    complete new one. When the atomic path cannot be completed the error is
+    raised (with the destination path in the message) and the old file is
+    left untouched -- fail, never corrupt.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+    except OSError as exc:
+        raise OSError(
+            f"Cannot create a temporary file next to {path} ({exc}); "
+            "refusing to write directly because that would truncate an "
+            "existing export"
+        ) from exc
+
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+    except BaseException:
+        # ``fdopen`` may fail before it owns the descriptor; close it here so
+        # the temporary file can really be removed (Windows refuses to unlink
+        # a file that still has an open handle).
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        _discard_temp(tmp_name)
+        raise
+
+    try:
+        with handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        _discard_temp(tmp_name)
+        raise
+
+    try:
+        os.replace(tmp_name, path)
+    except OSError as exc:
+        _discard_temp(tmp_name)
+        raise OSError(
+            f"Atomic replace failed for {path} ({exc}); the previous export "
+            "was left untouched"
+        ) from exc
+
+    return path
+
+
+def _count_unique_cids(vols: list[VolumeInfoDict]) -> int:
+    """Number of distinct chapter ids across the (already filtered) volumes."""
+    cids = {
+        cid
+        for vol in vols
+        for chap in vol.get("chapters", [])
+        if (cid := chap.get("chapterId"))
+    }
+    return len(cids)
+
+
+def _check_export_consistency(
+    *,
+    fmt: str,
+    site: str,
+    book_id: str,
+    planned: int,
+    rendered: int,
+    skipped: int,
+) -> None:
+    """
+    Warn when the artifact does not account for every planned chapter.
+
+    ``rendered + skipped`` must equal the number of distinct chapters the
+    filtered book metadata promised. A mismatch means a chapter was silently
+    dropped (or duplicated) by the writer, which is worth a loud log line but
+    not worth discarding an otherwise usable export: ``CommonClient.export_book``
+    only reports a boolean outcome per format, so raising here would throw away
+    the good chapters along with the missing ones.
+    """
+    if planned == rendered + skipped:
+        return
+
+    logger.warning(
+        "Export consistency mismatch (%s, site=%s, book=%s): planned=%d, "
+        "rendered=%d, skipped=%d",
+        fmt,
+        site,
+        book_id,
+        planned,
+        rendered,
+        skipped,
+    )
 
 
 if TYPE_CHECKING:
@@ -95,6 +246,9 @@ class ExportTxtMixin:
         # --- Build body by volumes & chapters ---
         parts: list[str] = [header_txt]
         seen_cids: set[str] = set()
+        planned = _count_unique_cids(vols)
+        rendered = 0
+        skipped = 0
         with ChapterStorage(raw_base, filename=f"chapter.{stage}.sqlite") as storage:
             for v_idx, volume in enumerate(vols, start=1):
                 vol_title = volume.get("volume_name") or f"卷 {v_idx}"
@@ -127,24 +281,42 @@ class ExportTxtMixin:
                                     chap_title=ch_title,
                                 )
                             )
+                            rendered += 1
+                        else:
+                            skipped += 1
                         continue
 
                     parts.append(self._xp_txt_chapter(ch_title, ch))
+                    rendered += 1
+
+        _check_export_consistency(
+            fmt="TXT",
+            site=self._site,
+            book_id=book_id,
+            planned=planned,
+            rendered=rendered,
+            skipped=skipped,
+        )
 
         final_text = "\n".join(parts)
 
         # --- Determine output file path ---
-        out_name = format_filename(
+        # Fit the raw name first: sanitize_filename has its own 255-char cap
+        # that would chop off the distinguishing hash suffix before the path
+        # length is considered.
+        raw_name = format_filename(
             cfg.filename_template,
             title=name,
             author=author,
             append_timestamp=cfg.append_timestamp,
             ext="txt",
         )
-        out_path = self._output_dir / sanitize_filename(out_name)
+        out_path = self._output_dir / sanitize_filename(
+            _fit_name(raw_name, self._output_dir)
+        )
 
         # --- Save final text ---
-        result = write_file(content=final_text, filepath=out_path, on_exist="overwrite")
+        result = _atomic_write_text(out_path, final_text)
         logger.info(
             "Exported TXT (site=%s, book=%s): %s", self._site, book_id, out_path
         )
@@ -182,21 +354,19 @@ class ExportTxtMixin:
         final_text = self._xp_txt_chapter(chap_title, chap)
 
         # --- Output file name ---
-        out_name = format_filename(
+        raw_name = format_filename(
             cfg.filename_template,
             title=chap_title,
             author="Unknown",
             append_timestamp=cfg.append_timestamp,
             ext="txt",
         )
-        out_path = self._output_dir / sanitize_filename(out_name)
+        out_path = self._output_dir / sanitize_filename(
+            _fit_name(raw_name, self._output_dir)
+        )
 
         # --- Save file ---
-        result = write_file(
-            content=final_text,
-            filepath=out_path,
-            on_exist="overwrite",
-        )
+        result = _atomic_write_text(out_path, final_text)
 
         logger.info(
             "Exported TXT chapter (site=%s, book=%s, chapter=%s): %s",

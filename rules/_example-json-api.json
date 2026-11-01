@@ -1,0 +1,106 @@
+{
+  "_comment": [
+    "JSON 接口示例: 全部段落走 format=json, 演示 steps / fallback / limits / stop_when / loop_guard / single_result_fallback。",
+    "文件名以 _ 开头, 加载器会跳过该文件, 因此不会被当作真实站点注册。",
+    "接口地址与字段均为虚构, 只用于演示写法。",
+    "本示例假定 data.content 是字符串; 若接口返回段落数组, JSON 路径末段会先把数组展开, 字段只会取到第一段。"
+  ],
+  "site_key": "example-json-api",
+  "site_name": "JSON 接口示例 (不会被自动加载)",
+  "base_url": "https://api.example-json.test",
+  "encoding": "utf-8",
+  "format": "json",
+  "priority": 910,
+  "hosts": ["api.example-json.test"],
+
+  "limits": {
+    "concurrency": 1,
+    "min_interval": 0.8,
+    "max_interval": 1.2,
+    "max_attempts": 2,
+    "retry_min_interval": 3,
+    "retry_max_interval": 8
+  },
+
+  "search": {
+    "url": "https://api.example-json.test/v1/search",
+    "method": "POST",
+    "json_body": {"kw": "{raw_keyword}", "page": 1},
+    "item": "data.list",
+    "single_result_fallback": true,
+    "book_id_regex": "/book/(\\d+)",
+    "fields": {
+      "title": {
+        "selector": "name",
+        "fallback": ["title", "bookName"],
+        "attr": "text",
+        "steps": [{"lang": "js", "code": "strip(input)"}]
+      },
+      "url": {"selector": "url", "attr": "text"},
+      "author": {
+        "selector": "author.name",
+        "fallback": ["authorName"],
+        "attr": "text"
+      },
+      "cover": {"selector": "cover", "attr": "text"},
+      "word": {
+        "selector": "wordCount",
+        "fallback": ["words"],
+        "attr": "text",
+        "steps": [{"lang": "js", "code": "strip(input)"}]
+      }
+    }
+  },
+
+  "book": {
+    "url": "https://api.example-json.test/v1/book/{book_id}",
+    "pages": {
+      "url": "https://api.example-json.test/v1/book/{book_id}/chapters?page={page}",
+      "start": 2,
+      "max_pages": 50,
+      "stop_when": "\"list\"\\s*:\\s*\\[\\s*\\]",
+      "loop_guard": true
+    },
+    "fields": {
+      "book_name": {
+        "selector": "data.name",
+        "fallback": ["data.title"],
+        "attr": "text"
+      },
+      "author": {"selector": "data.author", "attr": "text"},
+      "cover_url": {"selector": "data.cover", "attr": "text"},
+      "update_time": {"selector": "data.updatedAt", "attr": "text"},
+      "summary": {
+        "selector": "data.intro",
+        "fallback": ["data.description"],
+        "attr": "inner_text",
+        "steps": [{"lang": "js", "code": "strip_html(input)"}]
+      },
+      "tags": {"selector": "data.tags[*]", "attr": "text", "multi": true}
+    },
+    "chapters": {
+      "item": "data.list",
+      "title": {"selector": "title", "attr": "text"},
+      "url": {"selector": "url", "attr": "text"},
+      "id_regex": "/(\\d+)$",
+      "id_group": 1,
+      "volume_name": "正文"
+    }
+  },
+
+  "chapter": {
+    "url": "https://api.example-json.test/v1/chapter/{chapter_id}",
+    "title": {"selector": "data.title", "attr": "text"},
+    "content": {
+      "selector": "data.content",
+      "fallback": ["data.text"],
+      "attr": "inner_text",
+      "steps": [{"lang": "js", "code": "strip(input)"}]
+    }
+  },
+
+  "resolve": {
+    "book": "^/book/(\\d+)/?$",
+    "chapter": "^/book/(\\d+)/(\\d+)$"
+  }
+}

@@ -20,6 +20,12 @@ Keyword relevance is deliberately the dominant signal: an exact title match
 should outrank a merely similar (e.g. derivative) title even when the latter
 was updated more recently.
 
+Because plain ``max(title, author)`` cannot tell a search for an author from a
+search for a title, :func:`detect_query_intent` first asks whether the result
+set as a whole looks title-like or author-like, and
+:func:`sort_results_with_intent` feeds that verdict back into the relevance
+signal (see the intent constants below).
+
 Every helper is a pure function (no I/O); ``now`` can be injected to keep
 the recency signal deterministic in tests.
 """
@@ -28,21 +34,28 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Any
 
 from novel_downloader.schemas import SearchResult
 
 __all__ = [
+    "INTENT_LONG_MIN",
+    "INTENT_SHORT_MAX",
+    "INTENT_WEIGHTS",
     "SORT_KEYS",
     "default_order",
+    "detect_query_intent",
     "normalize_text",
     "parse_update_date",
     "parse_word_count",
     "rank_score",
+    "relevance_of",
     "sort_results",
+    "sort_results_with_intent",
 ]
 
 #: Supported sort keys (shared by the CLI and the Web UI).
@@ -62,6 +75,51 @@ _W_WORDS = 0.15
 _W_RECENCY = 0.12
 _W_SITE = 0.08
 _W_COMPLETE = 0.10
+
+#: The intent values accepted by the relevance helpers.  Any other string is
+#: coerced to the default ``"either"`` instead of raising: intent may come
+#: straight from a CLI/API query parameter and must never break a search.
+_VALID_INTENTS = frozenset({"author", "either", "title"})
+
+#: Keyword lengths up to this many characters form the short tier.
+#:
+#: Chinese pen names are overwhelmingly 2-4 characters ("天蚕土豆", "老舍",
+#: "猫腻", "烽火戏诸侯"); a 4-character query is therefore far more often an
+#: author than a full title, so the author side gets the larger weight.
+INTENT_SHORT_MAX = 4
+
+#: Keyword lengths of at least this many characters form the long tier.
+#:
+#: Web-novel titles are routinely 5-12 characters ("重生之都市修仙",
+#: "我在东京教剑道"); once a query is 10+ characters the odds that it is a
+#: title rather than a pen name are high, so the title side gets the larger
+#: weight.
+INTENT_LONG_MIN = 10
+
+#: ``tier -> (title weight, author weight)`` used to combine per-field
+#: similarity.  The middle tier (5-9 characters) is deliberately balanced:
+#: at that length both interpretations are plausible, so the actual matches
+#: alone should decide.
+INTENT_WEIGHTS: dict[str, tuple[float, float]] = {
+    "short": (0.35, 0.65),
+    "medium": (0.5, 0.5),
+    "long": (0.65, 0.35),
+}
+
+#: A weighted title/author lead narrower than this fraction of their sum is
+#: not treated as evidence for either side.  Without it, tiny coverage
+#: differences on a noisy result page would flip the intent on every search.
+_INTENT_MARGIN = 0.15
+
+#: Historical asymmetry kept for the default ``"either"`` path: an author
+#: match is discounted to 0.9 so an equally strong title match always wins.
+_EITHER_AUTHOR_WEIGHT = 0.9
+
+#: Weight of the non-primary field once an intent has been decided.  Low
+#: enough that the primary field dominates (a contained ``"土豆"`` in an
+#: author must beat a book literally *titled* ``"土豆"`` under author intent),
+#: high enough that a book with no primary match still gets partial credit.
+_INTENT_SECONDARY_WEIGHT = 0.6
 
 _DAY = timedelta(days=1)
 
@@ -298,7 +356,115 @@ def _match_score(
     return base * _coverage(keyword, text)
 
 
-def _relevance(keyword: str, title: str, author: str) -> float:
+@lru_cache(maxsize=8192)
+def _similarity_cached(needle: str, text: str) -> float:
+    """
+    Return the 0..1 similarity between two already-normalised strings.
+
+    Exact / prefix / substring relations reuse :func:`_match_score` with the
+    *same* parameters for both fields, so title and author are compared on a
+    level playing field.  For merely overlapping strings the score blends
+    character coverage (order-insensitive, but robust for the sparse CJK
+    overlap where only one or two characters coincide) with
+    :class:`difflib.SequenceMatcher` (order-sensitive, so "苍穹斗破" scores
+    lower than "斗破苍穹").  Both are pure standard library.
+    """
+    if not needle or not text:
+        return 0.0
+    matched = _match_score(
+        needle, text, exact=1.0, prefix=0.85, contains=0.75, base=0.0
+    )
+    if matched:
+        return matched
+    coverage = _coverage(needle, text)
+    ordered = SequenceMatcher(None, needle, text).ratio()
+    return 0.6 * (0.5 * coverage + 0.5 * ordered)
+
+
+def _similarity(keyword: object, text: object) -> float:
+    """Normalise both sides, then score them with :func:`_similarity_cached`."""
+    return _similarity_cached(normalize_text(keyword), normalize_text(text))
+
+
+def _intent_tier(length: int) -> str:
+    """Map a normalised keyword length to an :data:`INTENT_WEIGHTS` tier."""
+    if length <= INTENT_SHORT_MAX:
+        return "short"
+    if length >= INTENT_LONG_MIN:
+        return "long"
+    return "medium"
+
+
+def _normalize_intent(intent: str) -> str:
+    """Coerce an unknown intent string to ``"either"`` (never raises)."""
+    return intent if intent in _VALID_INTENTS else "either"
+
+
+def detect_query_intent(keyword: str, results: Sequence[SearchResult]) -> str:
+    """
+    Decide whether ``keyword`` looks like a title, an author, or neither.
+
+    Returns ``"title"``, ``"author"`` or ``"either"``.
+
+    Heuristic
+    ---------
+    Plain ``max(title_score, author_score)`` relevance cannot notice *which*
+    field a whole result set agrees on.  This function accumulates a
+    similarity score for both fields over every result, weights the two sums
+    by the keyword-length tier (:data:`INTENT_WEIGHTS`), and compares them:
+
+    * a short query (<= 4 characters) leans ``"author"``, because Chinese pen
+      names are typically 2-4 characters while full titles rarely are;
+    * 5-9 characters is balanced -- both readings are plausible;
+    * a long query (>= 10 characters) leans ``"title"``, because that is
+      almost always a full web-novel title rather than a pen name.
+
+    When the weighted sums are within :data:`_INTENT_MARGIN` of each other,
+    the evidence is too weak or contradictory and ``"either"`` is returned,
+    which keeps the historical ranking behaviour.  An empty keyword or a
+    result set with no overlap at all also yields ``"either"``.
+
+    The function is pure with respect to ``results`` (they are only read) and
+    never mutates the input.
+    """
+    needle = normalize_text(keyword)
+    if not needle:
+        return "either"
+
+    title_weight, author_weight = INTENT_WEIGHTS[_intent_tier(len(needle))]
+    title_total = 0.0
+    author_total = 0.0
+    for result in results:
+        title_total += _similarity(needle, result.get("title"))
+        author_total += _similarity(needle, result.get("author"))
+
+    title_score = title_total * title_weight
+    author_score = author_total * author_weight
+    total = title_score + author_score
+    if total <= 0.0:
+        return "either"
+    if abs(title_score - author_score) / total <= _INTENT_MARGIN:
+        return "either"
+    return "title" if title_score > author_score else "author"
+
+
+def _relevance(
+    keyword: str, title: str, author: str, *, intent: str = "either"
+) -> float:
+    """
+    Return the 0..1 keyword relevance of one title/author pair.
+
+    ``intent`` changes which field is primary:
+
+    * ``"either"`` (default) keeps the historical behaviour, i.e. the larger
+      of ``title_score`` and ``author_score * 0.9``; output is unchanged.
+    * ``"author"`` puts the author first: the title score is scaled down by
+      :data:`_INTENT_SECONDARY_WEIGHT`, so a genuine author hit outranks a
+      book whose *title* merely contains the same characters.
+    * ``"title"`` is the mirror image, demoting the author score.
+
+    Unknown intent values fall back to ``"either"``.
+    """
     needle = normalize_text(keyword)
     if not needle:
         return 0.5
@@ -309,7 +475,33 @@ def _relevance(keyword: str, title: str, author: str) -> float:
     author_score = _match_score(
         needle, normalize_text(author), exact=0.9, prefix=0.7, contains=0.7, base=0.5
     )
-    return max(title_score, author_score * 0.9)
+
+    resolved = _normalize_intent(intent)
+    if resolved == "author":
+        return max(author_score, title_score * _INTENT_SECONDARY_WEIGHT)
+    if resolved == "title":
+        return max(title_score, author_score * _INTENT_SECONDARY_WEIGHT)
+    return max(title_score, author_score * _EITHER_AUTHOR_WEIGHT)
+
+
+def relevance_of(
+    result: SearchResult, keyword: str, *, intent: str = "either"
+) -> float:
+    """
+    Return the 0..1 keyword relevance of ``result`` under ``intent``.
+
+    Public counterpart of :func:`_relevance` for callers that need the raw
+    relevance (CLI/API display, custom filtering) without the quality blend.
+    ``intent`` accepts ``"title"``, ``"author"`` or ``"either"``; anything
+    else is treated as ``"either"``.  An empty keyword yields the neutral
+    ``0.5`` for every result.
+    """
+    return _relevance(
+        keyword,
+        str(result.get("title") or ""),
+        str(result.get("author") or ""),
+        intent=intent,
+    )
 
 
 def _words_score(words: float | None) -> float:
@@ -376,12 +568,24 @@ def _completeness_score(result: SearchResult) -> float:
 
 
 def rank_score(
-    result: SearchResult, keyword: str = "", *, now: datetime | None = None
+    result: SearchResult,
+    keyword: str = "",
+    *,
+    intent: str = "either",
+    now: datetime | None = None,
 ) -> float:
-    """Return a 0..1 quality score for ``result`` given the search ``keyword``."""
+    """
+    Return a 0..1 quality score for ``result`` given the search ``keyword``.
+
+    ``intent`` is forwarded to :func:`_relevance`; the default ``"either"``
+    reproduces the historical score exactly.
+    """
     current = now or datetime.now()
     relevance = _relevance(
-        keyword, str(result.get("title") or ""), str(result.get("author") or "")
+        keyword,
+        str(result.get("title") or ""),
+        str(result.get("author") or ""),
+        intent=intent,
     )
     words = _words_score(parse_word_count(result.get("word_count")))
     recency = _recency_score(
@@ -409,6 +613,7 @@ def sort_results(
     by: str = "quality",
     order: str | None = None,
     keyword: str = "",
+    intent: str = "either",
     now: datetime | None = None,
     site_labels: Mapping[str, str] | None = None,
 ) -> None:
@@ -418,6 +623,9 @@ def sort_results(
     ``order`` defaults to :func:`default_order` for the chosen ``by``.
     ``keyword`` feeds the relevance signal used by ``by="quality"``, and
     ``site_labels`` maps a site key to its display label for ``by="site"``.
+    ``intent`` selects how title and author are weighted
+    (:func:`_relevance`); the default ``"either"`` is the historical
+    behaviour and leaves existing output unchanged.
     """
     direction = order or default_order(by)
     reverse = direction == "desc"
@@ -459,7 +667,7 @@ def sort_results(
         return normalize_text(result.get("author"))
 
     key_fns: dict[str, Callable[[SearchResult], Any]] = {
-        "quality": lambda r: rank_score(r, keyword, now=current),
+        "quality": lambda r: rank_score(r, keyword, intent=intent, now=current),
         "priority": _priority_key,
         "site": _site_key,
         "title": _title_key,
@@ -479,3 +687,61 @@ def sort_results(
         )
     )
     results.sort(key=key_fn, reverse=reverse)
+
+
+def sort_results_with_intent(
+    results: list[SearchResult],
+    keyword: str,
+    *,
+    by: str = "quality",
+    order: str | None = None,
+    min_relevance: float | None = None,
+    now: datetime | None = None,
+) -> None:
+    """
+    Sort ``results`` in place after inferring what ``keyword`` refers to.
+
+    The intent is detected once with :func:`detect_query_intent` and handed to
+    :func:`rank_score` via :func:`sort_results`, so an author search ranks the
+    author's own books above books whose *title* happens to contain the same
+    characters (and vice versa).
+
+    ``min_relevance`` (0..1, or ``None`` for no filtering) drops entries whose
+    :func:`relevance_of` under the detected intent falls below the threshold.
+    Filtering never empties the result set: if nothing clears the bar, entries
+    with any positive relevance are kept instead, and if even those do not
+    exist the input is left untouched so callers always get something back.
+
+    Other parameters mirror :func:`sort_results`; ``by="quality"`` (the
+    default) is the key whose result intent actually improves.
+    """
+    current = now or datetime.now()
+    intent = detect_query_intent(keyword, results)
+
+    if min_relevance is not None:
+        kept = [
+            item
+            for item in results
+            if relevance_of(item, keyword, intent=intent) >= min_relevance
+        ]
+        if not kept:
+            # Fall back to "anything that matches at all" rather than handing
+            # back an empty page just because the threshold was too strict.
+            kept = [
+                item
+                for item in results
+                if relevance_of(item, keyword, intent=intent) > 0.0
+            ]
+        if kept:
+            results[:] = kept
+        # Otherwise nothing is relevant: keep the input so the caller still
+        # sees the raw results (the historical "never clear the page" rule).
+
+    sort_results(
+        results,
+        by=by,
+        order=order,
+        keyword=keyword,
+        intent=intent,
+        now=current,
+    )

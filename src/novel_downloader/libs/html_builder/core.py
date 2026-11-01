@@ -4,6 +4,14 @@ novel_downloader.libs.html_builder.core
 ---------------------------------------
 """
 
+from __future__ import annotations
+
+import contextlib
+import logging
+import os
+import shutil
+import tempfile
+import uuid
 from pathlib import Path
 
 from novel_downloader.infra.paths import (
@@ -12,7 +20,7 @@ from novel_downloader.infra.paths import (
     HTML_JS_MAIN_PATH,
 )
 from novel_downloader.libs.crypto.hash_utils import hash_bytes, hash_file
-from novel_downloader.libs.filesystem import sanitize_filename, write_file
+from novel_downloader.libs.filesystem import sanitize_filename
 from novel_downloader.libs.media.font import detect_font_format
 from novel_downloader.libs.media.image import detect_image_format
 
@@ -25,6 +33,94 @@ from .constants import (
     MEDIA_DIR,
 )
 from .models import HtmlChapter, HtmlFont, HtmlImage, HtmlVolume, IndexDocument
+
+logger = logging.getLogger(__name__)
+
+
+def _discard_temp(path: str | Path) -> None:
+    """Remove a staging file, warning instead of hiding a failed cleanup."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning("Could not remove temporary file %s: %s", path, exc)
+
+
+def _discard_tree(path: Path) -> None:
+    """Remove a staging/backup tree, warning instead of hiding a failure."""
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning("Could not remove temporary directory %s: %s", path, exc)
+
+
+def _atomic_write(path: Path, data: str | bytes) -> None:
+    """
+    Write ``data`` to ``path`` through a sibling temporary file.
+
+    The temporary file is flushed and fsynced before ``os.replace`` moves it
+    into place, so an interrupted export never leaves a half-written chapter
+    or stylesheet behind.
+
+    There is deliberately no "write directly instead" fallback: opening the
+    destination for writing truncates it, so failing halfway through the
+    fallback would destroy the previous export as well. Failures are raised
+    (with the destination path in the message) and the old file is preserved.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    binary = isinstance(data, bytes)
+    mode = "wb" if binary else "w"
+    encoding = None if binary else "utf-8"
+
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+    except OSError as exc:
+        raise OSError(
+            f"Cannot create a temporary file next to {path} ({exc}); "
+            "refusing to write directly because that would truncate an "
+            "existing export"
+        ) from exc
+
+    try:
+        handle = os.fdopen(
+            fd,
+            mode,
+            encoding=encoding,
+            newline=None if binary else "\n",
+        )
+    except BaseException:
+        # ``fdopen`` may fail before it owns the descriptor; close it here so
+        # the temporary file can really be removed (Windows refuses to unlink
+        # a file that still has an open handle).
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        _discard_temp(tmp_name)
+        raise
+
+    try:
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        _discard_temp(tmp_name)
+        raise
+
+    try:
+        os.replace(tmp_name, path)
+    except OSError as exc:
+        _discard_temp(tmp_name)
+        raise OSError(
+            f"Atomic replace failed for {path} ({exc}); the previous export "
+            "was left untouched"
+        ) from exc
 
 
 class HtmlBuilder:
@@ -205,6 +301,11 @@ class HtmlBuilder:
         self._chapters.append(chap)
         self._index.add_chapter(chap)
 
+    @property
+    def chapter_count(self) -> int:
+        """Number of chapters registered for export, in reading order."""
+        return len(self._chapters)
+
     def add_volume(self, volume: HtmlVolume) -> None:
         """Add a volume and all its chapters to the HTML."""
         self._vol_idx += 1
@@ -234,13 +335,13 @@ class HtmlBuilder:
         css_dir = html_dir / CSS_DIR
         css_dir.mkdir(parents=True, exist_ok=True)
         index_css = HTML_CSS_INDEX_PATH.read_bytes()
-        write_file(index_css, css_dir / "index.css")
+        _atomic_write(css_dir / "index.css", index_css)
         chapter_css = HTML_CSS_CHAPTER_PATH.read_bytes()
-        write_file(chapter_css, css_dir / "chapter.css")
+        _atomic_write(css_dir / "chapter.css", chapter_css)
         js_dir = html_dir / JS_DIR
         js_dir.mkdir(parents=True, exist_ok=True)
         main_js = HTML_JS_MAIN_PATH.read_bytes()
-        write_file(main_js, js_dir / "main.js")
+        _atomic_write(js_dir / "main.js", main_js)
 
     def _write_media(self, html_dir: Path) -> None:
         """
@@ -251,12 +352,12 @@ class HtmlBuilder:
         if self.images:
             media_dir.mkdir(parents=True, exist_ok=True)
             for img in self.images:
-                write_file(img.data, media_dir / img.filename)
+                _atomic_write(media_dir / img.filename, img.data)
 
         # Write cover image as media/cover.xxx
         if self.cover and self._cover_filename:
             media_dir.mkdir(parents=True, exist_ok=True)
-            write_file(self.cover, media_dir / self._cover_filename)
+            _atomic_write(media_dir / self._cover_filename, self.cover)
 
     def _write_fonts(self, html_dir: Path) -> None:
         """
@@ -269,12 +370,12 @@ class HtmlBuilder:
         font_dir.mkdir(parents=True, exist_ok=True)
 
         for font in self.fonts:
-            write_file(font.data, font_dir / font.filename)
+            _atomic_write(font_dir / font.filename, font.data)
 
     def _build_index(self, html_dir: Path) -> None:
         index_path = html_dir / "index.html"
 
-        write_file(self._index.to_html(), index_path)
+        _atomic_write(index_path, self._index.to_html())
 
     def _build_chapters(self, html_dir: Path) -> None:
         chap_dir = html_dir / CHAPTER_DIR
@@ -293,16 +394,76 @@ class HtmlBuilder:
                 prev_link=prev_link,
                 next_link=next_link,
             )
-            write_file(chap_html, chap_dir / chap.filename)
+            _atomic_write(chap_dir / chap.filename, chap_html)
 
     def _build_html(self, output_path: Path, folder: str | None) -> Path:
+        """
+        Assemble the folder in a staging directory and swap it into place.
+
+        Writing straight into ``output_path/folder`` would leave files from a
+        previous export (chapters removed in the new data, old media) behind:
+        the index would no longer reference them, but they would still be on
+        disk. Building in a sibling staging directory keeps the previous
+        export intact until the new one is complete, and lets the swap remove
+        every stale file. If the swap fails, the previous export is restored.
+        """
         folder_name = (
             sanitize_filename(folder) if folder else sanitize_filename(self.title)
         )
-        html_dir = output_path / folder_name
-        self._prepare_output_dir(html_dir)
-        self._write_media(html_dir)
-        self._write_fonts(html_dir)
-        self._build_index(html_dir)
-        self._build_chapters(html_dir)
-        return html_dir
+        output_path.mkdir(parents=True, exist_ok=True)
+        final_dir = output_path / folder_name
+
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{folder_name}.",
+                suffix=".tmp",
+                dir=str(output_path),
+            )
+        )
+        completed = False
+        try:
+            self._prepare_output_dir(staging)
+            self._write_media(staging)
+            self._write_fonts(staging)
+            self._build_index(staging)
+            self._build_chapters(staging)
+            _replace_directory(staging, final_dir)
+            completed = True
+        finally:
+            if not completed:
+                _discard_tree(staging)
+        return final_dir
+
+
+def _replace_directory(new_dir: Path, final_dir: Path) -> None:
+    """
+    Replace ``final_dir`` with ``new_dir``, keeping the old tree until the
+    swap has succeeded.
+
+    ``os.replace`` cannot overwrite a non-empty directory on Windows, so the
+    existing export is first renamed aside. If moving the new tree into place
+    fails, the old one is renamed back; nothing is deleted before the new
+    export is fully in place.
+    """
+    backup: Path | None = None
+    if final_dir.exists() or final_dir.is_symlink():
+        backup = final_dir.with_name(f".{final_dir.name}.{uuid.uuid4().hex[:8]}.old")
+        os.replace(final_dir, backup)
+
+    try:
+        os.replace(new_dir, final_dir)
+    except BaseException:
+        if backup is not None:
+            try:
+                os.replace(backup, final_dir)
+            except OSError:
+                logger.warning(
+                    "Could not restore the previous HTML export at %s; it is "
+                    "kept at %s",
+                    final_dir,
+                    backup,
+                )
+        raise
+
+    if backup is not None:
+        _discard_tree(backup)

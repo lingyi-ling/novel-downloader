@@ -893,7 +893,7 @@ def test_download_json_site_mode_reports_success(
     payload = json.loads(capsys.readouterr().out)
     assert payload["site"] == "b520"
     assert payload["books"] == [
-        {"book_id": "123", "downloaded": True, "exported": None}
+        {"book_id": "123", "downloaded": True, "failed": 0, "exported": None}
     ]
     assert client.downloaded == ["123"]
 

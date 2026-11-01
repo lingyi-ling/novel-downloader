@@ -7,14 +7,65 @@ novel_downloader.plugins.mixins.download
 import asyncio
 import logging
 import time
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol, final
 
 from novel_downloader.infra.persistence.chapter_storage import ChapterStorage
+from novel_downloader.infra.persistence.download_ledger import (
+    DownloadLedger,
+    LedgerEntry,
+    utc_now_iso,
+)
 from novel_downloader.libs.time_utils import async_jitter_sleep
-from novel_downloader.schemas import BookConfig, BookInfoDict, ChapterDict
+from novel_downloader.schemas import (
+    BookConfig,
+    BookInfoDict,
+    ChapterDict,
+    VolumeInfoDict,
+)
+from novel_downloader.schemas.book import ChapterFailureDict, DownloadSummary
+
+__all__ = ["STOP", "DownloadMixin", "IncompleteDownloadError", "StopToken"]
 
 ONE_DAY = 86400  # seconds
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _ChapterFailure:
+    """Diagnostic detail for one failed ``get_chapter`` call."""
+
+    reason: str
+    attempts: int
+
+
+# Task-local (each ``asyncio.Task`` owns a copy of the context), so concurrent
+# producers never see each other's diagnostics.  ``get_chapter`` fills it in;
+# ``download_book`` reads it right after the call.
+_LAST_FAILURE: ContextVar[_ChapterFailure | None] = ContextVar(
+    "novel_downloader_last_chapter_failure", default=None
+)
+
+
+class IncompleteDownloadError(RuntimeError):
+    """
+    Raised by :meth:`DownloadMixin.download_book` when ``strict=True`` and at
+    least one planned chapter could not be downloaded.
+
+    The carried :attr:`summary` lets the caller report the exact failures (and
+    decide whether exporting is still acceptable).
+    """
+
+    __slots__ = ("summary",)
+
+    def __init__(self, summary: DownloadSummary) -> None:
+        super().__init__(
+            f"Incomplete download for book {summary['book_id']} on "
+            f"'{summary['site']}': {summary['failed']} of "
+            f"{summary['total']} chapter(s) failed"
+        )
+        self.summary = summary
 
 
 if TYPE_CHECKING:
@@ -56,6 +107,14 @@ if TYPE_CHECKING:
 
         def _dl_check_refetch(self, chap: ChapterDict) -> bool: ...
 
+        @staticmethod
+        def _dl_chapter_meta(
+            vols: list[VolumeInfoDict],
+        ) -> dict[str, tuple[str, str]]: ...
+
+        @staticmethod
+        def _dl_chapter_is_empty(chap: ChapterDict) -> bool: ...
+
 
 @final
 class StopToken:
@@ -78,13 +137,38 @@ class DownloadMixin:
         book: BookConfig,
         *,
         ui: "DownloadUI | None" = None,
+        strict: bool = False,
         **kwargs: Any,
-    ) -> None:
+    ) -> DownloadSummary:
         """
         Download all chapters and metadata for a single book.
 
+        A chapter that cannot be fetched (retries exhausted, access limited,
+        empty content, storage rejected it) is written to the book's failure
+        ledger (``chapter.failures.jsonl``) and counted in the returned summary
+        instead of being skipped silently.
+
+        The ledger is *per run*: :meth:`DownloadLedger.begin_run` wipes the
+        previous run's records before the first chapter is attempted, so after
+        this call the file lists exactly the chapters this run could not fetch.
+        A run without failures leaves no ledger file at all -- reading a stale
+        file after a successful re-run must not report phantom missing
+        chapters.
+
+        Progress still advances for failed chapters so the progress bar does
+        not stall at ``< total``; the returned summary -- not the percentage --
+        is therefore the authoritative completeness signal.  A run in which
+        every chapter failed still ends at ``(total, total)``: the bar reports
+        "all chapters processed", ``failed == total`` reports "none usable".
+
         :param book: :class:`BookConfig` with at least ``book_id`` defined.
         :param ui: Optional :class:`DownloadUI` for progress reporting.
+        :param strict: When ``True``, raise :class:`IncompleteDownloadError`
+            if any planned chapter failed.  When ``False`` (the default) the
+            failures are only reported in the returned summary.
+        :return: Structured summary of the run.
+        :raises IncompleteDownloadError: if ``strict`` is set and a chapter
+            failed.
         """
         book_id = book.book_id
         start_id = book.start_id
@@ -93,6 +177,19 @@ class DownloadMixin:
 
         raw_base = self._raw_data_dir / book_id
         raw_base.mkdir(parents=True, exist_ok=True)
+        ledger = DownloadLedger(raw_base)
+        # The ledger describes this run, never the previous one.  Wiped before
+        # any work so a crash mid-run cannot leave yesterday's failures looking
+        # like today's result.
+        try:
+            ledger.begin_run()
+        except OSError as exc:
+            logger.warning(
+                "Failed to reset download ledger (site=%s, book=%s): %s",
+                self._site,
+                book_id,
+                exc,
+            )
 
         if ui:
             await ui.on_start(book)
@@ -114,16 +211,66 @@ class DownloadMixin:
             logger.info(
                 "Nothing to do after filtering (site=%s, book=%s)", self._site, book_id
             )
-            return
+            return DownloadSummary(
+                book_id=book_id,
+                site=self._site,
+                total=0,
+                succeeded=0,
+                failed=0,
+                skipped=0,
+                failures=[],
+                ledger_path=str(ledger.path),
+            )
 
         total = len(plan)
+        chapter_meta = self._dl_chapter_meta(vols)
         done = 0
+        skipped = 0
+        failures: list[ChapterFailureDict] = []
 
         async def bump(n: int = 1) -> None:
             nonlocal done
             done += n
             if ui:
                 await ui.on_progress(done, total)
+
+        def record_failure(chapter_id: str, reason: str, attempts: int) -> None:
+            """Record a failed chapter in the summary and in the ledger."""
+            title, url = chapter_meta.get(chapter_id, ("", ""))
+            failed_at = utc_now_iso()
+            failures.append(
+                ChapterFailureDict(
+                    chapter_id=chapter_id,
+                    chapter_title=title,
+                    url=url,
+                    reason=reason,
+                    attempts=attempts,
+                    failed_at=failed_at,
+                )
+            )
+            # A ledger problem must never break (or mask) a download.
+            try:
+                ledger.append(
+                    LedgerEntry(
+                        book_id=book_id,
+                        chapter_id=chapter_id,
+                        chapter_title=title,
+                        url=url,
+                        reason=reason,
+                        attempts=attempts,
+                        failed_at=failed_at,
+                        site=self._site,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to append to download ledger (site=%s, book=%s, "
+                    "chapter=%s): %s",
+                    self._site,
+                    book_id,
+                    chapter_id,
+                    exc,
+                )
 
         # ---- queues & batching ---
         save_q: asyncio.Queue[ChapterDict | StopToken] = asyncio.Queue(maxsize=10)
@@ -149,10 +296,15 @@ class DownloadMixin:
                     need_refetch,
                     e,
                 )
-            else:
-                await bump(len(batch))
+                # The chapters were fetched but are not on disk: they must not
+                # be reported as succeeded.
+                for chap in batch:
+                    record_failure(chap["id"], f"storage_error: {e}", 1)
             finally:
+                size = len(batch)
                 batch.clear()
+                # Progress covers processed chapters, written or not.
+                await bump(size)
 
         async def flush_all() -> None:
             await flush_batch(False)
@@ -173,13 +325,34 @@ class DownloadMixin:
             await flush_all()
 
         async def producer(cid: str) -> None:
+            nonlocal skipped
             async with sem:
                 if self._cache_chapter and not storage.need_refetch(cid):
+                    skipped += 1
                     await bump(1)
                     return
 
+                # Reset the task-local diagnostic first: site overrides of
+                # ``get_chapter`` (e.g. qidian) do not fill it in.
+                _LAST_FAILURE.set(None)
                 chap = await self.get_chapter(book_id, cid)
-                if chap is not None:
+                detail = _LAST_FAILURE.get()
+
+                if chap is None:
+                    record_failure(
+                        cid,
+                        detail.reason if detail else "no_content",
+                        detail.attempts if detail else self._retry_times + 1,
+                    )
+                    await bump(1)
+                elif self._dl_chapter_is_empty(chap):
+                    record_failure(
+                        cid,
+                        "empty_content",
+                        detail.attempts if detail else 1,
+                    )
+                    await bump(1)
+                else:
                     await save_q.put(chap)
 
                 await async_jitter_sleep(
@@ -217,14 +390,42 @@ class DownloadMixin:
                     await asyncio.gather(storage_task, return_exceptions=True)
 
         # ---- done ---
-        if ui:
-            await ui.on_complete(book)
-
-        logger.info(
-            "Download completed for site=%s book=%s",
-            self._site,
-            book_id,
+        failed = len(failures)
+        summary = DownloadSummary(
+            book_id=book_id,
+            site=self._site,
+            total=total,
+            succeeded=total - failed,
+            failed=failed,
+            skipped=skipped,
+            failures=failures,
+            ledger_path=str(ledger.path),
         )
+
+        if ui:
+            await ui.on_complete(book, failed=failed)
+
+        if failed:
+            logger.warning(
+                "Download incomplete (site=%s, book=%s): %d of %d chapter(s) "
+                "failed; see %s",
+                self._site,
+                book_id,
+                failed,
+                total,
+                ledger.path,
+            )
+        else:
+            logger.info(
+                "Download completed for site=%s book=%s",
+                self._site,
+                book_id,
+            )
+
+        if strict and failed:
+            raise IncompleteDownloadError(summary)
+
+        return summary
 
     async def cache_media(
         self: "DownloadClientContext",
@@ -338,10 +539,15 @@ class DownloadMixin:
         """
         Fetch, parse, and return a single chapter, retrying on transient errors.
 
+        Terminal failures (``None``) also publish their reason and attempt count
+        to the task-local :data:`_LAST_FAILURE`, which
+        :meth:`download_book` reads to fill the failure ledger.
+
         :param book_id: Book identifier.
         :param chapter_id: Chapter identifier.
         :return: Parsed :class:`ChapterDict`, or ``None`` if failed.
         """
+        _LAST_FAILURE.set(None)
         for attempt in range(self._retry_times + 1):
             try:
                 raw_pages = await self.fetcher.fetch_chapter_content(
@@ -356,6 +562,7 @@ class DownloadMixin:
                         book_id,
                         chapter_id,
                     )
+                    _LAST_FAILURE.set(_ChapterFailure("access_restricted", attempt + 1))
                     return None
 
                 chap = await asyncio.to_thread(
@@ -369,6 +576,7 @@ class DownloadMixin:
                             book_id,
                             chapter_id,
                         )
+                        _LAST_FAILURE.set(_ChapterFailure("empty_parse", attempt + 1))
                         return None
                     raise ValueError("Empty parse result")
 
@@ -399,6 +607,12 @@ class DownloadMixin:
                         book_id,
                         chapter_id,
                         e,
+                    )
+                    _LAST_FAILURE.set(
+                        _ChapterFailure(
+                            f"retry_exhausted: {type(e).__name__}: {e}",
+                            attempt + 1,
+                        )
                     )
         return None
 
@@ -497,6 +711,39 @@ class DownloadMixin:
         ]
         if vol_covers:
             await self.fetcher.fetch_images(img_dir, vol_covers)
+
+    @staticmethod
+    def _dl_chapter_meta(vols: list[VolumeInfoDict]) -> dict[str, tuple[str, str]]:
+        """
+        Map ``chapter_id -> (title, url)`` for failure reporting.
+
+        The first occurrence of an id wins, matching
+        :meth:`_extract_chapter_ids`, which also emits a chapter at its first
+        appearance.
+
+        :param vols: Volumes from the book metadata.
+        """
+        meta: dict[str, tuple[str, str]] = {}
+        for vol in vols:
+            for chap in vol["chapters"]:
+                cid = chap.get("chapterId")
+                if cid and cid not in meta:
+                    meta[cid] = (chap.get("title", ""), chap.get("url", ""))
+        return meta
+
+    @staticmethod
+    def _dl_chapter_is_empty(chap: ChapterDict) -> bool:
+        """
+        Return True if a downloaded chapter carries neither text nor media.
+
+        An empty text body alone is not a failure: image-only chapters
+        legitimately have no text but do reference ``extra["resources"]``.
+
+        :param chap: Parsed chapter.
+        """
+        if chap["content"].strip():
+            return False
+        return not chap["extra"].get("resources")
 
     def _dl_check_restricted(self, raw_pages: list[str]) -> bool:
         """

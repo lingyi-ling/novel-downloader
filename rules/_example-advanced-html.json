@@ -1,0 +1,140 @@
+{
+  "_comment": [
+    "进阶规则能力示例: steps / fallback / preprocess + container / limits / stop_when + loop_guard。",
+    "文件名以 _ 开头, 加载器会跳过该文件, 因此不会被当作真实站点注册。",
+    "示例站点与选择器均为虚构, 只用于演示字段写法, 不要直接用于抓取。"
+  ],
+  "site_key": "example-advanced",
+  "site_name": "进阶能力示例 (不会被自动加载)",
+  "base_url": "https://novel.example-advanced.test",
+  "encoding": "utf-8",
+  "format": "html",
+  "priority": 900,
+  "hosts": ["novel.example-advanced.test"],
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+  },
+
+  "limits": {
+    "concurrency": 2,
+    "min_interval": 1.0,
+    "max_interval": 2.5,
+    "max_attempts": 3,
+    "retry_min_interval": 5,
+    "retry_max_interval": 20
+  },
+
+  "search": {
+    "url": "https://novel.example-advanced.test/search?q={keyword}",
+    "item": "ul.result-list > li",
+    "single_result_fallback": true,
+    "priority": 900,
+    "book_id_regex": "/book/(\\d+)/",
+    "fields": {
+      "title": {
+        "selector": "h3 a",
+        "fallback": [".book-title", ".title"],
+        "attr": "text",
+        "steps": [
+          {"lang": "js", "code": "normalize_space(strip_html(input))"},
+          {"lang": "py", "name": "strip"}
+        ]
+      },
+      "url": {"selector": "h3 a", "attr": "href"},
+      "author": {
+        "selector": ".author",
+        "fallback": [".book-author"],
+        "attr": "text",
+        "steps": [{"lang": "py", "name": "normalize_space"}]
+      },
+      "latest": {"selector": ".latest", "attr": "text"}
+    }
+  },
+
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "pages": {
+      "url": "{base_url}/book/{book_id}/index_{page}.html",
+      "start": 2,
+      "max_pages": 40,
+      "stop_when": "已显示全部章节",
+      "loop_guard": true
+    },
+    "fields": {
+      "book_name": {
+        "selector": "meta[property='og:novel:book_name']",
+        "attr": "content",
+        "fallback": [
+          {"selector": "h1.book-name", "attr": "text"},
+          {"selector": "//h1[@class='book-name']", "attr": "text"}
+        ]
+      },
+      "author": {
+        "selector": "meta[property='og:novel:author']",
+        "attr": "content",
+        "fallback": [{"selector": ".book-author", "attr": "text"}]
+      },
+      "cover_url": {"selector": "meta[property='og:image']", "attr": "content"},
+      "update_time": {
+        "selector": "meta[property='og:novel:update_time']",
+        "attr": "content"
+      },
+      "serial_status": {
+        "selector": "meta[property='og:novel:status']",
+        "attr": "content"
+      },
+      "summary": {
+        "selector": "div.summary",
+        "fallback": ["#intro", "//div[@id='intro']"],
+        "attr": "inner_text",
+        "steps": [
+          {"lang": "py", "name": "dedupe_lines"},
+          {"lang": "py", "name": "normalize_space"}
+        ],
+        "replace": [["\u00a0", " "]]
+      },
+      "tags": {
+        "selector": "a.tag",
+        "fallback": [".tag-list a"],
+        "attr": "text",
+        "multi": true
+      }
+    },
+    "chapters": {
+      "item": "dd a",
+      "container": "div#catalog",
+      "preprocess": [{"lang": "py", "name": "html_unescape"}],
+      "title": {"attr": "text", "regex": "^\\s*(.+?)\\s*$", "group": 1},
+      "url": {"attr": "href"},
+      "id_regex": "/(\\d+)\\.html",
+      "id_group": 1,
+      "volume_name": "正文"
+    }
+  },
+
+  "chapter": {
+    "url": "{base_url}/book/{book_id}/{chapter_id}.html",
+    "preprocess": [{"lang": "py", "name": "html_unescape"}],
+    "pages": {
+      "url": "{base_url}/book/{book_id}/{chapter_id}_{page}.html",
+      "start": 2,
+      "max_pages": 10,
+      "stop_when": "本章完",
+      "loop_guard": true
+    },
+    "title": {"selector": "h1", "attr": "text"},
+    "content": {
+      "selector": "div#content",
+      "fallback": ["article.content", "//div[@id='content']"],
+      "attr": "inner_text",
+      "steps": [{"lang": "py", "name": "dedupe_lines"}]
+    },
+    "replace": [["\u3000", " "]],
+    "drop": ["^第\\(\\d+/\\d+\\)页$"]
+  },
+
+  "resolve": {
+    "book": "^/book/(\\d+)/?$",
+    "chapter": "^/book/(\\d+)/(\\d+)\\.html$"
+  }
+}

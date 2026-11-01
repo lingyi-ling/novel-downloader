@@ -24,6 +24,7 @@ from novel_downloader.schemas import (
     ProcessorConfig,
     VolumeInfoDict,
 )
+from novel_downloader.schemas.book import DownloadSummary
 
 from .fetcher import FetcherProtocol
 from .parser import ParserProtocol
@@ -139,12 +140,13 @@ class ClientProtocol(Protocol):
         *,
         ui: DownloadUI | None = None,
         **kwargs: Any,
-    ) -> None:
+    ) -> DownloadSummary:
         """
         Download all chapters and metadata for a single book.
 
         :param book: :class:`BookConfig` with at least ``book_id`` defined.
         :param ui: Optional :class:`DownloadUI` for progress reporting.
+        :return: Structured summary of the run (chapter counts + failures).
         """
         ...
 

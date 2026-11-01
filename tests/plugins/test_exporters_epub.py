@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import base64
+import logging
+import os
+import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
@@ -462,3 +466,251 @@ def test_xp_epub_chapter_tolerates_none_title_and_content(
     assert chapter_obj.filename == "c1.xhtml"
     assert chapter_obj.title == ""
     assert chapter_obj.content == ""
+
+
+# ---------------------------------------------------------------------------
+# Table of contents: volume -> chapter hierarchy, NCX + nav
+# ---------------------------------------------------------------------------
+
+XHTML_NS = "http://www.w3.org/1999/xhtml"
+NCX_NS = "http://www.daisy.org/z3986/2005/ncx/"
+
+
+def _nav_top_items(nav_xml: bytes) -> list[ET.Element]:
+    root = ET.fromstring(nav_xml)
+    nav = root.find(f".//{{{XHTML_NS}}}nav")
+    assert nav is not None
+    top = nav.find(f"{{{XHTML_NS}}}ol")
+    assert top is not None
+    return list(top.findall(f"{{{XHTML_NS}}}li"))
+
+
+def _li_label(li: ET.Element) -> str:
+    link = li.find(f"{{{XHTML_NS}}}a")
+    assert link is not None
+    return "".join(link.itertext())
+
+
+def _li_children(li: ET.Element) -> list[ET.Element]:
+    child_ol = li.find(f"{{{XHTML_NS}}}ol")
+    if child_ol is None:
+        return []
+    return list(child_ol.findall(f"{{{XHTML_NS}}}li"))
+
+
+def test_export_book_epub_nav_has_volume_hierarchy(scenario: Scenario) -> None:
+    _stage_two_volume_book(scenario)
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+
+    with zipfile.ZipFile(path) as zf:
+        items = _nav_top_items(zf.read("OEBPS/nav.xhtml"))
+
+    # intro + two volumes at the top level.
+    assert [_li_label(li) for li in items] == ["书籍简介", "第一卷", "第二卷"]
+    assert [_li_label(c) for c in _li_children(items[1])] == ["第一章", "第二章"]
+    assert [_li_label(c) for c in _li_children(items[2])] == ["第三章"]
+
+
+def test_export_book_epub_ncx_has_volume_hierarchy(scenario: Scenario) -> None:
+    _stage_two_volume_book(scenario)
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+
+    with zipfile.ZipFile(path) as zf:
+        assert "OEBPS/toc.ncx" in zf.namelist()
+        opf = zf.read("OEBPS/content.opf").decode("utf-8")
+        ncx = ET.fromstring(zf.read("OEBPS/toc.ncx"))
+
+    # Older readers only understand the NCX: the spine must point at it.
+    assert 'toc="ncx"' in opf
+    assert 'media-type="application/x-dtbncx+xml"' in opf
+
+    nav_map = ncx.find(f"{{{NCX_NS}}}navMap")
+    assert nav_map is not None
+    top = list(nav_map.findall(f"{{{NCX_NS}}}navPoint"))
+    assert len(top) == 3  # intro + 2 volumes
+
+    labels = [point.findtext(f"{{{NCX_NS}}}navLabel/{{{NCX_NS}}}text") for point in top]
+    assert labels == ["书籍简介", "第一卷", "第二卷"]
+
+    first_volume_children = list(top[1].findall(f"{{{NCX_NS}}}navPoint"))
+    assert len(first_volume_children) == 2
+    # playOrder is a single, strictly increasing sequence across the tree.
+    orders = [int(p.get("playOrder", "0")) for p in ncx.iter(f"{{{NCX_NS}}}navPoint")]
+    assert orders == sorted(orders)
+    assert len(set(orders)) == len(orders)
+
+
+def test_export_book_epub_empty_volume_is_a_leaf(scenario: Scenario) -> None:
+    scenario.write_book_info(
+        make_book_info(
+            volumes=[
+                make_volume("空卷", []),
+                make_volume("实卷", [make_chapter_info("1", "第一章")]),
+            ]
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容", title="第一章")])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        nav_items = _nav_top_items(zf.read("OEBPS/nav.xhtml"))
+        ncx = ET.fromstring(zf.read("OEBPS/toc.ncx"))
+
+    empty = nav_items[1]
+    assert _li_label(empty) == "空卷"
+    # No empty <ol> that strict EPUB validators reject.
+    assert _li_children(empty) == []
+    raw_nav = ET.tostring(empty, encoding="unicode")
+    assert "<ol" not in raw_nav
+
+    nav_map = ncx.find(f"{{{NCX_NS}}}navMap")
+    assert nav_map is not None
+    empty_point = list(nav_map.findall(f"{{{NCX_NS}}}navPoint"))[1]
+    assert empty_point.find(f"{{{NCX_NS}}}navPoint") is None
+
+
+# ---------------------------------------------------------------------------
+# Chapter name safety inside the archive
+# ---------------------------------------------------------------------------
+
+
+def test_export_book_epub_long_cid_is_truncated(scenario: Scenario) -> None:
+    cid = "9" * 400
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info(cid, "长id")])])
+    )
+    scenario.write_chapters([make_chapter(cid, "长id内容", title="长id")])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        chapters = [name for name in zf.namelist() if name.startswith("OEBPS/Text/c")]
+        assert len(chapters) == 1
+        # Bounded so extracting the archive on Windows cannot exceed the
+        # 255-character component limit.
+        assert len(Path(chapters[0]).name) <= 72
+        assert "长id内容" in zf.read(chapters[0]).decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Consistency diagnostics
+# ---------------------------------------------------------------------------
+
+
+def test_epub_consistency_mismatch_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from novel_downloader.plugins.mixins.export_epub import _check_export_consistency
+
+    with caplog.at_level(logging.WARNING):
+        _check_export_consistency(
+            fmt="EPUB",
+            site="site",
+            book_id="b1",
+            planned=3,
+            rendered=2,
+            skipped=0,
+        )
+
+    assert any(
+        "planned=3" in record.getMessage() and "rendered=2" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ordering
+# ---------------------------------------------------------------------------
+
+
+def test_export_book_epub_preserves_book_order(scenario: Scenario) -> None:
+    scenario.write_book_info(
+        make_book_info(
+            volumes=[
+                make_volume(
+                    "卷",
+                    [
+                        make_chapter_info("10", "第十章"),
+                        make_chapter_info("2", "第二章"),
+                        make_chapter_info("1", "第一章"),
+                    ],
+                )
+            ]
+        )
+    )
+    scenario.write_chapters(
+        [
+            make_chapter("10", "内容十", title="第十章"),
+            make_chapter("2", "内容二", title="第二章"),
+            make_chapter("1", "内容一", title="第一章"),
+        ]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        items = _nav_top_items(zf.read("OEBPS/nav.xhtml"))
+
+    assert [_li_label(c) for c in _li_children(items[1])] == [
+        "第十章",
+        "第二章",
+        "第一章",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Atomic writes: degradation paths
+# ---------------------------------------------------------------------------
+
+
+def test_epub_export_replace_failure_keeps_previous_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "book.epub"
+    good = EpubBuilder(title="Good")
+    good.add_chapter(EpubChapter(id="c1", filename="c1.xhtml", title="ok"))
+    good.export(out)
+    before = out.read_bytes()
+
+    def no_replace(src: object, dst: object) -> None:
+        raise PermissionError("target locked")
+
+    monkeypatch.setattr(os, "replace", no_replace)
+
+    builder = EpubBuilder(title="书")
+    builder.add_chapter(EpubChapter(id="c2", filename="c2.xhtml", title="new"))
+
+    with pytest.raises(OSError) as excinfo:
+        builder.export(out)
+
+    # Writing directly would have truncated the good archive; the export must
+    # fail instead and keep the previous file byte-for-byte.
+    assert "Atomic replace failed" in str(excinfo.value)
+    assert str(out) in str(excinfo.value)
+    assert out.read_bytes() == before
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_epub_export_temp_file_failure_raises_with_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "book.epub"
+    out.write_bytes(b"EXISTING")
+
+    def no_temp(*args: object, **kwargs: object) -> None:
+        raise PermissionError("no temp space")
+
+    monkeypatch.setattr(tempfile, "mkstemp", no_temp)
+
+    builder = EpubBuilder(title="书")
+    builder.add_chapter(EpubChapter(id="c1", filename="c1.xhtml", title="ok"))
+
+    with pytest.raises(OSError) as excinfo:
+        builder.export(out)
+
+    # The error must be diagnosable even though the temp file was never
+    # created, and the existing archive must not be touched.
+    assert str(out) in str(excinfo.value)
+    assert "temporary file" in str(excinfo.value)
+    assert out.read_bytes() == b"EXISTING"
+    assert list(tmp_path.glob("*.tmp")) == []

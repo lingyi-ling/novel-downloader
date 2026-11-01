@@ -520,6 +520,25 @@ def test_extract_chapter_ids_honours_range_and_ignore(tmp_path: Path) -> None:
     assert client._extract_chapter_ids(vols, "9", None, frozenset()) == []
 
 
+def test_extract_chapter_ids_deduplicates_repeated_entries(tmp_path: Path) -> None:
+    """A TOC that lists a chapter twice must not inflate the plan."""
+    client = _client(tmp_path)
+    vols = _book_info(
+        [
+            {"chapterId": "1", "title": "a"},
+            {"chapterId": "2", "title": "b"},
+            {"chapterId": "2", "title": "b (again)"},
+            {"chapterId": "3", "title": "c"},
+        ]
+    )["volumes"]
+
+    assert client._extract_chapter_ids(vols, None, None, frozenset()) == [
+        "1",
+        "2",
+        "3",
+    ]
+
+
 def test_extract_chapter_ids_skips_inaccessible_unless_configured(
     tmp_path: Path,
 ) -> None:

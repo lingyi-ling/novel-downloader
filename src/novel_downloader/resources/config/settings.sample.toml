@@ -129,6 +129,16 @@ local_plugins_path = "./novel_plugins"
 # name = "cleaner"
 # overwrite = false
 # remove_invisible = true
+# 移除 Unicode 格式字符 (Cf) 与私用区字符 (Co)；不填时跟随 remove_invisible
+# remove_format_chars = true
+# 删除空 <p></p> 标签与连续的 <br/><br/>；默认关闭。
+# 只有站点正文保留真实 HTML 标签（解析时用 attr = "html"）时才建议开启：
+# 默认链路的正文是纯文本，开启后会把正文里作为字面量出现的 <p></p> 一起删掉。
+# remove_empty_tags = false
+# 删除正文开头重复的章节名，默认开启
+# strip_leading_title = true
+# 把 "1. 名字"/"1、名字" 规范成 "第1章 名字"，默认关闭
+# normalize_chapter_title = false
 
 # title_removes = "path/to/title-remove.json"
 # title_replace = "path/to/title-replace.json"

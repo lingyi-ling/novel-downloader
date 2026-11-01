@@ -50,8 +50,15 @@ class DownloadUI(Protocol):
         """Called periodically to report progress."""
         ...
 
-    async def on_complete(self, book: BookConfig) -> None:
-        """Called when a book download completes."""
+    async def on_complete(self, book: BookConfig, *, failed: int = 0) -> None:
+        """
+        Called when a book download finishes.
+
+        :param failed: Number of chapters that could not be downloaded.  A
+            non-zero value means the run is *finished*, not *complete*: callers
+            must not report plain success, otherwise a book full of holes looks
+            like a clean download.
+        """
         ...
 
 

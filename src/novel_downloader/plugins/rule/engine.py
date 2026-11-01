@@ -18,19 +18,51 @@ elements.
 
 The extraction rules implemented here are intentionally simple and predictable;
 anything beyond them should live in a dedicated site plugin.
+
+Post-processing and hooks
+-------------------------
+:class:`~.model.Field` values run ``regex`` -> ``replace`` -> ``steps`` (in
+that order).  ``steps`` is the only place where arbitrary logic is allowed, and
+it is deliberately constrained:
+
+* ``py`` steps call one of the pure ``str -> str`` functions in
+  :data:`PY_STEP_FUNCTIONS` (an explicit whitelist -- unknown names are a load
+  time :class:`RuleError`).
+* ``js`` steps run on :class:`~novel_downloader.libs.mini_js.MiniJS`, which
+  understands ``let`` / ``function`` / ``return`` / expression statements,
+  arithmetic, ternary, object/array literals and *dict/list* member access.  It
+  does **not** support ``if``, loops, regex literals, string prototypes
+  (``.replace``, ``.trim``, ...) or global constructors.  The whitelisted
+  ``py`` helpers are injected as unary functions, and two multi-argument
+  helpers cover the HTML-rewriting case that motivated ``preprocess``:
+  ``replace_all(text, old, new)`` and ``regex_replace(text, pattern, repl)``
+  (Python ``re.sub`` semantics; a backslash passes through the JSON *and* JS
+  string escaping, so a digit class is four backslashes in the rule file).
+  ``input`` (alias ``result``) is the string being processed.  Unsupported code
+  raises :class:`RuleError`, never a silent pass-through.
+
+:func:`preprocess` rewrites a page's HTML before the selectors run.
+:func:`should_stop_pagination` guards the extra-page walk.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import html
 import json
 import re
+from collections.abc import Callable, Sequence
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, unquote, urljoin
 
 from lxml import etree
 from lxml import html as lxml_html
 
-from .model import Field, RuleError
+from novel_downloader.libs.mini_js import MiniJS
+
+from .model import Field, PagesRule, RuleError, Step, regex_backtracking_risk
 
 __all__ = [
     "parse_page",
@@ -42,6 +74,13 @@ __all__ = [
     "json_to_str",
     "extract",
     "extract_multi",
+    "apply_steps",
+    "preprocess",
+    "body_fingerprint",
+    "matches_stop_when",
+    "should_stop_pagination",
+    "PY_STEP_FUNCTIONS",
+    "JS_STEP_HELPERS",
     "render",
     "abs_url",
 ]
@@ -257,6 +296,296 @@ def _node_str(node: Any, attr: str, fmt: str) -> str:
     return node_to_str(node, attr)
 
 
+# --------------------------------------------------------------------------- #
+# post-processing steps
+# --------------------------------------------------------------------------- #
+_TAG_RE = re.compile(r"<[^>]*>")
+_TAG_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+
+
+def _py_strip_html(value: str) -> str:
+    """Drop HTML comments and tags, leaving the text content."""
+    return _TAG_RE.sub("", _TAG_COMMENT_RE.sub("", value))
+
+
+def _py_normalize_space(value: str) -> str:
+    """Collapse every whitespace run into a single space."""
+    return " ".join(value.split())
+
+
+def _py_dedupe_lines(value: str) -> str:
+    """Drop blank and repeated lines, keeping the first occurrence order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in value.splitlines():
+        key = line.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+    return "\n".join(out)
+
+
+def _py_base64_decode(value: str) -> str:
+    """Decode standard Base64 (whitespace tolerated, padding inferred)."""
+    compact = "".join(value.split())
+    padded = compact + "=" * (-len(compact) % 4)
+    try:
+        raw = base64.b64decode(padded, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(f"invalid base64 input: {e}") from e
+    return raw.decode("utf-8", errors="replace")
+
+
+#: Explicit whitelist of pure ``str -> str`` functions usable as ``py`` steps.
+#: Every entry must be side-effect free, deterministic and accept/return a
+#: ``str``; anything else does not belong in a rule file.
+PY_STEP_FUNCTIONS: dict[str, Callable[[str], str]] = {
+    "strip_html": _py_strip_html,
+    "normalize_space": _py_normalize_space,
+    "dedupe_lines": _py_dedupe_lines,
+    "base64_decode": _py_base64_decode,
+    "url_decode": unquote,
+    "url_encode": quote,
+    "html_unescape": html.unescape,
+    "strip": lambda value: value.strip(),
+    "lower": lambda value: value.lower(),
+    "upper": lambda value: value.upper(),
+    "reverse": lambda value: value[::-1],
+}
+
+
+def _step_where(step: Step, index: int) -> str:
+    return step.where or f"steps[{index}]"
+
+
+def _coerce_step_result(value: Any, *, where: str) -> str:
+    """Require a step to produce text (``None`` -> empty, scalars stringified)."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    raise RuleError(f"{where}: step must produce a string, got {type(value).__name__}")
+
+
+def _js_helper(fn: Callable[[str], str]) -> Callable[[list[Any]], str]:
+    """Adapt a ``py`` whitelist function to the mini-js calling convention."""
+
+    def _call(args: list[Any]) -> str:
+        if not args:
+            raise TypeError("expected at least one argument")
+        return fn(_coerce_step_result(args[0], where="js helper argument"))
+
+    return _call
+
+
+def _js_args(args: list[Any], count: int, name: str) -> list[str]:
+    """Coerce exactly ``count`` mini-js call arguments to strings."""
+    if len(args) != count:
+        raise TypeError(f"{name} expects {count} arguments, got {len(args)}")
+    return [_coerce_step_result(arg, where=f"{name} argument") for arg in args]
+
+
+def _js_replace_all(args: list[Any]) -> str:
+    """``replace_all(text, old, new)`` -- literal substring replacement."""
+    value, old, new = _js_args(args, 3, "replace_all")
+    return value.replace(old, new)
+
+
+def _js_regex_replace(args: list[Any]) -> str:
+    """``regex_replace(text, pattern, repl)`` -- Python ``re.sub`` semantics."""
+    value, pattern, repl = _js_args(args, 3, "regex_replace")
+    try:
+        compiled = re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"invalid pattern {pattern!r}: {e}") from e
+    # ``re`` cannot be interrupted, so a pattern that backtracks exponentially
+    # (``(a+)+$``) would hang the worker on one page of text.  The pattern is
+    # only known at run time here, hence the check at this point.
+    risk = regex_backtracking_risk(pattern)
+    if risk is not None:
+        raise ValueError(f"pattern {pattern!r} risks catastrophic backtracking: {risk}")
+    return compiled.sub(repl, value)
+
+
+#: Extra helpers available **only** inside ``js`` steps (they take several
+#: arguments, so they are not ``py`` step names).  Keeping the HTML rewrite
+#: capability here is what makes ``preprocess`` useful even though mini-js has
+#: no string prototype methods.
+JS_STEP_HELPERS: dict[str, Callable[[list[Any]], str]] = {
+    "replace_all": _js_replace_all,
+    "regex_replace": _js_regex_replace,
+}
+
+
+def _run_py_step(value: str, step: Step, *, where: str) -> str:
+    fn = PY_STEP_FUNCTIONS.get(step.name)
+    if fn is None:  # defensive: names are validated when the rule is parsed
+        raise RuleError(
+            f"{where}: unknown py step {step.name!r} "
+            f"(allowed: {', '.join(sorted(PY_STEP_FUNCTIONS))})"
+        )
+    try:
+        return _coerce_step_result(fn(value), where=where)
+    except RuleError:
+        raise
+    except Exception as e:
+        raise RuleError(f"{where}: py step {step.name!r} failed: {e}") from e
+
+
+def _run_js_step(value: str, step: Step, *, where: str) -> str:
+    js = MiniJS()
+    # A fresh instance per step keeps variables from leaking between rules or
+    # between pages.  Injection goes through the public ``bind`` API so this
+    # module does not depend on mini-js internals.
+    js.bind("input", value)
+    js.bind("result", value)
+    for name, fn in PY_STEP_FUNCTIONS.items():
+        js.bind(name, _js_helper(fn))
+    for name, helper in JS_STEP_HELPERS.items():
+        js.bind(name, helper)
+    try:
+        result = js.eval(step.code)
+    except RuleError:
+        raise
+    except Exception as e:
+        raise RuleError(
+            f"{where}: js step failed ({type(e).__name__}: {e}); "
+            "mini-js supports expressions/let/function only -- see the "
+            "engine module docstring for the exact subset"
+        ) from e
+    return _coerce_step_result(result, where=where)
+
+
+def apply_steps(value: str, steps: Sequence[Step]) -> str:
+    """
+    Run ``steps`` in order, feeding each step's output to the next.
+
+    :raises RuleError: when a step name is unknown, the code is unsupported by
+        mini-js, or a step raises.  The message carries the rule location
+        recorded in :attr:`~.model.Step.where`.
+    """
+    for index, step in enumerate(steps):
+        where = _step_where(step, index)
+        if step.lang == "py":
+            value = _run_py_step(value, step, where=where)
+        else:
+            value = _run_js_step(value, step, where=where)
+    return value
+
+
+# --------------------------------------------------------------------------- #
+# HTML pre-processing hook
+# --------------------------------------------------------------------------- #
+def preprocess(
+    raw: str,
+    steps: Sequence[Step],
+    *,
+    container: str | None = None,
+    where: str = "preprocess",
+) -> str:
+    """
+    Rewrite a page's HTML with ``steps`` before the selectors run.
+
+    The program receives the *inner* HTML of ``container`` when it is set, or
+    the whole raw response otherwise, and its output is re-parsed by the caller
+    (see :meth:`~.parser.RuleParser`).  Typical uses: drop decoy chapters
+    hidden with ``display:none``, turn ``onclick="read(123)"`` into a real
+    ``href``, or absolutise relative links.
+
+    :raises RuleError: when ``container`` matches nothing, the program errors,
+        or the result is empty / not parsable as HTML.  A rewrite that silently
+        yields nothing would otherwise produce a book with zero chapters.  The
+        message names the section *and* the last step's location
+        (``book.chapters.preprocess[1]``), because the damage is done by the
+        final step even when the output looks fine in isolation.
+    """
+    if not steps:
+        return raw
+    tree = parse_page(raw, "html")
+    if container:
+        nodes = select(tree, container, "html")
+        if not nodes:
+            raise RuleError(
+                f"{where}: container {container!r} matched nothing "
+                f"(used by {_step_where(steps[0], 0)} and the steps after it)"
+            )
+        source = node_to_str(nodes[0], "html")
+    else:
+        source = raw
+    result = apply_steps(source, steps)
+    last = _step_where(steps[-1], len(steps) - 1)
+    if not result.strip():
+        raise RuleError(
+            f"{where}: produced an empty document (output of {last} is blank)"
+        )
+    try:
+        parse_page(result, "html")
+    except RuleError as e:
+        raise RuleError(
+            f"{where}: produced invalid HTML (output of {last}): {e}"
+        ) from e
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# pagination guard
+# --------------------------------------------------------------------------- #
+def body_fingerprint(body: str) -> str:
+    """Digest a page body for duplicate-page detection."""
+    return hashlib.sha256(body.encode("utf-8", "ignore")).hexdigest()
+
+
+def matches_stop_when(pages: PagesRule, body: str) -> bool:
+    """Whether ``body`` matches the rule's optional ``stop_when`` regex."""
+    pattern = pages.stop_when
+    if not pattern:
+        return False
+    return re.search(pattern, body, re.S) is not None
+
+
+def should_stop_pagination(
+    pages: PagesRule,
+    body: str,
+    url: str,
+    seen_urls: set[str],
+    seen_bodies: set[str],
+) -> bool:
+    """
+    Decide whether fetching more pages must stop after consuming ``body``.
+
+    ``url`` should be the URL of ``body`` and must *not* be in ``seen_urls``
+    yet: this function records it (and the body digest) as visited.  The two
+    sets are the caller's pagination state, so a repeated page is detected
+    across the whole walk without any module-level mutable state.
+
+    * ``pages.stop_when`` matching the body stops immediately (page kept).
+    * with ``pages.loop_guard`` (default) an already-seen URL or an identical
+      body digest also stops, which is what prevents the classic
+      "last page links to itself forever" infinite loop.
+
+    The URL is recorded as visited even when ``loop_guard`` is off: the
+    duplicate-URL guard predates the body-digest guard and must keep working
+    when only the latter is disabled.
+    """
+    matched = matches_stop_when(pages, body)
+    if not pages.loop_guard:
+        seen_urls.add(url)
+        return matched
+    fingerprint = body_fingerprint(body)
+    repeated = url in seen_urls or fingerprint in seen_bodies
+    seen_urls.add(url)
+    seen_bodies.add(fingerprint)
+    return matched or repeated
+
+
+# --------------------------------------------------------------------------- #
+# extraction
+# --------------------------------------------------------------------------- #
 def _postprocess(value: str, fld: Field) -> str:
     if fld._pattern is not None:
         m = fld._pattern.search(value)
@@ -265,31 +594,72 @@ def _postprocess(value: str, fld: Field) -> str:
             # ``group`` is validated >= 0 at load time; stay defensive anyway
             # because a negative index raises a raw ``IndexError``.
             value = m.group(group) if 0 < group <= len(m.groups()) else m.group(0)
-    return fld.apply_replace(value).strip()
+    value = fld.apply_replace(value).strip()
+    # Steps only run on a non-empty value: otherwise a constant-producing
+    # program could invent content for a selector that matched nothing.
+    if value and fld.steps:
+        value = apply_steps(value, fld.steps).strip()
+    return value
 
 
 def _extract_one(node: Any, fld: Field, fmt: str) -> str:
     return _postprocess(_node_str(node, fld.attr, fmt), fld)
 
 
-def extract(root: Any, fld: Field, fmt: str = "html") -> str:
-    """Extract a single string for ``fld`` from ``root`` (or a child node)."""
-    nodes = select(root, fld.selector, fmt) if fld.selector else [root]
-    for node in nodes:
+def _nodes(root: Any, fld: Field, fmt: str) -> list[Any]:
+    return select(root, fld.selector, fmt) if fld.selector else [root]
+
+
+def _extract_chain(root: Any, fld: Field, fmt: str) -> str:
+    """First non-empty value from ``fld`` and, if empty, its fallback chain."""
+    for node in _nodes(root, fld, fmt):
         value = _extract_one(node, fld, fmt)
         if value:
             return value
+    for alt in fld.fallback:
+        value = _extract_chain(root, alt, fmt)
+        if value:
+            return value
+    return ""
+
+
+def extract(root: Any, fld: Field, fmt: str = "html") -> str:
+    """
+    Extract a single string for ``fld`` from ``root`` (or a child node).
+
+    The main selector is tried first; when it yields nothing the ``fallback``
+    chain is tried in order.  Only after every option failed is the field's
+    ``default`` used (a fallback's own ``default`` is ignored so the main
+    field always has the final say).
+    """
+    value = _extract_chain(root, fld, fmt)
+    if value:
+        return value
     return fld.apply_replace(fld.default).strip()
 
 
-def extract_multi(root: Any, fld: Field, fmt: str = "html") -> list[str]:
-    """Extract every non-empty match for ``fld`` from ``root``."""
-    nodes = select(root, fld.selector, fmt) if fld.selector else [root]
+def _extract_all(root: Any, fld: Field, fmt: str) -> list[str]:
     out: list[str] = []
-    for node in nodes:
+    for node in _nodes(root, fld, fmt):
         value = _extract_one(node, fld, fmt)
         if value:
             out.append(value)
+    return out
+
+
+def extract_multi(root: Any, fld: Field, fmt: str = "html") -> list[str]:
+    """Extract every non-empty match for ``fld`` from ``root``.
+
+    As with :func:`extract`, if the main selector matches nothing the first
+    fallback that yields values wins.
+    """
+    out = _extract_all(root, fld, fmt)
+    if out:
+        return out
+    for alt in fld.fallback:
+        out = extract_multi(root, alt, fmt)
+        if out:
+            return out
     return out
 
 
