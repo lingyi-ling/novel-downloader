@@ -290,6 +290,9 @@ def _i18n_catalog() -> dict[str, str]:
             "New version {ver} is out — click to download"
         ),
         "Download and install": t("Download and install"),
+        "No package for this platform in v{ver}; open the release page": t(
+            "No package for this platform in v{ver}; open the release page"
+        ),
         "Release notes": t("Release notes"),
         "Later": t("Later"),
         "Downloading…": t("Downloading…"),

@@ -56,6 +56,8 @@ https://github.com/lingyi-ling/novel-downloader/releases/latest/download/latest.
 
 It lists the exact file name, size, SHA-256 and download URL for each platform, and is generated from the assets that were **actually uploaded**. Clients prefer it and fall back to the GitHub API only when it is unavailable — the unauthenticated API allows 60 requests per hour, the manifest has no such limit.
 
+> Once a trusted signing key is configured the client **stops falling back** to the API: a missing or badly signed manifest is an error. That is deliberate — allowing the fallback would let an attacker delete the manifest to bypass signature checking. With signing enabled, every release must ship `latest.json`.
+
 Entries are per **package shape**:
 
 | Key | Artifact |

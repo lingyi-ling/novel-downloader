@@ -43,6 +43,7 @@ import argparse
 import base64
 import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +68,25 @@ ASSET_RULES: tuple[tuple[str, str], ...] = (
 
 #: Architecture tokens that appear in our asset names.
 _ARCH_TOKENS = ("arm64", "aarch64", "x64", "amd64", "x86_64")
+
+#: OS tokens as they appear in ``build_release.py``'s platform tag.
+_OS_TOKENS: tuple[tuple[str, str], ...] = (
+    ("windows", "windows"),
+    ("linux", "linux"),
+    ("macos", "macos"),
+    ("darwin", "macos"),
+)
+
+#: ``novel-downloader-<ver>-android-<stem>.apk`` — the ABI/variant suffix.
+_APK_VARIANT_RE = re.compile(r"-android-([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+#: Android ABI spellings as they appear in split APK names.
+_APK_ABIS: tuple[tuple[str, str], ...] = (
+    ("arm64-v8a", "arm64-v8a"),
+    ("armeabi-v7a", "armeabi-v7a"),
+    ("x86_64", "x86_64"),
+    ("universal", "universal"),
+)
 
 
 class ManifestError(RuntimeError):
@@ -110,12 +130,34 @@ def _asset_digest(item: dict[str, Any]) -> str | None:
     return value if len(value) == 64 else None
 
 
+def _os_of(name: str, shape: str) -> str | None:
+    """Infer the target OS from an asset name."""
+    lowered = name.lower()
+    for token, platform in _OS_TOKENS:
+        if token in lowered:
+            return platform
+    # The Inno Setup installer carries no OS token: it is Windows-only.
+    if shape == "installer" and lowered.endswith(".exe"):
+        return "windows"
+    return None
+
+
+def _arch_of(name: str) -> str | None:
+    """Normalise the architecture token in an asset name."""
+    lowered = name.lower()
+    arch = next((token for token in _ARCH_TOKENS if token in lowered), None)
+    if arch is None:
+        return None
+    return "arm64" if arch in {"arm64", "aarch64"} else "x64"
+
+
 def _classify(name: str) -> str | None:
     """
     Map an asset name onto a client target key, if it is an update payload.
 
     ``NovelDownloader-1.4.1-windows-x64.zip`` becomes
-    ``windows-x64-portable``; the Android APK becomes ``android``.
+    ``windows-x64-portable``; a single Android APK becomes ``android`` and a
+    per-ABI split becomes ``android-<stem>`` so several APKs can coexist.
     """
     if name in {"latest.json", "manifest.json"} or name.startswith("SHA256"):
         return None
@@ -123,15 +165,23 @@ def _classify(name: str) -> str | None:
         if not name.startswith(prefix):
             continue
         if shape == "android":
-            # Only the APK is an update payload; the same prefix also covers
-            # checksum files and other artefacts.
-            return "android" if name.endswith(".apk") else None
-        lowered = name.lower()
-        arch = next((token for token in _ARCH_TOKENS if token in lowered), None)
-        if arch is None:
+            if not name.endswith(".apk"):
+                return None
+            variant = _APK_VARIANT_RE.search(name)
+            if variant is None:
+                return "android"
+            stem = variant.group(1)
+            lowered = stem.lower()
+            for token, abi in _APK_ABIS:
+                if token in lowered:
+                    return f"android-{abi}"
+            # Unknown split: keep the stem so two APKs still never collide.
+            return "android-" + re.sub(r"[^A-Za-z0-9._-]+", "-", stem)
+        platform_tag = _os_of(name, shape)
+        arch = _arch_of(name)
+        if platform_tag is None or arch is None:
             return None
-        normalised = "arm64" if arch in {"arm64", "aarch64"} else "x64"
-        return f"windows-{normalised}-{shape}"
+        return f"{platform_tag}-{arch}-{shape}"
     return None
 
 

@@ -263,6 +263,7 @@ class UpdateCheckerTest {
             "novel-downloader-1.5.0-android.apk"
 
     private fun androidEntry(
+        key: String = "android",
         name: String? = "novel-downloader-1.5.0-android.apk",
         url: String? = apkUrl,
         sha256: String? = apkSha,
@@ -274,7 +275,17 @@ class UpdateCheckerTest {
             size?.let { add("\"size\": $it") }
             url?.let { add("\"url\": \"$it\"") }
         }
-        return "\"android\": {" + fields.joinToString(",") + "}"
+        return "\"$key\": {" + fields.joinToString(",") + "}"
+    }
+
+    /** A per-ABI entry such as `android-arm64-v8a`, distinguishable by name. */
+    private fun abiEntry(abi: String): String {
+        val name = "novel-downloader-1.5.0-android-$abi.apk"
+        return androidEntry(
+            key = "android-$abi",
+            name = name,
+            url = "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.5.0/$name",
+        )
     }
 
     private val windowsEntry = """
@@ -366,21 +377,107 @@ class UpdateCheckerTest {
     }
 
     @Test
-    fun manifestWithoutAndroidEntryMeansNoAndroidPackage() {
-        val info = parseManifest(manifest(platforms = windowsEntry), "1.4.1")!!
+    fun manifestWithoutAndroidEntryIsRejected() {
+        // The desktop/CLI manifest can legitimately list only Windows targets,
+        // but for Android that is *not* "no update": the generator may simply
+        // have missed the APK. Returning null makes check() ask the API, so a
+        // missing key can never pin the app to "up to date" for 24 hours.
+        assertNull(parseManifest(manifest(platforms = windowsEntry), "1.4.1"))
+        assertNull(
+            parseManifest(
+                """{"schema":1,"version":"1.5.0","platforms":{"windows-x64-installer":{}}}""",
+                "1.4.1",
+            ),
+        )
+        // Also null when `android` is present but is not an object.
+        assertNull(parseManifest(manifest(platforms = "\"android\": \"x.apk\""), "1.4.1"))
+        // A non-Android key whose name contains a device ABI must never be
+        // mistaken for an APK by the partial ABI match.
+        assertNull(
+            parseManifest(
+                manifest(
+                    platforms = "\"windows-arm64\": {\"name\":\"a.exe\"," +
+                        "\"url\":\"https://e.invalid/a.exe\"," +
+                        "\"sha256\":\"${"c".repeat(64)}\"}",
+                ),
+                "1.4.1",
+                listOf("arm64-v8a"),
+            ),
+        )
+    }
 
-        // The version is known, but this release published no APK: reporting
-        // an update here would only lead to a download that cannot succeed.
-        assertEquals("1.5.0", info.latest)
-        assertFalse(info.available)
-        assertNull(info.assetName)
-        assertNull(info.assetUrl)
-        assertNull(info.sha256)
-        assertEquals(UpdateFailure.NO_ASSET, downloadRequestFailure(info))
-        // The release notes are still usable ("what changed in 1.5.0").
+    @Test
+    fun manifestSingleApkEntryWinsOverAbiEntries() {
+        // A canonical single APK serves every device, so it is preferred over
+        // any `android-<abi>` variant regardless of the device ABI list.
+        val payload = manifest(
+            platforms = listOf(androidEntry(), abiEntry("arm64-v8a"), abiEntry("x86_64"))
+                .joinToString(",\n"),
+        )
+
+        for (abis in listOf(emptyList(), listOf("arm64-v8a"), listOf("x86_64"))) {
+            val info = parseManifest(payload, "1.4.1", abis)!!
+            assertEquals("novel-downloader-1.5.0-android.apk", info.assetName)
+        }
+    }
+
+    @Test
+    fun manifestMultiApkSelectsTheDeviceAbi() {
+        val payload = manifest(
+            platforms = listOf(abiEntry("arm64-v8a"), abiEntry("x86_64")).joinToString(",\n"),
+        )
+
+        // The first supported ABI wins, mirroring the API path's preference.
         assertEquals(
-            "https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.5.0",
-            info.notesUrl,
+            "novel-downloader-1.5.0-android-x86_64.apk",
+            parseManifest(payload, "1.4.1", listOf("x86_64", "arm64-v8a"))!!.assetName,
+        )
+        assertEquals(
+            "novel-downloader-1.5.0-android-arm64-v8a.apk",
+            parseManifest(payload, "1.4.1", listOf("arm64-v8a"))!!.assetName,
+        )
+        // A shorter key (`android-arm64`) still matches the fuller ABI name.
+        val shortened = manifest(platforms = abiEntry("arm64"))
+        assertEquals(
+            "novel-downloader-1.5.0-android-arm64.apk",
+            parseManifest(shortened, "1.4.1", listOf("arm64-v8a"))!!.assetName,
+        )
+        // The URL of the chosen entry travels with it.
+        assertEquals(
+            "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.5.0/" +
+                "novel-downloader-1.5.0-android-x86_64.apk",
+            parseManifest(payload, "1.4.1", listOf("x86_64"))!!.assetUrl,
+        )
+    }
+
+    @Test
+    fun manifestMultiApkFallsBackWhenTheAbiIsUnknown() {
+        val withUniversal = manifest(
+            platforms = listOf(
+                abiEntry("arm64-v8a"),
+                abiEntry("x86_64"),
+                abiEntry("universal"),
+            ).joinToString(",\n"),
+        )
+        // No exact or partial ABI match: the ABI-neutral entry is the safe pick.
+        assertEquals(
+            "novel-downloader-1.5.0-android-universal.apk",
+            parseManifest(withUniversal, "1.4.1", listOf("mips"))!!.assetName,
+        )
+
+        // Without a universal entry the first android-* key is used, exactly
+        // like ReleaseAssets.selectApk falls back to the first project APK.
+        val abiOnly = manifest(
+            platforms = listOf(abiEntry("x86_64"), abiEntry("arm64-v8a")).joinToString(",\n"),
+        )
+        assertEquals(
+            "novel-downloader-1.5.0-android-arm64-v8a.apk",
+            parseManifest(abiOnly, "1.4.1", listOf("mips"))!!.assetName,
+        )
+        // No ABI hint at all (JVM tests, unusual devices) resolves the same way.
+        assertEquals(
+            "novel-downloader-1.5.0-android-arm64-v8a.apk",
+            parseManifest(abiOnly, "1.4.1")!!.assetName,
         )
     }
 
@@ -873,6 +970,29 @@ class UpdateCheckerTest {
 
             assertEquals("1.4.1", info?.latest)
             // The API asset size is 1, proving the manifest's 62714163 was not used.
+            assertEquals(1L, info?.assetSize)
+            assertEquals(2, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun manifestWithoutAndroidEntryFallsBackToTheApi() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            // Valid manifest that simply forgot the APK: the API gets asked.
+            server.enqueue(MockResponse().setBody(manifest(platforms = windowsEntry)))
+            server.enqueue(MockResponse().setBody(apiReleaseForCheck))
+
+            val info = UpdateChecker.check(
+                "1.4.0",
+                apiUrl = server.url("/releases/latest").toString(),
+                manifestUrl = server.url("/latest.json").toString(),
+            )
+
+            assertEquals("1.4.1", info?.latest)
             assertEquals(1L, info?.assetSize)
             assertEquals(2, server.requestCount)
         } finally {

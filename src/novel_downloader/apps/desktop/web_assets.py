@@ -676,11 +676,16 @@ function applyUpdateState(st) {
   const show = !!st.available && !updates.dismissed;
   bar.hidden = !show;
   if (!show) return;
-  $("#update-text").textContent = t("Update available: v{ver}").replace("{ver}", st.latest || "");
+  // A release can be newer without shipping anything for this platform; say
+  // so instead of showing an update with no way to act on it.
+  const noAsset = !st.asset_name;
+  $("#update-text").textContent = noAsset
+    ? t("No package for this platform in v{ver}; open the release page").replace("{ver}", st.latest || "")
+    : t("Update available: v{ver}").replace("{ver}", st.latest || "");
   $("#update-size").textContent = st.asset_size ? fmtSize(st.asset_size) : "";
   $("#update-notes").hidden = !(st.notes_url || st.url);
-  // A release without an asset for this platform can only be opened manually.
-  $("#update-install").hidden = !st.asset_name;
+  $("#update-notes").classList.toggle("btn-primary", noAsset);
+  $("#update-install").hidden = noAsset;
 }
 
 function setUpdateBusy(busy) {

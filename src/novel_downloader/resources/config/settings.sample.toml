@@ -35,7 +35,7 @@ login_required = false
 # 需要借助真实浏览器搜索的站点 (其搜索请求由站点自身 JS 签名, 纯 HTTP 拿不到结果);
 # 使用前先 novel-cli login <site> 建立登录会话; 设为 [] 可禁用
 # browser_assisted_sites = ["fanqienovel"]
-# http2 = false
+# http2 = true
 # impersonate = "chrome"
 
 # 输出文件格式及相关选项
@@ -52,7 +52,7 @@ include_picture = true             # 是否附带书籍图片
 
 [general.parser]
 # 解析字体加密 / OCR / 图片章节等高级功能需要安装额外依赖
-# 参考文档: docs/1-installation.md
+# 参考文档: docs/guide/installation.md
 
 enable_ocr = false                 # 是否尝试本地解析混淆字体 / 图片章节
 batch_size = 32

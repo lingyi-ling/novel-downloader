@@ -123,6 +123,50 @@ def read_version(repo_root: Path) -> str:
     return match.group(1)
 
 
+def check_android_version(repo_root: Path, version: str) -> None:
+    """
+    Refuse to release when the Android version drifted from the package.
+
+    ``versionCode``/``versionName`` are a hand-maintained copy of
+    ``__version__``; a mismatch ships an APK that reports a different version
+    than the manifest and never updates.
+    """
+    gradle = repo_root / "android" / "app" / "build.gradle.kts"
+    if not gradle.is_file():
+        return
+    text = gradle.read_text(encoding="utf-8")
+    match = re.search(r'versionName\s*=\s*"([^"]+)"', text)
+    if match is None:
+        raise ReleaseError(f"no versionName in {gradle}")
+    name = match.group(1).strip()
+    if name != version:
+        raise ReleaseError(
+            f"android versionName {name!r} does not match __version__ "
+            f"{version!r}; update android/app/build.gradle.kts"
+        )
+    code = re.search(r"versionCode\s*=\s*(\d+)", text)
+    if code is None or int(code.group(1)) <= 0:
+        raise ReleaseError(f"invalid versionCode in {gradle}")
+
+
+def require_clean_worktree(repo_root: Path) -> None:
+    """Refuse to tag a commit whose working tree has uncommitted changes."""
+    proc = _run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_root,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return  # not a git checkout (e.g. an exported tree): nothing to check
+    dirty = [line for line in proc.stdout.splitlines() if line.strip()]
+    if dirty:
+        preview = "; ".join(dirty[:5])
+        raise ReleaseError(
+            f"working tree has {len(dirty)} uncommitted change(s): {preview}"
+            " (commit them, or pass --allow-dirty)"
+        )
+
+
 def extract_changelog_notes(changelog: Path, version: str) -> str:
     """
     Return the body of the ``## v<version>`` section of *changelog*.
@@ -477,13 +521,16 @@ def build_latest_manifest(
             if asset.name != "latest.json"
         ],
     }
-    document = builder.build_manifest(
-        payload,
-        version=version,
-        tag=tag,
-        repo=slug,
-        notes_url=payload["html_url"],
-    )
+    try:
+        document = builder.build_manifest(
+            payload,
+            version=version,
+            tag=tag,
+            repo=slug,
+            notes_url=payload["html_url"],
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced as a release error
+        raise ReleaseError(f"cannot build latest.json: {exc}") from exc
     if sign_key is not None:
         try:
             seed = sign_key.read_text(encoding="ascii").strip()
@@ -491,6 +538,16 @@ def build_latest_manifest(
         except Exception as exc:  # noqa: BLE001 - any failure aborts
             raise ReleaseError(f"cannot sign latest.json: {exc}") from exc
         print(f"==> latest.json signed (key id {document.get('key_id')})")
+    # Every advertised URL must point at the tag being released: a manifest
+    # carrying another release's URLs would send clients to the wrong file.
+    for key, entry in document["platforms"].items():
+        want = builder.expected_url(slug, tag, entry["name"])
+        if entry["url"] != want:
+            raise ReleaseError(
+                f"latest.json platform {key!r} points at {entry['url']!r}, "
+                f"expected {want!r}"
+            )
+
     target = release_dir / "latest.json"
     target.write_bytes(builder.manifest_bytes(document))
     print(f"==> latest.json: {len(document['platforms'])} platform(s) for v{version}")
@@ -820,6 +877,15 @@ def verify_assets(client: GitHubClient, tag: str, assets: list[AssetSpec]) -> No
         if (remote_digest := _remote_digest_by_name(current, asset.name)) is not None
         and remote_digest != asset.sha256
     ]
+    # The manifest decides where every client downloads from, so it has to be
+    # verifiable: an unverifiable entry means we cannot prove the published
+    # URLs are the ones we wrote.
+    publishes_manifest = any(asset.name == "latest.json" for asset in assets)
+    if publishes_manifest and _remote_digest_by_name(current, "latest.json") is None:
+        raise ReleaseError(
+            "release has no digest for latest.json; refusing to leave the "
+            "update manifest unverified"
+        )
     if mismatched:
         raise ReleaseError(
             f"release {tag} has stale content for: " + ", ".join(sorted(mismatched))
@@ -988,9 +1054,8 @@ def _dry_run(
 
 def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     """Execute a (real or dry-run) release for the parsed arguments."""
-    version = (
-        args.version.removeprefix("v") if args.version else read_version(repo_root)
-    )
+    package_version = read_version(repo_root)
+    version = args.version.removeprefix("v") if args.version else package_version
     if version.strip().lower() == "unreleased":
         raise ReleaseError(
             "'Unreleased' is not a releasable version; bump __version__ and "
@@ -998,7 +1063,20 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
         )
     tag = f"v{version}"
     targets = _parse_targets(args.targets)
+    # Notes first: a missing CHANGELOG section is the most actionable error,
+    # and it also covers the "released a version that was never documented"
+    # case before the version-consistency gate fires.
     notes = extract_changelog_notes(repo_root / "CHANGELOG.md", version)
+
+    # A mismatch here is how a release ends up shipping last build's assets
+    # under this build's tag: the bundles are built from ``__version__`` while
+    # the release directory is looked up by ``--version``.
+    if version != package_version:
+        raise ReleaseError(
+            f"--version {version} does not match __version__ "
+            f"{package_version}; bump src/novel_downloader/__init__.py"
+        )
+    check_android_version(repo_root, version)
 
     if args.dry_run:
         return _dry_run(
@@ -1022,6 +1100,12 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
             "store a PAT where `git credential fill` can find it "
             "(protocol=https, host=github.com)"
         )
+
+    # Credentials first (cheap, and the most common failure), then the
+    # working-tree guard: only a real release tags HEAD, so only a real
+    # release must be clean.  A dry run stays read-only.
+    if not args.allow_dirty:
+        require_clean_worktree(repo_root)
 
     # 1. PyInstaller bundles ------------------------------------------------
     if args.skip_build:
@@ -1214,6 +1298,11 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-build",
         action="store_true",
         help="reuse the existing dist/release bundle directory",
+    )
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="tag even when the working tree has uncommitted changes",
     )
     parser.add_argument(
         "--sign-key",

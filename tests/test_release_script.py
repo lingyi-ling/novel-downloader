@@ -45,9 +45,9 @@ CHANGELOG = (
 )
 
 ZIP_NAMES = (
-    f"novel-cli-{VERSION}-test-x64.zip",
-    f"novel-api-{VERSION}-test-x64.zip",
-    f"NovelDownloader-{VERSION}-test-x64.zip",
+    f"novel-cli-{VERSION}-windows-x64.zip",
+    f"novel-api-{VERSION}-windows-x64.zip",
+    f"NovelDownloader-{VERSION}-windows-x64.zip",
 )
 APK_NAME = f"novel-downloader-{VERSION}-android.apk"
 APK_BYTES = b"APK-BYTES"
@@ -105,7 +105,7 @@ def make_repo(tmp_path: Path) -> Path:
 
 def make_release_dir(root: Path) -> Path:
     """A dist/release directory as build_release.py would leave it."""
-    release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
+    release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-windows-x64"
     release_dir.mkdir(parents=True)
     sums = []
     for name in ZIP_NAMES:
@@ -311,6 +311,8 @@ def harness(
 
 
 def _route_tag_steps(sub: FakeSubprocess, *, local: bool, remote: bool) -> None:
+    # Clean working tree: ``release.py`` refuses to tag a dirty checkout.
+    sub.route(("git", "status", "--porcelain"), stdout="")
     sub.route(
         ("git", "rev-parse", "-q", "--verify"),
         returncode=0 if local else 128,
@@ -936,7 +938,9 @@ class TestMainPublish:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         root, sub, http = harness
-        release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
+        release_dir = (
+            root / "dist" / "release" / f"novel-downloader-{VERSION}-windows-x64"
+        )
         _seed_manifest(release, root, release_dir)
         _route_tag_steps(sub, local=False, remote=False)
         _route_publish(
@@ -1043,7 +1047,9 @@ class TestMainIdempotent:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         root, sub, http = harness
-        release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
+        release_dir = (
+            root / "dist" / "release" / f"novel-downloader-{VERSION}-windows-x64"
+        )
         _seed_manifest(release, root, release_dir)
         _route_tag_steps(sub, local=True, remote=True)
         http.route_json(
@@ -1075,7 +1081,9 @@ class TestMainIdempotent:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         root, sub, http = harness
-        release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
+        release_dir = (
+            root / "dist" / "release" / f"novel-downloader-{VERSION}-windows-x64"
+        )
         stale_zip = ZIP_NAMES[1]
         _seed_manifest(release, root, release_dir)
         assets = self._assets_payload(release_dir, stale=stale_zip)
@@ -1139,7 +1147,9 @@ class TestMainAndroid:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         root, sub, http = harness
-        release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
+        release_dir = (
+            root / "dist" / "release" / f"novel-downloader-{VERSION}-windows-x64"
+        )
         make_android(root)
         make_apk(root)
         installer = root / "dist" / SETUP_NAME
@@ -1190,7 +1200,7 @@ class TestMainAndroid:
             root
             / "dist"
             / "release"
-            / f"novel-downloader-{VERSION}-test-x64"
+            / f"novel-downloader-{VERSION}-windows-x64"
             / "SHA256SUMS.txt"
         )
         sums = sums_path.read_text(encoding="utf-8")
@@ -1243,6 +1253,7 @@ class TestMainAndroid:
         root, sub, http = harness
         make_android(root)
         make_apk(root)
+        sub.route(("git", "status", "--porcelain"), stdout="")
         sub.route_contains("assembleRelease", returncode=1, stdout="BUILD FAILED\n")
 
         rc = release.main(["--skip-build", "--repo", SLUG])
@@ -1478,7 +1489,7 @@ class TestAssetAuditGate:
     def test_the_real_gate_rejects_a_bundled_secret(
         self, release: Any, tmp_path: Path
     ) -> None:
-        leaky = tmp_path / "novel-cli-9.9.9-test-x64.zip"
+        leaky = tmp_path / "novel-cli-9.9.9-windows-x64.zip"
         import zipfile
 
         with zipfile.ZipFile(leaky, "w") as archive:
@@ -1563,7 +1574,9 @@ class TestManifestSigning:
         tmp_path: Path,
     ) -> None:
         root, sub, http = harness
-        release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
+        release_dir = (
+            root / "dist" / "release" / f"novel-downloader-{VERSION}-windows-x64"
+        )
         seed, public = release._manifest_builder().generate_keypair()
         key = tmp_path / "update.key"
         key.write_text(seed, encoding="ascii")

@@ -785,7 +785,8 @@ def test_app_html_update_bar_only_appears_when_a_release_exists() -> None:
     assert 'id="update-bar" hidden' in APP_HTML
     assert "const show = !!st.available && !updates.dismissed;" in APP_HTML
     # A release without a matching asset gets no (dead) install button.
-    assert '$("#update-install").hidden = !st.asset_name;' in APP_HTML
+    assert '$("#update-install").hidden = noAsset;' in APP_HTML
+    assert "No package for this platform in v{ver}; open the release page" in APP_HTML
 
 
 def test_app_html_update_bar_has_install_notes_and_later() -> None:

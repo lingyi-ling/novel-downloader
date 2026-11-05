@@ -1,6 +1,7 @@
 package com.lingyi.noveldl.data
 
 import android.content.Context
+import android.os.Build
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -375,25 +376,81 @@ private fun JsonObject.stringOrNull(key: String): String? =
     (this[key] as? JsonPrimitive)?.contentOrNull
 
 /**
+ * Pick the entry describing the APK an Android device should install.
+ *
+ * The publisher writes a single `android` key when one APK serves every
+ * device and `android-<abi>` / `android-universal` keys when several are
+ * published, so the device's own ABI has to win over a generic one:
+ *
+ * 1. `android` (the canonical single-APK entry),
+ * 2. `android-<abi>` for each ABI in [supportedAbis], in device order,
+ * 3. `android-universal`,
+ * 4. any `android-*` key whose suffix matches an ABI of the device in either
+ *    direction (so `android-arm64` serves an `arm64-v8a` device),
+ * 5. the first `android-*` key in key order — the API path does the same
+ *    (`ReleaseAssets.selectApk` falls back to the first project APK).
+ *
+ * Keys are matched case-insensitively. Returns `null` when the manifest has
+ * no Android entry at all, in which case the caller must not trust the
+ * document (see [parseManifest]).
+ */
+private fun selectAndroidEntry(platforms: JsonObject, supportedAbis: List<String>): JsonObject? {
+    val keys = platforms.keys.map { it to it.lowercase() }
+
+    fun objectFor(lowerKey: String): JsonObject? =
+        keys.firstOrNull { (_, lower) -> lower == lowerKey }
+            ?.let { (original, _) -> platforms[original] as? JsonObject }
+
+    objectFor("android")?.let { return it }
+
+    val abis = supportedAbis
+        .map { it.trim().lowercase() }
+        .filter { it.isNotEmpty() }
+        .distinct()
+    for (abi in abis) {
+        objectFor("android-$abi")?.let { return it }
+    }
+    objectFor("android-universal")?.let { return it }
+
+    for (abi in abis) {
+        keys.firstOrNull { (_, lower) ->
+            lower.startsWith("android-") &&
+                lower.removePrefix("android-").let { suffix ->
+                    suffix.isNotEmpty() && (suffix.contains(abi) || abi.contains(suffix))
+                }
+        }?.let { (original, _) -> platforms[original] as? JsonObject }?.let { return it }
+    }
+
+    return keys
+        .filter { (_, lower) -> lower.startsWith("android-") }
+        .sortedBy { (_, lower) -> lower }
+        .firstNotNullOfOrNull { (original, _) -> platforms[original] as? JsonObject }
+}
+
+/**
  * Maps an updater manifest (`latest.json`) onto [UpdateInfo].
  *
  * The manifest is the small, stable document the desktop and CLI clients read
  * first: unlike `releases/latest` it is not rate limited and carries the
- * SHA-256 of every asset. Android only cares about `platforms["android"]`.
+ * SHA-256 of every asset. Android reads the `platforms` entry selected by
+ * [supportedAbis] (`android`, then `android-<abi>`, see
+ * [selectAndroidEntry]).
  *
  * Returns `null` when the document cannot be trusted as a whole — a future
- * `schema`, a missing version, no `platforms` map, or an `android` entry that
- * fails the https/64-hex-digest requirements. The caller then falls back to
- * the GitHub API instead of guessing at a format it does not know.
- *
- * A manifest that *is* valid but has no `android` entry yields an
- * `available = false` info: that release deliberately published no APK, so
- * telling the user about it would only lead to a failed download.
+ * `schema`, a missing version, no `platforms` map, no Android entry at all,
+ * or an Android entry that fails the https/64-hex-digest requirements. The
+ * caller then falls back to the GitHub API rather than silently concluding
+ * "up to date": a manifest that forgot to list the APK must not suppress an
+ * update for the next 24 hours.
  *
  * [currentVersion] defaults to empty so the document can be inspected without
  * a running version; callers that decide `available` must pass it.
  */
-internal fun parseManifest(payload: String, currentVersion: String = ""): UpdateInfo? {
+internal fun parseManifest(
+    payload: String,
+    currentVersion: String = "",
+    supportedAbis: List<String> = emptyList(),
+): UpdateInfo? {
     val root = runCatching { manifestJson.parseToJsonElement(payload) }.getOrNull()
         as? JsonObject ?: return null
 
@@ -413,23 +470,10 @@ internal fun parseManifest(payload: String, currentVersion: String = ""): Update
         it.startsWith("https://") || it.startsWith("http://")
     }
 
-    val androidElement = platforms["android"]
-    if (androidElement == null) {
-        return UpdateInfo(
-            current = currentVersion,
-            latest = latest,
-            // No APK in this release: nothing to offer, so nothing to nag about.
-            available = false,
-            notesUrl = notesUrl,
-            assetName = null,
-            assetUrl = null,
-            assetSize = null,
-            sha256 = null,
-        )
-    }
-    // Present but not an object (`"android": "x.apk"`): a broken document, not
-    // a "no APK" release, so the API fallback gets a chance instead.
-    val android = androidElement as? JsonObject ?: return null
+    // No Android entry means this document says nothing about phones. That is
+    // not proof that no APK was published (the generator may have missed it),
+    // so it is treated as unusable and the API gets the final word.
+    val android = selectAndroidEntry(platforms, supportedAbis) ?: return null
 
     val name = android.stringOrNull("name")?.trim().orEmpty()
     if (name.isEmpty()) return null
@@ -533,14 +577,26 @@ object UpdateChecker {
         val http = client ?: client(timeoutMs, timeoutMs)
 
         // 1. The manifest: one small request that also carries the checksums.
+        // A multi-APK release publishes `android-<abi>` keys, so the device
+        // ABI list decides which entry is the right one.
         fetchBody(http, manifestUrl, manifestHeaders)
-            ?.let { body -> parseManifest(body, currentVersion) }
+            ?.let { body -> parseManifest(body, currentVersion, deviceAbis()) }
             ?.let { info -> return@withContext info }
 
-        // 2. Fallback: releases published before the manifest existed.
+        // 2. Fallback: releases published before the manifest existed, or a
+        // manifest that could not be trusted (including one without an
+        // Android entry). The API is the final authority on "up to date".
         fetchBody(http, apiUrl, jsonHeaders)
             ?.let { body -> parseRelease(body, currentVersion, preferredAbis) }
     }
+
+    /**
+     * Device ABIs for manifest entry selection. The read is guarded because
+     * JVM unit tests see the stub `android.os.Build`, where the field is
+     * absent — a check must degrade to "no ABI hint", never crash.
+     */
+    private fun deviceAbis(): List<String> =
+        runCatching { Build.SUPPORTED_ABIS.toList() }.getOrDefault(emptyList())
 
     /**
      * Downloads [UpdateInfo.assetUrl] into `cacheDir/updates/` and verifies its
