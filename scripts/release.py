@@ -453,6 +453,8 @@ def build_latest_manifest(
     version: str,
     tag: str,
     slug: str,
+    *,
+    sign_key: Path | None = None,
 ) -> AssetSpec:
     """
     Write ``latest.json`` describing *assets* and return it as an asset.
@@ -482,6 +484,13 @@ def build_latest_manifest(
         repo=slug,
         notes_url=payload["html_url"],
     )
+    if sign_key is not None:
+        try:
+            seed = sign_key.read_text(encoding="ascii").strip()
+            document = builder.sign_document(document, seed)
+        except Exception as exc:  # noqa: BLE001 - any failure aborts
+            raise ReleaseError(f"cannot sign latest.json: {exc}") from exc
+        print(f"==> latest.json signed (key id {document.get('key_id')})")
     target = release_dir / "latest.json"
     target.write_bytes(builder.manifest_bytes(document))
     print(f"==> latest.json: {len(document['platforms'])} platform(s) for v{version}")
@@ -1114,7 +1123,11 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     )
     # The updater manifest is rebuilt from the assets that actually exist, so
     # a missing platform shows up as a missing entry instead of a stale URL.
-    content.append(build_latest_manifest(content, release_dir, version, tag, slug))
+    content.append(
+        build_latest_manifest(
+            content, release_dir, version, tag, slug, sign_key=args.sign_key
+        )
+    )
     audit_release_content(content)
     sums_path = release_dir / "SHA256SUMS.txt"
     lines = merge_sums(sums_path, [(asset.name, asset.sha256) for asset in content])
@@ -1201,6 +1214,16 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-build",
         action="store_true",
         help="reuse the existing dist/release bundle directory",
+    )
+    parser.add_argument(
+        "--sign-key",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "sign latest.json with the 32-byte Ed25519 seed in PATH "
+            "(clients only verify once the public key is trusted)"
+        ),
     )
     parser.add_argument(
         "--skip-android",

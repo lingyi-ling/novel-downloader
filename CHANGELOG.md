@@ -1,3 +1,14 @@
+## Unreleased
+
+### Feat
+
+- **updater**: 更新清单签名机制（默认关闭）——`latest.json` 可用 Ed25519 签名，客户端在配置了可信公钥后**拒绝**未签名、未知密钥或签名不符的清单。私钥不进仓库（`--keygen` 写到指定路径、权限 0600），启用步骤写在 `AGENTS.md`。默认 `TRUSTED_UPDATE_KEYS` 为空，行为与现在完全一致
+- **build**: `release.py` 新增 `--sign-key`，发版时直接产出签名清单；`--check --public-key` 可在维护流程中复核签名
+
+### Test
+
+- 新增 `tests/test_build_update_manifest.py`（30 例：清单构建、目标键映射、URL 必须指向当前 tag、严格 diff、签名往返与篡改检测、CLI 退出码）与客户端签名校验用例；全仓 8815 passed
+
 ## v1.5.1 (2026-11-05)
 
 ### Feat

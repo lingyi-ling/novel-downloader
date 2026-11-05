@@ -1553,3 +1553,38 @@ class TestAlignmentGate:
 
         assert release.main(["--skip-build", "--repo", SLUG]) == 0
         assert [path.name for path in seen] == ["app-release.apk"]
+
+
+class TestManifestSigning:
+    def test_signs_latest_json_when_a_key_is_given(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        tmp_path: Path,
+    ) -> None:
+        root, sub, http = harness
+        release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
+        seed, public = release._manifest_builder().generate_keypair()
+        key = tmp_path / "update.key"
+        key.write_text(seed, encoding="ascii")
+
+        _route_tag_steps(sub, local=False, remote=False)
+        _route_publish(
+            http, (*ZIP_NAMES, "SHA256SUMS.txt", "manifest.json", "latest.json")
+        )
+
+        rc = release.main(
+            [
+                "--skip-build",
+                "--skip-android",
+                "--repo",
+                SLUG,
+                "--sign-key",
+                str(key),
+            ]
+        )
+
+        assert rc == 0
+        document = json.loads((release_dir / "latest.json").read_text(encoding="utf-8"))
+        assert document["key_id"]
+        assert release._manifest_builder().verify_document(document, public)

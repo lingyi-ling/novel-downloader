@@ -64,7 +64,19 @@ git push origin main
 - 每个 release 附带 `latest.json`，由 `scripts/build_update_manifest.py` 从**实际资产**重建
 - 稳定端点：`https://github.com/lingyi-ling/novel-downloader/releases/latest/download/latest.json`
 - 客户端（桌面/CLI/安卓）优先读它，GitHub API 作为回退
-- 清单尚未签名：信任锚是 HTTPS + 每个资产的 SHA-256。加签名需要一对 Ed25519 密钥，私钥**绝不能进仓库**
+- 清单签名**机制已就绪但尚未启用**（`updater.TRUSTED_UPDATE_KEYS` 为空）：
+
+  ```bash
+  # 1. 生成密钥对（私钥写到你指定的路径，权限 0600）
+  python scripts/build_update_manifest.py --keygen ~/.novel_downloader/update.key
+  # 2. 把输出的 public key 十六进制填进
+  #    src/novel_downloader/apps/common/updater.py 的 TRUSTED_UPDATE_KEYS
+  #    （键是输出的 key id）
+  # 3. 发版时让 release.py 带上 --sign-key（或手动对 latest.json 签名）
+  ```
+
+  启用后，客户端**拒绝**未签名或用未知密钥签名的清单，并回退 GitHub API。
+  私钥丢失 = 无法再签新清单，客户端只能走 API 回退，因此务必离线备份。
 
 ## 硬性约束
 

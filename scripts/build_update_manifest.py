@@ -40,6 +40,8 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -220,7 +222,7 @@ def diff_manifests(actual: dict[str, Any], expected: dict[str, Any]) -> list[str
     """Human-readable differences, empty when the two documents agree."""
     problems: list[str] = []
     for field in sorted(set(actual) | set(expected)):
-        if field == "platforms":
+        if field in {"platforms", "signature", "key_id"}:
             continue
         if actual.get(field) != expected.get(field):
             problems.append(
@@ -262,12 +264,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--release-json",
         type=Path,
-        required=True,
+        default=None,
         help="GitHub release payload (a file containing the API response)",
     )
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--tag", required=True)
-    parser.add_argument("--repo", required=True, help="owner/name")
+    parser.add_argument("--version", default=None)
+    parser.add_argument("--tag", default=None)
+    parser.add_argument("--repo", default=None, help="owner/name")
     parser.add_argument("--notes-url", default=None)
     parser.add_argument("--pub-date", default=None)
     parser.add_argument(
@@ -280,7 +282,54 @@ def main(argv: list[str] | None = None) -> int:
         metavar="EXISTING",
         help="compare against an existing manifest instead of writing",
     )
+    parser.add_argument(
+        "--sign-key",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="sign the manifest with the 32-byte Ed25519 seed in PATH",
+    )
+    parser.add_argument(
+        "--keygen",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="write a fresh Ed25519 seed to PATH and print its public key",
+    )
+    parser.add_argument(
+        "--public-key",
+        default=None,
+        metavar="HEX",
+        help="with --check, also verify the existing manifest signature",
+    )
     args = parser.parse_args(argv)
+
+    if args.keygen is not None:
+        seed, public = generate_keypair()
+        try:
+            args.keygen.parent.mkdir(parents=True, exist_ok=True)
+            args.keygen.write_text(seed + chr(10), encoding="ascii")
+            args.keygen.chmod(0o600)
+        except OSError as exc:
+            print(f"error: cannot write {args.keygen}: {exc}", file=sys.stderr)
+            return 1
+        print(f"private seed: {args.keygen} (keep it out of the repository)")
+        print(f"public key  : {public}")
+        print(f"key id      : {key_id(public)}")
+        return 0
+
+    missing = [
+        flag
+        for flag, value in (
+            ("--release-json", args.release_json),
+            ("--version", args.version),
+            ("--tag", args.tag),
+            ("--repo", args.repo),
+        )
+        if value in (None, "")
+    ]
+    if missing:
+        parser.error("the following arguments are required: " + ", ".join(missing))
 
     try:
         release = _load_json(args.release_json)
@@ -307,11 +356,28 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    if args.sign_key is not None:
+        try:
+            seed = args.sign_key.read_text(encoding="ascii").strip()
+            document = sign_document(document, seed)
+        except (OSError, ManifestError) as exc:
+            print(f"error: cannot sign: {exc}", file=sys.stderr)
+            return 1
+
     if args.check is not None:
         try:
             existing = _load_json(args.check)
         except ManifestError as exc:
             print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.public_key is not None and not verify_document(
+            existing, args.public_key
+        ):
+            print(
+                "stale: the existing manifest signature does not verify against "
+                "the given public key",
+                file=sys.stderr,
+            )
             return 1
         problems = diff_manifests(existing, document)
         if problems:
@@ -341,3 +407,76 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# ---------------------------------------------------------------------------
+# signing (optional)
+# ---------------------------------------------------------------------------
+
+#: Length of the ``key_id`` prefix (hex chars of the public-key digest).
+_KEY_ID_LEN = 16
+
+
+def key_id(public_hex: str) -> str:
+    """A short, stable identifier for a public key."""
+    return hashlib.sha256(bytes.fromhex(public_hex)).hexdigest()[:_KEY_ID_LEN]
+
+
+def _signing_bytes(document: dict[str, Any]) -> bytes:
+    """The bytes a signature covers: the document without its signature."""
+    payload = {k: v for k, v in document.items() if k not in {"signature", "key_id"}}
+    return canonical_bytes(payload)
+
+
+def generate_keypair() -> tuple[str, str]:
+    """Return ``(private_seed_hex, public_key_hex)`` for a fresh Ed25519 key."""
+    from Crypto.PublicKey import ECC
+
+    key = ECC.generate(curve="ed25519")
+    seed = key.seed.hex()
+    public = key.public_key().export_key(format="raw").hex()
+    return seed, public
+
+
+def sign_document(document: dict[str, Any], private_seed_hex: str) -> dict[str, Any]:
+    """
+    Return a copy of *document* with ``signature`` and ``key_id`` added.
+
+    The signature covers the canonical JSON of the document **without** those
+    two fields, so a client can recompute the same bytes after parsing.
+    """
+    from Crypto.Signature import eddsa
+
+    try:
+        seed = bytes.fromhex(private_seed_hex.strip())
+    except ValueError as exc:
+        raise ManifestError(f"signing key is not hex: {exc}") from exc
+    if len(seed) != 32:
+        raise ManifestError(
+            f"signing key must be a 32-byte seed (64 hex chars), got {len(seed)}"
+        )
+
+    private = eddsa.import_private_key(seed)
+    signature = eddsa.new(private, "rfc8032").sign(_signing_bytes(document))
+    public_hex = private.public_key().export_key(format="raw").hex()
+
+    signed = dict(document)
+    signed["key_id"] = key_id(public_hex)
+    signed["signature"] = base64.b64encode(signature).decode("ascii")
+    return signed
+
+
+def verify_document(document: dict[str, Any], public_hex: str) -> bool:
+    """Whether *document* carries a valid signature from *public_hex*."""
+    from Crypto.Signature import eddsa
+
+    encoded = document.get("signature")
+    if not isinstance(encoded, str):
+        return False
+    try:
+        signature = base64.b64decode(encoded, validate=True)
+        public = eddsa.import_public_key(bytes.fromhex(public_hex.strip()))
+        eddsa.new(public, "rfc8032").verify(_signing_bytes(document), signature)
+    except Exception:  # noqa: BLE001 - any failure means "not verified"
+        return False
+    return True

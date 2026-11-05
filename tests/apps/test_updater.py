@@ -1023,3 +1023,125 @@ class TestCheckForUpdatePrefersTheManifest:
         )
 
         assert result.source == "api"
+
+
+# ---------------------------------------------------------------------------
+# manifest signatures
+# ---------------------------------------------------------------------------
+
+
+def _sign_manifest(document: dict[str, Any], seed: bytes) -> tuple[dict[str, Any], str]:
+    """Sign *document* the same way scripts/build_update_manifest.py does."""
+    import base64
+
+    from Crypto.Signature import eddsa
+
+    body = {k: v for k, v in document.items() if k not in {"signature", "key_id"}}
+    payload = json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    private = eddsa.import_private_key(seed)
+    signature = eddsa.new(private, "rfc8032").sign(payload)
+    public = private.public_key().export_key(format="raw").hex()
+    key_id = hashlib.sha256(bytes.fromhex(public)).hexdigest()[:16]
+    signed = dict(document)
+    signed["key_id"] = key_id
+    signed["signature"] = base64.b64encode(signature).decode("ascii")
+    return signed, public
+
+
+def _seed() -> bytes:
+    return bytes(range(32))
+
+
+class TestManifestSignature:
+    def test_unsigned_is_accepted_while_no_key_is_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(updater, "TRUSTED_UPDATE_KEYS", {})
+
+        info = updater.parse_update_manifest(
+            _manifest(**{"windows-x64-installer": _entry("setup.exe")}),
+            current="1.0.0",
+            platform_tag="windows-x64",
+        )
+
+        assert info.latest == "9.9.9"
+
+    def test_a_valid_signature_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        signed, public = _sign_manifest(
+            _manifest(**{"windows-x64-installer": _entry("setup.exe")}), _seed()
+        )
+        monkeypatch.setattr(updater, "TRUSTED_UPDATE_KEYS", {signed["key_id"]: public})
+
+        info = updater.parse_update_manifest(
+            signed, current="1.0.0", platform_tag="windows-x64"
+        )
+
+        assert info.available is True
+
+    def test_an_unsigned_manifest_is_rejected_once_a_key_is_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, public = _sign_manifest(_manifest(), _seed())
+        monkeypatch.setattr(updater, "TRUSTED_UPDATE_KEYS", {"deadbeef": public})
+
+        with pytest.raises(ValueError, match="not signed"):
+            updater.parse_update_manifest(
+                _manifest(**{"windows-x64-installer": _entry("setup.exe")}),
+                current="1.0.0",
+                platform_tag="windows-x64",
+            )
+
+    def test_a_tampered_manifest_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        signed, public = _sign_manifest(
+            _manifest(**{"windows-x64-installer": _entry("setup.exe")}), _seed()
+        )
+        monkeypatch.setattr(updater, "TRUSTED_UPDATE_KEYS", {signed["key_id"]: public})
+        signed["version"] = "0.0.1"
+
+        with pytest.raises(ValueError, match="does not verify"):
+            updater.parse_update_manifest(
+                signed, current="1.0.0", platform_tag="windows-x64"
+            )
+
+    def test_an_unknown_key_id_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        signed, _ = _sign_manifest(
+            _manifest(**{"windows-x64-installer": _entry("setup.exe")}), _seed()
+        )
+        monkeypatch.setattr(
+            updater, "TRUSTED_UPDATE_KEYS", {"0000000000000000": "ab" * 32}
+        )
+
+        with pytest.raises(ValueError, match="unknown key"):
+            updater.parse_update_manifest(
+                signed, current="1.0.0", platform_tag="windows-x64"
+            )
+
+    def test_check_for_update_falls_back_when_the_signature_is_bad(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        signed, public = _sign_manifest(
+            _manifest(**{"windows-x64-installer": _entry("setup.exe")}), _seed()
+        )
+        monkeypatch.setattr(updater, "TRUSTED_UPDATE_KEYS", {signed["key_id"]: public})
+        signed["version"] = "0.0.1"  # invalidates the signature
+
+        def opener(url: str, timeout: float) -> Any:
+            if url.endswith("latest.json"):
+                return signed
+            return {"tag_name": "v9.9.9", "assets": []}
+
+        result = updater.check_for_update(
+            "1.0.0", platform_tag="windows-x64", opener=opener
+        )
+
+        assert result.source == "api"
+        assert result.info is not None
+        assert result.info.latest == "9.9.9"

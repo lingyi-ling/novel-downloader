@@ -29,6 +29,7 @@ there: nothing here executes, unpacks or replaces a running program.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -50,6 +51,7 @@ __all__ = [
     "UpdateCheck",
     "UpdateInfo",
     "MANIFEST_SCHEMA",
+    "TRUSTED_UPDATE_KEYS",
     "check_due",
     "check_for_update",
     "fetch_latest_release",
@@ -60,6 +62,7 @@ __all__ = [
     "release_api_url",
     "save_update_state",
     "select_manifest_asset",
+    "verify_manifest_signature",
     "detect_platform",
     "download_asset",
     "is_newer",
@@ -813,6 +816,8 @@ def parse_update_manifest(
     future format may move the digest, and silently reading it the old way
     would defeat the checksum.
     """
+    verify_manifest_signature(payload)
+
     schema = payload.get("schema")
     if schema != MANIFEST_SCHEMA:
         raise ValueError(f"unsupported manifest schema: {schema!r}")
@@ -855,3 +860,48 @@ def fetch_update_manifest(
     except Exception:  # noqa: BLE001 - an update check must never raise
         return None
     return payload if isinstance(payload, dict) else None
+
+
+#: Public keys (``key_id`` -> hex) whose manifest signatures are trusted.
+#:
+#: Empty by default: manifests are then accepted unsigned, exactly like before
+#: signatures existed.  Once a key is added here, an unsigned or wrongly
+#: signed manifest is rejected outright -- otherwise an attacker who controls
+#: the repository could simply strip the signature and fall back to the API.
+TRUSTED_UPDATE_KEYS: Mapping[str, str] = {}
+
+
+def _manifest_signing_bytes(payload: Mapping[str, Any]) -> bytes:
+    """Canonical bytes a signature covers (mirrors the build script)."""
+    body = {k: v for k, v in payload.items() if k not in {"signature", "key_id"}}
+    return json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def verify_manifest_signature(payload: Mapping[str, Any]) -> None:
+    """
+    Check a manifest signature when trusted keys are configured.
+
+    :raises ValueError: when a key is configured and the signature is missing,
+        from an unknown key, or does not verify.
+    """
+    if not TRUSTED_UPDATE_KEYS:
+        return
+
+    key_id = payload.get("key_id")
+    signature = payload.get("signature")
+    if not isinstance(key_id, str) or not isinstance(signature, str):
+        raise ValueError("manifest is not signed but a trusted key is configured")
+    public_hex = TRUSTED_UPDATE_KEYS.get(key_id)
+    if public_hex is None:
+        raise ValueError(f"manifest is signed with an unknown key: {key_id!r}")
+
+    try:
+        from Crypto.Signature import eddsa
+
+        raw = base64.b64decode(signature, validate=True)
+        public = eddsa.import_public_key(bytes.fromhex(public_hex))
+        eddsa.new(public, "rfc8032").verify(_manifest_signing_bytes(payload), raw)
+    except Exception as exc:  # noqa: BLE001 - any failure is a rejection
+        raise ValueError(f"manifest signature does not verify: {exc}") from exc
