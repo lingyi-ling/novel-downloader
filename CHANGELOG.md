@@ -1,3 +1,24 @@
+## v1.5.2 (2026-11-06)
+
+### Fix
+
+- **updater**: 清单把 OS 写死成 Windows——Linux/macOS 资产会被标成 Windows，同版本双 OS 发布直接建清单失败；现从文件名解析 OS，多 APK 生成 `android-<abi>` 键（单 APK 仍是 `android`），不再互相抢占
+- **updater**: 构建清单失败抛的是 `ManifestError` 而非 `ReleaseError`，用户看到 traceback 而不是干净的退出码；已统一包装
+- **build**: `--version` 可与 `__version__` 分裂——产物按 `__version__` 构建、发布目录按 `--version` 查找，可能把上一轮的资产挂到新 tag 下。现在启动即比对，并校验 Android `versionName`，发布前还要求工作区干净（`--allow-dirty` 可跳过）
+- **build**: 清单里的 URL 在发布路径上从未被校验——现在逐条比对是否指向当前 tag，且 `latest.json` 必须带远端 digest，否则中止
+- **build**: 发布上多余资产此前被静默保留且文档声称「精确一致」——现在文档改为如实描述，并在发现多余资产时打印警告（不自动删除）
+- **android**: 清单缺 `android` 条目时被判为「无更新」且记录 24h 节流，导致有包也永久漏更；现在返回空结果回退 GitHub API 再确认。同时支持多 ABI 清单键，按设备 ABI 选择
+- **cli**: 交互模式下载更新时，若发布方未提供 SHA-256 仍会下载（只有 `--yes` 会拒绝）——现在两条路径一致：无法校验就不下载，引导到发布页手动获取
+- **desktop**: 有更新但当前平台没有对应包时，更新条只隐藏按钮、不说明原因；现改为明确文案并高亮「发布说明」
+
+### Docs
+
+- 文档全面对齐代码：CLI 子命令 12→14（补 `batch`、`update`）、`download --strict`、JSON 契约新增 `failed`/`latency_ms`/`http_status`/`update` 八字段、书源字段表补 9 个新 DSL 键并删除英文版「规则不支持节流参数」的错误说法、`configuration` 补 `update_check`、`android-app` 补内置更新与 16 KB 对齐、`security` 补更新链威胁模型、`recipes` 把 `batch` 列为批量下载首选、官网文案与子命令数同步、英文 README 补三节并把链接改到 en 版
+
+### Test
+
+- 新增 `tests/test_build_update_manifest.py`（30 例）、清单签名与 fail-closed 用例、发布端版本/清单/多余资产的用例；Android 222 项、Python 8818 项全绿
+
 ## Unreleased
 
 ### Feat
