@@ -464,7 +464,7 @@ msgstr "确定要删除内部状态吗?"
 #: src/novel_downloader/apps/cli/commands/clean.py:441
 #: src/novel_downloader/apps/cli/commands/music.py:579
 #: src/novel_downloader/apps/cli/commands/storage.py:282
-#: src/novel_downloader/apps/cli/commands/update.py:289
+#: src/novel_downloader/apps/cli/commands/update.py:290
 #: src/novel_downloader/apps/cli/interactive.py:84
 #: src/novel_downloader/apps/cli/interactive.py:103
 #: src/novel_downloader/apps/cli/ui.py:452
@@ -1642,7 +1642,7 @@ msgid "song"
 msgstr "歌曲"
 
 #: src/novel_downloader/apps/cli/commands/music.py:617
-#: src/novel_downloader/apps/cli/commands/update.py:295
+#: src/novel_downloader/apps/cli/commands/update.py:296
 #, python-brace-format
 msgid "Download failed: {error}"
 msgstr "下载失败：{error}"
@@ -2115,19 +2115,19 @@ msgstr "已是最新版本（v{version}）。"
 msgid "A newer version is available."
 msgstr "有新版本可用。"
 
-#: src/novel_downloader/apps/cli/commands/update.py:275
+#: src/novel_downloader/apps/cli/commands/update.py:276
 #, python-brace-format
 msgid ""
 "The release provides no SHA-256 digest for {name}, so the download was "
 "not verified. Download it manually from {url}."
 msgstr "该版本没有为 {name} 提供 SHA-256 校验值，因此未自动下载。请手动前往 {url} 下载。"
 
-#: src/novel_downloader/apps/cli/commands/update.py:287
+#: src/novel_downloader/apps/cli/commands/update.py:288
 #, python-brace-format
 msgid "Download {name} now?"
 msgstr "现在下载 {name} 吗？"
 
-#: src/novel_downloader/apps/cli/commands/update.py:306
+#: src/novel_downloader/apps/cli/commands/update.py:307
 #, python-brace-format
 msgid "Downloaded and verified: {path}"
 msgstr "已下载并校验：{path}"
