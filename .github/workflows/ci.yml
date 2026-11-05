@@ -129,11 +129,9 @@ jobs:
     name: Android unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Kotlin changes ship inside the APK and have no other CI coverage.  The
-    # job is advisory for now: Chaquopy's Gradle plugin needs a Python
-    # toolchain on the runner, and a red badge is preferable to blocking every
-    # unrelated change while that dependency settles.
-    continue-on-error: true
+    # Kotlin changes ship inside the APK and have no other CI coverage, so a
+    # regression here must block: the first runs confirmed the runner has
+    # everything the Chaquopy plugin needs.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
