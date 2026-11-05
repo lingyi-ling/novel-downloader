@@ -124,3 +124,26 @@ jobs:
           python scripts/update_po.py
       - name: Fail if catalogs are stale
         run: git diff --exit-code -- src/novel_downloader/locales
+
+  android:
+    name: Android unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Kotlin changes ship inside the APK and have no other CI coverage.  The
+    # job is advisory for now: Chaquopy's Gradle plugin needs a Python
+    # toolchain on the runner, and a red badge is preferable to blocking every
+    # unrelated change while that dependency settles.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+      - name: Unit tests
+        working-directory: android
+        run: ./gradlew testDebugUnitTest --no-daemon --console=plain
