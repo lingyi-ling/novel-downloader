@@ -278,10 +278,34 @@ if (starsEl) {
 }
 const releaseEl = $("#gh-release");
 if (releaseEl) {
-  ghJson("/repos/lingyi-ling/novel-downloader/releases/latest", "gh-release")
-    .then((d) => {
-      if (!d.tag_name) return;
-      const ver = String(d.tag_name).replace(/^v/, "");
+  // The updater manifest is a tiny, cacheable document published with every
+  // release; the GitHub API is only the fallback (it is rate limited and its
+  // response is much larger).
+  const MANIFEST_URL =
+    "https://github.com/lingyi-ling/novel-downloader/releases/latest/download/latest.json";
+
+  async function latestVersion() {
+    try {
+      const resp = await fetch(MANIFEST_URL, { cache: "no-cache" });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data && typeof data.version === "string" && data.version) {
+          return data.version;
+        }
+      }
+    } catch {
+      /* offline or blocked: fall through to the API */
+    }
+    const d = await ghJson(
+      "/repos/lingyi-ling/novel-downloader/releases/latest",
+      "gh-release",
+    );
+    return String(d.tag_name || "").replace(/^v/, "");
+  }
+
+  latestVersion()
+    .then((ver) => {
+      if (!ver) return;
       const n = document.getElementById("gh-release-n");
       if (n) {
         n.textContent = ver;
@@ -297,7 +321,9 @@ if (releaseEl) {
           const data = JSON.parse(ld.textContent);
           data.softwareVersion = ver;
           ld.textContent = JSON.stringify(data);
-        } catch { /* leave the static value */ }
+        } catch {
+          /* leave the static value */
+        }
       }
     })
     .catch(() => {});

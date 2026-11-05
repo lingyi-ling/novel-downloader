@@ -53,9 +53,22 @@ git push origin main
 - `CHANGELOG.md` 顶部维护 `## Unreleased`，发版时改为 `## vX.Y.Z (YYYY-MM-DD)`
 - `scripts/release.py` 幂等：已有 tag/release/资产按 SHA-256 跳过或替换，`--skip-build` 可断点续跑，`--dry-run` 只打印计划
 
+### 发布前的三道硬门禁（都在 `release.py` 里，失败即中止，不打 tag）
+
+1. **16 KB 页对齐**（`scripts/check_android_alignment.py`）：zip 条目偏移 + ELF `PT_LOAD.p_align` 两项都要满足，否则 Android 15+ 的 16 KB 设备装得上、打不开。
+2. **资产泄漏审计**（`scripts/audit_release_assets.py`）：允许清单、归档成员路径、原始字节标记（含 96 字节跨块重叠），命中只报标记名不回显明文。
+3. **发布后校验**（`verify_assets`）：重读 release，逐个核对资产存在且 digest 与本地一致。
+
+### 更新清单
+
+- 每个 release 附带 `latest.json`，由 `scripts/build_update_manifest.py` 从**实际资产**重建
+- 稳定端点：`https://github.com/lingyi-ling/novel-downloader/releases/latest/download/latest.json`
+- 客户端（桌面/CLI/安卓）优先读它，GitHub API 作为回退
+- 清单尚未签名：信任锚是 HTTPS + 每个资产的 SHA-256。加签名需要一对 Ed25519 密钥，私钥**绝不能进仓库**
+
 ## 硬性约束
 
 - 提交信息用 conventional commits（`feat(scope):` / `fix(scope):` / `docs:` / `test:` / `build:`）
-- 不提交任何凭据、token、密码、keystore
+- 不提交任何凭据、token、密码、keystore、签名私钥
 - 破坏性操作（改写历史、强推、删除 release）需先征得用户同意
 - 新增用户可见字符串必须走 `t()` 并补 `zh_CN` 翻译，否则 `test_i18n_coverage` 会失败

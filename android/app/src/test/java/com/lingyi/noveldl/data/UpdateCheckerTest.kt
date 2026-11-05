@@ -252,6 +252,224 @@ class UpdateCheckerTest {
     }
 
     // ------------------------------------------------------------------
+    // Updater manifest (`latest.json`)
+    // ------------------------------------------------------------------
+
+    /** Digest of the real 1.5.0 Android APK, taken from the published manifest. */
+    private val apkSha = "7133f789a9a3b43d8aae5897fd41f62a5e91d45dba6f82d80fcc4e5a2cce0ac7"
+
+    private val apkUrl =
+        "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.5.0/" +
+            "novel-downloader-1.5.0-android.apk"
+
+    private fun androidEntry(
+        name: String? = "novel-downloader-1.5.0-android.apk",
+        url: String? = apkUrl,
+        sha256: String? = apkSha,
+        size: Long? = 62_714_163L,
+    ): String {
+        val fields = buildList {
+            name?.let { add("\"name\": \"$it\"") }
+            sha256?.let { add("\"sha256\": \"$it\"") }
+            size?.let { add("\"size\": $it") }
+            url?.let { add("\"url\": \"$it\"") }
+        }
+        return "\"android\": {" + fields.joinToString(",") + "}"
+    }
+
+    private val windowsEntry = """
+        "windows-x64-portable": {
+          "name": "novel-downloader-1.5.0-windows-x64.zip",
+          "sha256": "${"b".repeat(64)}",
+          "size": 1234,
+          "url": "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.5.0/portable.zip"
+        }
+    """.trimIndent()
+
+    private fun manifest(
+        schema: Int = 1,
+        version: String = "1.5.0",
+        platforms: String = androidEntry(),
+        withSchema: Boolean = true,
+    ): String = buildString {
+        append("{\n")
+        if (withSchema) append("  \"schema\": $schema,\n")
+        append("  \"version\": \"$version\",\n")
+        append("  \"tag\": \"v$version\",\n")
+        append("  \"repo\": \"lingyi-ling/novel-downloader\",\n")
+        append("  \"notes_url\": ")
+        append("\"https://github.com/lingyi-ling/novel-downloader/releases/tag/v$version\",\n")
+        append("  \"platforms\": {\n$platforms\n  }\n")
+        append("}")
+    }
+
+    @Test
+    fun manifestMapsOntoUpdateInfo() {
+        // The real published document also carries the Windows targets; the
+        // Android client must ignore them and pick `platforms["android"]`.
+        val payload = manifest(platforms = androidEntry() + ",\n" + windowsEntry)
+
+        val info = parseManifest(payload, "1.4.1")!!
+
+        assertEquals("1.4.1", info.current)
+        assertEquals("1.5.0", info.latest)
+        assertTrue(info.available)
+        assertEquals(
+            "https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.5.0",
+            info.notesUrl,
+        )
+        assertEquals("novel-downloader-1.5.0-android.apk", info.assetName)
+        assertEquals(
+            "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.5.0/" +
+                "novel-downloader-1.5.0-android.apk",
+            info.assetUrl,
+        )
+        assertEquals(62_714_163L, info.assetSize)
+        assertEquals(
+            "7133f789a9a3b43d8aae5897fd41f62a5e91d45dba6f82d80fcc4e5a2cce0ac7",
+            info.sha256,
+        )
+        // The parsed info passes the download pre-flight unchanged.
+        assertNull(downloadRequestFailure(info))
+    }
+
+    @Test
+    fun manifestSchemaMustBeExactlyOne() {
+        // A future format may move the digest; guessing would defeat the
+        // checksum, so the whole document is rejected and the API is used.
+        assertNull(parseManifest(manifest(schema = 2), "1.4.1"))
+        assertNull(parseManifest(manifest(schema = 0), "1.4.1"))
+        assertNull(parseManifest(manifest(schema = 1).replace("\"schema\": 1", "\"tag\": \"v1.5.0\""), "1.4.1"))
+        assertNull(parseManifest("", "1.4.1"))
+        assertNull(parseManifest("not json", "1.4.1"))
+        assertNull(parseManifest("[]", "1.4.1"))
+    }
+
+    @Test
+    fun manifestWithoutPlatformsIsRejected() {
+        // No platform map at all is a malformed document, not "no APK": the
+        // API fallback still has a chance to provide a usable asset.
+        assertNull(
+            parseManifest(
+                """
+                {"schema":1,"version":"1.5.0",
+                 "notes_url":"https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.5.0"}
+                """.trimIndent(),
+                "1.4.1",
+            ),
+        )
+        assertNull(parseManifest(manifest(platforms = ""), "1.4.1"))
+        assertNull(
+            parseManifest("""{"schema":1,"version":"1.5.0","platforms":[]}""", "1.4.1"),
+        )
+        // A manifest without a version cannot be compared to anything.
+        assertNull(
+            parseManifest("""{"schema":1,"platforms":{"android":{}}}""", "1.4.1"),
+        )
+    }
+
+    @Test
+    fun manifestWithoutAndroidEntryMeansNoAndroidPackage() {
+        val payload = manifest(
+            platforms = """
+                "windows-x64-installer": {
+                  "name": "novel-downloader-1.5.0-windows-x64-installer.exe",
+                  "sha256": "${"b".repeat(64)}",
+                  "size": 4321,
+                  "url": "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.5.0/setup.exe"
+                }
+            """,
+        )
+
+        val info = parseManifest(payload, "1.4.1")!!
+
+        // The version is known, but this release published no APK: reporting
+        // an update here would only lead to a download that cannot succeed.
+        assertEquals("1.5.0", info.latest)
+        assertFalse(info.available)
+        assertNull(info.assetName)
+        assertNull(info.assetUrl)
+        assertNull(info.sha256)
+        assertEquals(UpdateFailure.NO_ASSET, downloadRequestFailure(info))
+        // The release notes are still usable ("what changed in 1.5.0").
+        assertEquals(
+            "https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.5.0",
+            info.notesUrl,
+        )
+    }
+
+    @Test
+    fun manifestAndroidEntryMustCarryNameHttpsUrlAndSha256() {
+        fun android(overrides: String) = manifest(platforms = overrides)
+
+        // sha256 must be 64 hex characters.
+        assertNull(
+            parseManifest(
+                android(
+                    androidEntry.replace(
+                        "7133f789a9a3b43d8aae5897fd41f62a5e91d45dba6f82d80fcc4e5a2cce0ac7",
+                        "a".repeat(63),
+                    ),
+                ),
+                "1.4.1",
+            ),
+        )
+        assertNull(
+            parseManifest(
+                android(androidEntry.replace("7133f789a9a3b43d8aae5897fd41f62a5e91d45dba6f82d80fcc4e5a2cce0ac7", "z".repeat(64))),
+                "1.4.1",
+            ),
+        )
+        // No digest at all: the API path may publish one instead.
+        assertNull(
+            parseManifest(
+                android(androidEntry.replace("""          "sha256": "7133f789a9a3b43d8aae5897fd41f62a5e91d45dba6f82d80fcc4e5a2cce0ac7",""", "")),
+                "1.4.1",
+            ),
+        )
+        // Plain http is refused even with a valid digest.
+        assertNull(
+            parseManifest(
+                android(androidEntry.replace("https://github.com", "http://github.com")),
+                "1.4.1",
+            ),
+        )
+        // A missing name or url makes the entry unusable as well.
+        assertNull(
+            parseManifest(
+                android(androidEntry.replace("""          "name": "novel-downloader-1.5.0-android.apk",""", "")),
+                "1.4.1",
+            ),
+        )
+        assertNull(
+            parseManifest(
+                android(
+                    androidEntry.replace(
+                        "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.5.0/novel-downloader-1.5.0-android.apk",
+                        "",
+                    ),
+                ),
+                "1.4.1",
+            ),
+        )
+        // `android` that is not an object is equally unusable.
+        assertNull(parseManifest(manifest(platforms = """"android": "novel-downloader.apk""""), "1.4.1"))
+    }
+
+    @Test
+    fun manifestVersionComparisonDecidesAvailability() {
+        val payload = manifest()
+
+        assertTrue(parseManifest(payload, "1.4.1")!!.available)
+        assertFalse(parseManifest(payload, "1.5.0")!!.available)
+        assertFalse(parseManifest(payload, "1.6.0")!!.available)
+        // A leading `v` in `version` is normalised like a release tag.
+        val tagged = parseManifest(manifest(version = "v1.5.0"), "1.4.1")!!
+        assertEquals("1.5.0", tagged.latest)
+        assertTrue(tagged.available)
+    }
+
+    // ------------------------------------------------------------------
     // Checksums
     // ------------------------------------------------------------------
 
