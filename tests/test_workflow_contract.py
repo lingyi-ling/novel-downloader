@@ -601,3 +601,16 @@ def test_ci_python_matrix_matches_pyproject() -> None:
                 )
             )
     assert_clean(violations)
+
+
+class TestPosixWrapper:
+    """The Linux/macOS wrapper is exercised by CI and never locally."""
+
+    def test_gradlew_does_not_embed_quotes_in_jvm_options(self) -> None:
+        # ``DEFAULT_JVM_OPTS`` is expanded unquoted, so ``'"-Xmx64m"'`` reaches
+        # java as a literal argument and the launcher looks for a main class
+        # named "-Xmx64m" (exit 1 on Linux; the .bat wrapper is unaffected).
+        script = (ROOT / "android" / "gradlew").read_text(encoding="utf-8")
+
+        assert "'\"-" not in script
+        assert 'DEFAULT_JVM_OPTS="-Xmx64m -Xms64m"' in script
