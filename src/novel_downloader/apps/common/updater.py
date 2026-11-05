@@ -662,23 +662,39 @@ def check_for_update(
     opener: Callable[[str, float], Any] | None = None,
     now: float | None = None,
 ) -> UpdateCheck:
-    """Check the release feed once and interpret it for *current*."""
-    stamp = time.time() if now is None else now
+    """
+    Check the release feed once and interpret it for *current*.
 
-    # The manifest is one small request and carries the checksum per asset;
-    # the API is the fallback for releases published before it existed.
+    The manifest is preferred: one small request, checksums included.  The API
+    is the fallback for releases published before the manifest existed -- but
+    **only while no signing key is trusted**.  Once a key is configured the
+    manifest is the sole trust anchor: an attacker who controls the repository
+    could otherwise delete the manifest (or strip its signature) and force the
+    API path, which they also control.
+    """
+    stamp = time.time() if now is None else now
+    pinned = bool(TRUSTED_UPDATE_KEYS)
+
     manifest = fetch_update_manifest(slug, timeout=timeout, opener=opener)
     if manifest is not None:
         try:
             info = parse_update_manifest(
                 manifest, current=current, platform_tag=platform_tag
             )
-        except ValueError:
+        except ValueError as exc:
+            if pinned:
+                return UpdateCheck(
+                    info=None, error=f"untrusted-manifest: {exc}", checked_at=stamp
+                )
             info = None
         if info is not None:
             return UpdateCheck(
                 info=info, error=None, checked_at=stamp, source="manifest"
             )
+    elif pinned:
+        # No manifest at all while a key is trusted: refuse to consult the
+        # API, otherwise removing one file disables signature checking.
+        return UpdateCheck(info=None, error="manifest-unavailable", checked_at=stamp)
 
     payload = fetch_latest_release(slug, timeout=timeout, opener=opener)
     if payload is None:

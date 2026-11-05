@@ -1124,24 +1124,50 @@ class TestManifestSignature:
                 signed, current="1.0.0", platform_tag="windows-x64"
             )
 
-    def test_check_for_update_falls_back_when_the_signature_is_bad(
+    def test_a_bad_signature_does_not_fall_back_to_the_api(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Deleting or tampering with the manifest must not bypass the key."""
         signed, public = _sign_manifest(
             _manifest(**{"windows-x64-installer": _entry("setup.exe")}), _seed()
         )
         monkeypatch.setattr(updater, "TRUSTED_UPDATE_KEYS", {signed["key_id"]: public})
         signed["version"] = "0.0.1"  # invalidates the signature
+        api_hits: list[str] = []
 
         def opener(url: str, timeout: float) -> Any:
             if url.endswith("latest.json"):
                 return signed
+            api_hits.append(url)
             return {"tag_name": "v9.9.9", "assets": []}
 
         result = updater.check_for_update(
             "1.0.0", platform_tag="windows-x64", opener=opener
         )
 
-        assert result.source == "api"
-        assert result.info is not None
-        assert result.info.latest == "9.9.9"
+        assert result.error is not None
+        assert result.error.startswith("untrusted-manifest")
+        assert result.available is False
+        assert api_hits == []
+
+    def test_a_missing_manifest_does_not_fall_back_when_a_key_is_pinned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, public = _sign_manifest(
+            _manifest(**{"windows-x64-installer": _entry("setup.exe")}), _seed()
+        )
+        monkeypatch.setattr(updater, "TRUSTED_UPDATE_KEYS", {"dead": public})
+        api_hits: list[str] = []
+
+        def opener(url: str, timeout: float) -> Any:
+            if url.endswith("latest.json"):
+                raise OSError("404")
+            api_hits.append(url)
+            return {"tag_name": "v9.9.9", "assets": []}
+
+        result = updater.check_for_update(
+            "1.0.0", platform_tag="windows-x64", opener=opener
+        )
+
+        assert result.error == "manifest-unavailable"
+        assert api_hits == []
