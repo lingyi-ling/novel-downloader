@@ -133,11 +133,14 @@ def make_android(root: Path) -> None:
 
 
 def make_apk(root: Path) -> Path:
-    """A gradle assembleRelease output."""
+    """A gradle assembleRelease output (a valid, empty zip)."""
+    import zipfile
+
     outputs = root / "android" / "app" / "build" / "outputs" / "apk" / "release"
     outputs.mkdir(parents=True, exist_ok=True)
     apk = outputs / "app-release.apk"
-    apk.write_bytes(APK_BYTES)
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("classes.dex", APK_BYTES)
     return apk
 
 
@@ -300,6 +303,10 @@ def harness(
     monkeypatch.setattr(release, "subprocess", sub)
     monkeypatch.setattr(urllib.request, "urlopen", http)
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    # The audit walks real bytes; its own suite covers that.  Fake assets are
+    # a few bytes long and would trip the size heuristic.  The dedicated
+    # ``TestAssetAuditGate`` below exercises the real wiring.
+    monkeypatch.setattr(release, "audit_release_content", lambda assets: None)
     return root, sub, http
 
 
@@ -314,6 +321,31 @@ def _route_tag_steps(sub: FakeSubprocess, *, local: bool, remote: bool) -> None:
     )
     sub.route(("git", "tag"))
     sub.route(("git", "push"))
+
+
+def _seed_manifest(
+    release: Any,
+    root: Path,
+    release_dir: Path,
+    *,
+    include_apks: bool = False,
+) -> Any:
+    """Bring the release dir to the state release.main would produce.
+
+    The manifest and the merged ``SHA256SUMS.txt`` are generated from the same
+    inputs, so the fake remote digests line up and an idempotent run really is
+    read-only.
+    """
+    content = release.collect_content_assets(
+        root, release_dir, VERSION, include_apks=include_apks
+    )
+    manifest = release.build_latest_manifest(content, release_dir, VERSION, TAG, SLUG)
+    content.append(manifest)
+    release.merge_sums(
+        release_dir / "SHA256SUMS.txt",
+        [(asset.name, asset.sha256) for asset in content],
+    )
+    return manifest
 
 
 def _route_publish(http: FakeHTTP, upload_names: tuple[str, ...]) -> None:
@@ -904,8 +936,12 @@ class TestMainPublish:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         root, sub, http = harness
+        release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
+        _seed_manifest(release, root, release_dir)
         _route_tag_steps(sub, local=False, remote=False)
-        _route_publish(http, (*ZIP_NAMES, "SHA256SUMS.txt", "manifest.json"))
+        _route_publish(
+            http, (*ZIP_NAMES, "SHA256SUMS.txt", "manifest.json", "latest.json")
+        )
 
         rc = release.main(["--skip-build", "--skip-android", "--repo", SLUG])
 
@@ -947,7 +983,12 @@ class TestMainPublish:
             if request["method"] == "POST" and "/assets?name=" in request["url"]
         ]
         uploaded = {request["url"].split("?name=")[1] for request in uploads}
-        assert uploaded == {*ZIP_NAMES, "SHA256SUMS.txt", "manifest.json"}
+        assert uploaded == {
+            *ZIP_NAMES,
+            "SHA256SUMS.txt",
+            "manifest.json",
+            "latest.json",
+        }
         assert all(request["data"] for request in uploads)
 
         # API calls all carry the token.
@@ -985,6 +1026,8 @@ class TestMainIdempotent:
         self, release_dir: Path, stale: str | None
     ) -> list[dict[str, Any]]:
         names = (*ZIP_NAMES, "SHA256SUMS.txt", "manifest.json")
+        if (release_dir / "latest.json").is_file():
+            names = (*names, "latest.json")
         assets = []
         for index, name in enumerate(names):
             digest = (
@@ -1001,6 +1044,7 @@ class TestMainIdempotent:
     ) -> None:
         root, sub, http = harness
         release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
+        _seed_manifest(release, root, release_dir)
         _route_tag_steps(sub, local=True, remote=True)
         http.route_json(
             "GET",
@@ -1033,6 +1077,7 @@ class TestMainIdempotent:
         root, sub, http = harness
         release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
         stale_zip = ZIP_NAMES[1]
+        _seed_manifest(release, root, release_dir)
         assets = self._assets_payload(release_dir, stale=stale_zip)
         payload = {**RELEASE_JSON, "body": "old notes", "assets": assets}
         _route_tag_steps(sub, local=True, remote=True)
@@ -1094,16 +1139,25 @@ class TestMainAndroid:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         root, sub, http = harness
+        release_dir = root / "dist" / "release" / f"novel-downloader-{VERSION}-test-x64"
         make_android(root)
         make_apk(root)
         installer = root / "dist" / SETUP_NAME
         installer.parent.mkdir(parents=True, exist_ok=True)
         installer.write_bytes(SETUP_BYTES)
+        _seed_manifest(release, root, release_dir, include_apks=True)
         sub.route_contains("assembleRelease")
         _route_tag_steps(sub, local=False, remote=False)
         _route_publish(
             http,
-            (*ZIP_NAMES, APK_NAME, SETUP_NAME, "SHA256SUMS.txt", "manifest.json"),
+            (
+                *ZIP_NAMES,
+                APK_NAME,
+                SETUP_NAME,
+                "SHA256SUMS.txt",
+                "manifest.json",
+                "latest.json",
+            ),
         )
 
         rc = release.main(["--skip-build", "--repo", SLUG])
@@ -1128,6 +1182,7 @@ class TestMainAndroid:
             SETUP_NAME,
             "SHA256SUMS.txt",
             "manifest.json",
+            "latest.json",
         }
 
         # ... and the merged SHA256SUMS.txt covers them (zip lines kept).
@@ -1141,7 +1196,17 @@ class TestMainAndroid:
         sums = sums_path.read_text(encoding="utf-8")
         for name in ZIP_NAMES:
             assert any(line.endswith(f"  {name}") for line in sums.splitlines())
-        assert f"{sha256(APK_BYTES).hexdigest()}  {APK_NAME}" in sums
+        apk_path = (
+            root
+            / "android"
+            / "app"
+            / "build"
+            / "outputs"
+            / "apk"
+            / "release"
+            / "app-release.apk"
+        )
+        assert f"{sha256(apk_path.read_bytes()).hexdigest()}  {APK_NAME}" in sums
         assert f"{sha256(SETUP_BYTES).hexdigest()}  {SETUP_NAME}" in sums
 
     def test_missing_keystore_warns_and_skips_android(
@@ -1383,3 +1448,108 @@ class TestInstallerStep:
         # Nothing was tagged or published.
         assert not any(command[:2] == ["git", "tag"] for command in sub.commands())
         assert http.requests == []
+
+
+class TestAssetAuditGate:
+    def test_a_leaking_asset_aborts_before_tagging(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root, sub, http = harness
+        sub.route_contains("assembleRelease")
+        _route_tag_steps(sub, local=False, remote=False)
+        _route_publish(http, (*ZIP_NAMES, "SHA256SUMS.txt", "manifest.json"))
+
+        def _reject(assets: list[Any]) -> None:
+            raise release.ReleaseError("release asset audit failed: boom")
+
+        monkeypatch.setattr(release, "audit_release_content", _reject)
+
+        rc = release.main(["--skip-build", "--skip-android", "--repo", SLUG])
+
+        assert rc == 2
+        assert "asset audit failed" in capsys.readouterr().err
+        assert not any(command[:2] == ["git", "tag"] for command in sub.commands())
+        assert http.requests == []
+
+    def test_the_real_gate_rejects_a_bundled_secret(
+        self, release: Any, tmp_path: Path
+    ) -> None:
+        leaky = tmp_path / "novel-cli-9.9.9-test-x64.zip"
+        import zipfile
+
+        with zipfile.ZipFile(leaky, "w") as archive:
+            archive.writestr(".env", "NOVELDL_DEPLOY_PASSWORD=hunter2")
+        asset = release.AssetSpec(
+            leaky, leaky.name, sha256(leaky.read_bytes()).hexdigest()
+        )
+
+        with pytest.raises(release.ReleaseError, match="audit failed"):
+            release.audit_release_content([asset])
+
+
+class TestAlignmentGate:
+    def test_an_unaligned_apk_aborts_before_tagging(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root, sub, http = harness
+        make_android(root)
+        make_apk(root)
+        sub.route_contains("assembleRelease")
+        _route_tag_steps(sub, local=False, remote=False)
+        _route_publish(http, (*ZIP_NAMES, APK_NAME, "SHA256SUMS.txt", "manifest.json"))
+
+        class _Unaligned:
+            @staticmethod
+            def check_apk(apk: Path) -> Any:
+                return type(
+                    "Report",
+                    (),
+                    {
+                        "ok": False,
+                        "libs": [],
+                        "errors": ["lib/arm64-v8a/libfoo.so: PT_LOAD p_align is 4096"],
+                    },
+                )()
+
+        monkeypatch.setattr(release, "_alignment_checker", lambda: _Unaligned)
+
+        rc = release.main(["--skip-build", "--repo", SLUG])
+
+        assert rc == 2
+        assert "16 KB page-size" in capsys.readouterr().err
+        assert not any(command[:2] == ["git", "tag"] for command in sub.commands())
+        assert http.requests == []
+
+    def test_a_well_aligned_apk_continues(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root, sub, http = harness
+        make_android(root)
+        make_apk(root)
+        sub.route_contains("assembleRelease")
+        _route_tag_steps(sub, local=False, remote=False)
+        _route_publish(http, (*ZIP_NAMES, APK_NAME, "SHA256SUMS.txt", "manifest.json"))
+
+        seen: list[Path] = []
+
+        class _Aligned:
+            @staticmethod
+            def check_apk(apk: Path) -> Any:
+                seen.append(apk)
+                return type("Report", (), {"ok": True, "libs": [], "errors": []})()
+
+        monkeypatch.setattr(release, "_alignment_checker", lambda: _Aligned)
+
+        assert release.main(["--skip-build", "--repo", SLUG]) == 0
+        assert [path.name for path in seen] == ["app-release.apk"]

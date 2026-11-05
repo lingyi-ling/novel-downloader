@@ -1,3 +1,26 @@
+## v1.5.0 (2026-11-05)
+
+### Feat
+
+- **updater**: 发布物自带 `latest.json` 更新清单——每个 release 附带一份小文档，列出各平台资产的确切 URL、大小与 SHA-256；客户端优先读它（`releases/latest/download/latest.json`，一次请求、不受 API 速率限制），失败时回退 GitHub API。清单由**实际资产重建**而非构建期状态，缺哪个平台就没有那条，不会指向上一版的文件
+- **updater**: 清单使用包形态专属的 key（`windows-x64-installer` / `windows-x64-portable` / `android`），从安装器安装的副本只会更新到安装器，不会被静默换成免安装包
+- **build**: 发布前的 APK 必须通过 **16 KB 页对齐**硬门禁——同时检查 zip 条目偏移（仅未压缩的 `lib/**`）与 ELF `PT_LOAD` 的 `p_align`；任何一项不达标即中止发布，不打 tag。Android 15+ 的 16 KB 设备会拒绝加载 4 KB 对齐的 `.so`，此前整条流水线都不会发现
+- **build**: 发布前的资产泄漏审计——扫描待上传产物的归档成员（`.git`、`.env`、`id_rsa`、`*.pdb`、`*.map`、路径穿越）与原始字节（`github_pat_`、`BEGIN OPENSSH PRIVATE KEY`、`storePassword=`、`NOVELDL_DEPLOY_PASSWORD` 等），分块读取并保留 96 字节重叠，命中只报标记名、不回显明文；另拒绝零字节、异常大小与未知命名
+- **ci**: 供应链契约测试——把 workflow 当规格来测：所有 `uses:` 必须 pin 到 40 位 commit SHA、禁止 `pull_request_target`、`run:` 块内禁止 `${{ }}` 插值、权限最小化、禁止 `gh release upload` / `curl | bash` / force push、checkout 不得持久化凭据、workflow 文件集合固定
+
+### Fix
+
+- **ci**: 23 个 GitHub Action 引用**全部从 tag 改为真实 commit SHA**（经 API 逐个解析并二次核对），8 个 checkout 补上 `persist-credentials: false`——tag 可变，攻击者能重写 tag 让流水线执行任意代码
+- **build**: `release.py` 现在同时构建 Inno 安装器——此前只调 `build_release.py`，安装器要另外手动补一轮，v1.4.0 首次发布因此少了 `setup.exe`
+
+### Test
+
+- 新增 `tests/test_check_android_alignment.py`（12 例，含合成 ELF/zip）、`tests/test_audit_release_assets.py`（65 例，含 96 字节跨块重叠与 100 MB 性能上限）、`tests/test_workflow_contract.py`（12 例）、`tests/test_release_script.py` 的清单/审计/对齐门禁用例；清单解析另有 17 例覆盖 schema 拒绝、形态优先级、非 https 与坏摘要
+
+### Docs
+
+- 新增 `docs/notes/fanqie-release-engineering.md`——竞品发布运维仓的完整拆解：Draft-first 发布、更新器清单与渠道别名、资产泄漏审计、16 KB 对齐、静默执行器、issue 自动化，以及每条「值得抄 / 不该抄」的判断
+
 ## v1.4.1 (2026-11-01)
 
 ### Feat

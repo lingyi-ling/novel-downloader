@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -350,6 +351,45 @@ def find_release_apks(repo_root: Path) -> list[Path]:
     return sorted(path for path in outputs.glob("*.apk") if path.is_file())
 
 
+def _alignment_checker() -> Any:
+    """Import ``scripts/check_android_alignment.py`` once."""
+    global _ALIGNMENT_MODULE
+    if _ALIGNMENT_MODULE is None:
+        spec = importlib.util.spec_from_file_location(
+            "check_android_alignment",
+            SCRIPTS_DIR / "check_android_alignment.py",
+        )
+        if spec is None or spec.loader is None:  # pragma: no cover
+            raise ReleaseError("cannot load scripts/check_android_alignment.py")
+        module = importlib.util.module_from_spec(spec)
+        # Register before executing: dataclasses resolve their module through
+        # ``sys.modules``.
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _ALIGNMENT_MODULE = module
+    return _ALIGNMENT_MODULE
+
+
+def check_apk_alignment(apk: Path) -> None:
+    """
+    Refuse to publish an APK whose native libraries are not 16 KB aligned.
+
+    Android 15+ cannot load a 4 KB-aligned ``.so`` on a 16 KB page-size
+    device: the APK installs and then crashes on launch.  A single dependency
+    built without ``-Wl,-z,max-page-size=16384`` is enough to cause it, and
+    nothing else in the pipeline would notice.
+    """
+    report = _alignment_checker().check_apk(apk)
+    if report.ok:
+        print(f"==> {apk.name}: {len(report.libs)} native lib(s) are 16 KB aligned")
+        return
+    detail = "; ".join(report.errors[:5])
+    raise ReleaseError(f"{apk.name} is not 16 KB page-size ready: {detail}")
+
+
+_ALIGNMENT_MODULE: Any = None
+
+
 def android_asset_names(version: str, apks: list[Path]) -> list[str]:
     """Release asset names for the APKs, in the same order as *apks*."""
     if len(apks) == 1:
@@ -368,7 +408,7 @@ def collect_content_assets(
     only included when the Android build ran in this release (or, for the
     dry-run preview, when a signed output is already on disk).
     """
-    metadata = {"SHA256SUMS.txt", "manifest.json"}
+    metadata = {"SHA256SUMS.txt", "manifest.json", "latest.json"}
     files = sorted(
         path
         for path in release_dir.iterdir()
@@ -388,6 +428,110 @@ def collect_content_assets(
     if installer.is_file():
         assets.append(AssetSpec(installer, installer.name, _sha256_file(installer)))
     return assets
+
+
+def _manifest_builder() -> Any:
+    """Import ``scripts/build_update_manifest.py`` once."""
+    global _MANIFEST_MODULE
+    if _MANIFEST_MODULE is None:
+        spec = importlib.util.spec_from_file_location(
+            "build_update_manifest",
+            SCRIPTS_DIR / "build_update_manifest.py",
+        )
+        if spec is None or spec.loader is None:  # pragma: no cover
+            raise ReleaseError("cannot load scripts/build_update_manifest.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _MANIFEST_MODULE = module
+    return _MANIFEST_MODULE
+
+
+def build_latest_manifest(
+    assets: list[AssetSpec],
+    release_dir: Path,
+    version: str,
+    tag: str,
+    slug: str,
+) -> AssetSpec:
+    """
+    Write ``latest.json`` describing *assets* and return it as an asset.
+
+    The document is derived from the files about to be uploaded, never from
+    build-time state: if a bundle was not built, its platform simply has no
+    entry, instead of pointing at last release's file.
+    """
+    builder = _manifest_builder()
+    payload: dict[str, Any] = {
+        "html_url": f"https://github.com/{slug}/releases/tag/{tag}",
+        "assets": [
+            {
+                "name": asset.name,
+                "browser_download_url": builder.expected_url(slug, tag, asset.name),
+                "digest": f"sha256:{asset.sha256}",
+                "size": asset.path.stat().st_size,
+            }
+            for asset in assets
+            if asset.name != "latest.json"
+        ],
+    }
+    document = builder.build_manifest(
+        payload,
+        version=version,
+        tag=tag,
+        repo=slug,
+        notes_url=payload["html_url"],
+    )
+    target = release_dir / "latest.json"
+    target.write_bytes(builder.manifest_bytes(document))
+    print(f"==> latest.json: {len(document['platforms'])} platform(s) for v{version}")
+    return AssetSpec(target, target.name, _sha256_file(target))
+
+
+_MANIFEST_MODULE: Any = None
+
+
+def _audit_module() -> Any:
+    """Import ``scripts/audit_release_assets.py`` once."""
+    global _AUDIT_MODULE
+    if _AUDIT_MODULE is None:
+        spec = importlib.util.spec_from_file_location(
+            "audit_release_assets",
+            SCRIPTS_DIR / "audit_release_assets.py",
+        )
+        if spec is None or spec.loader is None:  # pragma: no cover
+            raise ReleaseError("cannot load scripts/audit_release_assets.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _AUDIT_MODULE = module
+    return _AUDIT_MODULE
+
+
+def audit_release_content(assets: list[AssetSpec]) -> None:
+    """
+    Refuse to publish assets that leak private data or hide files.
+
+    A PyInstaller bundle can pull in a stray ``.pdb``, a ``.env`` from the
+    build directory or a token embedded in a config sample.  Nothing else in
+    the pipeline inspects the bytes, so this is a hard gate before upload.
+    """
+    result = _audit_module().audit_files([(asset.name, asset.path) for asset in assets])
+    if result.problems:
+        detail = "; ".join(
+            f"{problem.asset}: {problem.kind} ({problem.detail})"
+            for problem in result.problems[:5]
+        )
+        raise ReleaseError(
+            f"release asset audit failed ({len(result.problems)} problem(s)): {detail}"
+        )
+    print(
+        f"==> asset audit clean: {result.scanned} file(s), "
+        f"{result.python_files} bundled .py file(s)"
+    )
+
+
+_AUDIT_MODULE: Any = None
 
 
 def merge_sums(sums_path: Path, entries: list[tuple[str, str]]) -> list[str]:
@@ -956,12 +1100,22 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
                     "assembleRelease finished but no APK found under "
                     f"android/{_APK_GLOB}"
                 )
+            # Android 15+ refuses to load 4 KB-aligned native libraries on
+            # 16 KB page-size devices.  A single dependency built without
+            # -Wl,-z,max-page-size=16384 silently produces an APK that
+            # installs but crashes, so this is a hard gate, not a warning.
+            for apk in apks:
+                check_apk_alignment(apk)
             android_built = True
 
     # 3. Assets + merged checksums -------------------------------------------
     content = collect_content_assets(
         repo_root, release_dir, version, include_apks=android_built
     )
+    # The updater manifest is rebuilt from the assets that actually exist, so
+    # a missing platform shows up as a missing entry instead of a stale URL.
+    content.append(build_latest_manifest(content, release_dir, version, tag, slug))
+    audit_release_content(content)
     sums_path = release_dir / "SHA256SUMS.txt"
     lines = merge_sums(sums_path, [(asset.name, asset.sha256) for asset in content])
     print(f"==> SHA256SUMS: {len(lines)} entries in {sums_path}")

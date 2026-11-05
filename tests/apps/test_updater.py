@@ -859,3 +859,167 @@ class TestUpdateState:
 
         # ``blocker / "child"`` cannot be a directory: the save must swallow it.
         updater.save_update_state(blocker / "update.json", None, now=1.0)
+
+
+# ---------------------------------------------------------------------------
+# updater manifest
+# ---------------------------------------------------------------------------
+
+
+def _manifest(version: str = "9.9.9", **platforms: Any) -> dict[str, Any]:
+    return {
+        "schema": updater.MANIFEST_SCHEMA,
+        "version": version,
+        "tag": f"v{version}",
+        "repo": "o/r",
+        "platforms": platforms,
+    }
+
+
+def _entry(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "url": f"https://github.com/o/r/releases/download/v9.9.9/{name}",
+        "sha256": "a" * 64,
+        "size": 1234,
+    }
+
+
+class TestManifestUrl:
+    def test_points_at_the_latest_release(self) -> None:
+        assert updater.manifest_url("owner/name") == (
+            "https://github.com/owner/name/releases/latest/download/latest.json"
+        )
+
+    def test_rejects_a_bad_slug(self) -> None:
+        with pytest.raises(ValueError):
+            updater.manifest_url("owner")
+
+
+class TestSelectManifestAsset:
+    def test_prefers_the_installer_over_the_portable_archive(self) -> None:
+        platforms = {
+            "windows-x64-portable": _entry("portable.zip"),
+            "windows-x64-installer": _entry("setup.exe"),
+        }
+
+        asset = updater.select_manifest_asset(platforms, "windows-x64")
+
+        assert asset is not None
+        assert asset.name == "setup.exe"
+
+    def test_falls_back_to_the_portable_archive(self) -> None:
+        platforms = {"windows-x64-portable": _entry("portable.zip")}
+
+        asset = updater.select_manifest_asset(platforms, "windows-x64")
+
+        assert asset is not None
+        assert asset.name == "portable.zip"
+
+    def test_android_uses_its_own_key(self) -> None:
+        platforms = {"android": _entry("app.apk")}
+
+        asset = updater.select_manifest_asset(platforms, "android")
+
+        assert asset is not None
+        assert asset.name == "app.apk"
+
+    def test_an_entry_without_a_valid_checksum_is_ignored(self) -> None:
+        bad = {**_entry("setup.exe"), "sha256": "not-a-digest"}
+
+        assert (
+            updater.select_manifest_asset({"windows-x64-installer": bad}, "windows-x64")
+            is None
+        )
+
+    def test_a_non_https_url_is_ignored(self) -> None:
+        bad = {**_entry("setup.exe"), "url": "http://example.invalid/setup.exe"}
+
+        assert (
+            updater.select_manifest_asset({"windows-x64-installer": bad}, "windows-x64")
+            is None
+        )
+
+
+class TestParseUpdateManifest:
+    def test_reads_version_and_asset(self) -> None:
+        info = updater.parse_update_manifest(
+            _manifest(**{"windows-x64-installer": _entry("setup.exe")}),
+            current="1.0.0",
+            platform_tag="windows-x64",
+        )
+
+        assert info.latest == "9.9.9"
+        assert info.available is True
+        assert info.asset is not None
+        assert info.asset.sha256 == "a" * 64
+
+    @pytest.mark.parametrize("schema", [0, 2, None, "1"])
+    def test_rejects_an_unknown_schema(self, schema: Any) -> None:
+        payload = _manifest()
+        payload["schema"] = schema
+
+        with pytest.raises(ValueError, match="schema"):
+            updater.parse_update_manifest(payload, current="1.0.0")
+
+    def test_rejects_a_document_without_platforms(self) -> None:
+        payload = _manifest()
+        payload["platforms"] = {}
+
+        with pytest.raises(ValueError, match="platforms"):
+            updater.parse_update_manifest(payload, current="1.0.0")
+
+    def test_an_older_manifest_is_not_available(self) -> None:
+        info = updater.parse_update_manifest(
+            _manifest(version="0.9.0", **{"windows-x64-installer": _entry("s.exe")}),
+            current="1.0.0",
+            platform_tag="windows-x64",
+        )
+
+        assert info.available is False
+
+
+class TestCheckForUpdatePrefersTheManifest:
+    def test_uses_the_manifest_when_present(self) -> None:
+        urls: list[str] = []
+
+        def opener(url: str, timeout: float) -> Any:
+            urls.append(url)
+            return _manifest(**{"windows-x64-installer": _entry("setup.exe")})
+
+        result = updater.check_for_update(
+            "1.0.0", platform_tag="windows-x64", opener=opener
+        )
+
+        assert result.source == "manifest"
+        assert result.available is True
+        assert urls == [updater.manifest_url(updater.DEFAULT_REPO)]
+
+    def test_falls_back_to_the_api_when_the_manifest_is_unusable(self) -> None:
+        urls: list[str] = []
+
+        def opener(url: str, timeout: float) -> Any:
+            urls.append(url)
+            if url.endswith("latest.json"):
+                return {"schema": 99}
+            return {"tag_name": "v9.9.9", "assets": []}
+
+        result = updater.check_for_update(
+            "1.0.0", platform_tag="windows-x64", opener=opener
+        )
+
+        assert result.source == "api"
+        assert result.info is not None
+        assert len(urls) == 2
+
+    def test_falls_back_when_the_manifest_is_unreachable(self) -> None:
+        def opener(url: str, timeout: float) -> Any:
+            if url.endswith("latest.json"):
+                raise OSError("offline")
+            return {"tag_name": "v9.9.9", "assets": []}
+
+        result = updater.check_for_update(
+            "1.0.0", platform_tag="windows-x64", opener=opener
+        )
+
+        assert result.source == "api"

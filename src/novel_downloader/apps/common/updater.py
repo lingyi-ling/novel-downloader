@@ -49,12 +49,17 @@ __all__ = [
     "ReleaseAsset",
     "UpdateCheck",
     "UpdateInfo",
+    "MANIFEST_SCHEMA",
     "check_due",
     "check_for_update",
     "fetch_latest_release",
+    "fetch_update_manifest",
     "load_update_state",
+    "manifest_url",
+    "parse_update_manifest",
     "release_api_url",
     "save_update_state",
+    "select_manifest_asset",
     "detect_platform",
     "download_asset",
     "is_newer",
@@ -595,6 +600,9 @@ class UpdateCheck:
     info: UpdateInfo | None
     error: str | None
     checked_at: float
+    #: ``"manifest"`` when the small published document was used, ``"api"``
+    #: when the client had to fall back to the GitHub release API.
+    source: str = "api"
 
     @property
     def available(self) -> bool:
@@ -653,6 +661,22 @@ def check_for_update(
 ) -> UpdateCheck:
     """Check the release feed once and interpret it for *current*."""
     stamp = time.time() if now is None else now
+
+    # The manifest is one small request and carries the checksum per asset;
+    # the API is the fallback for releases published before it existed.
+    manifest = fetch_update_manifest(slug, timeout=timeout, opener=opener)
+    if manifest is not None:
+        try:
+            info = parse_update_manifest(
+                manifest, current=current, platform_tag=platform_tag
+            )
+        except ValueError:
+            info = None
+        if info is not None:
+            return UpdateCheck(
+                info=info, error=None, checked_at=stamp, source="manifest"
+            )
+
     payload = fetch_latest_release(slug, timeout=timeout, opener=opener)
     if payload is None:
         return UpdateCheck(info=None, error="unreachable", checked_at=stamp)
@@ -660,7 +684,7 @@ def check_for_update(
         info = parse_manifest(payload, current=current, platform_tag=platform_tag)
     except Exception:  # noqa: BLE001 - parse_manifest is defensive already
         return UpdateCheck(info=None, error="malformed", checked_at=stamp)
-    return UpdateCheck(info=info, error=None, checked_at=stamp)
+    return UpdateCheck(info=info, error=None, checked_at=stamp, source="api")
 
 
 def load_update_state(path: Path) -> dict[str, Any]:
@@ -709,3 +733,125 @@ def check_due(
         return True
     stamp = time.time() if now is None else now
     return (stamp - last) >= interval
+
+
+# ---------------------------------------------------------------------------
+# updater manifest (small, stable document published with every release)
+# ---------------------------------------------------------------------------
+
+#: Where the manifest for the latest release lives.  Unlike the API this URL
+#: never changes and is not rate limited.
+_MANIFEST_URL = "https://github.com/{slug}/releases/latest/download/latest.json"
+
+#: The manifest schema this client understands.
+MANIFEST_SCHEMA = 1
+
+#: Lookup order for a platform: the shape the app was installed from wins.
+_PLATFORM_SHAPES: tuple[str, ...] = ("installer", "portable", "cli", "api")
+
+
+def manifest_url(slug: str = DEFAULT_REPO) -> str:
+    """The stable manifest endpoint for *slug*."""
+    cleaned = slug.strip().strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", cleaned):
+        raise ValueError(f"not an owner/name repository slug: {slug!r}")
+    return _MANIFEST_URL.format(slug=cleaned)
+
+
+def _manifest_asset(entry: Any) -> ReleaseAsset | None:
+    """Decode one ``platforms`` entry, or ``None`` when it is unusable."""
+    if not isinstance(entry, dict):
+        return None
+    name = entry.get("name")
+    url = entry.get("url")
+    digest = entry.get("sha256")
+    size = entry.get("size")
+    if not isinstance(name, str) or not name:
+        return None
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return None
+    if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest.lower()):
+        return None
+    return ReleaseAsset(
+        name=name,
+        url=url,
+        size=size if isinstance(size, int) and size > 0 else None,
+        sha256=digest.lower(),
+    )
+
+
+def select_manifest_asset(
+    platforms: Mapping[str, Any], platform_tag: str
+) -> ReleaseAsset | None:
+    """
+    Pick the entry for *platform_tag* from a manifest's ``platforms`` map.
+
+    The manifest keys are ``<platform>[-<shape>]``; a client installed from an
+    installer must update to the installer, not to the portable archive, so
+    the shapes are tried in a fixed order.
+    """
+    tag = platform_tag.strip().lower()
+    candidates = [f"{tag}-{shape}" for shape in _PLATFORM_SHAPES]
+    candidates.append(tag)
+    for key in candidates:
+        asset = _manifest_asset(platforms.get(key))
+        if asset is not None:
+            return asset
+    return None
+
+
+def parse_update_manifest(
+    payload: dict[str, Any],
+    *,
+    current: str = "",
+    platform_tag: str | None = None,
+) -> UpdateInfo:
+    """
+    Interpret an updater manifest, raising :class:`ValueError` when unusable.
+
+    A manifest from an unknown schema is rejected rather than guessed at: a
+    future format may move the digest, and silently reading it the old way
+    would defeat the checksum.
+    """
+    schema = payload.get("schema")
+    if schema != MANIFEST_SCHEMA:
+        raise ValueError(f"unsupported manifest schema: {schema!r}")
+    version = payload.get("version")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError("manifest has no version")
+    latest = version.strip()
+    if latest[:1] in ("v", "V"):
+        latest = latest[1:]
+
+    platforms = payload.get("platforms")
+    if not isinstance(platforms, dict) or not platforms:
+        raise ValueError("manifest has no platforms")
+
+    tag = platform_tag if platform_tag else detect_platform()
+    asset = select_manifest_asset(platforms, tag) if tag else None
+
+    notes = payload.get("notes_url")
+    notes_url = notes.strip() if isinstance(notes, str) and notes.strip() else None
+
+    return UpdateInfo(
+        current=str(current or ""),
+        latest=latest,
+        available=is_newer(latest, current),
+        notes_url=notes_url,
+        asset=asset,
+        assets=(asset,) if asset is not None else (),
+    )
+
+
+def fetch_update_manifest(
+    slug: str = DEFAULT_REPO,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    opener: Callable[[str, float], Any] | None = None,
+) -> dict[str, Any] | None:
+    """Fetch the manifest, returning ``None`` on any failure."""
+    try:
+        payload = (opener or _fetch_json)(manifest_url(slug), timeout)
+    except Exception:  # noqa: BLE001 - an update check must never raise
+        return None
+    return payload if isinstance(payload, dict) else None

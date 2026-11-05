@@ -21,8 +21,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Build-only run: keep the workflow token out of .git/config.
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip
@@ -37,14 +40,14 @@ jobs:
       - name: Build novel-cli and novel-api
         run: python scripts/build_cli.py --target both
       - name: Upload novel-cli
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: novel-cli-windows-x64
           path: dist/novel-cli
           if-no-files-found: error
           retention-days: 14
       - name: Upload novel-api
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: novel-api-windows-x64
           path: dist/novel-api
@@ -56,8 +59,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Build-only run: keep the workflow token out of .git/config.
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip
@@ -74,7 +80,7 @@ jobs:
         # bundle remains the artifact produced (and validated) here.
         run: python scripts/build_desktop.py
       - name: Upload NovelDownloader
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: novel-desktop-windows-x64
           path: dist/NovelDownloader
@@ -93,23 +99,26 @@ jobs:
     # a few runs.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Build-only run: keep the workflow token out of .git/config.
+          persist-credentials: false
       - name: Set up Python 3.12
         # Chaquopy targets Python 3.12 (android/app/build.gradle.kts) and its
         # buildPython must be a matching host interpreter. Locally that is
         # the repo venv (.venv/Scripts/python.exe, 3.12); on the runner the
         # venv does not exist, so Chaquopy falls back to PATH python3 — pin
         # it explicitly instead of relying on the image's default.
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "17"
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
         with:
           # compileSdk = 35 in android/app/build.gradle.kts; AGP 8.6.1 still
           # defaults to build-tools 34.0.0, so install both to be safe.
@@ -117,7 +126,7 @@ jobs:
           accept-android-sdk-licenses: "yes"
           log-accepted-android-sdk-licenses: "false"
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
       - name: Make gradlew executable
         # The wrapper is tracked as 100644; GitHub's Linux runners require +x.
         run: chmod +x android/gradlew
@@ -128,7 +137,7 @@ jobs:
         # `always()` so a partial APK is still collected when the build fails;
         # the hashFiles guard skips the upload when nothing was produced.
         if: always() && hashFiles('android/app/build/outputs/apk/debug/*.apk') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: novel-downloader-android-debug
           path: android/app/build/outputs/apk/debug/*.apk
