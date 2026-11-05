@@ -390,3 +390,14 @@ def test_100mb_scan_stays_within_time_budget(tmp_path: Path) -> None:
     elapsed = time.perf_counter() - started
     assert result.scanned == 1
     assert elapsed < 10.0, f"100 MiB scan took {elapsed:.2f}s"
+
+
+def test_latest_json_is_an_allowed_control_asset(tmp_path: Path) -> None:
+    """The updater manifest is published with every release."""
+    (tmp_path / "latest.json").write_text(
+        '{"schema": 1, "version": "1.5.0", "platforms": {}}', encoding="utf-8"
+    )
+
+    result = audit.audit_directory(tmp_path)
+
+    assert result.ok

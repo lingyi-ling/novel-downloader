@@ -73,6 +73,7 @@ _ALLOWED_ASSET_RE = re.compile(
     rf"|novel-downloader-{_VERSION}-android(?:-{_APK_STEM})?\.apk"
     rf"|SHA256SUMS\.txt"
     rf"|manifest\.json"
+    rf"|latest\.json"
     rf")\Z"
 )
 
