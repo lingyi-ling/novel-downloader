@@ -128,6 +128,7 @@ nav:
     - CLI 用法: guide/cli-examples.md
     - 常见任务: guide/recipes.md
     - 本地 API 服务: guide/api.md
+    - 更新与自动更新: guide/updates.md
     - Android 客户端: guide/android-app.md
     - 书源: guide/book-sources.md
     - 规则 DSL 参考: guide/rule-dsl.md

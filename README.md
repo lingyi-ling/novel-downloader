@@ -20,6 +20,7 @@
 ## 功能特性
 
 - **多站点搜索:** 覆盖 59 个搜索站点与 84 个下载站点, 支持聚合搜索、排序与结果筛选
+- **内置更新:** 桌面 / CLI / 安卓每日检查新版本, 下载后先做 SHA-256 校验再交付安装; 安卓走系统安装器, 不静默安装
 - **下载队列与进度:** 支持断点续爬、队列调度与实时进度显示
 - **多格式导出:** TXT / EPUB / HTML
 - **历史导出:** 从已下载的书目中随时重新导出
@@ -75,6 +76,15 @@ pip install "novel-downloader[api]"
 ```bash
 pip install "novel-downloader[music]"
 ```
+
+### 🔄 检查更新
+
+```bash
+novel-cli update --check   # 只检查
+novel-cli update           # 检查并询问是否下载 (下载后校验 SHA-256, 不执行)
+```
+
+桌面与安卓客户端启动后会自行检查 (每天最多一次)。详见 [更新与自动更新](docs/guide/updates.md)。
 
 ### 🐳 Docker (REST API)
 

@@ -1,0 +1,73 @@
+# Updates and auto-update
+
+The desktop app, the CLI and the Android client all check for new versions. They share one **update manifest** and the same verification rules; only the installation step differs.
+
+## How often the check runs
+
+| Client | When | Limit |
+| --- | --- | --- |
+| Desktop | after start-up, triggered by the front end | once per 24 hours |
+| CLI | silently after any command (TTY only, never with `--json`) | once per 24 hours |
+| Android | at start-up | once per 24 hours |
+
+The result is cached, so restarting within that window does not hit the network again.
+
+## Turning it off
+
+```toml
+[general]
+update_check = "auto"    # default: silent check after a command
+# update_check = "manual"  # only when running novel-cli update
+# update_check = "off"     # never
+```
+
+The desktop app has an "automatically check for updates" switch, and the Android settings screen has the same toggle.
+
+## Checking manually
+
+```bash
+novel-cli update --check   # report only
+novel-cli update           # check, then ask before downloading
+novel-cli update --yes     # download and verify without asking
+novel-cli update --json    # machine-readable output
+```
+
+`--yes` downloads into the app data directory (`<app_home>/updates/`) and verifies the file. It **never** runs or installs anything:
+
+- Windows: double-click `NovelDownloader-setup-<version>-x64.exe`
+- Other platforms: extract the archive and replace the installed files
+
+## What gets verified
+
+1. The download URL in the manifest must be **HTTPS**;
+2. a **SHA-256** must be present — without one the client refuses to download rather than install something it cannot verify;
+3. the digest is checked after the download **and again right before the installer starts**, so a file swapped in between is caught;
+4. a file that fails verification is deleted, never left half-written.
+
+On Windows the Inno Setup installer only replaces files after the app has exited. On Android the system installer performs the installation; the app cannot install silently.
+
+## The update manifest
+
+Every release ships `latest.json`:
+
+```
+https://github.com/lingyi-ling/novel-downloader/releases/latest/download/latest.json
+```
+
+It lists the exact file name, size, SHA-256 and download URL for each platform, and is generated from the assets that were **actually uploaded**. Clients prefer it and fall back to the GitHub API only when it is unavailable — the unauthenticated API allows 60 requests per hour, the manifest has no such limit.
+
+Entries are per **package shape**:
+
+| Key | Artifact |
+| --- | --- |
+| `windows-x64-installer` | `NovelDownloader-setup-<ver>-x64.exe` |
+| `windows-x64-portable` | `NovelDownloader-<ver>-windows-x64.zip` |
+| `android` | `novel-downloader-<ver>-android.apk` |
+
+A copy installed from the installer only ever updates to the installer, and a portable copy only to the portable archive.
+
+## Known limitations
+
+- **Android cannot install silently**: that needs a system signature permission ordinary apps do not have. The flow is download → verify → hand off to the system installer → user confirms.
+- **Only Windows and Android artifacts are published**: macOS/Linux need their own runners; PyInstaller cannot cross-compile.
+- **The manifest is unsigned by default**: the trust anchor is HTTPS plus the per-asset SHA-256. Ed25519 signing is built in and can be enabled (see `AGENTS.md`); once a key is trusted the client rejects unsigned or badly signed manifests.
