@@ -325,10 +325,7 @@ class UpdateCheckerTest {
             info.assetUrl,
         )
         assertEquals(62_714_163L, info.assetSize)
-        assertEquals(
-            "7133f789a9a3b43d8aae5897fd41f62a5e91d45dba6f82d80fcc4e5a2cce0ac7",
-            info.sha256,
-        )
+        assertEquals(apkSha, info.sha256)
         // The parsed info passes the download pre-flight unchanged.
         assertNull(downloadRequestFailure(info))
     }
@@ -339,7 +336,7 @@ class UpdateCheckerTest {
         // checksum, so the whole document is rejected and the API is used.
         assertNull(parseManifest(manifest(schema = 2), "1.4.1"))
         assertNull(parseManifest(manifest(schema = 0), "1.4.1"))
-        assertNull(parseManifest(manifest(schema = 1).replace("\"schema\": 1", "\"tag\": \"v1.5.0\""), "1.4.1"))
+        assertNull(parseManifest(manifest(withSchema = false), "1.4.1"))
         assertNull(parseManifest("", "1.4.1"))
         assertNull(parseManifest("not json", "1.4.1"))
         assertNull(parseManifest("[]", "1.4.1"))
@@ -370,18 +367,7 @@ class UpdateCheckerTest {
 
     @Test
     fun manifestWithoutAndroidEntryMeansNoAndroidPackage() {
-        val payload = manifest(
-            platforms = """
-                "windows-x64-installer": {
-                  "name": "novel-downloader-1.5.0-windows-x64-installer.exe",
-                  "sha256": "${"b".repeat(64)}",
-                  "size": 4321,
-                  "url": "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.5.0/setup.exe"
-                }
-            """,
-        )
-
-        val info = parseManifest(payload, "1.4.1")!!
+        val info = parseManifest(manifest(platforms = windowsEntry), "1.4.1")!!
 
         // The version is known, but this release published no APK: reporting
         // an update here would only lead to a download that cannot succeed.
@@ -400,60 +386,43 @@ class UpdateCheckerTest {
 
     @Test
     fun manifestAndroidEntryMustCarryNameHttpsUrlAndSha256() {
-        fun android(overrides: String) = manifest(platforms = overrides)
+        fun rejected(vararg entries: String): Boolean =
+            parseManifest(manifest(platforms = entries.joinToString(",\n")), "1.4.1") == null
 
-        // sha256 must be 64 hex characters.
-        assertNull(
-            parseManifest(
-                android(
-                    androidEntry.replace(
-                        "7133f789a9a3b43d8aae5897fd41f62a5e91d45dba6f82d80fcc4e5a2cce0ac7",
-                        "a".repeat(63),
-                    ),
-                ),
-                "1.4.1",
-            ),
-        )
-        assertNull(
-            parseManifest(
-                android(androidEntry.replace("7133f789a9a3b43d8aae5897fd41f62a5e91d45dba6f82d80fcc4e5a2cce0ac7", "z".repeat(64))),
-                "1.4.1",
-            ),
-        )
+        // sha256 must be exactly 64 hex characters.
+        assertTrue(rejected(androidEntry(sha256 = "a".repeat(63))))
+        assertTrue(rejected(androidEntry(sha256 = "a".repeat(65))))
+        assertTrue(rejected(androidEntry(sha256 = "z".repeat(64))))
         // No digest at all: the API path may publish one instead.
-        assertNull(
-            parseManifest(
-                android(androidEntry.replace("""          "sha256": "7133f789a9a3b43d8aae5897fd41f62a5e91d45dba6f82d80fcc4e5a2cce0ac7",""", "")),
-                "1.4.1",
-            ),
-        )
+        assertTrue(rejected(androidEntry(sha256 = null)))
         // Plain http is refused even with a valid digest.
-        assertNull(
-            parseManifest(
-                android(androidEntry.replace("https://github.com", "http://github.com")),
-                "1.4.1",
-            ),
-        )
+        assertTrue(rejected(androidEntry(url = apkUrl.replace("https://", "http://"))))
         // A missing name or url makes the entry unusable as well.
-        assertNull(
-            parseManifest(
-                android(androidEntry.replace("""          "name": "novel-downloader-1.5.0-android.apk",""", "")),
-                "1.4.1",
-            ),
-        )
-        assertNull(
-            parseManifest(
-                android(
-                    androidEntry.replace(
-                        "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.5.0/novel-downloader-1.5.0-android.apk",
-                        "",
-                    ),
-                ),
-                "1.4.1",
-            ),
-        )
+        assertTrue(rejected(androidEntry(name = null)))
+        assertTrue(rejected(androidEntry(name = "  ")))
+        assertTrue(rejected(androidEntry(url = null)))
         // `android` that is not an object is equally unusable.
-        assertNull(parseManifest(manifest(platforms = """"android": "novel-downloader.apk""""), "1.4.1"))
+        assertTrue(rejected("\"android\": \"novel-downloader.apk\""))
+        // A well-formed entry is accepted (guards the assertions above).
+        assertFalse(rejected(androidEntry()))
+    }
+
+    @Test
+    fun manifestToleratesExtraKeysAndChecksumPrefix() {
+        val info = parseManifest(
+            manifest(
+                platforms = "\"android\": {" +
+                    "\"name\": \"novel-downloader-1.5.0-android.apk\"," +
+                    "\"sha256\": \"sha256:${apkSha.uppercase()}\"," +
+                    "\"url\": \"$apkUrl\"," +
+                    "\"future_field\": 42}",
+            ),
+            "1.4.1",
+        )!!
+
+        assertEquals(apkSha, info.sha256)
+        assertNull(info.assetSize)
+        assertTrue(info.available)
     }
 
     @Test
@@ -793,8 +762,123 @@ class UpdateCheckerTest {
     }
 
     // ------------------------------------------------------------------
-    // Transport: the HTTP call must leave the main thread
+    // Transport: manifest first, API fallback, and the IO dispatcher
     // ------------------------------------------------------------------
+
+    private val manifestForCheck: String
+        get() = """
+            {
+              "schema": 1,
+              "version": "1.5.0",
+              "notes_url": "https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.5.0",
+              "platforms": {
+                "android": {
+                  "name": "novel-downloader-1.5.0-android.apk",
+                  "sha256": "$apkSha",
+                  "size": 62714163,
+                  "url": "$apkUrl"
+                }
+              }
+            }
+        """.trimIndent()
+
+    private val apiReleaseForCheck: String
+        get() = """
+            {"tag_name":"v1.4.1","assets":[{
+              "name":"novel-downloader-1.4.1-android.apk",
+              "browser_download_url":"https://e.invalid/a.apk",
+              "size":1,
+              "digest":"sha256:$digest"}]}
+        """.trimIndent()
+
+    @Test
+    fun checkPrefersTheManifestOverTheApi() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            server.enqueue(MockResponse().setBody(manifestForCheck))
+            // Second response only guards against a hang if the API is hit by
+            // mistake; requestCount below proves it never was.
+            server.enqueue(MockResponse().setResponseCode(500))
+
+            val info = UpdateChecker.check(
+                "1.4.1",
+                apiUrl = server.url("/releases/latest").toString(),
+                manifestUrl = server.url("/latest.json").toString(),
+            )
+
+            assertEquals("1.5.0", info?.latest)
+            assertTrue(info?.available == true)
+            assertEquals(62_714_163L, info?.assetSize)
+            assertEquals(apkSha, info?.sha256)
+            // Exactly one request: the API must not be touched when the
+            // manifest already answered.
+            assertEquals(1, server.requestCount)
+            val request = server.takeRequest()
+            assertEquals("/latest.json", request.path)
+            assertEquals("application/json", request.getHeader("Accept"))
+            assertEquals("novel-downloader-android", request.getHeader("User-Agent"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun manifestHttpFailureFallsBackToTheApi() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            server.enqueue(MockResponse().setResponseCode(500))
+            server.enqueue(MockResponse().setBody(apiReleaseForCheck))
+
+            val info = UpdateChecker.check(
+                "1.4.0",
+                apiUrl = server.url("/releases/latest").toString(),
+                manifestUrl = server.url("/latest.json").toString(),
+            )
+
+            // The API payload is older than the manifest would have said, which
+            // proves the second response is the one that was used.
+            assertEquals("1.4.1", info?.latest)
+            assertTrue(info?.available == true)
+
+            assertEquals(2, server.requestCount)
+            assertEquals("/latest.json", server.takeRequest().path)
+            val apiRequest = server.takeRequest()
+            assertEquals("/releases/latest", apiRequest.path)
+            assertEquals("application/vnd.github+json", apiRequest.getHeader("Accept"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun unusableManifestFallsBackToTheApi() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            // schema 2 is never guessed at, so the API gets its turn.
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"schema":2,"version":"9.9.9","platforms":{}}""",
+                ),
+            )
+            server.enqueue(MockResponse().setBody(apiReleaseForCheck))
+
+            val info = UpdateChecker.check(
+                "1.4.0",
+                apiUrl = server.url("/releases/latest").toString(),
+                manifestUrl = server.url("/latest.json").toString(),
+            )
+
+            assertEquals("1.4.1", info?.latest)
+            // The API asset size is 1, proving the manifest's 62714163 was not used.
+            assertEquals(1L, info?.assetSize)
+            assertEquals(2, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
 
     @Test
     fun checkPerformsItsHttpCallOnTheIoDispatcher() = runBlocking {
@@ -809,26 +893,19 @@ class UpdateCheckerTest {
             })
             .build()
         try {
-            server.enqueue(
-                MockResponse().setBody(
-                    """
-                    {"tag_name":"v1.4.1","assets":[{
-                      "name":"novel-downloader-1.4.1-android.apk",
-                      "browser_download_url":"https://e.invalid/a.apk",
-                      "size":1,
-                      "digest":"sha256:$digest"}]}
-                    """.trimIndent(),
-                ),
-            )
+            server.enqueue(MockResponse().setResponseCode(404))
+            server.enqueue(MockResponse().setBody(apiReleaseForCheck))
 
             val info = UpdateChecker.check(
                 "1.4.0",
                 apiUrl = server.url("/latest").toString(),
+                manifestUrl = server.url("/latest.json").toString(),
                 client = client,
             )
 
             assertEquals("1.4.1", info?.latest)
             assertTrue(info?.available == true)
+            assertEquals("/latest.json", server.takeRequest().path)
             val request = server.takeRequest()
             assertEquals("application/vnd.github+json", request.getHeader("Accept"))
             assertEquals("novel-downloader-android", request.getHeader("User-Agent"))
@@ -847,9 +924,15 @@ class UpdateCheckerTest {
         server.start()
         try {
             server.enqueue(MockResponse().setResponseCode(500))
+            server.enqueue(MockResponse().setResponseCode(500))
             assertNull(
-                UpdateChecker.check("1.4.0", apiUrl = server.url("/latest").toString()),
+                UpdateChecker.check(
+                    "1.4.0",
+                    apiUrl = server.url("/latest").toString(),
+                    manifestUrl = server.url("/latest.json").toString(),
+                ),
             )
+            assertEquals(2, server.requestCount)
         } finally {
             server.shutdown()
         }

@@ -9,6 +9,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -412,8 +413,9 @@ internal fun parseManifest(payload: String, currentVersion: String = ""): Update
         it.startsWith("https://") || it.startsWith("http://")
     }
 
-    val android = platforms["android"] as? JsonObject
-        ?: return UpdateInfo(
+    val androidElement = platforms["android"]
+    if (androidElement == null) {
+        return UpdateInfo(
             current = currentVersion,
             latest = latest,
             // No APK in this release: nothing to offer, so nothing to nag about.
@@ -424,6 +426,10 @@ internal fun parseManifest(payload: String, currentVersion: String = ""): Update
             assetSize = null,
             sha256 = null,
         )
+    }
+    // Present but not an object (`"android": "x.apk"`): a broken document, not
+    // a "no APK" release, so the API fallback gets a chance instead.
+    val android = androidElement as? JsonObject ?: return null
 
     val name = android.stringOrNull("name")?.trim().orEmpty()
     if (name.isEmpty()) return null
