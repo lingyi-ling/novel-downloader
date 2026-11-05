@@ -17,7 +17,7 @@ Rule files are loaded automatically from the following locations. **Later source
 
 Rule files whose names start with `_` are skipped, which makes them suitable for templates and drafts.
 
-The repository's [`rules/_example-template.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-template.json) is an example template covering every field. Because of the `_` prefix it is not loaded by default; copy it and remove the leading underscore to use it.
+The repository's [`rules/_example-template.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-template.json) is an example template covering the basic fields. Because of the `_` prefix it is not loaded by default; copy it and remove the leading underscore to use it. Two further examples cover the advanced features: [`rules/_example-advanced-html.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-advanced-html.json) (steps / fallback / preprocess / limits / pagination guards) and [`rules/_example-json-api.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-json-api.json).
 
 ---
 
@@ -86,8 +86,11 @@ JSON itself has no comment syntax. By convention, **keys starting with `_`** (su
 | `hosts` | string[] | No | Links whose host matches one of these values are handled by this rule (together with `resolve`) |
 | `headers` | object | No | Headers shared by all requests |
 | `resolve` | object | No | Link resolution rules, see below |
+| `limits` | object | No | Per-rule concurrency / interval / retry overrides, see [Rule DSL Reference](./rule-dsl.md) |
 
 At least one of `book` and `chapter` must be provided.
+
+> This section lists the common fields only. The full semantics and examples of the advanced keys (`limits`, `steps`, `fallback`, `preprocess`, `stop_when`, and others) are in the [Rule DSL Reference](./rule-dsl.md).
 
 If the whole site uses AJAX/JSON endpoints, set `"format": "json"` at the top level instead of repeating it in `search` / `book` / `chapter` (a section-level value overrides the top-level one).
 
@@ -108,6 +111,7 @@ If the whole site uses AJAX/JSON endpoints, set `"format": "json"` at the top le
 | `book_id_regex` | string | empty | Regex that extracts the book ID from the book URL, matched with `search` semantics |
 | `book_id_group` | int | `1` | Capture group index for `book_id_regex` |
 | `priority` | int | `200` | Ranking weight for this result; the N-th result gets N added |
+| `single_result_fallback` | bool | `false` | When `item` matches nothing, treat the whole page as one result; see the [Rule DSL Reference](./rule-dsl.md) |
 
 Available keys in `fields`: `title` / `url` / `cover` / `author` / `latest` / `update` / `word`; any other name is rejected at validation time (except `_`-prefixed comment keys). `url` is required; entries missing it are discarded.
 
@@ -134,6 +138,9 @@ Available keys in `fields`: `title` / `url` / `cover` / `author` / `latest` / `u
 | `id_regex` | string | empty | Regex that extracts the chapter ID from the link; when omitted, the link filename without its extension is used |
 | `id_group` | int | `1` | Capture group index for `id_regex` |
 | `volume_name` | string | `正文` | Volume name assigned to these chapters |
+| `is_desc` | bool | `false` | Set to `true` when the site lists newest chapters first: the merged list is reversed once as a whole |
+| `container` | string | empty | Used with `preprocess`: take this node's inner HTML as the rewrite input |
+| `preprocess` | step[] | `[]` | HTML rewrite chain applied before parsing the chapter list; see the [Rule DSL Reference](./rule-dsl.md) |
 
 ---
 
@@ -149,6 +156,8 @@ Available keys in `fields`: `title` / `url` / `cover` / `author` / `latest` / `u
 | `pages` | object \| string | empty | Chapter pagination rules |
 | `format` | string | inherited | Response format for this section, overriding the top-level `format` |
 | `headers` | object | `{}` | Headers specific to this section |
+| `container` | string | empty | Used with `preprocess`: take this node's inner HTML as the rewrite input |
+| `preprocess` | step[] | `[]` | HTML rewrite chain applied before parsing the body; see the [Rule DSL Reference](./rule-dsl.md) |
 
 ---
 
@@ -163,6 +172,8 @@ Available keys in `fields`: `title` / `url` / `cover` / `author` / `latest` / `u
 | `url` | string | — | Page URL template, required |
 | `start` | int | `2` | First page number |
 | `max_pages` | int | empty | When set, fetch pages `start` through `max_pages` unconditionally instead of relying on the "next-page link exists" heuristic |
+| `stop_when` | string | empty | Regex (with `re.S`); when it matches the current page body, pagination stops (that page is kept) |
+| `loop_guard` | bool | `true` | Stop on a repeated URL or identical response body, preventing self-referencing link loops |
 
 A string shorthand is also accepted. By default, fetching starts at `start` and continues while **the next-page link is still present in the current page's HTML**, up to 50 extra pages. JSON endpoints usually do not link to the next page in the response body; use `max_pages` for those sites. Table-of-contents pages are deduplicated by chapter link and merged; chapter pages are concatenated in order.
 
@@ -177,10 +188,14 @@ A `field` can be a string (equivalent to `{"selector": "..."}`) or an object:
 | `selector` | string | empty | Selector; leave empty to use the current node directly |
 | `attr` | string | `text` | Value extraction mode, see below |
 | `regex` | string | empty | Applies one more regex extraction to the extracted value (multiline matching) |
-| `group` | int | `0` | Regex capture group; falls back to the whole match when the index is out of range |
+| `group` | int | `1` | Regex capture group; falls back to the whole match when the index is out of range |
 | `multi` | bool | `false` | Whether to collect every match (returns an array) |
 | `replace` | `[string, string][]` | `[]` | Replacements applied in order |
 | `default` | string | empty | Fallback value when no node matches |
+| `steps` | step[] | `[]` | Post-processing chain, run after `regex` / `replace` |
+| `fallback` | (string \| field)[] | `[]` | Selector fallback chain, tried in order when the primary selector is empty |
+
+See the [Rule DSL Reference](./rule-dsl.md) for the execution order, inheritance rules and available expressions of `steps` / `fallback`.
 
 The `selector` syntax depends on the section's `format`:
 
@@ -283,13 +298,13 @@ For paginated JSON endpoints, the response usually does not link to the next pag
 
 ### Built-in Examples
 
-`biquge5r.json` is a complete, working built-in source that can serve as a starting point for new rules; `rules/_example-template.json` covers every field (including JSON-mode syntax).
+`biquge5r.json` is a complete, working built-in source that can serve as a starting point for new rules; `rules/_example-template.json` covers the basic fields (including JSON-mode syntax); `rules/_example-advanced-html.json` and `rules/_example-json-api.json` demonstrate the advanced HTML features and the JSON endpoint style respectively.
 
 ---
 
 ### Known Limitations
 
 - JSON mode for rule sources only **extracts values**; it does not include logic or scripts. Endpoints that require signatures, encryption, or complex computations should still be implemented as Python plugins.
-- Request rate is controlled centrally by the client configuration (see [Configuration](./configuration.md)); rules do not expose separate throttling parameters.
+- Request rate is controlled by the client configuration by default (see [Configuration](./configuration.en.md)); an individual source can override concurrency / interval / retries with the top-level `limits` object (see the [Rule DSL Reference](./rule-dsl.md)).
 - Table-of-contents and chapter pagination fetch at most 50 extra pages (the `max_pages` limit is subject to the same cap).
 - Mirror-site availability can fluctuate; if a search returns nothing, try another source.

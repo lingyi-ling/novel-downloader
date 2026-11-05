@@ -201,7 +201,7 @@
         <article class="card reveal">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg></div>
           <h3 data-en="Built-in updates">内置更新</h3>
-          <p data-en="Desktop, CLI and Android each check the release feed once a day. Downloads are SHA-256 verified before anything runs; the Android build hands the APK to the system installer and never installs silently.">桌面、CLI 与安卓每天最多检查一次新版本；下载后先做 SHA-256 校验再交付安装，安卓走系统安装器、绝不静默安装。</p>
+          <p data-en="Desktop, CLI and Android each read the update manifest (latest.json) at most once every 24 hours. Downloads are SHA-256 verified before anything runs; the Android build hands the APK to the system installer and never installs silently.">桌面、CLI 与安卓每 24 小时最多读取一次更新清单（latest.json）；下载后先做 SHA-256 校验再交付安装，安卓走系统安装器、绝不静默安装。</p>
         </article>
       </div>
     </div>
@@ -216,7 +216,7 @@
         <article class="client-card reveal">
           <h3>CLI</h3>
           <p class="client-tag">novel-cli</p>
-          <p data-en="12 subcommands: search, download, follow, export, login, diagnostics; pipe- and script-friendly.">12 个子命令：搜索、下载、追更、导出、登录、诊断，管道与脚本全兼容。</p>
+          <p data-en="14 subcommands: search, download, batch, follow, export, login, diagnostics; pipe- and script-friendly.">14 个子命令：搜索、下载、批量、追更、导出、登录、诊断，管道与脚本全兼容。</p>
         </article>
         <article class="client-card reveal">
           <h3>REST API</h3>
@@ -381,11 +381,11 @@ cd novel-downloader/android
         </details>
         <details>
           <summary data-en="How do desktop updates work?">桌面端怎么更新？</summary>
-          <p data-en="The app checks GitHub Releases once per day; a clickable toast appears when a newer version exists. Update checks are offline-safe and stay silent on failure.">应用每 24 小时检查一次 GitHub Releases，发现新版本会弹出可点击的提示；离线时静默，不打扰。</p>
+          <p data-en="The app reads the update manifest (latest.json) at most once every 24 hours; a clickable toast appears when a newer version exists. Update checks are offline-safe and stay silent on failure.">应用每 24 小时最多读取一次更新清单（latest.json），发现新版本会弹出可点击的提示；离线时静默，不打扰。</p>
         </details>
         <details>
           <summary data-en="How does the update mechanism work?">更新机制是怎么工作的？</summary>
-          <p data-en="CLI, API and desktop come from the same pip package — pip install -U novel-downloader (or re-running the one-line installer) gets you the latest; the Windows desktop additionally self-checks GitHub Releases every 24 h. Site parser fixes and new book sources ship with regular releases, so a plain upgrade fixes most broken sites — your config, queue and downloaded library carry over untouched.">CLI、API、桌面端同源于同一个 pip 包——pip install -U novel-downloader（或重跑一键安装脚本）即升到最新版，Windows 桌面端另有每 24 小时一次的 Releases 自查。站点解析修复与新书源随常规版本发布，普通升级即可修复大多数失效站点——你的配置、队列与已下载书目原样保留。</p>
+          <p data-en="CLI, API and desktop come from the same pip package — pip install -U novel-downloader (or re-running the one-line installer) gets you the latest; the Windows desktop additionally reads the update manifest (latest.json) at most once every 24 hours. Site parser fixes and new book sources ship with regular releases, so a plain upgrade fixes most broken sites — your config, queue and downloaded library carry over untouched.">CLI、API、桌面端同源于同一个 pip 包——pip install -U novel-downloader（或重跑一键安装脚本）即升到最新版，Windows 桌面端另有每 24 小时最多一次的更新清单（latest.json）自查。站点解析修复与新书源随常规版本发布，普通升级即可修复大多数失效站点——你的配置、队列与已下载书目原样保留。</p>
         </details>
         <details>
           <summary data-en="A site stopped working — what now?">某个站点失效了怎么办？</summary>

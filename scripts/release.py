@@ -825,11 +825,16 @@ def sync_assets(
     client: GitHubClient, release: dict[str, Any], assets: list[AssetSpec]
 ) -> None:
     """
-    Make the release contain exactly *assets* (others are left alone).
+    Upload *assets* to *release*, replacing anything whose content changed.
 
     Idempotent: an asset whose remote digest equals the local SHA-256 is
     skipped; an asset with the same name but different content is deleted and
     re-uploaded; a missing asset is simply uploaded.
+
+    Assets that are on the release but not in *assets* are **kept** and
+    reported: deleting published files automatically is destructive, and a
+    stale file is usually harmless (the manifest simply no longer points at
+    it).  Remove them by hand if the release page should be tidy.
     """
     remote: dict[str, dict[str, Any]] = {}
     for item in release.get("assets") or []:
@@ -845,6 +850,14 @@ def sync_assets(
             print(f"  asset {asset.name}: digest differs, replacing")
             client.delete_asset(int(existing["id"]))
         client.upload_asset(str(release.get("upload_url", "")), asset)
+
+    intended = {asset.name for asset in assets}
+    extras = sorted(name for name in remote if name not in intended)
+    if extras:
+        print(
+            "warning: the release has extra asset(s) not in this build: "
+            + ", ".join(extras)
+        )
 
 
 def verify_assets(client: GitHubClient, tag: str, assets: list[AssetSpec]) -> None:

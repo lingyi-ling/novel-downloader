@@ -78,7 +78,25 @@ Install music download support:
 pip install "novel-downloader[music]"
 ```
 
-For other optional features (local API, music, OCR, image-to-text, extra backends, etc.), refer to the [Full Installation Guide](./docs/guide/installation.md).
+### 🔄 Check for updates
+
+```bash
+novel-cli update --check   # check only
+novel-cli update           # check and ask before downloading (verifies SHA-256, never runs the file)
+```
+
+The desktop and Android clients check on their own after launch (at most once per day). See [Updates and auto-update](./docs/guide/updates.en.md).
+
+### 🐳 Docker (REST API)
+
+```bash
+docker build -f packaging/Dockerfile -t novel-downloader-api:local .
+docker run -d -p 8081:8081 -v noveldl-data:/data novel-downloader-api:local
+```
+
+See [packaging/README-docker.md](./packaging/README-docker.md); a Compose example is provided in [packaging/docker-compose.yml](./packaging/docker-compose.yml).
+
+For other optional features (local API, music, OCR, image-to-text, extra backends, etc.), refer to the [Full Installation Guide](./docs/guide/installation.en.md).
 
 ---
 
@@ -99,7 +117,7 @@ novel-cli music search "keyword" --platform netease
 novel-cli music download "keyword" --pick 1
 ```
 
-More examples: [CLI Examples](./docs/guide/cli-examples.md)
+More examples: [CLI Examples](./docs/guide/cli-examples.en.md)
 
 ---
 
@@ -122,6 +140,90 @@ novel-desktop
 ```
 
 A graphical interface for search, the download queue, export history, and music downloads.
+
+---
+
+## Rule-driven Book Sources (Add a Site Without Code)
+
+Besides the built-in Python site plugins, a book source can be described entirely by a JSON rule:
+search, book details, table of contents, body text, pagination, and URL resolution are all rule-driven, so a new site needs no code changes.
+
+See [Rule-driven Book Sources](./docs/guide/book-sources.en.md) for the full field reference, load order, and known limitations.
+
+Rule files are loaded automatically from the following locations (later ones override earlier ones):
+
+| Location | Description |
+| --- | --- |
+| `novel_downloader/plugins/rule/builtin/*.json` | Sources shipped with the project |
+| `./rules/*.json` | Custom sources in the working directory |
+| `$NOVEL_RULES_DIR/*.json` | Directory specified by an environment variable |
+| `<user config dir>/novel_downloader/rules/*.json` | Per-user private sources |
+
+```json
+{
+  "site_key": "example",
+  "site_name": "Example Source",
+  "base_url": "https://www.example.com",
+  "encoding": "utf-8",
+  "hosts": ["www.example.com"],
+  "search": {
+    "url": "https://www.example.com/search.php?q={keyword}",
+    "item": "div.result-list dl",
+    "fields": {
+      "title": {"selector": "dd h3 a", "attr": "text"},
+      "url":   {"selector": "dt a", "attr": "href"},
+      "author":{"regex": "Author:\\s*(\\S+)", "group": 1}
+    }
+  },
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "pages": {"url": "{base_url}/book/{book_id}/index_{page}.html", "start": 2},
+    "fields": {
+      "book_name": {"selector": "meta[property='og:novel:book_name']", "attr": "content"},
+      "summary":   {"selector": "meta[property='og:description']", "attr": "content"}
+    },
+    "chapters": {
+      "item": "div.listmain a",
+      "title": {"attr": "text"},
+      "url":   {"attr": "href"},
+      "id_regex": "/(\\d+)\\.html"
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/book/{book_id}/{chapter_id}.html",
+    "content": {"selector": "#content", "attr": "inner_text"},
+    "drop": ["^Page \\(\\d+/\\d+\\)$"]
+  },
+  "resolve": {
+    "book": "^/book/(\\d+)/?$",
+    "chapter": "^/book/(\\d+)/(\\d+)\\.html$"
+  }
+}
+```
+
+Key points:
+
+* `selector` accepts CSS selectors and XPath (a value starting with `/` or `(` is treated as XPath).
+* `attr` values: `text` (concatenated text) / `inner_text` (joined by line) / `html` / any attribute name such as `href`, `src`, `content`.
+* `{keyword}` is URL-encoded before substitution; `{page}`, `{book_id}`, `{chapter_id}`, `{base_url}` work the same way.
+* `hosts` + `resolve` enable "paste a link to download"; built-in plugins take precedence over rule sources.
+* `pages` drives table-of-contents/body pagination: fetching continues while the next-page link is still present in the current page's HTML.
+
+List and manage sources:
+
+```bash
+# List every rule source (--check also verifies that each one registers)
+novel-cli sources list --check
+
+# Validate a single rule file
+novel-cli sources check ./rules/example.json
+
+# Search / download with a rule source
+novel-cli search "斗破苍穹" -s biquge5r
+novel-cli download --site biquge5r 0_143 --start 155832 --end 155835
+```
+
+The built-in `biquge5r.json` is a complete, working example source and a good starting point for new rules.
 
 ---
 
@@ -148,7 +250,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-More examples: [API Examples](./docs/reference/api-examples.md)
+More examples: [API Examples](./docs/reference/api-examples.en.md)
 
 ---
 
@@ -180,7 +282,7 @@ PRs and issues are welcome.
 * Site structures may change. If parsing issues occur, please open an issue or submit a patch.
 * Login support depends on site policies. Cookies or manual account setup may be required.
 * Configure request intervals responsibly to avoid rate limiting or IP blocking.
-* For errors, see [Troubleshooting](docs/guide/troubleshooting.md); for the code structure, see [Architecture](docs/guide/architecture.md).
+* For errors, see [Troubleshooting](docs/guide/troubleshooting.en.md); for the code structure, see [Architecture](docs/guide/architecture.en.md).
 
 ---
 

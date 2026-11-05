@@ -64,7 +64,11 @@ Commands:
   sources     列出、校验、安装和移除规则书源
   music       搜索并下载来自多个音乐平台的歌曲
   completion  输出 novel-cli 的 shell 补全脚本
+  batch       按 `title author` 书单批量搜索并可选下载
+  update      检查新版本并按需下载
 ```
+
+共 14 个子命令。`batch` 与 `update` 由入口点追加注册, 因此排在 `completion` 之后。
 
 ---
 
@@ -79,7 +83,7 @@ Commands:
 **Synopsis**
 
 ```bash
-novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [--format FORMAT [FORMAT ...]] [--json] [book_ids ...]
+novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [--format FORMAT [FORMAT ...]] [--json] [--strict] [book_ids ...]
 ```
 
 **Options**
@@ -94,6 +98,7 @@ novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end E
 * `--no-export`: 仅下载, 不进行导出。启用后将跳过导出步骤
 * `--format FORMAT [FORMAT ...]`: 导出格式: `txt` / `epub` / `html`, 可指定多个, 默认使用配置文件设定
 * `--json`: 以 JSON 输出到标准输出并退出 (结构见文末表格)
+* `--strict`: 只要有章节下载失败就以非零状态退出; 缺章的书不会导出, 失败清单最多列出 20 条 (默认只警告并列出前 5 条)
 
 > `--start` / `--end` 用于临时下载部分章节, 仅影响**第一个**命令行提供的 `book_id`。
 >
@@ -817,6 +822,105 @@ novel-cli completion --shell powershell >> $PROFILE
 
 ---
 
+#### 12. batch 子命令
+
+从一份纯文本书单批量搜索, 可选地把命中的书下载并导出。每行一本书:
+
+* `title author`: 以任意空白 (空格、Tab、全角空格) 分隔; 只有一个字段时按标题匹配 (会给出警告)。
+* 标题本身含空格时, 用 **Tab** 分隔标题与作者 (`title<TAB>author`), 第一个 Tab 之前的空格仍属于标题。
+* `#` 开头为注释, 空行忽略; 无法解析的行不会被静默丢弃, 而是汇总报告并以注释形式保留在未找到文件里。
+
+**Synopsis**
+
+```bash
+novel-cli batch [-h] (--file PATH | --from-not-found PATH) [--site SITE]
+                [--out DIR] [--strict-match] [--not-found PATH] [--force]
+                [--download] [--interval SECONDS] [--verbose] [--config CONFIG]
+```
+
+**Options**
+
+* `--file PATH`: 从 PATH 读取 `title author` 书单 (与 `--from-not-found` 二选一, 必填其一)
+* `--from-not-found PATH`: 续跑上一次 `batch` 写出的未找到文件
+* `--site SITE`: 只在这个站点搜索; 省略时搜索全部站点。`--from-not-found` 会沿用文件头 `# site=` 记录的站点 (记录为 `all` 时不沿用)
+* `--out DIR`: 把导出文件写到 DIR, 原始缓存写到 `DIR/raw_data`; 省略时使用配置
+* `--strict-match`: 标题与作者都必须精确匹配; 默认标题精确、作者取相似度最高者
+* `--not-found PATH`: 未找到记录的写出路径; 默认 `logs/not_found_<site>.txt`
+* `--force`: 覆盖不是本命令写出的同名 `--not-found` 文件
+* `--download`: 下载并导出命中的书; 默认只报告匹配结果
+* `--interval SECONDS`: 两次书目搜索之间的等待秒数, 默认 `0`
+* `--verbose`: 显示候选数量与作者匹配细节
+* `--config CONFIG`: 配置文件路径
+
+**未找到文件与换源重试**
+
+未找到文件与输入格式完全一致, 首行是 `# site=<site> searched_at=<时间> matches=<命中>/<总数>` 头, 末尾以 `#` 结束, 因此可以直接作为下一次 `batch --from-not-found` 的输入。典型换源流程:
+
+```bash
+# 1. 在全部站点搜索并下载
+novel-cli batch --file books.txt --download
+
+# 2. 某些书在主站没找到, 换一个源重试 (显式 --site 会覆盖文件里记录的站点)
+novel-cli batch --from-not-found logs/not_found_all.txt --site biquge5r --download
+
+# 3. 省略 --site 时沿用文件头记录的站点, 重新跑一遍
+novel-cli batch --from-not-found logs/not_found_b520.txt --download
+```
+
+> 默认只报告匹配结果, 不加 `--download` 时不会下载。`--file` 输入永远是只读的: 即使加 `--force` 也不会把未找到结果写回输入文件。
+
+**Examples**
+
+```bash
+# books.txt 每行 "标题 作者"
+novel-cli batch --file books.txt
+novel-cli batch --file books.txt --site b520 --download
+novel-cli batch --file books.txt --download --interval 1.5 --verbose
+```
+
+---
+
+#### 13. update 子命令
+
+检查更新清单 (`latest.json`) 并可选地下载当前平台的资产。检查与下载是两个独立步骤: `--check` 只检查, 下载必须显式触发。CLI 只负责**下载并校验**, 不会执行、解压或安装任何东西。
+
+**Synopsis**
+
+```bash
+novel-cli update [-h] [--check] [--json] [-y] [--no-mirror]
+```
+
+**Options**
+
+* `--check`: 只检查, 不询问也不下载; 退出码表示*检查*是否成功, 而不表示是否有新版本
+* `--json`: 在 stdout 输出一份机器可读的 JSON 文档并退出; 不带 `--yes` 时等价于 `--check`, `download_path` 为 `null`
+* `-y, --yes`: 非交互下载; 下载并校验 SHA-256 后打印文件路径, 但**不安装**。缺少摘要的资产会被拒绝
+* `--no-mirror`: 忽略 `NOVEL_UPDATE_MIRROR`, 直接从发布地址下载
+
+**环境变量**
+
+* `NOVEL_UPDATE_MIRROR`: 逗号分隔的镜像前缀, 依次探测可用者并优先使用; 全部不可用时回退到原始发布地址, 未设置时不走镜像。
+
+下载文件固定落在 `<应用主目录>/updates/` (不是当前目录)。安装方式: Windows 双击下载到的 `NovelDownloader-setup-<version>-x64.exe`; 其它平台解压后手动替换已安装文件。桌面 / 安卓的自动检查与完整校验规则见 [更新与自动更新](./updates.md)。
+
+**Examples**
+
+```bash
+# 只检查
+novel-cli update --check
+
+# 检查并询问是否下载
+novel-cli update
+
+# 脚本化: 直接下载并校验, 不安装
+novel-cli update --yes
+
+# 机器可读输出
+novel-cli update --json
+```
+
+---
+
 ### 退出码与 `--json` 输出契约
 
 #### 退出码
@@ -824,8 +928,10 @@ novel-cli completion --shell powershell >> $PROFILE
 | 退出码 | 含义 | 典型场景 |
 | --- | --- | --- |
 | `0` | 成功 | 命令正常完成; 搜索无结果、追更无新章节也属于成功 |
-| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败 |
-| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`--json` 与 `--first` 同用、`--json` 与 `--clean` 同用、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes` |
+| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败、`batch` 存在未匹配/格式错误/下载失败、`update` 检查失败 (以及 `--yes` 时无匹配资产、缺少摘要或下载失败) |
+| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`--json` 与 `--first` 同用、`--json` 与 `--clean` 同用、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`batch` 未提供输入文件或 `--interval` 为负 |
+
+`update --check` 的退出码表示**检查**是否成功, 而不是是否有新版本: 发现有更新仍返回 `0`。`sources list --probe` 本身不改变退出码——网络不可达只在 `Latency`/`HTTP` 列显示为 `-`, 只有 `--check` 的结构校验失败才会以 `1` 退出。
 
 按 `Ctrl+C` 中断时, CLI 在 stderr 输出 `Aborted.` 并以 `1` 退出。
 
@@ -839,10 +945,11 @@ novel-cli completion --shell powershell >> $PROFILE
 
 | 命令 | 选项 | stdout 结构 |
 | --- | --- | --- |
-| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "exported"}]}`; `exported` 为 `{格式: [路径...]}`; 指定 `--no-export` 时为 `null` |
+| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; `failed` 为缺失章节数 (`0` 表示完整); `exported` 为 `{格式: [路径...]}`; 指定 `--no-export` 时为 `null` |
 | `search` | `--json` | 搜索结果数组, 每项含 `site`、`book_id`、`book_url`、`cover_url`、`title`、`author`、`latest_chapter`、`update_date`、`word_count`、`priority` |
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
-| `sources list` | `--json` | 数组, 每项含 `site_key`、`name`、`search`、`hosts`、`origin`; 加 `--check` 时 `status` 才有值 (否则为 `null`) |
+| `sources list` | `--json` | 数组, 每项含 `site_key`、`name`、`search`、`hosts`、`origin`; 加 `--check` 时 `status` 才有值 (否则为 `null`); 加 `--probe` 时额外含 `latency_ms`、`http_status` (探测不到时为 `null`) |
+| `update` | `--json` | 单个对象, 固定含 `current`、`latest`、`available`、`asset_name`、`asset_size`、`sha256`、`download_path`、`error` 八个字段; 无对应值时除 `current`/`available` 外为 `null` (或 `latest` 为空串) |
 | `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}` |
 | `follow list` | `--json` | 数组, 每项含 `site`、`book_id`、`title`、`last_chapter`、`updated_at` |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` |
@@ -858,7 +965,7 @@ novel-cli follow list --json | jq 'length'
 novel-cli storage --json | jq '.total.bytes'
 ```
 
-> `login --list` 也输出纯文本列表, 但不是 JSON; `sources check`、`config`、`clean` 目前没有 `--json`。
+> `login --list` 也输出纯文本列表, 但不是 JSON; `sources check`、`config`、`clean`、`batch` 目前没有 `--json`。
 >
 > 上面的 `jq` 示例需要另行安装 [jq](https://jqlang.github.io/jq/); 不安装时可直接查看原始 JSON 输出。
 

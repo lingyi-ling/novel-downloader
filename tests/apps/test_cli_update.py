@@ -1020,3 +1020,25 @@ def test_validation_reports_non_string_update_check() -> None:
 
     assert problems
     assert problems[0].level == "error"
+
+
+def test_interactive_missing_digest_refuses_to_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interactive "yes" is not a substitute for integrity."""
+    _patch_check(monkeypatch, _info(asset=_asset(sha256=None)))
+    messages = _capture_ui(monkeypatch)
+    downloads: list[object] = []
+
+    def _never(asset: object, **kwargs: object) -> object:
+        downloads.append(asset)
+        raise AssertionError("must not download an unverifiable asset")
+
+    monkeypatch.setattr(update_module, "_download", _never)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["update"])
+
+    assert excinfo.value.code == 1
+    assert "no SHA-256 digest" in messages.text()
+    assert downloads == []

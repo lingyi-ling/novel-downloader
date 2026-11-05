@@ -185,6 +185,27 @@ Recommendations:
 
 ---
 
+### Threat Model for the Update Chain
+
+Automatic updates turn "third-party content" into "an executable program", so the chain gets its own threat model. Its trust anchors, in order:
+
+| Step | Constraint | Code |
+| --- | --- | --- |
+| Manifest fetch | Fixed HTTPS endpoint `releases/latest/download/latest.json`; a mismatched `schema` is rejected outright | `fetch_update_manifest` / `parse_update_manifest` in `apps/common/updater.py` |
+| Download URL | Asset URLs in the manifest must be **HTTPS**; the Android client also only accepts HTTPS | `_manifest_asset`, `UpdateChecker.downloadRequestFailure` |
+| Integrity | The asset must carry a **SHA-256**: the desktop and Android clients refuse to download without one, and the CLI does the same in non-interactive (`--yes`) mode (the interactive path skips verification); the digest is recomputed after the download and a mismatch deletes the partial file | `download_asset` / `verify_sha256` |
+| Before install | The digest is **recomputed right before the installer starts**, closing the time-of-check/time-of-use window between verification and installation | `webview_app._install_verified`, `installPrecheck` |
+| Release side | Before upload, `scripts/audit_release_assets.py` performs a **release asset leak audit** (allowlist, archive member paths, private keys / deploy passwords / tokens in raw bytes); matches report only the marker name, never the value | `audit_release_content` in `scripts/release.py` |
+
+**Optional manifest signing**: update manifests support Ed25519 signatures. `updater.TRUSTED_UPDATE_KEYS` is empty by default, so manifests are **accepted unsigned** and the trust anchor is HTTPS plus each asset's SHA-256. Once a trusted key is configured, a missing manifest, an unsigned manifest, a bad signature or an unknown `key_id` is rejected, and the client **stops falling back** to the GitHub API — otherwise deleting the manifest would bypass signature checking.
+
+Residual risks:
+
+- With signing disabled (the default), an attacker who can modify both the manifest and the assets (for example, someone who controls the repository) can ship a malicious package whose digest is internally consistent. Enable manifest signing and pin the public key in the client when you need a stronger guarantee.
+- The asset leak audit covers release artifacts only; it is not a substitute for protecting the build machine and release credentials.
+
+---
+
 ### Auditing it yourself
 
 The repository ships an offline audit script, `scripts/security_audit.py`; it **does not touch the network** and does not query CVEs.

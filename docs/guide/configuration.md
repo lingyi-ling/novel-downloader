@@ -55,6 +55,23 @@ novel-cli download --site linovelib
 > 若 CLI 同时传入了 Book ID, 例如 `novel-cli download --site linovelib 5555`,
 > 则 **命令行参数会覆盖配置文件中的 `book_ids`**。
 
+#### 更新检查 (`general.update_check`)
+
+```toml
+[general]
+update_check = "auto"     # 默认
+# update_check = "manual"
+# update_check = "off"
+```
+
+| 值 | 行为 |
+| --- | --- |
+| `auto` | 任意命令**正常结束后**静默检查一次新版本, 有更新时在 stderr 提示; 仅在交互终端且未使用 `--json` 时触发 |
+| `manual` | 只在显式运行 `novel-cli update` 时检查 |
+| `off` | 从不自动检查 |
+
+自动检查**每天最多一次**, 结果缓存在 `<应用主目录>/update_check.json`; 网络请求在后台守护线程中执行, 主命令最多等待 0.75 秒, 失败或离线时完全静默, 绝不影响命令本身。提示行只写到 stderr, stdout 始终留给命令自己的输出。详见 [更新与自动更新](./updates.md)。
+
 ---
 
 ### 3. 登录与 Cookie 配置

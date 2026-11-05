@@ -84,6 +84,19 @@ Bottom tabs: **Search / Tasks / History / Music / Follow**.
 
 When a task finishes (completed or failed) the app posts a system notification. On Android 13+ the first launch asks for the "Notifications" permission (`POST_NOTIFICATIONS`); if it was denied, re-enable it from the system settings.
 
+## Built-in Update Check
+
+The app checks for updates at launch, **at most once every 24 hours** (the timestamp of the previous check is cached on the device; a clock moved backwards triggers a new check as well). It reads the update manifest `latest.json` shipped with each release first — a stable URL that is not subject to GitHub API rate limits — and falls back to the GitHub Releases API only when the manifest is unavailable or has no Android entry.
+
+Constraints on the update flow:
+
+1. Only **HTTPS** download URLs are accepted.
+2. The asset must carry a **SHA-256**; without one the download is refused — better to update by hand than to install something that cannot be verified.
+3. The digest is recomputed after the download and **checked again right before the system installer is launched**, catching a file swapped between the two checks.
+4. A verified APK is handed to the **system installer** for the user to confirm; the app does not and cannot install silently.
+
+The release side has a gate as well: before publishing, `scripts/release.py` runs `scripts/check_android_alignment.py` to verify zip-entry and `PT_LOAD` segment alignment of the release APK. A package that is not **16 KB page aligned** is never published — that alignment is what lets Android 15+ devices with 16 KB pages load its native libraries.
+
 ## Standalone Engine (No PC Needed)
 
 The app supports two operating modes, switched at any time via the "Standalone engine (no PC needed)" toggle on the Settings page:

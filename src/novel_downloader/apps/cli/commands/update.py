@@ -267,10 +267,11 @@ class UpdateCmd(Command):
             )
             raise SystemExit(EXIT_FAILURE)
 
-        if assume_yes and not asset.sha256:
-            # Without a digest the download cannot be verified, so it is not
-            # offered silently: the user has to fetch it from the release
-            # page, where the browser/OS can at least show where it came from.
+        if not asset.sha256:
+            # Without a digest the download cannot be verified, so it is never
+            # downloaded -- not silently, and not after an interactive "yes":
+            # a prompt is not a substitute for integrity.  The user fetches it
+            # from the release page instead.
             reason = t(
                 "The release provides no SHA-256 digest for {name}, so the "
                 "download was not verified. Download it manually from {url}."

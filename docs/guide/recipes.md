@@ -8,6 +8,34 @@
 
 ### 1. 批量下载书单
 
+#### 用 `batch` 按书名批量搜索并下载（推荐）
+
+如果手上只有书名和作者（没有站点书籍 ID），用 `batch` 最省事。`books.txt` 每行 `标题 作者`：
+
+```text
+斗破苍穹 天蚕土豆
+诡秘之主 爱潜水的乌贼
+```
+
+```bash
+# 先试运行，确认匹配结果
+novel-cli batch --file books.txt
+
+# 确认无误后下载
+novel-cli batch --file books.txt --download
+
+# 只在一个站点搜索；两次搜索之间等待 1.5 秒
+novel-cli batch --file books.txt --site b520 --download --interval 1.5
+```
+
+未匹配或格式错误的行会写进 `logs/not_found_<site>.txt`，可直接用它换源重试：
+
+```bash
+novel-cli batch --from-not-found logs/not_found_b520.txt --site biquge5r --download
+```
+
+标题本身含空格时用 Tab 分隔标题与作者。完整的输入格式、匹配规则与退出码见 [CLI 使用示例](./cli-examples.md)。
+
 #### 同一站点、多个书籍 ID
 
 `download --site` 接受多个书籍 ID：
@@ -18,7 +46,7 @@ novel-cli download --site b520 8_8187 12345 23456
 
 > `--start` / `--end` 只作用于**第一个** `book_id`。需要给每本书指定范围时，请分多条命令执行，或使用配置文件中的结构化 `book_ids`。
 
-#### 通过配置文件维护书单（推荐）
+#### 通过配置文件维护书单（备选）
 
 ```toml
 # settings.toml

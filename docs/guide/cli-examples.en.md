@@ -64,7 +64,11 @@ Commands:
   sources     list, verify, install and remove rule-based book sources
   music       search and download songs from music platforms
   completion  print a shell completion script for novel-cli
+  batch       batch search a 'title author' list and optionally download the matches
+  update      check for a newer release and optionally download it
 ```
+
+There are 14 subcommands in total. `batch` and `update` are appended by the entry point, so they appear after `completion`.
 
 ---
 
@@ -79,7 +83,7 @@ Download a complete novel, supporting three approaches:
 **Synopsis**
 
 ```bash
-novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [--format FORMAT [FORMAT ...]] [--json] [book_ids ...]
+novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end END] [--no-export] [--format FORMAT [FORMAT ...]] [--json] [--strict] [book_ids ...]
 ```
 
 **Options**
@@ -94,6 +98,7 @@ novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end E
 * `--no-export`: download only, no export. When enabled, the export step is skipped
 * `--format FORMAT [FORMAT ...]`: export format: `txt` / `epub` / `html`; multiple values allowed; defaults to the setting in the configuration file
 * `--json`: print the result to stdout as JSON and exit (structure in the table at the end of this page)
+* `--strict`: exit non-zero if any chapter could not be downloaded; an incomplete book is not exported, and up to 20 failures are listed (the default only warns with the first 5)
 
 > `--start` / `--end` are used to temporarily download a subset of chapters, and only affect the **first** `book_id` provided on the command line.
 >
@@ -819,6 +824,105 @@ novel-cli completion --shell powershell >> $PROFILE
 
 ---
 
+#### 12. batch Subcommand
+
+Search a plain-text reading list in one pass, optionally downloading and exporting the matches. One book per line:
+
+* `title author`: separated by any run of whitespace (spaces, tabs, the full-width space); a line with a single field is matched by title (with a warning).
+* When the title itself contains spaces, separate title and author with a **Tab** (`title<TAB>author`); spaces before the first Tab stay part of the title.
+* Lines starting with `#` are comments and blank lines are ignored. Lines that cannot be parsed are not dropped silently: they are reported and preserved as comments in the not-found file.
+
+**Synopsis**
+
+```bash
+novel-cli batch [-h] (--file PATH | --from-not-found PATH) [--site SITE]
+                [--out DIR] [--strict-match] [--not-found PATH] [--force]
+                [--download] [--interval SECONDS] [--verbose] [--config CONFIG]
+```
+
+**Options**
+
+* `--file PATH`: read `title author` lines from PATH (mutually exclusive with `--from-not-found`; one is required)
+* `--from-not-found PATH`: continue from a not-found file written by a previous `batch` run
+* `--site SITE`: search only this site; omit it to search every site. `--from-not-found` reuses the site recorded in the file's `# site=` header (not when it is recorded as `all`)
+* `--out DIR`: write exported books to DIR and the raw cache to `DIR/raw_data`; defaults to the configuration
+* `--strict-match`: require both title and author to match exactly; the default matches the title exactly and picks the most similar author
+* `--not-found PATH`: where to write unmatched entries; defaults to `logs/not_found_<site>.txt`
+* `--force`: overwrite an existing `--not-found` file that was not written by this command
+* `--download`: download and export the matched books; the default only reports the matches
+* `--interval SECONDS`: seconds to wait between book searches, default `0`
+* `--verbose`: show candidate counts and author-match details
+* `--config CONFIG`: configuration file path
+
+**Not-found file and retrying on another site**
+
+The not-found file keeps the exact input format: its first line is `# site=<site> searched_at=<time> matches=<matched>/<total>`, and it ends with a `#` marker, so it can be fed straight back into `batch --from-not-found`. A typical switch-site workflow:
+
+```bash
+# 1. Search every site and download
+novel-cli batch --file books.txt --download
+
+# 2. Some books were not found; retry them on another site (an explicit --site overrides the recorded one)
+novel-cli batch --from-not-found logs/not_found_all.txt --site biquge5r --download
+
+# 3. Omit --site to reuse the site recorded in the file header
+novel-cli batch --from-not-found logs/not_found_b520.txt --download
+```
+
+> Without `--download` the command only reports matches. `--file` input is always read-only: even `--force` never writes the not-found result back into the input file.
+
+**Examples**
+
+```bash
+# books.txt holds one "title author" pair per line
+novel-cli batch --file books.txt
+novel-cli batch --file books.txt --site b520 --download
+novel-cli batch --file books.txt --download --interval 1.5 --verbose
+```
+
+---
+
+#### 13. update Subcommand
+
+Check the update manifest (`latest.json`) and optionally download this platform's asset. Checking and downloading are two separate steps: `--check` only checks, and the download must be triggered explicitly. The CLI only **downloads and verifies**; it never executes, unpacks or installs anything.
+
+**Synopsis**
+
+```bash
+novel-cli update [-h] [--check] [--json] [-y] [--no-mirror]
+```
+
+**Options**
+
+* `--check`: check only; never ask or download. The exit code reports whether the *check* worked, not whether an update exists
+* `--json`: print one machine-readable JSON document on stdout and exit; without `--yes` it behaves like `--check` and leaves `download_path` as `null`
+* `-y, --yes`: non-interactive download; downloads, verifies the SHA-256 digest and prints the file path, but does **not** install it. An asset without a digest is refused
+* `--no-mirror`: ignore `NOVEL_UPDATE_MIRROR` and download from the release URL directly
+
+**Environment variable**
+
+* `NOVEL_UPDATE_MIRROR`: comma-separated mirror prefixes, probed in order and used when one answers; when none answers the original release URL is used, and an unset variable means no mirror.
+
+The file always lands in `<app home>/updates/` (never the current directory). To install: on Windows double-click the downloaded `NovelDownloader-setup-<version>-x64.exe`; on other platforms extract the archive and replace the installed files manually. See [Updates and auto-update](./updates.en.md) for the desktop/Android automatic checks and the full verification rules.
+
+**Examples**
+
+```bash
+# Check only
+novel-cli update --check
+
+# Check, then ask before downloading
+novel-cli update
+
+# Scripted: download and verify without installing
+novel-cli update --yes
+
+# Machine-readable output
+novel-cli update --json
+```
+
+---
+
 ### Exit Codes and `--json` Contract
 
 #### Exit codes
@@ -826,8 +930,10 @@ novel-cli completion --shell powershell >> $PROFILE
 | Code | Meaning | Typical cases |
 | --- | --- | --- |
 | `0` | Success | The command completed; no search results or no new chapters is still success |
-| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean` |
-| `2` | Usage error | Missing/conflicting arguments (including argparse errors), `--json` with `--first`, `--json` with `--clean`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell |
+| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean`, unmatched/malformed/download-failed entries in `batch`, a failed `update` check (also no asset for the platform, missing digest, or a failed download with `--yes`) |
+| `2` | Usage error | Missing/conflicting arguments (including argparse errors), `--json` with `--first`, `--json` with `--clean`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, `batch` without an input file or with a negative `--interval` |
+
+The `update --check` exit code reports whether the **check** succeeded, not whether an update exists: finding one still returns `0`. `sources list --probe` never changes the exit code by itself — network unreachability only shows as `-` in the `Latency`/`HTTP` columns, and only a failed structural `--check` exits with `1`.
 
 Pressing `Ctrl+C` prints `Aborted.` on stderr and exits with `1`.
 
@@ -841,10 +947,11 @@ With `--json`:
 
 | Command | Option | stdout shape |
 | --- | --- | --- |
-| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "exported"}]}`; `exported` is `{format: [paths...]}`, or `null` with `--no-export` |
+| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; `failed` is the number of missing chapters (`0` means complete); `exported` is `{format: [paths...]}`, or `null` with `--no-export` |
 | `search` | `--json` | Array of results with `site`, `book_id`, `book_url`, `cover_url`, `title`, `author`, `latest_chapter`, `update_date`, `word_count`, `priority` |
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
-| `sources list` | `--json` | Array with `site_key`, `name`, `search`, `hosts`, `origin`; `status` is populated only with `--check` (otherwise `null`) |
+| `sources list` | `--json` | Array with `site_key`, `name`, `search`, `hosts`, `origin`; `status` is populated only with `--check` (otherwise `null`); with `--probe` each item also carries `latency_ms` and `http_status` (`null` when unreachable) |
+| `update` | `--json` | One object with exactly eight keys: `current`, `latest`, `available`, `asset_name`, `asset_size`, `sha256`, `download_path`, `error`; absent values are `null` (or an empty string for `latest`) |
 | `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}` |
 | `follow list` | `--json` | Array with `site`, `book_id`, `title`, `last_chapter`, `updated_at` |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` |
@@ -860,7 +967,7 @@ novel-cli follow list --json | jq 'length'
 novel-cli storage --json | jq '.total.bytes'
 ```
 
-> `login --list` prints a plain-text list, not JSON. `sources check`, `config`, and `clean` currently have no `--json`.
+> `login --list` prints a plain-text list, not JSON. `sources check`, `config`, `clean`, and `batch` currently have no `--json`.
 >
 > The `jq` examples above require [jq](https://jqlang.github.io/jq/); without it, read the raw JSON output directly.
 

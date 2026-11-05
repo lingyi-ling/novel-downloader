@@ -56,6 +56,23 @@ novel-cli download --site linovelib
 > `novel-cli download --site linovelib 5555`, the **command-line argument
 > overrides `book_ids` from the configuration file**.
 
+#### Update check (`general.update_check`)
+
+```toml
+[general]
+update_check = "auto"     # default
+# update_check = "manual"
+# update_check = "off"
+```
+
+| Value | Behavior |
+| --- | --- |
+| `auto` | After **any command that completes successfully**, quietly check once for a newer version and hint on stderr when one exists; only in an interactive terminal and never with `--json` |
+| `manual` | Check only when `novel-cli update` is run explicitly |
+| `off` | Never check automatically |
+
+The automatic check runs **at most once per day**, with the result cached in `<app home>/update_check.json`. The request runs on a background daemon thread that the command waits for at most 0.75 seconds; failures and offline machines stay completely silent and never affect the command. The hint goes to stderr only, so stdout remains the command's own output. See [Updates and auto-update](./updates.en.md) for details.
+
 ---
 
 ### 3. Login and Cookie Configuration

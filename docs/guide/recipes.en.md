@@ -8,6 +8,34 @@ Configuration lookup order is `--config` file → `settings.toml` in the current
 
 ### 1. Batch-download a reading list
 
+#### Batch search by title with `batch` (recommended)
+
+When all you have is a title and author (no site/book ID), `batch` is the easiest route. `books.txt` holds one `title author` pair per line:
+
+```text
+The Three-Body Problem Liu Cixin
+Lord of the Mysteries Cuttlefish That Loves Diving
+```
+
+```bash
+# Dry pass first: check the matches
+novel-cli batch --file books.txt
+
+# Download once the matches look right
+novel-cli batch --file books.txt --download
+
+# Search one site only; wait 1.5 seconds between searches
+novel-cli batch --file books.txt --site b520 --download --interval 1.5
+```
+
+Unmatched or malformed lines are written to `logs/not_found_<site>.txt`, which can be fed back to retry on another site:
+
+```bash
+novel-cli batch --from-not-found logs/not_found_b520.txt --site biquge5r --download
+```
+
+When the title itself contains spaces, put a Tab between title and author. See [CLI Usage Examples](./cli-examples.en.md) for the full input format, matching rules, and exit codes.
+
 #### Multiple book IDs on one site
 
 `download --site` accepts several book IDs:
@@ -18,7 +46,7 @@ novel-cli download --site b520 8_8187 12345 23456
 
 > `--start` / `--end` apply to the **first** `book_id` only. To give each book its own range, run separate commands or use structured `book_ids` in the configuration file.
 
-#### Maintain the list in the configuration file (recommended)
+#### Maintain the list in the configuration file (alternative)
 
 ```toml
 # settings.toml

@@ -17,7 +17,7 @@
 
 文件名以 `_` 开头的规则文件会被跳过, 适合存放模板与草稿。
 
-仓库中的 [`rules/_example-template.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-template.json) 是一个覆盖全部字段的示例模板 (因带 `_` 前缀默认不会被加载), 可直接复制并去掉下划线后使用。
+仓库中的 [`rules/_example-template.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-template.json) 是一个覆盖基础字段的示例模板 (因带 `_` 前缀默认不会被加载), 可直接复制并去掉下划线后使用。进阶能力另有两份示例: [`rules/_example-advanced-html.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-advanced-html.json)（steps / fallback / preprocess / limits / 分页守卫）与 [`rules/_example-json-api.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-json-api.json)。
 
 ---
 
@@ -86,8 +86,11 @@ JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 
 | `hosts` | string[] | 否 | 命中这些主机名的链接交给本规则解析 (配合 `resolve`) |
 | `headers` | object | 否 | 所有请求共用的请求头 |
 | `resolve` | object | 否 | 链接解析规则, 见下方 |
+| `limits` | object | 否 | 规则级并发 / 间隔 / 重试覆盖, 见 [规则 DSL 参考](./rule-dsl.md) |
 
 `book` 与 `chapter` 至少提供一个。
+
+> 本节只列常用字段。`limits`、`steps`、`fallback`、`preprocess`、`stop_when` 等进阶字段的完整语义与示例见 [规则 DSL 参考](./rule-dsl.md)。
 
 站点若整体走 AJAX/JSON 接口, 在顶层写 `"format": "json"` 即可, 无需给 `search` / `book` / `chapter` 逐段重复声明 (逐段声明会覆盖顶层值)。
 
@@ -108,6 +111,7 @@ JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 
 | `book_id_regex` | string | 空 | 从书籍链接中提取 ID 的正则, 用 `search` 语义匹配 |
 | `book_id_group` | int | `1` | `book_id_regex` 的捕获组序号 |
 | `priority` | int | `200` | 该结果的排序权重, 第 N 个结果加 N |
+| `single_result_fallback` | bool | `false` | `item` 零匹配时把整页当作一条结果, 详见 [规则 DSL 参考](./rule-dsl.md) |
 
 `fields` 中可用的键: `title` / `url` / `cover` / `author` / `latest` / `update` / `word`; 其余键名会在校验时被拒绝 (前缀 `_` 的注释键除外)。其中 `url` 为必填, 缺失该字段的条目会被丢弃。
 
@@ -134,6 +138,9 @@ JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 
 | `id_regex` | string | 空 | 从链接中提取章节 ID 的正则; 缺省时取链接文件名去扩展名 |
 | `id_group` | int | `1` | `id_regex` 的捕获组序号 |
 | `volume_name` | string | `正文` | 归入的分卷名 |
+| `is_desc` | bool | `false` | 站点目录“最新在前”时设为 `true`: 合并全部分页后整体反转一次 |
+| `container` | string | 空 | 与 `preprocess` 配合: 取该节点的 inner HTML 作为重写输入 |
+| `preprocess` | step[] | `[]` | 解析目录前对 HTML 的重写链, 详见 [规则 DSL 参考](./rule-dsl.md) |
 
 ---
 
@@ -149,6 +156,8 @@ JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 
 | `pages` | object \| string | 空 | 正文分页规则 |
 | `format` | string | 继承 | 本节响应格式, 覆盖顶层 `format` |
 | `headers` | object | `{}` | 本节独享的请求头 |
+| `container` | string | 空 | 与 `preprocess` 配合: 取该节点的 inner HTML 作为重写输入 |
+| `preprocess` | step[] | `[]` | 解析正文前对 HTML 的重写链, 详见 [规则 DSL 参考](./rule-dsl.md) |
 
 ---
 
@@ -163,6 +172,8 @@ JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 
 | `url` | string | — | 页码地址模板, 必填 |
 | `start` | int | `2` | 起始页码 |
 | `max_pages` | int | 空 | 指定后固定抓取 `start`~`max_pages` 页, 不再依赖“下一页链接是否存在”的启发式 |
+| `stop_when` | string | 空 | 正则 (开启 `re.S`); 命中当前页响应体时停止翻页 (当前页保留) |
+| `loop_guard` | bool | `true` | 重复 URL / 相同响应体时停止翻页, 防止自指链接死循环 |
 
 也可写成字符串简写。默认策略从 `start` 开始, 当**下一页链接仍出现在当前页 HTML 中**时继续, 最多额外抓取 50 页。JSON 接口通常不会在响应体里回链下一页, 这类站点应改用 `max_pages`。目录分页结果会自动按章节链接去重合并; 正文分页结果按顺序拼接。
 
@@ -181,6 +192,10 @@ JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 
 | `multi` | bool | `false` | 是否收集全部匹配项 (返回数组) |
 | `replace` | `[string, string][]` | `[]` | 逐条替换 |
 | `default` | string | 空 | 未匹配到任何节点时的兜底值 |
+| `steps` | step[] | `[]` | 后处理链, 在 `regex` / `replace` 之后执行 |
+| `fallback` | (string \| field)[] | `[]` | 选择器回退链, 主选择器为空时依次尝试 |
+
+`steps` / `fallback` 的执行顺序、覆盖语义与可用表达式见 [规则 DSL 参考](./rule-dsl.md)。
 
 `selector` 的语法取决于所在段的 `format`:
 
@@ -283,7 +298,7 @@ JSON 接口分页时, 由于响应体通常不回链下一页, 请在 `pages` �
 
 ### 内置示例
 
-`biquge5r.json` 是一个完整可用的内置书源, 可作为编写新规则的起点; `rules/_example-template.json` 覆盖了基础字段 (含 JSON 模式写法)。
+`biquge5r.json` 是一个完整可用的内置书源, 可作为编写新规则的起点; `rules/_example-template.json` 覆盖了基础字段 (含 JSON 模式写法); `rules/_example-advanced-html.json` 与 `rules/_example-json-api.json` 分别演示进阶 HTML 能力与 JSON 接口写法。
 
 进阶能力 (字段后处理 `steps`、选择器回退 `fallback`、HTML 重写 `preprocess`、分页守卫 `stop_when` / `loop_guard`、规则级 `limits`、搜索单结果回退) 的字段级说明与示例见 [规则 DSL 参考](./rule-dsl.md)。
 

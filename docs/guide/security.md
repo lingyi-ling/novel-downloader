@@ -188,6 +188,27 @@ icacls .\novel_cache
 
 ---
 
+### 更新链的威胁模型
+
+自动更新把"第三方内容"换成了"可执行程序", 因此单独列出。链路上的信任锚:
+
+| 环节 | 约束 | 代码位置 |
+| --- | --- | --- |
+| 清单获取 | 固定 HTTPS 端点 `releases/latest/download/latest.json`; `schema` 不符直接拒绝 | `apps/common/updater.py` 的 `fetch_update_manifest` / `parse_update_manifest` |
+| 下载地址 | 清单中的资产地址必须是 **HTTPS**; 安卓端同样只接受 HTTPS | `_manifest_asset`、`UpdateChecker.downloadRequestFailure` |
+| 完整性 | 资产必须带 **SHA-256**: 桌面端与安卓端缺失即拒绝下载, CLI 在非交互 (`--yes`) 下同样拒绝 (交互模式会跳过校验); 下载后复算, 失败立即删除半成品 | `download_asset` / `verify_sha256` |
+| 安装前 | 启动安装器**前再复算一次摘要**, 关闭"校验后到安装前被替换"的 TOCTOU 窗口 | `webview_app._install_verified`、`installPrecheck` |
+| 发布侧 | 上传前运行 `scripts/audit_release_assets.py` 做**资产泄漏审计** (允许清单、归档成员路径、原始字节中的私钥/部署口令/令牌), 命中只报标记名, 不回显明文 | `scripts/release.py` 的 `audit_release_content` |
+
+**可选的清单签名**: 更新清单支持 Ed25519 签名。`updater.TRUSTED_UPDATE_KEYS` 默认为空, 即**默认不验签**, 信任锚是 HTTPS 加每个资产的 SHA-256。一旦配置可信公钥, 清单缺失、未签名、签名不符或使用未知 `key_id` 都会被拒绝, 且客户端**不再回退** GitHub API——否则攻击者删掉清单即可绕过验签。
+
+残余风险:
+
+- 默认未启用签名时, 能同时篡改清单与资产的攻击者 (例如仓库控制权失守) 可以下发一个摘要自洽的恶意包; 需要更强保证时请启用清单签名, 并在客户端内置公钥。
+- 资产泄漏审计只覆盖发布产物, 不能替代对构建机与发布凭据的保护。
+
+---
+
 ### 自行审计
 
 仓库提供离线审计脚本 `scripts/security_audit.py`，**不联网**，不会查询 CVE。

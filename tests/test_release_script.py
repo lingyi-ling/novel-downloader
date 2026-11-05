@@ -1601,3 +1601,41 @@ class TestManifestSigning:
         document = json.loads((release_dir / "latest.json").read_text(encoding="utf-8"))
         assert document["key_id"]
         assert release._manifest_builder().verify_document(document, public)
+
+
+class TestExtraAssets:
+    def test_leftover_assets_are_reported_not_deleted(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root, sub, http = harness
+        release_dir = (
+            root / "dist" / "release" / f"novel-downloader-{VERSION}-windows-x64"
+        )
+        _seed_manifest(release, root, release_dir)
+        _route_tag_steps(sub, local=True, remote=True)
+        assets = release_dir
+        payload = {
+            **RELEASE_JSON,
+            "body": NOTES,
+            "assets": [
+                *TestMainIdempotent()._assets_payload(assets, stale=None),
+                {
+                    "name": "novel-cli-0.0.1-windows-x64.zip",
+                    "id": 999,
+                    "digest": "sha256:" + "9" * 64,
+                },
+            ],
+        }
+        http.route_json("GET", f"/releases/tags/{TAG}", 200, payload)
+
+        rc = release.main(["--skip-build", "--skip-android", "--repo", SLUG])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "extra asset(s)" in out
+        assert "novel-cli-0.0.1-windows-x64.zip" in out
+        # Nothing was deleted.
+        assert not [r for r in http.requests if r["method"] == "DELETE"]
