@@ -180,7 +180,7 @@ async def _register(session: Any) -> tuple[str, str] | None:
 
 
 async def _register_key(
-    session: Any, device_id: str, install_id: str
+    session: Any, device_id: str, install_id: str, ladon_value: str
 ) -> tuple[bytes, int] | None:
     timestamp = int(time.time())
     query = (
@@ -197,7 +197,7 @@ async def _register_key(
         json.dumps({"content": content, "keyver": 1}).encode(), 9, mtime=0
     )
     stub = hashlib.md5(body).hexdigest().upper()
-    seed = os.environ.get("NOVELDL_FANQIE_LADON") or random.choice(LADON_SEEDS)
+    seed = ladon_value
     headers = {
         "user-agent": CLIENT_USER_AGENT,
         "accept": "application/json",
@@ -244,12 +244,22 @@ def _pad(data: bytes, block: int = 16) -> bytes:
     return data + bytes([n]) * n
 
 
+def ladon_candidates() -> list[str]:
+    """Seeds to try, the environment override first."""
+    override = os.environ.get("NOVELDL_FANQIE_LADON", "").strip()
+    return ([override] if override else []) + list(LADON_SEEDS)
+
+
 async def mint_device(session: Any, cache_dir: Any) -> FanqieDevice | None:
     """Register a device and its content key, then persist the identity."""
     pair = await _register(session)
     if pair is None:
         return None
-    issued = await _register_key(session, *pair)
+    issued = None
+    for seed in ladon_candidates():
+        issued = await _register_key(session, pair[0], pair[1], seed)
+        if issued is not None:
+            break
     if issued is None:
         logger.info("fanqienovel: content key registration was refused")
         return None
