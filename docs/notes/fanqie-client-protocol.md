@@ -1,0 +1,118 @@
+# 番茄客户端协议：从发布物还原的接口地图
+
+> 来源：`FanqieNovelDownloader-2026.11.5-1322-android-arm64-v8a.apk` 的静态分析（`lib/arm64-v8a/libfanqie_novel_downloader_tauri.so`，stripped）。
+> 目的：记录**已观察到的**接口形状，供后续实现或与作者核对，而不是保留反编译代码。
+> 标注约定：`observed` = 有命令输出；`inferred` = 由观察推理；`unverified` = 未复现。
+
+---
+
+## 1. 主机与路径（`observed`）
+
+字符串表里出现的常量：
+
+| 常量 | 含义 |
+| --- | --- |
+| `FANQIE_PRIMARY_BASE_URL` | 主 API 主机 |
+| `FANQIE_WEB_BASE_URL` / `FANQIE_OFFICIAL_BASE_URL` | 网页 / 官方站 |
+| `FANQIE_REDCANDLE_BASE_URL` | 红烛（评论/互动） |
+| `FANQIE_COMMENT_BASE_URL` | 评论 |
+| `FANQIE_PASSPORT_BASE_URL` | 登录 |
+| `FANQIE_DOUYIN_BASE_URL` | 抖音互通 |
+| `FANQIE_DEVICE_REGISTER_URLS` | 设备注册回退链 |
+
+主机集合：
+
+```
+api5-normal.fqnovel.com            api5-normal-sinfonlinec.fqnovel.com
+api5-normal-sinfonlinea.fqnovel.com api5-normal-lf.fqnovel.com
+api5-normal-hl.fqnovel.com         api3-normal.fqnovel.com
+api5-sinfonlinec.jxbhmy.com        api-sinfonlinea.fanqiesdk.com
+novel.snssdk.com                   novelfm-hl.snssdk.com
+reading.snssdk.com                 i.snssdk.com
+security.snssdk.com                open-client.douyin.com
+```
+
+内容接口：
+
+```
+/api/novel/book/reader/content/v1    单章
+/reading/reader/full/v               单章（网页同款路径）
+/reading/reader/batch_full/v         批量（可一次取多章）
+/api/novel/channel/homepage/search/search/v1/   搜索
+/bookapi/... /reading/bookapi/...    书架、进度、评论等
+```
+
+## 2. 请求参数（`observed`）
+
+寄存器级反汇编里可以直接读到拼接模板：
+
+```
+item_id={item_id}&aid={aid}&version_code=9050&version_name={version}
+&device_platform=android&os=android&device_type=Pixel%207&os_api=33&support_image=1
+```
+
+搜索：
+
+```
+/api/novel/channel/homepage/search/search/v1/?aid=1967&q={keyword}&offset=0
+```
+
+即客户端**冒充官方安卓端**：`aid=1967`、`package=com.dragon.read`、`version_code=9050`（9.5.0）、`device_type=Pixel 7`。
+
+## 3. 设备身份（`inferred`）
+
+持久化文件：
+
+```
+fanqie_primary_device.json   设备身份
+fanqie_iid_cache.json        install_id
+fanqie_passport_session.json 登录态（可选）
+```
+
+注册：
+
+```
+POST https://i.snssdk.com/service/2/device_register/?tt_data=a
+```
+
+回退链（同一路径依次尝试）：
+
+```
+log5-applog.fqnovel.com → log3-applog.fqnovel.com → log.snssdk.com
+→ log.isnssdk.com → log.tiktokv.com → log.byteoversea.com
+```
+
+载荷字段（`observed`，来自字符串表）：
+
+```
+magic_tag=ss_app_log  _gen_time  manifest_version_code  device_model
+device_manufacturer   device_platform  device_id_str  install_id_str
+serial  sim_serial_number  sim_region  tz_offset  density_dpi
+display_density  pre_install  not_request_sender  registerkey  seed
+```
+
+## 4. 我们验证过、但没走通的部分（`observed`）
+
+| 尝试 | 结果 |
+| --- | --- |
+| `POST log.snssdk.com/service/2/device_register/?tt_data=a`，`header` 为对象 | 200，`device_id: 0` |
+| 同上，`header` 为 JSON 字符串 | 200，`device_id: 0` |
+| `POST i.snssdk.com/...`（两种形状） | 200，`device_id: 0` |
+| `POST api5-normal-sinfonlinea / api5-normal-lf` 的注册路径 | 404 |
+| `/api/novel/book/reader/content/v1` + 随机 `device_id`/`install_id` cookie | 404（网关 TLB） |
+| `/reading/reader/full/v` + `x-ss-stub` + 匿名 cookie | 200，空 body |
+
+二进制里**没有 AES/des**（AES S-box 不存在，`PKCS#7` 属于 rustls 的 X.509 解析），也没有 `a_bogus` / `X-Bogus` / `msToken` 的实现痕迹。因此：
+
+- 该 App **不走网页签名接口**（`a_bogus` 那套），走官方客户端 API；
+- 身份签发被服务端拒绝，说明还差一个我们没能从字符串还原的环节。
+
+## 5. 结论与下一步
+
+匿名读全文的关键是**一个有效的设备身份**。要补齐，成本从低到高：
+
+1. **向作者要一段样例**（最省）：一个 `fanqie_primary_device.json`，或注册请求的抓包。有源的人在对面，逆向是下策。
+2. **动态抓包**：root 设备/模拟器 + Frida hook 注册响应；本项目所在的机器没有 adb/frida，且包只有 arm64。
+3. **继续静态**：从 `x-ss-stub` 等字符串的 ADRP 引用反向追完整个 header 构造，数小时级且不保证成功。
+
+在拿到身份之前，本项目的番茄支持边界是：**匿名可读的章节正常下载；`isChapterLock` 的章节判为失败并进入缺章账本**，不再产出 200 字假章节。

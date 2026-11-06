@@ -161,6 +161,7 @@ nav:
     - 西瓜书屋笔记: notes/xiguashuwu.md
     - so-novel 代码审计: notes/so-novel-audit.md
     - 竞品发布工程审计: notes/fanqie-release-engineering.md
+    - 番茄客户端协议: notes/fanqie-client-protocol.md
 
   - 其他:
     - 待办: misc/todo.md
