@@ -65,41 +65,31 @@ https://fanqienovel.com/reader/7276663560427471412
 
 ---
 
-## 锁定章节与设备身份 (Locked Chapters)
+## 锁定章节 (Locked Chapters)
 
-番茄的网页阅读页对锁定章节只返回约 200 字预览。官方 App 的内容接口会给**持有内容密钥的设备**下发全文，本项目实现了同一套协议（请求签名 → 设备身份 → AES 解密），因此配置了可用设备身份就能下载锁定章节。
+番茄的网页阅读页对锁定章节只返回约 200 字预览。官方 App 的内容接口会给持有内容密钥的设备下发全文，本项目实现了同一套协议：**首次使用时自动注册一台设备并换取内容密钥**，之后直接读取全文——不需要安装官方 App，也不需要登录。
 
 !!! warning "合规提示"
     该能力等价于「在自己设备上使用官方客户端阅读」，仅用于个人离线阅读。请遵守站点服务条款，不要用于批量抓取或再分发。
 
-### 提供设备身份
+### 它是怎么工作的
 
-按优先级依次尝试，找到第一个可用文件即停止：
+1. 向 applog 注册一台虚拟设备（`device_id` / `install_id`）
+2. 用自己的 `X-Argus` / `X-Ladon` 签名换取服务端下发的内容密钥
+3. 把身份保存到 `<缓存目录>/fanqienovel/device.json`，后续复用
 
-| 顺序 | 位置 |
+整个流程约一次往返，失败时静默回退到网页模式，不影响免费章节。
+
+### 高级选项
+
+| 需求 | 做法 |
 | --- | --- |
-| 1 | 环境变量 `NOVELDL_FANQIE_DEVICE` 指向的 JSON 文件 |
-| 2 | `<缓存目录>/fanqienovel/device.json` |
-| 3 | 本机已安装的 FanqieNovelDownloader（`com.pofl.fanqienoveldownloader`）自己注册的身份文件 |
+| 使用自己的设备身份 | 设 `NOVELDL_FANQIE_DEVICE` 指向 JSON（字段：`device_id` / `install_id` / `content_key`） |
+| 关闭自动注册 | 设 `NOVELDL_FANQIE_AUTO_REGISTER=0` |
+| 更换 `x-ladon` 种子 | 设 `NOVELDL_FANQIE_LADON=<48 字符>` |
 
-文件只需要三个字段：
+### 常见日志
 
-```json
-{
-  "device_id": "<19 位数字>",
-  "install_id": "<19 位数字>",
-  "content_key": "<base64 或 32 位 hex，解码后 16 字节>"
-}
-```
-
-多出来的字段（机型、版本号等）会被忽略。文件只在本机读取，不会随任何请求上传。
-
-### 行为差异
-
-* **有身份**：先走 App 内容接口；成功即返回全文。请求失败或密钥不匹配时自动回退网页阅读页，不会让整本书失败
-* **无身份**：与以前完全一致——可匿名读的章节正常下载，锁定章节记为缺失并进入缺章账本
-
-### 常见问题
-
-* 日志出现 `content key rejected`：密钥与该设备不匹配（换过设备或密钥被刷新），重新提供一份身份文件即可
-* 日志出现 `no app device identity found`：三个位置都没找到可用文件，当前按网页模式运行
+* `registered a new device …`：自动注册成功
+* `automatic device registration failed`：注册被拒或网络不通，本次按网页模式运行
+* `content key rejected for chapter …`：密钥与该设备不匹配，删除 `device.json` 后会自动重新注册

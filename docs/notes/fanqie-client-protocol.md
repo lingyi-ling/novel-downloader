@@ -190,72 +190,54 @@ App 把注册结果写在 `%APPDATA%/com.pofl.fanqienoveldownloader/fanqie_prima
 同目录还有 `rust_state.json`，其中 `"download_channel": "official"`、
 `"experimental_device_pool"` 两个开关说明：官方通道 + 设备池是设计内的能力。
 
-## 5. 仍未打通：内容密钥的签发（`observed`）
+## 5. 已打通：自签名 + 自注册（2026-11-07）
 
-### 5.1 抓到过完整请求（2026-11-07 运行时内存）
-
-把 `fanqie_primary_device.json` 移走再启动 Windows 客户端，它会在 5 秒内自动注册一台新
-设备（含 `content_key` / `content_key_version` / `privilege_expire_time`）。趁这段窗口扫进程
-私有堆，可以拿到**未经日志脱敏的原始 HTTP 请求**：
+内容密钥不再需要官方客户端。两步都在本项目里完成：
 
 ```
-POST /reading/crypt/registerkey?device_id=<19位>&iid=<19位>&device_type=SM-G9750
-     &aid=1967&app_name=novelapp&channel=0&device_platform=android
-     &os_version=0&version_code=6.3.9.32 HTTP/1.1
-user-agent: com.dragon.read/74132 (Linux; U; Android 14; zh_CN; SM-G9750;
-            Build/<ROM> release-keys; Cronet/TTNetVersion:8d40f833 2026-03-03
-            QuicVersion:21ac1950 2025-11-18)
-accept: application/json
-accept-encoding: gzip
-x-ss-req-ticket: <毫秒时间戳>
-x-argus: <240 字符 base64>
-x-ladon: <48 字符 base64>
-x-khronos: <unix 秒>
-x-ss-stub: <小写 md5>
-content-type: application/json; charset=utf-8
-content-encoding: gzip
+1. POST log5-applog.fqnovel.com/service/2/device_register/?<query>
+      X-Gorgon(8404) + X-Khronos + x-ss-stub(md5 body, 大写)
+      -> device_id / install_id
+2. POST reading.snssdk.com/reading/crypt/registerkey?<query>
+      version_code=6.3.9.32
+      X-Argus(长签) + X-Ladon(48 字符) + x-khronos
+      体 = gzip({"content": <AES(device_id)>, "keyver": 1})
+      x-ss-stub = md5(gzip 体) 小写
+      -> {"code":0,"data":{"key":<16 字节密钥被 master key 包裹>,"keyver":N}}
 ```
 
-三个与文档旧结论不同的地方：
+`data.key` 用 master key（`ac25c67d…`，AES-128-CBC，前 16 字节 IV）解出 16 字节内容密钥，
+再去 `full/v?version_code=66.9` 取正文，AES-128-CBC 解密即可。
 
-1. **`version_code=6.3.9.32`**，是带点的版本**字符串**，不是 `66.9` 也不是数字。
-   （社区说的「版本号里加小数点」在这里是整串版本名。）
-2. **没有 `x-gorgon`**，改带 `x-argus`（长签，240 字符）+ `x-ladon`（48 字符）。
-3. 请求体是 gzip 后的 JSON，`x-ss-stub` 为 **小写** md5。
+### 5.1 X-Argus：已逐字节复现
 
-### 5.2 但复现仍然失败：门槛就是 `x-argus`
+从客户端运行时抓到的 argus 用公开根密钥解帧，得到完整 bean，字段与取值一一对上；
+再用同一套算法重算，**与抓包逐字节相同**（`tests/plugins/fanqienovel/test_argus.py`
+把它钉成了固定向量）。算法：
 
-按上述形状逐项复现（含 gzip 体、小写 stub、`6.3.9.32`、同一台设备、全新无密钥设备）：
-**全部 200 + 空 body**。
+```
+protobuf bean（字段 1..16,20,21,23,25）
+  -> PKCS#7 -> Simon-128/256（72 轮，rotr 常量 0x3DC94C3A046D678B, %62）
+  -> 8 字节魔术 f2f7fcff ×2 + 9 字节尾 + 逐字节异或 -> 反转 -> "ao"
+  -> AES-128-CBC(key=md5(root[:16]), iv=md5(root[16:])) -> 前缀 f281 -> base64
+```
 
-| 变体 | 结果 |
-| --- | --- |
-| 完全照抄形状，`x-argus` 用短签（`base64(pack('<I', khronos))`） | 空 |
-| 不带 `x-argus` / `x-ladon` | 空 |
-| `x-argus` / `x-ladon` 换成**长度一致的随机 base64**（240 / 48） | 空 |
-| 换 `Content-Type`（json / octet-stream / form）、换 GET / PUT | 空 |
-| 换主机（reading / i / security / api5-normal-* / novel / novelfm-hl） | 空 |
-| 换 TLS 指纹（urllib 与 curl_cffi 的 chrome / safari 指纹） | 空 |
-| `device_register` 改用 TTEncrypt 编码体 | 响应 `device_id: 0`（不认编码体） |
+关键字段：`f1=0x40401252`、`f4="1967"`、`f5=device_id`、`f7=version_name`、
+`f12=ts<<1`、`f13=SM3(MD5(body) 原字节)[:6]`、`f14=SM3(query)[:6]`。
 
-**长度一致但内容随机 → 仍然空**，说明服务端是在做真实的密码学校验，而不是检查长度或存在性。
-配合 §5.1 抓到的「真实请求必然是 240 字符 argus」，结论收敛为一条：
+注意 `f7` 取的是**客户端自身的版本名**（如 `7.4.1.32`），query 里没有也要填。
 
-> `/crypt/registerkey` 要求**由 `libmetasec` 生成的 `x-argus` 长签**；
-> 阅读接口（`version_code=66.9`）不要求它，所以取正文本身是通的。
+### 5.2 X-Ladon：尚未复现，但可复用
 
-密钥只能从这一步来：用我们的明文 `device_register` 注册的新设备，响应里只有
-`device_id/install_id/device_token/klink_egdi`，没有任何密钥字段；而 App 注册的设备
-`crypt_status=0` 且能用 `content_key` 解密。两者之差就是这一次带签名的 registerkey。
+ladon 是 36 字节 base64：4 随机字节 + 一段密文（明文形如 `"{ts}-{license}-{aid}"`）。
+它的加密与本项目移植的公开 Speck 变体不同，尚未还原。
 
-### 5.3 无法自签，但身份可以「导入」
+实测结论：**服务端不校验 ladon 与 `x-khronos`/设备/query 的绑定**——一个抓到的值配
+新时间戳、新设备、新 argus 依然通过。因此 `register.py` 内置两枚种子（可用
+`NOVELDL_FANQIE_LADON` 覆盖）。若某天该端点开始返回空 body，替换种子即可。
 
-因此本项目的边界没有变，只是原因写实了：
+### 5.3 结果
 
-- 有设备身份：App 接口取下全文（含锁定章节），失败自动回退网页
-- 无设备身份：与以前一致，锁定章节记为缺失并进入缺章账本
-- 不再产出 200 字假章节
-
-身份文件的提供方式见 `docs/supported-sites/site-details/fanqienovel.md`。
-若要真正「零配置自注册」，只剩两条路：移植 `x-argus` 纯算（需要从客户端二进制里
-逆出算法与 sign key），或用 unidbg 仿真 `libmetasec`（社区已有工程）。
+全新环境（无任何设备文件）首次使用时会自动注册一台设备、落盘到
+`<缓存目录>/fanqienovel/device.json`，随后直接读取包括锁定章节在内的全文。
+`NOVELDL_FANQIE_AUTO_REGISTER=0` 可关闭自动注册。

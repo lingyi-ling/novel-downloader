@@ -96,6 +96,7 @@ def sign_query(
     *,
     khronos: int | None = None,
     key_bytes: bytes | None = None,
+    stub: bytes | None = None,
 ) -> tuple[str, int]:
     """Return ``(x-gorgon, x-khronos)`` for a raw query string.
 

@@ -245,3 +245,53 @@ def test_handles_locked_chapters_follows_device_presence(
         tmp_path, monkeypatch, lambda url, kw: BaseResponse(content=b"{}")
     )
     assert with_device.handles_locked_chapters is True
+
+
+@pytest.mark.asyncio
+async def test_init_registers_a_device_when_none_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_device(monkeypatch, tmp_path)
+    created = appapi.FanqieDevice(
+        device_id="555", install_id="666", content_key=b"\x09" * 16
+    )
+    calls: list[Path] = []
+
+    async def _fake_mint(session: Any, cache_dir: Path) -> appapi.FanqieDevice:
+        calls.append(cache_dir)
+        return created
+
+    monkeypatch.setattr(fetcher_module, "mint_device", _fake_mint)
+    fetcher, _ = _make(
+        tmp_path, monkeypatch, lambda url, kw: BaseResponse(content=b"{}")
+    )
+
+    await fetcher.init()
+
+    assert calls == [tmp_path / "cache" / "fanqienovel"]
+    assert fetcher._device_cache is created
+    assert fetcher.handles_locked_chapters is True
+
+
+@pytest.mark.asyncio
+async def test_init_skips_registration_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_device(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOVELDL_FANQIE_AUTO_REGISTER", "0")
+    called = False
+
+    async def _fake_mint(session: Any, cache_dir: Path) -> None:
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(fetcher_module, "mint_device", _fake_mint)
+    fetcher, _ = _make(
+        tmp_path, monkeypatch, lambda url, kw: BaseResponse(content=b"{}")
+    )
+
+    await fetcher.init()
+
+    assert called is False
+    assert fetcher.handles_locked_chapters is False

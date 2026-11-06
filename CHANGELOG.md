@@ -1,3 +1,23 @@
+## v1.7.0 (2026-11-07)
+
+### Feature
+
+- **fanqienovel**: 锁定章节不再需要任何外部条件。首次使用会自动注册一台虚拟设备并换取内容密钥，之后直接读取全文——不装官方 App、不登录、不手动放文件。实测干净环境首次运行即拿到第 280 章 2220 字正文
+- **fanqienovel**: 实现长签 `X-Argus`（SM3 + Simon-128/256 + AES-128-CBC + protobuf bean），与原客户端发出的签名**逐字节一致**，并钉成固定向量测试
+- **fanqienovel**: `X-Ladon` 尚未还原算法，改为内置两枚可用种子（`NOVELDL_FANQIE_LADON` 可覆盖）；实测服务端不校验它与时间戳/设备的绑定
+- **fanqienovel**: `NOVELDL_FANQIE_AUTO_REGISTER=0` 可关闭自动注册；注册失败静默回退网页模式，不影响免费章节
+
+### Docs
+
+- 协议笔记改写为「已打通」：完整的两步请求、argus 的 bean 字段与算法、ladon 的现状与替换方式
+- 站点详情页改为「开箱即用」描述，补高级选项与常见日志
+
+### Test
+
+- 新增 `tests/plugins/fanqienovel/test_argus.py`（4 例）：SM3 标准向量、抓包签名逐字节复现、随机数与时间戳的影响
+- 新增 `tests/plugins/fanqienovel/test_register.py`（6 例）：注册与换钥、请求签名形状、拒绝与非 JSON 回复、环境变量覆盖
+- `test_fetcher_appapi.py` 增加 2 例：`init` 自动注册、开关关闭时不注册
+
 ## v1.6.0 (2026-11-06)
 
 ### Feature

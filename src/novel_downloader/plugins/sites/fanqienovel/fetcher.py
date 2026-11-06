@@ -6,6 +6,7 @@ novel_downloader.plugins.sites.fanqienovel.fetcher
 
 import json
 import logging
+import os
 from typing import Any
 
 from novel_downloader.plugins.base.fetcher import GenericFetcher
@@ -18,6 +19,7 @@ from novel_downloader.plugins.sites.fanqienovel.appapi import (
     sign_query,
     to_reader_page,
 )
+from novel_downloader.plugins.sites.fanqienovel.register import mint_device
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,22 @@ class FanqienovelFetcher(GenericFetcher):
         super().__init__(*args, **kwargs)
         self._device_checked = False
         self._device_cache: FanqieDevice | None = None
+
+    async def init(self, **kwargs: Any) -> None:
+        """Initialise the session, registering a device identity if needed."""
+        await super().init(**kwargs)
+        if self._app_device() is not None:
+            return
+        if os.environ.get("NOVELDL_FANQIE_AUTO_REGISTER", "1") == "0":
+            return
+        try:
+            device = await mint_device(self.session, self._cache_dir)
+        except (ConnectionError, TimeoutError, ValueError, OSError):
+            logger.info("fanqienovel: automatic device registration failed")
+            return
+        if device is not None:
+            self._device_cache = device
+            self._device_checked = True
 
     def _app_device(self) -> FanqieDevice | None:
         """Device identity for the app API, looked up at most once per fetcher."""
