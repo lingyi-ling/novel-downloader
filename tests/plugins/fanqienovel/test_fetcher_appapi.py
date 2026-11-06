@@ -43,6 +43,10 @@ class FakeSession:
         self.calls.append((url, kwargs))
         return self.handler(url, kwargs)
 
+    async def post(self, url: str, **kwargs: Any) -> BaseResponse:
+        self.calls.append((url, kwargs))
+        return BaseResponse(content=b"")
+
     def load_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:
         return False
 
@@ -61,6 +65,10 @@ def _encrypt(plain: str) -> str:
     iv = b"\x00" * 16
     body = pad(plain.encode(), 16)
     return base64.b64encode(iv + AES.new(KEY, AES.MODE_CBC, iv).encrypt(body)).decode()
+
+
+async def _refuse_mint(session: Any, cache_dir: Path) -> None:
+    return None
 
 
 def _device_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,6 +154,7 @@ async def test_web_reader_is_used_when_the_device_has_no_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _device_file(tmp_path, monkeypatch)
+    monkeypatch.setattr(fetcher_module, "mint_device", _refuse_mint)
     body = _app_body("", crypt_status=2)
     fetcher, session = _make(
         tmp_path, monkeypatch, lambda url, kw: BaseResponse(content=body)
@@ -295,3 +304,62 @@ async def test_init_skips_registration_when_disabled(
 
     assert called is False
     assert fetcher.handles_locked_chapters is False
+
+
+@pytest.mark.asyncio
+async def test_key_rejection_triggers_one_renewal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused key must not silently drop the chapter: renew once, then retry."""
+    _device_file(tmp_path, monkeypatch)
+    renewed = appapi.FanqieDevice(device_id="777", install_id="888", content_key=KEY)
+    calls: list[int] = []
+
+    async def _fake_mint(session: Any, cache_dir: Path) -> appapi.FanqieDevice:
+        calls.append(1)
+        return renewed
+
+    monkeypatch.setattr(fetcher_module, "mint_device", _fake_mint)
+    bodies = [
+        _app_body("", crypt_status=2),
+        _app_body("<p>正文</p>"),
+    ]
+
+    def handler(url: str, kwargs: dict[str, Any]) -> BaseResponse:
+        if url.startswith("https://reading.snssdk.com"):
+            return BaseResponse(
+                content=bodies.pop(0) if bodies else _app_body("<p>x</p>")
+            )
+        return BaseResponse(content=b"<html></html>")
+
+    fetcher, session = _make(tmp_path, monkeypatch, handler)
+
+    pages = await fetcher.fetch_chapter_content("1", "7704667598306165273")
+
+    assert calls == [1]
+    assert "正文" in pages[0]
+    assert sum(1 for u, _ in session.calls if u.startswith("https://reading")) == 2
+
+
+@pytest.mark.asyncio
+async def test_key_rejection_gives_up_after_one_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _device_file(tmp_path, monkeypatch)
+    calls: list[int] = []
+
+    async def _fake_mint(session: Any, cache_dir: Path) -> None:
+        calls.append(1)
+        return None
+
+    monkeypatch.setattr(fetcher_module, "mint_device", _fake_mint)
+    fetcher, session = _make(
+        tmp_path,
+        monkeypatch,
+        lambda url, kw: BaseResponse(content=_app_body("", crypt_status=2)),
+    )
+
+    await fetcher.fetch_chapter_content("1", "7704667598306165273")
+
+    assert calls == [1]
+    assert session.calls[-1][0].startswith("https://fanqienovel.com/reader/")

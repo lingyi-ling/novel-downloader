@@ -4,6 +4,7 @@ novel_downloader.plugins.sites.fanqienovel.fetcher
 --------------------------------------------------
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ from typing import Any
 from novel_downloader.plugins.base.fetcher import GenericFetcher
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.plugins.sites.fanqienovel.appapi import (
+    DEVICE_FILENAME,
     FanqieDevice,
     decrypt_content,
     discover_device,
@@ -96,7 +98,24 @@ class FanqienovelFetcher(GenericFetcher):
             return [page]
         return await super().fetch_chapter_content(book_id, chapter_id, **kwargs)
 
-    async def _fetch_chapter_via_app(self, chapter_id: str) -> str | None:
+    async def _renew_device(self) -> bool:
+        """Drop the cached identity and register a fresh one."""
+        with contextlib.suppress(OSError):
+            (self._cache_dir / DEVICE_FILENAME).unlink(missing_ok=True)
+        try:
+            device = await mint_device(self.session, self._cache_dir)
+        except (ConnectionError, TimeoutError, ValueError, OSError):
+            return False
+        if device is None:
+            return False
+        self._device_cache = device
+        self._device_checked = True
+        logger.info("fanqienovel: replaced the device identity after a key rejection")
+        return True
+
+    async def _fetch_chapter_via_app(
+        self, chapter_id: str, *, renewed: bool = False
+    ) -> str | None:
         device = self._app_device()
         if device is None or not chapter_id.isdigit():
             return None
@@ -120,7 +139,13 @@ class FanqienovelFetcher(GenericFetcher):
         except ValueError:
             return None
         data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, dict) or data.get("crypt_status") != 0:
+        if not isinstance(data, dict):
+            return None
+        if data.get("crypt_status") != 0:
+            # The server refused our key (rotated or revoked).  Register a
+            # fresh identity once instead of silently dropping the chapter.
+            if not renewed and await self._renew_device():
+                return await self._fetch_chapter_via_app(chapter_id, renewed=True)
             return None
         blob = data.get("content")
         if not isinstance(blob, str) or not blob:
