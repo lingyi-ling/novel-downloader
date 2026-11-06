@@ -25,6 +25,19 @@ from novel_downloader.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _is_locked(chapter_data: dict[str, Any]) -> bool:
+    """
+    Detect the "login required" teaser the site returns for locked chapters.
+
+    ``isChapterLock`` is the authoritative flag the page's own JS uses; the
+    fallback covers payloads that only carry the payment counter.
+    """
+    if chapter_data.get("isChapterLock"):
+        return True
+    need_pay = chapter_data.get("needPay")
+    return isinstance(need_pay, int) and need_pay > 0
+
+
 @registrar.register_parser()
 class FanqienovelParser(BaseParser):
     """
@@ -98,7 +111,7 @@ class FanqienovelParser(BaseParser):
             for ch in chapter_list:
                 chapter_id = str(ch.get("itemId") or "")
                 title = ch.get("title") or ""
-                accessible = not bool(ch.get("isChapterLock"))
+                accessible = not _is_locked(ch)
                 chapters.append(
                     {
                         "title": title,
@@ -154,6 +167,18 @@ class FanqienovelParser(BaseParser):
             )
             return None
 
+        # The site answers a locked chapter with a ~200-character teaser in the
+        # same HTML shape as a real chapter.  Without this check the teaser is
+        # written to disk as if it were the chapter, and the book is silently
+        # truncated: every locked chapter looks downloaded.
+        if _is_locked(chapter_data):
+            logger.warning(
+                "fanqienovel: chapter %s is locked (login required); "
+                "the page only contains a preview, skipping it",
+                chapter_id,
+            )
+            return None
+
         raw_content = chapter_data.get("content")
         if not raw_content:
             logger.warning("fanqienovel: empty content (chapter=%s)", chapter_id)
@@ -178,6 +203,11 @@ class FanqienovelParser(BaseParser):
             "content": content,
             "extra": {"site": self.site_name},
         }
+
+    @staticmethod
+    def _is_locked(chapter_data: dict[str, Any]) -> bool:
+        """Whether the page carries a paywall/login teaser instead of text."""
+        return _is_locked(chapter_data)
 
     @classmethod
     def _apply_font_mapping(cls, text: str) -> str:

@@ -140,6 +140,32 @@ ls -l novel_cache/<site>/*.cookies
 
 ---
 
+### Fanqie: some chapters are very short or marked as failed
+
+For anonymous visitors Fanqie locks chapters **one by one**: the table of
+contents carries an `isChapterLock` flag per chapter, and a locked chapter's
+reader page returns only a ~200-character preview.
+
+What the downloader does:
+
+- chapters flagged as locked are recorded as `accessible: false` and skipped
+  by default, so it does not spend requests on them;
+- if fetching is forced (`fetch_inaccessible = true`), the parser recognises
+  the preview and reports the chapter as failed instead of writing 200
+  characters to disk as if it were the chapter.
+
+Those chapters need a signed-in session:
+
+```bash
+novel-cli login fanqienovel
+```
+
+or a Cookie copied from the browser (see the previous section). Anonymous
+access covers the unlocked chapters of a book; that limit comes from the site,
+not from this tool.
+
+---
+
 ## 3. API Returns 401 / Port Already in Use
 
 ### 3.1 401 Unauthorized
