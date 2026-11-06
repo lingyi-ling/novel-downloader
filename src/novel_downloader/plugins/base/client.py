@@ -467,6 +467,18 @@ class BaseClient(AbstractClient, abc.ABC):
         path = img_dir / image_filename(url, name=name)
         return path if path.is_file() else None
 
+    def _reaches_locked_chapters(self) -> bool:
+        """
+        Whether chapters the catalog marks inaccessible are still worth fetching.
+
+        ``fetch_inaccessible`` is the user's explicit opt-in.  A fetcher may also
+        report that it can read them on its own (e.g. a site that serves full
+        text through a different endpoint when a device identity is available).
+        """
+        if self._fetch_inaccessible:
+            return True
+        return bool(getattr(self._fetcher, "handles_locked_chapters", False))
+
     def _extract_chapter_ids(
         self,
         vols: list[VolumeInfoDict],
@@ -495,7 +507,7 @@ class BaseClient(AbstractClient, abc.ABC):
                     continue
                 if cid not in ignore:
                     accessible = chap.get("accessible", True)
-                    if accessible or self._fetch_inaccessible:
+                    if accessible or self._reaches_locked_chapters():
                         seen.add(cid)
                         out.append(cid)
                 if end_id is not None and cid == end_id:

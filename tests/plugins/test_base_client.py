@@ -559,6 +559,32 @@ def test_extract_chapter_ids_skips_inaccessible_unless_configured(
     ]
 
 
+def test_extract_chapter_ids_keeps_locked_when_the_fetcher_can_read_them(
+    tmp_path: Path,
+) -> None:
+    """A fetcher reaching paywalled text keeps those chapters in the plan."""
+    vols = _book_info(
+        [
+            {"chapterId": "1", "accessible": False},
+            {"chapterId": "2", "accessible": True},
+        ]
+    )["volumes"]
+
+    class _Reader:
+        handles_locked_chapters = True
+
+    class _Plain:
+        handles_locked_chapters = False
+
+    capable = _client(tmp_path)
+    capable._fetcher = _Reader()  # type: ignore[assignment]
+    plain = _client(tmp_path)
+    plain._fetcher = _Plain()  # type: ignore[assignment]
+
+    assert capable._extract_chapter_ids(vols, None, None, frozenset()) == ["1", "2"]
+    assert plain._extract_chapter_ids(vols, None, None, frozenset()) == ["2"]
+
+
 def test_filter_volumes_keeps_only_the_selected_range(tmp_path: Path) -> None:
     client = _client(tmp_path)
     vols = _book_info(

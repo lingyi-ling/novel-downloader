@@ -5,6 +5,7 @@
 - **fanqienovel**: 锁定章节可下载。实现了官方 App 内容接口的请求签名（`X-Gorgon` 8404 变体）、设备身份加载与 AES-128-CBC 解密：配置了可用设备身份后，原先只有 200 字预览的章节可以拿到完整正文（实测第 280 章 3359 字 → 2220 字纯文本）。请求失败、密钥不匹配或章节号不是纯数字时自动回退网页阅读页；没有设备身份时行为与以前完全一致
 - **fanqienovel**: 设备身份支持三种来源（`NOVELDL_FANQIE_DEVICE` 环境变量、缓存目录 `fanqienovel/device.json`、本机同类客户端已注册的身份文件），文件只在本机读取，不随请求上传
 - **fanqienovel**: App 接口返回的正文标记为 `app-api` 来源，解析器据此跳过网页字体混淆检查与字形替换，不再每章误报缺少 webfont
+- **client**: 新增 `handles_locked_chapters` 能力位——抓取器声明能读到锁定章节时，编排阶段不再把它们当作不可读而丢弃。番茄配置设备身份后，实测同一本书的计划章节数从 10 章变成 280 章
 
 ### Docs
 
@@ -16,6 +17,7 @@
 - 新增 `tests/plugins/fanqienovel/test_appapi.py`（18 例）：签名固定向量逐字节锁定、解密往返与错误密钥、身份文件解析、来源优先级、与解析器的页面对接
 - 新增 `tests/plugins/fanqienovel/test_fetcher_appapi.py`（6 例）：App 接口优先、三种回退路径、设备只发现一次
 - `test_parser.py` 增加 2 例：App 页面不触发字体告警、不做字形替换
+- `tests/apps/test_embedded_server.py`：chunked 请求改用原始 socket。服务端一见 `Transfer-Encoding: chunked` 就回 501 并断开，`http.client` 有时会在写完终止块前抛 `BrokenPipeError`，导致用例随机失败（本机 3 次里失败 2 次）
 
 ## v1.5.3 (2026-11-06)
 

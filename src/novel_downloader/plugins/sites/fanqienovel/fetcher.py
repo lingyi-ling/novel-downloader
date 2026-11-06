@@ -50,6 +50,15 @@ class FanqienovelFetcher(GenericFetcher):
                 )
         return self._device_cache
 
+    @property
+    def handles_locked_chapters(self) -> bool:
+        """Whether paywalled chapters can be read through the app API.
+
+        The planner uses this to keep locked chapters in the download queue
+        instead of dropping them as unreadable.
+        """
+        return self._app_device() is not None
+
     async def fetch_chapter_content(
         self,
         book_id: str,

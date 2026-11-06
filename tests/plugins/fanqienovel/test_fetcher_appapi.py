@@ -229,3 +229,19 @@ async def test_device_is_discovered_only_once(
     await fetcher.fetch_chapter_content("1", "7704667598306165273")
     await fetcher.fetch_chapter_content("1", "7704667598306165273")
     assert len(calls) == 1
+
+
+def test_handles_locked_chapters_follows_device_presence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_device(monkeypatch, tmp_path)
+    without, _ = _make(
+        tmp_path, monkeypatch, lambda url, kw: BaseResponse(content=b"{}")
+    )
+    assert without.handles_locked_chapters is False
+
+    _device_file(tmp_path, monkeypatch)
+    with_device, _ = _make(
+        tmp_path, monkeypatch, lambda url, kw: BaseResponse(content=b"{}")
+    )
+    assert with_device.handles_locked_chapters is True

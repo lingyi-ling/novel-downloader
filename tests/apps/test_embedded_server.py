@@ -830,12 +830,22 @@ def test_malformed_content_length_returns_400(
 
 
 def test_chunked_request_body_rejected(running_server: SimpleNamespace) -> None:
-    conn = http.client.HTTPConnection("127.0.0.1", _port, timeout=10)
-    conn.request("POST", "/api/v1/search", body=iter([b'{"keyword": "x"}']))
-    resp = conn.getresponse()
-    assert resp.status == 501
-    resp.read()
-    conn.close()
+    # Sent raw: the server answers as soon as it sees the chunked header and
+    # closes the connection, so ``http.client.request()`` would sometimes raise
+    # while still writing the terminating chunk instead of letting us read the
+    # 501 back.
+    raw = (
+        b"POST /api/v1/search HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"Content-Type: application/json\r\n"
+        b"\r\n"
+        b"10\r\n"
+        b'{"keyword": "x"}\r\n'
+        b"0\r\n\r\n"
+    )
+    data = _raw_exchange(_port, raw)
+    assert data.startswith(b"HTTP/1.1 501")
 
 
 def test_body_size_limit_413(running_server: SimpleNamespace) -> None:
