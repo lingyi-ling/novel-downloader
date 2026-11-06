@@ -363,3 +363,94 @@ async def test_key_rejection_gives_up_after_one_retry(
 
     assert calls == [1]
     assert session.calls[-1][0].startswith("https://fanqienovel.com/reader/")
+
+
+_BOOK_PAGE = (
+    "<html><script>window.__INITIAL_STATE__ = "
+    '{"page":{"bookName":"B"},"reader":{"chapterData":{}}};</script>'
+    '<a data-item="1"></a>' + '"itemId":"111"' + '"itemId":"222"' + "</html>"
+)
+
+
+def _batch_body(ids: list[str]) -> bytes:
+    return json.dumps(
+        {
+            "code": 0,
+            "data": {
+                cid: {
+                    "title": f"章{cid}",
+                    "content": _encrypt(f"<p>正文{cid}</p>"),
+                    "crypt_status": 0,
+                }
+                for cid in ids
+            },
+        }
+    ).encode()
+
+
+@pytest.mark.asyncio
+async def test_book_info_records_the_chapter_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _device_file(tmp_path, monkeypatch)
+    fetcher, _ = _make(
+        tmp_path, monkeypatch, lambda url, kw: BaseResponse(content=_BOOK_PAGE.encode())
+    )
+
+    await fetcher.fetch_book_info("b1")
+
+    assert fetcher._catalog["b1"] == ["111", "222"]
+
+
+@pytest.mark.asyncio
+async def test_consecutive_chapters_share_one_batch_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _device_file(tmp_path, monkeypatch)
+
+    def handler(url: str, kwargs: dict[str, Any]) -> BaseResponse:
+        if "batch_full" in url:
+            return BaseResponse(content=_batch_body(["111", "222"]))
+        if url.startswith(WEB_PREFIX) or "page/" in url:
+            return BaseResponse(content=_BOOK_PAGE.encode())
+        return BaseResponse(content=b"{}")
+
+    fetcher, session = _make(tmp_path, monkeypatch, handler)
+    await fetcher.fetch_book_info("b1")
+    before = len(session.calls)
+
+    first = await fetcher.fetch_chapter_content("b1", "111")
+    second = await fetcher.fetch_chapter_content("b1", "222")
+
+    assert "正文111" in first[0]
+    assert "正文222" in second[0]
+    batch_calls = [u for u, _ in session.calls[before:] if "batch_full" in u]
+    assert len(batch_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_request_carries_argus_and_ladon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _device_file(tmp_path, monkeypatch)
+
+    def handler(url: str, kwargs: dict[str, Any]) -> BaseResponse:
+        if "batch_full" in url:
+            return BaseResponse(content=_batch_body(["111"]))
+        return BaseResponse(content=_BOOK_PAGE.encode())
+
+    fetcher, session = _make(tmp_path, monkeypatch, handler)
+    await fetcher.fetch_book_info("b1")
+    await fetcher.fetch_chapter_content("b1", "111")
+
+    batch = next(kw for u, kw in session.calls if "batch_full" in u)
+    headers = dict(batch["headers"])
+    assert headers["x-argus"].startswith("8o")
+    assert headers["x-ladon"] in reg_seeds()
+    assert "X-Gorgon" in headers
+
+
+def reg_seeds() -> tuple[str, ...]:
+    from novel_downloader.plugins.sites.fanqienovel.register import LADON_SEEDS
+
+    return LADON_SEEDS

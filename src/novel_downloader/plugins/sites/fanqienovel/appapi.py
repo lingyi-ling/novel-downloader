@@ -180,6 +180,25 @@ def reader_url(device: FanqieDevice, item_id: str) -> str:
     return f"{READER_HOST}{READER_PATH}?{build_reader_query(device, item_id)}"
 
 
+def build_batch_query(device: FanqieDevice, item_ids: list[str]) -> str:
+    """Query string for a batch of chapters (same host, up to ~20)."""
+    joined = ",".join(item_ids)
+    return (
+        f"aid=1967&app_name=novelapp&channel=0&device_platform=android"
+        f"&device_id={device.device_id}&device_type=Honor10&book_id=0"
+        f"&item_ids={joined}&novel_text_type=1&os_version=0"
+        f"&req_type=1&version_code={READER_VERSION_CODE}"
+    )
+
+
+def batch_url(device: FanqieDevice, item_ids: list[str]) -> str:
+    """Full batch reader URL."""
+    return (
+        "https://api5-normal-sinfonlineb.fqnovel.com/reading/reader/batch_full/v"
+        f"?{build_batch_query(device, item_ids)}"
+    )
+
+
 def decrypt_content(cipher_text: str, key: bytes) -> str:
     """Decrypt a ``data.content`` body and undo optional gzip compression."""
     raw = base64.b64decode(cipher_text)

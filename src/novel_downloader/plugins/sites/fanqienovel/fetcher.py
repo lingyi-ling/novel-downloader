@@ -8,6 +8,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from novel_downloader.plugins.base.fetcher import GenericFetcher
@@ -15,13 +16,19 @@ from novel_downloader.plugins.registry import registrar
 from novel_downloader.plugins.sites.fanqienovel.appapi import (
     DEVICE_FILENAME,
     FanqieDevice,
+    batch_url,
     decrypt_content,
     discover_device,
     reader_url,
     sign_query,
     to_reader_page,
 )
-from novel_downloader.plugins.sites.fanqienovel.register import mint_device
+from novel_downloader.plugins.sites.fanqienovel.argus import x_argus
+from novel_downloader.plugins.sites.fanqienovel.register import (
+    CLIENT_USER_AGENT,
+    LADON_SEEDS,
+    mint_device,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +44,16 @@ class FanqienovelFetcher(GenericFetcher):
     BOOK_INFO_URL = "https://fanqienovel.com/page/{book_id}"
     CHAPTER_URL = "https://fanqienovel.com/reader/{chapter_id}"
 
+    #: The batch endpoint accepts roughly this many chapters per call.
+    BATCH_SIZE = 20
+    _ITEM_ID_RE = re.compile(r'"itemId":"(\d+)"')
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._device_checked = False
         self._device_cache: FanqieDevice | None = None
+        self._catalog: dict[str, list[str]] = {}
+        self._page_cache: dict[str, str] = {}
 
     async def init(self, **kwargs: Any) -> None:
         """Initialise the session, registering a device identity if needed."""
@@ -79,6 +92,15 @@ class FanqienovelFetcher(GenericFetcher):
         """
         return self._app_device() is not None
 
+    async def fetch_book_info(self, book_id: str, **kwargs: Any) -> list[str]:
+        pages = await super().fetch_book_info(book_id, **kwargs)
+        for page in pages:
+            ids = self._ITEM_ID_RE.findall(page)
+            if ids:
+                self._catalog[book_id] = ids
+                break
+        return pages
+
     async def fetch_chapter_content(
         self,
         book_id: str,
@@ -93,7 +115,9 @@ class FanqienovelFetcher(GenericFetcher):
         When no key is available the request is skipped entirely, so behaviour
         is unchanged for installations without a device identity.
         """
-        page = await self._fetch_chapter_via_app(chapter_id)
+        page = self._page_cache.get(chapter_id)
+        if page is None:
+            page = await self._fetch_chapter_via_app(book_id, chapter_id)
         if page is not None:
             return [page]
         return await super().fetch_chapter_content(book_id, chapter_id, **kwargs)
@@ -113,12 +137,73 @@ class FanqienovelFetcher(GenericFetcher):
         logger.info("fanqienovel: replaced the device identity after a key rejection")
         return True
 
+    def _batch_window(self, book_id: str, chapter_id: str) -> list[str]:
+        """Chapter ids to request together, aligned to the batch size."""
+        ids = self._catalog.get(book_id)
+        if not ids or chapter_id not in ids:
+            return [chapter_id]
+        start = (ids.index(chapter_id) // self.BATCH_SIZE) * self.BATCH_SIZE
+        return ids[start : start + self.BATCH_SIZE]
+
+    async def _fetch_batch(
+        self, device: FanqieDevice, book_id: str, chapter_id: str
+    ) -> str | None:
+        window = self._batch_window(book_id, chapter_id)
+        if len(window) <= 1:
+            return None
+        url = batch_url(device, window)
+        query = url.split("?", 1)[1]
+        timestamp = int(__import__("time").time())
+        gorgon, khronos = sign_query(query, khronos=timestamp)
+        headers = {
+            "User-Agent": CLIENT_USER_AGENT,
+            "Accept-Encoding": "identity",
+            "X-Gorgon": gorgon,
+            "X-Khronos": str(khronos),
+            "x-argus": x_argus(query, timestamp, device_id=device.device_id),
+            "x-ladon": LADON_SEEDS[0],
+        }
+        try:
+            text = await self.fetch(url, headers=headers)
+        except (ConnectionError, TimeoutError):
+            return None
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            return None
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict) or not data:
+            return None
+        for item_id, item in data.items():
+            if not isinstance(item, dict) or item.get("crypt_status") != 0:
+                continue
+            blob = item.get("content")
+            if not isinstance(blob, str) or not blob:
+                continue
+            try:
+                html = decrypt_content(blob, device.content_key)
+            except (ValueError, TypeError):
+                continue
+            if html.strip():
+                title = item.get("title")
+                self._page_cache[item_id] = to_reader_page(
+                    title if isinstance(title, str) else "", html
+                )
+        if len(self._page_cache) > 4 * self.BATCH_SIZE:
+            for stale in list(self._page_cache)[: 2 * self.BATCH_SIZE]:
+                del self._page_cache[stale]
+        return self._page_cache.get(chapter_id)
+
     async def _fetch_chapter_via_app(
-        self, chapter_id: str, *, renewed: bool = False
+        self, book_id: str, chapter_id: str, *, renewed: bool = False
     ) -> str | None:
         device = self._app_device()
         if device is None or not chapter_id.isdigit():
             return None
+
+        batched = await self._fetch_batch(device, book_id, chapter_id)
+        if batched is not None:
+            return batched
 
         url = reader_url(device, chapter_id)
         query = url.split("?", 1)[1]
@@ -145,7 +230,9 @@ class FanqienovelFetcher(GenericFetcher):
             # The server refused our key (rotated or revoked).  Register a
             # fresh identity once instead of silently dropping the chapter.
             if not renewed and await self._renew_device():
-                return await self._fetch_chapter_via_app(chapter_id, renewed=True)
+                return await self._fetch_chapter_via_app(
+                    book_id, chapter_id, renewed=True
+                )
             return None
         blob = data.get("content")
         if not isinstance(blob, str) or not blob:
