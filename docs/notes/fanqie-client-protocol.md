@@ -145,8 +145,46 @@ display_density  pre_install  not_request_sender  registerkey  seed
 `/crypt/registerkey` 仍然 504；东京机器同样 504。所以**不是地域问题**，
 而是请求形状未对上。`register_key` 以 hex/base64/JSON 三种形式提交均为 504。
 
-**推论**（`inferred`）：如果该端点在正式网络里也返回 504，那么他的 App 同样注册失败，
-"不用登录能下"就更可能只是下到了未锁章节。要证实只需一次抓包。
+**推论修正**：App 侧确实持有已注册身份（见 §4.5），所以「不登录看全部」成立。
+我们缺的不是身份，而是**请求签名/头部**——网关对缺签名的请求返回
+`200 + Content-Length: 0`（静默拒绝），而不是 403。
+
+已排除：地域（北京联通直连同样 504/空体）、Cookie（带真实 device_id/install_id 仍空）、
+查询参数（把 device_profile 全字段铺进 query 仍空）、主机（7 个 API 主机全试）。
+
+## 4.5 设备身份的真实结构（`observed`）
+
+App 把注册结果写在 `%APPDATA%\com.pofl.fanqienoveldownloaderanqie_primary_device.json`
+（值已脱敏，仅记录字段）：
+
+```json
+{
+  "install_id": "<19 位数字>",
+  "device_id":  "<19 位数字>",
+  "registered": true,
+  "device_profile": {
+    "device_type": "<机型>", "device_brand": "<品牌>",
+    "os_version": "<版本>", "os_api": "<API 级别>", "host_abi": "arm64-v8a",
+    "resolution": "<宽*高>", "dpi": "<dpi>",
+    "cdid": "<UUID>", "openudid": "<16 位 hex>",
+    "rom_version": "<ROM>", "language": "zh", "channel": "<渠道号>",
+    "version_code": "<官方版本号>", "version_name": "<官方版本名>",
+    "dragon_device_type": "0", "is_android_pad_screen": "0"
+  },
+  "content_key": "<base64，解码后 16 字节>",
+  "content_key_version": <整数>,
+  "privilege_expire_time": "<unix 秒>"
+}
+```
+
+三个字段直接印证了 §3.5 的推断：
+
+- `content_key` 解码后 **16 字节** → 就是 `/crypt/registerkey` 换来的 AES-128 密钥；
+- `content_key_version` → 响应里的 `keyver`；
+- `privilege_expire_time` → 注册设备获得的**免费阅读权限到期时间**，这正是「不登录也能看全部」的来源。
+
+同目录还有 `rust_state.json`，其中 `"download_channel": "official"`、
+`"experimental_device_pool"` 两个开关说明：官方通道 + 设备池是设计内的能力。
 
 ## 5. 结论与下一步
 
