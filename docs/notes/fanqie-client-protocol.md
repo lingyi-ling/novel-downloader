@@ -108,6 +108,15 @@ display_density  pre_install  not_request_sender  registerkey  seed
 即密钥长度），`0x73826c/0x7382f0/0x7383a8` 引用 `/crypt/registerkey`，并格式化了
 `missing_key` / `invalid_key` / `keyver` 三条错误。
 
+进一步（`0x7380f0` 起）：代码把 `(path='/crypt/registerkey', len=18)` 与
+`(value, 'register_key', len=12)` 一起写进一个请求描述结构，然后调用 `0x740624`。
+说明 **`register_key` 是请求里携带的字段**，不是响应字段——客户端先生成 16 字节密钥，
+带去 `/crypt/registerkey` 换取 `keyver`，再用它加密第二步的 body。
+
+注册是一个**状态机**（入口 `0x737758`，状态字节 `[x1,#0x29]` 取 0–3），按状态在
+`api5-normal-sinfonlinec.fqnovel.com`(35 字符) 与 `novelfm-hl.snssdk.com`(21 字符)
+之间做主机故障转移；失败落到终止状态 3。
+
 **之前「二进制里没有 AES」的判断是错的**：ring 在 arm64 上走硬件 AES 指令
 （`aese`/`aesmc`），不会在 `.rodata` 留下 S-box。密钥长度 16 字节也与 AES-128 吻合。
 
@@ -130,7 +139,14 @@ display_density  pre_install  not_request_sender  registerkey  seed
 - 身份签发被服务端拒绝，说明还差一个我们没能从字符串还原的环节。
 
 **卡点已收敛到一处**：`/crypt/registerkey` 的请求形状，以及第二步的 AES 模式（CBC/GCM）
-与 IV 约定。504 而非 400 也提示可能是**地域限制**（非 CN 出口）——这条未验证。
+与 IV 约定。
+
+补充实测（`observed`）：本机出口是 **124.64.18.88 / 北京联通**（直连，无代理），
+`/crypt/registerkey` 仍然 504；东京机器同样 504。所以**不是地域问题**，
+而是请求形状未对上。`register_key` 以 hex/base64/JSON 三种形式提交均为 504。
+
+**推论**（`inferred`）：如果该端点在正式网络里也返回 504，那么他的 App 同样注册失败，
+"不用登录能下"就更可能只是下到了未锁章节。要证实只需一次抓包。
 
 ## 5. 结论与下一步
 
