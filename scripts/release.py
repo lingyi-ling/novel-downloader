@@ -54,6 +54,7 @@ import platform
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -71,6 +72,11 @@ GITHUB_HOST = "github.com"
 TOKEN_ENV_VARS = ("GITHUB_TOKEN", "GH_TOKEN")
 CHUNK_SIZE = 1024 * 1024
 HTTP_TIMEOUT = 120.0
+#: Uploads move tens of megabytes; a slow link can exceed the API timeout.
+UPLOAD_TIMEOUT = 900.0
+#: Attempts per asset upload, with the delays below between them.
+UPLOAD_ATTEMPTS = 4
+UPLOAD_BACKOFF = (4.0, 8.0, 16.0)
 CREDENTIAL_TIMEOUT = 30.0
 GRADLE_TIMEOUT = 2700.0
 # PyInstaller builds of three bundles take tens of minutes: no timeout.
@@ -88,6 +94,10 @@ _APK_GLOB = "app/build/outputs/apk/release/*.apk"
 
 class ReleaseError(RuntimeError):
     """A release step failed; the message is safe to print."""
+
+
+class TransientAPIError(ReleaseError):
+    """A failure worth retrying: network drop, timeout, 5xx or rate limit."""
 
 
 @dataclass(frozen=True)
@@ -704,6 +714,7 @@ class GitHubClient:
         data: bytes | None = None,
         content_type: str | None = None,
         expected: tuple[int, ...] = (200,),
+        timeout: float | None = None,
     ) -> Reply:
         headers = {
             "Authorization": f"Bearer {self._token}",
@@ -719,24 +730,33 @@ class GitHubClient:
             headers["Content-Type"] = content_type
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+            with urllib.request.urlopen(
+                request, timeout=timeout if timeout is not None else HTTP_TIMEOUT
+            ) as response:
                 status = int(response.status)
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             status = int(exc.code)
             raw = exc.read()
         except urllib.error.URLError as exc:
-            raise ReleaseError(
+            raise TransientAPIError(
                 f"network error calling {method} {url}: {exc.reason}"
+            ) from exc
+        except TimeoutError as exc:
+            raise TransientAPIError(
+                f"network timeout calling {method} {url}: {exc}"
             ) from exc
         payload = _parse_json(raw)
         if status not in expected:
             message = (
                 payload.get("message") if isinstance(payload, dict) else None
             ) or raw[:200].decode("utf-8", "replace")
-            raise ReleaseError(
-                f"GitHub API {method} {url} returned HTTP {status}: {message}"
+            error = (
+                TransientAPIError
+                if status in {429, 500, 502, 503, 504}
+                else ReleaseError
             )
+            raise error(f"GitHub API {method} {url} returned HTTP {status}: {message}")
         return Reply(status, payload)
 
     def _json(self, reply: Reply, context: str) -> dict[str, Any]:
@@ -791,23 +811,46 @@ class GitHubClient:
         self._request("DELETE", url, expected=(200, 204))
 
     def upload_asset(self, upload_url: str, asset: AssetSpec) -> None:
-        """Upload *asset* to the release's upload endpoint."""
+        """
+        Upload *asset* to the release's upload endpoint, retrying transient faults.
+
+        A 55 MiB upload over a slow link fails regularly with a write timeout;
+        aborting the whole release for that wastes the build and leaves the
+        release half-populated.  GitHub only registers an asset once the upload
+        completes, so retrying the same name is safe.
+        """
         base = upload_url.split("{", 1)[0].rstrip("/")
         if not base:
             raise ReleaseError(
                 "release payload has no upload_url; cannot upload assets"
             )
         url = f"{base}?name={quote(asset.name)}"
-        self._request(
-            "POST",
-            url,
-            data=asset.path.read_bytes(),
-            content_type="application/octet-stream",
-            expected=(200, 201),
-        )
-        print(
-            f"  asset {asset.name}: uploaded ({_human_size(asset.path.stat().st_size)})"
-        )
+        payload = asset.path.read_bytes()
+        for attempt in range(UPLOAD_ATTEMPTS):
+            try:
+                self._request(
+                    "POST",
+                    url,
+                    data=payload,
+                    content_type="application/octet-stream",
+                    expected=(200, 201),
+                    timeout=UPLOAD_TIMEOUT,
+                )
+            except TransientAPIError as exc:
+                if attempt == UPLOAD_ATTEMPTS - 1:
+                    raise
+                delay = UPLOAD_BACKOFF[min(attempt, len(UPLOAD_BACKOFF) - 1)]
+                print(
+                    f"  asset {asset.name}: {exc}; retrying in {delay:.0f}s "
+                    f"({attempt + 1}/{UPLOAD_ATTEMPTS - 1})"
+                )
+                time.sleep(delay)
+                continue
+            print(
+                f"  asset {asset.name}: uploaded "
+                f"({_human_size(asset.path.stat().st_size)})"
+            )
+            return
 
 
 def _remote_digest(asset: dict[str, Any]) -> str | None:

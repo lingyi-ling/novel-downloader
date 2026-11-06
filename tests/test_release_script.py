@@ -1639,3 +1639,90 @@ class TestExtraAssets:
         assert "novel-cli-0.0.1-windows-x64.zip" in out
         # Nothing was deleted.
         assert not [r for r in http.requests if r["method"] == "DELETE"]
+
+
+class TestUploadRetry:
+    """A 55 MiB upload over a slow link times out; that must not kill a release."""
+
+    def _client(self, release: Any) -> Any:
+        return release.GitHubClient("o/r", "token", api_base="https://api.example")
+
+    def _spec(self, release: Any, tmp_path: Path) -> Any:
+        path = tmp_path / "novel-api-1.5.3-windows-x64.zip"
+        path.write_bytes(b"payload")
+        return release.AssetSpec(path, path.name, "0" * 64)
+
+    def test_transient_failure_is_retried_then_succeeds(
+        self, release: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(release)
+        spec = self._spec(release, tmp_path)
+        calls: list[str] = []
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> Any:
+            calls.append(url)
+            if len(calls) < 3:
+                raise release.TransientAPIError("write operation timed out")
+            return release.Reply(201, {})
+
+        monkeypatch.setattr(client, "_request", fake_request)
+        monkeypatch.setattr(release.time, "sleep", lambda seconds: None)
+
+        client.upload_asset("https://up.example/assets{?name,label}", spec)
+
+        assert len(calls) == 3
+
+    def test_it_gives_up_after_the_attempt_budget(
+        self, release: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(release)
+        spec = self._spec(release, tmp_path)
+        calls: list[str] = []
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> Any:
+            calls.append(url)
+            raise release.TransientAPIError("still down")
+
+        monkeypatch.setattr(client, "_request", fake_request)
+        monkeypatch.setattr(release.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(release.TransientAPIError):
+            client.upload_asset("https://up.example/assets{?name,label}", spec)
+
+        assert len(calls) == release.UPLOAD_ATTEMPTS
+
+    def test_a_permanent_error_is_not_retried(
+        self, release: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(release)
+        spec = self._spec(release, tmp_path)
+        calls: list[str] = []
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> Any:
+            calls.append(url)
+            raise release.ReleaseError("HTTP 422: validation failed")
+
+        monkeypatch.setattr(client, "_request", fake_request)
+        monkeypatch.setattr(release.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(release.ReleaseError, match="validation"):
+            client.upload_asset("https://up.example/assets{?name,label}", spec)
+
+        assert len(calls) == 1
+
+    def test_uploads_use_the_longer_timeout(
+        self, release: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(release)
+        spec = self._spec(release, tmp_path)
+        seen: list[Any] = []
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> Any:
+            seen.append(kwargs.get("timeout"))
+            return release.Reply(201, {})
+
+        monkeypatch.setattr(client, "_request", fake_request)
+
+        client.upload_asset("https://up.example/assets{?name,label}", spec)
+
+        assert seen == [release.UPLOAD_TIMEOUT]
