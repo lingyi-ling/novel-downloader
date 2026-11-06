@@ -1,3 +1,22 @@
+## v1.6.0 (2026-11-06)
+
+### Feature
+
+- **fanqienovel**: 锁定章节可下载。实现了官方 App 内容接口的请求签名（`X-Gorgon` 8404 变体）、设备身份加载与 AES-128-CBC 解密：配置了可用设备身份后，原先只有 200 字预览的章节可以拿到完整正文（实测第 280 章 3359 字 → 2220 字纯文本）。请求失败、密钥不匹配或章节号不是纯数字时自动回退网页阅读页；没有设备身份时行为与以前完全一致
+- **fanqienovel**: 设备身份支持三种来源（`NOVELDL_FANQIE_DEVICE` 环境变量、缓存目录 `fanqienovel/device.json`、本机同类客户端已注册的身份文件），文件只在本机读取，不随请求上传
+- **fanqienovel**: App 接口返回的正文标记为 `app-api` 来源，解析器据此跳过网页字体混淆检查与字形替换，不再每章误报缺少 webfont
+
+### Docs
+
+- 站点详情页新增「锁定章节与设备身份」：文件格式、来源优先级、回退行为、常见日志含义
+- `docs/notes/fanqie-client-protocol.md` 改写为实测结论：可用的完整请求形状、8404 签名结构、`version_code` 为何必须压低，以及内容密钥签发仍未打通的完整证据表（含「已知可用设备同样被拒」这个决定性对照）
+
+### Test
+
+- 新增 `tests/plugins/fanqienovel/test_appapi.py`（18 例）：签名固定向量逐字节锁定、解密往返与错误密钥、身份文件解析、来源优先级、与解析器的页面对接
+- 新增 `tests/plugins/fanqienovel/test_fetcher_appapi.py`（6 例）：App 接口优先、三种回退路径、设备只发现一次
+- `test_parser.py` 增加 2 例：App 页面不触发字体告警、不做字形替换
+
 ## v1.5.3 (2026-11-06)
 
 ### Fix

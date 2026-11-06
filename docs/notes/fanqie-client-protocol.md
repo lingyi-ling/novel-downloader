@@ -120,41 +120,45 @@ display_density  pre_install  not_request_sender  registerkey  seed
 **之前「二进制里没有 AES」的判断是错的**：ring 在 arm64 上走硬件 AES 指令
 （`aese`/`aesmc`），不会在 `.rodata` 留下 S-box。密钥长度 16 字节也与 AES-128 吻合。
 
-## 4. 我们验证过、但没走通的部分（`observed`）
+## 4. 内容接口已打通（`observed`，2026-11-06 实测）
 
-| 尝试 | 结果 |
+单个章节的完整请求形状如下（**参数顺序、编码一个字符都不能变**，签名覆盖的是原始
+query 串）：
+
+```
+GET https://reading.snssdk.com/reading/reader/full/v/
+    ?aid=1967&app_name=novelapp&channel=0&device_platform=android
+    &device_id={device_id}&device_type=Honor10
+    &item_id={item_id}&os_version=0&version_code=66.9
+Headers: User-Agent: com.dragon.read
+         X-Gorgon: 8404xxxx...（52 位 hex）
+         X-Khronos: <unix 秒，与签名同源>
+```
+
+响应 `data` 里 `crypt_status=0` 时，`content` 是 base64（前 16 字节 IV，其余
+AES-128-CBC 密文），用设备身份里的 `content_key` 解密即得正文 HTML。
+
+实测证据：
+
+| 章节 | 结果 |
 | --- | --- |
-| `POST log.snssdk.com/service/2/device_register/?tt_data=a`，`header` 为对象 | 200，`device_id: 0` |
-| 同上，`header` 为 JSON 字符串 | 200，`device_id: 0` |
-| `POST i.snssdk.com/...`（两种形状） | 200，`device_id: 0` |
-| `POST api5-normal-sinfonlinea / api5-normal-lf` 的注册路径 | 404 |
-| `/api/novel/book/reader/content/v1` + 随机 `device_id`/`install_id` cookie | 404（网关 TLB） |
-| `/reading/reader/full/v` + `x-ss-stub` + 匿名 cookie | 200，空 body |
-| `POST/GET i.snssdk.com/crypt/registerkey`（空体 / seed 表单 / JSON） | **504**（路由存在，上游不接） |
-| 同上，`api5-normal-*` 主机 | 404 |
+| `7704667598306165273`（第 280 章，网页端 `isChapterLock=true`） | 响应 25809 字节 → 解密 3359 字符完整正文 |
+| 同上，`version_code=9050` | `{"code":110,"message":"ILLEGAL_ACCESS"}` |
 
-二进制里**没有 AES/des**（AES S-box 不存在，`PKCS#7` 属于 rustls 的 X.509 解析），也没有 `a_bogus` / `X-Bogus` / `msToken` 的实现痕迹。因此：
+三个关键点：
 
-- 该 App **不走网页签名接口**（`a_bogus` 那套），走官方客户端 API；
-- 身份签发被服务端拒绝，说明还差一个我们没能从字符串还原的环节。
-
-**卡点已收敛到一处**：`/crypt/registerkey` 的请求形状，以及第二步的 AES 模式（CBC/GCM）
-与 IV 约定。
-
-补充实测（`observed`）：本机出口是 **124.64.18.88 / 北京联通**（直连，无代理），
-`/crypt/registerkey` 仍然 504；东京机器同样 504。所以**不是地域问题**，
-而是请求形状未对上。`register_key` 以 hex/base64/JSON 三种形式提交均为 504。
-
-**推论修正**：App 侧确实持有已注册身份（见 §4.5），所以「不登录看全部」成立。
-我们缺的不是身份，而是**请求签名/头部**——网关对缺签名的请求返回
-`200 + Content-Length: 0`（静默拒绝），而不是 403。
-
-已排除：地域（北京联通直连同样 504/空体）、Cookie（带真实 device_id/install_id 仍空）、
-查询参数（把 device_profile 全字段铺进 query 仍空）、主机（7 个 API 主机全试）。
+1. **签名算法是 `8404` 变体**：`md5(query)[:4] + 4×0 + [0,0,0,0] + [0,1,7,4] + 时间戳`
+   共 20 字节，用两个随机字节派生 8 字节密钥做 KSA + 两轮变换，最后加 6 字节头
+   `84 04 <a1> <a2> 00 00`。随机数写在头里，服务端据此重建密钥流。
+   移植件在 `src/novel_downloader/plugins/sites/fanqienovel/appapi.py`，
+   并由 `tests/plugins/fanqienovel/test_appapi.py` 用固定向量逐字节锁住。
+2. **`version_code` 必须低**。新版号会打开 `x-medusa` / `x-helios` 校验，那两个
+   签名要跑官方 `.so`；旧版号只看 `x-gorgon`。`66.9` 是社区长期沿用的值。
+3. **只需要三个头**，不需要 `x-argus` / `x-ladon` / `x-ss-stub`，也不需要 Cookie。
 
 ## 4.5 设备身份的真实结构（`observed`）
 
-App 把注册结果写在 `%APPDATA%\com.pofl.fanqienoveldownloaderanqie_primary_device.json`
+App 把注册结果写在 `%APPDATA%/com.pofl.fanqienoveldownloader/fanqie_primary_device.json`
 （值已脱敏，仅记录字段）：
 
 ```json
@@ -186,12 +190,33 @@ App 把注册结果写在 `%APPDATA%\com.pofl.fanqienoveldownloaderanqie_primar
 同目录还有 `rust_state.json`，其中 `"download_channel": "official"`、
 `"experimental_device_pool"` 两个开关说明：官方通道 + 设备池是设计内的能力。
 
-## 5. 结论与下一步
+## 5. 仍未打通：内容密钥的签发（`observed`）
 
-匿名读全文的关键是**一个有效的设备身份**。要补齐，成本从低到高：
+设备本身可以自助注册（`POST log5-applog.fqnovel.com/service/2/device_register/`，
+带 `x-gorgon` 的查询签名 + `x-ss-stub` 即可拿到 `device_id` / `install_id` /
+`device_token`）。缺的是**内容密钥**：
 
-1. **向作者要一段样例**（最省）：一个 `fanqie_primary_device.json`，或注册请求的抓包。有源的人在对面，逆向是下策。
-2. **动态抓包**：root 设备/模拟器 + Frida hook 注册响应；本项目所在的机器没有 adb/frida，且包只有 arm64。
-3. **继续静态**：从 `x-ss-stub` 等字符串的 ADRP 引用反向追完整个 header 构造，数小时级且不保证成功。
+| 尝试 | 结果 |
+| --- | --- |
+| `GET/POST reading.snssdk.com/reading/crypt/registerkey`（`aid` / `device_id+iid` / 低版本参数集） | 200，空 body |
+| 同上，`api5-normal-*` / `api3-normal` / `novelfm-hl` | 路由存在时一律 200 空 body；`novel.snssdk.com` 404 |
+| body 换成 `{"content": AES(device_id), "keyver": 1/0/1219929098}` | 空 |
+| `register_key` / `registerkey` / `seed` 作为 query（hex / base64） | 空 |
+| `Content-Type` 在 JSON 与 form 之间切换、`x-ss-stub` 用原文或 gzip 摘要 | 空 |
+| 上述请求带**已知可用**的设备（已持有 `content_key`） | **仍然空**——说明不是设备问题 |
+| `POST reading.snssdk.com/reading/user/privilege/add/v/`（无签名的 JSON） | 200，`{"Code":110001,"Message":"未知异常"}` |
 
-在拿到身份之前，本项目的番茄支持边界是：**匿名可读的章节正常下载；`isChapterLock` 的章节判为失败并进入缺章账本**，不再产出 200 字假章节。
+`200 + Content-Length: 0` 是这张网关的静默拒绝形状。既然已知可用的身份也被拒，
+问题就只剩「缺 `x-medusa` / `x-helios`」这一种解释——这两个签名由
+`libmetasec_ml.so` 生成，需要 unidbg 或真机 hook，不在本项目的范围内。
+
+旁证：目前仍在维护的第三方下载器，其「官方通道」的 `registerkey` 也是**走别人的
+反向代理**，并没有自己签发密钥。
+
+### 因此本项目的边界
+
+- 有设备身份：App 接口取下全文（含锁定章节），失败自动回退网页
+- 无设备身份：与以前一致，锁定章节记为缺失并进入缺章账本
+- 不再产出 200 字假章节
+
+身份文件的提供方式见 `docs/supported-sites/site-details/fanqienovel.md`。

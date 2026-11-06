@@ -97,3 +97,31 @@ def test_whitespace_only_paragraphs_return_none() -> None:
     )
 
     assert _parser().parse_chapter_content([raw], "1") is None
+
+
+# --------------------------------------------------------------------------- #
+# App API pages
+# --------------------------------------------------------------------------- #
+def test_app_page_is_parsed_without_the_font_warning(caplog: Any) -> None:
+    from novel_downloader.plugins.sites.fanqienovel.appapi import to_reader_page
+
+    raw = to_reader_page("第280章", "<article><p>第一段</p><p>第二段</p></article>")
+
+    with caplog.at_level("WARNING"):
+        result = _parser().parse_chapter_content([raw], "7704667598306165273")
+
+    assert result is not None
+    assert result["content"] == "第一段\n第二段"
+    assert "font check" not in caplog.text
+
+
+def test_app_page_skips_glyph_substitution() -> None:
+    """App text is plain; private-use codepoints must survive unchanged."""
+    from novel_downloader.plugins.sites.fanqienovel.appapi import to_reader_page
+
+    raw = to_reader_page("第1章", "<p>前\ue000后</p>")
+
+    result = _parser().parse_chapter_content([raw], "1")
+
+    assert result is not None
+    assert "\ue000" in result["content"]

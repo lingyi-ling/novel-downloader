@@ -38,6 +38,12 @@ def _is_locked(chapter_data: dict[str, Any]) -> bool:
     return isinstance(need_pay, int) and need_pay > 0
 
 
+def _is_app_page(data: dict[str, Any]) -> bool:
+    """Whether the payload came from the official app API shim."""
+    reader = data.get("reader")
+    return isinstance(reader, dict) and reader.get("source") == "app-api"
+
+
 @registrar.register_parser()
 class FanqienovelParser(BaseParser):
     """
@@ -157,9 +163,13 @@ class FanqienovelParser(BaseParser):
             return None
 
         html_str = raw_pages[0]
-        self._check_font(html_str)
-
         data = self._extract_initial_state(html_str)
+        # Pages built by :mod:`...appapi` carry plain text; there is no webfont
+        # to look for and no glyph substitution to undo.
+        app_source = _is_app_page(data)
+        if not app_source:
+            self._check_font(html_str)
+
         chapter_data = self._extract_chapter_data(data)
         if not chapter_data:
             logger.warning(
@@ -187,7 +197,10 @@ class FanqienovelParser(BaseParser):
         tree = html.fromstring(raw_content)
         paragraphs: list[str] = []
         for p in tree.xpath("//p"):
-            text = self._apply_font_mapping(p.text_content()).strip()
+            text = p.text_content()
+            if not app_source:
+                text = self._apply_font_mapping(text)
+            text = text.strip()
             if text:
                 paragraphs.append(text)
 
