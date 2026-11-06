@@ -192,31 +192,70 @@ App 把注册结果写在 `%APPDATA%/com.pofl.fanqienoveldownloader/fanqie_prima
 
 ## 5. 仍未打通：内容密钥的签发（`observed`）
 
-设备本身可以自助注册（`POST log5-applog.fqnovel.com/service/2/device_register/`，
-带 `x-gorgon` 的查询签名 + `x-ss-stub` 即可拿到 `device_id` / `install_id` /
-`device_token`）。缺的是**内容密钥**：
+### 5.1 抓到过完整请求（2026-11-07 运行时内存）
 
-| 尝试 | 结果 |
+把 `fanqie_primary_device.json` 移走再启动 Windows 客户端，它会在 5 秒内自动注册一台新
+设备（含 `content_key` / `content_key_version` / `privilege_expire_time`）。趁这段窗口扫进程
+私有堆，可以拿到**未经日志脱敏的原始 HTTP 请求**：
+
+```
+POST /reading/crypt/registerkey?device_id=<19位>&iid=<19位>&device_type=SM-G9750
+     &aid=1967&app_name=novelapp&channel=0&device_platform=android
+     &os_version=0&version_code=6.3.9.32 HTTP/1.1
+user-agent: com.dragon.read/74132 (Linux; U; Android 14; zh_CN; SM-G9750;
+            Build/<ROM> release-keys; Cronet/TTNetVersion:8d40f833 2026-03-03
+            QuicVersion:21ac1950 2025-11-18)
+accept: application/json
+accept-encoding: gzip
+x-ss-req-ticket: <毫秒时间戳>
+x-argus: <240 字符 base64>
+x-ladon: <48 字符 base64>
+x-khronos: <unix 秒>
+x-ss-stub: <小写 md5>
+content-type: application/json; charset=utf-8
+content-encoding: gzip
+```
+
+三个与文档旧结论不同的地方：
+
+1. **`version_code=6.3.9.32`**，是带点的版本**字符串**，不是 `66.9` 也不是数字。
+   （社区说的「版本号里加小数点」在这里是整串版本名。）
+2. **没有 `x-gorgon`**，改带 `x-argus`（长签，240 字符）+ `x-ladon`（48 字符）。
+3. 请求体是 gzip 后的 JSON，`x-ss-stub` 为 **小写** md5。
+
+### 5.2 但复现仍然失败：门槛就是 `x-argus`
+
+按上述形状逐项复现（含 gzip 体、小写 stub、`6.3.9.32`、同一台设备、全新无密钥设备）：
+**全部 200 + 空 body**。
+
+| 变体 | 结果 |
 | --- | --- |
-| `GET/POST reading.snssdk.com/reading/crypt/registerkey`（`aid` / `device_id+iid` / 低版本参数集） | 200，空 body |
-| 同上，`api5-normal-*` / `api3-normal` / `novelfm-hl` | 路由存在时一律 200 空 body；`novel.snssdk.com` 404 |
-| body 换成 `{"content": AES(device_id), "keyver": 1/0/1219929098}` | 空 |
-| `register_key` / `registerkey` / `seed` 作为 query（hex / base64） | 空 |
-| `Content-Type` 在 JSON 与 form 之间切换、`x-ss-stub` 用原文或 gzip 摘要 | 空 |
-| 上述请求带**已知可用**的设备（已持有 `content_key`） | **仍然空**——说明不是设备问题 |
-| `POST reading.snssdk.com/reading/user/privilege/add/v/`（无签名的 JSON） | 200，`{"Code":110001,"Message":"未知异常"}` |
+| 完全照抄形状，`x-argus` 用短签（`base64(pack('<I', khronos))`） | 空 |
+| 不带 `x-argus` / `x-ladon` | 空 |
+| `x-argus` / `x-ladon` 换成**长度一致的随机 base64**（240 / 48） | 空 |
+| 换 `Content-Type`（json / octet-stream / form）、换 GET / PUT | 空 |
+| 换主机（reading / i / security / api5-normal-* / novel / novelfm-hl） | 空 |
+| 换 TLS 指纹（urllib 与 curl_cffi 的 chrome / safari 指纹） | 空 |
+| `device_register` 改用 TTEncrypt 编码体 | 响应 `device_id: 0`（不认编码体） |
 
-`200 + Content-Length: 0` 是这张网关的静默拒绝形状。既然已知可用的身份也被拒，
-问题就只剩「缺 `x-medusa` / `x-helios`」这一种解释——这两个签名由
-`libmetasec_ml.so` 生成，需要 unidbg 或真机 hook，不在本项目的范围内。
+**长度一致但内容随机 → 仍然空**，说明服务端是在做真实的密码学校验，而不是检查长度或存在性。
+配合 §5.1 抓到的「真实请求必然是 240 字符 argus」，结论收敛为一条：
 
-旁证：目前仍在维护的第三方下载器，其「官方通道」的 `registerkey` 也是**走别人的
-反向代理**，并没有自己签发密钥。
+> `/crypt/registerkey` 要求**由 `libmetasec` 生成的 `x-argus` 长签**；
+> 阅读接口（`version_code=66.9`）不要求它，所以取正文本身是通的。
 
-### 因此本项目的边界
+密钥只能从这一步来：用我们的明文 `device_register` 注册的新设备，响应里只有
+`device_id/install_id/device_token/klink_egdi`，没有任何密钥字段；而 App 注册的设备
+`crypt_status=0` 且能用 `content_key` 解密。两者之差就是这一次带签名的 registerkey。
+
+### 5.3 无法自签，但身份可以「导入」
+
+因此本项目的边界没有变，只是原因写实了：
 
 - 有设备身份：App 接口取下全文（含锁定章节），失败自动回退网页
 - 无设备身份：与以前一致，锁定章节记为缺失并进入缺章账本
 - 不再产出 200 字假章节
 
 身份文件的提供方式见 `docs/supported-sites/site-details/fanqienovel.md`。
+若要真正「零配置自注册」，只剩两条路：移植 `x-argus` 纯算（需要从客户端二进制里
+逆出算法与 sign key），或用 unidbg 仿真 `libmetasec`（社区已有工程）。
