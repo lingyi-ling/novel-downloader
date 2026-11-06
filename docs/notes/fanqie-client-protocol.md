@@ -91,6 +91,26 @@ serial  sim_serial_number  sim_region  tz_offset  density_dpi
 display_density  pre_install  not_request_sender  registerkey  seed
 ```
 
+## 3.5 注册的真实流程（`observed`，反汇编确认）
+
+设备注册不是「直接 POST 一个 JSON」，而是**两步**：
+
+```
+1. POST/GET  {i.snssdk.com | log.snssdk.com}/crypt/registerkey
+       → 返回 16 字节密钥（AES-128）+ keyver
+       → 错误分支：missing_key / invalid_key / keyver
+2. POST      /service/2/device_register/?tt_data=a
+       → body 用上一步的 16 字节密钥加密
+       → 字段：magic_tag=ss_app_log、header（JSON 字符串）、_gen_time、register_key、seed
+```
+
+证据：`0x738110` 处引用 `register_key`，`0x73835c` 有 `cmp x9, #0x10`（长度为 16 才继续，
+即密钥长度），`0x73826c/0x7382f0/0x7383a8` 引用 `/crypt/registerkey`，并格式化了
+`missing_key` / `invalid_key` / `keyver` 三条错误。
+
+**之前「二进制里没有 AES」的判断是错的**：ring 在 arm64 上走硬件 AES 指令
+（`aese`/`aesmc`），不会在 `.rodata` 留下 S-box。密钥长度 16 字节也与 AES-128 吻合。
+
 ## 4. 我们验证过、但没走通的部分（`observed`）
 
 | 尝试 | 结果 |
@@ -101,11 +121,16 @@ display_density  pre_install  not_request_sender  registerkey  seed
 | `POST api5-normal-sinfonlinea / api5-normal-lf` 的注册路径 | 404 |
 | `/api/novel/book/reader/content/v1` + 随机 `device_id`/`install_id` cookie | 404（网关 TLB） |
 | `/reading/reader/full/v` + `x-ss-stub` + 匿名 cookie | 200，空 body |
+| `POST/GET i.snssdk.com/crypt/registerkey`（空体 / seed 表单 / JSON） | **504**（路由存在，上游不接） |
+| 同上，`api5-normal-*` 主机 | 404 |
 
 二进制里**没有 AES/des**（AES S-box 不存在，`PKCS#7` 属于 rustls 的 X.509 解析），也没有 `a_bogus` / `X-Bogus` / `msToken` 的实现痕迹。因此：
 
 - 该 App **不走网页签名接口**（`a_bogus` 那套），走官方客户端 API；
 - 身份签发被服务端拒绝，说明还差一个我们没能从字符串还原的环节。
+
+**卡点已收敛到一处**：`/crypt/registerkey` 的请求形状，以及第二步的 AES 模式（CBC/GCM）
+与 IV 约定。504 而非 400 也提示可能是**地域限制**（非 CN 出口）——这条未验证。
 
 ## 5. 结论与下一步
 
