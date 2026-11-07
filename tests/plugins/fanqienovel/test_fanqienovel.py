@@ -323,3 +323,62 @@ async def test_explicit_search_uses_the_app_api_first(
     assert [r["title"] for r in results] == ["开局剑落南海"]
     assert results[0]["book_id"] == "7551348540727905342"
     assert results[0]["cover_url"] == "https://p6-tt.bytecdn.cn/novel-pic/abc"
+
+
+_RANK_STATE = {
+    "rank": {
+        "serverRendered": True,
+        "book_list": [
+            {
+                "bookId": "7231424472606051384",
+                "bookName": "惹\u3000枝",
+                "author": "空留",
+                "thumbUri": "//p3.example.com/cover.jpg",
+                "wordNumber": 1163967,
+                "lastChapterTitle": "第550章 终（完结）",
+            },
+            {"bookId": "", "bookName": "missing id"},
+        ],
+    }
+}
+
+
+@pytest.mark.asyncio
+async def test_rank_list_maps_the_server_rendered_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    searcher = _make_searcher()
+    page = (
+        "<html><script>window.__INITIAL_STATE__ = "
+        + json.dumps(_RANK_STATE, ensure_ascii=False)
+        + ";</script></html>"
+    )
+    searcher.session = _FakeSession(page)  # type: ignore[assignment]
+
+    async def _no_repair(
+        self: FanqienovelSearcher, results: list[SearchResult]
+    ) -> None:
+        for item in results:
+            item["title"] = "真实书名"
+
+    monkeypatch.setattr(FanqienovelSearcher, "_fill_book_metadata", _no_repair)
+
+    results = await searcher.rank(5)
+
+    assert len(results) == 1
+    assert results[0]["book_id"] == "7231424472606051384"
+    assert results[0]["title"] == "真实书名"
+    assert results[0]["author"] == "空留"
+    assert results[0]["cover_url"] == "https://p3.example.com/cover.jpg"
+    assert results[0]["word_count"] == "1163967"
+    assert results[0]["latest_chapter"] == "第550章 终（完结）"
+
+
+@pytest.mark.asyncio
+async def test_rank_list_returns_empty_on_a_broken_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    searcher = _make_searcher()
+    searcher.session = _FakeSession("<html>no state</html>")  # type: ignore[assignment]
+
+    assert await searcher.rank(5) == []

@@ -488,6 +488,7 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
                  re-synced by a concurrent change, so the msgid cannot land
                  yet; wire this label through the i18n attributes once it does. -->
             <label class="merge-toggle" for="q-group"><input type="checkbox" class="cb" id="q-group"><span>Merge same book</span></label>
+            <button class="btn btn-ghost btn-sm" id="btn-rank"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Rankings">Rankings</span></button>
             <span class="hint" id="search-hint"></span>
           </div>
         </div>
@@ -928,6 +929,25 @@ $("#detail").addEventListener("click", async e => {
     api("open_url", url.dataset.openUrl).catch(() => {});
   }
 });
+$("#btn-rank").onclick = async () => {
+  const btn = $("#btn-rank");
+  btn.disabled = true;
+  $("#search-hint").textContent = t("Searching…");
+  try {
+    const data = await call("rank_list", 10);
+    if (data && data.error) throw new Error(data.error);
+    const results = (data && data.results) || [];
+    lastResults = results; lastKeyword = ""; selIndex = -1;
+    $("#detail").hidden = true;
+    renderResults(results, "");
+    $("#search-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", "0.0");
+  } catch (e) {
+    $("#results").innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("Search failed"))}</div><div class="s">${esc(String(e && e.message || e))}</div></div>`;
+    $("#search-hint").textContent = "";
+  } finally {
+    btn.disabled = false;
+  }
+};
 $("#btn-search").onclick = doSearch;
 $("#q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.isComposing) doSearch(); });
 

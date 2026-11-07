@@ -249,6 +249,7 @@ def _i18n_catalog() -> dict[str, str]:
         "History": t("History"),
         "Music": t("Music"),
         "Search in Music": t("Search in Music"),
+        "Rankings": t("Rankings"),
         "Follow": t("Follow"),
         "Refresh": t("Refresh"),
         "Open": t("Open"),
@@ -1553,6 +1554,31 @@ class ApiBridge:
             logger.exception("Aggregate search failed")
             return {"results": [], "elapsed": 0.0, "error": format_error(exc)}
         return {"results": results, "elapsed": elapsed}
+
+    def rank_list(self, limit: int = 10) -> dict[str, Any]:
+        """Return the 番茄 ranking page as result rows."""
+
+        async def run() -> list[dict[str, Any]]:
+            import aiohttp
+
+            from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
+            from novel_downloader.plugins.sites.fanqienovel.searcher import (
+                FanqienovelSearcher,
+            )
+
+            timeout_cfg = aiohttp.ClientTimeout(total=SEARCH_SITE_TIMEOUT)
+            async with aiohttp.ClientSession(
+                timeout=timeout_cfg, headers=DEFAULT_USER_HEADERS
+            ) as session:
+                rows = await FanqienovelSearcher(session).rank(limit)
+            return [_result_dict(r, i) for i, r in enumerate(rows)]
+
+        try:
+            rows = self._engine.submit(run()).result(SEARCH_WAIT_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+            logger.exception("Rank list failed")
+            return {"results": [], "error": format_error(exc)}
+        return {"results": rows}
 
     # ------------------------------------------------------------------
     # download tasks

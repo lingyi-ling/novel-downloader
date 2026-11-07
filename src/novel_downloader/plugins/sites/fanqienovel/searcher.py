@@ -69,6 +69,7 @@ class FanqienovelSearcher(BaseSearcher):
     priority = 5
     BASE_URL = "https://fanqienovel.com"
     SEARCH_URL = "https://fanqienovel.com/api/author/search/search_book/v1"
+    RANK_URL = "https://fanqienovel.com/rank"
     PAGE_SIZE = 10
 
     #: Seconds the browser window may take to answer.
@@ -169,6 +170,67 @@ class FanqienovelSearcher(BaseSearcher):
         if device is not None:
             self._device = device
         return device
+
+    async def rank(self, limit: int = 10) -> list[SearchResult]:
+        """Return the site's ranking page as search results.
+
+        The page is server-rendered, so it is a plain HTML fetch; it carries the
+        book ids and metadata, while the titles/authors are written with the
+        usual private-use font and are repaired from the book pages.
+        """
+        from novel_downloader.plugins.sites.fanqienovel.parser import (
+            FanqienovelParser,
+        )
+
+        headers = dict(self.session.headers)
+        if self._cookies:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in self._cookies.items())
+        try:
+            async with self.session.get(self.RANK_URL, headers=headers) as resp:
+                resp.raise_for_status()
+                html_str = await self._response_to_str(resp)
+            state = FanqienovelParser._extract_initial_state(html_str)
+        except Exception:
+            logger.debug("fanqienovel: rank page unavailable", exc_info=True)
+            return []
+
+        rank = state.get("rank")
+        books = rank.get("book_list") if isinstance(rank, dict) else None
+        if not isinstance(books, list):
+            return []
+
+        results: list[SearchResult] = []
+        for entry in books:
+            if len(results) >= max(1, limit):
+                break
+            item = self._rank_result(entry)
+            if item is not None:
+                results.append(item)
+        await self._fill_book_metadata(results)
+        return results
+
+    def _rank_result(self, entry: Any) -> SearchResult | None:
+        if not isinstance(entry, dict):
+            return None
+        book_id = entry.get("bookId")
+        if not book_id:
+            return None
+        cover = entry.get("thumbUri")
+        if isinstance(cover, str) and cover.startswith("//"):
+            cover = "https:" + cover
+        words = entry.get("wordNumber")
+        return SearchResult(
+            site=self.site_name,
+            book_id=str(book_id),
+            book_url=f"{self.BASE_URL}/page/{book_id}",
+            cover_url=cover if isinstance(cover, str) else "",
+            title=str(entry.get("bookName") or ""),
+            author=str(entry.get("author") or ""),
+            latest_chapter=str(entry.get("lastChapterTitle") or ""),
+            update_date="",
+            word_count=str(words) if isinstance(words, int) else "",
+            priority=self.priority,
+        )
 
     async def _search_via_app(
         self, keyword: str, limit: int | None
