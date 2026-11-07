@@ -586,7 +586,19 @@ async def test_music_stub_status_semantics_parity(
         )
 
 
-def test_music_platforms_stub_is_the_documented_empty_list() -> None:
-    """The Compose music UI gates on this stub (see server.py's docstring)."""
+def test_music_platforms_mirror_the_api_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The embedded handler returns the same ``{key, label, note}`` triples."""
+    from types import SimpleNamespace
+
+    components = SimpleNamespace(
+        available_labels=lambda: [("netease", "国内 · 网易云音乐")],
+        platform_note=lambda key: "note",
+    )
+    monkeypatch.setattr(eserver, "_music_components", lambda: components)
+
     handler = eserver.ROUTES[("GET", "/api/v1/music/platforms")]
-    assert handler({}, {}, {}) == {"platforms": []}
+    assert handler({}, {}, {}) == {
+        "platforms": [{"key": "netease", "label": "国内 · 网易云音乐", "note": "note"}]
+    }

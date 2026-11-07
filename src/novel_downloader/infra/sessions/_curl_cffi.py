@@ -79,6 +79,9 @@ class CurlCffiSession(BaseSession):
             # curl_cffi defaults to 30 redirects; pin it to the unified
             # ceiling so a long chain behaves like on the other backends.
             max_redirects=DEFAULT_MAX_REDIRECTS,
+            # Without this curl_cffi opens one connection per request, so a
+            # 16-worker download ignores ``max_connections`` entirely.
+            max_clients=self._max_connections,
             proxy=self._proxy,
             proxy_auth=proxy_auth,
             trust_env=self._trust_env,

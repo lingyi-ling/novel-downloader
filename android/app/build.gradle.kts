@@ -41,8 +41,8 @@ android {
         applicationId = "com.lingyi.noveldl"
         minSdk = 26
         targetSdk = 35
-        versionCode = 31
-        versionName = "1.21.0"
+        versionCode = 32
+        versionName = "1.22.0"
         // Chaquopy requires explicit ABIs; arm64 covers modern phones, x86_64
         // keeps the emulator usable.
         ndk.abiFilters += listOf("arm64-v8a", "x86_64")
@@ -112,6 +112,13 @@ chaquopy {
             install("pycryptodome")
             install("rich")
             install("platformdirs")
+            // Optional music engine (search / download / tagging). All of
+            // these ship Android-compatible wheels through Chaquopy.
+            install("requests")
+            install("mutagen")
+            install("Pillow")
+            install("qrcode")
+            install("websocket-client")
         }
     }
     sourceSets {

@@ -235,7 +235,7 @@ class DownloadMixin:
             if ui:
                 await ui.on_progress(done, total)
 
-        def record_failure(chapter_id: str, reason: str, attempts: int) -> None:
+        async def record_failure(chapter_id: str, reason: str, attempts: int) -> None:
             """Record a failed chapter in the summary and in the ledger."""
             title, url = chapter_meta.get(chapter_id, ("", ""))
             failed_at = utc_now_iso()
@@ -249,20 +249,20 @@ class DownloadMixin:
                     failed_at=failed_at,
                 )
             )
-            # A ledger problem must never break (or mask) a download.
+            # A ledger problem must never break (or mask) a download. The
+            # append is a small blocking file write, so it runs off the loop.
+            entry = LedgerEntry(
+                book_id=book_id,
+                chapter_id=chapter_id,
+                chapter_title=title,
+                url=url,
+                reason=reason,
+                attempts=attempts,
+                failed_at=failed_at,
+                site=self._site,
+            )
             try:
-                ledger.append(
-                    LedgerEntry(
-                        book_id=book_id,
-                        chapter_id=chapter_id,
-                        chapter_title=title,
-                        url=url,
-                        reason=reason,
-                        attempts=attempts,
-                        failed_at=failed_at,
-                        site=self._site,
-                    )
-                )
+                await asyncio.to_thread(ledger.append, entry)
             except Exception as exc:
                 logger.warning(
                     "Failed to append to download ledger (site=%s, book=%s, "
@@ -300,7 +300,7 @@ class DownloadMixin:
                 # The chapters were fetched but are not on disk: they must not
                 # be reported as succeeded.
                 for chap in batch:
-                    record_failure(chap["id"], f"storage_error: {e}", 1)
+                    await record_failure(chap["id"], f"storage_error: {e}", 1)
             finally:
                 size = len(batch)
                 batch.clear()
@@ -339,7 +339,7 @@ class DownloadMixin:
                         book_id,
                         exc,
                     )
-                    record_failure(item["id"], f"storage_error: {exc}", 1)
+                    await record_failure(item["id"], f"storage_error: {exc}", 1)
             if not storage_error:
                 await flush_all()
 
@@ -358,14 +358,14 @@ class DownloadMixin:
                 detail = _LAST_FAILURE.get()
 
                 if chap is None:
-                    record_failure(
+                    await record_failure(
                         cid,
                         detail.reason if detail else "no_content",
                         detail.attempts if detail else self._retry_times + 1,
                     )
                     await bump(1)
                 elif self._dl_chapter_is_empty(chap):
-                    record_failure(
+                    await record_failure(
                         cid,
                         "empty_content",
                         detail.attempts if detail else 1,
@@ -565,7 +565,7 @@ class DownloadMixin:
 
         try:
             info_html = await self.fetcher.fetch_book_info(book_id)
-            self._save_raw_pages(book_id, "info", info_html)
+            await asyncio.to_thread(self._save_raw_pages, book_id, "info", info_html)
 
             book_info = self.parser.parse_book_info(info_html)
             if book_info:
@@ -601,7 +601,9 @@ class DownloadMixin:
                 raw_pages = await self.fetcher.fetch_chapter_content(
                     book_id, chapter_id
                 )
-                self._save_raw_pages(book_id, chapter_id, raw_pages)
+                await asyncio.to_thread(
+                    self._save_raw_pages, book_id, chapter_id, raw_pages
+                )
 
                 if self._dl_check_restricted(raw_pages):
                     logger.warning(

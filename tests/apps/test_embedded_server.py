@@ -668,9 +668,21 @@ def test_watchlist_check_mirrors_api_semantics(
 # ---------------------------------------------------------------------------
 
 
-def test_music_stub_contract(running_server: SimpleNamespace) -> None:
+def test_music_unavailable_contract(
+    running_server: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the optional extras every music endpoint answers 503."""
+
+    def _unavailable() -> Any:
+        raise eserver._ApiError(
+            503, eserver._MSG_MUSIC_UNAVAILABLE.format(error="ModuleNotFoundError")
+        )
+
+    monkeypatch.setattr(eserver, "_music_components", _unavailable)
+
     status, body = _get("/api/v1/music/platforms")
-    assert (status, body) == (200, {"platforms": []})
+    assert status == 503
+    assert body["detail"].startswith("Music support is not available")
 
     for path in ("/api/v1/music/search", "/api/v1/music/jobs"):
         status, body = _post(path, {"keyword": "x", "platform": "netease"})

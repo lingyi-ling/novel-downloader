@@ -106,7 +106,7 @@ App 支持两种运行模式，可在设置页通过「独立引擎（无需电�
 
 注意事项：
 
-- **音乐页为空态**：音乐扩展未打包进 APK，独立模式下音乐相关端点返回空列表，音乐页显示空态。
+- **音乐**：独立模式已内置音乐引擎（requests / mutagen / Pillow / qrcode / websocket-client），可直接搜索、下载；文件先落到引擎目录，完成后由系统 DownloadManager 转存到公共「下载」目录。
 - **APK 体积增大**：因打包 Python 运行时及其依赖（aiohttp、lxml、cssselect、pycryptodome、rich、platformdirs 等），APK 体积从约 12MB 增至约 68MB。
 - 本地引擎仅绑定环回地址 `127.0.0.1`，只有 App 自身可以访问，局域网内其他设备无法连接。
 

@@ -53,6 +53,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
+import com.lingyi.noveldl.data.HistoryDownloader
+import com.lingyi.noveldl.data.HistoryFile
 import com.lingyi.noveldl.data.MusicHealthItem
 import com.lingyi.noveldl.data.MusicJobProgress
 import com.lingyi.noveldl.data.MusicJobRequest
@@ -282,6 +284,22 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                         val ok = job.results.count { it.status == "ok" }
                         val skip = job.results.count { it.status == "skip" }
                         val fail = job.results.count { it.status == "fail" }
+                        // The engine wrote the files into app storage; hand
+                        // each one to DownloadManager so it lands in the
+                        // public Downloads folder like an exported book.
+                        job.results
+                            .filter { it.status == "ok" && it.download_url.isNotBlank() }
+                            .forEach { result ->
+                                val name = result.download_url.substringAfterLast('/')
+                                HistoryDownloader.enqueue(
+                                    context,
+                                    HistoryFile(
+                                        name = name,
+                                        ext = name.substringAfterLast('.', ""),
+                                        download_url = result.download_url,
+                                    ),
+                                )
+                            }
                         onMessage(context.getString(R.string.music_job_done, ok, skip, fail))
                         jobRunning = false
                         return@launch

@@ -1,3 +1,23 @@
+## v1.22.0 (2026-11-08)
+
+### Feature
+
+- **Android 音乐**：独立引擎不再把音乐接口当桩，平台列表 / 搜索 / 健康检查 / 导出 / 下载 / 异步任务全部可用
+  - APK 打包 `requests`、`mutagen`、`Pillow`、`qrcode`、`websocket-client`（Chaquopy 构建已验证）
+  - 歌曲先写入引擎输出目录的 `music/`，`/downloads/music/<name>` 提供回环下载地址；Android 端任务完成后交给系统 DownloadManager，落到公共「下载」目录
+  - 任务结果新增 `download_url`，Kotlin 侧据此转存；导出歌单默认与音频同目录
+
+### Fix
+
+- **事件循环阻塞**：封面/字体落盘、raw 页面保存、失败账本追加都改到线程池执行，多 worker 下载时不再卡住超时回调与进度刷新
+- **curl_cffi**：补 `max_clients`，之前每个请求新开连接，`max_connections` 对 curl_cffi 后端完全不生效
+
+### Test
+
+- 新增 `tests/apps/test_embedded_music.py`（13 例）：平台列表、搜索映射与校验、健康检查、下载计数、导出跳过无路径曲目、任务生命周期、缺失扩展 503、下载 URL 与路径穿越防护
+- 更新 `test_embedded_server` 的音乐契约与 `test_contract_parity` 的平台形状断言
+- 全量 `pytest` 8956 passed；Android `compileDebugKotlin` + `assembleDebug` 通过；`ruff` / `format` / `mypy` 全过
+
 ## v1.21.0 (2026-11-08)
 
 ### Feature

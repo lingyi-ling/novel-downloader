@@ -48,14 +48,18 @@ Lifecycle
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
 import re
 import threading
+import time
+import uuid
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -77,6 +81,10 @@ _SEARCH_TIMEOUT = 120.0
 #: Wall-clock budget for the browse endpoints — mirrors
 #: ``BLOCKING_TIMEOUTS["browse"]`` in apps.api.routes.
 _BROWSE_TIMEOUT = 60.0
+
+#: Wall-clock budget (seconds) for one music download job
+#: (mirrors the REST API's ``music_download`` blocking timeout).
+_MUSIC_JOB_TIMEOUT = 1800.0
 
 #: Concurrent request-handler threads.  ThreadingHTTPServer spawns one
 #: thread per connection with no built-in ceiling; requests beyond this cap
@@ -137,6 +145,8 @@ _MSG_MUSIC_UNAVAILABLE = (
     'Install it with: pip install "novel-downloader[music]"'
 )
 _MSG_MUSIC_JOB_NOT_FOUND = "Music job not found: {job_id}"
+_MSG_UNKNOWN_MUSIC_PLATFORM = "Unknown music platform: {platform}. Available: {keys}"
+_MSG_PLAYLIST_WRITE_FAILED = "Could not write playlist {target}: {error}"
 _MSG_TIMED_OUT = "{label} timed out after {timeout:g}s"
 _MSG_BROWSE_UNSUPPORTED = "Site '{site}' does not support browsing."
 
@@ -149,8 +159,11 @@ _store_lock = threading.Lock()
 _watchlist_stores: dict[Path, Any] = {}
 
 #: Handler signature: ``(body, path params, query params) -> JSON payload``.
+#: Handlers return a JSON-serialisable payload; ``/music/health`` answers a
+#: bare list like the REST API, so the return type is open.
 Handler = Callable[
-    [dict[str, Any], dict[str, str], dict[str, list[str]]], dict[str, Any]
+    [dict[str, Any], dict[str, str], dict[str, list[str]]],
+    dict[str, Any] | list[dict[str, Any]],
 ]
 
 
@@ -967,31 +980,397 @@ def _handle_watchlist_check(
     }
 
 
+#: Extensions the ``/downloads/music/<name>`` route may serve.
+_MUSIC_EXTS = frozenset({"mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "ape"})
+
+#: Mirrors ``apps.api.schemas.MAX_MUSIC_TRACKS``.
+_MAX_MUSIC_TRACKS = 200
+
+#: In-process music jobs, guarded because the download callback runs in a
+#: worker thread while request threads read the table.
+_MUSIC_JOBS: dict[str, dict[str, Any]] = {}
+_MUSIC_JOBS_LOCK = threading.Lock()
+_MAX_MUSIC_JOBS = 100
+_TERMINAL_MUSIC_STATUSES = frozenset({"done", "failed"})
+
+
+def _music_components() -> Any:
+    """
+    Import the optional music engine.
+
+    :raises _ApiError: 503 with the install hint, exactly like the REST API.
+    """
+    try:
+        import mutagen  # noqa: F401
+        import qrcode  # noqa: F401
+        import websocket  # noqa: F401
+
+        from novel_downloader.apps.music import paths
+        from novel_downloader.apps.music.downloader import (
+            DownloadOptions,
+            download_many,
+            export_m3u,
+        )
+        from novel_downloader.apps.music.providers import (
+            available_labels,
+            create,
+            platform_note,
+        )
+        from novel_downloader.apps.music.providers.base import Track
+        from novel_downloader.apps.music.providers.health import health_check
+    except Exception as exc:  # noqa: BLE001 - optional dependency guard
+        raise _ApiError(
+            503, _MSG_MUSIC_UNAVAILABLE.format(error=type(exc).__name__)
+        ) from exc
+    return SimpleNamespace(
+        paths=paths,
+        download_options=DownloadOptions,
+        download_many=download_many,
+        export_m3u=export_m3u,
+        available_labels=available_labels,
+        create=create,
+        platform_note=platform_note,
+        track_cls=Track,
+        health_check=health_check,
+    )
+
+
+def _music_keys(components: Any) -> list[str]:
+    return [str(key) for key, _label in components.available_labels()]
+
+
+def _require_music_platform(components: Any, platform: str) -> None:
+    keys = _music_keys(components)
+    if platform not in keys:
+        raise _ApiError(
+            400,
+            _MSG_UNKNOWN_MUSIC_PLATFORM.format(platform=platform, keys=", ".join(keys)),
+        )
+
+
+def _music_track(components: Any, data: Any) -> Any:
+    """Build the provider track, ignoring fields this server does not know."""
+    if not isinstance(data, dict):
+        raise _validation_error(
+            [_err("tracks", "Input should be a valid dictionary", "dict_type")]
+        )
+    allowed = {field.name for field in dataclasses.fields(components.track_cls)}
+    return components.track_cls(**{k: v for k, v in data.items() if k in allowed})
+
+
+def _music_output_dir() -> Path:
+    """Music files land beside the exported books, under ``music/``."""
+    from novel_downloader.apps.common.history_files import _output_dir
+
+    target = _output_dir() / "music"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _music_result_item(result: Any) -> dict[str, Any]:
+    raw_path = str(getattr(result, "path", "") or "")
+    download_url = ""
+    if raw_path:
+        name = Path(raw_path).name
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        if name and ext in _MUSIC_EXTS:
+            # The Kotlin client hands this to DownloadManager, which can only
+            # fetch over HTTP; the engine serves music/ through /downloads.
+            download_url = f"/downloads/music/{quote(name, safe='')}"
+    return {
+        "status": str(getattr(result, "status", "fail")),
+        "reason": str(getattr(result, "reason", "") or ""),
+        "path": raw_path,
+        "download_url": download_url,
+        "bytes": int(getattr(result, "bytes_", 0) or 0),
+    }
+
+
 def _handle_music_platforms(
     _body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
-    # Music extras (mutagen/qrcode/websocket/Pillow) are not bundled on
-    # Android in v1; an empty platform list makes the Compose screens render
-    # their empty state and gate every other music call.
-    return {"platforms": []}
+    components = _music_components()
+    return {
+        "platforms": [
+            {
+                "key": str(key),
+                "label": str(label),
+                "note": str(components.platform_note(key)),
+            }
+            for key, label in components.available_labels()
+        ]
+    }
 
 
-def _handle_music_unavailable(
-    _body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
+def _handle_music_search(
+    body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
-    # Unreachable while the platform list is empty (the client gates on it),
-    # but answer exactly like the REST API does without the music extras.
-    raise _ApiError(503, _MSG_MUSIC_UNAVAILABLE.format(error="ModuleNotFoundError"))
+    components = _music_components()
+    entries: list[dict[str, Any]] = []
+    platform, platform_err = _required_str(body, "platform")
+    keyword, keyword_err = _required_str(body, "keyword")
+    limit = _int_field(body, "limit", 20, 1, entries)
+    offset = _int_field(body, "offset", 0, 0, entries)
+    for error in (platform_err, keyword_err):
+        if error is not None:
+            entries.append(error)
+    if entries:
+        raise _validation_error(entries)
+    assert platform is not None and keyword is not None
+    assert limit is not None and offset is not None
+    _require_music_platform(components, platform)
+
+    provider = components.create(platform)
+    tracks, total = provider.search(keyword, limit=limit, offset=offset)
+    payload = [dataclasses.asdict(track) for track in tracks]
+    return {"total": int(total or len(payload)), "tracks": payload}
+
+
+def _handle_music_health(
+    _body: dict[str, Any], _params: dict[str, str], query: dict[str, list[str]]
+) -> list[dict[str, Any]]:
+    components = _music_components()
+    values = query.get("platform") or []
+    platform = values[0] if values else None
+    if platform is not None:
+        _require_music_platform(components, platform)
+        selected = [platform]
+    else:
+        selected = _music_keys(components)
+    timeout_values = query.get("timeout") or []
+    try:
+        timeout = float(timeout_values[0]) if timeout_values else 5.0
+    except ValueError:
+        timeout = 5.0
+    timeout = min(max(timeout, 0.1), 60.0)
+
+    results: list[dict[str, Any]] = []
+    for key in selected:
+        payload: dict[str, Any] = {"platform": key}
+        payload.update(dict(components.health_check(key, timeout=timeout)))
+        results.append(payload)
+    return results
+
+
+def _music_download_args(
+    body: dict[str, Any], components: Any, entries: list[dict[str, Any]]
+) -> tuple[str, list[Any], Any]:
+    platform, platform_err = _required_str(body, "platform")
+    if platform_err is not None:
+        entries.append(platform_err)
+    raw_tracks = body.get("tracks")
+    tracks: list[Any] = []
+    if not isinstance(raw_tracks, list):
+        entries.append(_err("tracks", "Input should be a valid list", "list_type"))
+    elif not raw_tracks:
+        entries.append(
+            _err(
+                "tracks",
+                "List should have at least 1 item after validation, not 0",
+                "too_short",
+            )
+        )
+    elif len(raw_tracks) > _MAX_MUSIC_TRACKS:
+        entries.append(
+            _err(
+                "tracks",
+                f"List should have at most {_MAX_MUSIC_TRACKS} items",
+                "too_long",
+            )
+        )
+    else:
+        tracks = [_music_track(components, item) for item in raw_tracks]
+    if entries:
+        raise _validation_error(entries)
+    assert platform is not None
+    _require_music_platform(components, platform)
+
+    out_dir = str(body.get("out_dir") or "").strip() or str(_music_output_dir())
+    level = body.get("level")
+    options = components.download_options(
+        out_dir=out_dir, level=str(level) if level else "exhigh"
+    )
+    return platform, tracks, options
+
+
+def _handle_music_export(
+    body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
+) -> dict[str, Any]:
+    components = _music_components()
+    entries: list[dict[str, Any]] = []
+    platform, platform_err = _required_str(body, "platform")
+    if platform_err is not None:
+        entries.append(platform_err)
+    raw_tracks = body.get("tracks")
+    tracks: list[Any] = []
+    if not isinstance(raw_tracks, list):
+        entries.append(_err("tracks", "Input should be a valid list", "list_type"))
+    else:
+        tracks = [_music_track(components, item) for item in raw_tracks]
+    if entries:
+        raise _validation_error(entries)
+    assert platform is not None
+    _require_music_platform(components, platform)
+
+    usable = [track for track in tracks if str(getattr(track, "path", "") or "")]
+    skipped = len(tracks) - len(usable)
+    out_path = str(body.get("out_path") or "").strip()
+    target = Path(out_path) if out_path else _music_output_dir() / "playlist.m3u8"
+    try:
+        written = components.export_m3u(usable, target)
+    except OSError as exc:
+        raise _ApiError(
+            500,
+            _MSG_PLAYLIST_WRITE_FAILED.format(target=target, error=type(exc).__name__),
+        ) from exc
+    return {"written": int(written), "skipped": int(skipped), "path": str(target)}
+
+
+def _handle_music_download(
+    body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
+) -> dict[str, Any]:
+    components = _music_components()
+    entries: list[dict[str, Any]] = []
+    platform, tracks, options = _music_download_args(body, components, entries)
+    provider = components.create(platform)
+
+    results: list[tuple[int, dict[str, Any]]] = []
+    lock = threading.Lock()
+
+    def on_result(index: int, _track: Any, result: Any) -> None:
+        with lock:
+            results.append((index, _music_result_item(result)))
+
+    ok, skip, fail, _failed_pairs, _failed_tracks = components.download_many(
+        provider, tracks, options, on_result=on_result
+    )
+    ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
+    return {"ok": int(ok), "skip": int(skip), "fail": int(fail), "results": ordered}
+
+
+def _prune_music_jobs_locked() -> None:
+    while len(_MUSIC_JOBS) >= _MAX_MUSIC_JOBS:
+        for job_id, job in _MUSIC_JOBS.items():
+            if job["status"] in _TERMINAL_MUSIC_STATUSES:
+                del _MUSIC_JOBS[job_id]
+                break
+        else:
+            _MUSIC_JOBS.pop(next(iter(_MUSIC_JOBS)), None)
+
+
+def _music_job_update(job_id: str, **fields: Any) -> None:
+    with _MUSIC_JOBS_LOCK:
+        job = _MUSIC_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _music_job_progress(job_id: str, done: int) -> None:
+    with _MUSIC_JOBS_LOCK:
+        job = _MUSIC_JOBS.get(job_id)
+        if job is not None and job["status"] not in _TERMINAL_MUSIC_STATUSES:
+            job["progress"]["done"] = done
+
+
+def _music_job_worker(
+    job_id: str,
+    components: Any,
+    provider: Any,
+    tracks: list[Any],
+    options: Any,
+    timeout: float,
+) -> None:
+    """Run one job on a plain thread; the engine is synchronous anyway."""
+    _music_job_update(job_id, status="running")
+    started = time.monotonic()
+    results: list[tuple[int, dict[str, Any]]] = []
+    lock = threading.Lock()
+    expired = False
+
+    def on_result(index: int, _track: Any, result: Any) -> None:
+        nonlocal expired
+        with lock:
+            results.append((index, _music_result_item(result)))
+            done = len(results)
+        if time.monotonic() - started > timeout and not expired:
+            expired = True
+            _music_job_update(
+                job_id,
+                status="failed",
+                error=_MSG_TIMED_OUT.format(label="Music download", timeout=timeout),
+                finished_at=time.time(),
+            )
+        _music_job_progress(job_id, done)
+
+    try:
+        components.download_many(provider, tracks, options, on_result=on_result)
+    except Exception as exc:  # noqa: BLE001 - reported in the job record
+        if not expired:
+            _music_job_update(
+                job_id,
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+                finished_at=time.time(),
+            )
+        return
+    if expired:
+        return
+    ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
+    _music_job_update(
+        job_id,
+        status="done",
+        results=ordered,
+        error=None,
+        finished_at=time.time(),
+    )
+
+
+def _handle_music_jobs_post(
+    body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
+) -> dict[str, Any]:
+    components = _music_components()
+    entries: list[dict[str, Any]] = []
+    platform, tracks, options = _music_download_args(body, components, entries)
+    provider = components.create(platform)
+
+    job_id = uuid.uuid4().hex
+    with _MUSIC_JOBS_LOCK:
+        _prune_music_jobs_locked()
+        _MUSIC_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "progress": {"done": 0, "total": len(tracks)},
+            "results": [],
+            "error": None,
+            "created_at": time.time(),
+            "finished_at": None,
+        }
+    threading.Thread(
+        target=_music_job_worker,
+        args=(job_id, components, provider, tracks, options, _MUSIC_JOB_TIMEOUT),
+        name=f"noveldl-music-{job_id[:8]}",
+        daemon=True,
+    ).start()
+    return {"job_id": job_id}
 
 
 def _handle_music_job_status(
     _body: dict[str, Any], params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
-    # No job can ever exist here (``POST /api/v1/music/jobs`` is a 503 stub),
-    # so every lookup answers with the REST API's unknown-job 404 instead of
-    # the generic route-miss one.
     job_id = params.get("job_id", "")
-    raise _ApiError(404, _MSG_MUSIC_JOB_NOT_FOUND.format(job_id=job_id))
+    with _MUSIC_JOBS_LOCK:
+        job = _MUSIC_JOBS.get(job_id)
+        if job is None:
+            raise _ApiError(404, _MSG_MUSIC_JOB_NOT_FOUND.format(job_id=job_id))
+        return {
+            "job_id": job["job_id"],
+            "status": job["status"],
+            "progress": dict(job["progress"]),
+            "results": list(job["results"]),
+            "error": job["error"],
+            "created_at": job["created_at"],
+            "finished_at": job["finished_at"],
+        }
 
 
 ROUTES: dict[tuple[str, str], Handler] = {
@@ -1012,11 +1391,11 @@ ROUTES: dict[tuple[str, str], Handler] = {
     ("DELETE", "/api/v1/watchlist/{site}/{book_id}"): _handle_watchlist_delete,
     ("POST", "/api/v1/watchlist/check"): _handle_watchlist_check,
     ("GET", "/api/v1/music/platforms"): _handle_music_platforms,
-    ("POST", "/api/v1/music/search"): _handle_music_unavailable,
-    ("POST", "/api/v1/music/export"): _handle_music_unavailable,
-    ("POST", "/api/v1/music/download"): _handle_music_unavailable,
-    ("GET", "/api/v1/music/health"): _handle_music_unavailable,
-    ("POST", "/api/v1/music/jobs"): _handle_music_unavailable,
+    ("POST", "/api/v1/music/search"): _handle_music_search,
+    ("POST", "/api/v1/music/export"): _handle_music_export,
+    ("POST", "/api/v1/music/download"): _handle_music_download,
+    ("GET", "/api/v1/music/health"): _handle_music_health,
+    ("POST", "/api/v1/music/jobs"): _handle_music_jobs_post,
     ("GET", "/api/v1/music/jobs/{job_id}"): _handle_music_job_status,
 }
 
@@ -1083,7 +1462,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_json(
         self,
-        payload: dict[str, Any],
+        payload: Any,
         status: int = 200,
         extra_headers: dict[str, str] | None = None,
     ) -> None:
@@ -1183,12 +1562,22 @@ class _Handler(BaseHTTPRequestHandler):
     def _serve_download(self, name: str) -> None:
         from novel_downloader.apps.common.history_files import _EXTS, _output_dir
 
-        safe = Path(unquote(name)).name
-        ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
-        if not safe or ext not in _EXTS:
-            self._send_json({"detail": "Not Found"}, 404)
-            return
-        path = _output_dir() / safe
+        decoded = unquote(name)
+        prefix, _, rest = decoded.partition("/")
+        if prefix == "music":
+            safe = Path(rest).name
+            ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
+            if not safe or ext not in _MUSIC_EXTS:
+                self._send_json({"detail": "Not Found"}, 404)
+                return
+            path = _output_dir() / "music" / safe
+        else:
+            safe = Path(decoded).name
+            ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
+            if not safe or ext not in _EXTS:
+                self._send_json({"detail": "Not Found"}, 404)
+                return
+            path = _output_dir() / safe
         try:
             size = path.stat().st_size
         except OSError:

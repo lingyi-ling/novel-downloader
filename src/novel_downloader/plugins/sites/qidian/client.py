@@ -76,7 +76,13 @@ class QidianClient(CommonClient):
                 encrypted = self._check_encrypted(raw_pages)
 
                 folder = "html_encrypted" if encrypted else "html_plain"
-                self._save_raw_pages(book_id, chapter_id, raw_pages, folder=folder)
+                await asyncio.to_thread(
+                    self._save_raw_pages,
+                    book_id,
+                    chapter_id,
+                    raw_pages,
+                    folder=folder,
+                )
 
                 chap = await asyncio.to_thread(
                     self.parser.parse_chapter_content, raw_pages, chapter_id

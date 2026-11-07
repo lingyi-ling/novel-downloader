@@ -520,7 +520,9 @@ class BaseFetcher(abc.ABC):
         if content is None:
             return None
 
-        write_file(content=content, filepath=save_path, on_exist="overwrite")
+        await asyncio.to_thread(
+            write_file, content=content, filepath=save_path, on_exist="overwrite"
+        )
         logger.debug("Saved image: %s <- %s", save_path, url)
         return save_path
 
@@ -543,7 +545,9 @@ class BaseFetcher(abc.ABC):
         if content is None:
             return None
 
-        write_file(content=content, filepath=save_path, on_exist="overwrite")
+        await asyncio.to_thread(
+            write_file, content=content, filepath=save_path, on_exist="overwrite"
+        )
         logger.debug("Saved font: %s <- %s", save_path, url)
         return save_path
 

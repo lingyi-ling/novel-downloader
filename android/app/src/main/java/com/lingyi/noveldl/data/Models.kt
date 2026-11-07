@@ -189,6 +189,8 @@ data class MusicJobResult(
     val status: String = "",
     val reason: String = "",
     val path: String = "",
+    /** Loopback URL handed to DownloadManager so tracks land in public Downloads. */
+    val download_url: String = "",
     val bytes: Long = 0,
 )
 
