@@ -33,23 +33,30 @@ class TokenBucketRateLimiter:
         self.jitter_strength = jitter_strength
 
     async def wait(self) -> None:
+        """
+        Block until this caller owns a slot.
+
+        The slot is *reserved* under the lock: the bucket may go negative and
+        each caller sleeps for its own deficit (``-tokens / rate``), so the
+        callers wake one interval apart.
+
+        The previous implementation slept outside the lock and only took a
+        token afterwards, so every concurrent waiter computed the same delay
+        and fired at the same instant — ``max_rps`` was silently ignored as
+        soon as ``workers`` > 1.
+        """
         async with self.lock:
             now = time.monotonic()
             elapsed = now - self.timestamp
-
             self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
             self.timestamp = now
 
-            if self.tokens >= 1.0:
-                self.tokens -= 1.0
+            self.tokens -= 1.0
+            if self.tokens >= 0:
                 return
 
-            wait_time = (1.0 - self.tokens) / self.rate
+            wait_time = -self.tokens / self.rate
             jitter = random.uniform(-self.jitter_strength, self.jitter_strength)
             total_wait = max(0.0, wait_time + jitter)
 
         await asyncio.sleep(total_wait)
-
-        async with self.lock:
-            self.timestamp = time.monotonic()
-            self.tokens = max(0.0, self.tokens - 1.0)

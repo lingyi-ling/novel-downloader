@@ -4,6 +4,7 @@ novel_downloader.infra.sessions._httpx
 --------------------------------------
 """
 
+import asyncio
 from http.cookies import CookieError
 from pathlib import Path
 from typing import Any, Unpack
@@ -90,7 +91,13 @@ class HttpxSession(BaseSession):
         kwargs.setdefault("follow_redirects", redirect)  # type: ignore[typeddict-item]
 
         try:
-            r = await self.session.get(url, **kwargs)
+            # ``httpx.Timeout`` applies per operation, so a server that
+            # trickles bytes every timeout-1 seconds could hold the request
+            # open forever.  The outer deadline restores the per-request
+            # guarantee the other backends already provide.
+            r = await asyncio.wait_for(self.session.get(url, **kwargs), self._timeout)
+        except TimeoutError as exc:
+            raise as_timeout_error(exc) from exc
         except httpx.TimeoutException as exc:
             raise as_timeout_error(exc) from exc
         except httpx.TooManyRedirects as exc:
@@ -128,7 +135,9 @@ class HttpxSession(BaseSession):
         kwargs.setdefault("follow_redirects", redirect)  # type: ignore[typeddict-item]
 
         try:
-            r = await self.session.post(url, **kwargs)
+            r = await asyncio.wait_for(self.session.post(url, **kwargs), self._timeout)
+        except TimeoutError as exc:
+            raise as_timeout_error(exc) from exc
         except httpx.TimeoutException as exc:
             raise as_timeout_error(exc) from exc
         except httpx.TooManyRedirects as exc:

@@ -18,7 +18,12 @@ import novel_downloader.plugins.base.fetcher as fetcher_mod
 from novel_downloader.infra.http_defaults import IMAGE_HEADERS
 from novel_downloader.infra.sessions.response import BaseResponse
 from novel_downloader.libs.filesystem import font_filename, image_filename
-from novel_downloader.plugins.base.fetcher import BaseFetcher, GenericFetcher
+from novel_downloader.plugins.base.errors import HttpStatusError, TransportError
+from novel_downloader.plugins.base.fetcher import (
+    BaseFetcher,
+    GenericFetcher,
+    _retry_after_seconds,
+)
 from novel_downloader.schemas import FetcherConfig
 
 Handler = Callable[[str, dict[str, Any]], BaseResponse | BaseException]
@@ -172,20 +177,137 @@ async def test_fetch_zero_retries_makes_one_attempt(
 
 
 @pytest.mark.asyncio
-async def test_fetch_propagates_transport_errors_without_inner_retry(
+async def test_fetch_retries_transport_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Transport exceptions are retried by ``DownloadMixin.get_chapter`` only.
+    """A reset/timeout is worth another attempt: the budget exists for it."""
+    handler = _sequence_handler(
+        ConnectionError("connection reset"),
+        BaseResponse(content=b"ok", status=200),
+    )
+    fetcher, session = _make(monkeypatch, handler, retry_times=2)
 
-    Keeping them out of ``fetch`` avoids multiplying the two retry loops.
-    """
-    handler = lambda url, kw: OSError("connection reset")  # noqa: E731
-    fetcher, session = _make(monkeypatch, handler, retry_times=3)
+    assert await fetcher.fetch("https://demo/1") == "ok"
+    assert len(session.calls) == 2
 
-    with pytest.raises(OSError, match="connection reset"):
+
+@pytest.mark.asyncio
+async def test_fetch_raises_transport_error_after_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exhausted transport retries surface as a typed, non-retryable error."""
+    handler = lambda url, kw: ConnectionError("connection reset")  # noqa: E731
+    fetcher, session = _make(monkeypatch, handler, retry_times=2)
+
+    with pytest.raises(TransportError) as excinfo:
         await fetcher.fetch("https://demo/1")
 
+    assert len(session.calls) == 3  # retry_times + 1
+    assert isinstance(excinfo.value.__cause__, ConnectionError)
+
+
+@pytest.mark.asyncio
+async def test_fetch_does_not_retry_a_deterministic_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """404 cannot change between attempts, so it must not be retried."""
+    handler = lambda url, kw: BaseResponse(content=b"", status=404)  # noqa: E731
+    fetcher, session = _make(monkeypatch, handler, retry_times=3)
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await fetcher.fetch("https://demo/1")
+
+    assert excinfo.value.status == 404
     assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_honours_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 429/503 with ``Retry-After`` sleeps exactly what the server asked."""
+    handler = _sequence_handler(
+        BaseResponse(content=b"", status=429, headers={"Retry-After": "7"}),
+        BaseResponse(content=b"ok", status=200),
+    )
+    fetcher, _ = _make(monkeypatch, handler, retry_times=2)
+    delays: list[float | None] = []
+
+    async def _record(attempt: int, delay: float | None = None) -> None:
+        delays.append(delay)
+
+    fetcher._retry_backoff = _record  # type: ignore[method-assign]
+
+    assert await fetcher.fetch("https://demo/1") == "ok"
+    assert delays == [7.0]
+
+
+def test_retry_after_accepts_both_header_forms() -> None:
+    assert _retry_after_seconds({"Retry-After": "12"}) == 12.0
+    # An HTTP-date in the past means "retry now", never a negative sleep.
+    assert _retry_after_seconds({"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}) == 0.0
+    assert _retry_after_seconds({"Retry-After": "not-a-date"}) is None
+    assert _retry_after_seconds({}) is None
+
+
+def test_retry_after_is_capped() -> None:
+    assert _retry_after_seconds({"Retry-After": "3600"}) == 30.0
+
+
+@pytest.mark.asyncio
+async def test_pagination_stops_when_a_page_repeats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A site that echoes page 1 forever must not loop forever."""
+
+    class _AlwaysMore(_Generic):
+        def should_continue_pagination(self, **kwargs: Any) -> bool:
+            return True
+
+    fetcher, session = _make(
+        monkeypatch,
+        lambda url, kw: BaseResponse(content=b"same page"),
+        fetcher_cls=_AlwaysMore,
+    )
+
+    pages = await fetcher._paginate(
+        make_suffix=lambda i: f"/p{i}",
+        page_type="chapter",
+        book_id="7",
+        chapter_id="1",
+    )
+
+    assert pages == ["same page"]
+    assert len(session.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_pagination_stops_at_max_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with unique pages, the loop is bounded by ``MAX_PAGES``."""
+
+    class _Endless(_Generic):
+        MAX_PAGES = 3
+
+        def should_continue_pagination(self, **kwargs: Any) -> bool:
+            return True
+
+    fetcher, session = _make(
+        monkeypatch,
+        lambda url, kw: BaseResponse(content=url.encode()),
+        fetcher_cls=_Endless,
+    )
+
+    pages = await fetcher._paginate(
+        make_suffix=lambda i: f"/p{i}",
+        page_type="chapter",
+        book_id="7",
+        chapter_id="1",
+    )
+
+    assert len(pages) == 3
+    assert len(session.calls) == 3
 
 
 @pytest.mark.asyncio

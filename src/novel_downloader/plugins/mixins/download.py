@@ -18,6 +18,7 @@ from novel_downloader.infra.persistence.download_ledger import (
     utc_now_iso,
 )
 from novel_downloader.libs.time_utils import async_jitter_sleep
+from novel_downloader.plugins.base.errors import HttpStatusError, TransportError
 from novel_downloader.schemas import (
     BookConfig,
     BookInfoDict,
@@ -311,18 +312,36 @@ class DownloadMixin:
             await flush_batch(True)
 
         # ---- workers ---
+        # Set when the storage worker hit an unrecoverable error. Producers
+        # keep enqueuing, so the worker must keep draining: a dead consumer
+        # with a bounded queue would otherwise block every producer forever.
+        storage_error: list[BaseException] = []
+
         async def storage_worker() -> None:
             while True:
                 item = await save_q.get()
                 if isinstance(item, StopToken):
                     break
+                if storage_error:
+                    continue
 
-                need = self._dl_check_refetch(item)
-                bucket = _batch(need)
-                bucket.append(item)
-                if len(bucket) >= self._storage_batch_size:
-                    await flush_batch(need)
-            await flush_all()
+                try:
+                    need = self._dl_check_refetch(item)
+                    bucket = _batch(need)
+                    bucket.append(item)
+                    if len(bucket) >= self._storage_batch_size:
+                        await flush_batch(need)
+                except Exception as exc:  # noqa: BLE001 - must not kill the queue
+                    storage_error.append(exc)
+                    logger.error(
+                        "Storage worker failed (site=%s, book=%s): %s",
+                        self._site,
+                        book_id,
+                        exc,
+                    )
+                    record_failure(item["id"], f"storage_error: {exc}", 1)
+            if not storage_error:
+                await flush_all()
 
         async def producer(cid: str) -> None:
             nonlocal skipped
@@ -365,25 +384,54 @@ class DownloadMixin:
         with ChapterStorage(raw_base, filename="chapter.raw.sqlite") as storage:
             storage_task = asyncio.create_task(storage_worker())
 
-            try:
-                tasks = [asyncio.create_task(producer(cid)) for cid in plan]
-                await asyncio.gather(*tasks)
-
-                # signal storage to finish and wait for flush
-                await save_q.put(STOP)
-                await storage_task
-            except asyncio.CancelledError:
-                logger.info("Download cancelled, stopping storage worker...")
-                await save_q.put(STOP)
-
+            def signal_stop() -> bool:
+                """Ask the worker to finish; never block on a full queue."""
                 try:
-                    await asyncio.wait_for(storage_task, timeout=10)
+                    save_q.put_nowait(STOP)
+                    return True
+                except asyncio.QueueFull:
+                    return False
+
+            async def join_storage(timeout: float | None = None) -> None:
+                """Wait for the worker to drain, cancelling it on overrun."""
+                try:
+                    if timeout is None:
+                        await storage_task
+                    else:
+                        await asyncio.wait_for(storage_task, timeout=timeout)
                 except TimeoutError:
                     logger.warning("Storage worker did not exit, cancelling.")
                     storage_task.cancel()
                     await asyncio.gather(storage_task, return_exceptions=True)
 
-                raise
+            try:
+                tasks = [asyncio.create_task(producer(cid)) for cid in plan]
+                try:
+                    await asyncio.gather(*tasks)
+                except asyncio.CancelledError:
+                    logger.info("Download cancelled, stopping storage worker...")
+                    # Cancel the producers first: otherwise they keep feeding a
+                    # queue that is about to be drained by the final flush.
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    if signal_stop():
+                        await join_storage(timeout=10)
+                    else:
+                        storage_task.cancel()
+                        await asyncio.gather(storage_task, return_exceptions=True)
+                    raise
+                except BaseException:
+                    # A producer raised: cancel its siblings so none of them
+                    # stays blocked on a bounded queue, then propagate.
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
+
+                if not signal_stop():
+                    storage_task.cancel()
+                await join_storage(timeout=30)
             finally:
                 if not storage_task.done():
                     storage_task.cancel()
@@ -586,6 +634,34 @@ class DownloadMixin:
                     await self.fetcher.fetch_media(media_dir, resources)
 
                 return chap
+            except HttpStatusError as e:
+                # ``fetch`` already refused to retry deterministic statuses
+                # (404/401/403) and spent the whole budget on retryable ones.
+                # Looping again here would multiply the request count for an
+                # answer that cannot change.
+                logger.warning(
+                    "HTTP %s for chapter (site=%s, book=%s, chapter=%s); not retrying",
+                    e.status,
+                    self._site,
+                    book_id,
+                    chapter_id,
+                )
+                _LAST_FAILURE.set(_ChapterFailure(f"http_{e.status}", 1))
+                return None
+            except TransportError as e:
+                # Same reasoning: the fetcher's retry budget is the one that
+                # counts for network trouble.
+                logger.warning(
+                    "Network failure for chapter (site=%s, book=%s, chapter=%s): %s",
+                    self._site,
+                    book_id,
+                    chapter_id,
+                    e.reason,
+                )
+                _LAST_FAILURE.set(
+                    _ChapterFailure("network_error", self._retry_times + 1)
+                )
+                return None
             except Exception as e:
                 if attempt < self._retry_times:
                     logger.info(

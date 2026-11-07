@@ -470,3 +470,112 @@ async def test_cache_media_skips_chapters_missing_from_storage(
     assert fetcher.media_calls == []
     assert fetcher.image_calls == []
     assert fetcher.images_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# get_chapter(): typed network/status failures are terminal
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_get_chapter_does_not_retry_a_deterministic_http_status(
+    tmp_path: Path,
+    harness: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 from the fetcher must not enter the content-retry loop."""
+    from novel_downloader.plugins.base.errors import HttpStatusError
+
+    sleeps: list[float] = []
+
+    async def _record_sleep(**kwargs: Any) -> None:
+        sleeps.append(kwargs["base"])
+
+    monkeypatch.setattr(download_mod, "async_jitter_sleep", _record_sleep)
+
+    client, fetcher = await _client(tmp_path, harness, retry_times=3)
+
+    async def _missing(*args: Any, **kwargs: Any) -> list[str]:
+        fetcher.chapter_calls += 1
+        raise HttpStatusError("https://demo/c1", 404)
+
+    monkeypatch.setattr(fetcher, "fetch_chapter_content", _missing)
+
+    assert await client.get_chapter("b1", "c1") is None
+    assert fetcher.chapter_calls == 1
+    assert sleeps == []
+    failure = download_mod._LAST_FAILURE.get()
+    assert failure is not None and failure.reason == "http_404"
+
+
+@pytest.mark.asyncio
+async def test_get_chapter_does_not_retry_an_exhausted_transport_error(
+    tmp_path: Path,
+    harness: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fetcher already spent the retry budget; the outer loop must not."""
+    from novel_downloader.plugins.base.errors import TransportError
+
+    sleeps: list[float] = []
+
+    async def _record_sleep(**kwargs: Any) -> None:
+        sleeps.append(kwargs["base"])
+
+    monkeypatch.setattr(download_mod, "async_jitter_sleep", _record_sleep)
+
+    client, fetcher = await _client(tmp_path, harness, retry_times=3)
+
+    async def _reset(*args: Any, **kwargs: Any) -> list[str]:
+        fetcher.chapter_calls += 1
+        raise TransportError("https://demo/c1", ConnectionError("reset"))
+
+    monkeypatch.setattr(fetcher, "fetch_chapter_content", _reset)
+
+    assert await client.get_chapter("b1", "c1") is None
+    assert fetcher.chapter_calls == 1
+    assert sleeps == []
+    failure = download_mod._LAST_FAILURE.get()
+    assert failure is not None and failure.reason == "network_error"
+    assert failure.attempts == 4  # retry_times + 1
+
+
+# --------------------------------------------------------------------------- #
+# download_book(): a poisoned storage worker must not hang the download
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_download_book_survives_a_failing_storage_worker(
+    tmp_path: Path,
+    harness: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead consumer used to block every producer on the bounded queue."""
+    from novel_downloader.infra.persistence.chapter_storage import ChapterStorage
+
+    def _boom(self: ChapterStorage, data: Any, need_refetch: bool = False) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ChapterStorage, "upsert_chapters", _boom)
+
+    client, fetcher = await _client(
+        tmp_path, harness, cache_chapter=False, storage_batch_size=1
+    )
+    harness.parser.book_info_result = _book_info(
+        [
+            {"title": "C1", "url": "u1", "chapterId": "c1"},
+            {"title": "C2", "url": "u2", "chapterId": "c2"},
+            {"title": "C3", "url": "u3", "chapterId": "c3"},
+        ]
+    )
+
+    summary = await asyncio.wait_for(
+        client.download_book(BookConfig(book_id="b1")), timeout=10
+    )
+
+    # All three chapters were fetched; the storage failure is reported as
+    # chapter failures instead of wedging the queue.
+    assert fetcher.chapter_calls == 3
+    assert summary["total"] == 3
+    assert summary["failed"] >= 1

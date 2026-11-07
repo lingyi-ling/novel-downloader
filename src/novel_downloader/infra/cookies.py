@@ -147,10 +147,19 @@ class CookieStore:
                 continue
             try:
                 mtime = state_file.stat().st_mtime
-                if self.mtimes.get(filename) == mtime:
-                    continue
+            except OSError:
+                continue
+            if self.mtimes.get(filename) == mtime:
+                continue
+            try:
                 data = json.loads(state_file.read_text(encoding="utf-8"))
             except (OSError, ValueError):
+                # A half-written file must not keep serving the previous
+                # cookies, and recording its mtime stops every later call from
+                # re-reading it.
+                self.mtimes[filename] = mtime
+                if self._file_cookies.pop(filename, None) is not None:
+                    changed = True
                 continue
 
             self.mtimes[filename] = mtime

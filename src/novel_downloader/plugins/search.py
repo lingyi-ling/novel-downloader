@@ -54,6 +54,25 @@ class GroupedSearchResult(SearchResult, total=False):
     sources: list[str]
 
 
+#: Per-host connection ceiling for the aggregate session. aiohttp defaults to
+#: ``limit=100, limit_per_host=0`` (unlimited per host), so a fan-out of many
+#: searchers could burst past a single site's tolerance.
+_MAX_CONNECTIONS_PER_HOST = 8
+_MAX_CONNECTIONS_TOTAL = 64
+#: Reuse DNS answers for a whole search session instead of resolving the same
+#: host once per request.
+_DNS_CACHE_SECONDS = 300
+
+
+def _make_connector() -> aiohttp.TCPConnector:
+    """Connection pool shared by every site of one aggregate search."""
+    return aiohttp.TCPConnector(
+        limit=_MAX_CONNECTIONS_TOTAL,
+        limit_per_host=_MAX_CONNECTIONS_PER_HOST,
+        ttl_dns_cache=_DNS_CACHE_SECONDS,
+    )
+
+
 #: Process-wide short-lived cache shared by ``search`` and ``search_stream``.
 _CACHE = SearchCache()
 
@@ -469,6 +488,7 @@ async def search(
     results: list[SearchResult] = []
 
     async with aiohttp.ClientSession(
+        connector=_make_connector(),
         timeout=timeout_cfg,
         headers=DEFAULT_USER_HEADERS,
     ) as session:
@@ -574,6 +594,7 @@ async def search_stream(
 
     timeout_cfg = aiohttp.ClientTimeout(total=timeout)
     async with aiohttp.ClientSession(
+        connector=_make_connector(),
         timeout=timeout_cfg,
         headers=DEFAULT_USER_HEADERS,
     ) as session:

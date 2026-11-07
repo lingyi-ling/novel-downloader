@@ -85,6 +85,26 @@ async def test_concurrent_waits_safe(monkeypatch):
     tasks = [asyncio.create_task(do_wait()) for _ in range(10)]
     await asyncio.gather(*tasks)
 
-    # After burst depletion, tokens should be ≈0 (not negative!)
-    assert rl.tokens >= 0.0
+    # Slots are reserved under the lock: nine of the ten callers hold a
+    # reservation (tokens go negative on purpose), never beyond the burst.
     assert rl.tokens <= rl.capacity
+    assert rl.tokens == -9.0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_waits_get_increasing_slots(monkeypatch):
+    """Concurrent callers reserve distinct slots instead of firing together."""
+    rl = TokenBucketRateLimiter(rate=4.0, burst=1, jitter_strength=0)
+    await rl.wait()  # spend the initial burst token
+
+    slept: list[float] = []
+
+    async def fake_sleep(t):
+        slept.append(t)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await asyncio.gather(*(rl.wait() for _ in range(4)))
+
+    # rate 4/s -> one slot every 0.25s: 0.25, 0.50, 0.75, 1.00
+    assert slept == [0.25, 0.5, 0.75, 1.0]

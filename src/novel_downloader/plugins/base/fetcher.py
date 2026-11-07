@@ -8,9 +8,12 @@ Abstract base class providing common HTTP session handling for fetchers.
 
 import abc
 import asyncio
+import hashlib
 import logging
+import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -19,10 +22,45 @@ from novel_downloader.infra.i18n import t
 from novel_downloader.infra.sessions import create_session
 from novel_downloader.libs.filesystem import font_filename, image_filename, write_file
 from novel_downloader.libs.time_utils import async_jitter_sleep
+from novel_downloader.plugins.base.errors import (
+    RETRYABLE_STATUS,
+    HttpStatusError,
+    TransportError,
+)
 from novel_downloader.plugins.utils.rate_limiter import TokenBucketRateLimiter
 from novel_downloader.schemas import FetcherConfig, LoginField, MediaResource
 
 logger = logging.getLogger(__name__)
+
+#: A server may ask us to wait an hour; downloads should not stall that long.
+_MAX_RETRY_AFTER = 30.0
+
+
+def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    """
+    Parse a ``Retry-After`` header into a bounded delay.
+
+    Accepts both forms the RFC allows: a number of seconds, or an HTTP date.
+
+    :param headers: Response headers (case-insensitive lookup).
+    :return: Seconds to wait, capped at :data:`_MAX_RETRY_AFTER`; ``None``
+        when the header is absent or unparseable.
+    """
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if not raw:
+        return None
+    text = str(raw).strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+        if when is None:
+            return None
+        seconds = when.timestamp() - time.time()
+    return max(0.0, min(seconds, _MAX_RETRY_AFTER))
 
 
 class BaseFetcher(abc.ABC):
@@ -34,6 +72,9 @@ class BaseFetcher(abc.ABC):
     BASE_URL_MAP: dict[str, str] = {}
     DEFAULT_BASE_URL: str = ""
     IMAGE_HEADERS: dict[str, str] = IMAGE_HEADERS
+    #: Safety valve for :meth:`_paginate`: a site that always confirms a next
+    #: page must not grow the page list (and the request count) without bound.
+    MAX_PAGES: int = 500
 
     def __init__(
         self,
@@ -134,38 +175,63 @@ class BaseFetcher(abc.ABC):
         """
         Fetch arbitrary binary data from a remote URL.
 
+        Media (covers, inline images, fonts) shares the same retry budget and
+        rate limiter as page fetches: a burst of images used to bypass
+        ``max_rps`` and give up on the first connection reset.
+
         :param url: The target URL.
         :return: raw content if success, else None
         """
-        try:
-            resp = await self.session.get(url, **kwargs)
-        except Exception as e:
-            logger.warning(
-                "Request failed (site=%s) %s: %s",
-                self.site_name,
-                url,
-                e,
-            )
-            return None
+        for attempt in range(self._retry_times + 1):
+            if self._rate_limiter:
+                await self._rate_limiter.wait()
+            try:
+                resp = await self.session.get(url, **kwargs)
+            except (TimeoutError, ConnectionError) as exc:
+                if attempt < self._retry_times:
+                    logger.info(
+                        "Retrying media (site=%s, attempt=%d/%d) %s: %s",
+                        self.site_name,
+                        attempt + 1,
+                        self._retry_times,
+                        url,
+                        exc,
+                    )
+                    await self._retry_backoff(attempt)
+                    continue
+                logger.warning(
+                    "Request failed (site=%s) %s: %s",
+                    self.site_name,
+                    url,
+                    exc,
+                )
+                return None
 
-        if not resp.ok:
-            logger.warning(
-                "Request failed (site=%s) %s: HTTP %s",
-                self.site_name,
-                url,
-                resp.status,
-            )
-            return None
+            if not resp.ok:
+                if resp.status in RETRYABLE_STATUS and attempt < self._retry_times:
+                    await self._retry_backoff(
+                        attempt, _retry_after_seconds(resp.headers)
+                    )
+                    continue
+                logger.warning(
+                    "Request failed (site=%s) %s: HTTP %s",
+                    self.site_name,
+                    url,
+                    resp.status,
+                )
+                return None
 
-        if not resp.content:
-            logger.warning(
-                "Empty response (site=%s): %s",
-                self.site_name,
-                url,
-            )
-            return None
+            if not resp.content:
+                logger.warning(
+                    "Empty response (site=%s): %s",
+                    self.site_name,
+                    url,
+                )
+                return None
 
-        return resp.content
+            return resp.content
+
+        return None
 
     async def fetch_media(
         self,
@@ -345,25 +411,70 @@ class BaseFetcher(abc.ABC):
         :param kwargs: Additional keyword arguments to pass to `session.get`.
         :return: The response body as text.
         """
-        if self._rate_limiter:
-            await self._rate_limiter.wait()
-
         for attempt in range(self._retry_times + 1):
-            resp = await self.session.get(url, encoding=encoding, **kwargs)
-            if not resp.ok:
+            if self._rate_limiter:
+                await self._rate_limiter.wait()
+            try:
+                resp = await self.session.get(url, encoding=encoding, **kwargs)
+            except (TimeoutError, ConnectionError) as exc:
+                # Transport trouble is exactly what the retry budget is for;
+                # the previous version only retried HTTP statuses, so one
+                # reset killed a book-info fetch outright.
                 if attempt < self._retry_times:
-                    await async_jitter_sleep(
-                        self._backoff_factor,
-                        mul_spread=1.1,
-                        max_sleep=self._backoff_factor + 2,
+                    logger.info(
+                        "Retrying (site=%s, attempt=%d/%d) %s: %s",
+                        self.site_name,
+                        attempt + 1,
+                        self._retry_times,
+                        url,
+                        exc,
                     )
+                    await self._retry_backoff(attempt)
                     continue
-                raise ConnectionError(
-                    f"Request to {url} failed with status {resp.status}"
-                )
-            return resp.text
+                raise TransportError(url, exc) from exc
 
-        raise RuntimeError("Unreachable code reached in fetch()")
+            if resp.ok:
+                return resp.text
+
+            if resp.status not in RETRYABLE_STATUS:
+                # Deterministic failure (404/401/403...): another attempt
+                # returns the same answer and only amplifies traffic.
+                raise HttpStatusError(url, resp.status)
+
+            if attempt >= self._retry_times:
+                raise HttpStatusError(url, resp.status)
+
+            logger.info(
+                "Retrying (site=%s, attempt=%d/%d) %s: HTTP %s",
+                self.site_name,
+                attempt + 1,
+                self._retry_times,
+                url,
+                resp.status,
+            )
+            await self._retry_backoff(attempt, _retry_after_seconds(resp.headers))
+
+        raise AssertionError("unreachable: the retry loop always returns or raises")
+
+    async def _retry_backoff(self, attempt: int, delay: float | None = None) -> None:
+        """
+        Sleep before the next attempt.
+
+        A server-supplied ``Retry-After`` wins over the local jitter schedule;
+        otherwise the jittered exponential backoff is spread around
+        ``backoff_factor``.
+
+        :param attempt: Zero-based index of the attempt that just failed.
+        :param delay: Delay requested by the server, if any.
+        """
+        if delay is not None:
+            await asyncio.sleep(delay)
+            return
+        await async_jitter_sleep(
+            self._backoff_factor,
+            mul_spread=1.1,
+            max_sleep=self._backoff_factor + 2,
+        )
 
     async def _check_login_status(self) -> bool:
         """
@@ -618,11 +729,36 @@ class GenericFetcher(BaseFetcher):
         origin = self.BASE_URL.rstrip("/")
 
         pages: list[str] = []
+        seen: set[bytes] = set()
         idx = 1
         suffix = make_suffix(idx)
 
         while True:
+            if len(pages) >= self.MAX_PAGES:
+                # A site that keeps answering "there is a next page" (login
+                # wall, error page echoing the suffix) used to loop forever
+                # while growing this list.
+                logger.warning(
+                    "%s: %s pagination stopped at MAX_PAGES=%d",
+                    self.site_name,
+                    page_type,
+                    self.MAX_PAGES,
+                )
+                break
+
             html = await self.fetch(origin + suffix, **fetch_kwargs)
+            fingerprint = hashlib.blake2b(
+                html.encode("utf-8", "replace"), digest_size=8
+            ).digest()
+            if fingerprint in seen:
+                logger.warning(
+                    "%s: %s pagination repeated page %d; stopping",
+                    self.site_name,
+                    page_type,
+                    idx,
+                )
+                break
+            seen.add(fingerprint)
             pages.append(html)
             idx += 1
             suffix = make_suffix(idx)

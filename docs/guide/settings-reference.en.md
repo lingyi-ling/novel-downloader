@@ -14,8 +14,8 @@ Global runtime settings for downloads / concurrency / rate limits / directories 
 | `request_interval`   | `float`   | 0.5                | Interval (seconds) between chapter requests for **the same book** |
 | `workers`            | `int`     | 4                  | Number of download task coroutines |
 | `max_connections`    | `int`     | 10                 | Maximum number of concurrent connections |
-| `max_rps`            | `float`   | 1000.0             | Global RPS limit (requests per second) |
-| `retry_times`        | `int`     | 3                  | Number of retries after a failed request |
+| `max_rps`            | `float`   | 1000.0             | Global RPS limit shared by page and media (image/font) requests |
+| `retry_times`        | `int`     | 3                  | Request retries (timeouts/connection errors and 408/425/429/5xx only; deterministic 4xx are not retried, and `Retry-After` is honoured) |
 | `backoff_factor`     | `float`   | 2.0                | Retry backoff factor (wait time grows by this multiple per retry, e.g. `2s`, `4s`, `8s`) |
 | `timeout`            | `float`   | 10.0               | Per-request timeout (seconds) |
 | `storage_batch_size` | `int`     | 1                  | Number of chapters committed per SQLite batch (improves write performance) |
@@ -26,7 +26,7 @@ Global runtime settings for downloads / concurrency / rate limits / directories 
 | `http2`              | `bool`    | `true`             | Only effective for `httpx`; enables HTTP/2 |
 | `impersonate`        | `str/None`| `None`             | Only effective for `curl_cffi`; enables browser fingerprint impersonation |
 | `browser_assisted_sites` | `list[str]` | `["fanqienovel"]` | Site keys whose search needs a real browser; set to `[]` to disable |
-| `download_retry_times` | `int`   | 2                  | Extra retries for download tasks after transient network errors |
+| `download_retry_times` | `int`   | 2                  | Extra retries for chapter content; network retries already happen at the request layer |
 | `proxy`              | `str/None`| `None`             | HTTP/HTTPS proxy URL, e.g. `"http://127.0.0.1:7890"` |
 | `proxy_user`         | `str/None`| `None`             | Proxy username |
 | `proxy_pass`         | `str/None`| `None`             | Proxy password |

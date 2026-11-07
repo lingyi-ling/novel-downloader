@@ -276,7 +276,13 @@ class PluginRegistry:
             except ModuleNotFoundError as e:
                 if e.name and modname.startswith(e.name):
                     continue
-                raise
+                # The module exists but one of its imports is missing: treat
+                # it as an unusable plugin instead of aborting the lookup.
+                logger.warning("Skipping plugin %s: %s", modname, e)
+                continue
+            except Exception as e:  # noqa: BLE001 - one bad plugin is not fatal
+                logger.warning("Skipping plugin %s: %s", modname, e)
+                continue
 
     def _try_import_processor(self, key: str) -> None:
         """
@@ -292,7 +298,11 @@ class PluginRegistry:
             except ModuleNotFoundError as e:
                 if e.name and modname.startswith(e.name):
                     continue
-                raise
+                logger.warning("Skipping plugin %s: %s", modname, e)
+                continue
+            except Exception as e:  # noqa: BLE001 - one bad plugin is not fatal
+                logger.warning("Skipping plugin %s: %s", modname, e)
+                continue
 
     def _load_all_sites(self, kind: str) -> None:
         """
@@ -316,8 +326,15 @@ class PluginRegistry:
                     import_module(modname)
                 except ModuleNotFoundError as e:
                     if e.name and modname.startswith(e.name):
+                        # This site simply has no module for ``kind``.
                         continue
-                    raise
+                    # Present but unimportable (missing dependency): skip the
+                    # site, keep the other 58 searchable.
+                    logger.warning("Skipping plugin %s: %s", modname, e)
+                    continue
+                except Exception as e:  # noqa: BLE001 - one bad plugin is not fatal
+                    logger.warning("Skipping plugin %s: %s", modname, e)
+                    continue
 
     def enable_local_plugins(
         self,

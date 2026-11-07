@@ -132,3 +132,44 @@ def test_cookie_store_does_not_log_values(
 
     assert secret not in caplog.text
     assert all(record.name.startswith("novel_downloader") for record in caplog.records)
+
+
+def test_corrupt_rewrite_drops_the_previous_cookies(tmp_path) -> None:
+    """A half-written file must not keep serving the old credentials."""
+    path = tmp_path / "aiohttp.cookies"
+    _write(path, [{"name": "sid", "value": "old"}])
+    store = CookieStore(tmp_path)
+    store.load_all()
+    assert store.cache == {"sid": "old"}
+
+    # Simulate a crash mid-write: valid JSON is gone.
+    path.write_text('{"broken":', encoding="utf-8")
+    os.utime(path, None)
+    store.load_all()
+
+    assert store.cache == {}
+    # The broken file's mtime is recorded, so it is not re-read every call.
+    assert store.mtimes[str(path.name)] == path.stat().st_mtime
+
+
+def test_corrupt_file_is_not_reread_on_every_access(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "aiohttp.cookies"
+    path.write_text("{", encoding="utf-8")
+    store = CookieStore(tmp_path)
+    store.load_all()
+
+    reads = 0
+    original = CookieStore._load_file if hasattr(CookieStore, "_load_file") else None
+    real_read_text = type(path).read_text
+
+    def _counting_read(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal reads
+        reads += 1
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(path), "read_text", _counting_read)
+    store.load_all()
+    store.load_all()
+
+    assert reads == 0
+    assert original is None or callable(original)

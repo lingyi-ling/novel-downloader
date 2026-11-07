@@ -782,3 +782,21 @@ async def test_stream_drops_a_site_that_misses_its_budget(
     assert [[item["site"] for item in chunk] for chunk in chunks] == [["recorder"]]
     assert elapsed < 5.0
     assert any(event.kind == "failed" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_search_connector_bounds_per_host_connections() -> None:
+    """A 59-site fan-out must not open the default 100 sockets per host."""
+    from novel_downloader.plugins.search import (
+        _MAX_CONNECTIONS_PER_HOST,
+        _MAX_CONNECTIONS_TOTAL,
+        _make_connector,
+    )
+
+    connector = _make_connector()
+    try:
+        assert connector.limit == _MAX_CONNECTIONS_TOTAL
+        assert connector.limit_per_host == _MAX_CONNECTIONS_PER_HOST
+        assert _MAX_CONNECTIONS_PER_HOST < _MAX_CONNECTIONS_TOTAL
+    finally:
+        await connector.close()

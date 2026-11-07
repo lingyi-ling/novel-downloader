@@ -14,8 +14,8 @@
 | `request_interval`   | `float` | 0.5               | **同一本书**章节请求的间隔 (秒)               |
 | `workers`            | `int`   | 4                 | 下载任务协程数量                             |
 | `max_connections`    | `int`   | 10                | 最大并发连接数                               |
-| `max_rps`            | `float` | 1000.0            | 全局 RPS 上限 (requests per second)         |
-| `retry_times`        | `int`   | 3                 | 请求失败重试次数                             |
+| `max_rps`            | `float` | 1000.0            | 全局 RPS 上限 (requests per second), 页面与图片/字体请求共享 |
+| `retry_times`        | `int`   | 3                 | 请求重试次数 (只重试超时/连接错误与 408/425/429/5xx; 404/403 等确定性状态不重试, 并遵守服务端 `Retry-After`) |
 | `backoff_factor`     | `float` | 2.0               | 重试的退避因子 (每次重试等待时间将按倍数增加, 如 `2s`, `4s`, `8s`) |
 | `timeout`            | `float` | 10.0              | 单次请求超时 (秒)                            |
 | `storage_batch_size` | `int`   | 1                 | `sqlite` 每批提交的章节数 (提高写入性能)       |
@@ -26,7 +26,7 @@
 | `http2`              | `bool`  | `true`            | 仅对 `httpx` 生效, 启用 HTTP/2 支持           |
 | `impersonate`        | `str/None` | `None`         | 仅对 `curl_cffi` 生效, 启用浏览器指纹仿真模式  |
 | `browser_assisted_sites` | `list[str]` | `["fanqienovel"]` | 搜索时必须借助真实浏览器的站点键列表; 显式设为 `[]` 可禁用 |
-| `download_retry_times` | `int`  | 2                 | 下载任务遇到瞬时网络错误时的额外重试次数       |
+| `download_retry_times` | `int`  | 2                 | 章节内容层面的额外重试次数; 网络重试已由 `retry_times` 在请求层完成 |
 | `proxy`              | `str/None` | `None`         | HTTP/HTTPS 代理地址, 如 `"http://127.0.0.1:7890"` |
 | `proxy_user`         | `str/None` | `None`         | 代理用户名                                    |
 | `proxy_pass`         | `str/None` | `None`         | 代理密码                                      |

@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import aiohttp.web
@@ -173,3 +174,43 @@ async def test_cookie_update_and_clear(cfg):
     assert s.get_cookie("b") is None
 
     await s.close()
+
+
+class _DripClient:
+    """AsyncClient double whose request never finishes on its own."""
+
+    is_closed = False
+
+    async def get(self, url: str, **kwargs: object) -> object:
+        await asyncio.sleep(30)
+        raise AssertionError("the outer deadline should have fired")
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_request_honours_a_total_deadline(cfg):
+    """httpx's own timeout is per operation; a drip feed must still end."""
+    cfg.timeout = 0.05
+    session = HttpxSession(cfg, cookies=None)
+    session._session = _DripClient()  # type: ignore[assignment]
+
+    with pytest.raises(TimeoutError):
+        await session.get("https://demo/drip")
+
+
+@pytest.mark.asyncio
+async def test_post_honours_a_total_deadline(cfg):
+    cfg.timeout = 0.05
+    session = HttpxSession(cfg, cookies=None)
+
+    class _Drip(_DripClient):
+        async def post(self, url: str, **kwargs: object) -> object:
+            await asyncio.sleep(30)
+            raise AssertionError("unreachable")
+
+    session._session = _Drip()  # type: ignore[assignment]
+
+    with pytest.raises(TimeoutError):
+        await session.post("https://demo/drip")
