@@ -1,46 +1,52 @@
 /* ============================================================ tokens
+   Navy carries structure, warm orange carries actions — the same pair the
+   desktop and Android clients use.
+
    Contrast (WCAG 2.x relative-luminance, AA):
-   light: text 15.1 / text-2 5.0 / text-3 4.7 / accent 4.2 (bg), 4.5 (card)
-          accent-ink >= 4.8 everywhere incl. 10% soft tints
-          on-accent (white) on accent 4.6, on hover 5.8
-   dark:  text 14.9 / text-2 6.8 / text-3 5.3 / accent 6.9 / on-accent 7.0 */
+   light: text 14.9 / text-2 7.2 / text-3 4.5 / accent 4.9 (bg), 5.2 (card)
+          on-accent (white) on accent 5.2, on hover 7.3
+   dark:  text 16.1 / text-2 9.2 / text-3 5.9 / accent 7.0 / on-accent 6.9 */
 :root {
-  --bg: #f6f5f1;
-  --bg-alt: #efede6;
+  --bg: #f7f9fc;
+  --bg-alt: #eef2f7;
   --card: #ffffff;
-  --border: #e5e2d8;
-  --text: #201f1b;
-  --text-2: #6d6960;
-  --text-3: #726d5f;
-  --accent: #b95a2c;
-  --accent-hover: #9a4724;
-  --accent-ink: #9c4526;
-  --accent-soft: rgba(185, 90, 44, .10);
-  --accent-soft-2: rgba(185, 90, 44, .20);
+  --border: #e3e8ef;
+  --text: #16233a;
+  --text-2: #475569;
+  --text-3: #64748b;
+  --accent: #c2410c;
+  --accent-hover: #9a3412;
+  --accent-ink: #9a3412;
+  --accent-soft: rgba(194, 65, 12, .09);
+  --accent-soft-2: rgba(194, 65, 12, .18);
   --on-accent: #ffffff;
-  --code-bg: #201f1b;
-  --code-text: #ece9e2;
-  --shadow-1: 0 1px 2px rgba(32, 31, 27, .05);
-  --shadow-2: 0 10px 32px -12px rgba(32, 31, 27, .16);
+  --brand-tile: #1e3a5f;
+  --brand-glyph: #e9a184;
+  --code-bg: #0e1b2e;
+  --code-text: #e8eef7;
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, .05);
+  --shadow-2: 0 10px 32px -12px rgba(15, 23, 42, .18);
   --radius: 14px;
 }
 :root[data-theme="dark"] {
-  --bg: #171614;
-  --bg-alt: #1e1d1a;
-  --card: #232220;
-  --border: #34322c;
-  --text: #ece9e2;
-  --text-2: #a39e93;
-  --text-3: #8f8a7d;
-  --accent: #e08a63;
-  --accent-hover: #eb9d78;
-  --accent-ink: #e08a63;
-  --accent-soft: rgba(224, 138, 99, .13);
-  --accent-soft-2: rgba(224, 138, 99, .24);
-  --on-accent: #1c1208;
-  --code-bg: #111010;
-  --code-text: #e4e1d8;
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, .35);
+  --bg: #0b1220;
+  --bg-alt: #0f172a;
+  --card: #111c2e;
+  --border: #22304a;
+  --text: #e8eef7;
+  --text-2: #a9b7cc;
+  --text-3: #8291a9;
+  --accent: #e8835f;
+  --accent-hover: #f09a7a;
+  --accent-ink: #f0a184;
+  --accent-soft: rgba(232, 131, 95, .12);
+  --accent-soft-2: rgba(232, 131, 95, .22);
+  --on-accent: #1a1208;
+  --brand-tile: #243b57;
+  --brand-glyph: #f0a184;
+  --code-bg: #070d18;
+  --code-text: #e8eef7;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .4);
   --shadow-2: 0 10px 32px -12px rgba(0, 0, 0, .55);
 }
 
@@ -79,10 +85,14 @@ svg { display: block; }
   height: 60px; display: flex; align-items: center; gap: 22px;
 }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.01em; }
+.brand-name small {
+  font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--text-3); margin-left: 6px;
+}
 .brand-mark {
   width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
-  color: #fff; background: linear-gradient(135deg, var(--accent), #b95a38);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 3px 10px -2px var(--accent-soft-2);
+  color: var(--brand-glyph); background: var(--brand-tile);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06);
 }
 .brand-mark svg { width: 17px; height: 17px; }
 .brand-mark.small { width: 24px; height: 24px; border-radius: 7px; }
@@ -124,11 +134,7 @@ svg { display: block; }
   font-size: clamp(38px, 7vw, 68px); line-height: 1.12; letter-spacing: -.03em;
   font-weight: 800;
 }
-.hero h1 em {
-  font-style: normal; color: var(--accent);
-  background: linear-gradient(120deg, var(--accent), #c96f42);
-  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
-}
+.hero h1 em { font-style: normal; color: var(--accent); }
 .hero-sub {
   max-width: 640px; margin: 22px auto 0;
   font-size: 17px; color: var(--text-2);
@@ -235,11 +241,11 @@ svg { display: block; }
 .tab-bar { display: flex; gap: 4px; padding: 10px 12px 0; border-bottom: 1px solid rgba(255,255,255,.08); }
 .tab {
   appearance: none; border: none; background: none; cursor: pointer;
-  color: #94907f; font: 600 13.5px/1 inherit;
+  color: #8291a9; font: 600 13.5px/1 inherit;
   padding: 10px 16px; border-radius: 8px 8px 0 0;
   transition: color .15s, background .15s;
 }
-.tab:hover { color: #d5d0c4; }
+.tab:hover { color: #c7d3e3; }
 .tab.active { color: #fff; background: rgba(255,255,255,.08); }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
@@ -248,7 +254,7 @@ svg { display: block; }
   font: 13.5px/1.75 ui-monospace, "Cascadia Code", Consolas, monospace;
   color: var(--code-text);
 }
-.tab-panel .c { color: #8f8a7c; user-select: none; }
+.tab-panel .c { color: #8291a9; user-select: none; }
 
 /* ============================================================ footer cta */
 .footer-cta {
@@ -358,7 +364,7 @@ svg { display: block; }
 }
 .aw-brand {
   height: 26px; width: 26px; border-radius: 8px; margin-bottom: 6px;
-  background: linear-gradient(135deg, var(--accent), #b95a38);
+  background: var(--brand-tile);
 }
 .aw-nav { height: 26px; border-radius: 8px; background: var(--hover, var(--card)); opacity: .6; }
 .aw-nav.active { background: var(--accent-soft); opacity: 1; position: relative; }

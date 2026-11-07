@@ -8,7 +8,7 @@ const $$ = (s) => [...document.querySelectorAll(s)];
 const root = document.documentElement;
 const themeColorMetas = $$('meta[name="theme-color"]');
 function syncThemeColor() {
-  const bg = root.dataset.theme === "dark" ? "#171614" : "#f6f5f1";
+  const bg = root.dataset.theme === "dark" ? "#0b1220" : "#f7f9fc";
   // once the user picks a theme manually, drop the media hints so the
   // browser chrome follows the page instead of the OS scheme
   themeColorMetas.forEach((m) => {

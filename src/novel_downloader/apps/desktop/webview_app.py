@@ -2263,7 +2263,7 @@ def run_webview_app() -> int:
         "书音 BookTone",
         html=APP_HTML,
         js_api=bridge,
-        background_color="#f6f5f1",
+        background_color="#f8fafc",
         **kwargs,
     )
     assert window is not None  # nb: pywebview types this as Optional[Window]

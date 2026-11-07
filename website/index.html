@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>书音 BookTone — 小说与音乐 · 多站点聚合 · 四端同源</title>
 <meta name="description" content="异步、模块化、可扩展的小说下载工具链：84 个下载站点、59 个搜索源、25 个音乐平台，CLI / REST API / Windows 桌面 / Android 四端同源。">
-<meta name="keywords" content="小说下载,聚合搜索,EPUB,音乐下载,开源,Novel Downloader">
+<meta name="keywords" content="书音,BookTone,小说下载,聚合搜索,EPUB,音乐下载,开源">
 <meta name="color-scheme" content="light dark">
-<meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#171614" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f7f9fc" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
 <link rel="canonical" href="http://43.165.170.43/noveldl/">
 <link rel="alternate" hreflang="zh-CN" href="http://43.165.170.43/noveldl/?lang=zh">
 <link rel="alternate" hreflang="en" href="http://43.165.170.43/noveldl/?lang=en">
@@ -20,7 +20,7 @@
 <meta property="og:image" content="http://43.165.170.43/noveldl/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Novel Downloader — 84 个下载站点 · 59 个搜索源 · 25 个音乐平台 · 四端同源">
+<meta property="og:image:alt" content="书音 BookTone — 84 个下载站点 · 59 个搜索源 · 25 个音乐平台 · 四端同源">
 <meta property="og:locale" content="zh_CN">
 <meta property="og:locale:alternate" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
@@ -31,7 +31,7 @@
 {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
-  "name": "Novel Downloader",
+  "name": "书音 BookTone",
   "url": "http://43.165.170.43/noveldl/",
   "description": "异步、模块化、可扩展的小说下载工具链：84 个下载站点、59 个搜索源、25 个音乐平台，CLI / REST API / Windows 桌面 / Android 四端同源。",
   "softwareVersion": "1.2.0",
@@ -51,7 +51,7 @@
     "处理器管线"
   ],
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-  "author": { "@type": "Organization", "name": "Novel Downloader contributors", "url": "https://github.com/lingyi-ling" }
+  "author": { "@type": "Organization", "name": "书音 BookTone contributors", "url": "https://github.com/lingyi-ling" }
 }
 </script>
 </head>
@@ -62,7 +62,7 @@
   <div class="nav-inner">
     <a class="brand" href="#top">
       <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg></span>
-      <span class="brand-name">Novel Downloader</span>
+      <span class="brand-name">书音<small>BookTone</small></span>
       <span class="gh-chip" id="gh-stars" hidden>★ <span id="gh-stars-n">–</span></span>
     </a>
     <nav class="nav-links" id="nav-links">
@@ -123,11 +123,11 @@
   <section class="section showcase" id="showcase">
     <div class="section-inner">
       <h2 class="section-title" data-en="See it in action">眼见为实</h2>
-      <p class="section-sub" data-en="The Windows desktop client — warm paper theme, live queue, one-click export.">Windows 桌面客户端——暖纸双主题、实时队列、一键导出。</p>
-      <div class="appwin reveal" role="img" aria-label="Novel Downloader desktop app preview">
+      <p class="section-sub" data-en="The Windows desktop client — navy & orange themes, live queue, one-click export.">Windows 桌面客户端——藏青与暖橙双主题、实时队列、一键导出。</p>
+      <div class="appwin reveal" role="img" aria-label="书音 BookTone desktop app preview">
         <div class="appwin-titlebar">
           <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
-          <span class="appwin-title">Novel Downloader</span>
+          <span class="appwin-title">书音 BookTone</span>
           <span class="appwin-pill" id="appwin-ver">v1.13.0</span>
         </div>
         <div class="appwin-body">
@@ -226,7 +226,7 @@
         <article class="client-card reveal">
           <h3 data-en="Windows desktop">Windows 桌面</h3>
           <p class="client-tag">novel-desktop</p>
-          <p data-en="Native window, warm-paper dual theme, live progress and health panel; ships as a standalone exe.">原生窗口、暖纸双主题、实时进度与健康检查面板，打包成独立 exe。</p>
+          <p data-en="Native window, navy & orange themes, live progress and health panel; ships as a standalone exe.">原生窗口、藏青与暖橙双主题、实时进度与健康检查面板，打包成独立 exe。</p>
         </article>
         <article class="client-card reveal">
           <h3>Android</h3>
@@ -299,7 +299,7 @@ pip install -U novel-downloader
 novel-desktop
 
 <span class="c" data-en="# Warm-paper dual theme · live download progress · site health checks
-# Ctrl+1-5 switches the five pages"># 暖纸色双主题 · 实时下载进度 · 平台健康检查
+# Ctrl+1-5 switches the five pages"># 藏青与暖橙双主题 · 实时下载进度 · 平台健康检查
 # Ctrl+1-5 切换五个页面</span></code></pre>
         </div>
         <div class="tab-panel" id="panel-android" role="tabpanel" aria-labelledby="tab-android" tabindex="0" data-panel="android">
@@ -416,7 +416,7 @@ cd novel-downloader/android
   <div class="footer-inner">
     <div class="foot-brand">
       <span class="brand-mark small"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg></span>
-      <span>Novel Downloader</span>
+      <span>书音 BookTone</span>
     </div>
     <nav class="foot-links">
       <a href="https://github.com/lingyi-ling/novel-downloader" target="_blank" rel="noopener">GitHub</a>
@@ -428,7 +428,7 @@ cd novel-downloader/android
     </p>
     <p class="foot-legal">
       <span data-en="For learning and research only; respect target sites' robots.txt and local laws. No commercial use.">本项目仅供学习与研究，请勿用于商业或非法用途；请遵守目标站点 robots.txt 与当地法规。</span><br>
-      © 2026 Novel Downloader contributors · Apache-2.0
+      © 2026 书音 BookTone contributors · Apache-2.0
     </p>
   </div>
 </footer>
