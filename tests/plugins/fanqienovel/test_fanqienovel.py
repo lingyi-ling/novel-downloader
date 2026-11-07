@@ -265,6 +265,11 @@ def _no_app_device(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep these tests off the network by default."""
     monkeypatch.setattr(FanqienovelSearcher, "_app_device", lambda self: None)
 
+    async def _no_mint(self: Any) -> None:
+        return None
+
+    monkeypatch.setattr(FanqienovelSearcher, "_ensure_device", _no_mint)
+
 
 _APP_PAYLOAD = {
     "code": 0,
@@ -291,6 +296,11 @@ async def test_explicit_search_uses_the_app_api_first(
     searcher = _make_searcher(explicitly_selected=True)
     fake_device = type("D", (), {"device_id": "123", "install_id": "456"})()
     monkeypatch.setattr(FanqienovelSearcher, "_app_device", lambda self: fake_device)
+
+    async def _device(self: Any) -> Any:
+        return fake_device
+
+    monkeypatch.setattr(FanqienovelSearcher, "_ensure_device", _device)
     calls: list[str] = []
 
     async def _fake_json(

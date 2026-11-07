@@ -24,6 +24,26 @@ from novel_downloader.schemas.config import default_cache_dir
 
 logger = logging.getLogger(__name__)
 
+
+class _AiohttpResponse:
+    """Minimal adapter so ``register.mint_device`` can drive aiohttp."""
+
+    def __init__(self, status: int, text: str) -> None:
+        self.status = status
+        self.text = text
+
+
+class _AiohttpTransport:
+    def __init__(self, session: aiohttp.ClientSession) -> None:
+        self._session = session
+
+    async def post(
+        self, url: str, *, headers: dict[str, str], data: bytes
+    ) -> _AiohttpResponse:
+        async with self._session.post(url, headers=headers, data=data) as resp:
+            return _AiohttpResponse(resp.status, await resp.text())
+
+
 COOKIE_ENV_VAR = "FANQIENOVEL_COOKIE"
 
 
@@ -130,11 +150,31 @@ class FanqienovelSearcher(BaseSearcher):
             configured = str(default_cache_dir())
         return Path(str(configured)) / self.site_name
 
+    async def _ensure_device(self) -> Any:
+        """Return a device identity, registering one if needed."""
+        device = self._app_device()
+        if device is not None:
+            return device
+        if os.environ.get("NOVELDL_FANQIE_AUTO_REGISTER", "1") == "0":
+            return None
+        from novel_downloader.plugins.sites.fanqienovel.register import mint_device
+
+        try:
+            device = await mint_device(
+                _AiohttpTransport(self.session), self._cache_dir()
+            )
+        except Exception:
+            logger.debug("fanqienovel: search-time registration failed", exc_info=True)
+            return None
+        if device is not None:
+            self._device = device
+        return device
+
     async def _search_via_app(
         self, keyword: str, limit: int | None
     ) -> list[SearchResult]:
         """Search through the app API: no login, no browser window."""
-        device = self._app_device()
+        device = await self._ensure_device()
         if device is None:
             return []
 
