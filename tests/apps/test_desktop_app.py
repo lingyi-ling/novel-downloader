@@ -875,6 +875,95 @@ def test_bridge_search_stays_flat_without_group(
     assert "sources" not in payload["results"][0]
 
 
+def test_bridge_progressive_search_reports_rows_then_the_ranked_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page gets rows while sites answer, then the ranked final list."""
+    row_a = {
+        "site": "alpha",
+        "book_id": "a",
+        "book_url": "https://example.invalid/a",
+        "cover_url": "",
+        "title": "三体",
+        "author": "刘慈欣",
+        "latest_chapter": "",
+        "update_date": "",
+        "word_count": "",
+        "priority": 2,
+    }
+    row_b = dict(row_a, site="beta", book_id="b")
+
+    async def fake_stream(keyword: str, **kwargs: Any) -> Any:
+        assert keyword == "三体"
+        yield [row_a]
+        yield [row_b]
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        # Final ranking puts beta first; the page must end up with this order.
+        return [row_b, row_a]
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search_stream", fake_stream)
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    bridge = ApiBridge()
+    try:
+        job = bridge.search_async("三体")
+        assert job["search_id"]
+        assert job["done"] is False
+
+        deadline = time.time() + 5
+        while True:
+            state = bridge.search_progress(job["search_id"])
+            if state["done"] or time.time() > deadline:
+                break
+            time.sleep(0.02)
+
+        assert state["done"] is True
+        assert state["error"] == ""
+        assert [item["book_id"] for item in state["results"]] == ["b", "a"]
+        assert state["results"][0]["best"] is True
+        # The finished entry is dropped, so a late poll cannot leak state.
+        assert bridge.search_progress(job["search_id"])["results"] == []
+    finally:
+        bridge.shutdown()
+
+
+def test_bridge_progressive_search_reports_backend_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_stream(keyword: str, **kwargs: Any) -> Any:
+        raise RuntimeError("engine down")
+        yield  # pragma: no cover - keeps this an async generator
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search_stream", failing_stream)
+
+    bridge = ApiBridge()
+    try:
+        job = bridge.search_async("三体")
+        deadline = time.time() + 5
+        while True:
+            state = bridge.search_progress(job["search_id"])
+            if state["done"] or time.time() > deadline:
+                break
+            time.sleep(0.02)
+
+        assert state["done"] is True
+        assert "engine down" in state["error"]
+    finally:
+        bridge.shutdown()
+
+
+def test_bridge_progressive_search_ignores_an_empty_keyword() -> None:
+    bridge = ApiBridge()
+    try:
+        payload = bridge.search_async("   ")
+    finally:
+        bridge.shutdown()
+
+    assert payload["search_id"] == ""
+    assert payload["done"] is True
+
+
 def test_bridge_add_task_queues_via_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1407,8 +1496,16 @@ def test_app_html_call_helper_toasts_instead_of_rejecting() -> None:
 
 def test_app_html_search_surfaces_payload_errors() -> None:
     """A failed aggregate search must not render as "No results"."""
-    assert "if (data && data.error) throw new Error(data.error);" in APP_HTML
+    assert "if (st.error) throw new Error(st.error);" in APP_HTML
     assert 'toast(data.error, "err");' in APP_HTML
+
+
+def test_app_html_search_streams_results_while_sites_answer() -> None:
+    """Search polls the progressive bridge instead of one blocking call."""
+    assert 'api("search_async"' in APP_HTML
+    assert 'api("search_progress"' in APP_HTML
+    # The polling loop must stop on the final poll rather than spin forever.
+    assert "if (st.done) break;" in APP_HTML
 
 
 def test_app_html_surfaces_rejected_task_errors() -> None:

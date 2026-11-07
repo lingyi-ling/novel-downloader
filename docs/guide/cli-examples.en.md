@@ -148,7 +148,7 @@ novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit 
 * `--site SITE`, `-s SITE`: specify the search site; can be used multiple times to specify multiple sites; if not specified, all supported sites are searched
 * `--limit N`, `-l N`: overall result limit (minimum 1), defaults to **no limit**
 * `--site-limit M`: per-site result limit (minimum 1), defaults to `10`
-* `--timeout SECS`: request timeout in seconds, defaults to `5.0`
+* `--timeout SECS`: wall-clock budget per site in seconds, defaults to `5.0`; a site that misses it is dropped, and the whole search returns at roughly that budget
 * `--format FORMAT [FORMAT ...]`: export format used when auto-downloading a confirmed result (defaults to the config file)
 * `--json`: print all search results to stdout as JSON and exit (for scripts)
 * `--first`: download the top-ranked result directly without confirmation (non-interactive)

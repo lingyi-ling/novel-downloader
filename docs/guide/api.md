@@ -138,7 +138,8 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 - `keyword` 必填。
 - `sites` 省略时搜索全部启用站点；留空数组则不搜索任何站点。
 - `per_site_limit` 为每个站点的结果上限，默认 `5`。
-- `timeout` 为单个站点的请求预算（秒）。
+- `timeout` 为**每个站点的墙钟预算**（秒）：站点在这段时间内没返回就算超时，
+  整个聚合搜索的耗时也大致等于这个值，而不是被最慢的站点拖住。
 - `sort` 可选 `quality`、`priority`、`site`、`title`、`author`、
   `words`、`update`。
 - `limit` 为合并后的总结果上限。
@@ -201,7 +202,7 @@ curl -s -X POST "$BASE/api/v1/browse" \
 | `keyword` | string | 必填 | 搜索关键词。 |
 | `sites` | string | 全部启用站点 | 逗号分隔的站点列表，如 `qidian,biquge5`。 |
 | `per_site_limit` | int | `5` | 每个站点的结果上限。 |
-| `timeout` | float | `5` | 单个站点的请求预算（秒）。 |
+| `timeout` | float | `5` | 每个站点的墙钟预算（秒）；超时站点被丢弃，不阻塞其它站点。 |
 
 响应为 `text/event-stream`，事件格式：
 

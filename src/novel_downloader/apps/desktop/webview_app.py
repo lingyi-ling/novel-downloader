@@ -33,6 +33,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from novel_downloader.apps.common.updater import (
     DEFAULT_REPO,
@@ -680,6 +681,8 @@ class ApiBridge:
         self._download_active = False
         self._downloaded: _DownloadedUpdate | None = None
         self._exit_callback: Callable[[], None] | None = None
+        # progressive search state, keyed by search id (polled by the page)
+        self._searches: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # system
@@ -1558,6 +1561,126 @@ class ApiBridge:
             logger.exception("Aggregate search failed")
             return {"results": [], "elapsed": 0.0, "error": format_error(exc)}
         return {"results": results, "elapsed": elapsed}
+
+    def search_async(
+        self,
+        keyword: str,
+        sites_csv: str = "",
+        group: bool = False,
+        per_site_limit: int = 4,
+    ) -> dict[str, Any]:
+        """
+        Start a progressive search and return its id.
+
+        The page polls :meth:`search_progress` while the sites answer, so the
+        first rows appear as soon as the fastest site replies instead of
+        waiting for the slowest one. The final poll carries the fully ranked
+        (and optionally merged) list.
+
+        :param keyword: The search term.
+        :param sites_csv: Optional comma-separated site filter.
+        :param group: Merge same-book results into one entry per book.
+        :param per_site_limit: Results kept per site before ranking.
+        """
+        text = str(keyword or "").strip()
+        if not text:
+            return {"search_id": "", "results": [], "done": True, "elapsed": 0.0}
+        names = [s.strip() for s in str(sites_csv or "").split(",") if s.strip()]
+        sites = names or None
+
+        search_id = uuid4().hex
+        state: dict[str, Any] = {
+            "results": [],
+            "done": False,
+            "error": "",
+            "sites_done": 0,
+            "elapsed": 0.0,
+            "started": time.perf_counter(),
+        }
+        with self._lock:
+            # Abandoned searches (page closed mid-run) must not pile up.
+            while len(self._searches) >= 8:
+                self._searches.pop(next(iter(self._searches)), None)
+            self._searches[search_id] = state
+
+        async def run() -> None:
+            from novel_downloader.plugins.search import search, search_stream
+
+            rows: list[dict[str, Any]] = []
+            try:
+                async for chunk in search_stream(
+                    text,
+                    sites=sites,
+                    per_site_limit=per_site_limit,
+                    timeout=SEARCH_SITE_TIMEOUT,
+                ):
+                    base = len(rows)
+                    rows.extend(
+                        _result_dict(item, base + i) for i, item in enumerate(chunk)
+                    )
+                    with self._lock:
+                        state["results"] = list(rows)
+                        state["sites_done"] = int(state["sites_done"]) + 1
+                if rows:
+                    # The stream left its merged snapshot in the search cache,
+                    # so this ranks/groups it without touching the network.
+                    final = await search(
+                        text,
+                        sites=sites,
+                        per_site_limit=per_site_limit,
+                        timeout=SEARCH_SITE_TIMEOUT,
+                        group=bool(group),
+                    )
+                    rows = [_result_dict(item, i) for i, item in enumerate(final)]
+                with self._lock:
+                    state["results"] = rows
+            except Exception as exc:  # noqa: BLE001 - reported to the page
+                logger.exception("Progressive search failed")
+                with self._lock:
+                    state["error"] = format_error(exc)
+            finally:
+                with self._lock:
+                    state["done"] = True
+                    state["elapsed"] = time.perf_counter() - float(state["started"])
+
+        try:
+            self._engine.submit(run())
+        except Exception as exc:  # noqa: BLE001 - engine refused the coroutine
+            logger.exception("Progressive search could not start")
+            with self._lock:
+                state["error"] = format_error(exc)
+                state["done"] = True
+        return {"search_id": search_id, "results": [], "done": False, "elapsed": 0.0}
+
+    def search_progress(self, search_id: str) -> dict[str, Any]:
+        """
+        Return the rows accumulated for a progressive search.
+
+        ``done`` marks the final poll, which carries the ranked list; the
+        entry is dropped afterwards so a page that stops polling cannot leak
+        state.
+        """
+        key = str(search_id or "")
+        with self._lock:
+            state = self._searches.get(key)
+            if state is None:
+                return {
+                    "results": [],
+                    "done": True,
+                    "error": "",
+                    "sites_done": 0,
+                    "elapsed": 0.0,
+                }
+            payload = {
+                "results": list(state["results"]),
+                "done": bool(state["done"]),
+                "error": str(state["error"]),
+                "sites_done": int(state["sites_done"]),
+                "elapsed": float(state["elapsed"]),
+            }
+            if payload["done"]:
+                self._searches.pop(key, None)
+        return payload
 
     def category_list(self) -> dict[str, Any]:
         """Return the browse categories (male/female groups)."""

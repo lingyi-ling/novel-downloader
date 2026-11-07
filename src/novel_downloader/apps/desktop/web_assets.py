@@ -834,17 +834,30 @@ async function doSearch() {
   $("#btn-search").disabled = true;
   $("#search-hint").textContent = t("Searching…");
   $("#results").innerHTML = "";
+  const started = performance.now();
+  let rendered = -1;
   try {
-    const data = await api("search", kw, $("#q-sites").value.trim(), $("#q-group").checked);
-    // The bridge reports aggregate search failures inside the payload (site
-    // timeouts, engine errors), not as exceptions: surface them instead of
-    // letting them render as "No results".
-    if (data && data.error) throw new Error(data.error);
-    const results = (data && data.results) || [];
-    lastResults = results; lastKeyword = kw; selIndex = -1;
-    $("#detail").hidden = true;
-    renderResults(results, kw);
-    $("#search-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", ((data && data.elapsed) || 0).toFixed(1));
+    const job = await api("search_async", kw, $("#q-sites").value.trim(), $("#q-group").checked);
+    if (!job || !job.search_id) throw new Error(t("Search failed"));
+    for (;;) {
+      // Poll while the sites answer: the fastest ones land in ~0.2s instead
+      // of the page waiting for the slowest (bounded by the bridge budget).
+      await new Promise(resolve => setTimeout(resolve, 250));
+      const st = await api("search_progress", job.search_id);
+      if (!st) break;
+      // Bridge failures come back inside the payload, not as exceptions.
+      if (st.error) throw new Error(st.error);
+      const results = st.results || [];
+      if (results.length !== rendered) {
+        rendered = results.length;
+        lastResults = results; lastKeyword = kw; selIndex = -1;
+        $("#detail").hidden = true;
+        renderResults(results, kw);
+      }
+      const secs = ((performance.now() - started) / 1000).toFixed(1);
+      $("#search-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", secs);
+      if (st.done) break;
+    }
   } catch (e) {
     $("#results").innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("Search failed"))}</div><div class="s">${esc(String(e && e.message || e))}</div></div>`;
     $("#search-hint").textContent = "";

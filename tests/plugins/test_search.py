@@ -706,3 +706,79 @@ def test_finalize_non_quality_sorts_ignore_query_intent() -> None:
     _finalize(results, keyword="x", sort="title", order="asc", limit=None, group=False)
 
     assert [r["title"] for r in results] == ["短", "长很多的书名"]
+
+
+# --------------------------------------------------------------------------- #
+# per-site deadline: a hung site must not hold the whole aggregate hostage
+# --------------------------------------------------------------------------- #
+
+
+class _SlowSearcher(_RecordingSearcher):
+    """Searcher that never answers within a test-sized budget."""
+
+    site_name = "slow"
+
+    async def _fetch_html(self, keyword: str) -> str:
+        await asyncio.sleep(30)
+        return "html"
+
+
+@pytest.mark.asyncio
+async def test_aggregate_search_drops_a_site_that_misses_its_budget(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    import time
+
+    events: list[SearchEvent] = []
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_RecordingSearcher, _SlowSearcher]),
+    )
+
+    started = time.perf_counter()
+    results = await search(
+        "keyword",
+        sites=["recorder", "slow"],
+        timeout=0.2,
+        on_event=events.append,
+    )
+    elapsed = time.perf_counter() - started
+
+    # The healthy site's results survive; the hung one is cut at the budget
+    # instead of letting a 30-second sleep define the search's wall clock.
+    assert [item["site"] for item in results] == ["recorder"]
+    assert elapsed < 5.0
+    failed = [event for event in events if event.kind == "failed"]
+    assert failed
+    assert "timed out" in failed[0].message.lower()
+
+
+@pytest.mark.asyncio
+async def test_stream_drops_a_site_that_misses_its_budget(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    import time
+
+    events: list[SearchEvent] = []
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_RecordingSearcher, _SlowSearcher]),
+    )
+
+    started = time.perf_counter()
+    chunks = [
+        chunk
+        async for chunk in search_stream(
+            "keyword",
+            sites=["recorder", "slow"],
+            timeout=0.2,
+            on_event=events.append,
+        )
+    ]
+    elapsed = time.perf_counter() - started
+
+    assert [[item["site"] for item in chunk] for chunk in chunks] == [["recorder"]]
+    assert elapsed < 5.0
+    assert any(event.kind == "failed" for event in events)

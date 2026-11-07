@@ -247,7 +247,12 @@ class FanqienovelSearcher(BaseSearcher):
         offset: int = 0,
         limit: int = 20,
     ) -> list[SearchResult]:
-        """List books in one category (the web endpoint needs no signature)."""
+        """List books in one category (the web endpoint needs no signature).
+
+        Like the ranking page, the payload writes titles and authors with the
+        site's private-use font, so the entries are repaired from their book
+        pages before they are returned.
+        """
         params = {
             "app_id": "2503",
             "category_id": str(category_id),

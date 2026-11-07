@@ -15,14 +15,16 @@ __all__ = [
 ]
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import aiohttp
 
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
+from novel_downloader.infra.i18n import t
 from novel_downloader.plugins.base.searcher import BaseSearcher
 from novel_downloader.plugins.grouping import group_results
 from novel_downloader.plugins.ranking import detect_query_intent, sort_results
@@ -129,6 +131,64 @@ def _site_key(cls: type[BaseSearcher]) -> str:
     if len(parts) >= 2:
         return parts[-2].lower()
     return cls.__name__.lower()
+
+
+async def _search_one(
+    searcher: BaseSearcher,
+    keyword: str,
+    limit: int,
+    budget: float,
+) -> list[SearchResult]:
+    """
+    Run one site's search under a hard per-site deadline.
+
+    ``aiohttp.ClientTimeout(total=...)`` only bounds a single HTTP request, so
+    a searcher that issues several requests in sequence (pagination, detail
+    enrichment) could otherwise run far past the caller's budget and hold the
+    whole aggregate hostage.  ``wait_for`` cancels the site's coroutine at the
+    deadline instead, which keeps an aggregate search at roughly ``budget``
+    wall-clock seconds.
+
+    :param searcher: The site's searcher instance.
+    :param keyword: Search keyword.
+    :param limit: Per-site result limit.
+    :param budget: Per-site wall-clock budget in seconds.
+    :return: The site's results.
+    :raises TimeoutError: When the site misses the deadline.
+    """
+    try:
+        return await asyncio.wait_for(
+            searcher.search(keyword, limit=limit), timeout=budget
+        )
+    except TimeoutError as exc:
+        raise TimeoutError(
+            t("Search timed out after {budget:g}s").format(budget=budget)
+        ) from exc
+
+
+def _timeout_error(budget: float) -> TimeoutError:
+    """Build the per-site deadline error reported to callers and events."""
+    return TimeoutError(t("Search timed out after {budget:g}s").format(budget=budget))
+
+
+def _abandon(task: asyncio.Task[Any]) -> None:
+    """
+    Cancel a site task and stop caring about it.
+
+    Cancellation is a *request*: a socket operation already in flight can
+    delay its delivery (notably with the Windows proactor loop), so awaiting
+    the task would let one stuck site stretch the aggregate past its budget.
+    The done-callback consumes whatever the abandoned task eventually raises,
+    keeping "exception was never retrieved" warnings out of the log.
+    """
+    task.cancel()
+    task.add_done_callback(_consume_task)
+
+
+def _consume_task(task: asyncio.Task[Any]) -> None:
+    """Retrieve (and discard) an abandoned task's outcome."""
+    with contextlib.suppress(BaseException):
+        task.exception()
 
 
 def _emit(on_event: Callable[[SearchEvent], None] | None, event: SearchEvent) -> None:
@@ -367,7 +427,8 @@ async def search(
     :param limit: Maximum total number of results to return (applied after
         ranking, and after grouping when ``group=True``); if None, return all.
     :param per_site_limit: Maximum number of search results per site.
-    :param timeout: Per-request time budget (seconds)
+    :param timeout: Wall-clock budget per site (seconds); a site that misses
+        it is dropped instead of holding the aggregate
     :param nsfw: Whether to include NSFW searchers.
     :param sort: Ranking key (see ``ranking.SORT_KEYS``); default ``"quality"``.
     :param order: ``"asc"``/``"desc"``; defaults to the key's natural direction.
@@ -418,19 +479,32 @@ async def search(
             nsfw=nsfw,
             on_event=on_event,
         )
-        coros = [inst.search(keyword, limit=per_site_limit) for _, inst in plan.entries]
-        site_lists = await asyncio.gather(*coros, return_exceptions=True)
+        site_tasks: dict[str, asyncio.Task[list[SearchResult]]] = {}
+        for site, inst in plan.entries:
+            site_tasks[site] = asyncio.create_task(
+                _search_one(inst, keyword, per_site_limit, timeout),
+                name=f"{inst.__class__.__name__}.search",
+            )
+        # One deadline for the whole fan-out: every site started together, so
+        # a site still running when the budget expires is a timeout, and the
+        # aggregate returns instead of waiting for it.
+        late: set[asyncio.Task[list[SearchResult]]] = set()
+        if site_tasks:
+            _, late = await asyncio.wait(site_tasks.values(), timeout=timeout)
+            for task in late:
+                _abandon(task)
 
-    for (site, _), item in zip(plan.entries, site_lists, strict=False):
-        if isinstance(item, BaseException):
-            if isinstance(
-                item, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)
-            ):
-                # 取消和解释器级退出必须向上传播（与 search_stream 的
-                # 逐站路径一致）：把它们吞成 per-site 失败会偷走调用方的
-                # 取消语义。
-                raise item
-            _report_failure(site, item, plan.browser_sites, on_event)
+    for site, _ in plan.entries:
+        task = site_tasks[site]
+        if task in late:
+            _report_failure(site, _timeout_error(timeout), plan.browser_sites, on_event)
+            continue
+        try:
+            item: object = task.result()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _report_failure(site, exc, plan.browser_sites, on_event)
             continue
         if not isinstance(item, list):
             # A searcher that returns something other than a list is a site
@@ -515,18 +589,26 @@ async def search_stream(
         site_by_task: dict[asyncio.Task[list[SearchResult]], str] = {}
         for site, inst in plan.entries:
             task = asyncio.create_task(
-                inst.search(keyword, limit=per_site_limit),
+                _search_one(inst, keyword, per_site_limit, timeout),
                 name=f"{inst.__class__.__name__}.search",
             )
             pending.add(task)
             site_by_task[task] = site
 
         accumulated: list[SearchResult] = []
+        deadline = asyncio.get_running_loop().time() + timeout
         try:
             while pending:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
                 done, pending = await asyncio.wait(
-                    pending, return_when=asyncio.FIRST_COMPLETED
+                    pending,
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
+                if not done:
+                    break
                 for task in done:
                     site = site_by_task[task]
                     try:
@@ -553,11 +635,19 @@ async def search_stream(
                         accumulated.extend(payload)
                         yield payload
         finally:
-            # ensure no background tasks are left running after cancel/exit
+            # Cancel whatever is left and move on: awaiting the tasks would
+            # hand the wall clock back to a site whose socket operation is
+            # slow to observe the cancellation (see ``_abandon``).
             for task in site_by_task:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*site_by_task, return_exceptions=True)
+                if task.done():
+                    continue
+                _abandon(task)
+                _report_failure(
+                    site_by_task[task],
+                    _timeout_error(timeout),
+                    plan.browser_sites,
+                    on_event,
+                )
 
     # Only reached on normal completion; cancelled/closed streams skip this.
     # Empty streams are not cached (transient failures must not be pinned).

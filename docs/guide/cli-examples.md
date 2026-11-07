@@ -148,7 +148,7 @@ novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit 
 * `--site SITE`, `-s SITE`: 指定搜索站点, 可多次使用以指定多个站点, 不指定则搜索全部支持站点
 * `--limit N`, `-l N`: 总体结果上限 (最小 1), 默认为**不限制**
 * `--site-limit M`: 单站点结果上限 (最小 1), 默认为 `10`
-* `--timeout SECS`: 请求超时时间 (秒), 默认为 `5.0`
+* `--timeout SECS`: 每个站点的墙钟预算 (秒), 默认为 `5.0`; 超时站点会被丢弃, 整体耗时约等于该值
 * `--format FORMAT [FORMAT ...]`: 结果确认后自动下载时的导出格式 (默认使用配置文件设定)
 * `--json`: 将所有搜索结果以 JSON 输出到标准输出后退出 (便于脚本消费)
 * `--first`: 直接下载排名第一的结果, 无需确认 (非交互模式)
