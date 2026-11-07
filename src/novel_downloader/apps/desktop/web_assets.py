@@ -891,7 +891,10 @@ $("#results").addEventListener("click", async e => {
     const kw = $("#q").value.trim();
     $("#m-q").value = kw;
     showPage("music");
-    if (kw) doMusicSearch();
+    // Wait for the music page to load its settings/platforms before querying.
+    Promise.resolve(typeof initMusic === "function" ? initMusic() : null)
+      .then(() => { if (kw) doMusicSearch(); })
+      .catch(() => {});
     return;
   }
   const card = e.target.closest("[data-sel]");
