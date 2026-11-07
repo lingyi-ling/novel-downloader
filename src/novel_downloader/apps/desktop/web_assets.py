@@ -21,7 +21,7 @@ APP_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Novel Downloader</title>
+<title>书音 BookTone</title>
 <style>
 /* ============================================================ tokens */
 :root {
@@ -298,7 +298,18 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 .spin.on { display: inline-block; }
 @keyframes rot { to { transform: rotate(360deg); } }
 
-.result-card { padding: 15px 17px; margin-bottom: 10px; max-width: 860px; }
+.result-card { padding: 15px 17px; margin-bottom: 10px; cursor: pointer; }
+.result-card.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft-2); }
+.split { display: grid; grid-template-columns: minmax(0, 1fr) 336px; gap: 18px; align-items: start; }
+.split > #results { margin-top: 18px; }
+.split > #detail { margin-top: 18px; }
+.detail-head { display: flex; gap: 12px; align-items: flex-start; }
+.detail-cover { width: 76px; height: 102px; object-fit: cover; border-radius: 10px;
+  flex: none; background: var(--card-2); border: 1px solid var(--border); }
+@media (max-width: 1180px) {
+  .split { grid-template-columns: minmax(0, 1fr); }
+  .split > #detail { display: none !important; }
+}
 .best-chip {
   font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   color: var(--green); background: var(--green-bg); border-radius: 6px; padding: 2px 7px;
@@ -427,7 +438,7 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
   <aside class="sidebar">
     <div class="logo">
       <div class="logo-mark"><svg class="icon"><use href="#i-book"/></svg></div>
-      <div><div class="logo-name">Novel Downloader</div><div class="logo-sub" id="ver"></div></div>
+      <div><div class="logo-name">书音</div><div class="logo-sub" id="ver"></div></div>
     </div>
     <nav class="nav" id="nav">
       <button class="nav-item active" data-page="search"><svg class="icon"><use href="#i-search"/></svg><span data-i18n="Search">Search</span><kbd>1</kbd></button>
@@ -480,7 +491,10 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
             <span class="hint" id="search-hint"></span>
           </div>
         </div>
-        <div id="results" style="margin-top:18px"></div>
+        <div class="split">
+          <div id="results"></div>
+          <aside class="card side-card" id="detail" hidden></aside>
+        </div>
       </div>
     </section>
 
@@ -771,6 +785,40 @@ $("#update-install").onclick = async () => {
 
 /* ================================================================ search */
 let searching = false;
+let lastResults = [];
+let lastKeyword = "";
+let selIndex = -1;
+function selectResult(i) {
+  if (i < 0 || i >= lastResults.length) return;
+  selIndex = i;
+  document.querySelectorAll("#results .result-card").forEach((el, k) => el.classList.toggle("sel", k === i));
+  renderDetail(lastResults[i], lastKeyword);
+}
+function renderDetail(r, kw) {
+  const box = $("#detail");
+  if (!r) { box.hidden = true; box.innerHTML = ""; return; }
+  let cover = r.cover_url || "";
+  if (cover.startsWith("//")) cover = "https:" + cover;
+  const img = cover ? `<img class="detail-cover" src="${esc(cover)}" alt="" referrerpolicy="no-referrer">` : "";
+  const meta = [r.author && t("Author") + ": " + r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join(" · ");
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="detail-head">
+      ${img}
+      <div style="min-width:0">
+        <div class="row-title" style="white-space:normal">${highlight(r.title, kw || "")}</div>
+        <div class="row-sub">${meta}</div>
+        ${r.latest_chapter ? `<div class="row-meta">${esc(r.latest_chapter)}</div>` : ""}
+        <div class="row-meta">${esc(r.site)}</div>
+      </div>
+    </div>
+    <div class="row-actions" style="margin-top:12px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
+      <button class="btn btn-ghost btn-sm" data-follow="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-heart"/></svg>${esc(t("Follow"))}</button>
+      <button class="btn btn-ghost btn-sm" data-open-url="${esc(r.book_url || "")}"><svg class="icon"><use href="#i-ext"/></svg>${esc(t("Open in browser"))}</button>
+    </div>`;
+}
+
 async function doSearch() {
   const kw = $("#q").value.trim();
   if (!kw || searching) return;
@@ -786,6 +834,8 @@ async function doSearch() {
     // letting them render as "No results".
     if (data && data.error) throw new Error(data.error);
     const results = (data && data.results) || [];
+    lastResults = results; lastKeyword = kw; selIndex = -1;
+    $("#detail").hidden = true;
     renderResults(results, kw);
     $("#search-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", ((data && data.elapsed) || 0).toFixed(1));
   } catch (e) {
@@ -803,9 +853,9 @@ function renderResults(results, kw) {
     box.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("No results"))}</div><div class="s">${esc(t("Try another keyword or clear the site filter"))}</div></div>`;
     return;
   }
-  box.innerHTML = results.map(r => {
+  box.innerHTML = results.map((r, i) => {
     const sub = [r.author && t("Author") + ": " + r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join('<span style="opacity:.4"> · </span>');
-    return `<div class="card hover result-card">
+    return `<div class="card hover result-card" data-sel="${i}">
       <div style="display:flex;gap:12px;align-items:flex-start">
         <div style="flex:1;min-width:0">
           <div style="display:flex;align-items:center;gap:8px">
@@ -819,8 +869,6 @@ function renderResults(results, kw) {
       </div>
       <div class="row-actions" style="margin-top:11px">
         <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
-        <button class="btn btn-ghost btn-sm" data-follow="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-heart"/></svg>${esc(t("Follow"))}</button>
-        <button class="btn btn-ghost btn-sm" data-open-url="${esc(r.book_url || "")}"><svg class="icon"><use href="#i-ext"/></svg>${esc(t("Open in browser"))}</button>
       </div>
     </div>`;
   }).join("");
@@ -839,6 +887,23 @@ function sourceCaps(r) {
     `</div>`;
 }
 $("#results").addEventListener("click", async e => {
+  const card = e.target.closest("[data-sel]");
+  if (card && !e.target.closest("[data-add]")) selectResult(+card.dataset.sel);
+  const add = e.target.closest("[data-add]");
+  const fol = e.target.closest("[data-follow]");
+  const url = e.target.closest("[data-open-url]");
+  if (add) {
+    const r = await call("add_task", add.dataset.site, add.dataset.bid, add.dataset.title);
+    if (r && r.ok) { toast(t("Queued: {title}").replace("{title}", add.dataset.title), "ok"); showPage("download"); }
+    else if (r && r.error) toast(r.error, "err");
+  } else if (fol) {
+    const r = await call("add_watch", fol.dataset.site, fol.dataset.bid, fol.dataset.title);
+    if (r) toast(r.message || (r.ok ? t("Added to follow list") : t("Already followed")), r.ok ? "ok" : "info");
+  } else if (url && url.dataset.openUrl) {
+    api("open_url", url.dataset.openUrl).catch(() => {});
+  }
+});
+$("#detail").addEventListener("click", async e => {
   const add = e.target.closest("[data-add]");
   const fol = e.target.closest("[data-follow]");
   const url = e.target.closest("[data-open-url]");

@@ -1,5 +1,5 @@
-site_name: NovelDownloader
-site_description: "NovelDownloader: A toolkit for downloading and processing novels."
+site_name: 书音 BookTone
+site_description: "书音 BookTone: a toolkit for downloading novels, audiobooks and music."
 site_author: "lingyi-ling"
 repo_name: "novel-downloader"
 repo_url: "https://github.com/lingyi-ling/novel-downloader"

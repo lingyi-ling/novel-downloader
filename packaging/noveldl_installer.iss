@@ -7,7 +7,7 @@
 ; Design: per-user install (no UAC), desktop + Start-menu icons, and user
 ; data (settings.toml, downloads/) is intentionally preserved on uninstall.
 
-#define MyAppName "Novel Downloader"
+#define MyAppName "书音 BookTone"
 #define MyAppExe "NovelDownloader.exe"
 
 #ifndef AppVersion

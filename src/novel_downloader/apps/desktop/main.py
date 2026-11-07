@@ -124,9 +124,7 @@ def _acquire_instance_lock(path: Path) -> Any:
 
 def _warn_already_running() -> None:
     """Show a native message when a second instance is launched."""
-    message = (
-        "Novel Downloader is already running.\n请查看任务栏或系统托盘中的已有窗口。"
-    )
+    message = "书音已经在运行。\n请查看任务栏或系统托盘中的已有窗口。"
     if sys.platform == "win32":
         try:
             import ctypes
@@ -134,7 +132,7 @@ def _warn_already_running() -> None:
             ctypes.windll.user32.MessageBoxW(
                 None,
                 message,
-                "Novel Downloader",
+                "书音 BookTone",
                 0x40,
             )
             return

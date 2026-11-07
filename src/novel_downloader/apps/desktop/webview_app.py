@@ -67,7 +67,7 @@ TASK_WAIT_TIMEOUT = 30.0
 _PREFS_FILENAME = "desktop_prefs.json"
 
 #: Name of the shortcut files created on the desktop and in the Start menu.
-_SHORTCUT_NAME = "Novel Downloader.lnk"
+_SHORTCUT_NAME = "书音.lnk"
 
 #: GitHub endpoints used by the in-app update check.
 _RELEASES_API = (
@@ -122,7 +122,7 @@ foreach ($dir in @($desktop, $programs)) {{
   $lnk.TargetPath = $target
   $lnk.WorkingDirectory = $workdir
   $lnk.IconLocation = "$target,0"
-  $lnk.Description = 'Novel Downloader'
+  $lnk.Description = '书音 BookTone'
   $lnk.Save()
 }}
 """
@@ -2048,7 +2048,7 @@ def run_webview_app() -> int:
             kwargs["x"], kwargs["y"] = origin
 
     window = webview.create_window(
-        "Novel Downloader",
+        "书音 BookTone",
         html=APP_HTML,
         js_api=bridge,
         background_color="#f6f5f1",

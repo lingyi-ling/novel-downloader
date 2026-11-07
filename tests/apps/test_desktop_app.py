@@ -1147,7 +1147,7 @@ def test_create_shortcut_runs_powershell_with_target(
     assert result["ok"] is True
     assert calls and calls[0][0] == "powershell"
     assert str(exe) in calls[0][-1]
-    assert "Novel Downloader.lnk" in calls[0][-1]
+    assert "书音.lnk" in calls[0][-1]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="shortcut paths are Windows-only")
