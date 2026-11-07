@@ -45,6 +45,26 @@ data class SearchResponse(
 )
 
 @Serializable
+data class BrowseCategory(
+    val id: String = "",
+    val name: String = "",
+)
+
+@Serializable
+data class BrowseCategoriesResponse(
+    val site: String = "",
+    val groups: Map<String, List<BrowseCategory>> = emptyMap(),
+)
+
+@Serializable
+data class BrowseRequest(
+    val site: String,
+    val category_id: String? = null,
+    val gender: String = "male",
+    val limit: Int = 20,
+)
+
+@Serializable
 data class Task(
     val task_id: String = "",
     val title: String = "",

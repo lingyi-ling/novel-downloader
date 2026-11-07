@@ -509,6 +509,32 @@ async def test_category_books_sends_the_required_library_params(
 
 
 @pytest.mark.asyncio
+async def test_category_books_enforces_the_limit_the_endpoint_ignores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    searcher = _make_searcher()
+    payload = {
+        "data": {
+            "book_list": [
+                {"book_id": str(i), "book_name": f"book {i}", "author": "a"}
+                for i in range(10)
+            ]
+        }
+    }
+    searcher.session = _ParamSession(json.dumps(payload))  # type: ignore[assignment]
+
+    async def _no_repair(
+        self: FanqienovelSearcher, results: list[SearchResult]
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(FanqienovelSearcher, "_fill_book_metadata", _no_repair)
+
+    assert len(await searcher.category_books("1141", limit=3)) == 3
+    assert len(await searcher.category_books("1141", limit=20)) == 10
+
+
+@pytest.mark.asyncio
 async def test_category_books_tolerates_garbage() -> None:
     searcher = _make_searcher()
     searcher.session = _ParamSession("<html>not json</html>")  # type: ignore[assignment]

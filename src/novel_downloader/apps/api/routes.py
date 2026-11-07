@@ -21,7 +21,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -56,6 +56,7 @@ from .auth import require_token
 from .constants import (
     LABEL_MUSIC_DOWNLOAD,
     MSG_BOOK_NOT_IN_WATCHLIST,
+    MSG_BROWSE_UNSUPPORTED,
     MSG_LOGIN_REQUEST_ALREADY_COMPLETED,
     MSG_LOGIN_REQUEST_NOT_FOUND,
     MSG_MUSIC_DOWNLOAD_FAILED,
@@ -68,6 +69,7 @@ from .constants import (
     MSG_UNKNOWN_MUSIC_PLATFORM,
 )
 from .schemas import (
+    BrowseRequest,
     LoginSubmitRequest,
     MusicDownloadRequest,
     MusicExportRequest,
@@ -85,6 +87,7 @@ logger = logging.getLogger(__name__)
 OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "system", "description": "Health checks and supported-site metadata."},
     {"name": "search", "description": "Aggregated book search across sites."},
+    {"name": "browse", "description": "Site-published rankings and categories."},
     {"name": "tasks", "description": "Download task queue management."},
     {"name": "login", "description": "Interactive login credential requests."},
     {"name": "watchlist", "description": "Followed books and new-chapter checks."},
@@ -137,6 +140,7 @@ def get_watchlist_store() -> WatchlistStore:
 #: ``create_app(timeouts={...})`` (see ``app.state.api_timeouts``).
 BLOCKING_TIMEOUTS: dict[str, float] = {
     "search": 120.0,
+    "browse": 60.0,
     "music_search": 120.0,
     "music_download": 1800.0,
 }
@@ -191,6 +195,92 @@ def task_to_dict(task: DownloadTask) -> dict[str, Any]:
         "finished_at": task.finished_at,
         "export_stage": task.export_stage,
     }
+
+
+# ---------------------------------------------------------------------------
+# Browse (rankings / categories)
+# ---------------------------------------------------------------------------
+
+
+def _browse_searcher(site: str, method: str) -> type[Any]:
+    """
+    Return the searcher class for ``site``, validated for ``method``.
+
+    :param site: Site key requested by the caller.
+    :param method: ``rank``, ``categories`` or ``category_books``.
+    :raises HTTPException: 400 when the site is unknown or cannot browse.
+    """
+    from novel_downloader.plugins import registrar
+
+    try:
+        searcher_cls = registrar.get_searcher_class(site)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    if not callable(getattr(searcher_cls, method, None)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=MSG_BROWSE_UNSUPPORTED.format(site=site),
+        )
+    return searcher_cls
+
+
+async def _with_searcher(
+    searcher_cls: type[Any], call: Callable[[Any], Awaitable[Any]]
+) -> Any:
+    """Run ``call`` with a fresh searcher bound to its own HTTP session."""
+    import aiohttp
+
+    from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
+
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=30), headers=DEFAULT_USER_HEADERS
+    ) as session:
+        return await call(searcher_cls(session))
+
+
+def _gender_code(gender: str) -> str:
+    """Map ``male``/``female`` onto the site's numeric audience code."""
+    return "2" if gender in ("female", "2") else "1"
+
+
+@router.get("/browse/categories", tags=["browse"])
+async def browse_categories(site: str, request: Request) -> dict[str, Any]:
+    """Return a site's browse categories, grouped by audience."""
+    searcher_cls = _browse_searcher(site, "categories")
+    timeout = _blocking_timeout(request, "browse")
+    groups = await _with_timeout(
+        _with_searcher(searcher_cls, lambda s: s.categories()), timeout, "Browse"
+    )
+    return {"site": site, "groups": groups}
+
+
+@router.post("/browse", tags=["browse"])
+async def browse_books(body: BrowseRequest, request: Request) -> dict[str, Any]:
+    """
+    List a site's ranking entries, or one category's books.
+
+    ``category_id`` omitted means the ranking page; ``gender`` only matters for
+    category browsing.
+    """
+    method = "rank" if body.category_id is None else "category_books"
+    searcher_cls = _browse_searcher(body.site, method)
+    timeout = _blocking_timeout(request, "browse")
+
+    if body.category_id is None:
+        coro = _with_searcher(searcher_cls, lambda s: s.rank(body.limit))
+    else:
+        gender = _gender_code(body.gender)
+        coro = _with_searcher(
+            searcher_cls,
+            lambda s: s.category_books(
+                str(body.category_id), gender=gender, limit=body.limit
+            ),
+        )
+
+    results = await _with_timeout(coro, timeout, "Browse")
+    return {"site": body.site, "total": len(results), "results": results}
 
 
 # ---------------------------------------------------------------------------

@@ -97,6 +97,17 @@ class SearchRequest(BaseModel):
     group: bool = False
 
 
+class BrowseRequest(BaseModel):
+    """Body of ``POST /api/v1/browse``."""
+
+    site: str = Field(min_length=1)
+    #: Omitted means "the site's ranking page"; set to a category id to list
+    #: that category instead.
+    category_id: str | None = None
+    gender: Literal["male", "female", "1", "2"] = "male"
+    limit: int = Field(default=20, ge=1, le=100)
+
+
 class TaskCreateRequest(BaseModel):
     """Body of ``POST /api/v1/tasks``."""
 

@@ -74,6 +74,10 @@ _RUN_TIMEOUT = 600.0
 #: ``BLOCKING_TIMEOUTS["search"]`` in apps.api.routes.
 _SEARCH_TIMEOUT = 120.0
 
+#: Wall-clock budget for the browse endpoints — mirrors
+#: ``BLOCKING_TIMEOUTS["browse"]`` in apps.api.routes.
+_BROWSE_TIMEOUT = 60.0
+
 #: Concurrent request-handler threads.  ThreadingHTTPServer spawns one
 #: thread per connection with no built-in ceiling; requests beyond this cap
 #: are answered with ``503`` instead of exhausting the phone's memory.
@@ -88,6 +92,7 @@ _MAX_BODY_BYTES = 1024 * 1024
 _BODY_LIMIT_ENDPOINTS = frozenset(
     {
         ("POST", "/api/v1/search"),
+        ("POST", "/api/v1/browse"),
         ("POST", "/api/v1/watchlist"),
         ("POST", "/api/v1/watchlist/check"),
         ("POST", "/api/v1/music/search"),
@@ -133,6 +138,7 @@ _MSG_MUSIC_UNAVAILABLE = (
 )
 _MSG_MUSIC_JOB_NOT_FOUND = "Music job not found: {job_id}"
 _MSG_TIMED_OUT = "{label} timed out after {timeout:g}s"
+_MSG_BROWSE_UNSUPPORTED = "Site '{site}' does not support browsing."
 
 _server: ThreadingHTTPServer | None = None
 _server_lock = threading.Lock()
@@ -660,6 +666,101 @@ def _handle_search(
     return {"total": len(results), "results": [dict(r) for r in results]}
 
 
+_BROWSE_GENDERS = ("male", "female", "1", "2")
+
+
+def _browse_searcher(site: str, method: str) -> Any:
+    """Return the searcher class for ``site``, validated for ``method``."""
+    from novel_downloader.plugins import registrar
+
+    try:
+        searcher_cls = registrar.get_searcher_class(site)
+    except ValueError as exc:
+        raise _ApiError(400, str(exc)) from exc
+    if not callable(getattr(searcher_cls, method, None)):
+        raise _ApiError(400, _MSG_BROWSE_UNSUPPORTED.format(site=site))
+    return searcher_cls
+
+
+async def _with_browse_searcher(searcher_cls: Any, call: Any) -> Any:
+    """Run ``call`` with a searcher bound to its own HTTP session."""
+    import aiohttp
+
+    from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
+
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=30), headers=DEFAULT_USER_HEADERS
+    ) as session:
+        return await call(searcher_cls(session))
+
+
+def _handle_browse_categories(
+    _body: dict[str, Any], _params: dict[str, str], query: dict[str, list[str]]
+) -> dict[str, Any]:
+    values = query.get("site") or []
+    site = values[0] if values else ""
+    if not site:
+        raise _validation_error(
+            [_err("site", "Field required", "missing", source="query")]
+        )
+    searcher_cls = _browse_searcher(site, "categories")
+    groups = _run(
+        _with_browse_searcher(searcher_cls, lambda s: s.categories()),
+        timeout=_BROWSE_TIMEOUT,
+        label="Browse",
+    )
+    return {"site": site, "groups": groups}
+
+
+def _handle_browse(
+    body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    site, site_err = _required_str(body, "site")
+    if site_err is not None:
+        entries.append(site_err)
+
+    category_id = body.get("category_id")
+    if category_id is not None and not isinstance(category_id, str):
+        entries.append(
+            _err("category_id", "Input should be a valid string", "string_type")
+        )
+
+    gender = _literal_field(body, "gender", "male", _BROWSE_GENDERS, entries)
+    limit = _int_field(body, "limit", 20, 1, entries)
+    if limit is not None and limit > 100:
+        entries.append(
+            _err(
+                "limit",
+                "Input should be less than or equal to 100",
+                "less_than_equal",
+            )
+        )
+    if entries:
+        raise _validation_error(entries)
+    assert site is not None and gender is not None and limit is not None
+
+    if category_id is None:
+        searcher_cls = _browse_searcher(site, "rank")
+        results = _run(
+            _with_browse_searcher(searcher_cls, lambda s: s.rank(limit)),
+            timeout=_BROWSE_TIMEOUT,
+            label="Browse",
+        )
+    else:
+        code = "2" if gender in ("female", "2") else "1"
+        searcher_cls = _browse_searcher(site, "category_books")
+        results = _run(
+            _with_browse_searcher(
+                searcher_cls,
+                lambda s: s.category_books(category_id, gender=code, limit=limit),
+            ),
+            timeout=_BROWSE_TIMEOUT,
+            label="Browse",
+        )
+    return {"site": site, "total": len(results), "results": [dict(r) for r in results]}
+
+
 def _handle_tasks_get(
     _body: dict[str, Any], _params: dict[str, str], query: dict[str, list[str]]
 ) -> dict[str, Any]:
@@ -897,6 +998,8 @@ ROUTES: dict[tuple[str, str], Handler] = {
     ("GET", "/api/v1/health"): _handle_health,
     ("GET", "/api/v1/sites"): _handle_sites,
     ("POST", "/api/v1/search"): _handle_search,
+    ("GET", "/api/v1/browse/categories"): _handle_browse_categories,
+    ("POST", "/api/v1/browse"): _handle_browse,
     ("GET", "/api/v1/tasks"): _handle_tasks_get,
     ("GET", "/api/v1/tasks/{task_id}"): _handle_task_get,
     ("POST", "/api/v1/tasks"): _handle_tasks_post,

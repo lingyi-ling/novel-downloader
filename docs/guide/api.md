@@ -84,6 +84,8 @@ X-API-Key: my-secret
 | `GET` | `/api/v1/sites` | 搜索/下载支持的站点，返回 `{search: {...}, download: {...}}`。 |
 | `POST` | `/api/v1/search` | 聚合搜索多个站点。 |
 | `GET` | `/api/v1/search/stream` | 以 SSE 流式返回各站点搜索结果。 |
+| `GET` | `/api/v1/browse/categories` | 站点发布的分类树（按频道分组）。 |
+| `POST` | `/api/v1/browse` | 站点榜单（省略 `category_id`）或某个分类下的书目。 |
 | `GET` | `/api/v1/tasks` | 任务快照：`{pending, running, completed}`，支持分页。 |
 | `GET` | `/api/v1/tasks/stream` | 以 SSE 每秒推送一次任务快照。 |
 | `GET` | `/api/v1/tasks/{task_id}` | 查询单个任务；不存在返回 `404`。 |
@@ -105,7 +107,7 @@ X-API-Key: my-secret
 | `POST` | `/api/v1/music/export` | 把已下载曲目导出为 M3U8 歌单。 |
 | `GET` | `/api/v1/music/health` | 平台连通性自检（单个或全部平台）。 |
 
-Swagger UI（`/docs`）按 `system`、`search`、`tasks`、`login`、`watchlist`、
+Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、`watchlist`、
 `history`、`music` 分组展示以上端点。
 
 任务对象字段：
@@ -162,6 +164,32 @@ Swagger UI（`/docs`）按 `system`、`search`、`tasks`、`login`、`watchlist`
   ]
 }
 ```
+
+## 榜单与分类浏览
+
+番茄等站点会公开发布榜单和分类，不需要关键字：
+
+```bash
+# 分类树：{site, groups: {male: [{id, name}], female: [...]}}
+curl -s "$BASE/api/v1/browse/categories?site=fanqienovel" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 榜单（省略 category_id）
+curl -s -X POST "$BASE/api/v1/browse" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"site":"fanqienovel","limit":20}'
+
+# 某个分类：gender 只对分类浏览有意义
+curl -s -X POST "$BASE/api/v1/browse" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"site":"fanqienovel","category_id":"1141","gender":"male","limit":20}'
+```
+
+`POST /browse` 的响应与 `/search` 同形：`{site, total, results}`。站点不支持浏览
+（该站点的 searcher 没实现 `rank`/`categories`）时返回 `400`，`detail` 里带
+`Site '<site>' does not support browsing.`。
 
 ## 流式搜索（SSE）
 

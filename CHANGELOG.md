@@ -1,3 +1,20 @@
+## v1.15.0 (2026-11-07)
+
+### Feature
+
+- **api**: 新增 `GET /api/v1/browse/categories`（分类树，按频道分组）与 `POST /api/v1/browse`（省略 `category_id` 看榜单，给了就取该分类书目）；站点没有浏览能力时返回 `400` 并说明原因
+- **android**: 搜索页加「排行榜」「分类」入口，男生/女生切换 + 分类标签横向滑动，点一下直接把书目填进结果列表，可直接加入下载队列或追更
+
+### Fix
+
+- **fanqienovel**: `/api/library/book_list` 不认 `limit`（固定回 10 条），现在在客户端按调用方预算截断
+
+### Test
+
+- 新增 `tests/apps/test_api_browse.py`（5 例）：分类树、榜单默认、频道码映射、无浏览能力站点、非法 limit
+- 分类用例补一条「endpoint 忽略 limit 时客户端仍按预算截断」
+- Android `testDebugUnitTest` 与 `compileDebugKotlin` 通过
+
 ## v1.14.0 (2026-11-07)
 
 ### Feature

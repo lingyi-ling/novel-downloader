@@ -44,6 +44,12 @@
     <string name="search_follow_in_list">已在追更列表中</string>
     <string name="search_follow_added">已加入追更</string>
 
+    <string name="browse_rank">排行榜</string>
+    <string name="browse_categories">分类</string>
+    <string name="browse_male">男生</string>
+    <string name="browse_female">女生</string>
+    <string name="browse_failed">浏览失败：%1$s</string>
+
     <!-- 任务 -->
     <string name="tasks_running">进行中</string>
     <string name="tasks_pending">排队中</string>

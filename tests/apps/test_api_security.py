@@ -802,7 +802,7 @@ async def test_track_count_at_limit_passes_validation(
 
 def test_blocking_timeout_defaults_and_override() -> None:
     defaults = api_routes.BLOCKING_TIMEOUTS
-    assert set(defaults) == {"search", "music_search", "music_download"}
+    assert set(defaults) == {"search", "browse", "music_search", "music_download"}
     assert all(value > 0 for value in defaults.values())
 
     request = SimpleNamespace(

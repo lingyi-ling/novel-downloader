@@ -280,6 +280,9 @@ class FanqienovelSearcher(BaseSearcher):
             item = self._library_result(entry)
             if item is not None:
                 results.append(item)
+        # The endpoint answers with a fixed page (usually 10) no matter what
+        # ``limit`` says, so the caller's budget is enforced here.
+        results = results[: max(1, limit)]
         await self._fill_book_metadata(results)
         return results
 

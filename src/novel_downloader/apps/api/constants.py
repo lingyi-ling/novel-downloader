@@ -20,6 +20,7 @@ from __future__ import annotations
 
 __all__ = [
     "LABEL_MUSIC_DOWNLOAD",
+    "MSG_BROWSE_UNSUPPORTED",
     "MSG_BOOK_NOT_IN_WATCHLIST",
     "MSG_LOGIN_REQUEST_ALREADY_COMPLETED",
     "MSG_LOGIN_REQUEST_NOT_FOUND",
@@ -105,3 +106,10 @@ MSG_TIMED_OUT = "{label} timed out after {timeout:g}s"
 #: Label for the music download budget; shared by the 504 ``detail`` and the
 #: asynchronous job's ``error`` field so both spell it the same way.
 LABEL_MUSIC_DOWNLOAD = "Music download"
+
+# ---------------------------------------------------------------------------
+# Browse
+# ---------------------------------------------------------------------------
+
+#: ``detail`` of the 400 response when a site's searcher has no browse surface.
+MSG_BROWSE_UNSUPPORTED = "Site '{site}' does not support browsing."

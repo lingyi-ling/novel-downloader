@@ -17,6 +17,13 @@ interface ApiService {
     @POST("api/v1/search")
     suspend fun search(@Body body: SearchRequest): SearchResponse
 
+    @GET("api/v1/browse/categories")
+    suspend fun browseCategories(@Query("site") site: String): BrowseCategoriesResponse
+
+    /** Site rankings when `category_id` is null, one category's books otherwise. */
+    @POST("api/v1/browse")
+    suspend fun browse(@Body body: BrowseRequest): SearchResponse
+
     @GET("api/v1/tasks")
     suspend fun tasks(): TasksResponse
 

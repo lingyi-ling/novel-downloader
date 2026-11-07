@@ -41,6 +41,12 @@
     <string name="search_follow_in_list">Already in the follow list</string>
     <string name="search_follow_added">Added to follow updates</string>
 
+    <string name="browse_rank">Rankings</string>
+    <string name="browse_categories">Categories</string>
+    <string name="browse_male">Male</string>
+    <string name="browse_female">Female</string>
+    <string name="browse_failed">Browse failed: %1$s</string>
+
     <string name="tasks_running">Running</string>
     <string name="tasks_pending">Queued</string>
     <string name="tasks_completed">Completed / Cancelled / Failed</string>

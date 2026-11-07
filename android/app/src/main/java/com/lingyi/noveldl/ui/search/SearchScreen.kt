@@ -1,6 +1,7 @@
 package com.lingyi.noveldl.ui.search
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -53,6 +55,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.AddTaskRequest
+import com.lingyi.noveldl.data.BrowseCategory
+import com.lingyi.noveldl.data.BrowseRequest
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.SearchRequest
 import com.lingyi.noveldl.data.SearchResult
@@ -92,6 +96,17 @@ fun SearchScreen(onMessage: (String) -> Unit) {
     var watchedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
     // Follow requests currently in flight, so a row cannot be followed twice.
     var watchingKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    // Browse: the site publishes a ranking page and a category tree, so the
+    // search page can show content without a keyword.
+    val browseSite = "fanqienovel"
+    var showBrowse by rememberSaveable { mutableStateOf(false) }
+    var browseGender by rememberSaveable { mutableStateOf("male") }
+    var categories by remember {
+        mutableStateOf<Map<String, List<BrowseCategory>>>(emptyMap())
+    }
+    var categoriesLoading by remember { mutableStateOf(false) }
+    var categoriesError by remember { mutableStateOf<String?>(null) }
 
     // Best-effort seed of what the server already follows; failures stay
     // silent because the local set still prevents duplicate prompts.
@@ -135,6 +150,56 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 )
             }
             outcome
+                .onSuccess {
+                    results = it.results
+                    total = it.total
+                }
+                .onFailure { error = it.message }
+            loading = false
+        }
+    }
+
+    fun runRank() {
+        if (loading) return
+        loading = true
+        error = null
+        scope.launch {
+            Api.call { Api.service().browse(BrowseRequest(site = browseSite)) }
+                .onSuccess {
+                    results = it.results
+                    total = it.total
+                }
+                .onFailure { error = it.message }
+            loading = false
+        }
+    }
+
+    fun loadCategories() {
+        if (categoriesLoading) return
+        categoriesLoading = true
+        categoriesError = null
+        scope.launch {
+            Api.call { Api.service().browseCategories(browseSite) }
+                .onSuccess { categories = it.groups }
+                .onFailure { categoriesError = it.message }
+            categoriesLoading = false
+        }
+    }
+
+    fun runCategory(categoryId: String) {
+        if (loading) return
+        loading = true
+        error = null
+        scope.launch {
+            Api.call {
+                Api.service().browse(
+                    BrowseRequest(
+                        site = browseSite,
+                        category_id = categoryId,
+                        gender = browseGender,
+                    ),
+                )
+            }
                 .onSuccess {
                     results = it.results
                     total = it.total
@@ -254,6 +319,64 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                     stringResource(R.string.search_searching),
                     style = MaterialTheme.typography.bodySmall,
                 )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = { runRank() }, enabled = !loading) {
+                Text(stringResource(R.string.browse_rank))
+            }
+            TextButton(
+                onClick = {
+                    showBrowse = !showBrowse
+                    if (showBrowse && categories.isEmpty()) loadCategories()
+                },
+            ) {
+                Text(stringResource(R.string.browse_categories))
+            }
+            if (categoriesLoading) {
+                CircularProgressIndicator(modifier = Modifier.height(16.dp))
+            }
+        }
+        if (showBrowse) {
+            categoriesError?.let {
+                Text(
+                    stringResource(R.string.browse_failed, it),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilterChip(
+                    selected = browseGender == "male",
+                    onClick = { browseGender = "male" },
+                    label = { Text(stringResource(R.string.browse_male)) },
+                )
+                FilterChip(
+                    selected = browseGender == "female",
+                    onClick = { browseGender = "female" },
+                    label = { Text(stringResource(R.string.browse_female)) },
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                val audience = if (browseGender == "male") "male" else "female"
+                (categories[audience] ?: emptyList()).forEach { category ->
+                    FilterChip(
+                        selected = false,
+                        onClick = { runCategory(category.id) },
+                        label = { Text(category.name) },
+                    )
+                }
             }
         }
         error?.let {
