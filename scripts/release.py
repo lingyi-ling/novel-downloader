@@ -1038,9 +1038,13 @@ def push_tag(repo_root: Path, tag: str, token: str | None, slug: str) -> None:
         # github.com:443 and api.github.com are different services; when only
         # the latter is reachable, create the ref through REST instead of
         # failing the whole release after a successful build.
-        head = _run(["git", "rev-parse", "HEAD"], cwd=repo_root).stdout.strip()
+        # The ref must point at the tag's own commit: HEAD may be ahead of it
+        # (a docs commit after the build), and GitHub rejects unknown objects.
+        target = _run(
+            ["git", "rev-parse", f"{tag}^{{commit}}"], cwd=repo_root
+        ).stdout.strip()
         print("git push failed; creating the tag ref through the REST API")
-        GitHubClient(slug, token).ensure_tag_ref(tag, head)
+        GitHubClient(slug, token).ensure_tag_ref(tag, target)
 
 
 # ---------------------------------------------------------------------------
