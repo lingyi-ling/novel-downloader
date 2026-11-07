@@ -382,3 +382,135 @@ async def test_rank_list_returns_empty_on_a_broken_page(
     searcher.session = _FakeSession("<html>no state</html>")  # type: ignore[assignment]
 
     assert await searcher.rank(5) == []
+
+
+_CATEGORY_STATE = {
+    "rank": {
+        "rankCategoryTypeList": {
+            "1": [
+                {"id": 1141, "name": "西方奇幻"},
+                {"id": 1140, "name": "东方仙侠"},
+            ],
+            "2": [{"id": 8, "name": "现代言情"}],
+            "broken": "not-a-list",
+        }
+    }
+}
+
+_LIBRARY_PAYLOAD = {
+    "data": {
+        "book_list": [
+            {
+                "book_id": "7617740782291651646",
+                "book_name": "骇夜：我在恐怖游戏里暴富",
+                "author": "阿一不是阿二",
+                "thumb_url": "http://p3.example.com/cover.jpg",
+                "last_chapter_time": 1794002246,
+            },
+            {"book_id": "", "book_name": "missing id"},
+        ]
+    }
+}
+
+
+class _ParamGet:
+    def __init__(self, text: str, params: dict[str, str]) -> None:
+        self._text = text
+        self.params = params
+
+    async def __aenter__(self) -> _FakeResponse:
+        return _FakeResponse(self._text)
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class _ParamSession:
+    """Session double that records the query parameters of each call."""
+
+    headers = {"User-Agent": "test-agent"}
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    def get(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> _ParamGet:
+        self.calls.append((url, params or {}))
+        return _ParamGet(self._text, params or {})
+
+
+@pytest.mark.asyncio
+async def test_categories_parses_the_rank_page() -> None:
+    searcher = _make_searcher()
+    page = (
+        "<html><script>window.__INITIAL_STATE__ = "
+        + json.dumps(_CATEGORY_STATE, ensure_ascii=False)
+        + ";</script></html>"
+    )
+    searcher.session = _ParamSession(page)  # type: ignore[assignment]
+
+    groups = await searcher.categories()
+
+    assert groups == {
+        "1": [
+            {"id": "1141", "name": "西方奇幻"},
+            {"id": "1140", "name": "东方仙侠"},
+        ],
+        "2": [{"id": "8", "name": "现代言情"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_categories_returns_empty_on_a_broken_page() -> None:
+    searcher = _make_searcher()
+    searcher.session = _ParamSession("<html>no state</html>")  # type: ignore[assignment]
+
+    assert await searcher.categories() == {}
+
+
+@pytest.mark.asyncio
+async def test_category_books_sends_the_required_library_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    searcher = _make_searcher()
+    session = _ParamSession(json.dumps(_LIBRARY_PAYLOAD, ensure_ascii=False))
+    searcher.session = session  # type: ignore[assignment]
+
+    async def _no_repair(
+        self: FanqienovelSearcher, results: list[SearchResult]
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(FanqienovelSearcher, "_fill_book_metadata", _no_repair)
+
+    results = await searcher.category_books("1141", gender="1", limit=20)
+
+    assert len(results) == 1
+    item = results[0]
+    assert item["book_id"] == "7617740782291651646"
+    assert item["title"] == "骇夜：我在恐怖游戏里暴富"
+    assert item["author"] == "阿一不是阿二"
+    assert item["cover_url"] == "https://p3.example.com/cover.jpg"
+    assert item["update_date"] != ""
+
+    url, params = session.calls[0]
+    assert url == FanqienovelSearcher.LIBRARY_URL
+    assert params["category_id"] == "1141"
+    assert params["gender"] == "1"
+    assert params["word_count"] == "0"
+    assert params["sort"] == "0"
+    assert params["offset"] == "0"
+    assert params["limit"] == "20"
+
+
+@pytest.mark.asyncio
+async def test_category_books_tolerates_garbage() -> None:
+    searcher = _make_searcher()
+    searcher.session = _ParamSession("<html>not json</html>")  # type: ignore[assignment]
+
+    assert await searcher.category_books("1") == []

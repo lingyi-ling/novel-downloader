@@ -265,7 +265,19 @@ k[i+1] = rol3(k_i) ^ new_i      # 存进表的是这个，不是 new_i
 > aid=1967/3019 的明文，差异自然只出现在明文不同的位置——那是比较方法的伪影，
 > 不是密码学性质。按分组密码实现后一次命中。
 
-### 5.2.1 分类浏览：三条路都试过
+### 5.2.1 分类浏览
+
+分类列表来自榜单页的 `window.__INITIAL_STATE__.rank.rankCategoryTypeList`（键 `male` / `female`，共 37 个分类），纯 HTML，无需签名。
+
+书目走 `GET /api/library/book_list`，**无需任何签名 header**，唯一要求是参数齐全：
+
+```
+app_id=2503&category_id=<id>&gender=<1|2>&offset=0&limit=20&word_count=0&sort=0
+```
+
+二分过：`word_count=0&sort=0` 缺一不可（缺了就返回空 `book_list`），`book_status`、`rank_version` 等可有可无。返回的 `book_name` / `author` / `thumb_url` / `last_chapter_time` 都是明文，不必再回填详情页。
+
+试过但不通的路径，留档以免重复踩：
 
 | 路径 | 结果 |
 | --- | --- |
@@ -274,7 +286,7 @@ k[i+1] = rol3(k_i) ^ new_i      # 存进表的是这个，不是 new_i
 | 网页 `fanqienovel.com/api/rank/category/list` | ❌ 从 JS bundle 里挖到真实参数（`app_id=2503&rank_list_type=3&offset=&limit=&category_id=&rank_version=&gender=&rankMold=`），但 web 侧同样要签名：`code:0` 却 `book_list: []` |
 | 网页 `/rank?category_id=…` | ❌ 服务端只渲染默认榜单，分类由前端二次请求 |
 
-目前可用的是**总榜**（`/rank` 服务端渲染，10 条，标题经详情页回填为明文），已接入「排行榜」入口。
+总榜（`/rank` 服务端渲染，10 条，标题经详情页回填为明文）走「排行榜」入口，分类走「分类」入口。
 
 ### 5.3 结果
 

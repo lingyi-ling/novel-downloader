@@ -25,6 +25,17 @@ from novel_downloader.schemas.config import default_cache_dir
 logger = logging.getLogger(__name__)
 
 
+def _format_date(raw: Any) -> str:
+    """Render a unix timestamp as ``YYYY-MM-DD``; blank when unusable."""
+    try:
+        stamp = int(str(raw))
+    except (TypeError, ValueError):
+        return ""
+    if stamp <= 0:
+        return ""
+    return datetime.datetime.fromtimestamp(stamp).strftime("%Y-%m-%d")
+
+
 class _AiohttpResponse:
     """Minimal adapter so ``register.mint_device`` can drive aiohttp."""
 
@@ -70,6 +81,7 @@ class FanqienovelSearcher(BaseSearcher):
     BASE_URL = "https://fanqienovel.com"
     SEARCH_URL = "https://fanqienovel.com/api/author/search/search_book/v1"
     RANK_URL = "https://fanqienovel.com/rank"
+    LIBRARY_URL = "https://fanqienovel.com/api/library/book_list"
     PAGE_SIZE = 10
 
     #: Seconds the browser window may take to answer.
@@ -208,6 +220,105 @@ class FanqienovelSearcher(BaseSearcher):
                 results.append(item)
         await self._fill_book_metadata(results)
         return results
+
+    async def categories(self) -> dict[str, list[dict[str, str]]]:
+        """Return the site's browse categories, split by audience."""
+        state = await self._fetch_state(self.RANK_URL)
+        rank = state.get("rank") if isinstance(state, dict) else None
+        groups = rank.get("rankCategoryTypeList") if isinstance(rank, dict) else None
+        if not isinstance(groups, dict):
+            return {}
+        out: dict[str, list[dict[str, str]]] = {}
+        for key, entries in groups.items():
+            if not isinstance(entries, list):
+                continue
+            out[str(key)] = [
+                {"id": str(e.get("id")), "name": str(e.get("name") or "")}
+                for e in entries
+                if isinstance(e, dict) and e.get("id")
+            ]
+        return out
+
+    async def category_books(
+        self,
+        category_id: str,
+        *,
+        gender: str = "1",
+        offset: int = 0,
+        limit: int = 20,
+    ) -> list[SearchResult]:
+        """List books in one category (the web endpoint needs no signature)."""
+        params = {
+            "app_id": "2503",
+            "category_id": str(category_id),
+            "gender": str(gender),
+            "offset": str(offset),
+            "limit": str(limit),
+            "word_count": "0",
+            "sort": "0",
+        }
+        headers = dict(self.session.headers)
+        if self._cookies:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in self._cookies.items())
+        try:
+            async with self.session.get(
+                self.LIBRARY_URL, params=params, headers=headers
+            ) as resp:
+                resp.raise_for_status()
+                html_str = await self._response_to_str(resp)
+            payload = json.loads(html_str)
+        except Exception:
+            logger.debug("fanqienovel: category list unavailable", exc_info=True)
+            return []
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        books = data.get("book_list") if isinstance(data, dict) else None
+        if not isinstance(books, list):
+            return []
+        results: list[SearchResult] = []
+        for entry in books:
+            item = self._library_result(entry)
+            if item is not None:
+                results.append(item)
+        await self._fill_book_metadata(results)
+        return results
+
+    def _library_result(self, entry: Any) -> SearchResult | None:
+        if not isinstance(entry, dict):
+            return None
+        book_id = entry.get("book_id")
+        if not book_id:
+            return None
+        cover = entry.get("thumb_url")
+        if isinstance(cover, str) and cover.startswith("http://"):
+            cover = "https://" + cover[len("http://") :]
+        return SearchResult(
+            site=self.site_name,
+            book_id=str(book_id),
+            book_url=f"{self.BASE_URL}/page/{book_id}",
+            cover_url=cover if isinstance(cover, str) else "",
+            title=str(entry.get("book_name") or ""),
+            author=str(entry.get("author") or ""),
+            latest_chapter="",
+            update_date=_format_date(entry.get("last_chapter_time")),
+            word_count="",
+            priority=self.priority,
+        )
+
+    async def _fetch_state(self, url: str) -> dict[str, Any]:
+        from novel_downloader.plugins.sites.fanqienovel.parser import (
+            FanqienovelParser,
+        )
+
+        headers = dict(self.session.headers)
+        try:
+            async with self.session.get(url, headers=headers) as resp:
+                resp.raise_for_status()
+                html_str = await self._response_to_str(resp)
+            return FanqienovelParser._extract_initial_state(html_str)
+        except Exception:
+            logger.debug("fanqienovel: could not read %s", url, exc_info=True)
+            return {}
 
     def _rank_result(self, entry: Any) -> SearchResult | None:
         if not isinstance(entry, dict):

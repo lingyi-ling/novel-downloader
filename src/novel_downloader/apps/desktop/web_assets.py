@@ -484,13 +484,19 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
           </div>
           <div class="filters">
             <div class="field"><svg class="icon"><use href="#i-pulse"/></svg><input id="q-sites" data-i18n-ph="Site filter, comma separated (blank = all)" placeholder="Site filter, comma separated (blank = all)"></div>
-            <!-- i18n: plain literal on purpose -- the zh_CN catalog is being
-                 re-synced by a concurrent change, so the msgid cannot land
-                 yet; wire this label through the i18n attributes once it does. -->
-            <label class="merge-toggle" for="q-group"><input type="checkbox" class="cb" id="q-group"><span>Merge same book</span></label>
+            <label class="merge-toggle" for="q-group"><input type="checkbox" class="cb" id="q-group"><span data-i18n="Merge same book">Merge same book</span></label>
             <button class="btn btn-ghost btn-sm" id="btn-rank"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Rankings">Rankings</span></button>
+            <button class="btn btn-ghost btn-sm" id="btn-cats"><svg class="icon"><use href="#i-book"/></svg><span data-i18n="Categories">Categories</span></button>
             <span class="hint" id="search-hint"></span>
           </div>
+        </div>
+        <div class="card" id="cat-panel" hidden style="margin-top:16px;padding:14px 16px">
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+            <button class="btn btn-sm btn-primary" id="cat-male" data-i18n="Male">Male</button>
+            <button class="btn btn-sm btn-ghost" id="cat-female" data-i18n="Female">Female</button>
+            <span class="hint" id="cat-hint"></span>
+          </div>
+          <div id="cat-chips" class="filters" style="gap:8px;flex-wrap:wrap"></div>
         </div>
         <div class="split">
           <div id="results"></div>
@@ -948,6 +954,54 @@ $("#btn-rank").onclick = async () => {
     btn.disabled = false;
   }
 };
+let catGroups = {};
+let catGender = "male";
+function renderCatChips() {
+  const items = catGroups[catGender] || [];
+  $("#cat-chips").innerHTML = items.map(c =>
+    `<button class="btn btn-sm btn-ghost" data-cat="${esc(c.id)}" data-gender="${catGender === "male" ? "1" : "2"}">${esc(c.name)}</button>`
+  ).join("");
+}
+$("#btn-cats").onclick = async () => {
+  const panel = $("#cat-panel");
+  if (!panel.hidden) { panel.hidden = true; return; }
+  panel.hidden = false;
+  if (Object.keys(catGroups).length) { renderCatChips(); return; }
+  $("#cat-hint").textContent = t("Searching…");
+  try {
+    const data = await call("category_list");
+    catGroups = (data && data.groups) || {};
+    $("#cat-hint").textContent = "";
+    renderCatChips();
+  } catch (e) {
+    $("#cat-hint").textContent = String(e && e.message || e);
+  }
+};
+function switchCat(gender) {
+  catGender = gender;
+  $("#cat-male").className = "btn btn-sm " + (gender === "male" ? "btn-primary" : "btn-ghost");
+  $("#cat-female").className = "btn btn-sm " + (gender === "female" ? "btn-primary" : "btn-ghost");
+  renderCatChips();
+}
+$("#cat-male").onclick = () => switchCat("male");
+$("#cat-female").onclick = () => switchCat("female");
+$("#cat-chips").addEventListener("click", async e => {
+  const chip = e.target.closest("[data-cat]");
+  if (!chip) return;
+  $("#cat-hint").textContent = t("Searching…");
+  const started = performance.now();
+  try {
+    const data = await call("category_books", chip.dataset.cat, chip.dataset.gender, 20);
+    const results = (data && data.results) || [];
+    lastResults = results; lastKeyword = ""; selIndex = -1;
+    $("#detail").hidden = true;
+    renderResults(results, "");
+    const secs = ((performance.now() - started) / 1000).toFixed(1);
+    $("#cat-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", secs);
+  } catch (e) {
+    $("#cat-hint").textContent = String(e && e.message || e);
+  }
+});
 $("#btn-search").onclick = doSearch;
 $("#q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.isComposing) doSearch(); });
 

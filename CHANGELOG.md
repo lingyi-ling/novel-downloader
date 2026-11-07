@@ -1,3 +1,15 @@
+## v1.13.0 (2026-11-07)
+
+### Feature
+
+- **fanqienovel**: 分类浏览接通。榜单页里的 `rankCategoryTypeList` 给出男女频共 37 个分类，书目取 `GET /api/library/book_list`（`app_id=2503&category_id&gender&offset&limit&word_count=0&sort=0`，无需签名），书名/作者/封面/更新日期都是明文，不需要再回填详情页
+- **desktop**: 搜索页加「分类」入口，男女频切换 + 分类标签，点一下直接列出该分类的书目并进入下载流程；「合并同一本书」标签也接入了 i18n
+
+### Test
+
+- 新增 4 例分类用例：解析 `rankCategoryTypeList`、坏页面返回空、书目映射与必填参数（含 `word_count=0&sort=0`）、非 JSON 容错
+- 原先锁定「合并同一本书未接入 i18n」的测试改为正向断言
+
 ## v1.12.0 (2026-11-07)
 
 ### Feature

@@ -608,21 +608,15 @@ def test_app_html_contains_core_structures(needle: str) -> None:
     assert needle in APP_HTML
 
 
-def test_app_html_mergetoggle_is_not_registered_as_i18n_key_yet() -> None:
-    """
-    The merge toggle label is a plain literal until the ``.po`` catalog gains
-    its msgid (a concurrent catalog sync owns that file).
-
-    This lock prevents someone from half-wiring ``data-i18n`` without adding
-    the catalog entry: a key the bridge does not publish would fall back to
-    English silently, which is exactly what the i18n coverage suite guards.
-    """
+def test_app_html_mergetoggle_is_registered_as_i18n_key() -> None:
+    """The merge toggle label goes through the catalog like every other label."""
     label = next(
         line
         for line in APP_HTML.splitlines()
         if "merge-toggle" in line and "q-group" in line
     )
-    assert "data-i18n" not in label
+    assert 'data-i18n="Merge same book"' in label
+    assert "Merge same book" in _i18n_catalog()
 
 
 def test_app_html_is_self_contained() -> None:

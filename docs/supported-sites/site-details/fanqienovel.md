@@ -59,3 +59,8 @@ https://fanqienovel.com/reader/7276663560427471412
     * 需要先建立登录会话：`novel-cli login fanqienovel`，或设 `FANQIENOVEL_COOKIE`
     * 下载器会复用会话启动隐藏浏览器窗口，由站点自身 JS 发起已签名请求，再通过 DevTools 协议截获结果 JSON
     * 截获结果的标题/作者经过字体混淆，回退路径会用书籍详情页回填真实值
+
+## 浏览 (Browse)
+
+* 「排行榜」：抓取 `/rank` 服务端渲染页，取总榜 10 条，标题/作者用书籍详情页回填成明文
+* 「分类」：分类列表来自榜单页的 `rankCategoryTypeList`（男频 19 + 女频 18），书目取 `/api/library/book_list`，**不需要签名**，只要参数里带上 `word_count=0&sort=0`；书名、作者、封面、更新日期本身就都是明文

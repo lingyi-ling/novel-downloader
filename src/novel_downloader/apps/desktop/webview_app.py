@@ -250,6 +250,10 @@ def _i18n_catalog() -> dict[str, str]:
         "Music": t("Music"),
         "Search in Music": t("Search in Music"),
         "Rankings": t("Rankings"),
+        "Categories": t("Categories"),
+        "Male": t("Male"),
+        "Female": t("Female"),
+        "Merge same book": t("Merge same book"),
         "Follow": t("Follow"),
         "Refresh": t("Refresh"),
         "Open": t("Open"),
@@ -1554,6 +1558,58 @@ class ApiBridge:
             logger.exception("Aggregate search failed")
             return {"results": [], "elapsed": 0.0, "error": format_error(exc)}
         return {"results": results, "elapsed": elapsed}
+
+    def category_list(self) -> dict[str, Any]:
+        """Return the browse categories (male/female groups)."""
+
+        async def run() -> dict[str, Any]:
+            import aiohttp
+
+            from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
+            from novel_downloader.plugins.sites.fanqienovel.searcher import (
+                FanqienovelSearcher,
+            )
+
+            timeout_cfg = aiohttp.ClientTimeout(total=SEARCH_SITE_TIMEOUT)
+            async with aiohttp.ClientSession(
+                timeout=timeout_cfg, headers=DEFAULT_USER_HEADERS
+            ) as session:
+                return await FanqienovelSearcher(session).categories()
+
+        try:
+            return {"groups": self._engine.submit(run()).result(SEARCH_WAIT_TIMEOUT)}
+        except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+            logger.exception("Category list failed")
+            return {"groups": {}, "error": format_error(exc)}
+
+    def category_books(
+        self, category_id: str, gender: str = "1", limit: int = 20
+    ) -> dict[str, Any]:
+        """Return the books of one browse category."""
+
+        async def run() -> list[dict[str, Any]]:
+            import aiohttp
+
+            from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
+            from novel_downloader.plugins.sites.fanqienovel.searcher import (
+                FanqienovelSearcher,
+            )
+
+            timeout_cfg = aiohttp.ClientTimeout(total=SEARCH_SITE_TIMEOUT)
+            async with aiohttp.ClientSession(
+                timeout=timeout_cfg, headers=DEFAULT_USER_HEADERS
+            ) as session:
+                rows = await FanqienovelSearcher(session).category_books(
+                    str(category_id), gender=str(gender), limit=limit
+                )
+            return [_result_dict(r, i) for i, r in enumerate(rows)]
+
+        try:
+            rows = self._engine.submit(run()).result(SEARCH_WAIT_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+            logger.exception("Category books failed")
+            return {"results": [], "error": format_error(exc)}
+        return {"results": rows}
 
     def rank_list(self, limit: int = 10) -> dict[str, Any]:
         """Return the 番茄 ranking page as result rows."""
