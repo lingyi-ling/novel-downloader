@@ -265,6 +265,17 @@ k[i+1] = rol3(k_i) ^ new_i      # 存进表的是这个，不是 new_i
 > aid=1967/3019 的明文，差异自然只出现在明文不同的位置——那是比较方法的伪影，
 > 不是密码学性质。按分组密码实现后一次命中。
 
+### 5.2.1 分类浏览：三条路都试过
+
+| 路径 | 结果 |
+| --- | --- |
+| App `new_category/front/v` | ✅ 194 个分类 + 出版/男生/女生/有声书 四个 tab（含封面、书数） |
+| App `new_category/landing/v` / `cell/v` | ❌ 前者空 body，后者恒 `PARAM_INVALID`；试过 `category_id`/`categoy_id`（后端确有拼写错误）/`cell_id`/`gender`/`query_gender`/`genre_type`/`dim`/`tag`/分页/`search_id`/超集，约 20 组 |
+| 网页 `fanqienovel.com/api/rank/category/list` | ❌ 从 JS bundle 里挖到真实参数（`app_id=2503&rank_list_type=3&offset=&limit=&category_id=&rank_version=&gender=&rankMold=`），但 web 侧同样要签名：`code:0` 却 `book_list: []` |
+| 网页 `/rank?category_id=…` | ❌ 服务端只渲染默认榜单，分类由前端二次请求 |
+
+目前可用的是**总榜**（`/rank` 服务端渲染，10 条，标题经详情页回填为明文），已接入「排行榜」入口。
+
 ### 5.3 结果
 
 全新环境（无任何设备文件）首次使用时会自动注册一台设备、落盘到
