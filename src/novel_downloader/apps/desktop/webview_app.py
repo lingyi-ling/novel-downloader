@@ -255,6 +255,12 @@ def _i18n_catalog() -> dict[str, str]:
         "Male": t("Male"),
         "Female": t("Female"),
         "Merge same book": t("Merge same book"),
+        "Search to see results": t("Search to see results"),
+        "Type a title, or browse the rankings and categories": t(
+            "Type a title, or browse the rankings and categories"
+        ),
+        "Source": t("Source"),
+        "Remove": t("Remove"),
         "Follow": t("Follow"),
         "Refresh": t("Refresh"),
         "Open": t("Open"),

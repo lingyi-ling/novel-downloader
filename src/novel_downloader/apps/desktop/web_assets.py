@@ -53,6 +53,12 @@ APP_HTML = r"""<!DOCTYPE html>
   --shadow-3: 0 16px 48px -12px rgba(32, 31, 27, .22);
   --scroll: rgba(32, 31, 27, .18);
   --focus: rgba(217, 119, 87, .45);
+  /* layout + motion scale (shared by every page) */
+  --content-max: 1120px;
+  --ease: cubic-bezier(.2, .7, .3, 1);
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
 }
 :root[data-theme="dark"] {
   --bg: #171614;
@@ -65,8 +71,8 @@ APP_HTML = r"""<!DOCTYPE html>
   --border: #34322c;
   --border-strong: #45423a;
   --text: #ece9e2;
-  --text-2: #a39e93;
-  --text-3: #726d62;
+  --text-2: #b4aea2;
+  --text-3: #8f897c;
   --accent: #e08a63;
   --accent-hover: #eb9d78;
   --accent-soft: rgba(224, 138, 99, .13);
@@ -112,7 +118,7 @@ input, select, textarea { font: inherit; color: inherit; }
 .sidebar {
   display: flex; flex-direction: column; gap: 4px;
   background: var(--side); border-right: 1px solid var(--border);
-  padding: 18px 14px 14px; min-height: 0;
+  padding: 16px 12px 12px; min-height: 0;
 }
 .logo { display: flex; align-items: center; gap: 11px; padding: 4px 10px 18px; }
 .logo-mark {
@@ -126,26 +132,32 @@ input, select, textarea { font: inherit; color: inherit; }
 
 .nav { display: flex; flex-direction: column; gap: 3px; }
 .nav-item {
-  position: relative; display: flex; align-items: center; gap: 11px;
-  padding: 9px 12px; border-radius: 10px; color: var(--text-2);
-  font-weight: 500; text-align: left; width: 100%;
+  position: relative; display: flex; align-items: center; gap: 10px;
+  min-height: 38px; padding: 8px 11px; border-radius: var(--radius-md);
+  color: var(--text-2); font-weight: 500; text-align: left; width: 100%;
+  font-size: 13.5px;
   transition: background .16s ease, color .16s ease, transform .1s ease;
 }
 .nav-item:hover { background: var(--hover); color: var(--text); }
 .nav-item:active { transform: scale(.985); }
 .nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .nav-item.active::before {
-  content: ""; position: absolute; left: -14px; top: 22%; bottom: 22%;
+  content: ""; position: absolute; left: -12px; top: 24%; bottom: 24%;
   width: 3px; border-radius: 0 3px 3px 0; background: var(--accent);
 }
 .nav-item kbd {
-  margin-left: auto; font: 600 10px/1 inherit; color: var(--text-3);
-  background: var(--card); border: 1px solid var(--border); border-bottom-width: 2px;
-  border-radius: 5px; padding: 3px 5px; opacity: .75;
+  margin-left: auto; font: 600 9.5px/1 inherit; color: var(--text-3);
+  background: transparent; border: 1px solid var(--border);
+  border-radius: 5px; padding: 2px 5px; opacity: 0;
+  transition: opacity .15s ease, color .15s ease;
 }
+.nav-item:hover kbd, .nav-item:focus-visible kbd { opacity: .7; }
 .nav-item.active kbd { color: var(--accent); border-color: var(--accent-soft-2); }
 
-.side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
+.side-foot {
+  margin-top: auto; display: flex; flex-direction: column; gap: 8px;
+  border-top: 1px solid var(--border); padding-top: 10px;
+}
 .foot-row { display: flex; align-items: center; gap: 6px; }
 .icon-btn {
   display: grid; place-items: center; width: 34px; height: 34px;
@@ -183,6 +195,13 @@ input, select, textarea { font: inherit; color: inherit; }
 
 .scroll { overflow-y: auto; padding: 4px 28px 28px; flex: 1; min-height: 0; }
 
+/* One content column for every page: the header and the body share the same
+   gutters, so the title never sits outside the cards it introduces. */
+.topbar, .scroll {
+  padding-left: max(28px, calc((100% - var(--content-max)) / 2));
+  padding-right: max(28px, calc((100% - var(--content-max)) / 2));
+}
+
 /* ============================================================ controls */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -201,6 +220,7 @@ input, select, textarea { font: inherit; color: inherit; }
 .btn-danger { background: var(--red-bg); color: var(--red); }
 .btn-danger:hover:not(:disabled) { background: var(--red); color: #fff; }
 .btn-sm { height: 30px; padding: 0 11px; font-size: 12.5px; border-radius: 8px; gap: 6px; }
+.btn-lg { height: 46px; padding: 0 20px; font-size: 14px; border-radius: 12px; }
 .btn-sm svg.icon { width: 15px; height: 15px; }
 
 .field {
@@ -248,6 +268,20 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
   display: flex; align-items: center; gap: 14px;
   padding: 14px 16px; margin-bottom: 9px;
 }
+/* A 3px status stripe anchors each queue row: colour carries the state
+   without adding another badge to the row. */
+.row-card.task { position: relative; padding-left: 19px; }
+.row-card.task::before {
+  content: ""; position: absolute; left: 0; top: 14px; bottom: 14px;
+  width: 3px; border-radius: 0 3px 3px 0; background: var(--border);
+}
+.row-card.task.st-running::before,
+.row-card.task.st-processing::before,
+.row-card.task.st-exporting::before { background: var(--accent); }
+.row-card.task.st-queued::before { background: var(--yellow); }
+.row-card.task.st-completed::before { background: var(--green); }
+.row-card.task.st-failed::before { background: var(--red); }
+.row-card.task.st-cancelled::before { background: var(--gray); }
 .row-main { flex: 1; min-width: 0; }
 .row-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-sub { font-size: 12.5px; color: var(--text-2); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -284,10 +318,11 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 @keyframes slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(380%); } }
 
 /* ============================================================ search page */
-.search-zone { max-width: 760px; margin: 2px auto 0; width: 100%; }
+.search-zone { margin: 2px 0 0; width: 100%; }
 .search-row { display: flex; gap: 10px; }
 .search-row .field { flex: 1; }
-.filters { display: flex; gap: 10px; margin-top: 10px; align-items: center; }
+.filters { display: flex; gap: 10px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+.filters .spacer { flex: 1; }
 .filters .field { height: 36px; border-radius: 10px; flex: 1; }
 .hint { font-size: 12px; color: var(--text-3); }
 .spin {
@@ -298,14 +333,44 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 .spin.on { display: inline-block; }
 @keyframes rot { to { transform: rotate(360deg); } }
 
-.result-card { padding: 15px 17px; margin-bottom: 10px; cursor: pointer; }
+.result-card { padding: 13px 15px; margin-bottom: 10px; cursor: pointer; }
 .result-card.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft-2); }
+.rc { display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; gap: 13px; align-items: start; }
+.rc-cover {
+  position: relative; width: 46px; height: 62px; margin-top: 1px;
+  border-radius: var(--radius-sm); overflow: hidden;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent-soft-2), var(--accent-soft));
+  border: 1px solid var(--border);
+}
+.rc-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.rc-cover span { font-weight: 700; font-size: 18px; color: var(--accent); }
+.rc-main { min-width: 0; }
+.rc-main .row-title { font-size: 14.5px; }
+.rc-side { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex: none; }
+.rc-side .src-caps { max-width: 260px; }
+@media (max-width: 720px) {
+  .rc { grid-template-columns: 40px minmax(0, 1fr); }
+  .rc-cover { width: 40px; height: 54px; }
+  .rc-side { grid-column: 1 / -1; flex-direction: row; align-items: center; justify-content: space-between; width: 100%; }
+}
 .split { display: grid; grid-template-columns: minmax(0, 1fr) 336px; gap: 18px; align-items: start; }
 .split > #results { margin-top: 18px; }
 .split > #detail { margin-top: 18px; }
 .detail-head { display: flex; gap: 12px; align-items: flex-start; }
-.detail-cover { width: 76px; height: 102px; object-fit: cover; border-radius: 10px;
+.detail-cover { width: 84px; height: 112px; object-fit: cover; border-radius: var(--radius-md);
   flex: none; background: var(--card-2); border: 1px solid var(--border); }
+.detail-cover-blank {
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent-soft-2), var(--accent-soft));
+  font-weight: 700; font-size: 30px; color: var(--accent);
+}
+.detail-meta { display: flex; align-items: baseline; gap: 6px; margin-top: 7px; }
+.detail-meta .k {
+  font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--text-3); font-weight: 600;
+}
+.detail-meta .v { font-size: 12.5px; color: var(--text-2); }
 @media (max-width: 1180px) {
   .split { grid-template-columns: minmax(0, 1fr); }
   .split > #detail { display: none !important; }
@@ -389,6 +454,14 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
 .modal h3 { font-size: 15.5px; font-weight: 700; margin-bottom: 14px; }
 .modal .field { margin-bottom: 10px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 16px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
 
 /* ============================================================ toasts */
 #toasts { position: fixed; top: 16px; right: 18px; z-index: 100; display: flex; flex-direction: column; gap: 9px; }
@@ -480,7 +553,7 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
               <svg class="icon"><use href="#i-search"/></svg>
               <input id="q" data-i18n-ph="Enter book title or author…" placeholder="Enter book title or author…" autocomplete="off">
             </div>
-            <button class="btn btn-primary field-lg" id="btn-search" style="height:48px"><span class="spin" id="search-spin"></span><svg class="icon"><use href="#i-search"/></svg><span data-i18n="Search">Search</span></button>
+            <button class="btn btn-primary btn-lg" id="btn-search"><span class="spin" id="search-spin"></span><svg class="icon"><use href="#i-search"/></svg><span data-i18n="Search">Search</span></button>
           </div>
           <div class="filters">
             <div class="field"><svg class="icon"><use href="#i-pulse"/></svg><input id="q-sites" data-i18n-ph="Site filter, comma separated (blank = all)" placeholder="Site filter, comma separated (blank = all)"></div>
@@ -499,7 +572,13 @@ mark { background: var(--accent-soft-2); color: var(--accent); border-radius: 3p
           <div id="cat-chips" class="filters" style="gap:8px;flex-wrap:wrap"></div>
         </div>
         <div class="split">
-          <div id="results"></div>
+          <div id="results">
+            <div class="empty">
+              <svg class="icon"><use href="#i-search"/></svg>
+              <div class="t" data-i18n="Search to see results">Search to see results</div>
+              <div class="s" data-i18n="Type a title, or browse the rankings and categories">Type a title, or browse the rankings and categories</div>
+            </div>
+          </div>
           <aside class="card side-card" id="detail" hidden></aside>
         </div>
       </div>
@@ -806,24 +885,28 @@ function renderDetail(r, kw) {
   if (!r) { box.hidden = true; box.innerHTML = ""; return; }
   let cover = r.cover_url || "";
   if (cover.startsWith("//")) cover = "https:" + cover;
-  const img = cover ? `<img class="detail-cover" src="${esc(cover)}" alt="" referrerpolicy="no-referrer">` : "";
-  const meta = [r.author && t("Author") + ": " + r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join(" · ");
+  const img = cover
+    ? `<img class="detail-cover" src="${esc(cover)}" alt="" referrerpolicy="no-referrer">`
+    : `<div class="detail-cover detail-cover-blank"><span>${esc((r.title || "?").trim().slice(0, 1) || "?")}</span></div>`;
+  // The panel is narrow: the "Author:" prefix would push this line into a
+  // ragged wrap, so the values speak for themselves here.
+  const meta = [r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join('<span style="opacity:.45"> · </span>');
   box.hidden = false;
   box.innerHTML = `
     <div class="detail-head">
       ${img}
       <div style="min-width:0">
         <div class="row-title" style="white-space:normal">${highlight(r.title, kw || "")}</div>
-        <div class="row-sub">${meta}</div>
+        <div class="row-sub" style="white-space:normal">${meta}</div>
         ${r.latest_chapter ? `<div class="row-meta">${esc(r.latest_chapter)}</div>` : ""}
-        <div class="row-meta">${esc(r.site)}</div>
+        <div class="detail-meta"><span class="k">${esc(t("Source"))}</span><span class="v">${esc(r.site)}</span></div>
       </div>
     </div>
     <div class="row-actions" style="margin-top:12px;flex-wrap:wrap">
       <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
       <button class="btn btn-ghost btn-sm" data-follow="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-heart"/></svg>${esc(t("Follow"))}</button>
-      <button class="btn btn-ghost btn-sm" data-open-url="${esc(r.book_url || "")}"><svg class="icon"><use href="#i-ext"/></svg>${esc(t("Open in browser"))}</button>
-    </div>`;
+    </div>
+    <button class="btn btn-ghost btn-sm" style="margin-top:7px;width:100%" data-open-url="${esc(r.book_url || "")}"><svg class="icon"><use href="#i-ext"/></svg>${esc(t("Open in browser"))}</button>`;
 }
 
 async function doSearch() {
@@ -875,23 +958,38 @@ function renderResults(results, kw) {
   }
   box.innerHTML = results.map((r, i) => {
     const sub = [r.author && t("Author") + ": " + r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join('<span style="opacity:.4"> · </span>');
-    return `<div class="card hover result-card" data-sel="${i}">
-      <div style="display:flex;gap:12px;align-items:flex-start">
-        <div style="flex:1;min-width:0">
-          <div style="display:flex;align-items:center;gap:8px">
+    return `<div class="card hover result-card" data-sel="${i}" tabindex="0" role="group" aria-label="${esc(r.title)}">
+      <div class="rc">
+        ${coverBox(r)}
+        <div class="rc-main">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <span class="row-title" style="white-space:normal">${highlight(r.title, kw)}</span>
             ${r.best ? `<span class="best-chip">${esc(t("Best match"))}</span>` : ""}
           </div>
           <div class="row-sub">${sub}</div>
           ${r.latest_chapter ? `<div class="row-meta">${esc(r.latest_chapter)}</div>` : ""}
         </div>
-        ${sourceCaps(r)}
-      </div>
-      <div class="row-actions" style="margin-top:11px">
-        <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
+        <div class="rc-side">
+          ${sourceCaps(r)}
+          <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
+        </div>
       </div>
     </div>`;
   }).join("");
+}
+/**
+ * Cover thumbnail with a typographic fallback.
+ *
+ * The letter stays in the DOM behind the image: a broken or blocked cover
+ * simply reveals it instead of leaving an empty framed box (no onerror
+ * bookkeeping, and the image is decorative because the title is right there).
+ */
+function coverBox(r) {
+  const letter = esc((r.title || "?").trim().slice(0, 1) || "?");
+  let src = r.cover_url || "";
+  if (src.startsWith("//")) src = "https:" + src;
+  const img = src ? `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : "";
+  return `<div class="rc-cover">${img}<span>${letter}</span></div>`;
 }
 function sourceCaps(r) {
   // Merged rows ("Merge same book" on) carry ``sources``: every site holding
@@ -906,6 +1004,12 @@ function sourceCaps(r) {
     (rest > 0 ? `<span class="site-tag cap-more">+${rest}</span>` : "") +
     `</div>`;
 }
+$("#results").addEventListener("keydown", e => {
+  const card = e.target.closest("[data-sel]");
+  if (!card || (e.key !== "Enter" && e.key !== " ")) return;
+  e.preventDefault();
+  selectResult(+card.dataset.sel);
+});
 $("#results").addEventListener("click", async e => {
   if (e.target.closest("#search-in-music")) {
     const kw = $("#q").value.trim();
@@ -1053,7 +1157,7 @@ function taskCard(k) {
   const exports = (k.exports || []).map(p =>
     `<button class="btn btn-ghost btn-sm" data-open-file="${esc(p)}"><svg class="icon"><use href="#i-folder"/></svg>${esc(p.split(/[\\/]/).pop())}</button>`).join("");
   const created = k.created_at ? `<span>${esc(fmtTime(k.created_at))}</span>` : "";
-  return `<div class="card hover row-card">
+  return `<div class="card hover row-card task st-${esc(k.status)}">
     <div class="row-main">
       <div style="display:flex;align-items:center;gap:9px"><span class="row-title">${esc(k.title)}</span>${pill(k.status)}${retry}</div>
       <div class="row-sub"><span class="site-tag">${esc(k.site)}</span> <span class="mono">${k.chapters_done || 0}/${k.chapters_total || 0}${stage}${speed}</span></div>
@@ -1312,7 +1416,7 @@ async function refreshFollow() {
         </div>
         <div class="row-actions">
           <button class="btn btn-primary btn-sm" data-fdl="${esc(w.site)}" data-bid="${esc(w.book_id)}" data-title="${esc(w.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
-          <button class="btn btn-danger btn-sm" data-unfollow="${esc(w.site)}" data-bid="${esc(w.book_id)}"><svg class="icon"><use href="#i-trash"/></svg></button>
+          <button class="btn btn-danger btn-sm" data-unfollow="${esc(w.site)}" data-bid="${esc(w.book_id)}" title="${esc(t("Remove"))}" aria-label="${esc(t("Remove"))}"><svg class="icon"><use href="#i-trash"/></svg></button>
         </div>
       </div>`).join("");
   } catch (e) {
