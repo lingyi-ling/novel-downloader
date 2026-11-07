@@ -54,6 +54,7 @@ Options:
 Commands:
   download    通过书籍 ID 或 URL 下载小说
   search      在一个或多个站点搜索书籍
+  browse      浏览站点的排行榜与分类
   follow      追更书籍并检查新章节
   export      导出已下载的小说
   login       为站点打开登录窗口并保存其会话 Cookies
@@ -68,7 +69,7 @@ Commands:
   update      检查新版本并按需下载
 ```
 
-共 14 个子命令。`batch` 与 `update` 由入口点追加注册, 因此排在 `completion` 之后。
+共 15 个子命令。`batch` 与 `update` 由入口点追加注册, 因此排在 `completion` 之后。
 
 ---
 
@@ -174,16 +175,55 @@ novel-cli search --limit 20 --site-limit 5 三体
 novel-cli search -s b520 -s n23qb 三体
 ```
 
-!!! note "浏览器辅助搜索"
-    少数站点 (如番茄) 的搜索接口需要站点自身 JS 生成的签名, 纯 HTTP 请求拿不到结果, 因此**聚合搜索时会跳过这些站点** (不影响其它站点)。
-    显式指定该站点时会启用浏览器辅助搜索: 复用登录会话启动一个隐藏浏览器窗口, 由站点自身 JS 发起已签名的搜索请求并截获结果 JSON。
+!!! note "番茄为什么不在聚合搜索里"
+    番茄的搜索接口要客户端签名, 且**不需要登录**。显式指定站点时会直接走官方 App 接口: 首次使用自动注册一台设备身份 (落盘复用), 之后 `x-argus` / `x-gorgon` / `x-ladon` 全部本地现算, 无需浏览器窗口。
 
     ```bash
-    novel-cli login fanqienovel        # 先建立登录会话
     novel-cli search -s fanqienovel 斗破苍穹
     ```
 
-    浏览器辅助搜索需要安装可选的浏览器组件; 若组件缺失, 命令会给出安装提示。
+    聚合搜索仍然跳过番茄, 以保持「快、不弹窗」的既有约定; 只有 App 接口不可用时才回退到浏览器辅助搜索 (此时需要可选的浏览器组件, 缺失会给出安装提示)。
+
+---
+
+#### 2.1 browse 子命令
+
+不靠关键字, 直接浏览站点自己发布的榜单与分类 (目前由番茄提供)
+
+**Synopsis**
+
+```bash
+novel-cli browse [-h] [--categories] [--category ID|NAME] [--gender {1,2,female,male}] [--limit N] [--config CONFIG] [--json] [--first] site
+```
+
+**Options**
+
+* `site`: 站点标识 (例如 `fanqienovel`)
+* `--categories`: 列出该站点的分类 (按频道分组) 后退出
+* `--category ID|NAME`: 列出某个分类下的书籍, 支持分类 ID 或中文名称; 同名分类按 `--gender` 优先匹配
+* `--gender {male,female,1,2}`: 分类所属频道, 默认为 `male`
+* `--limit N`: 显示的条目数, 默认为 `20`
+* `--json`: 以 JSON 输出条目后退出
+* `--first`: 交互选择后直接下载第一条, 无需确认 (非交互)
+
+**Examples**
+
+```bash
+# 看有哪些分类
+novel-cli browse fanqienovel --categories
+
+# 总榜前 10 条
+novel-cli browse fanqienovel --limit 10
+
+# 按分类名取书 (不必知道 ID)
+novel-cli browse fanqienovel --category 西方奇幻 --limit 20
+
+# 脚本消费
+novel-cli browse fanqienovel --category 1141 --json
+```
+
+!!! note "为什么番茄能浏览"
+    分类列表来自榜单页 `window.__INITIAL_STATE__` 里的 `rankCategoryTypeList` (男频 19 + 女频 18), 书目则走 `/api/library/book_list`, 只要参数带上 `word_count=0&sort=0` 就不需要任何签名。
 
 ---
 

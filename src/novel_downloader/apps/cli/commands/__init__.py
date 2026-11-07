@@ -8,6 +8,7 @@ CLI command definitions. Each file corresponds to a subcommand.
 
 __all__ = ["commands"]
 
+from .browse import BrowseCmd
 from .clean import CleanCmd
 from .completion import CompletionCmd
 from .config import ConfigCmd
@@ -24,6 +25,7 @@ from .storage import StorageCmd
 commands = [
     DownloadCmd,
     SearchCmd,
+    BrowseCmd,
     FollowCmd,
     ExportCmd,
     LoginCmd,

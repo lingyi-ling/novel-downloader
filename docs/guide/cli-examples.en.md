@@ -54,6 +54,7 @@ Options:
 Commands:
   download    download a novel by book ID or URL
   search      search for books across one or more sites
+  browse      browse a site's rankings and categories
   follow      follow books and check for new chapters
   export      export downloaded novels
   login       open a login window for a site and save its session cookies
@@ -68,7 +69,7 @@ Commands:
   update      check for a newer release and optionally download it
 ```
 
-There are 14 subcommands in total. `batch` and `update` are appended by the entry point, so they appear after `completion`.
+There are 15 subcommands in total. `batch` and `update` are appended by the entry point, so they appear after `completion`.
 
 ---
 
@@ -174,16 +175,55 @@ novel-cli search --limit 20 --site-limit 5 三体
 novel-cli search -s b520 -s n23qb 三体
 ```
 
-!!! note "Browser-assisted search"
-    A few sites (e.g. fanqienovel) sign their search requests inside their own JavaScript, so a plain HTTP request returns nothing and these sites are **skipped during aggregate searches** (other sites are unaffected).
-    Selecting such a site explicitly enables browser-assisted search: the login session is reused to open a hidden browser window, let the site's own script issue the signed request, and capture the resulting JSON.
+!!! note "Why fanqienovel is excluded from aggregate searches"
+    Fanqie signs its search requests client-side, and needs **no login**. Selecting the site explicitly uses the official app API: the first run registers a device identity (cached on disk), after which `x-argus` / `x-gorgon` / `x-ladon` are computed locally — no browser window involved.
 
     ```bash
-    novel-cli login fanqienovel        # establish the login session first
     novel-cli search -s fanqienovel 斗破苍穹
     ```
 
-    Browser-assisted search requires an optional browser component; if it is missing, the command prints an installation hint.
+    Aggregate searches still skip Fanqie to keep the "fast, no window" contract; browser-assisted search remains only as a fallback when the app API is unavailable (and needs the optional browser component).
+
+---
+
+#### 2.1 browse Subcommand
+
+Browse a site's own rankings and category tree without a keyword (fanqienovel today)
+
+**Synopsis**
+
+```bash
+novel-cli browse [-h] [--categories] [--category ID|NAME] [--gender {1,2,female,male}] [--limit N] [--config CONFIG] [--json] [--first] site
+```
+
+**Options**
+
+* `site`: site key (e.g. `fanqienovel`)
+* `--categories`: list the site's categories, grouped by audience, and exit
+* `--category ID|NAME`: list the books of one category, by id or name; a name shared by both audiences follows `--gender`
+* `--gender {male,female,1,2}`: audience used for category browsing, defaults to `male`
+* `--limit N`: number of entries to show, defaults to `20`
+* `--json`: print the entries as JSON and exit
+* `--first`: download the top entry without asking after selection (non-interactive)
+
+**Examples**
+
+```bash
+# What categories exist?
+novel-cli browse fanqienovel --categories
+
+# Top 10 of the ranking page
+novel-cli browse fanqienovel --limit 10
+
+# Pick a category by name (no id needed)
+novel-cli browse fanqienovel --category 西方奇幻 --limit 20
+
+# Machine-readable output
+novel-cli browse fanqienovel --category 1141 --json
+```
+
+!!! note "Why fanqienovel can be browsed"
+    The category tree lives in the ranking page's `window.__INITIAL_STATE__.rankCategoryTypeList` (19 male + 18 female), and the books come from `/api/library/book_list`, which needs no signature as long as the query carries `word_count=0&sort=0`.
 
 ---
 

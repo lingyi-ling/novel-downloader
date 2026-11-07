@@ -215,6 +215,7 @@ msgid "Show candidate counts and author-match details."
 msgstr "显示候选数量与作者匹配详情。"
 
 #: src/novel_downloader/apps/cli/commands/batch.py:225
+#: src/novel_downloader/apps/cli/commands/browse.py:62
 #: src/novel_downloader/apps/cli/commands/clean.py:96
 #: src/novel_downloader/apps/cli/commands/clean.py:187
 #: src/novel_downloader/apps/cli/commands/clean.py:256
@@ -419,6 +420,87 @@ msgstr "没有从 {site} 下载到任何书籍。"
 #, python-brace-format
 msgid "Process/export failed for book {book_id}: {err}"
 msgstr "书籍 {book_id} 的处理/导出失败：{err}"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:33
+msgid "Browse rankings and categories on a site."
+msgstr "浏览站点的排行榜与分类。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:37
+msgid "Site key to browse (e.g. fanqienovel)"
+msgstr "要浏览的站点标识（例如 fanqienovel）"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:41
+msgid "List the site's browse categories and exit."
+msgstr "列出该站点的分类后退出。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:46
+msgid "List the books of one category (id or name)."
+msgstr "列出某个分类下的书籍（ID 或名称）。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:52
+msgid "Audience for category browsing (default: male)."
+msgstr "分类浏览的频道（默认：男生）。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:59
+msgid "Number of entries to show (default: 20)."
+msgstr "显示的条目数（默认：20）。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:68
+msgid "Print the entries as JSON on stdout and exit."
+msgstr "以 JSON 输出条目并退出。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:73
+msgid "Download the top entry without asking (non-interactive)."
+msgstr "直接下载第一条，无需确认（非交互）。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:100
+msgid "--categories and --category cannot be combined."
+msgstr "--categories 与 --category 不能同时使用。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:111
+#, python-brace-format
+msgid "'{site}' does not support browsing."
+msgstr "站点「{site}」不支持浏览。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:143
+#, python-brace-format
+msgid "Could not read '{site}': {err}"
+msgstr "无法读取「{site}」：{err}"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:154
+#, python-brace-format
+msgid "No entries returned by '{site}'."
+msgstr "「{site}」没有返回条目。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:158
+#, python-brace-format
+msgid "Found {count} entr(y/ies) on '{site}'."
+msgstr "在「{site}」找到 {count} 条。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:198
+#, python-brace-format
+msgid "Category '{name}' was not found."
+msgstr "找不到分类「{name}」。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:208
+#, python-brace-format
+msgid "No browse categories returned by '{site}'."
+msgstr "「{site}」没有返回分类。"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:211
+#: src/novel_downloader/apps/desktop/webview_app.py:254
+msgid "Male"
+msgstr "男生"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:211
+#: src/novel_downloader/apps/desktop/webview_app.py:255
+msgid "Female"
+msgstr "女生"
+
+#: src/novel_downloader/apps/cli/commands/browse.py:212
+#, python-brace-format
+msgid "{name} ({count})"
+msgstr "{name}（{count}）"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:31
 msgid "Clear application logs, caches, and book data"
@@ -2530,14 +2612,6 @@ msgstr "排行榜"
 msgid "Categories"
 msgstr "分类"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:254
-msgid "Male"
-msgstr "男生"
-
-#: src/novel_downloader/apps/desktop/webview_app.py:255
-msgid "Female"
-msgstr "女生"
-
 #: src/novel_downloader/apps/desktop/webview_app.py:256
 msgid "Merge same book"
 msgstr "合并同一本书"
@@ -2824,35 +2898,35 @@ msgid "Search a song to begin"
 msgstr "搜索一首歌开始"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:366
-#: src/novel_downloader/apps/desktop/webview_app.py:1855
+#: src/novel_downloader/apps/desktop/webview_app.py:1857
 msgid "A download is already running"
 msgstr "已有下载任务在进行"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:367
-#: src/novel_downloader/apps/desktop/webview_app.py:1832
-#: src/novel_downloader/apps/desktop/webview_app.py:1884
+#: src/novel_downloader/apps/desktop/webview_app.py:1834
+#: src/novel_downloader/apps/desktop/webview_app.py:1886
 msgid "Music extras are not installed"
 msgstr "未安装音乐组件（music 扩展）"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:368
-#: src/novel_downloader/apps/desktop/webview_app.py:1934
+#: src/novel_downloader/apps/desktop/webview_app.py:1936
 #, python-brace-format
 msgid "Downloaded {n} tracks"
 msgstr "已下载 {n} 首"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:370
-#: src/novel_downloader/apps/desktop/webview_app.py:1939
+#: src/novel_downloader/apps/desktop/webview_app.py:1941
 #, python-brace-format
 msgid "Done: {ok} downloaded, {skip} skipped, {fail} failed"
 msgstr "完成：{ok} 下载成功，{skip} 跳过，{fail} 失败"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:373
-#: src/novel_downloader/apps/desktop/webview_app.py:1773
+#: src/novel_downloader/apps/desktop/webview_app.py:1775
 msgid "Added to follow list"
 msgstr "已加入追更列表"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:374
-#: src/novel_downloader/apps/desktop/webview_app.py:1773
+#: src/novel_downloader/apps/desktop/webview_app.py:1775
 msgid "Already followed"
 msgstr "已在追更列表中"
 
@@ -2874,8 +2948,8 @@ msgid "Checked {n} books, {u} updated, {f} failed"
 msgstr "已检查 {n} 本，{u} 本更新，{f} 本失败"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:384
-#: src/novel_downloader/apps/desktop/webview_app.py:1647
-#: src/novel_downloader/apps/desktop/webview_app.py:1763
+#: src/novel_downloader/apps/desktop/webview_app.py:1649
+#: src/novel_downloader/apps/desktop/webview_app.py:1765
 msgid "Site and book ID are required"
 msgstr "站点和书籍 ID 不能为空"
 

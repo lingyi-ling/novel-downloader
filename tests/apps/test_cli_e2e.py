@@ -52,6 +52,7 @@ CLI_MODULE = "novel_downloader.apps.cli.main"
 ALL_COMMANDS = (
     "download",
     "search",
+    "browse",
     "follow",
     "export",
     "login",
@@ -76,6 +77,7 @@ HELP_TOKENS: dict[str, tuple[str, ...]] = {
         "--sort",
         "--group",
     ),
+    "browse": ("--categories", "--category", "--gender", "--limit", "--json"),
     "follow": ("add", "remove", "list", "check"),
     "export": ("--format", "--site", "--stage", "--json"),
     "login": ("--timeout", "--list"),
