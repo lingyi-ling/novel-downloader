@@ -248,6 +248,7 @@ def _i18n_catalog() -> dict[str, str]:
         "Download": t("Download"),
         "History": t("History"),
         "Music": t("Music"),
+        "Search in Music": t("Search in Music"),
         "Follow": t("Follow"),
         "Refresh": t("Refresh"),
         "Open": t("Open"),

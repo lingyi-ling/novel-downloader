@@ -850,7 +850,7 @@ async function doSearch() {
 function renderResults(results, kw) {
   const box = $("#results");
   if (!results.length) {
-    box.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("No results"))}</div><div class="s">${esc(t("Try another keyword or clear the site filter"))}</div></div>`;
+    box.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("No results"))}</div><div class="s">${esc(t("Try another keyword or clear the site filter"))}</div><button class="btn btn-ghost btn-sm" id="search-in-music" style="margin-top:12px"><svg class="icon"><use href="#i-music"/></svg>${esc(t("Search in Music"))}</button></div>`;
     return;
   }
   box.innerHTML = results.map((r, i) => {
@@ -887,6 +887,13 @@ function sourceCaps(r) {
     `</div>`;
 }
 $("#results").addEventListener("click", async e => {
+  if (e.target.closest("#search-in-music")) {
+    const kw = $("#q").value.trim();
+    $("#m-q").value = kw;
+    showPage("music");
+    if (kw) doMusicSearch();
+    return;
+  }
   const card = e.target.closest("[data-sel]");
   if (card && !e.target.closest("[data-add]")) selectResult(+card.dataset.sel);
   const add = e.target.closest("[data-add]");

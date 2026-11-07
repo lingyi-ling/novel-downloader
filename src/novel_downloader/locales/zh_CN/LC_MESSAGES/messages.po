@@ -1224,7 +1224,7 @@ msgstr "将书籍加入追更列表。"
 #: src/novel_downloader/apps/cli/commands/follow.py:346
 #: src/novel_downloader/apps/cli/prompts.py:147
 #: src/novel_downloader/apps/cli/prompts.py:231
-#: src/novel_downloader/apps/desktop/webview_app.py:320
+#: src/novel_downloader/apps/desktop/webview_app.py:322
 msgid "Book ID"
 msgstr "书籍 ID"
 
@@ -1633,7 +1633,7 @@ msgid "Audio quality: {level}"
 msgstr "音质：{level}"
 
 #: src/novel_downloader/apps/cli/commands/music.py:603
-#: src/novel_downloader/apps/desktop/webview_app.py:324
+#: src/novel_downloader/apps/desktop/webview_app.py:326
 msgid "Downloading"
 msgstr "下载中"
 
@@ -1862,7 +1862,7 @@ msgid "Site Key"
 msgstr "站点键"
 
 #: src/novel_downloader/apps/cli/commands/sources.py:439
-#: src/novel_downloader/apps/desktop/webview_app.py:246
+#: src/novel_downloader/apps/desktop/webview_app.py:247
 msgid "Search"
 msgstr "搜索"
 
@@ -2335,7 +2335,7 @@ msgstr "{site} 的可用书籍 · 第 {page}/{total} 页"
 
 #: src/novel_downloader/apps/cli/prompts.py:147
 #: src/novel_downloader/apps/cli/prompts.py:227
-#: src/novel_downloader/apps/desktop/webview_app.py:340
+#: src/novel_downloader/apps/desktop/webview_app.py:342
 msgid "Author"
 msgstr "作者"
 
@@ -2472,7 +2472,7 @@ msgid "New version v{latest} (current v{current}); run 'novel-cli update'."
 msgstr "有新版本 v{latest}（当前 v{current}）；运行 'novel-cli update' 查看。"
 
 #: src/novel_downloader/apps/desktop/formatting.py:32
-#: src/novel_downloader/apps/desktop/webview_app.py:323
+#: src/novel_downloader/apps/desktop/webview_app.py:325
 msgid "Queued"
 msgstr "排队中"
 
@@ -2481,431 +2481,435 @@ msgid "Running"
 msgstr "进行中"
 
 #: src/novel_downloader/apps/desktop/formatting.py:34
-#: src/novel_downloader/apps/desktop/webview_app.py:325
+#: src/novel_downloader/apps/desktop/webview_app.py:327
 msgid "Processing"
 msgstr "正在处理"
 
 #: src/novel_downloader/apps/desktop/formatting.py:35
-#: src/novel_downloader/apps/desktop/webview_app.py:326
+#: src/novel_downloader/apps/desktop/webview_app.py:328
 msgid "Exporting"
 msgstr "正在导出"
 
 #: src/novel_downloader/apps/desktop/formatting.py:36
-#: src/novel_downloader/apps/desktop/webview_app.py:327
+#: src/novel_downloader/apps/desktop/webview_app.py:329
 msgid "Completed"
 msgstr "已完成"
 
 #: src/novel_downloader/apps/desktop/formatting.py:37
-#: src/novel_downloader/apps/desktop/webview_app.py:329
+#: src/novel_downloader/apps/desktop/webview_app.py:331
 #: src/novel_downloader/apps/music/browser_login.py:169
 msgid "Cancelled"
 msgstr "已取消"
 
 #: src/novel_downloader/apps/desktop/formatting.py:38
-#: src/novel_downloader/apps/desktop/webview_app.py:328
+#: src/novel_downloader/apps/desktop/webview_app.py:330
 msgid "Failed"
 msgstr "失败"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:247
+#: src/novel_downloader/apps/desktop/webview_app.py:248
 msgid "Download"
 msgstr "下载"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:248
+#: src/novel_downloader/apps/desktop/webview_app.py:249
 msgid "History"
 msgstr "历史记录"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:249
+#: src/novel_downloader/apps/desktop/webview_app.py:250
 msgid "Music"
 msgstr "音乐"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:250
+#: src/novel_downloader/apps/desktop/webview_app.py:251
+msgid "Search in Music"
+msgstr "在音乐中搜索"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:252
 msgid "Follow"
 msgstr "追更"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:251
+#: src/novel_downloader/apps/desktop/webview_app.py:253
 msgid "Refresh"
 msgstr "刷新"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:252
+#: src/novel_downloader/apps/desktop/webview_app.py:254
 msgid "Open"
 msgstr "打开"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:253
+#: src/novel_downloader/apps/desktop/webview_app.py:255
 msgid "OK"
 msgstr "成功"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:254
+#: src/novel_downloader/apps/desktop/webview_app.py:256
 msgid "Cancel"
 msgstr "取消"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:255
+#: src/novel_downloader/apps/desktop/webview_app.py:257
 msgid "Retry"
 msgstr "重试"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:256
+#: src/novel_downloader/apps/desktop/webview_app.py:258
 msgid "Stop"
 msgstr "停止"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:257
+#: src/novel_downloader/apps/desktop/webview_app.py:259
 msgid "Theme"
 msgstr "主题"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:258
+#: src/novel_downloader/apps/desktop/webview_app.py:260
 msgid "Results"
 msgstr "搜索结果"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:259
+#: src/novel_downloader/apps/desktop/webview_app.py:261
 msgid "Select all"
 msgstr "全选"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:260
+#: src/novel_downloader/apps/desktop/webview_app.py:262
 msgid "Add book"
 msgstr "添加书籍"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:261
+#: src/novel_downloader/apps/desktop/webview_app.py:263
 msgid "Check updates"
 msgstr "检查更新"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:262
+#: src/novel_downloader/apps/desktop/webview_app.py:264
 msgid "Open folder"
 msgstr "打开目录"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:263
+#: src/novel_downloader/apps/desktop/webview_app.py:265
 msgid "Download selected"
 msgstr "下载所选"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:264
+#: src/novel_downloader/apps/desktop/webview_app.py:266
 msgid "Check all platforms"
 msgstr "检查全部平台"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:265
+#: src/novel_downloader/apps/desktop/webview_app.py:267
 msgid "Quality"
 msgstr "音质"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:266
+#: src/novel_downloader/apps/desktop/webview_app.py:268
 msgid "Quality & tags"
 msgstr "音质与标签"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:267
+#: src/novel_downloader/apps/desktop/webview_app.py:269
 msgid "Embed tags"
 msgstr "嵌入标签"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:268
+#: src/novel_downloader/apps/desktop/webview_app.py:270
 msgid "Embed cover"
 msgstr "嵌入封面"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:269
+#: src/novel_downloader/apps/desktop/webview_app.py:271
 msgid "Save lyrics"
 msgstr "保存歌词"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:270
+#: src/novel_downloader/apps/desktop/webview_app.py:272
 msgid "Split folders"
 msgstr "分文件夹保存"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:271
+#: src/novel_downloader/apps/desktop/webview_app.py:273
 msgid "Skip existing"
 msgstr "跳过已存在"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:272
+#: src/novel_downloader/apps/desktop/webview_app.py:274
 msgid "Platform health"
 msgstr "平台健康"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:273
+#: src/novel_downloader/apps/desktop/webview_app.py:275
 msgid "Ctrl+1-5 switch pages"
 msgstr "Ctrl+1-5 切换页面"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:275
+#: src/novel_downloader/apps/desktop/webview_app.py:277
 msgid "Create desktop shortcut"
 msgstr "创建桌面快捷方式"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:277
-#: src/novel_downloader/apps/desktop/webview_app.py:1421
+#: src/novel_downloader/apps/desktop/webview_app.py:279
+#: src/novel_downloader/apps/desktop/webview_app.py:1506
 msgid "Shortcuts created on the desktop and Start menu"
 msgstr "已在桌面和开始菜单创建快捷方式"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:279
-#: src/novel_downloader/apps/desktop/webview_app.py:1394
+#: src/novel_downloader/apps/desktop/webview_app.py:281
+#: src/novel_downloader/apps/desktop/webview_app.py:1479
 msgid "Shortcut already exists"
 msgstr "快捷方式已存在"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:280
-#: src/novel_downloader/apps/desktop/webview_app.py:1383
+#: src/novel_downloader/apps/desktop/webview_app.py:282
+#: src/novel_downloader/apps/desktop/webview_app.py:1468
 msgid "Shortcuts require the packaged app"
 msgstr "需要打包版（exe）才能创建快捷方式"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:282
-#: src/novel_downloader/apps/desktop/webview_app.py:1388
+#: src/novel_downloader/apps/desktop/webview_app.py:284
+#: src/novel_downloader/apps/desktop/webview_app.py:1473
 msgid "Shortcuts are only supported on Windows"
 msgstr "仅支持在 Windows 上创建快捷方式"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:285
+#: src/novel_downloader/apps/desktop/webview_app.py:287
 msgid "Click here to create a desktop shortcut"
 msgstr "点这里创建桌面快捷方式"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:288
-#: src/novel_downloader/apps/desktop/webview_app.py:875
+#: src/novel_downloader/apps/desktop/webview_app.py:290
+#: src/novel_downloader/apps/desktop/webview_app.py:877
 #, python-brace-format
 msgid "Update available: v{ver}"
 msgstr "发现新版本：v{ver}"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:290
+#: src/novel_downloader/apps/desktop/webview_app.py:292
 #, python-brace-format
 msgid "New version {ver} is out — click to download"
 msgstr "新版本 {ver} 已发布——点击下载"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:292
+#: src/novel_downloader/apps/desktop/webview_app.py:294
 msgid "Download and install"
 msgstr "下载并安装"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:294
+#: src/novel_downloader/apps/desktop/webview_app.py:296
 #, python-brace-format
 msgid "No package for this platform in v{ver}; open the release page"
 msgstr "v{ver} 没有适用于当前平台的安装包，请打开发布页"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:296
+#: src/novel_downloader/apps/desktop/webview_app.py:298
 msgid "Release notes"
 msgstr "发布说明"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:297
+#: src/novel_downloader/apps/desktop/webview_app.py:299
 msgid "Later"
 msgstr "稍后"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:298
+#: src/novel_downloader/apps/desktop/webview_app.py:300
 msgid "Downloading…"
 msgstr "下载中…"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:299
+#: src/novel_downloader/apps/desktop/webview_app.py:301
 msgid "Installing…"
 msgstr "正在安装…"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:300
+#: src/novel_downloader/apps/desktop/webview_app.py:302
 msgid "Update download failed"
 msgstr "更新下载失败"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:301
+#: src/novel_downloader/apps/desktop/webview_app.py:303
 msgid "Could not start the installer"
 msgstr "无法启动安装程序"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:304
+#: src/novel_downloader/apps/desktop/webview_app.py:306
 msgid "Search novels across all sites, ranked by quality"
 msgstr "聚合全站搜索，按质量排序"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:306
+#: src/novel_downloader/apps/desktop/webview_app.py:308
 msgid "Live queue and progress"
 msgstr "实时队列与进度"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:308
+#: src/novel_downloader/apps/desktop/webview_app.py:310
 msgid "Search and download across 25 music platforms"
 msgstr "跨 25 个音乐平台搜索与下载"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:311
+#: src/novel_downloader/apps/desktop/webview_app.py:313
 msgid "Track new chapters of books you care about"
 msgstr "追踪关注书籍的新章节"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:314
+#: src/novel_downloader/apps/desktop/webview_app.py:316
 msgid "Enter book title or author…"
 msgstr "输入书名或作者…"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:316
+#: src/novel_downloader/apps/desktop/webview_app.py:318
 msgid "Site filter, comma separated (blank = all)"
 msgstr "站点过滤，逗号分隔（留空=全部）"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:318
+#: src/novel_downloader/apps/desktop/webview_app.py:320
 msgid "Song / artist / album…"
 msgstr "歌曲 / 歌手 / 专辑…"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:319
+#: src/novel_downloader/apps/desktop/webview_app.py:321
 msgid "Site (e.g. n23qb)"
 msgstr "站点（如 n23qb）"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:321
+#: src/novel_downloader/apps/desktop/webview_app.py:323
 msgid "Title (optional)"
 msgstr "标题（可选）"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:330
+#: src/novel_downloader/apps/desktop/webview_app.py:332
 #, python-brace-format
 msgid "Exporting {fmt}"
 msgstr "正在导出 {fmt}"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:331
+#: src/novel_downloader/apps/desktop/webview_app.py:333
 #, python-brace-format
 msgid "Downloading {done}/{total}"
 msgstr "下载中 {done}/{total}"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:333
+#: src/novel_downloader/apps/desktop/webview_app.py:335
 msgid "Searching…"
 msgstr "搜索中…"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:334
+#: src/novel_downloader/apps/desktop/webview_app.py:336
 #, python-brace-format
 msgid "{n} results in {s}s"
 msgstr "{s} 秒内找到 {n} 条结果"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:335
+#: src/novel_downloader/apps/desktop/webview_app.py:337
 msgid "Search failed"
 msgstr "搜索失败"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:336
+#: src/novel_downloader/apps/desktop/webview_app.py:338
 msgid "No results"
 msgstr "无结果"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:338
+#: src/novel_downloader/apps/desktop/webview_app.py:340
 msgid "Try another keyword or clear the site filter"
 msgstr "换个关键词，或清空站点过滤"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:341
+#: src/novel_downloader/apps/desktop/webview_app.py:343
 msgid "Best match"
 msgstr "最佳匹配"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:342
+#: src/novel_downloader/apps/desktop/webview_app.py:344
 msgid "Open in browser"
 msgstr "在浏览器中打开"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:343
+#: src/novel_downloader/apps/desktop/webview_app.py:345
 #, python-brace-format
 msgid "Queued: {title}"
 msgstr "已入队：{title}"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:345
+#: src/novel_downloader/apps/desktop/webview_app.py:347
 msgid "Active"
 msgstr "进行中"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:346
+#: src/novel_downloader/apps/desktop/webview_app.py:348
 msgid "Nothing in the queue"
 msgstr "队列为空"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:348
+#: src/novel_downloader/apps/desktop/webview_app.py:350
 msgid "Search for a book and press Download"
 msgstr "搜索一本书并点击下载"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:350
+#: src/novel_downloader/apps/desktop/webview_app.py:352
 msgid "No tasks yet"
 msgstr "暂无任务"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:352
+#: src/novel_downloader/apps/desktop/webview_app.py:354
 #, python-brace-format
 msgid "{n} files in {dir}"
 msgstr "{dir} 中共 {n} 个文件"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:353
+#: src/novel_downloader/apps/desktop/webview_app.py:355
 msgid "No exported books yet"
 msgstr "还没有导出的书籍"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:355
+#: src/novel_downloader/apps/desktop/webview_app.py:357
 msgid "Files land here when a download finishes"
 msgstr "下载完成后文件会出现在这里"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:358
+#: src/novel_downloader/apps/desktop/webview_app.py:360
 msgid "Search a song to begin"
 msgstr "搜索一首歌开始"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:359
-#: src/novel_downloader/apps/desktop/webview_app.py:1690
+#: src/novel_downloader/apps/desktop/webview_app.py:361
+#: src/novel_downloader/apps/desktop/webview_app.py:1775
 msgid "A download is already running"
 msgstr "已有下载任务在进行"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:360
-#: src/novel_downloader/apps/desktop/webview_app.py:1667
-#: src/novel_downloader/apps/desktop/webview_app.py:1719
+#: src/novel_downloader/apps/desktop/webview_app.py:362
+#: src/novel_downloader/apps/desktop/webview_app.py:1752
+#: src/novel_downloader/apps/desktop/webview_app.py:1804
 msgid "Music extras are not installed"
 msgstr "未安装音乐组件（music 扩展）"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:361
-#: src/novel_downloader/apps/desktop/webview_app.py:1769
+#: src/novel_downloader/apps/desktop/webview_app.py:363
+#: src/novel_downloader/apps/desktop/webview_app.py:1854
 #, python-brace-format
 msgid "Downloaded {n} tracks"
 msgstr "已下载 {n} 首"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:363
-#: src/novel_downloader/apps/desktop/webview_app.py:1774
+#: src/novel_downloader/apps/desktop/webview_app.py:365
+#: src/novel_downloader/apps/desktop/webview_app.py:1859
 #, python-brace-format
 msgid "Done: {ok} downloaded, {skip} skipped, {fail} failed"
 msgstr "完成：{ok} 下载成功，{skip} 跳过，{fail} 失败"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:366
-#: src/novel_downloader/apps/desktop/webview_app.py:1608
+#: src/novel_downloader/apps/desktop/webview_app.py:368
+#: src/novel_downloader/apps/desktop/webview_app.py:1693
 msgid "Added to follow list"
 msgstr "已加入追更列表"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:367
-#: src/novel_downloader/apps/desktop/webview_app.py:1608
+#: src/novel_downloader/apps/desktop/webview_app.py:369
+#: src/novel_downloader/apps/desktop/webview_app.py:1693
 msgid "Already followed"
 msgstr "已在追更列表中"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:368
+#: src/novel_downloader/apps/desktop/webview_app.py:370
 msgid "No chapter recorded yet"
 msgstr "尚未记录章节"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:369
+#: src/novel_downloader/apps/desktop/webview_app.py:371
 msgid "No followed books"
 msgstr "暂无追更书籍"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:371
+#: src/novel_downloader/apps/desktop/webview_app.py:373
 msgid "Follow a search result or add a book manually"
 msgstr "在搜索结果中追更，或手动添加书籍"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:374
+#: src/novel_downloader/apps/desktop/webview_app.py:376
 #, python-brace-format
 msgid "Checked {n} books, {u} updated, {f} failed"
 msgstr "已检查 {n} 本，{u} 本更新，{f} 本失败"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:377
-#: src/novel_downloader/apps/desktop/webview_app.py:1482
-#: src/novel_downloader/apps/desktop/webview_app.py:1598
+#: src/novel_downloader/apps/desktop/webview_app.py:379
+#: src/novel_downloader/apps/desktop/webview_app.py:1567
+#: src/novel_downloader/apps/desktop/webview_app.py:1683
 msgid "Site and book ID are required"
 msgstr "站点和书籍 ID 不能为空"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1144
+#: src/novel_downloader/apps/desktop/webview_app.py:1229
 msgid "An update download is already running"
 msgstr "已有更新正在下载"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1151
+#: src/novel_downloader/apps/desktop/webview_app.py:1236
 msgid "No update is available to download"
 msgstr "当前没有可下载的更新"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1155
+#: src/novel_downloader/apps/desktop/webview_app.py:1240
 msgid "This release has no download for your platform"
 msgstr "该版本没有适用于当前平台的下载文件"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1159
+#: src/novel_downloader/apps/desktop/webview_app.py:1244
 msgid "Refusing to download an update from an insecure source"
 msgstr "拒绝从非加密（http）来源下载更新"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1165
+#: src/novel_downloader/apps/desktop/webview_app.py:1250
 msgid "The release does not publish a checksum; refusing to download it"
 msgstr "该版本未提供校验值，拒绝下载"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1192
+#: src/novel_downloader/apps/desktop/webview_app.py:1277
 msgid "The download landed outside the update folder"
 msgstr "下载文件落在了更新目录之外"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1200
+#: src/novel_downloader/apps/desktop/webview_app.py:1285
 msgid "The downloaded update failed its checksum check and was deleted"
 msgstr "下载的更新未通过校验，已删除"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1233
+#: src/novel_downloader/apps/desktop/webview_app.py:1318
 msgid "No update has been downloaded yet"
 msgstr "尚未下载任何更新"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1247
+#: src/novel_downloader/apps/desktop/webview_app.py:1332
 msgid ""
 "Automatic installation is only supported on Windows; please extract the "
 "downloaded file manually"
 msgstr "仅 Windows 支持自动安装；请手动解压下载的文件"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1257
+#: src/novel_downloader/apps/desktop/webview_app.py:1342
 msgid "This update is not an installer; please extract it manually"
 msgstr "该更新不是安装包；请手动解压"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1265
+#: src/novel_downloader/apps/desktop/webview_app.py:1350
 msgid "Refusing to run an update from outside the update folder"
 msgstr "拒绝运行更新目录之外的文件"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1272
+#: src/novel_downloader/apps/desktop/webview_app.py:1357
 msgid "The downloaded installer is missing; please download it again"
 msgstr "下载的安装包已不存在，请重新下载"
 
-#: src/novel_downloader/apps/desktop/webview_app.py:1284
+#: src/novel_downloader/apps/desktop/webview_app.py:1369
 msgid ""
 "The downloaded installer failed its checksum check; please download it "
 "again"
