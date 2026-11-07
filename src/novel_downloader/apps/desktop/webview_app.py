@@ -19,6 +19,7 @@ responsive:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import logging
@@ -1002,6 +1003,49 @@ class ApiBridge:
             logger.debug("Update install failed", exc_info=True)
             return {"ok": False, "error": format_error(exc)}
 
+    def _has_downloaded_update(self) -> bool:
+        """Whether a verified installer is waiting to be launched."""
+        with self._download_guard:
+            return self._downloaded is not None
+
+    def _install_on_exit(self) -> None:
+        """Run a verified installer when the app is closing.
+
+        This is the zero-click path: the update was downloaded in the
+        background, and quitting the app is the only step left.
+        """
+        try:
+            if sys.platform != "win32":
+                return
+            if not _prefs_flag(_load_prefs(), "auto_install_on_exit", True):
+                return
+            with self._download_guard:
+                record = self._downloaded
+                if record is None:
+                    return
+                self._downloaded = None
+            target = record.path
+            if target.suffix.lower() != ".exe" or not _inside_dir(
+                target, _updates_dir()
+            ):
+                self._release_claim(record)
+                return
+            if not target.is_file() or not verify_sha256(target, record.sha256):
+                with contextlib.suppress(OSError):
+                    target.unlink(missing_ok=True)
+                return
+            subprocess.Popen(  # noqa: S603
+                [str(target), *_INSTALLER_ARGS], close_fds=True, shell=False
+            )
+            logger.info("Launched the update installer on exit")
+        except Exception:  # noqa: BLE001 - shutdown must never fail
+            logger.debug("Install on exit failed", exc_info=True)
+
+    def _on_window_closing(self) -> bool:
+        """pywebview closing hook: install first, then let the window go."""
+        self._install_on_exit()
+        return True
+
     def _attach_window(self, window: Any) -> None:
         """
         Register the pywebview window so an update can close the app.
@@ -1014,6 +1058,8 @@ class ApiBridge:
             window.destroy()
 
         self._exit_callback = request_exit
+        with contextlib.suppress(Exception):
+            window.events.closing += self._on_window_closing
 
     def _remember_check(
         self,
@@ -1051,7 +1097,9 @@ class ApiBridge:
             "checked_at": 0.0,
             "error": error,
             "pending": False,
+            "downloaded": False,
             "auto_check": auto,
+            "auto_install": True,
         }
 
     def _update_payload(
@@ -1082,7 +1130,9 @@ class ApiBridge:
             "checked_at": float(cache.checked_at) if cache is not None else 0.0,
             "error": cache.error if cache is not None else None,
             "pending": inflight,
+            "downloaded": self._has_downloaded_update(),
             "auto_check": _prefs_flag(stored, "auto_check_updates", True),
+            "auto_install": _prefs_flag(stored, "auto_install_on_exit", True),
         }
 
     def _start_update_check(self) -> bool:
@@ -1136,6 +1186,40 @@ class ApiBridge:
         with self._update_guard:
             self._update_cache = cache
             self._update_thread = None
+        self._maybe_auto_download()
+
+    def _maybe_auto_download(self) -> None:
+        """Fetch a newly discovered update in the background.
+
+        The bar's single button then only has to launch the installer, so
+        the user never waits for a download.  Failures stay quiet: the
+        button still downloads on demand.
+        """
+        try:
+            if not _prefs_flag(_load_prefs(), "auto_download_updates", True):
+                return
+            with self._update_guard:
+                cache = self._update_cache
+            if cache is None or cache.info is None or not cache.info.available:
+                return
+            with self._download_guard:
+                if self._downloaded is not None or self._download_active:
+                    return
+            threading.Thread(target=self._auto_download_worker, daemon=True).start()
+        except Exception:  # noqa: BLE001 - never break the check worker
+            logger.debug("Could not start the background download", exc_info=True)
+
+    def _auto_download_worker(self) -> None:
+        """Download the pending update without a user action."""
+        try:
+            result = self._download_update()
+        except Exception:  # noqa: BLE001
+            logger.debug("Background update download raised", exc_info=True)
+            return
+        if result.get("ok"):
+            logger.info("Update downloaded in the background")
+        else:
+            logger.debug("Background update download failed: %s", result.get("error"))
 
     def _download_update(self) -> dict[str, Any]:
         """Implementation of :meth:`download_update` (may raise)."""

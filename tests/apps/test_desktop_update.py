@@ -1253,3 +1253,111 @@ def test_app_html_renders_the_version_as_text() -> None:
     """The release tag is never interpolated as HTML."""
     assert '$("#update-text").textContent' in APP_HTML
     assert '$("#update-text").innerHTML' not in APP_HTML
+
+
+# ---------------------------------------------------------------------------
+# zero-step update: background download + install on exit
+# ---------------------------------------------------------------------------
+
+
+def test_a_found_update_is_downloaded_without_a_click(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check itself fetches the asset, so the bar only has to install."""
+    monkeypatch.setattr(
+        wa,
+        "check_for_update",
+        lambda *a, **k: UpdateCheck(
+            info=_info(), error=None, checked_at=time.time(), source="manifest"
+        ),
+    )
+    downloaded: list[Path] = []
+
+    def fake_download(url: str, name: Path, **kwargs: Any) -> Path:
+        target = Path(kwargs["root"]) / name.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_PAYLOAD)
+        downloaded.append(target)
+        return target
+
+    monkeypatch.setattr(wa, "download_asset", fake_download)
+    bridge = wa.ApiBridge()
+
+    bridge._start_update_check()
+    _wait_for_check(bridge)
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not downloaded:
+        time.sleep(0.05)
+
+    assert downloaded, "the background download never ran"
+    assert bridge.update_state()["downloaded"] is True
+
+
+def test_background_download_can_be_disabled(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefs["auto_download_updates"] = False
+    monkeypatch.setattr(
+        wa,
+        "check_for_update",
+        lambda *a, **k: UpdateCheck(
+            info=_info(), error=None, checked_at=time.time(), source="manifest"
+        ),
+    )
+    touched: list[int] = []
+    monkeypatch.setattr(wa, "download_asset", lambda *a, **k: touched.append(1))
+    bridge = wa.ApiBridge()
+
+    bridge._start_update_check()
+    _wait_for_check(bridge)
+    time.sleep(0.3)
+
+    assert touched == []
+    assert bridge.update_state()["downloaded"] is False
+
+
+def test_install_on_exit_launches_a_verified_installer(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_windows(monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    path = _write_updates_file(home, "setup.exe", _PAYLOAD)
+    bridge = wa.ApiBridge()
+    bridge._downloaded = wa._DownloadedUpdate(path=path, sha256=_SHA, name=path.name)
+
+    bridge._install_on_exit()
+
+    assert calls and calls[0][0] == str(path)
+    assert bridge._downloaded is None
+
+
+def test_install_on_exit_honours_the_preference(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_windows(monkeypatch)
+    prefs["auto_install_on_exit"] = False
+    calls = _recording_popen(monkeypatch)
+    path = _write_updates_file(home, "setup.exe", _PAYLOAD)
+    bridge = wa.ApiBridge()
+    bridge._downloaded = wa._DownloadedUpdate(path=path, sha256=_SHA, name=path.name)
+
+    bridge._install_on_exit()
+
+    assert calls == []
+    assert bridge._downloaded is not None
+
+
+def test_install_on_exit_refuses_a_modified_installer(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_windows(monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    path = _write_updates_file(home, "setup.exe", b"tampered")
+    bridge = wa.ApiBridge()
+    bridge._downloaded = wa._DownloadedUpdate(path=path, sha256=_SHA, name=path.name)
+
+    bridge._install_on_exit()
+
+    assert calls == []
+    assert not path.exists()

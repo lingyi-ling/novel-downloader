@@ -92,7 +92,12 @@ object UpdateCenter {
                 }
                 info.available -> {
                     _phase.value = UpdatePhase.Available(info)
-                    if (notifyDialog) _dialogVisible.value = true
+                    if (notifyDialog) {
+                        _dialogVisible.value = true
+                        // Fetch in the background while the dialog is up, so
+                        // the only action left is the system installer.
+                        download()
+                    }
                 }
                 else -> _phase.value = UpdatePhase.UpToDate(info)
             }

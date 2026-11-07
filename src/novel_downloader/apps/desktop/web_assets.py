@@ -739,12 +739,17 @@ $("#update-install").onclick = async () => {
   // Disable synchronously (before the await): a double click must not start
   // two downloads or two installer launches.
   setUpdateBusy(true);
-  btn.textContent = t("Downloading…");
+  // The backend downloads an announced update in the background, so by the
+  // time the bar is clicked the installer is usually already on disk.
+  const ready = !!(updates.state && updates.state.downloaded);
+  if (!ready) btn.textContent = t("Downloading…");
   try {
-    const dl = await api("download_update");
-    if (!dl || !dl.ok || !dl.path) {
-      toast((dl && dl.error) || t("Update download failed"), "err", 9000);
-      return;
+    if (!ready) {
+      const dl = await api("download_update");
+      if (!dl || !dl.ok || !dl.path) {
+        toast((dl && dl.error) || t("Update download failed"), "err", 9000);
+        return;
+      }
     }
     btn.textContent = t("Installing…");
     const res = await api("install_update");
