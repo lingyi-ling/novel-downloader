@@ -258,3 +258,58 @@ async def test_fetch_book_page_tolerates_broken_html() -> None:
     searcher = _make_searcher()
     searcher.session = _FakeSession("<html>no state here</html>")  # type: ignore[assignment]
     assert await searcher._fetch_book_page("123", {}) == {}
+
+
+@pytest.fixture(autouse=True)
+def _no_app_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep these tests off the network by default."""
+    monkeypatch.setattr(FanqienovelSearcher, "_app_device", lambda self: None)
+
+
+_APP_PAYLOAD = {
+    "code": 0,
+    "data": {
+        "has_more": False,
+        "offset": 0,
+        "ret_data": [
+            {
+                "book_id": "7551348540727905342",
+                "title": "开局剑落南海",
+                "author": "索尔配音",
+                "thumb_url": "https://p6-tt.bytecdn.cn/novel-pic/abc",
+            }
+        ],
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_explicit_search_uses_the_app_api_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With an identity available, search needs neither login nor a browser."""
+    searcher = _make_searcher(explicitly_selected=True)
+    fake_device = type("D", (), {"device_id": "123", "install_id": "456"})()
+    monkeypatch.setattr(FanqienovelSearcher, "_app_device", lambda self: fake_device)
+    calls: list[str] = []
+
+    async def _fake_json(
+        self: FanqienovelSearcher, url: str, headers: dict[str, str]
+    ) -> Any:
+        calls.append(url)
+        assert headers["x-argus"].startswith("8o")
+        assert headers["x-ladon"]
+        return _APP_PAYLOAD
+
+    def _unexpected(*args: Any, **kwargs: Any) -> str | None:
+        raise AssertionError("the browser must not be used when the app API answers")
+
+    monkeypatch.setattr(FanqienovelSearcher, "_get_json", _fake_json)
+    monkeypatch.setattr(browser, "search_via_browser", _unexpected)
+
+    results = await searcher.search("剑来")
+
+    assert calls and "novel.snssdk.com" in calls[0]
+    assert [r["title"] for r in results] == ["开局剑落南海"]
+    assert results[0]["book_id"] == "7551348540727905342"
+    assert results[0]["cover_url"] == "https://p6-tt.bytecdn.cn/novel-pic/abc"

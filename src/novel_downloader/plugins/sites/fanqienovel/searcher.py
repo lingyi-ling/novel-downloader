@@ -57,6 +57,8 @@ class FanqienovelSearcher(BaseSearcher):
     def __init__(self, session: aiohttp.ClientSession) -> None:
         super().__init__(session)
         self._cookies = self._load_cookies()
+        self._device: Any = None
+        self._device_checked = False
 
     @staticmethod
     def _load_cookies() -> dict[str, str]:
@@ -91,6 +93,10 @@ class FanqienovelSearcher(BaseSearcher):
         if not self.explicitly_selected:
             return await super().search(keyword, limit)
 
+        results = await self._search_via_app(keyword, limit)
+        if results:
+            return results
+
         results = await self._search_with_browser(keyword, limit)
         if results:
             return results
@@ -100,6 +106,115 @@ class FanqienovelSearcher(BaseSearcher):
             "(run 'novel-cli login fanqienovel' if no session is available)"
         )
         return await super().search(keyword, limit)
+
+    def _app_device(self) -> Any:
+        """Device identity for the app API, looked up once."""
+        if self._device is None and not self._device_checked:
+            from novel_downloader.plugins.sites.fanqienovel.appapi import (
+                discover_device,
+            )
+
+            self._device = discover_device(self._cache_dir())
+            self._device_checked = True
+        return self._device
+
+    def _cache_dir(self) -> Path:
+        override = os.environ.get("NOVEL_CACHE_DIR", "").strip()
+        if override:
+            return Path(override) / self.site_name
+        try:
+            configured = get_config_value(
+                ["general", "cache_dir"], str(default_cache_dir())
+            )
+        except Exception:  # no config file on disk yet
+            configured = str(default_cache_dir())
+        return Path(str(configured)) / self.site_name
+
+    async def _search_via_app(
+        self, keyword: str, limit: int | None
+    ) -> list[SearchResult]:
+        """Search through the app API: no login, no browser window."""
+        device = self._app_device()
+        if device is None:
+            return []
+
+        from novel_downloader.plugins.sites.fanqienovel.appapi import sign_query
+        from novel_downloader.plugins.sites.fanqienovel.argus import x_argus
+        from novel_downloader.plugins.sites.fanqienovel.register import (
+            CLIENT_USER_AGENT,
+            LADON_SEEDS,
+        )
+
+        wanted = limit if limit is not None else self.PAGE_SIZE * 3
+        results: list[SearchResult] = []
+        offset = 0
+        while len(results) < wanted:
+            query = f"aid=1967&q={quote(keyword)}&offset={offset}"
+            url = (
+                "https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/"
+                f"?{query}"
+            )
+            timestamp = int(datetime.datetime.now().timestamp())
+            gorgon, khronos = sign_query(query, khronos=timestamp)
+            headers = {
+                "X-Gorgon": gorgon,
+                "X-Khronos": str(khronos),
+                "x-argus": x_argus(query, timestamp, device_id=device.device_id),
+                "x-ladon": LADON_SEEDS[0],
+                "User-Agent": CLIENT_USER_AGENT,
+                "Accept-Encoding": "identity",
+            }
+            payload = await self._get_json(url, headers)
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data, dict):
+                break
+            items = data.get("ret_data")
+            if not isinstance(items, list) or not items:
+                break
+            for item in items:
+                if len(results) >= wanted:
+                    break
+                result = self._app_result(item)
+                if result is not None:
+                    results.append(result)
+            if not data.get("has_more"):
+                break
+            offset = int(data.get("offset") or (offset + len(items)))
+            if offset <= 0:
+                break
+        return results
+
+    async def _get_json(self, url: str, headers: dict[str, str]) -> Any:
+        try:
+            async with self.session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    return {}
+                return await resp.json(content_type=None)
+        except Exception:
+            logger.debug("fanqienovel: app search request failed", exc_info=True)
+            return {}
+
+    def _app_result(self, item: Any) -> SearchResult | None:
+        if not isinstance(item, dict):
+            return None
+        book_id = item.get("book_id")
+        title = item.get("title")
+        if not book_id or not isinstance(title, str) or not title:
+            return None
+        author = item.get("author")
+        cover = item.get("thumb_url")
+        return SearchResult(
+            site=self.site_name,
+            book_id=str(book_id),
+            book_url=f"{self.BASE_URL}/page/{book_id}",
+            cover_url=cover if isinstance(cover, str) else "",
+            title=title,
+            author=author if isinstance(author, str) else "",
+            latest_chapter="",
+            update_date="",
+            word_count="",
+            priority=self.priority,
+        )
 
     async def _search_with_browser(
         self, keyword: str, limit: int | None
