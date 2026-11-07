@@ -135,6 +135,11 @@ async def _watch_finished_tasks(
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     """Start the optional webhook watcher and stop workers on shutdown."""
+    # Resume the queue persisted by the previous run first: restored tasks
+    # become queued, and the webhook watcher must not treat them as freshly
+    # finished work.
+    await manager.start()
+
     watcher_task: asyncio.Task[None] | None = None
     notifier = getattr(application.state, "webhook_notifier", None)
     if notifier is not None:

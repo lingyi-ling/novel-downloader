@@ -1155,13 +1155,20 @@ def test_bridge_open_url_ignores_unsafe_schemes(
     assert opened == ["https://example.invalid/book"]
 
 
-def test_absolutize_argv0_resolves_relative_paths() -> None:
+def test_absolutize_argv0_resolves_relative_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from novel_downloader.apps.desktop import main as desktop_main_mod
+
+    # Pin the working directory: an earlier test in the same session may have
+    # chdir-ed away, and this test needs a known relative path to exist.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "script.py").write_text("", encoding="utf-8")
 
     original = sys.argv[0]
     try:
         # A relative path that exists is made absolute before the chdir.
-        sys.argv[0] = "setup.py" if Path("setup.py").is_file() else "pyproject.toml"
+        sys.argv[0] = "script.py"
         expected = os.path.abspath(sys.argv[0])
         desktop_main_mod._absolutize_argv0()
         assert os.path.isabs(sys.argv[0])

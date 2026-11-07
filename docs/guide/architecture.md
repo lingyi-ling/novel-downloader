@@ -133,6 +133,17 @@ QUEUED → RUNNING → PROCESSING → EXPORTING → COMPLETED
 7. **重试策略**：只有瞬时传输错误会重试（`is_retryable_error()`）；登录失败、权限、数据缺失、编程错误等永久错误不重试。额外重试次数由 `general.download_retry_times` 控制，默认 `DEFAULT_MAX_DOWNLOAD_RETRIES = 2`。
 8. 已完成任务保留在 `completed` 双端队列中，上限 `MAX_COMPLETED_TASKS = 100`。
 
+
+### 队列持久化
+
+API、桌面客户端与 Android 独立引擎会把队列写到 `<应用数据目录>/tasks.json`（`TaskManager(state_path=...)` 或 `persist=True`）：
+
+* 写入是原子的（临时文件 + `os.replace`），每 1.5 秒最多一次，`close()` 时再补一次；快照在事件循环线程上生成，只有落盘交给线程池
+* 启动时（API lifespan / 桌面窗口打开 / 内嵌引擎绑定端口）调用 `manager.start()` 恢复：pending 与中断的任务都回到 `QUEUED`，按站点重新排队
+* 已下载的章节在章节缓存里，恢复的任务从断点继续，不会重下一遍
+* 恢复的历史保留最近 50 条已完成任务；文件损坏或版本不认时直接忽略，不阻塞启动
+* CLI 的 `download`/`follow` 不启用持久化（一次性进程，队列不在它们之间共享）
+
 API 对应端点：
 
 | 端点 | 行为 |

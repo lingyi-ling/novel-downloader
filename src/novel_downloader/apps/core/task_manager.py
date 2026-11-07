@@ -6,9 +6,14 @@ novel_downloader.apps.core.task_manager
 """
 
 import asyncio
+import contextlib
+import json
+import logging
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -27,7 +32,36 @@ from .models import (
     error_text,
 )
 
+logger = logging.getLogger(__name__)
+
 MAX_COMPLETED_TASKS = 100
+
+#: File name of the persisted queue inside the application home.
+TASKS_STATE_FILENAME = "tasks.json"
+
+
+def default_tasks_state_path() -> Path:
+    """
+    Path of the persisted queue under the *current* application home.
+
+    Resolved lazily (not at import) so ``NOVEL_HOME`` changes — test fixtures,
+    embedded engines — take effect.
+    """
+    from novel_downloader.infra.paths import app_home
+
+    return app_home() / TASKS_STATE_FILENAME
+
+
+#: Schema version of that file; unknown versions are ignored (the queue is
+#: rebuilt empty) instead of being mis-read.
+TASKS_STATE_VERSION = 1
+
+#: How many finished tasks are written to disk (the in-memory deque is capped
+#: at :data:`MAX_COMPLETED_TASKS` anyway).
+_PERSISTED_COMPLETED = 50
+
+#: Seconds between two background flushes while tasks are changing.
+_FLUSH_INTERVAL = 1.5
 
 #: Extra attempts made after a *transient* (network/timeout) download failure.
 #: ``2`` means at most three attempts in total: the first one plus two retries.
@@ -145,6 +179,8 @@ class TaskManager:
         *,
         max_download_retries: int | None = None,
         retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+        state_path: Path | None = None,
+        persist: bool = False,
     ) -> None:
         self.pending: dict[str, list[DownloadTask]] = defaultdict(list)
         self.running: dict[str, DownloadTask] = {}
@@ -169,6 +205,15 @@ class TaskManager:
 
         self._lock = asyncio.Lock()
         self._adapter: ConfigAdapter | None = None
+
+        # Queue persistence (opt-in): app surfaces pass the path they own,
+        # tests and embedded one-shot runs leave it ``None``.
+        self._persist = bool(persist) or state_path is not None
+        self._state_path = Path(state_path) if state_path is not None else None
+        self._started = False
+        self._restored = False
+        self._dirty = False
+        self._flush_task: asyncio.Task[None] | None = None
 
         # ``None`` means "resolve from config, fall back to the default".
         self._max_download_retries = max_download_retries
@@ -204,6 +249,33 @@ class TaskManager:
         return DEFAULT_MAX_DOWNLOAD_RETRIES
 
     # ---------- public API ----------
+    async def start(self) -> None:
+        """
+        Restore the persisted queue (once) and resume its pending tasks.
+
+        Idempotent and cheap: :meth:`add_task` calls it, and the app entry
+        points call it at startup so a queue survives an app restart. Tasks
+        that were running when the app stopped come back as ``queued``; chapter
+        data already on disk is reused, so a resumed download continues where
+        it left off.
+        """
+        if self._started:
+            return
+        async with self._lock:
+            if self._started:
+                return
+            self._started = True
+            if self._persist and self._state_path is None:
+                # Resolved here, not at import: tests and embedders point
+                # NOVEL_HOME at a temporary directory after importing.
+                self._state_path = default_tasks_state_path()
+            self._restore_locked()
+            if self._state_path is not None:
+                self._flush_task = asyncio.create_task(self._flush_loop())
+            for site, queue in self.pending.items():
+                if queue:
+                    self._spawn_worker_locked(site)
+
     async def add_task(self, *, title: str, site: str, book_id: str) -> DownloadTask:
         """
         Add a new task and ensure a worker for its site is running.
@@ -211,9 +283,8 @@ class TaskManager:
         task = DownloadTask(title=title, site=site, book_id=book_id)
         async with self._lock:
             self.pending[site].append(task)
-            # start a new worker if needed
-            if site not in self._worker_tasks or self._worker_tasks[site].done():
-                self._worker_tasks[site] = asyncio.create_task(self._site_worker(site))
+            self._spawn_worker_locked(site)
+            self._mark_dirty()
         return task
 
     async def cancel_task(self, task_id: str) -> bool:
@@ -248,6 +319,7 @@ class TaskManager:
                     running_task.finished_at = time.time()
                     if running_task.asyncio_task:
                         running_task.asyncio_task.cancel()
+                    self._mark_dirty()
                     return True
 
             # cancel a task queued/being handled by the process/export stage
@@ -275,6 +347,11 @@ class TaskManager:
 
     async def close(self) -> None:
         """Cancel or gracefully finish all workers before shutdown."""
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            await asyncio.gather(self._flush_task, return_exceptions=True)
+            self._flush_task = None
+
         all_tasks = [*self._worker_tasks.values()]
         if self._export_worker_task:
             all_tasks.append(self._export_worker_task)
@@ -293,6 +370,191 @@ class TaskManager:
 
         self._worker_tasks.clear()
         self._export_worker_task = self._process_worker_task = None
+
+        # A final write keeps the queue durable even if the last flush was
+        # less than one interval ago.
+        if self._state_path is not None:
+            await self._flush_now()
+
+    # ---------- persistence ----------
+    def _spawn_worker_locked(self, site: str) -> None:
+        """Ensure the site has a live worker (caller holds the lock)."""
+        if site not in self._worker_tasks or self._worker_tasks[site].done():
+            self._worker_tasks[site] = asyncio.create_task(self._site_worker(site))
+
+    def _mark_dirty(self) -> None:
+        """Record that the queue changed; the flusher writes it soon."""
+        self._dirty = True
+
+    async def _flush_loop(self) -> None:
+        """Write the queue every :data:`_FLUSH_INTERVAL` while it is changing."""
+        while True:
+            await asyncio.sleep(_FLUSH_INTERVAL)
+            if self._dirty:
+                await self._flush_now()
+
+    async def _flush_now(self) -> None:
+        """
+        Persist the current queue.
+
+        The snapshot is taken on the event loop (the queues are mutated there
+        concurrently) and only the file write is handed to a worker thread.
+        """
+        self._dirty = False
+        try:
+            payload = self._snapshot_payload()
+            await asyncio.to_thread(self._write_payload, payload)
+        except Exception:  # noqa: BLE001 - persistence must not kill the app
+            logger.warning("Could not persist the task queue", exc_info=True)
+
+    def _restore_locked(self) -> None:
+        """Load the persisted queue (caller holds the lock)."""
+        if self._restored:
+            return
+        self._restored = True
+        if self._state_path is None or not self._state_path.exists():
+            return
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("Ignoring unreadable task queue at %s", self._state_path)
+            return
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != TASKS_STATE_VERSION
+        ):
+            logger.warning("Ignoring task queue with an unknown schema")
+            return
+
+        restored = 0
+        for entry in payload.get("pending") or []:
+            task = self._task_from_payload(entry)
+            if task is None:
+                continue
+            # Anything that was mid-flight comes back as queued; on-disk
+            # chapters are reused by the downloader.
+            task.status = Status.QUEUED
+            task.asyncio_task = None
+            self.pending[task.site].append(task)
+            restored += 1
+        for entry in payload.get("completed") or []:
+            task = self._task_from_payload(entry)
+            if task is not None:
+                self._append_completed(task)
+        if restored:
+            logger.info(
+                "Restored %d queued task(s) from %s", restored, self._state_path
+            )
+
+    def _snapshot_payload(self) -> dict[str, Any]:
+        """Serialise the queue (event-loop thread only)."""
+        pending: list[dict[str, Any]] = [
+            self._task_payload(task)
+            for queue in self.pending.values()
+            for task in queue
+        ]
+        pending.extend(self._task_payload(task) for task in self.running.values())
+        return {
+            "version": TASKS_STATE_VERSION,
+            "saved_at": time.time(),
+            "pending": pending,
+            "completed": [
+                self._task_payload(task)
+                for task in list(self.completed)[-_PERSISTED_COMPLETED:]
+            ],
+        }
+
+    def _write_payload(self, payload: dict[str, Any]) -> None:
+        """Atomically write a prepared payload (runs in a worker thread)."""
+        if self._state_path is None:
+            return
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._state_path.with_name(
+            f"{self._state_path.name}.{os.getpid()}.tmp"
+        )
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        try:
+            os.replace(tmp_path, self._state_path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                tmp_path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _task_payload(task: DownloadTask) -> dict[str, Any]:
+        """Serialise the fields a restored task needs."""
+        return {
+            "task_id": task.task_id,
+            "title": task.title,
+            "site": task.site,
+            "book_id": task.book_id,
+            "status": getattr(task.status, "value", str(task.status)),
+            "chapters_total": task.chapters_total,
+            "chapters_done": task.chapters_done,
+            "error": task.error,
+            "retry_count": task.retry_count,
+            "export_stage": task.export_stage,
+            "exported_paths": {
+                fmt: str(path) for fmt, path in task.exported_paths.items()
+            },
+            "created_at": task.created_at,
+            "finished_at": task.finished_at,
+        }
+
+    @staticmethod
+    def _task_from_payload(entry: Any) -> DownloadTask | None:
+        """Rebuild a task from :meth:`_task_payload` output."""
+        if not isinstance(entry, dict):
+            return None
+        site = entry.get("site")
+        book_id = entry.get("book_id")
+        if not isinstance(site, str) or not site:
+            return None
+        if not isinstance(book_id, str) or not book_id:
+            return None
+        try:
+            status = Status(str(entry.get("status") or "queued"))
+        except ValueError:
+            status = Status.QUEUED
+        try:
+            created_at = float(entry.get("created_at") or time.time())
+        except (TypeError, ValueError):
+            created_at = time.time()
+        finished_raw = entry.get("finished_at")
+        try:
+            finished_at = float(finished_raw) if finished_raw is not None else None
+        except (TypeError, ValueError):
+            finished_at = None
+        paths: dict[str, Path] = {}
+        raw_paths = entry.get("exported_paths")
+        if isinstance(raw_paths, dict):
+            for fmt, value in raw_paths.items():
+                if isinstance(fmt, str) and isinstance(value, str):
+                    paths[fmt] = Path(value)
+        try:
+            total = int(entry.get("chapters_total") or 0)
+            done = int(entry.get("chapters_done") or 0)
+        except (TypeError, ValueError):
+            total = done = 0
+        return DownloadTask(
+            title=str(entry.get("title") or book_id),
+            site=site,
+            book_id=book_id,
+            task_id=str(entry.get("task_id") or ""),
+            status=status,
+            chapters_total=max(0, total),
+            chapters_done=max(0, done),
+            error=str(entry["error"]) if entry.get("error") else None,
+            retry_count=int(entry.get("retry_count") or 0),
+            export_stage=(
+                str(entry["export_stage"]) if entry.get("export_stage") else None
+            ),
+            exported_paths=paths,
+            created_at=created_at,
+            finished_at=finished_at,
+        )
 
     # ---------- internals ----------
     def _append_completed(self, task: DownloadTask) -> None:
@@ -317,6 +579,7 @@ class TaskManager:
             self._completed_ids.discard(completed[0].task_id)
         self._completed_ids.add(task.task_id)
         completed.append(task)
+        self._mark_dirty()
 
     def _get_client(self, site: str) -> ClientProtocol:
         """Get or create a client instance for a site."""
@@ -403,6 +666,7 @@ class TaskManager:
     async def _run_task(self, task: DownloadTask) -> None:
         """Run a single download task and dispatch to processing or export."""
         task.status = Status.RUNNING
+        self._mark_dirty()
         adapter = self.adapter
         client = self._get_client(task.site)
 
@@ -436,6 +700,7 @@ class TaskManager:
 
         if adapter.get_processor_configs(task.site):
             task.status = Status.PROCESSING
+            self._mark_dirty()
             self._stage_tasks[task.task_id] = task
             await self._process_waiting.put(task)
             self._ensure_worker("_process_worker_task", self._process_worker)
@@ -586,4 +851,4 @@ class TaskManager:
                 self._export_waiting.task_done()
 
 
-manager = TaskManager()
+manager = TaskManager(persist=True)

@@ -1343,6 +1343,11 @@ def start_server(home_dir: str, port: int = 8081) -> int:
         if _server is not None:
             return int(_server.server_address[1])
         _prepare_home(home_dir)
+        # Resume the queue saved by the previous engine run before the first
+        # request can observe it.
+        from novel_downloader.apps.core.task_manager import manager
+
+        _run(manager.start())
         server = _QuietThreadingHTTPServer((_HOST, port), _Handler)
         _server = server
     threading.Thread(

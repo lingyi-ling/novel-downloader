@@ -133,7 +133,18 @@ Key behavior:
 7. **Retry policy**: only transient transport errors are retried (`is_retryable_error()`); login failures, permission errors, missing data, and programming errors are not. The extra retry budget comes from `general.download_retry_times`, defaulting to `DEFAULT_MAX_DOWNLOAD_RETRIES = 2`.
 8. Finished tasks are kept in the `completed` deque, capped at `MAX_COMPLETED_TASKS = 100`.
 
-Corresponding API endpoints:
+Corresponding 
+### Queue persistence
+
+The API server, the desktop client and the Android standalone engine persist the queue to `<app data>/tasks.json` (`TaskManager(state_path=...)` or `persist=True`):
+
+* Writes are atomic (temp file + `os.replace`), throttled to one every 1.5 s, with a final write on `close()`. The snapshot is taken on the event-loop thread; only the disk write runs in a thread.
+* On startup (API lifespan / desktop window / embedded engine bind) `manager.start()` restores it: pending tasks and anything interrupted come back as `QUEUED` and are re-queued per site.
+* Downloaded chapters already live in the chapter store, so a resumed task continues where it stopped instead of re-fetching.
+* The last 50 finished tasks are restored too. A corrupt file or an unknown schema version is ignored rather than blocking startup.
+* The CLI `download`/`follow` commands do not enable it (one-shot processes with no shared queue).
+
+API endpoints:
 
 | Endpoint | Behavior |
 | --- | --- |

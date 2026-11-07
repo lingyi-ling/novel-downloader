@@ -1,3 +1,20 @@
+## v1.21.0 (2026-11-08)
+
+### Feature
+
+- **任务队列持久化**：API、桌面端与 Android 独立引擎的队列写入 `<应用数据目录>/tasks.json`，重启后自动恢复并继续
+  - 快照在事件循环线程生成，只有落盘交给线程池；1.5 秒节流 + `close()` 补写，写入走临时文件 + `os.replace`
+  - 启动时恢复：pending 与中断的任务都回到 `queued`，按站点重新排队；章节缓存让任务从断点继续，不重复下载
+  - 已完成历史恢复最近 50 条；文件损坏或 schema 版本不认时忽略并记 warning，不阻塞启动
+  - 开关是显式的（`persist=True` / `state_path=...`），CLI 的一次性 `download`/`follow` 不启用
+- **桌面端**：窗口打开时恢复队列，关闭时补一次落盘；`shutdown()` 真正关闭任务管理器（之前只有注释写着）
+
+### Test
+
+- 新增 `tests/core/test_task_persistence.py`（9 例）：pending 恢复、中断任务回到 queued、完成历史、start 幂等、损坏文件、未知 schema、缺字段条目、默认关闭、原子写无残留
+- 顺带修复 `test_absolutize_argv0_resolves_relative_paths` 对工作目录的隐式依赖（改为 `monkeypatch.chdir`）
+- 全量 `pytest` 8944 passed；`ruff` / `format` / `mypy` 全过
+
 ## v1.20.0 (2026-11-08)
 
 ### Refactor

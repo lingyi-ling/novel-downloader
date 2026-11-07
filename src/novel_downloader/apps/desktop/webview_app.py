@@ -690,6 +690,24 @@ class ApiBridge:
         # progressive search state, keyed by search id (polled by the page)
         self._searches: dict[str, dict[str, Any]] = {}
 
+    def start_services(self) -> None:
+        """
+        Restore the persisted download queue for this app session.
+
+        Called once from :func:`run_webview_app` (never from ``__init__``, so
+        constructing a bridge in tests cannot touch a real queue file).
+        """
+
+        async def run() -> None:
+            from novel_downloader.apps.core.task_manager import manager
+
+            await manager.start()
+
+        try:
+            self._engine.submit(run()).result(TASK_WAIT_TIMEOUT)
+        except Exception:  # noqa: BLE001 - the app still works without a queue
+            logger.exception("Could not restore the task queue")
+
     # ------------------------------------------------------------------
     # system
     # ------------------------------------------------------------------
@@ -2218,6 +2236,18 @@ class ApiBridge:
     def shutdown(self) -> None:
         """Stop background work and close the task manager."""
         self._music_stop.set()
+
+        async def close_manager() -> None:
+            from novel_downloader.apps.core.task_manager import manager
+
+            # Flushes the queue one last time; a no-op when persistence was
+            # never enabled for this process.
+            await manager.close()
+
+        try:
+            self._engine.submit(close_manager()).result(5)
+        except Exception:  # noqa: BLE001 - never block the window closing
+            logger.debug("Task manager shutdown failed", exc_info=True)
         self._engine.shutdown()
 
 
@@ -2245,6 +2275,7 @@ def run_webview_app() -> int:
     _hold_update_mutex()
 
     bridge = ApiBridge()
+    bridge.start_services()
     geometry = load_window_geometry(window_state_file())
     kwargs: dict[str, Any] = {
         "width": geometry.width if geometry else 1220,
