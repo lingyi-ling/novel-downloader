@@ -774,6 +774,29 @@ class GitHubClient:
             return None
         return self._json(reply, f"release lookup for {tag}")
 
+    def ensure_tag_ref(self, tag: str, sha: str) -> None:
+        """
+        Point ``refs/tags/<tag>`` at *sha*, tolerating an existing ref.
+
+        Used as the fallback when ``git push`` cannot reach github.com (the
+        git endpoint and the REST host are separate services, and only the
+        latter may be reachable). A 422 whose message says the ref already
+        exists is success; any other 422 is a real error.
+        """
+        url = f"{self._api}/repos/{self._slug}/git/refs"
+        reply = self._request(
+            "POST",
+            url,
+            json_body={"ref": f"refs/tags/{tag}", "sha": sha},
+            expected=(201, 422),
+        )
+        if reply.status == 422:
+            message = ""
+            if isinstance(reply.payload, dict):
+                message = str(reply.payload.get("message") or "")
+            if "already exists" not in message.lower():
+                raise ReleaseError(f"could not create tag ref {tag}: {message}")
+
     def create_release(
         self,
         tag: str,
@@ -1006,7 +1029,18 @@ def push_tag(repo_root: Path, tag: str, token: str | None, slug: str) -> None:
     else:
         command = ["git", "push", "origin", tag]
     _announce(command)
-    _run(command, cwd=repo_root)
+    try:
+        _run(command, cwd=repo_root)
+        return
+    except ReleaseError:
+        if not token:
+            raise
+        # github.com:443 and api.github.com are different services; when only
+        # the latter is reachable, create the ref through REST instead of
+        # failing the whole release after a successful build.
+        head = _run(["git", "rev-parse", "HEAD"], cwd=repo_root).stdout.strip()
+        print("git push failed; creating the tag ref through the REST API")
+        GitHubClient(slug, token).ensure_tag_ref(tag, head)
 
 
 # ---------------------------------------------------------------------------
