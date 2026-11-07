@@ -40,19 +40,13 @@ from novel_downloader.plugins.sites.fanqienovel.appapi import (
     sign_query,
 )
 from novel_downloader.plugins.sites.fanqienovel.argus import x_argus
+from novel_downloader.plugins.sites.fanqienovel.ladon import x_ladon
 
 logger = logging.getLogger(__name__)
 
 #: AES key wrapping the content key in the registerkey response.
 MASTER_KEY: Final = bytes.fromhex("ac25c67ddd8f38c1b37a2348828e222e")
 
-#: ``x-ladon`` seeds captured from the official client.  The value is a
-#: signed ``"{ts}-{license}-{aid}"`` envelope; the server accepts any valid
-#: one regardless of the timestamp it carries, so a small pool is enough.
-LADON_SEEDS: Final = (
-    "BQsH+rWlg0BS/umXcHBy+jGh2JwW3x2kHUpHmVNF3cgof3MP",
-    "07KhztgRGZydIx5SAXD6UOM1Lq1VmsmA8llirfhLfIN4ixGY",
-)
 
 REGISTER_URL: Final = "https://log5-applog.fqnovel.com/service/2/device_register/"
 KEY_URL: Final = "https://reading.snssdk.com/reading/crypt/registerkey"
@@ -180,7 +174,7 @@ async def _register(session: Any) -> tuple[str, str] | None:
 
 
 async def _register_key(
-    session: Any, device_id: str, install_id: str, ladon_value: str
+    session: Any, device_id: str, install_id: str
 ) -> tuple[bytes, int] | None:
     timestamp = int(time.time())
     query = (
@@ -197,7 +191,7 @@ async def _register_key(
         json.dumps({"content": content, "keyver": 1}).encode(), 9, mtime=0
     )
     stub = hashlib.md5(body).hexdigest().upper()
-    seed = ladon_value
+    seed = ladon_value(timestamp)
     headers = {
         "user-agent": CLIENT_USER_AGENT,
         "accept": "application/json",
@@ -244,10 +238,10 @@ def _pad(data: bytes, block: int = 16) -> bytes:
     return data + bytes([n]) * n
 
 
-def ladon_candidates() -> list[str]:
-    """Seeds to try, the environment override first."""
+def ladon_value(timestamp: int) -> str:
+    """A fresh ``x-ladon`` for ``timestamp``, unless the user pinned one."""
     override = os.environ.get("NOVELDL_FANQIE_LADON", "").strip()
-    return ([override] if override else []) + list(LADON_SEEDS)
+    return override or x_ladon(timestamp)
 
 
 async def mint_device(session: Any, cache_dir: Any) -> FanqieDevice | None:
@@ -255,11 +249,7 @@ async def mint_device(session: Any, cache_dir: Any) -> FanqieDevice | None:
     pair = await _register(session)
     if pair is None:
         return None
-    issued = None
-    for seed in ladon_candidates():
-        issued = await _register_key(session, pair[0], pair[1], seed)
-        if issued is not None:
-            break
+    issued = await _register_key(session, pair[0], pair[1])
     if issued is None:
         logger.info("fanqienovel: content key registration was refused")
         return None

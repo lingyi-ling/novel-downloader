@@ -98,7 +98,7 @@ async def test_register_key_request_is_signed(tmp_path: Path) -> None:
     argus = base64.b64decode(headers["x-argus"])
     assert argus[:2] == bytes([0xF2, 0x81])
     assert (len(argus) - 2) % 16 == 0  # CBC ciphertext blocks only
-    assert headers["x-ladon"] in reg.LADON_SEEDS
+    assert len(base64.b64decode(headers["x-ladon"])) == 36
     assert headers["content-encoding"] == "gzip"
     assert headers["x-ss-stub"] == hashlib.md5(request["data"]).hexdigest().upper()
 
@@ -127,48 +127,3 @@ async def test_mint_device_survives_a_non_json_reply(tmp_path: Path) -> None:
             return _Resp(None)
 
     assert await reg.mint_device(_Broken(register=None, key=None), tmp_path) is None
-
-
-def test_ladon_override_comes_from_the_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("NOVELDL_FANQIE_LADON", "custom-value")
-
-    assert reg.os.environ["NOVELDL_FANQIE_LADON"] == "custom-value"
-    assert reg.LADON_SEEDS
-
-
-@pytest.mark.asyncio
-async def test_mint_device_tries_the_next_seed_when_one_is_refused(
-    tmp_path: Path,
-) -> None:
-    """A dead ladon seed must not take the whole registration down."""
-    content_key = b"" * 16
-    good = {"code": 0, "data": {"key": _wrapped_key(content_key), "keyver": 7}}
-
-    class _Flaky(_Session):
-        async def post(self, url: str, **kwargs: Any) -> _Resp:
-            self.calls.append({"url": url, **kwargs})
-            if "device_register" in url:
-                return _Resp({"device_id": 1, "install_id": 2})
-            if kwargs["headers"]["x-ladon"] == reg.LADON_SEEDS[0]:
-                return _Resp(None)
-            return _Resp(good)
-
-    session = _Flaky(register=None, key=None)
-    device = await reg.mint_device(session, tmp_path)
-
-    assert device is not None
-    assert device.content_key == content_key
-    ladons = [
-        c["headers"]["x-ladon"] for c in session.calls if "registerkey" in c["url"]
-    ]
-    assert ladons == list(reg.LADON_SEEDS[:2])
-
-
-def test_ladon_candidates_puts_the_override_first(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("NOVELDL_FANQIE_LADON", "override-value")
-
-    assert reg.ladon_candidates()[0] == "override-value"

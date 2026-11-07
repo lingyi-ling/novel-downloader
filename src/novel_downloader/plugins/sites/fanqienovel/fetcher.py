@@ -24,9 +24,9 @@ from novel_downloader.plugins.sites.fanqienovel.appapi import (
     to_reader_page,
 )
 from novel_downloader.plugins.sites.fanqienovel.argus import x_argus
+from novel_downloader.plugins.sites.fanqienovel.ladon import x_ladon
 from novel_downloader.plugins.sites.fanqienovel.register import (
     CLIENT_USER_AGENT,
-    LADON_SEEDS,
     mint_device,
 )
 
@@ -161,7 +161,7 @@ class FanqienovelFetcher(GenericFetcher):
             "X-Gorgon": gorgon,
             "X-Khronos": str(khronos),
             "x-argus": x_argus(query, timestamp, device_id=device.device_id),
-            "x-ladon": LADON_SEEDS[0],
+            "x-ladon": x_ladon(timestamp),
         }
         try:
             text = await self.fetch(url, headers=headers)

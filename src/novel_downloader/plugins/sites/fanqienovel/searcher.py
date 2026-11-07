@@ -242,9 +242,9 @@ class FanqienovelSearcher(BaseSearcher):
 
         from novel_downloader.plugins.sites.fanqienovel.appapi import sign_query
         from novel_downloader.plugins.sites.fanqienovel.argus import x_argus
+        from novel_downloader.plugins.sites.fanqienovel.ladon import x_ladon
         from novel_downloader.plugins.sites.fanqienovel.register import (
             CLIENT_USER_AGENT,
-            LADON_SEEDS,
         )
 
         wanted = limit if limit is not None else self.PAGE_SIZE * 3
@@ -262,7 +262,7 @@ class FanqienovelSearcher(BaseSearcher):
                 "X-Gorgon": gorgon,
                 "X-Khronos": str(khronos),
                 "x-argus": x_argus(query, timestamp, device_id=device.device_id),
-                "x-ladon": LADON_SEEDS[0],
+                "x-ladon": x_ladon(timestamp),
                 "User-Agent": CLIENT_USER_AGENT,
                 "Accept-Encoding": "identity",
             }

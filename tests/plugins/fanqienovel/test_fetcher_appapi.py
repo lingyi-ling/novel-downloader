@@ -446,11 +446,6 @@ async def test_batch_request_carries_argus_and_ladon(
     batch = next(kw for u, kw in session.calls if "batch_full" in u)
     headers = dict(batch["headers"])
     assert headers["x-argus"].startswith("8o")
-    assert headers["x-ladon"] in reg_seeds()
+    ladon = base64.b64decode(headers["x-ladon"])
+    assert len(ladon) == 36
     assert "X-Gorgon" in headers
-
-
-def reg_seeds() -> tuple[str, ...]:
-    from novel_downloader.plugins.sites.fanqienovel.register import LADON_SEEDS
-
-    return LADON_SEEDS
