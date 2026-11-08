@@ -78,6 +78,7 @@ class FakeEngine:
         self.health_results = health_results or {}
         self.created: list[str] = []
         self.download_calls: list[dict[str, Any]] = []
+        self.mixed_calls: list[dict[str, Any]] = []
         self.export_calls: list[tuple[list[Any], str]] = []
         self.health_calls: list[tuple[str, str]] = []
         self.download_options_calls: list[dict[str, Any]] = []
@@ -115,6 +116,14 @@ class FakeEngine:
         self.download_calls.append(
             {"tracks": list(tracks), "options": options, **kwargs}
         )
+        return self.download_result
+
+    def download_mixed(
+        self, create_provider: Any, tracks: list[Any], options: Any, **kwargs: Any
+    ) -> tuple[Any, ...]:
+        if self.download_error is not None:
+            raise self.download_error
+        self.mixed_calls.append({"tracks": list(tracks), "options": options, **kwargs})
         return self.download_result
 
     def export_m3u(self, tracks: list[Any], out_path: str) -> str:
@@ -202,6 +211,7 @@ def test_track_payload_serialises_all_fields() -> None:
         "duration_s": 185,
         "vip": False,
         "platform": "netease",
+        "sources": [],
     }
 
 
@@ -394,7 +404,11 @@ def test_download_with_pick_invokes_engine(monkeypatch, tmp_path, capsys) -> Non
         download_result=(2, 0, 0, [], None),
     )
 
-    _run(["music", "download", "hello", "--pick", "1,2"], monkeypatch, engine)
+    _run(
+        ["music", "download", "--platform", "netease", "hello", "--pick", "1,2"],
+        monkeypatch,
+        engine,
+    )
 
     call = engine.download_calls[0]
     assert len(call["tracks"]) == 2
@@ -415,7 +429,11 @@ def test_download_reports_failed_pairs(monkeypatch, capsys) -> None:
         download_result=(0, 0, 1, [("Song 1", "vip")], None),
     )
 
-    _run(["music", "download", "hello", "--pick", "1"], monkeypatch, engine)
+    _run(
+        ["music", "download", "--platform", "netease", "hello", "--pick", "1"],
+        monkeypatch,
+        engine,
+    )
 
     combined = capsys.readouterr()
     text = combined.out + combined.err
@@ -431,7 +449,9 @@ def test_download_requires_pick_or_yes_when_non_interactive(
     monkeypatch.setattr(music.sys, "stdin", SimpleNamespace(isatty=lambda: False))
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(["music", "download", "hello"], monkeypatch, engine)
+        _run(
+            ["music", "download", "--platform", "netease", "hello"], monkeypatch, engine
+        )
 
     assert excinfo.value.code == 2
     assert "--pick" in capsys.readouterr().err
@@ -442,7 +462,11 @@ def test_download_login_expired_shows_hint(monkeypatch, capsys) -> None:
     engine = FakeEngine(provider=provider)
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(["music", "download", "hello", "--yes"], monkeypatch, engine)
+        _run(
+            ["music", "download", "--platform", "netease", "hello", "--yes"],
+            monkeypatch,
+            engine,
+        )
 
     assert excinfo.value.code == 1
     assert "expired" in capsys.readouterr().err.lower()
@@ -453,7 +477,11 @@ def test_download_search_failure_exits_one(monkeypatch, capsys) -> None:
     engine = FakeEngine(provider=provider)
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(["music", "download", "hello", "--yes"], monkeypatch, engine)
+        _run(
+            ["music", "download", "--platform", "netease", "hello", "--yes"],
+            monkeypatch,
+            engine,
+        )
 
     assert excinfo.value.code == 1
     assert "Search failed" in capsys.readouterr().err
@@ -462,7 +490,11 @@ def test_download_search_failure_exits_one(monkeypatch, capsys) -> None:
 def test_download_no_results_returns_cleanly(monkeypatch, capsys) -> None:
     engine = FakeEngine(provider=FakeProvider([]))
 
-    _run(["music", "download", "hello", "--yes"], monkeypatch, engine)
+    _run(
+        ["music", "download", "--platform", "netease", "hello", "--yes"],
+        monkeypatch,
+        engine,
+    )
 
     assert engine.download_calls == []
     assert "No results found" in capsys.readouterr().err
@@ -472,7 +504,11 @@ def test_download_keyword_flag_matches_positional(monkeypatch, tmp_path) -> None
     provider = FakeProvider([_track(1)])
     engine = FakeEngine(provider=provider, settings={"out_dir": str(tmp_path)})
 
-    _run(["music", "download", "--keyword", "flag-kw", "--yes"], monkeypatch, engine)
+    _run(
+        ["music", "download", "--platform", "netease", "--keyword", "flag-kw", "--yes"],
+        monkeypatch,
+        engine,
+    )
 
     assert engine.download_calls[0]["tracks"]
 
@@ -610,7 +646,7 @@ def test_create_provider_generic_failure_exits_one(monkeypatch, capsys) -> None:
     engine = _BrokenCreate()
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(["music", "search", "hello"], monkeypatch, engine)
+        _run(["music", "search", "--platform", "netease", "hello"], monkeypatch, engine)
 
     assert excinfo.value.code == 1
     assert "Could not start this platform" in capsys.readouterr().err
@@ -634,7 +670,26 @@ def test_search_empty_keyword_is_usage_error(monkeypatch, capsys) -> None:
     engine = FakeEngine()
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(["music", "search", "   "], monkeypatch, engine)
+        _run(["music", "search", "--platform", "netease", "   "], monkeypatch, engine)
 
     assert excinfo.value.code == 2
     assert "No keyword" in capsys.readouterr().err
+
+
+def test_download_with_all_platforms_uses_mixed_downloader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--platform all`` downloads each track on its own provider."""
+    track = _track(1)
+    engine = FakeEngine()
+    engine.download_result = (1, 0, 0, [], [])
+
+    monkeypatch.setattr(
+        music, "_search_all", lambda keyword, limit, *, show_status: ([track], 1, [])
+    )
+
+    _run(["music", "download", "hello", "--yes"], monkeypatch, engine)
+
+    assert engine.download_calls == []
+    assert len(engine.mixed_calls) == 1
+    assert engine.mixed_calls[0]["tracks"] == [track]

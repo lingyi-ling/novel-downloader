@@ -154,7 +154,7 @@ def test_search_json_prints_valid_payload(
     engine = FakeEngine(provider=provider, labels=[("netease", "NetEase")])
 
     _run(
-        ["music", "search", "hello", "--json", "--limit", "2"],
+        ["music", "search", "hello", "--platform", "netease", "--json", "--limit", "2"],
         monkeypatch,
         engine,
     )
@@ -177,6 +177,7 @@ def test_search_json_prints_valid_payload(
         "duration_s",
         "vip",
         "platform",
+        "sources",
     }
     assert first == {
         "index": 1,
@@ -187,6 +188,7 @@ def test_search_json_prints_valid_payload(
         "duration_s": 185,
         "vip": False,
         "platform": "netease",
+        "sources": [],
     }
 
     # The provider was queried once with the normalized arguments.
@@ -200,7 +202,11 @@ def test_search_json_empty_result_is_still_valid_json(
 ) -> None:
     engine = FakeEngine(provider=FakeProvider([], total=0))
 
-    _run(["music", "search", "nothing", "--json"], monkeypatch, engine)
+    _run(
+        ["music", "search", "nothing", "--platform", "netease", "--json"],
+        monkeypatch,
+        engine,
+    )
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["tracks"] == []
@@ -266,3 +272,35 @@ def test_unknown_platform_exits_non_zero(
     stderr = capsys.readouterr().err
     assert "unknown-platform" in stderr
     assert "netease" in stderr
+
+
+def test_search_defaults_to_every_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No ``--platform`` means an aggregate (``all``) search."""
+    engine = FakeEngine(provider=FakeProvider([], total=0))
+    outcome = SimpleNamespace(
+        platform="netease",
+        ok=True,
+        count=1,
+        error="",
+        as_dict=lambda: {"platform": "netease", "ok": True, "count": 1, "error": ""},
+    )
+    calls: list[tuple[str, int]] = []
+
+    def fake_search_all(keyword: str, limit: int, *, show_status: bool):
+        calls.append((keyword, limit))
+        return [_track(1)], 1, [outcome]
+
+    monkeypatch.setattr(music, "_search_all", fake_search_all)
+
+    _run(["music", "search", "hello", "--json"], monkeypatch, engine)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["platform"] == "all"
+    assert payload["platforms"] == [
+        {"platform": "netease", "ok": True, "count": 1, "error": ""}
+    ]
+    assert payload["tracks"][0]["sources"] == []
+    assert calls == [("hello", 20)]

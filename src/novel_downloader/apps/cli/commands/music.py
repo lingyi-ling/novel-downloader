@@ -53,6 +53,7 @@ class _MusicEngine:
     login_expired: type[BaseException]
     health_check: Any
     export_m3u: Any
+    download_mixed: Any
 
     def labels(self) -> list[tuple[str, str]]:
         """Return ``(key, label)`` pairs for every registered platform."""
@@ -79,6 +80,7 @@ def _load_engine() -> _MusicEngine:
         from novel_downloader.apps.music.downloader import (
             DownloadOptions,
             download_many,
+            download_mixed,
             export_m3u,
         )
         from novel_downloader.apps.music.paths import default_download_dir
@@ -103,6 +105,7 @@ def _load_engine() -> _MusicEngine:
         login_expired=LoginExpired,
         health_check=health_check,
         export_m3u=export_m3u,
+        download_mixed=download_mixed,
     )
 
 
@@ -193,29 +196,74 @@ def _format_duration(seconds: int) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def _track_rows(tracks: list[Any]) -> list[list[str]]:
+def _search_all(
+    keyword: str,
+    limit: int,
+    *,
+    show_status: bool,
+) -> tuple[list[Any], int, list[Any]]:
+    """Cross-platform search; returns ``(merged_tracks, total, outcomes)``."""
+    from novel_downloader.apps.music.aggregate import search_all_isolated
+
+    try:
+        if show_status:
+            with ui.status(
+                t("Searching every platform for '{keyword}'...").format(keyword=keyword)
+            ):
+                result = search_all_isolated(keyword, limit=limit)
+        else:
+            result = search_all_isolated(keyword, limit=limit)
+    except Exception as exc:
+        ui.error(t("Search failed: {err}").format(err=exc))
+        raise SystemExit(1) from exc
+    return list(result.tracks), int(result.total), list(result.platforms)
+
+
+def _is_all_platforms(platform: str) -> bool:
+    """Whether the request asks for every platform (``all`` or empty)."""
+    from novel_downloader.apps.music.aggregate import is_all_platforms
+
+    return is_all_platforms(platform)
+
+
+def _sources_text(track: Any) -> str:
+    """Compact ``netease,qq`` source list for CLI tables."""
+    sources = [str(key) for key in (getattr(track, "sources", None) or []) if key]
+    if not sources:
+        provider = str(getattr(track, "provider", "") or "")
+        return provider
+    if len(sources) <= 3:
+        return ",".join(sources)
+    return ",".join(sources[:3]) + f"+{len(sources) - 3}"
+
+
+def _track_rows(tracks: list[Any], *, show_sources: bool = False) -> list[list[str]]:
     """Build the table rows shared by the search and picker views."""
     rows: list[list[str]] = []
     for index, track in enumerate(tracks, 1):
-        rows.append(
-            [
-                str(index),
-                str(track.name),
-                str(track.artists),
-                str(track.album),
-                _format_duration(int(track.duration_s or 0)),
-                t("VIP") if track.vip else "-",
-            ]
-        )
+        row = [
+            str(index),
+            str(track.name),
+            str(track.artists),
+            str(track.album),
+            _format_duration(int(track.duration_s or 0)),
+            t("VIP") if track.vip else "-",
+        ]
+        if show_sources:
+            row.append(_sources_text(track))
+        rows.append(row)
     return rows
 
 
-def _render_tracks(tracks: list[Any]) -> None:
+def _render_tracks(tracks: list[Any], *, show_sources: bool = False) -> None:
     """Print the search result table."""
+    headers = [t("#"), t("Title"), t("Artist"), t("Album"), t("Duration"), t("VIP")]
+    if show_sources:
+        headers.append(t("Sources"))
     ui.render_table(
         t("Search results"),
-        [t("#"), t("Title"), t("Artist"), t("Album"), t("Duration"), t("VIP")],
-        _track_rows(tracks),
+        headers,
+        _track_rows(tracks, show_sources=show_sources),
     )
 
 
@@ -230,6 +278,7 @@ def _track_payload(index: int, track: Any) -> dict[str, Any]:
         "duration_s": int(track.duration_s or 0),
         "vip": bool(track.vip),
         "platform": str(getattr(track, "provider", "")),
+        "sources": [str(key) for key in (getattr(track, "sources", None) or []) if key],
     }
 
 
@@ -408,9 +457,11 @@ class MusicSearchCmd(Command):
         parser.add_argument("keyword", help=t("Search keyword"))
         parser.add_argument(
             "--platform",
-            default="netease",
+            default="all",
             metavar="KEY",
-            help=t("Music platform key (default: netease)."),
+            help=t(
+                "Music platform key, or 'all' to search every platform (default: all)."
+            ),
         )
         parser.add_argument(
             "--limit",
@@ -439,19 +490,25 @@ class MusicSearchCmd(Command):
         limit = max(1, int(args.limit))
         as_json = bool(args.as_json)
 
-        provider = _create_provider(engine, platform)
-        _print_platform_note(engine, platform)
-        tracks, total = _search(
-            engine,
-            provider,
-            keyword,
-            limit,
-            show_status=not as_json,
-        )
+        if _is_all_platforms(platform):
+            tracks, total, outcomes = _search_all(
+                keyword, limit, show_status=not as_json
+            )
+        else:
+            provider = _create_provider(engine, platform)
+            _print_platform_note(engine, platform)
+            tracks, total = _search(
+                engine,
+                provider,
+                keyword,
+                limit,
+                show_status=not as_json,
+            )
+            outcomes = []
 
         if as_json:
-            payload = {
-                "platform": platform,
+            payload: dict[str, Any] = {
+                "platform": platform or "all",
                 "keyword": keyword,
                 "total": total,
                 "tracks": [
@@ -459,6 +516,8 @@ class MusicSearchCmd(Command):
                     for index, track in enumerate(tracks, 1)
                 ],
             }
+            if outcomes:
+                payload["platforms"] = [item.as_dict() for item in outcomes]
             ui.emit(json.dumps(payload, ensure_ascii=False, indent=2))
             return
 
@@ -471,7 +530,14 @@ class MusicSearchCmd(Command):
                 count=len(tracks), keyword=keyword
             )
         )
-        _render_tracks(tracks)
+        for outcome in outcomes:
+            if not outcome.ok:
+                ui.warn(
+                    t("Platform {platform} failed: {error}").format(
+                        platform=outcome.platform, error=outcome.error
+                    )
+                )
+        _render_tracks(tracks, show_sources=_is_all_platforms(platform))
 
 
 class MusicDownloadCmd(Command):
@@ -493,9 +559,11 @@ class MusicDownloadCmd(Command):
         )
         parser.add_argument(
             "--platform",
-            default="netease",
+            default="all",
             metavar="KEY",
-            help=t("Music platform key (default: netease)."),
+            help=t(
+                "Music platform key, or 'all' to search every platform (default: all)."
+            ),
         )
         parser.add_argument(
             "--limit",
@@ -549,9 +617,14 @@ class MusicDownloadCmd(Command):
         level = str(args.level or settings.get("level") or "exhigh")
         workers = max(1, int(settings.get("workers") or 3))
 
-        provider = _create_provider(engine, platform)
-        _print_platform_note(engine, platform)
-        tracks, _total = _search(engine, provider, keyword, limit, show_status=True)
+        all_platforms = _is_all_platforms(platform)
+        provider = None
+        if all_platforms:
+            tracks, _total, _outcomes = _search_all(keyword, limit, show_status=True)
+        else:
+            provider = _create_provider(engine, platform)
+            _print_platform_note(engine, platform)
+            tracks, _total = _search(engine, provider, keyword, limit, show_status=True)
         if not tracks:
             ui.warn(t("No results found for '{keyword}'.").format(keyword=keyword))
             return
@@ -561,7 +634,7 @@ class MusicDownloadCmd(Command):
                 count=len(tracks), keyword=keyword
             )
         )
-        _render_tracks(tracks)
+        _render_tracks(tracks, show_sources=all_platforms)
 
         if args.pick:
             selected = _pick_tracks(tracks, str(args.pick))
@@ -579,7 +652,11 @@ class MusicDownloadCmd(Command):
             ui.warn(t("Cancelled."))
             return
 
-        if platform == "netease" and not _is_logged_in(provider):
+        if (
+            platform == "netease"
+            and provider is not None
+            and not _is_logged_in(provider)
+        ):
             ui.warn(
                 t(
                     "NetEase is not logged in; member-only tracks may fail. "
@@ -603,13 +680,22 @@ class MusicDownloadCmd(Command):
         progress = ui.ProgressUI(prefix=t("Downloading"), unit=t("song"))
         progress.start()
         try:
-            ok, skip, fail, failed_pairs, _failed = engine.download_many(
-                provider,
-                selected,
-                options,
-                workers=workers,
-                on_tick=progress.update_sync,
-            )
+            if all_platforms:
+                ok, skip, fail, failed_pairs, _failed = engine.download_mixed(
+                    engine.create,
+                    selected,
+                    options,
+                    workers=workers,
+                    on_tick=progress.update_sync,
+                )
+            else:
+                ok, skip, fail, failed_pairs, _failed = engine.download_many(
+                    provider,
+                    selected,
+                    options,
+                    workers=workers,
+                    on_tick=progress.update_sync,
+                )
         except Exception as exc:
             if isinstance(exc, engine.login_expired):
                 _login_expired_hint()

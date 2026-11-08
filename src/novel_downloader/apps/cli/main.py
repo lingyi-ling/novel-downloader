@@ -72,6 +72,13 @@ def _notify_update(args: argparse.Namespace) -> None:
 
 
 def cli_main() -> None:
+    # Frozen builds (PyInstaller) must re-enter through this entry point when a
+    # multiprocessing child is spawned; the music aggregate search relies on
+    # that to keep a stuck platform request from delaying CLI exit.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
+
     _preparse_language()
 
     # Imported lazily so localized ``help`` strings pick up ``--lang``.
