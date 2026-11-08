@@ -30,12 +30,14 @@ there: nothing here executes, unpacks or replaces a running program.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
+import os
 import platform
 import re
-import shutil
+import sys
 import time
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
@@ -204,6 +206,32 @@ def detect_platform() -> str:
     return f"{os_name}-{arch}"
 
 
+def detect_install_shape() -> str:
+    """
+    How this copy was installed: ``"installer"``, ``"portable"`` or ``"source"``.
+
+    The installer writes to ``%LOCALAPPDATA%\\Programs\\NovelDownloader``;
+    any other frozen executable is a portable extraction.  A source checkout
+    (not frozen) reports ``"source"``.  Asset selection uses this so a portable
+    build replaces its own folder instead of silently installing a second copy.
+    """
+    if not getattr(sys, "frozen", False):
+        return "source"
+    try:
+        exe = Path(sys.executable).resolve()
+    except OSError:
+        return "portable"
+    local = str(os.environ.get("LOCALAPPDATA") or "").strip()
+    if local:
+        try:
+            installed = (Path(local) / "Programs" / "NovelDownloader").resolve()
+            if exe.is_relative_to(installed):
+                return "installer"
+        except (OSError, ValueError):
+            pass
+    return "portable"
+
+
 def _find_asset(
     assets: Sequence[ReleaseAsset],
     *,
@@ -243,7 +271,10 @@ def _find_android_asset(assets: Sequence[ReleaseAsset]) -> ReleaseAsset | None:
 
 
 def select_asset(
-    assets: Sequence[ReleaseAsset], platform_tag: str
+    assets: Sequence[ReleaseAsset],
+    platform_tag: str,
+    *,
+    shape: str | None = None,
 ) -> ReleaseAsset | None:
     """
     Pick the release asset that belongs to ``platform_tag``.
@@ -252,8 +283,10 @@ def select_asset(
 
     * Android: the single ``novel-downloader-<ver>-android.apk``, or the first
       project APK when the release publishes per-ABI names;
-    * Windows x64: the ``NovelDownloader-setup-<ver>-x64.exe`` installer,
-      falling back to the desktop bundle zip;
+    * Windows x64 from the installer: the ``NovelDownloader-setup-<ver>-x64.exe``
+      installer, falling back to the desktop bundle zip;
+    * Windows x64 portable: the desktop bundle zip first (it replaces the
+      portable folder), installer only as a fallback;
     * everything else: the ``NovelDownloader-<ver>-<platform>.zip`` bundle.
 
     CLI/API bundles are never returned: they are not what the desktop client
@@ -262,6 +295,7 @@ def select_asset(
 
     :param assets: every asset of the release, in payload order.
     :param platform_tag: a tag as produced by :func:`detect_platform`.
+    :param shape: :func:`detect_install_shape` result, when known.
     :return: the matching asset, or ``None``.
     """
     tag = str(platform_tag or "").strip().lower()
@@ -274,8 +308,16 @@ def select_asset(
         installer = _find_asset(
             assets, prefix="noveldownloader-setup-", suffix="-x64.exe"
         )
+        bundle = _find_asset(assets, prefix="noveldownloader-", suffix=f"-{tag}.zip")
+        if str(shape or "").strip().lower() == "portable" and bundle is not None:
+            # A portable copy must replace its own folder, not install a
+            # second copy into %LOCALAPPDATA%.
+            return bundle
         if installer is not None:
             return installer
+        if bundle is not None:
+            return bundle
+        return None
     return _find_asset(assets, prefix="noveldownloader-", suffix=f"-{tag}.zip")
 
 
@@ -326,6 +368,7 @@ def parse_manifest(
     *,
     current: str = "",
     platform_tag: str | None = None,
+    shape: str | None = None,
 ) -> UpdateInfo:
     """
     Interpret a GitHub release payload (or a build ``manifest.json``).
@@ -361,7 +404,7 @@ def parse_manifest(
     frozen = tuple(assets)
 
     tag_platform = platform_tag if platform_tag else detect_platform()
-    asset = select_asset(frozen, tag_platform) if tag_platform else None
+    asset = select_asset(frozen, tag_platform, shape=shape) if tag_platform else None
 
     return UpdateInfo(
         current=str(current or ""),
@@ -510,6 +553,9 @@ def download_asset(
     *,
     root: Path | None = None,
     timeout: float = 30.0,
+    resume: bool = False,
+    progress: Callable[[int, int], None] | None = None,
+    attempts: int = 1,
 ) -> Path:
     """
     Download one release asset to ``dest`` and verify its checksum.
@@ -533,9 +579,17 @@ def download_asset(
     :param root: directory the output must stay inside.
     :param timeout: request timeout in seconds.  Mirror probes are capped at
         :data:`DEFAULT_TIMEOUT` so a dead proxy cannot stall the transfer.
+    :param resume: reuse an existing ``.part`` file and continue with an HTTP
+        ``Range`` request.  The updater enables this: a 60 MB installer often
+        dies halfway on a flaky link, and re-downloading from zero wastes the
+        whole transfer.
+    :param progress: optional ``(received, total)`` callback; ``total`` is 0
+        when the server does not report a length.
+    :param attempts: how many times a failed transfer is retried.  With
+        ``resume`` the retry continues where the previous one stopped.
     :return: the path actually written.
     :raises ValueError: for a non-HTTP URL, an escaping path or a bad digest.
-    :raises OSError: when the transfer itself fails.
+    :raises OSError: when the transfer itself fails after every attempt.
     """
     if not _is_http_url(url):
         raise ValueError(f"refusing non-HTTP(S) update URL: {url!r}")
@@ -560,25 +614,73 @@ def download_asset(
         timeout=min(timeout, DEFAULT_TIMEOUT),
     )
 
-    try:
-        request = urllib.request.Request(  # noqa: S310 - validated above
-            resolved_url, headers={"User-Agent": _USER_AGENT}
-        )
-        with (
-            urllib.request.urlopen(request, timeout=timeout) as response,  # noqa: S310
-            part.open("wb") as handle,
-        ):
-            shutil.copyfileobj(response, handle, _CHUNK_SIZE)
-    except Exception:
-        part.unlink(missing_ok=True)
-        raise
+    def report(received: int, total: int) -> None:
+        if progress is None:
+            return
+        with contextlib.suppress(Exception):
+            progress(received, total)
 
-    if expected_sha256 and not verify_sha256(part, expected_sha256):
-        part.unlink(missing_ok=True)
-        raise ValueError(f"checksum mismatch for {filename}")
-
-    part.replace(final)
-    return final
+    tries = max(1, int(attempts))
+    last_error: BaseException | None = None
+    for attempt in range(1, tries + 1):
+        offset = 0
+        if resume and part.is_file():
+            offset = max(0, part.stat().st_size)
+        headers = {"User-Agent": _USER_AGENT}
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
+        try:
+            request = urllib.request.Request(  # noqa: S310 - validated above
+                resolved_url, headers=headers
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+                # A server that ignores Range answers 200 with the full body.
+                appending = offset > 0 and getattr(response, "status", 0) == 206
+                if not appending:
+                    offset = 0
+                resp_headers = getattr(response, "headers", None)
+                length = (
+                    resp_headers.get("Content-Length")
+                    if resp_headers is not None
+                    else None
+                )
+                try:
+                    total = offset + int(length) if length else 0
+                except (TypeError, ValueError):
+                    total = 0
+                received = offset
+                report(received, total)
+                with part.open("ab" if appending else "wb") as handle:
+                    while True:
+                        chunk = response.read(_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        received += len(chunk)
+                        report(received, total)
+            if expected_sha256 and not verify_sha256(part, expected_sha256):
+                # A stale partial from an older release can make a resumed
+                # transfer fail its digest; it is useless either way.
+                part.unlink(missing_ok=True)
+                raise ValueError(f"checksum mismatch for {filename}")
+            part.replace(final)
+            return final
+        except Exception as exc:  # noqa: BLE001 - retried below
+            if isinstance(exc, ValueError) and "checksum mismatch" in str(exc):
+                # A wrong digest is not transient; do not re-download.
+                raise
+            last_error = exc
+            if attempt >= tries:
+                break
+            if not resume:
+                part.unlink(missing_ok=True)
+            # Keep a verified prefix for the next attempt; a digest failure
+            # already deleted it above.
+            time.sleep(min(5.0, 1.5 * attempt))
+    assert last_error is not None
+    raise OSError(
+        f"update download failed after {tries} attempt(s): {last_error}"
+    ) from last_error
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +760,7 @@ def check_for_update(
     *,
     slug: str = DEFAULT_REPO,
     platform_tag: str | None = None,
+    shape: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     opener: Callable[[str, float], Any] | None = None,
     now: float | None = None,
@@ -679,7 +782,7 @@ def check_for_update(
     if manifest is not None:
         try:
             info = parse_update_manifest(
-                manifest, current=current, platform_tag=platform_tag
+                manifest, current=current, platform_tag=platform_tag, shape=shape
             )
         except ValueError as exc:
             if pinned:
@@ -700,7 +803,9 @@ def check_for_update(
     if payload is None:
         return UpdateCheck(info=None, error="unreachable", checked_at=stamp)
     try:
-        info = parse_manifest(payload, current=current, platform_tag=platform_tag)
+        info = parse_manifest(
+            payload, current=current, platform_tag=platform_tag, shape=shape
+        )
     except Exception:  # noqa: BLE001 - parse_manifest is defensive already
         return UpdateCheck(info=None, error="malformed", checked_at=stamp)
     return UpdateCheck(info=info, error=None, checked_at=stamp, source="api")
@@ -800,7 +905,10 @@ def _manifest_asset(entry: Any) -> ReleaseAsset | None:
 
 
 def select_manifest_asset(
-    platforms: Mapping[str, Any], platform_tag: str
+    platforms: Mapping[str, Any],
+    platform_tag: str,
+    *,
+    shape: str | None = None,
 ) -> ReleaseAsset | None:
     """
     Pick the entry for *platform_tag* from a manifest's ``platforms`` map.
@@ -810,7 +918,10 @@ def select_manifest_asset(
     the shapes are tried in a fixed order.
     """
     tag = platform_tag.strip().lower()
-    candidates = [f"{tag}-{shape}" for shape in _PLATFORM_SHAPES]
+    order = _PLATFORM_SHAPES
+    if str(shape or "").strip().lower() == "portable":
+        order = ("portable", "installer", "cli", "api")
+    candidates = [f"{tag}-{item}" for item in order]
     candidates.append(tag)
     for key in candidates:
         asset = _manifest_asset(platforms.get(key))
@@ -824,6 +935,7 @@ def parse_update_manifest(
     *,
     current: str = "",
     platform_tag: str | None = None,
+    shape: str | None = None,
 ) -> UpdateInfo:
     """
     Interpret an updater manifest, raising :class:`ValueError` when unusable.
@@ -849,7 +961,7 @@ def parse_update_manifest(
         raise ValueError("manifest has no platforms")
 
     tag = platform_tag if platform_tag else detect_platform()
-    asset = select_manifest_asset(platforms, tag) if tag else None
+    asset = select_manifest_asset(platforms, tag, shape=shape) if tag else None
 
     notes = payload.get("notes_url")
     notes_url = notes.strip() if isinstance(notes, str) and notes.strip() else None

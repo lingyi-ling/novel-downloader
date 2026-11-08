@@ -24,6 +24,7 @@ import dataclasses
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -40,6 +41,7 @@ from novel_downloader.apps.common.updater import (
     DEFAULT_TIMEOUT,
     UpdateInfo,
     check_for_update,
+    detect_install_shape,
     detect_platform,
     download_asset,
     parse_manifest,
@@ -108,6 +110,44 @@ _INSTALL_EXIT_DELAY = 0.25
 #: Grace period before retrying a window close that raised, so a GUI thread
 #: still delivering the bridge reply cannot make us give up too early.
 _INSTALL_EXIT_RETRY_DELAY = 1.0
+#: Grace period for user data / old update files: ``.part`` leftovers expire
+#: after a day, finished downloads after a week.
+_PRUNE_PART_AGE = 24 * 3600.0
+_PRUNE_FILE_AGE = 7 * 24 * 3600.0
+#: Helper that replaces a *portable* copy after the app exits.  PowerShell is
+#: shipped with Windows 10/11, so this needs no extra runtime; arguments are
+#: always passed as separate argv entries (never parsed from a command line).
+_PORTABLE_UPDATE_SCRIPT = r"""param(
+    [Parameter(Mandatory=$true)][int]$ProcessId,
+    [Parameter(Mandatory=$true)][string]$Zip,
+    [Parameter(Mandatory=$true)][string]$AppDir,
+    [Parameter(Mandatory=$true)][string]$Exe
+)
+$ErrorActionPreference = 'Stop'
+# Wait for the running instance to release its executable and DLLs.
+for ($i = 0; $i -lt 240; $i++) {
+    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 500
+}
+$temp = Join-Path $env:TEMP ('noveldl-update-' + [guid]::NewGuid().ToString('N'))
+Expand-Archive -LiteralPath $Zip -DestinationPath $temp -Force
+$items = @(Get-ChildItem -LiteralPath $temp)
+$source = $temp
+if ($items.Count -eq 1 -and $items[0].PSIsContainer) { $source = $items[0].FullName }
+# A slow antivirus scan can keep a file locked for a moment; retry briefly.
+for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    try {
+        Copy-Item -Path (Join-Path $source '*') -Destination $AppDir -Recurse -Force
+        break
+    } catch {
+        if ($attempt -eq 9) { throw }
+        Start-Sleep -Seconds 1
+    }
+}
+Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $Zip -Force -ErrorAction SilentlyContinue
+Start-Process -FilePath (Join-Path $AppDir $Exe)
+"""
 
 # ``_version_tuple`` is the pre-existing name used by the bridge tests; the
 # implementation lives in :mod:`apps.common.updater` so the update logic has a
@@ -675,6 +715,38 @@ def _updates_dir() -> Path:
     return path
 
 
+def _prune_updates(updates_dir: Path) -> None:
+    """
+    Delete stale update artefacts so ``updates/`` cannot grow forever.
+
+    Interrupted ``.part`` files live for a day (a retry may still use them),
+    finished installers/zips for a week.  Nothing here is fatal: a file that
+    cannot be removed (still mapped by a running installer) is simply left for
+    the next pass.
+    """
+    now = time.time()
+    try:
+        entries = list(updates_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        age = now - stat.st_mtime
+        limit = _PRUNE_PART_AGE if entry.suffix.lower() == ".part" else _PRUNE_FILE_AGE
+        if age <= limit:
+            continue
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except OSError:
+            logger.debug("Could not prune %s", entry, exc_info=True)
+
+
 def _inside_dir(path: Path, root: Path) -> bool:
     """Whether ``path`` resolves inside ``root`` (``False`` on I/O errors)."""
     try:
@@ -801,6 +873,17 @@ class ApiBridge:
         self._download_guard = threading.Lock()
         self._download_active = False
         self._downloaded: _DownloadedUpdate | None = None
+        # Byte-level transfer progress, polled by the update bar.  The auto
+        # download runs in the background, so without this the page can only
+        # show "Downloading…" for however long a 60 MB asset takes.
+        self._update_download_state: dict[str, Any] = {
+            "active": False,
+            "ok": False,
+            "received": 0,
+            "total": 0,
+            "error": None,
+            "path": None,
+        }
         self._exit_callback: Callable[[], None] | None = None
         # progressive search state, keyed by search id (polled by the page)
         self._searches: dict[str, dict[str, Any]] = {}
@@ -1315,6 +1398,7 @@ class ApiBridge:
                 current,
                 slug=DEFAULT_REPO,
                 platform_tag=platform_tag,
+                shape=detect_install_shape(),
                 timeout=_UPDATE_TIMEOUT,
             )
             cache = _UpdateCache(
@@ -1374,9 +1458,13 @@ class ApiBridge:
     def _download_update(self) -> dict[str, Any]:
         """Implementation of :meth:`download_update` (may raise)."""
         with self._download_guard:
-            if self._download_active:
-                return self._download_error(t("An update download is already running"))
-            self._download_active = True
+            busy = self._download_active
+            if not busy:
+                self._download_active = True
+        if busy:
+            # Not inside the lock: ``_download_error`` updates the shared state
+            # under the same non-reentrant lock.
+            return self._download_error(t("An update download is already running"))
         try:
             with self._update_guard:
                 cache = self._update_cache
@@ -1402,7 +1490,28 @@ class ApiBridge:
                 )
 
             updates_dir = _updates_dir()
+            _prune_updates(updates_dir)
             name = Path(str(asset.name).replace("\\", "/")).name or "update.bin"
+            with self._download_guard:
+                self._update_download_state = {
+                    "active": True,
+                    "ok": False,
+                    "received": 0,
+                    "total": int(asset.size or 0),
+                    "error": None,
+                    "path": None,
+                }
+
+            def on_progress(received: int, total: int) -> None:
+                # Called once per 64 KiB chunk; updating the shared dict is
+                # cheap, but the page only polls twice a second, so there is
+                # no need to touch anything else here.
+                with self._download_guard:
+                    state = self._update_download_state
+                    state["received"] = int(received)
+                    if total > 0:
+                        state["total"] = int(total)
+
             try:
                 written = download_asset(
                     asset.url,
@@ -1410,6 +1519,9 @@ class ApiBridge:
                     expected_sha256=digest,
                     root=updates_dir,
                     timeout=_UPDATE_DOWNLOAD_TIMEOUT,
+                    resume=True,
+                    progress=on_progress,
+                    attempts=3,
                 )
             except (ValueError, OSError) as exc:
                 logger.debug("Asset transfer failed: %s", exc)
@@ -1438,6 +1550,14 @@ class ApiBridge:
                 self._downloaded = _DownloadedUpdate(
                     path=final, sha256=digest, name=final.name
                 )
+                self._update_download_state = {
+                    "active": False,
+                    "ok": True,
+                    "received": int(final.stat().st_size),
+                    "total": int(final.stat().st_size),
+                    "error": None,
+                    "path": str(final),
+                }
             return {
                 "ok": True,
                 "path": str(final),
@@ -1447,11 +1567,80 @@ class ApiBridge:
         finally:
             with self._download_guard:
                 self._download_active = False
+                self._update_download_state["active"] = False
 
-    @staticmethod
-    def _download_error(message: str) -> dict[str, Any]:
+    def _download_error(self, message: str) -> dict[str, Any]:
         """A failed :meth:`download_update` reply."""
+        with self._download_guard:
+            state = self._update_download_state
+            self._update_download_state = {
+                "active": False,
+                "ok": False,
+                "received": int(state.get("received") or 0),
+                "total": int(state.get("total") or 0),
+                "error": message,
+                "path": None,
+            }
         return {"ok": False, "path": None, "error": message}
+
+    def update_download_state(self) -> dict[str, Any]:
+        """
+        Byte-level progress of the background update download.
+
+        :return: ``{"active", "ok", "received", "total", "error", "path"}``;
+            ``total`` is 0 when the server does not publish a length.
+        """
+        with self._download_guard:
+            state = dict(self._update_download_state)
+        try:
+            received = int(state.get("received") or 0)
+            total = int(state.get("total") or 0)
+            state["percent"] = (
+                max(0, min(100, int(received * 100 / total))) if total else 0
+            )
+        except (TypeError, ValueError):
+            state["percent"] = 0
+        return state
+
+    def download_update_async(self) -> dict[str, Any]:
+        """
+        Start the update download on a worker thread and return immediately.
+
+        The page polls :meth:`update_download_state` for bytes/percent, so the
+        update bar stays responsive while a 60 MB asset is in flight.  A second
+        call while a transfer is running reports ``started: False``.
+        """
+        with self._download_guard:
+            if self._download_active:
+                return {
+                    "started": False,
+                    "error": t("An update download is already running"),
+                }
+            self._download_active = True
+            self._update_download_state = {
+                "active": True,
+                "ok": False,
+                "received": 0,
+                "total": 0,
+                "error": None,
+                "path": None,
+            }
+        # ``_download_update`` claims the same flag; release it here first so
+        # the worker does not see its own reservation as a concurrent call.
+        with self._download_guard:
+            self._download_active = False
+
+        def worker() -> None:
+            try:
+                self._download_update()
+            except Exception:  # noqa: BLE001 - surfaced through the state
+                logger.debug("Update download raised", exc_info=True)
+                self._download_error(t("Update download failed"))
+
+        threading.Thread(
+            target=worker, name="novel-desktop-update-dl", daemon=True
+        ).start()
+        return {"started": True, "error": None}
 
     def _install_update(self) -> dict[str, Any]:
         """Implementation of :meth:`install_update` (may raise)."""
@@ -1483,7 +1672,8 @@ class ApiBridge:
                 ),
             }
         target = record.path
-        if target.suffix.lower() != ".exe":
+        suffix = target.suffix.lower()
+        if suffix not in {".exe", ".zip"}:
             self._release_claim(record)
             return {
                 "ok": False,
@@ -1520,6 +1710,9 @@ class ApiBridge:
                 ),
             }
 
+        if suffix == ".zip":
+            return self._launch_portable_update(record, updates_dir)
+
         try:
             # Fixed argument vector: no shell, no user-supplied text.  A list
             # argument keeps an installer path containing spaces intact
@@ -1542,6 +1735,79 @@ class ApiBridge:
             "ok": True,
             "error": None,
             "restarting": True,
+            "pid": pid if isinstance(pid, int) else None,
+        }
+
+    def _launch_portable_update(
+        self, record: _DownloadedUpdate, updates_dir: Path
+    ) -> dict[str, Any]:
+        """Replace this portable folder after the app exits, then restart it.
+
+        A running executable cannot overwrite itself, so a small PowerShell
+        helper waits for this process to end, expands the verified zip over the
+        current folder and starts the new executable.  Only reachable for a
+        ``portable`` install; the installer build keeps using Inno Setup.
+        """
+
+        def refuse(message: str) -> dict[str, Any]:
+            """Give the download back so a failed attempt can be retried."""
+            self._release_claim(record)
+            return {"ok": False, "error": message}
+
+        if detect_install_shape() != "portable":
+            return refuse(
+                t("This update is for a portable copy; use the installer instead")
+            )
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            return refuse(
+                t(
+                    "PowerShell was not found; please extract the downloaded "
+                    "file over this folder manually"
+                )
+            )
+        try:
+            exe = Path(sys.executable).resolve()
+            app_dir = exe.parent
+        except OSError as exc:
+            return refuse(format_error(exc))
+        script = updates_dir / "_apply_portable_update.ps1"
+        try:
+            script.write_text(_PORTABLE_UPDATE_SCRIPT, encoding="utf-8")
+        except OSError as exc:
+            return refuse(format_error(exc))
+        command = [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            str(script),
+            "-ProcessId",
+            str(os.getpid()),
+            "-Zip",
+            str(record.path),
+            "-AppDir",
+            str(app_dir),
+            "-Exe",
+            exe.name,
+        ]
+        try:
+            process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                command, close_fds=True, shell=False
+            )
+        except OSError as exc:
+            return refuse(format_error(exc))
+        pid = getattr(process, "pid", None)
+        logger.info("Launched the portable update helper (pid=%s)", pid)
+        self._schedule_exit()
+        return {
+            "ok": True,
+            "error": None,
+            "restarting": True,
+            "portable": True,
             "pid": pid if isinstance(pid, int) else None,
         }
 
