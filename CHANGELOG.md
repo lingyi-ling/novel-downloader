@@ -1,3 +1,30 @@
+## v1.23.0 (2026-11-08)
+
+### Feature
+
+- **搜索相关性过滤**：`sort="quality"` 默认丢弃相关性低于 `0.45` 的无关结果，搜「斗破苍穹」不再混入「狂三的轮回之旅」这类 0 相关性噪声（实测 119 条结果最低相关性 0.55）；「斗破苍穹之雷霆震碎」等衍生作（约 0.75）仍保留
+  - 新增 `search(min_relevance=...)`：传 `None` 关闭；`words` / `update` / `title` 等显式排序不过滤
+  - 过滤永不返回空页：全部低于阈值时退回「相关性 > 0」，再不行原样返回
+  - 执行顺序固定为「精确去重 → 排序 → 相关性过滤 → 分组 → limit」，缓存仍存未过滤快照
+- **精确去重**：同站同 `book_id`（无 id 时同站同规范化标题+作者）的重复行自动折叠；跨站重复仍交给「合并同名书」
+- **桌面端「合并同名书」默认开启**：同一本书只占一行，来源站以胶囊展示；`localStorage` 记住用户的选择
+- **桌面端窄窗口详情**：`<1180px` 不再直接隐藏 `#detail`，改为可关闭的底部抽屉（遮罩、关闭按钮、Esc、焦点回归卡片）
+- **桌面端导出歌单**：音乐页新增「导出歌单（.m3u8）」，走新桥方法 `music_export`（镜像 `POST /api/v1/music/export`），导出后显示可复制/打开的路径；下载完成会把本地路径回填到结果行
+- **Android 导出歌单**：音乐页新增导出入口，覆盖无结果 / 全部无本地文件 / 引擎不可用 / 写盘失败；下载完成后按顺序回填 `path`
+
+### Fix
+
+- **搜索取消回收**：超时站点被取消后不再刷 `Task was destroyed but it is pending!`、`Unclosed client session`、`Unclosed connector`；改为有界宽限（0.35s）等任务退出，整体耗时仍有界
+- **内嵌引擎歌单导出必然 500**：`export_m3u()` 返回的是歌单路径，处理器却执行 `int(written)` → `ValueError`。现在 `written` 表示有本地文件的曲目数，`path` 返回真实写入路径（与 REST 契约一致）
+- **站点失败日志降噪**：53 个站点搜索器统一走 `BaseSearcher._log_fetch_failure()`，超时 / 连接失败 / 4xx 记 WARNING，只有真正异常才 ERROR + traceback；`SearchEvent` 的 `failed` 上报不变
+- **westnovel_sub 必然超时**：搜索后端已返回 200 空 body，回退逻辑无上限扫描 150 个 listing 页；现在加 4s 软截止并返回已找到的部分结果
+- **8 个超时站点体检**：mangg_net / dxmwx / esjzone / kadokado / syosetu / westnovel / westnovel_sub / yodu 中 7 个经外部网络核实为**本机 DNS 污染/被墙**，非代码缺陷；mangg_net 模板用真实搜索页验证解析 20/20 正确
+
+### Test
+
+- 新增搜索相关性过滤、精确去重、取消回收、日志级别、站点降级、桌面结构、Android 歌单导出（10 例）等测试
+- 全量 `pytest` **9004 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿；Android `compileDebugKotlin` + `testDebugUnitTest` 通过（232 例）
+
 ## v1.22.1 (2026-11-08)
 
 ### Fix
