@@ -79,6 +79,13 @@ cd android
   已上传且 digest 一致的资产会跳过。
 - `git push` 失败通常重试几轮就好（曾连续失败 6 次后成功）；本机没有 `gh`，GitHub 相关 API 操作用 Python `urllib` + `git credential fill` 取令牌。
 
+### 2026-11-08 起：github.com 被链路拦截
+
+- `git push` 持续报 `Recv failure` / `Failed to connect to github.com:443`；`curl https://github.com/...` 直接返回 **504**（连接 0.1s 就通，说明是中间代理拦截）。`api.github.com` 与 `uploads.github.com` 正常。
+- 应急做法：用 GitHub Git Data API 逐提交创建 blob/tree/commit，再 `PATCH /git/refs/heads/main`。API 创建的提交 sha 与本地不同、**tree 一致**；本地 `main` 会与远端分叉，后续提交继续走 API，别再普通 `git push`（会 non-fast-forward）。
+- `release.py` 的 tag 推送回退会指向本地提交；本地提交不在远端时会 422。绕法：先用 API 把 `refs/tags/vX.Y.Z` 建在远端 head 上，再把 `origin` 临时指向一个含有同名 tag 的本地 bare 仓库（让 `remote_tag_exists` 为真、跳过 tag 推送），带 `--repo` 跑 release，结束后恢复 origin。
+- 本机 `~/.ssh/id_ed25519` 未加入 GitHub：`ssh.github.com:443` 端口可达但 `Permission denied (publickey)`。
+
 ### 官网
 
 - 目录 `website/`（纯静态），线上 <http://43.165.170.43/noveldl/>，服务器路径 `/var/www/noveldl`
