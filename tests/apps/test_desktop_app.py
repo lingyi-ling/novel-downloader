@@ -2471,3 +2471,17 @@ def test_save_prefs_swallows_serialization_failures(
 
     monkeypatch.setattr(wa.json, "dumps", boom)
     wa._save_prefs({"theme": "dark"})  # must not raise
+
+
+def test_result_buttons_read_the_dataset_keys_they_set() -> None:
+    """A card puts the site in ``data-add`` / ``data-follow``.
+
+    Reading ``dataset.site`` instead passed an empty string to ``add_task``,
+    so every Download / Follow click answered "Site and book ID are required"
+    even though the row rendered perfectly.
+    """
+    assert "add.dataset.add" in APP_HTML
+    assert "add.dataset.bid" in APP_HTML
+    assert "fol.dataset.follow" in APP_HTML
+    assert "fol.dataset.bid" in APP_HTML
+    assert "dataset.site" not in APP_HTML

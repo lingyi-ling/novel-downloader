@@ -8,7 +8,7 @@
 ## 0. 一句话现状
 
 - **版本 v1.28.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.28.0>
-- 全量测试 **9056 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
+- 全量测试 **9059 passed / 30 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
