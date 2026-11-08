@@ -487,6 +487,13 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
   color: var(--yellow); background: var(--yellow-bg);
   border-radius: 3px; padding: 1px 5px;
 }
+.src-tags { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; max-width: 220px; flex: none; }
+.src-tag {
+  font-size: 9.5px; font-weight: 600; line-height: 1.5;
+  color: var(--text-2); background: var(--card-2); border: 1px solid var(--border);
+  border-radius: 3px; padding: 1px 5px; white-space: nowrap; max-width: 92px;
+  overflow: hidden; text-overflow: ellipsis;
+}
 .health-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .health-dot.ok { background: var(--green); }
 .health-dot.bad { background: var(--red); }
@@ -1364,7 +1371,7 @@ $("#btn-refresh-hist").onclick = refreshHistory;
 $("#btn-open-dl").onclick = () => api("open_downloads_dir").catch(() => {});
 
 /* ================================================================ music */
-const music = { tracks: [], selected: new Set(), downloading: false, note: "", batch: [] };
+const music = { tracks: [], selected: new Set(), downloading: false, note: "", batch: [], searchId: "", labels: {} };
 let musicInited = false;
 async function initMusic() {
   if (musicInited) { renderHealth(); return; }
@@ -1379,7 +1386,12 @@ async function initMusic() {
   try {
     const plats = await call("get_music_platforms");
     const sel = $("#m-platform");
-    sel.innerHTML = (plats || []).map(p => `<option value="${esc(p.key)}">${esc(p.label)}</option>`).join("");
+    music.labels = Object.fromEntries((plats || []).map(p => [p.key, p.label]));
+    // "All platforms" comes first and is the default: aggregate search needs no
+    // per-platform choice from the user.
+    sel.innerHTML = `<option value="all">${esc(t("All platforms"))}</option>` +
+      (plats || []).map(p => `<option value="${esc(p.key)}">${esc(p.label)}</option>`).join("");
+    sel.value = "all";
     sel.onchange = updateMusicNote;
     updateMusicNote();
   } catch (e) {
@@ -1410,12 +1422,16 @@ async function doMusicSearch() {
     if (!data) return;
     if (data.error) {
       toast(data.error, "err");
+      music.searchId = "";
       music.tracks = [];
       renderTracks();
       $("#m-count").textContent = "0";
       return;
     }
     music.tracks = data.tracks || [];
+    // The bridge keeps the original provider objects; the id lets the download
+    // call get them back instead of the JSON copies.
+    music.searchId = data.search_id || "";
     music.note = data.note || "";
     music.selected = new Set(music.tracks.map((_, i) => i).filter(i => !music.tracks[i].vip));
     renderTracks();
@@ -1425,6 +1441,20 @@ async function doMusicSearch() {
     $("#m-spin").classList.remove("on");
     $("#btn-m-search").disabled = false;
   }
+}
+function platformShortLabel(key) {
+  const label = String((music.labels || {})[key] || "");
+  const short = label.includes(" · ") ? label.split(" · ").pop() : label;
+  return short || key;
+}
+function sourceChips(tr) {
+  const listed = Array.isArray(tr && tr.sources) ? tr.sources.filter(s => String(s || "").trim()) : [];
+  const fallback = String((tr && tr.provider) || "").trim();
+  const sources = listed.length ? listed : (fallback ? [fallback] : []);
+  if (!sources.length) return "";
+  const shown = sources.slice(0, 3).map(s => `<span class="src-tag" title="${esc(s)}">${esc(platformShortLabel(s))}</span>`).join("");
+  const more = sources.length > 3 ? `<span class="src-tag">+${sources.length - 3}</span>` : "";
+  return `<span class="src-tags" title="${esc(sources.join(", "))}">${shown}${more}</span>`;
 }
 function renderTracks() {
   const box = $("#m-tracks");
@@ -1440,6 +1470,7 @@ function renderTracks() {
         <div style="display:flex;align-items:center;gap:8px"><span class="row-title">${esc(tr.name)}</span>${tr.vip ? `<span class="vip-tag">VIP</span>` : ""}</div>
         <div class="row-sub">${esc(tr.artists)}${tr.album ? " — " + esc(tr.album) : ""}</div>
       </div>
+      ${sourceChips(tr)}
       ${tr.ext ? `<span class="hint mono">${esc(tr.ext.toUpperCase())}</span>` : ""}
       <span class="hint mono">${esc(fmtDur(tr.duration_s))}</span>
     </div>`).join("");
@@ -1469,7 +1500,7 @@ $("#btn-m-dl").onclick = async () => {
     const indexes = [...music.selected].sort((a, b) => a - b);
     music.batch = indexes;
     const tracks = indexes.map(i => music.tracks[i]);
-    const r = await call("music_download", $("#m-platform").value, tracks);
+    const r = await call("music_download", $("#m-platform").value, tracks, null, music.searchId || null);
     if (r && r.ok !== false) {
       started = true;
       music.downloading = true;

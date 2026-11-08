@@ -201,8 +201,13 @@ def _music_funcs() -> dict[str, Any] | None:
     global _MUSIC_FUNCS
     if _MUSIC_FUNCS is None:
         try:
+            from novel_downloader.apps.music.aggregate import (
+                ALL_PLATFORM_KEY,
+                is_all_platforms,
+                search_all,
+            )
             from novel_downloader.apps.music.downloader import (
-                download_many,
+                download_mixed,
                 export_m3u,
             )
             from novel_downloader.apps.music.providers import (
@@ -212,6 +217,7 @@ def _music_funcs() -> dict[str, Any] | None:
                 platform_note,
             )
             from novel_downloader.apps.music.providers.base import Track
+            from novel_downloader.apps.music.trackcache import CACHE
         except Exception as exc:  # noqa: BLE001 - optional extras missing
             logger.debug("Music extras unavailable: %s", exc)
             _MUSIC_FUNCS = {}
@@ -221,8 +227,12 @@ def _music_funcs() -> dict[str, Any] | None:
             "create": create,
             "health_check": health_check,
             "platform_note": platform_note,
-            "download_many": download_many,
+            "download_mixed": download_mixed,
             "export_m3u": export_m3u,
+            "search_all": search_all,
+            "is_all_platforms": is_all_platforms,
+            "CACHE": CACHE,
+            "ALL_PLATFORM_KEY": ALL_PLATFORM_KEY,
             "Track": Track,
         }
     return _MUSIC_FUNCS or None
@@ -411,6 +421,13 @@ def _i18n_catalog() -> dict[str, str]:
             "Files land here when a download finishes"
         ),
         # music page
+        "All platforms": t("All platforms"),
+        "Searches every platform at once and merges the results": t(
+            "Searches every platform at once and merges the results"
+        ),
+        "The search results expired — search again before downloading": t(
+            "The search results expired — search again before downloading"
+        ),
         "Search a song to begin": t("Search a song to begin"),
         "A download is already running": t("A download is already running"),
         "Music extras are not installed": t("Music extras are not installed"),
@@ -509,18 +526,33 @@ def _result_dict(result: Mapping[str, Any], index: int) -> dict[str, Any]:
 
 
 def _music_track_dict(track: object) -> dict[str, Any]:
-    """Serialise a music provider track dataclass."""
+    """
+    Serialise a music provider track dataclass for the front end.
+
+    ``extra`` is dropped on purpose: it holds provider-private objects (musicdl
+    ``SongInfo``, NetEase raw payloads) that JSON cannot carry. Downloading goes
+    through :data:`novel_downloader.apps.music.trackcache.CACHE` instead, which
+    hands the engine the original objects back.
+    """
     try:
-        return dict(dataclasses.asdict(track))  # type: ignore[call-overload]
+        data = dict(dataclasses.asdict(track))  # type: ignore[call-overload]
     except Exception:  # noqa: BLE001 - fall back to attribute copy
+        sources = getattr(track, "sources", [])
         return {
+            "provider": str(getattr(track, "provider", "") or ""),
+            "id": str(getattr(track, "id", "") or ""),
             "name": str(getattr(track, "name", "") or ""),
             "artists": str(getattr(track, "artists", "") or ""),
             "album": str(getattr(track, "album", "") or ""),
             "duration_s": int(getattr(track, "duration_s", 0) or 0),
             "vip": bool(getattr(track, "vip", False)),
             "ext": str(getattr(track, "ext", "") or ""),
+            "sources": (
+                [str(item) for item in sources] if isinstance(sources, list) else []
+            ),
         }
+    data.pop("extra", None)
+    return data
 
 
 def _format_size(size: int) -> str:
@@ -2033,35 +2065,68 @@ class ApiBridge:
         ]
 
     def music_note(self, platform: str) -> str:
-        """Usage hint for one platform (may be empty)."""
+        """Usage hint for one platform, or for the aggregate search (may be empty)."""
         funcs = _music_funcs()
         if funcs is None:
             return ""
+        if funcs["is_all_platforms"](platform):
+            return t("Searches every platform at once and merges the results")
         return str(funcs["platform_note"](str(platform or "")) or "")
 
     def music_search(
         self, platform: str, keyword: str, limit: int = 30
     ) -> dict[str, Any]:
-        """Search one platform and return serialised tracks."""
+        """
+        Search one platform, or every platform when ``platform`` is ``"all"``.
+
+        The aggregate answer carries one merged row per song: ``sources`` lists
+        the platforms it was found on. Both shapes return a ``search_id`` that
+        :meth:`music_download` uses to recover the original (non-JSON) tracks.
+        """
         funcs = _music_funcs()
         if funcs is None:
             return {"tracks": [], "error": t("Music extras are not installed")}
+        text = str(keyword or "").strip()
+        if not text:
+            return {"tracks": []}
         try:
-            text = str(keyword or "").strip()
-            if not text:
-                return {"tracks": []}
+            wanted = max(1, int(limit))
+            if funcs["is_all_platforms"](platform):
+                result = funcs["search_all"](text, None, wanted)
+                tracks = list(result.tracks)
+                return {
+                    "tracks": [_music_track_dict(track) for track in tracks],
+                    "search_id": funcs["CACHE"].put(tracks),
+                    "platforms": [item.as_dict() for item in result.platforms],
+                    "platform": funcs["ALL_PLATFORM_KEY"],
+                    "total": int(result.total),
+                }
             provider = funcs["create"](str(platform or ""))
-            tracks = provider.search(text, limit=max(1, int(limit)))
+            found = provider.search(text, limit=wanted)
+            # Providers answer ``(tracks, total)``; older fakes return a list.
+            tracks = list(found[0] if isinstance(found, tuple) else found or ())
         except Exception as exc:  # noqa: BLE001 - reported to the page
             logger.exception("Music search failed on %s", platform)
             return {"tracks": [], "error": format_error(exc)}
-        return {"tracks": [_music_track_dict(track) for track in tracks]}
+        return {
+            "tracks": [_music_track_dict(track) for track in tracks],
+            "search_id": funcs["CACHE"].put(tracks),
+        }
 
     def music_download(
-        self, platform: str, tracks: list[dict[str, Any]], level: str | None = None
+        self,
+        platform: str,
+        tracks: list[dict[str, Any]],
+        level: str | None = None,
+        search_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Start downloading the selected tracks on a background thread.
+
+        ``platform="all"`` routes every track to its own provider (aggregate
+        search); an explicit key keeps the single-platform behaviour. When
+        ``search_id`` is given the original, in-process tracks are restored from
+        the search cache, because the serialised copies cannot be resolved.
 
         Progress is polled through :meth:`get_music_status`; the returned
         dictionary only reports whether the job started.
@@ -2080,7 +2145,12 @@ class ApiBridge:
 
         worker = threading.Thread(
             target=self._music_worker,
-            args=(str(platform or ""), list(tracks or []), level),
+            args=(
+                str(platform or ""),
+                list(tracks or []),
+                level,
+                str(search_id or "").strip() or None,
+            ),
             name="novel-desktop-music",
             daemon=True,
         )
@@ -2088,10 +2158,14 @@ class ApiBridge:
         return {"ok": True}
 
     def _music_worker(
-        self, platform: str, tracks: list[dict[str, Any]], level: str | None
+        self,
+        platform: str,
+        tracks: list[dict[str, Any]],
+        level: str | None,
+        search_id: str | None = None,
     ) -> None:
         """Download tracks on a worker thread, updating polled state."""
-        # ``download_many`` invokes the callbacks from its own worker pool, so
+        # ``download_mixed`` invokes the callbacks from its own worker pool, so
         # every counter is updated under the bridge lock: an unlocked ``+=``
         # loses results whenever two tracks finish concurrently.
         counts = {"ok": 0, "skip": 0, "fail": 0}
@@ -2099,7 +2173,6 @@ class ApiBridge:
             funcs = _music_funcs()
             if funcs is None:
                 raise RuntimeError(t("Music extras are not installed"))
-            provider = funcs["create"](platform)
             options = self._music_options(level)
             track_cls = funcs["Track"]
             fields = {f.name for f in dataclasses.fields(track_cls)}
@@ -2108,8 +2181,32 @@ class ApiBridge:
                 for raw in tracks
                 if isinstance(raw, dict)
             ]
+            if search_id:
+                cache = funcs["CACHE"]
+                if cache.get(search_id) is None:
+                    # The cache expires (or dies with the process): say so
+                    # instead of letting every track fail with a cryptic error.
+                    raise RuntimeError(
+                        t(
+                            "The search results expired — search again "
+                            "before downloading"
+                        )
+                    )
+                objects = cache.resolve(search_id, objects)
             with self._lock:
                 self._music_total = len(objects)
+
+            if funcs["is_all_platforms"](platform):
+                create_provider = funcs["create"]
+                target_platform = None
+            else:
+                fixed = funcs["create"](platform)
+
+                def create_provider(_key: str, _provider: Any = fixed) -> Any:
+                    """Every track uses the platform picked in the UI."""
+                    return _provider
+
+                target_platform = platform
 
             def on_result(index: int, _track: object, result: object) -> None:
                 state = str(getattr(result, "status", "") or "").lower()
@@ -2132,14 +2229,15 @@ class ApiBridge:
                     # never moves backwards.
                     self._music_fraction = max(self._music_fraction, float(fraction))
 
-            funcs["download_many"](
-                provider,
+            funcs["download_mixed"](
+                create_provider,
                 objects,
                 options,
                 workers=3,
                 on_result=on_result,
                 on_tick=on_tick,
                 should_stop=self._music_stop.is_set,
+                platform=target_platform,
             )
         except Exception as exc:  # noqa: BLE001 - reported through the poll
             logger.exception("Music download crashed")
@@ -2208,8 +2306,9 @@ class ApiBridge:
         Mirrors ``POST /api/v1/music/export``: tracks without ``path`` are
         counted in ``skipped`` and never fail the request; when none of them is
         playable the caller gets an explicit error instead of an empty file.
-        `platform` is accepted for parity with the REST contract (the playlist
-        itself only stores file locations).
+        `platform` is accepted for parity with the REST contract and may be
+        ``"all"`` (aggregate results): the playlist itself only stores file
+        locations, so no per-platform filtering happens here.
         """
         funcs = _music_funcs()
         if funcs is None:

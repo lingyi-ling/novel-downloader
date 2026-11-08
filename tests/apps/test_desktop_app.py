@@ -1213,6 +1213,296 @@ def test_bridge_music_export_without_local_paths_reports_error(
     assert result["skipped"] == 1
 
 
+def _wait_for_music_idle(bridge: Any, timeout: float = 10.0) -> dict[str, Any]:
+    """Block until the polled music job stops, then return its final status."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and bridge.get_music_status()["active"]:
+        time.sleep(0.02)
+    return bridge.get_music_status()
+
+
+def test_bridge_music_note_for_all_platforms_is_a_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    aggregate = pytest.importorskip("novel_downloader.apps.music.aggregate")
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "is_all_platforms": aggregate.is_all_platforms,
+            "platform_note": lambda _key: "",
+        },
+    )
+    bridge = wa.ApiBridge()
+    assert bridge.music_note("all") == t(
+        "Searches every platform at once and merges the results"
+    )
+    # A concrete platform still uses the provider's own note.
+    assert bridge.music_note("netease") == ""
+
+
+def test_bridge_music_search_all_uses_the_aggregate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``platform="all"`` must go through aggregate search, not ``create``."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    aggregate = pytest.importorskip("novel_downloader.apps.music.aggregate")
+    base = pytest.importorskip("novel_downloader.apps.music.providers.base")
+    calls: dict[str, Any] = {}
+    cached: dict[str, Any] = {}
+
+    track = base.Track(provider="netease", id="1", name="Song", artists="Artist")
+    track.sources = ["netease", "qq"]
+
+    def fake_search_all(keyword: str, platforms: Any = None, limit: Any = None) -> Any:
+        calls.update(keyword=keyword, platforms=platforms, limit=limit)
+        return aggregate.AggregateResult(
+            tracks=[track],
+            platforms=[aggregate.PlatformOutcome("netease", True, count=1)],
+            total=1,
+        )
+
+    class _Cache:
+        def put(self, tracks: Any) -> str:
+            cached["tracks"] = list(tracks)
+            return "sid-all"
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "is_all_platforms": aggregate.is_all_platforms,
+            "search_all": fake_search_all,
+            "CACHE": _Cache(),
+            "ALL_PLATFORM_KEY": aggregate.ALL_PLATFORM_KEY,
+            "create": lambda _key: pytest.fail("create() must not run for all"),
+        },
+    )
+
+    result = wa.ApiBridge().music_search("all", "  Song  ", 30)
+
+    assert calls == {"keyword": "Song", "platforms": None, "limit": 30}
+    assert result["platform"] == "all"
+    assert result["search_id"] == "sid-all"
+    assert result["total"] == 1
+    assert result["platforms"] == [
+        {"platform": "netease", "ok": True, "count": 1, "error": ""}
+    ]
+    assert result["tracks"][0]["sources"] == ["netease", "qq"]
+    # Provider-private data cannot cross the bridge; the cache carries it.
+    assert "extra" not in result["tracks"][0]
+    assert cached["tracks"] == [track]
+
+
+def test_bridge_music_search_single_platform_returns_search_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Providers answer ``(tracks, total)``; the tuple must be unpacked."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    aggregate = pytest.importorskip("novel_downloader.apps.music.aggregate")
+    base = pytest.importorskip("novel_downloader.apps.music.providers.base")
+    track = base.Track(provider="netease", id="7", name="Solo", artists="Artist")
+
+    class _Provider:
+        def search(self, keyword: str, limit: int = 30) -> Any:
+            assert (keyword, limit) == ("Solo", 5)
+            return [track], 1
+
+    class _Cache:
+        def put(self, tracks: Any) -> str:
+            assert list(tracks) == [track]
+            return "sid-one"
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "is_all_platforms": aggregate.is_all_platforms,
+            "create": lambda key: _Provider(),
+            "CACHE": _Cache(),
+        },
+    )
+    result = wa.ApiBridge().music_search("netease", "Solo", 5)
+    assert result["search_id"] == "sid-one"
+    assert [row["name"] for row in result["tracks"]] == ["Solo"]
+
+
+def test_bridge_music_download_uses_cached_tracks_for_all_platforms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matching ``search_id`` hands ``download_mixed`` the original objects."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    aggregate = pytest.importorskip("novel_downloader.apps.music.aggregate")
+
+    @dataclass
+    class _FakeTrack:
+        provider: str = ""
+        id: str = ""
+        name: str = ""
+
+    original = [_FakeTrack(provider="netease", id="1", name="cached")]
+    submitted = [{"provider": "netease", "id": "1", "name": "wire"}]
+    seen: dict[str, Any] = {}
+
+    class _Cache:
+        def get(self, search_id: str) -> Any:
+            return original if search_id == "sid" else None
+
+        def resolve(self, search_id: str, tracks: Any) -> Any:
+            seen["resolve"] = (search_id, list(tracks))
+            return list(original)
+
+    def fake_mixed(
+        create_provider: Any,
+        tracks: Any,
+        _opts: Any,
+        **kwargs: Any,
+    ) -> tuple[int, int, int, list[object], list[object]]:
+        seen["tracks"] = list(tracks)
+        seen["create_provider"] = create_provider
+        seen["platform"] = kwargs.get("platform")
+        return 1, 0, 0, [], []
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "Track": _FakeTrack,
+            "create": lambda key: ("created", key),
+            "download_mixed": fake_mixed,
+            "is_all_platforms": aggregate.is_all_platforms,
+            "CACHE": _Cache(),
+        },
+    )
+    monkeypatch.setattr(wa.ApiBridge, "_music_options", staticmethod(lambda _l: None))
+
+    bridge = wa.ApiBridge()
+    assert bridge.music_download("all", submitted, None, "sid")["ok"] is True
+    assert _wait_for_music_idle(bridge)["active"] is False
+
+    assert seen["resolve"][0] == "sid"
+    assert seen["tracks"] == original
+    assert seen["platform"] is None
+    # "all" resolves each track's own provider.
+    assert seen["create_provider"]("qq") == ("created", "qq")
+
+
+def test_bridge_music_download_single_platform_pins_the_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    aggregate = pytest.importorskip("novel_downloader.apps.music.aggregate")
+
+    @dataclass
+    class _FakeTrack:
+        name: str = ""
+
+    seen: dict[str, Any] = {}
+
+    def fake_mixed(
+        create_provider: Any, tracks: Any, _opts: Any, **kwargs: Any
+    ) -> tuple[int, int, int, list[object], list[object]]:
+        seen["create_provider"] = create_provider
+        seen["platform"] = kwargs.get("platform")
+        return len(tracks), 0, 0, [], []
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "Track": _FakeTrack,
+            "create": lambda key: ("created", key),
+            "download_mixed": fake_mixed,
+            "is_all_platforms": aggregate.is_all_platforms,
+        },
+    )
+    monkeypatch.setattr(wa.ApiBridge, "_music_options", staticmethod(lambda _l: None))
+
+    bridge = wa.ApiBridge()
+    assert bridge.music_download("netease", [{"name": "x"}])["ok"] is True
+    _wait_for_music_idle(bridge)
+
+    assert seen["platform"] == "netease"
+    # Every track goes to the platform picked in the UI, whatever it claims.
+    assert seen["create_provider"]("qq") == ("created", "netease")
+
+
+def test_bridge_music_download_reports_an_expired_search_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale ``search_id`` must surface as a failure, not a silent no-op."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    aggregate = pytest.importorskip("novel_downloader.apps.music.aggregate")
+
+    @dataclass
+    class _FakeTrack:
+        name: str = ""
+
+    class _Cache:
+        def get(self, _search_id: str) -> None:
+            return None
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "Track": _FakeTrack,
+            "create": lambda _key: None,
+            "download_mixed": lambda *_a, **_k: pytest.fail("must not download"),
+            "is_all_platforms": aggregate.is_all_platforms,
+            "CACHE": _Cache(),
+        },
+    )
+    monkeypatch.setattr(wa.ApiBridge, "_music_options", staticmethod(lambda _l: None))
+
+    bridge = wa.ApiBridge()
+    assert bridge.music_download("all", [{"name": "x"}], None, "gone")["ok"] is True
+    status = _wait_for_music_idle(bridge)
+    assert status["failed"] is True
+    assert (
+        t("The search results expired — search again before downloading")
+        in (status["summary"])
+    )
+
+
+def test_bridge_music_export_accepts_the_all_platform(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    @dataclass
+    class _FakeTrack:
+        name: str = ""
+        path: str = ""
+
+    written: list[str] = []
+
+    def fake_export(tracks: list[Any], path: Path) -> str:
+        written.extend(tr.path for tr in tracks)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#EXTM3U\n", encoding="utf-8")
+        return str(path)
+
+    monkeypatch.setattr(
+        wa, "_music_funcs", lambda: {"Track": _FakeTrack, "export_m3u": fake_export}
+    )
+    target = tmp_path / "all.m3u8"
+    result = wa.ApiBridge().music_export(
+        "all", [{"name": "A", "path": "C:/music/a.mp3"}], str(target)
+    )
+    assert result["ok"] is True
+    assert result["tracks_written"] == 1
+    assert written == ["C:/music/a.mp3"]
+    assert target.is_file()
+
+
 def test_bridge_music_settings_round_trip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1642,6 +1932,40 @@ def test_app_html_music_download_guard_is_synchronous() -> None:
     assert handler.index("btn.disabled = true;") < handler.index("await call")
 
 
+def test_app_html_music_platform_defaults_to_all() -> None:
+    """The first option is the aggregate search and it is selected by default."""
+    assert '<option value="all">${esc(t("All platforms"))}</option>' in APP_HTML
+    assert 'sel.value = "all";' in APP_HTML
+    # The aggregate option is prepended, so it stays first after a refresh.
+    assert 'sel.innerHTML = `<option value="all">' in APP_HTML
+
+
+def test_app_html_music_search_and_download_carry_the_search_id() -> None:
+    """The search id is what lets the bridge recover the original tracks."""
+    assert 'music.searchId = data.search_id || "";' in APP_HTML
+    assert (
+        'call("music_download", $("#m-platform").value, tracks, null, '
+        "music.searchId || null)" in APP_HTML
+    )
+
+
+def test_app_html_music_rows_prefer_sources_over_provider() -> None:
+    """Aggregate rows list their source platforms; single rows fall back."""
+    match = re.search(r"function sourceChips\(tr\) \{[\s\S]*?\n\}", APP_HTML)
+    assert match, "sourceChips() is missing from the front end"
+    handler = match.group(0)
+    assert "tr.sources" in handler
+    assert "tr.provider" in handler
+    assert 'class="src-tag"' in handler
+    assert "${sourceChips(tr)}" in APP_HTML
+
+
+def test_app_html_music_all_platform_note_is_inline_not_an_error() -> None:
+    """The "all platforms" hint is page copy: it must not raise a toast."""
+    assert 'const note = await call("music_note", $("#m-platform").value);' in APP_HTML
+    assert '$("#m-note").textContent = note || "";' in APP_HTML
+
+
 def test_app_html_normalizes_the_theme_value() -> None:
     assert 'const mode = raw === "dark" ? "dark" : "light";' in APP_HTML
 
@@ -1768,19 +2092,20 @@ class _FakeTrack:
 def test_music_worker_counts_results_from_concurrent_callbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``download_many`` fires callbacks from a worker pool; counts must win."""
+    """``download_mixed`` fires callbacks from a worker pool; counts must win."""
     import novel_downloader.apps.desktop.webview_app as wa
 
     total = 24
 
-    def fake_download_many(
-        _provider: object,
+    def fake_download_mixed(
+        _create_provider: object,
         tracks: list[_FakeTrack],
         _opts: object,
         workers: int = 3,
         on_result: Any = None,
         on_tick: Any = None,
         should_stop: Any = None,
+        platform: str | None = None,
     ) -> tuple[int, int, int, list[object], list[object]]:
         assert len(tracks) == total
         barrier = threading.Barrier(total)
@@ -1811,7 +2136,11 @@ def test_music_worker_counts_results_from_concurrent_callbacks(
         lambda: {
             "Track": _FakeTrack,
             "create": lambda _platform: None,
-            "download_many": fake_download_many,
+            "download_mixed": fake_download_mixed,
+            "is_all_platforms": lambda platform: (
+                not str(platform or "").strip()
+                or str(platform).strip().lower() == "all"
+            ),
         },
     )
     monkeypatch.setattr(wa.ApiBridge, "_music_options", staticmethod(lambda _l: None))
