@@ -60,7 +60,10 @@ def _components(tmp_path: Any) -> SimpleNamespace:
             out_dir=out_dir, level=level
         ),
         download_many=_download_many,
-        export_m3u=lambda tracks, target: len(tracks),
+        # The real ``export_m3u`` returns the playlist path, not a count.
+        # Returning a path here keeps the handler honest: ``int(path)`` used
+        # to raise ``ValueError`` (HTTP 500) against the real engine.
+        export_m3u=lambda tracks, target: str(target),
         available_labels=lambda: [("netease", "国内 · 网易云音乐")],
         create=lambda key: FakeProvider(),
         platform_note=lambda key: "note",

@@ -1217,13 +1217,21 @@ def _handle_music_export(
     out_path = str(body.get("out_path") or "").strip()
     target = Path(out_path) if out_path else _music_output_dir() / "playlist.m3u8"
     try:
-        written = components.export_m3u(usable, target)
+        written_path = components.export_m3u(usable, target)
     except OSError as exc:
         raise _ApiError(
             500,
             _MSG_PLAYLIST_WRITE_FAILED.format(target=target, error=type(exc).__name__),
         ) from exc
-    return {"written": int(written), "skipped": int(skipped), "path": str(target)}
+    # ``export_m3u`` returns the playlist path (mirroring the REST handler's
+    # ``path`` field), not a count: ``int()`` on it made every real export
+    # answer 500.  ``written`` is the number of tracks with a local file --
+    # the same meaning as REST's ``tracks_written``.
+    return {
+        "written": len(usable),
+        "skipped": int(skipped),
+        "path": str(written_path or target),
+    }
 
 
 def _handle_music_download(
