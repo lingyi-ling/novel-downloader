@@ -7,8 +7,8 @@
 
 ## 0. 一句话现状
 
-- **版本 v1.28.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.28.0>
-- 全量测试 **9056 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
+- **版本 v1.27.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.27.0>
+- 全量测试 **9049 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
@@ -78,23 +78,6 @@ cd android
   ```
   已上传且 digest 一致的资产会跳过。
 - `git push` 失败通常重试几轮就好（曾连续失败 6 次后成功）；本机没有 `gh`，GitHub 相关 API 操作用 Python `urllib` + `git credential fill` 取令牌。
-
-### 2026-11-08 起：github.com 被链路拦截
-
-- `git push` 持续报 `Recv failure` / `Failed to connect to github.com:443`；`curl https://github.com/...` 直接返回 **504**（连接 0.1s 就通，说明是中间代理拦截）。`api.github.com` 与 `uploads.github.com` 正常。
-- 应急做法：用 GitHub Git Data API 逐提交创建 blob/tree/commit，再 `PATCH /git/refs/heads/main`。API 创建的提交 sha 与本地不同、**tree 一致**；本地 `main` 会与远端分叉，后续提交继续走 API，别再普通 `git push`（会 non-fast-forward）。
-- `release.py` 的 tag 推送回退会指向本地提交；本地提交不在远端时会 422。绕法：先用 API 把 `refs/tags/vX.Y.Z` 建在远端 head 上，再把 `origin` 临时指向一个含有同名 tag 的本地 bare 仓库（让 `remote_tag_exists` 为真、跳过 tag 推送），带 `--repo` 跑 release，结束后恢复 origin。
-- 本机 `~/.ssh/id_ed25519` 未加入 GitHub：`ssh.github.com:443` 端口可达但 `Permission denied (publickey)`。
-
-### 自动更新（桌面）
-
-- 安装形态：`updater.detect_install_shape()` → `installer` / `portable` / `source`；资产选择据此优先 setup 或 zip
-- 安装版：setup + `/SILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS`，Inno 原地覆盖，用户数据在 `%LOCALAPPDATA%
-ovel_downloader` 不受影响
-- 便携版：zip 覆盖当前文件夹，由 `_apply_portable_update.ps1` 在主进程退出后解压并重启；需要 PowerShell（Win10/11 自带）
-- 下载：`download_update_async` + `update_download_state` 提供字节进度；`download_asset(resume=True, attempts=3)` 支持 Range 续传
-- 清理：`updates/` 里 `.part` 1 天、安装包/zip 7 天后自动删除
-- 仍是未启用状态：清单签名（`TRUSTED_UPDATE_KEYS` 为空）。启用后必须每次都发布 `latest.json`，且私钥丢失会导致无法再签新清单
 
 ### 官网
 
