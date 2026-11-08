@@ -1239,3 +1239,63 @@ async def test_closing_the_stream_reaps_the_site_tasks(
     await asyncio.sleep(0)
 
     assert _site_tasks() == set()
+
+
+# --------------------------------------------------------------------------- #
+# relevance floor is applied to the book, not to each source row
+# --------------------------------------------------------------------------- #
+
+
+class _AuthorHitSearcher(BaseSearcher):
+    """The author's book, found on a site that knows the author."""
+
+    site_name = "authorhit"
+
+    async def _fetch_html(self, keyword: str) -> str:
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [
+            _search_result("authorhit", "b1", "斗破苍穹", author="天蚕土豆"),
+        ]
+
+
+class _AuthorBlankSearcher(BaseSearcher):
+    """A mirror of the same book whose author field is missing."""
+
+    site_name = "authorblank"
+
+    async def _fetch_html(self, keyword: str) -> str:
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [
+            _search_result("authorblank", "b1", "斗破苍穹", author=""),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_group_filter_keeps_sources_without_the_keyword(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    """The floor decides whether a *book* is relevant, not every source row.
+
+    An author search ("天蚕土豆") must keep the mirror site that has the same
+    book but no author field: on its own that row scores 0, yet it is one of
+    the book's download sources.
+    """
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_AuthorHitSearcher, _AuthorBlankSearcher]),
+    )
+
+    merged = await search("天蚕土豆", group=True)
+
+    assert len(merged) == 1
+    assert merged[0]["title"] == "斗破苍穹"
+    assert set(merged[0]["sources"]) == {"authorhit", "authorblank"}
