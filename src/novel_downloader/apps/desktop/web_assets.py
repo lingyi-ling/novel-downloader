@@ -1265,11 +1265,11 @@ $("#results").addEventListener("click", async e => {
   const fol = e.target.closest("[data-follow]");
   const url = e.target.closest("[data-open-url]");
   if (add) {
-    const r = await call("add_task", add.dataset.site, add.dataset.bid, add.dataset.title);
+    const r = await call("add_task", add.dataset.add, add.dataset.bid, add.dataset.title);
     if (r && r.ok) { toast(t("Queued: {title}").replace("{title}", add.dataset.title), "ok"); showPage("download"); }
     else if (r && r.error) toast(r.error, "err");
   } else if (fol) {
-    const r = await call("add_watch", fol.dataset.site, fol.dataset.bid, fol.dataset.title);
+    const r = await call("add_watch", fol.dataset.follow, fol.dataset.bid, fol.dataset.title);
     if (r) toast(r.message || (r.ok ? t("Added to follow list") : t("Already followed")), r.ok ? "ok" : "info");
   } else if (url && url.dataset.openUrl) {
     api("open_url", url.dataset.openUrl).catch(() => {});
@@ -1281,11 +1281,11 @@ $("#detail").addEventListener("click", async e => {
   const fol = e.target.closest("[data-follow]");
   const url = e.target.closest("[data-open-url]");
   if (add) {
-    const r = await call("add_task", add.dataset.site, add.dataset.bid, add.dataset.title);
+    const r = await call("add_task", add.dataset.add, add.dataset.bid, add.dataset.title);
     if (r && r.ok) { toast(t("Queued: {title}").replace("{title}", add.dataset.title), "ok"); showPage("download"); }
     else if (r && r.error) toast(r.error, "err");
   } else if (fol) {
-    const r = await call("add_watch", fol.dataset.site, fol.dataset.bid, fol.dataset.title);
+    const r = await call("add_watch", fol.dataset.follow, fol.dataset.bid, fol.dataset.title);
     if (r) toast(r.message || (r.ok ? t("Added to follow list") : t("Already followed")), r.ok ? "ok" : "info");
   } else if (url && url.dataset.openUrl) {
     api("open_url", url.dataset.openUrl).catch(() => {});
