@@ -886,10 +886,18 @@ class MusicHealthCmd(Command):
         rows: list[list[str]] = []
         failed = 0
 
-        for key in selected:
-            with ui.status(t("Checking {platform}...").format(platform=key)):
-                result = engine.health_check(key, keyword)
+        # 并发探测：以前是逐站 15 秒串行，25 个平台要等好几分钟。
+        from concurrent.futures import ThreadPoolExecutor
 
+        with (
+            ui.status(t("Checking {count} platform(s)...").format(count=len(selected))),
+            ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool,
+        ):
+            results = list(
+                pool.map(lambda key: engine.health_check(key, keyword), selected)
+            )
+
+        for key, result in zip(selected, results, strict=True):
             ok = bool(result.get("ok"))
             elapsed = int(result.get("elapsed_ms") or 0)
             error_text = str(result.get("error") or "")

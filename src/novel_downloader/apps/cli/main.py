@@ -7,6 +7,7 @@ Unified CLI entry point. Parses arguments and delegates to parser or interactive
 """
 
 import argparse
+import contextlib
 import os
 import sys
 
@@ -158,13 +159,41 @@ def cli_main() -> None:
             # (``search --json``, ``login --list``, ...).
             print("\n" + t("Aborted."), file=sys.stderr)
             raise SystemExit(1) from err
+        except SystemExit as err:
+            code = err.code if isinstance(err.code, int) else 1
+            _exit_after_music_command(args, code)
+            raise
         else:
             # Only a command that returned normally earns the hint: a failed
             # one already printed its own diagnostics, and ``SystemExit``
             # (usage errors, ``--check`` results) deliberately skips it too.
             _notify_update(args)
+            _exit_after_music_command(args, 0)
     else:
         parser.print_help()
+
+
+def _exit_after_music_command(args: argparse.Namespace, code: int) -> None:
+    """End the process without waiting for the music vendor's worker threads.
+
+    Some music platforms leave non-daemon request threads behind (their
+    requests can ignore the per-request timeout).  Python joins those at exit,
+    so a finished ``novel-cli music ...`` would appear to hang for a minute or
+    more after printing its table.  Output is already flushed at this point;
+    the CLI is a one-shot process, so leaving budget to those threads has no
+    value.  Only ``music`` is affected -- other commands keep normal teardown.
+    """
+    if getattr(args, "command", "") != "music":
+        return
+    # Tests call ``cli_main`` in-process; hard-exiting would kill the runner.
+    # Real invocations (including subprocesses spawned by tests) do not import
+    # pytest, so they still get the prompt exit.
+    if "pytest" in sys.modules:
+        return
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+        sys.stderr.flush()
+    os._exit(int(code))
 
 
 if __name__ == "__main__":
