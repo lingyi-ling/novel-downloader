@@ -382,8 +382,17 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 
 .split { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
 .split > #results { margin-top: 14px; }
-.split > #detail { margin-top: 14px; }
+.split > #detail { margin-top: 14px; position: relative; }
 .side-card { padding: 16px; }
+/* Close affordance for the narrow-window drawer; hidden in the wide layout
+   where the panel is a permanent sidebar and needs no dismissal. */
+.detail-close {
+  display: none; position: absolute; top: 8px; right: 8px;
+  width: 28px; height: 28px; place-items: center;
+  border-radius: var(--radius-sm); background: var(--card); color: var(--text-3);
+}
+.detail-close:hover { background: var(--hover); color: var(--text); }
+#detail-backdrop { display: none; }
 .detail-head { display: flex; gap: 12px; align-items: flex-start; }
 .detail-cover { width: 80px; height: 106px; object-fit: cover; border-radius: var(--radius-sm);
   flex: none; background: var(--card-2); border: 1px solid var(--border); }
@@ -400,7 +409,29 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 .detail-meta .v { font-size: 12.5px; color: var(--text-2); }
 @media (max-width: 1180px) {
   .split { grid-template-columns: minmax(0, 1fr); }
-  .split > #detail { display: none !important; }
+  /* The wide layout's third column is gone, so the details panel becomes a
+     bottom sheet over the results: same DOM node (and id), explicit close
+     button, a backdrop to click away, and no horizontal overflow. */
+  .split > #detail {
+    display: block;
+    position: fixed; left: 0; right: 0; bottom: 0; top: auto;
+    z-index: 70; margin: 0;
+    max-height: min(76vh, 620px);
+    overflow-y: auto; overflow-x: hidden;
+    border-radius: 14px 14px 0 0;
+    border-bottom: none;
+    box-shadow: var(--shadow-3);
+    transform: translateY(100%);
+    visibility: hidden;
+    transition: transform .22s var(--ease), visibility .22s;
+  }
+  .split > #detail.open { transform: translateY(0); visibility: visible; }
+  .split > #detail > .detail-close { display: grid; }
+  .split > #detail .detail-head { padding-right: 28px; }
+  #detail-backdrop.show {
+    display: block; position: fixed; inset: 0; z-index: 65;
+    background: rgba(15, 23, 42, .42);
+  }
 }
 .best-chip {
   font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
@@ -460,6 +491,24 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 .health-dot.ok { background: var(--green); }
 .health-dot.bad { background: var(--red); }
 .health-dot.wait { background: var(--border-strong); }
+
+/* Playlist export result: the written path stays on screen (and selectable),
+   so copying it does not depend on a clipboard permission. */
+.export-note {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 2px 12px; padding: 10px 12px;
+  background: var(--green-bg); border-radius: var(--radius-md);
+  font-size: 12px; color: var(--text-2);
+}
+.export-note svg.icon { color: var(--green); flex: none; }
+.export-note-main { flex: 1 1 240px; min-width: 0; }
+.export-note-title { font-weight: 600; color: var(--text); }
+.export-note-path {
+  display: block; width: 100%; margin-top: 3px;
+  border: none; outline: none; background: transparent;
+  color: var(--text-2); font: 12px/1.45 ui-monospace, monospace;
+  text-overflow: ellipsis; user-select: text;
+}
 
 /* ============================================================ modal */
 .modal-mask {
@@ -580,7 +629,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
           </div>
           <div class="filters">
             <div class="field"><svg class="icon"><use href="#i-pulse"/></svg><input id="q-sites" data-i18n-ph="Site filter, comma separated (blank = all)" placeholder="Site filter, comma separated (blank = all)"></div>
-            <label class="merge-toggle" for="q-group"><input type="checkbox" class="cb" id="q-group"><span data-i18n="Merge same book">Merge same book</span></label>
+            <label class="merge-toggle" for="q-group"><input type="checkbox" class="cb" id="q-group" checked><span data-i18n="Merge same book">Merge same book</span></label>
             <button class="btn btn-ghost btn-sm" id="btn-rank"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Rankings">Rankings</span></button>
             <button class="btn btn-ghost btn-sm" id="btn-cats"><svg class="icon"><use href="#i-book"/></svg><span data-i18n="Categories">Categories</span></button>
             <span class="hint" id="search-hint"></span>
@@ -644,11 +693,21 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <div class="hint" id="m-note" style="margin-top:9px"></div>
             <div class="section-head"><span data-i18n="Results">Results</span><span class="count-chip" id="m-count">0</span>
               <div class="spacer" style="flex:1"></div>
+              <button class="btn btn-sm btn-ghost" id="btn-m-export"><svg class="icon"><use href="#i-down"/></svg><span data-i18n="Export playlist (.m3u8)">Export playlist (.m3u8)</span></button>
               <button class="btn btn-sm btn-ghost" id="btn-m-selall"><span data-i18n="Select all">Select all</span></button>
               <button class="btn btn-sm btn-danger" id="btn-m-stop" hidden><svg class="icon"><use href="#i-stop"/></svg><span data-i18n="Stop">Stop</span></button>
               <button class="btn btn-sm btn-primary" id="btn-m-dl"><svg class="icon"><use href="#i-down"/></svg><span id="m-dl-label" data-i18n="Download selected">Download selected</span></button>
             </div>
             <div class="progress" id="m-progress" style="margin:0 2px 12px" hidden><i></i></div>
+            <div class="export-note" id="m-export-note" hidden>
+              <svg class="icon"><use href="#i-check"/></svg>
+              <div class="export-note-main">
+                <div class="export-note-title" id="m-export-title"></div>
+                <input class="export-note-path" id="m-export-path" readonly>
+              </div>
+              <button class="btn btn-ghost btn-sm" id="m-export-copy" data-i18n="Copy">Copy</button>
+              <button class="btn btn-ghost btn-sm" id="m-export-open"><svg class="icon"><use href="#i-folder"/></svg><span data-i18n="Open">Open</span></button>
+            </div>
             <div id="m-tracks"></div>
           </div>
           <div class="card side-card">
@@ -685,6 +744,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 
   </main>
 </div>
+<div id="detail-backdrop"></div>
 <div id="toasts"></div>
 <script>
 "use strict";
@@ -897,15 +957,59 @@ let searching = false;
 let lastResults = [];
 let lastKeyword = "";
 let selIndex = -1;
+/* Below 1180px the details panel is a bottom sheet instead of a third column
+   (see the media query); these helpers keep its open/closed state, focus and
+   the backdrop in sync without changing the wide layout. */
+const narrowDetail = window.matchMedia("(max-width: 1180px)");
+let detailReturnFocus = null;
+function detailIsOpen() { const box = $("#detail"); return !!box && box.classList.contains("open"); }
+function hideDetail() {
+  const box = $("#detail");
+  box.hidden = true;
+  box.classList.remove("open");
+  $("#detail-backdrop").classList.remove("show");
+}
+function openDetail() {
+  const box = $("#detail");
+  if (!box || box.hidden) return;
+  if (!box.classList.contains("open")) {
+    // A programmatic click may leave focus on <body>; fall back to the row
+    // that was just selected so closing always has somewhere to return to.
+    const active = document.activeElement;
+    detailReturnFocus = (active && active !== document.body)
+      ? active
+      : ($("#results .result-card.sel") || $("#q"));
+  }
+  box.classList.add("open");
+  $("#detail-backdrop").classList.add("show");
+  const close = box.querySelector("[data-detail-close]");
+  if (close) close.focus({ preventScroll: true });
+}
+function closeDetail() {
+  const box = $("#detail");
+  box.classList.remove("open");
+  $("#detail-backdrop").classList.remove("show");
+  // Put focus back on the card that opened the drawer (or the search field).
+  const target = (detailReturnFocus && document.contains(detailReturnFocus))
+    ? detailReturnFocus
+    : ($("#results .result-card.sel") || $("#q"));
+  detailReturnFocus = null;
+  if (target && typeof target.focus === "function") target.focus({ preventScroll: true });
+}
+narrowDetail.addEventListener("change", e => {
+  if (!e.matches) { $("#detail").classList.remove("open"); $("#detail-backdrop").classList.remove("show"); }
+});
+$("#detail-backdrop").addEventListener("click", closeDetail);
 function selectResult(i) {
   if (i < 0 || i >= lastResults.length) return;
   selIndex = i;
   document.querySelectorAll("#results .result-card").forEach((el, k) => el.classList.toggle("sel", k === i));
   renderDetail(lastResults[i], lastKeyword);
+  if (narrowDetail.matches) openDetail();
 }
 function renderDetail(r, kw) {
   const box = $("#detail");
-  if (!r) { box.hidden = true; box.innerHTML = ""; return; }
+  if (!r) { hideDetail(); box.innerHTML = ""; return; }
   let cover = r.cover_url || "";
   if (cover.startsWith("//")) cover = "https:" + cover;
   const img = cover
@@ -916,6 +1020,7 @@ function renderDetail(r, kw) {
   const meta = [r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join('<span style="opacity:.45"> · </span>');
   box.hidden = false;
   box.innerHTML = `
+    <button type="button" class="detail-close" data-detail-close aria-label="${esc(t("Close"))}" title="${esc(t("Close"))}"><svg class="icon"><use href="#i-x"/></svg></button>
     <div class="detail-head">
       ${img}
       <div style="min-width:0">
@@ -957,7 +1062,7 @@ async function doSearch() {
       if (results.length !== rendered) {
         rendered = results.length;
         lastResults = results; lastKeyword = kw; selIndex = -1;
-        $("#detail").hidden = true;
+        hideDetail();
         renderResults(results, kw);
       }
       const secs = ((performance.now() - started) / 1000).toFixed(1);
@@ -1061,6 +1166,7 @@ $("#results").addEventListener("click", async e => {
   }
 });
 $("#detail").addEventListener("click", async e => {
+  if (e.target.closest("[data-detail-close]")) { closeDetail(); return; }
   const add = e.target.closest("[data-add]");
   const fol = e.target.closest("[data-follow]");
   const url = e.target.closest("[data-open-url]");
@@ -1084,7 +1190,7 @@ $("#btn-rank").onclick = async () => {
     if (data && data.error) throw new Error(data.error);
     const results = (data && data.results) || [];
     lastResults = results; lastKeyword = ""; selIndex = -1;
-    $("#detail").hidden = true;
+    hideDetail();
     renderResults(results, "");
     $("#search-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", "0.0");
   } catch (e) {
@@ -1134,7 +1240,7 @@ $("#cat-chips").addEventListener("click", async e => {
     const data = await call("category_books", chip.dataset.cat, chip.dataset.gender, 20);
     const results = (data && data.results) || [];
     lastResults = results; lastKeyword = ""; selIndex = -1;
-    $("#detail").hidden = true;
+    hideDetail();
     renderResults(results, "");
     const secs = ((performance.now() - started) / 1000).toFixed(1);
     $("#cat-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", secs);
@@ -1144,6 +1250,10 @@ $("#cat-chips").addEventListener("click", async e => {
 });
 $("#btn-search").onclick = doSearch;
 $("#q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.isComposing) doSearch(); });
+// "Merge same book" defaults to on: without it one title lists once per site.
+// An explicit earlier choice (stored as JSON true/false) still wins.
+$("#q-group").checked = store.get("merge_same_book", true) !== false;
+$("#q-group").addEventListener("change", () => store.set("merge_same_book", $("#q-group").checked));
 
 /* ================================================================ download */
 let taskTimer = null;
@@ -1254,7 +1364,7 @@ $("#btn-refresh-hist").onclick = refreshHistory;
 $("#btn-open-dl").onclick = () => api("open_downloads_dir").catch(() => {});
 
 /* ================================================================ music */
-const music = { tracks: [], selected: new Set(), downloading: false, note: "" };
+const music = { tracks: [], selected: new Set(), downloading: false, note: "", batch: [] };
 let musicInited = false;
 async function initMusic() {
   if (musicInited) { renderHealth(); return; }
@@ -1356,7 +1466,9 @@ $("#btn-m-dl").onclick = async () => {
   btn.disabled = true;
   let started = false;
   try {
-    const tracks = [...music.selected].sort((a, b) => a - b).map(i => music.tracks[i]);
+    const indexes = [...music.selected].sort((a, b) => a - b);
+    music.batch = indexes;
+    const tracks = indexes.map(i => music.tracks[i]);
     const r = await call("music_download", $("#m-platform").value, tracks);
     if (r && r.ok !== false) {
       started = true;
@@ -1372,6 +1484,67 @@ $("#btn-m-dl").onclick = async () => {
 };
 $("#btn-m-stop").onclick = () => api("music_stop").catch(() => {});
 
+/* Playlist export: only tracks that already carry a local file path can be
+   written (the engine does not download anything here). The written path is
+   shown in a selectable, read-only field so it can be copied even when the
+   clipboard API is unavailable. */
+function showExportNote(r) {
+  const skipped = Number(r.skipped || 0);
+  $("#m-export-title").textContent = t("Playlist saved") +
+    (skipped > 0 ? " · " + t("{n} track(s) without a local file were skipped").replace("{n}", skipped) : "");
+  const input = $("#m-export-path");
+  input.value = r.path || "";
+  input.title = r.path || "";
+  $("#m-export-note").hidden = false;
+}
+$("#btn-m-export").onclick = async () => {
+  if (!music.tracks.length) {
+    toast(t("Search songs first; there is nothing to export"), "warn", 5000);
+    return;
+  }
+  const ready = music.tracks.filter(tr => String((tr && tr.path) || "").trim());
+  if (!ready.length) {
+    toast(t("No track has a local file path yet — download the tracks first"), "warn", 6000);
+    return;
+  }
+  const btn = $("#btn-m-export");
+  btn.disabled = true;
+  try {
+    const r = await call("music_export", $("#m-platform").value, ready);
+    if (r && r.ok) {
+      showExportNote(r);
+      toast(t("Playlist saved to {path}").replace("{path}", r.path), "ok", 9000, () => api("open_path", r.path).catch(() => {}));
+    } else if (r && r.error) {
+      toast(r.error, "err", 7000);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+};
+$("#m-export-copy").onclick = async () => {
+  const input = $("#m-export-path");
+  const path = input.value;
+  if (!path) return;
+  let copied = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(path);
+      copied = true;
+    }
+  } catch {}
+  if (!copied) {
+    // Fallback: select the field and use the legacy copy command.
+    input.focus();
+    input.select();
+    try { copied = document.execCommand("copy"); } catch {}
+  }
+  toast(copied ? t("Copied") : t("Could not copy; the path is selected"), copied ? "ok" : "warn", 2600);
+};
+$("#m-export-open").onclick = () => {
+  const path = $("#m-export-path").value;
+  if (path) api("open_path", path).catch(() => {});
+};
+
 let musicPoll = null;
 function pollMusic() {
   if (musicPoll) return;
@@ -1379,6 +1552,14 @@ function pollMusic() {
     if (currentPage !== "music") return;
     try {
       const st = await api("get_music_status");
+      // Paths land on the downloader's Track objects; mirror them back onto the
+      // search rows so the export button can see them afterwards.
+      if (st && Array.isArray(st.paths)) {
+        st.paths.forEach((p, i) => {
+          const target = music.batch[i];
+          if (p && target != null && music.tracks[target]) music.tracks[target].path = p;
+        });
+      }
       if (!st || !st.active) {
         if (music.downloading) {
           music.downloading = false;
@@ -1516,6 +1697,13 @@ function typingTarget(el) {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable === true;
 }
 document.addEventListener("keydown", e => {
+  // Escape dismisses the narrow-window detail drawer (and returns focus);
+  // it is checked first so typing inside the drawer cannot swallow it.
+  if (e.key === "Escape" && !e.isComposing && detailIsOpen()) {
+    e.preventDefault();
+    closeDetail();
+    return;
+  }
   // Never hijack keys while the user is typing or composing text (IME):
   // Ctrl+F / Ctrl+D would otherwise steal keystrokes from the search fields.
   if (e.isComposing) return;

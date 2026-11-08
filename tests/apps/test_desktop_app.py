@@ -619,11 +619,44 @@ def test_window_state_file_lives_in_the_music_data_dir(
         ("cap-best",),
         ("cap-more",),
         ("src-caps",),
+        # narrow windows: the details panel becomes a dismissible drawer
+        ('id="detail-backdrop"',),
+        ("data-detail-close",),
+        ("closeDetail()",),
+        # music: playlist export entry point and its result bar
+        ('id="btn-m-export"',),
+        ('id="m-export-note"',),
+        ('id="m-export-path"',),
     ],
 )
 def test_app_html_contains_core_structures(needle: str) -> None:
     """The single-file front end keeps its pages, bridge calls and theming."""
     assert needle in APP_HTML
+
+
+def test_app_html_mergetoggle_defaults_on_and_remembers_choice() -> None:
+    """Search merges same-book rows out of the box; a stored choice wins."""
+    label = next(
+        line
+        for line in APP_HTML.splitlines()
+        if "merge-toggle" in line and "q-group" in line
+    )
+    assert 'id="q-group"' in label
+    assert "checked" in label
+    assert 'store.get("merge_same_book", true)' in APP_HTML
+    assert 'store.set("merge_same_book"' in APP_HTML
+
+
+def test_app_html_detail_is_reachable_below_1180px() -> None:
+    """The old `display: none` hide is replaced by an accessible drawer."""
+    assert "max-width: 1180px" in APP_HTML
+    assert ".split > #detail { display: none !important; }" not in APP_HTML
+    assert ".split > #detail.open" in APP_HTML
+    # Esc dismisses the drawer and focus is returned to the card.
+    assert 'e.key === "Escape"' in APP_HTML
+    assert "detailReturnFocus" in APP_HTML
+    # The reduced-motion rule still neutralises the slide animation.
+    assert "@media (prefers-reduced-motion: reduce)" in APP_HTML
 
 
 def test_app_html_mergetoggle_is_registered_as_i18n_key() -> None:
@@ -1121,7 +1154,63 @@ def test_bridge_music_status_and_stop_defaults() -> None:
     status = bridge.get_music_status()
     assert status["active"] is False
     assert status["total"] == 0
+    assert status["paths"] == []
     assert bridge.music_stop() == {"ok": True}
+
+
+def test_bridge_music_export_writes_playlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    @dataclass
+    class _FakeTrack:
+        name: str = ""
+        artists: str = ""
+        path: str = ""
+
+    written: list[str] = []
+
+    def fake_export(tracks: list[Any], path: Path) -> str:
+        written.extend(tr.path for tr in tracks)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#EXTM3U\n", encoding="utf-8")
+        return str(path)
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {"Track": _FakeTrack, "export_m3u": fake_export},
+    )
+    target = tmp_path / "playlist.m3u8"
+    result = wa.ApiBridge().music_export(
+        "netease",
+        [{"name": "A", "path": "C:/music/a.mp3"}, {"name": "B", "path": ""}],
+        str(target),
+    )
+    assert result["ok"] is True
+    assert result["path"] == str(target)
+    assert result["tracks_written"] == 1
+    assert result["skipped"] == 1
+    assert written == ["C:/music/a.mp3"]
+    assert target.read_text("utf-8") == "#EXTM3U\n"
+
+
+def test_bridge_music_export_without_local_paths_reports_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    @dataclass
+    class _FakeTrack:
+        name: str = ""
+        path: str = ""
+
+    monkeypatch.setattr(wa, "_music_funcs", lambda: {"Track": _FakeTrack})
+    result = wa.ApiBridge().music_export("netease", [{"name": "B", "path": ""}])
+    assert result["ok"] is False
+    assert result["error"]
+    assert result["skipped"] == 1
 
 
 def test_bridge_music_settings_round_trip(

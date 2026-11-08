@@ -201,7 +201,10 @@ def _music_funcs() -> dict[str, Any] | None:
     global _MUSIC_FUNCS
     if _MUSIC_FUNCS is None:
         try:
-            from novel_downloader.apps.music.downloader import download_many
+            from novel_downloader.apps.music.downloader import (
+                download_many,
+                export_m3u,
+            )
             from novel_downloader.apps.music.providers import (
                 available_labels,
                 create,
@@ -219,6 +222,7 @@ def _music_funcs() -> dict[str, Any] | None:
             "health_check": health_check,
             "platform_note": platform_note,
             "download_many": download_many,
+            "export_m3u": export_m3u,
             "Track": Track,
         }
     return _MUSIC_FUNCS or None
@@ -229,6 +233,44 @@ def _music_options_type(**kwargs: Any) -> Any:
     from novel_downloader.apps.music.downloader import DownloadOptions
 
     return DownloadOptions(**kwargs)
+
+
+#: Default suffix for playlists written without an explicit ``out_path``.
+_DEFAULT_PLAYLIST_SUFFIX = ".m3u8"
+
+
+def _default_playlist_name() -> str:
+    """Timestamped playlist file name (same convention as the REST API)."""
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    return f"playlist-{stamp}{_DEFAULT_PLAYLIST_SUFFIX}"
+
+
+def _playlist_target(out_path: str | None) -> Path:
+    """
+    Resolve where an exported playlist is written.
+
+    An explicit ``.m3u`` / ``.m3u8`` path is used verbatim, any other value is
+    treated as a directory. Without ``out_path`` the music settings' ``out_dir``
+    is used, falling back to the platform default music directory.
+    """
+    name = _default_playlist_name()
+    if out_path and str(out_path).strip():
+        candidate = Path(str(out_path).strip()).expanduser()
+        if candidate.suffix.lower() in {".m3u", ".m3u8"}:
+            return candidate
+        return candidate / name
+
+    from novel_downloader.apps.music.paths import default_download_dir
+    from novel_downloader.apps.music.settings import load_settings
+
+    stored = load_settings()
+    out_dir = stored.get("out_dir") if isinstance(stored, dict) else None
+    base = (
+        Path(str(out_dir)).expanduser()
+        if out_dir
+        else Path(default_download_dir()).expanduser()
+    )
+    return base / name
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +418,28 @@ def _i18n_catalog() -> dict[str, str]:
         "Done: {ok} downloaded, {skip} skipped, {fail} failed": t(
             "Done: {ok} downloaded, {skip} skipped, {fail} failed"
         ),
+        "Export playlist (.m3u8)": t("Export playlist (.m3u8)"),
+        "Playlist saved": t("Playlist saved"),
+        "Playlist saved to {path}": t("Playlist saved to {path}"),
+        "{n} track(s) without a local file were skipped": t(
+            "{n} track(s) without a local file were skipped"
+        ),
+        "Search songs first; there is nothing to export": t(
+            "Search songs first; there is nothing to export"
+        ),
+        "No track has a local file path yet — download the tracks first": t(
+            "No track has a local file path yet — download the tracks first"
+        ),
+        "Could not write the playlist: {error}": t(
+            "Could not write the playlist: {error}"
+        ),
+        "Copy": t("Copy"),
+        "Copied": t("Copied"),
+        "Could not copy; the path is selected": t(
+            "Could not copy; the path is selected"
+        ),
+        # detail drawer (narrow windows)
+        "Close": t("Close"),
         # follow page
         "Added to follow list": t("Added to follow list"),
         "Already followed": t("Already followed"),
@@ -676,6 +740,9 @@ class ApiBridge:
         self._music_stop = threading.Event()
         self._music_summary = ""
         self._music_failed = False
+        # Local paths of the submitted batch, aligned by index; the front end
+        # merges them back onto its search rows for playlist export.
+        self._music_paths: list[str] = []
         # health check state
         self._health_rows: dict[str, dict[str, Any]] = {}
         self._health_thread: threading.Thread | None = None
@@ -2008,6 +2075,7 @@ class ApiBridge:
             self._music_fraction = 0.0
             self._music_summary = ""
             self._music_failed = False
+            self._music_paths = [""] * len(tracks)
             self._music_stop.clear()
 
         worker = threading.Thread(
@@ -2043,14 +2111,19 @@ class ApiBridge:
             with self._lock:
                 self._music_total = len(objects)
 
-            def on_result(_index: int, _track: object, result: object) -> None:
+            def on_result(index: int, _track: object, result: object) -> None:
                 state = str(getattr(result, "status", "") or "").lower()
                 key = "ok" if state == "ok" else "skip" if state == "skip" else "fail"
+                path = str(
+                    getattr(_track, "path", "") or getattr(result, "path", "") or ""
+                )
                 with self._lock:
                     counts[key] += 1
                     # Exactly one increment per finished track: the count is
                     # owned here, ``on_tick`` only drives the fraction.
                     self._music_done += 1
+                    if 0 <= index < len(self._music_paths) and path:
+                        self._music_paths[index] = path
 
             def on_tick(fraction: float, _done: int) -> None:
                 with self._lock:
@@ -2118,12 +2191,67 @@ class ApiBridge:
                 "fraction": self._music_fraction,
                 "summary": self._music_summary,
                 "failed": self._music_failed,
+                "paths": list(self._music_paths),
             }
 
     def music_stop(self) -> dict[str, Any]:
         """Ask the running music download to stop."""
         self._music_stop.set()
         return {"ok": True}
+
+    def music_export(
+        self, platform: str, tracks: list[dict[str, Any]], out_path: str | None = None
+    ) -> dict[str, Any]:
+        """
+        Write an M3U8 playlist for tracks that already have a local file.
+
+        Mirrors ``POST /api/v1/music/export``: tracks without ``path`` are
+        counted in ``skipped`` and never fail the request; when none of them is
+        playable the caller gets an explicit error instead of an empty file.
+        `platform` is accepted for parity with the REST contract (the playlist
+        itself only stores file locations).
+        """
+        funcs = _music_funcs()
+        if funcs is None:
+            return {"ok": False, "error": t("Music extras are not installed")}
+        track_cls = funcs["Track"]
+        fields = {field.name for field in dataclasses.fields(track_cls)}
+        ready: list[Any] = []
+        skipped = 0
+        for raw in tracks if isinstance(tracks, list) else []:
+            path = str(raw.get("path") or "").strip() if isinstance(raw, dict) else ""
+            if not path:
+                skipped += 1
+                continue
+            ready.append(track_cls(**{k: v for k, v in raw.items() if k in fields}))
+        if not ready:
+            return {
+                "ok": False,
+                "error": t(
+                    "No track has a local file path yet — download the tracks first"
+                ),
+                "skipped": skipped,
+            }
+
+        target = _playlist_target(out_path)
+        try:
+            written = funcs["export_m3u"](ready, target)
+        except OSError as exc:
+            # This is the user's own destination, so the rendering helper (not
+            # a raw traceback) is shown; the full reason goes to the log.
+            logger.warning("Playlist write failed for %s: %s", target, exc)
+            return {
+                "ok": False,
+                "error": t("Could not write the playlist: {error}").replace(
+                    "{error}", format_error(exc)
+                ),
+            }
+        return {
+            "ok": True,
+            "path": str(written),
+            "tracks_written": len(ready),
+            "skipped": skipped,
+        }
 
     def get_music_settings(self) -> dict[str, Any]:
         """Stored music settings for the settings panel."""
