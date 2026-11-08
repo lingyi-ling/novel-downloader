@@ -152,6 +152,7 @@ class _FakeTrack:
     http_headers: dict[str, str] = field(default_factory=dict)
     path: str = ""
     lyric: str = ""
+    sources: list[str] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -184,6 +185,7 @@ def _fake_music_components(**overrides: Any) -> Any:
         "paths": SimpleNamespace(default_download_dir=lambda: Path("unused")),
         "download_options": lambda **kwargs: SimpleNamespace(data=kwargs),
         "download_many": lambda *args, **kwargs: (0, 0, 0, [], []),
+        "download_mixed": lambda *args, **kwargs: (0, 0, 0, [], []),
         "available_labels": lambda: [("netease", "netease")],
         "create": lambda platform: object(),
         "platform_note": lambda platform: "",
@@ -876,7 +878,7 @@ async def test_music_download_returns_ordered_results(
     monkeypatch.setattr(
         api_routes,
         "_load_music_components",
-        lambda: _fake_music_components(download_many=fake_download_many),
+        lambda: _fake_music_components(download_mixed=fake_download_many),
     )
 
     response = await client.post(
@@ -933,7 +935,7 @@ async def test_music_job_lifecycle(
     monkeypatch.setattr(
         api_routes,
         "_load_music_components",
-        lambda: _fake_music_components(download_many=fake_download_many),
+        lambda: _fake_music_components(download_mixed=fake_download_many),
     )
 
     created = await client.post(

@@ -188,6 +188,7 @@ def _components(
         paths=_FakePaths(out_dir),
         download_options=_FakeOptions,
         download_many=_download_many,
+        download_mixed=_download_many,
         available_labels=lambda: [("demo", "Demo")],
         create=_create,
         platform_note=lambda platform: "",

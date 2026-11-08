@@ -1009,6 +1009,7 @@ def _music_components() -> Any:
         from novel_downloader.apps.music.downloader import (
             DownloadOptions,
             download_many,
+            download_mixed,
             export_m3u,
         )
         from novel_downloader.apps.music.providers import (
@@ -1026,6 +1027,7 @@ def _music_components() -> Any:
         paths=paths,
         download_options=DownloadOptions,
         download_many=download_many,
+        download_mixed=download_mixed,
         export_m3u=export_m3u,
         available_labels=available_labels,
         create=create,
@@ -1046,6 +1048,13 @@ def _require_music_platform(components: Any, platform: str) -> None:
             400,
             _MSG_UNKNOWN_MUSIC_PLATFORM.format(platform=platform, keys=", ".join(keys)),
         )
+
+
+def _is_all_platforms(platform: Any) -> bool:
+    """``platform`` 是否表示「全部平台」（``all`` 或空）。"""
+    from novel_downloader.apps.music.aggregate import is_all_platforms
+
+    return is_all_platforms(platform)
 
 
 def _music_track(components: Any, data: Any) -> Any:
@@ -1107,23 +1116,49 @@ def _handle_music_search(
 ) -> dict[str, Any]:
     components = _music_components()
     entries: list[dict[str, Any]] = []
-    platform, platform_err = _required_str(body, "platform")
+    platform = str(body.get("platform") or "all").strip() or "all"
     keyword, keyword_err = _required_str(body, "keyword")
     limit = _int_field(body, "limit", 20, 1, entries)
     offset = _int_field(body, "offset", 0, 0, entries)
-    for error in (platform_err, keyword_err):
-        if error is not None:
-            entries.append(error)
+    if keyword_err is not None:
+        entries.append(keyword_err)
     if entries:
         raise _validation_error(entries)
-    assert platform is not None and keyword is not None
+    assert keyword is not None
     assert limit is not None and offset is not None
-    _require_music_platform(components, platform)
 
+    from novel_downloader.apps.music import aggregate
+    from novel_downloader.apps.music.trackcache import CACHE
+
+    if _is_all_platforms(platform):
+        result = aggregate.search_all(
+            keyword,
+            None,
+            limit,
+            per_platform_limit=max(
+                aggregate.DEFAULT_PER_PLATFORM_LIMIT, min(limit, 15)
+            ),
+            timeout=aggregate.DEFAULT_TIMEOUT,
+        )
+        payload = [dataclasses.asdict(track) for track in result.tracks]
+        return {
+            "total": result.total,
+            "tracks": payload,
+            "search_id": CACHE.put(result.tracks),
+            "platforms": [item.as_dict() for item in result.platforms],
+            "platform": aggregate.ALL_PLATFORM_KEY,
+        }
+
+    _require_music_platform(components, platform)
     provider = components.create(platform)
     tracks, total = provider.search(keyword, limit=limit, offset=offset)
     payload = [dataclasses.asdict(track) for track in tracks]
-    return {"total": int(total or len(payload)), "tracks": payload}
+    return {
+        "total": int(total or len(payload)),
+        "tracks": payload,
+        "search_id": CACHE.put(tracks),
+        "platform": platform,
+    }
 
 
 def _handle_music_health(
@@ -1155,9 +1190,7 @@ def _handle_music_health(
 def _music_download_args(
     body: dict[str, Any], components: Any, entries: list[dict[str, Any]]
 ) -> tuple[str, list[Any], Any]:
-    platform, platform_err = _required_str(body, "platform")
-    if platform_err is not None:
-        entries.append(platform_err)
+    platform = str(body.get("platform") or "all").strip() or "all"
     raw_tracks = body.get("tracks")
     tracks: list[Any] = []
     if not isinstance(raw_tracks, list):
@@ -1183,7 +1216,14 @@ def _music_download_args(
     if entries:
         raise _validation_error(entries)
     assert platform is not None
-    _require_music_platform(components, platform)
+    if not _is_all_platforms(platform):
+        _require_music_platform(components, platform)
+
+    from novel_downloader.apps.music.trackcache import CACHE
+
+    search_id = body.get("search_id")
+    if isinstance(search_id, str) and search_id.strip():
+        tracks = CACHE.resolve(search_id.strip(), tracks)
 
     out_dir = str(body.get("out_dir") or "").strip() or str(_music_output_dir())
     level = body.get("level")
@@ -1198,9 +1238,7 @@ def _handle_music_export(
 ) -> dict[str, Any]:
     components = _music_components()
     entries: list[dict[str, Any]] = []
-    platform, platform_err = _required_str(body, "platform")
-    if platform_err is not None:
-        entries.append(platform_err)
+    platform = str(body.get("platform") or "all").strip() or "all"
     raw_tracks = body.get("tracks")
     tracks: list[Any] = []
     if not isinstance(raw_tracks, list):
@@ -1210,7 +1248,8 @@ def _handle_music_export(
     if entries:
         raise _validation_error(entries)
     assert platform is not None
-    _require_music_platform(components, platform)
+    if not _is_all_platforms(platform):
+        _require_music_platform(components, platform)
 
     usable = [track for track in tracks if str(getattr(track, "path", "") or "")]
     skipped = len(tracks) - len(usable)
@@ -1234,13 +1273,25 @@ def _handle_music_export(
     }
 
 
+def _music_create_provider(components: Any, platform: str) -> Any:
+    """``create_provider`` for ``download_mixed``.
+
+    ``platform="all"`` lets every track use its own provider (aggregate
+    search); an explicit key overrides it, as single-platform UIs do.
+    """
+    if _is_all_platforms(platform):
+        return components.create
+    provider = components.create(platform)
+    return lambda _key: provider
+
+
 def _handle_music_download(
     body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
     components = _music_components()
     entries: list[dict[str, Any]] = []
     platform, tracks, options = _music_download_args(body, components, entries)
-    provider = components.create(platform)
+    create_provider = _music_create_provider(components, platform)
 
     results: list[tuple[int, dict[str, Any]]] = []
     lock = threading.Lock()
@@ -1249,8 +1300,8 @@ def _handle_music_download(
         with lock:
             results.append((index, _music_result_item(result)))
 
-    ok, skip, fail, _failed_pairs, _failed_tracks = components.download_many(
-        provider, tracks, options, on_result=on_result
+    ok, skip, fail, _failed_pairs, _failed_tracks = components.download_mixed(
+        create_provider, tracks, options, on_result=on_result
     )
     ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
     return {"ok": int(ok), "skip": int(skip), "fail": int(fail), "results": ordered}
@@ -1283,7 +1334,7 @@ def _music_job_progress(job_id: str, done: int) -> None:
 def _music_job_worker(
     job_id: str,
     components: Any,
-    provider: Any,
+    create_provider: Any,
     tracks: list[Any],
     options: Any,
     timeout: float,
@@ -1311,7 +1362,7 @@ def _music_job_worker(
         _music_job_progress(job_id, done)
 
     try:
-        components.download_many(provider, tracks, options, on_result=on_result)
+        components.download_mixed(create_provider, tracks, options, on_result=on_result)
     except Exception as exc:  # noqa: BLE001 - reported in the job record
         if not expired:
             _music_job_update(
@@ -1339,7 +1390,7 @@ def _handle_music_jobs_post(
     components = _music_components()
     entries: list[dict[str, Any]] = []
     platform, tracks, options = _music_download_args(body, components, entries)
-    provider = components.create(platform)
+    create_provider = _music_create_provider(components, platform)
 
     job_id = uuid.uuid4().hex
     with _MUSIC_JOBS_LOCK:
@@ -1355,7 +1406,7 @@ def _handle_music_jobs_post(
         }
     threading.Thread(
         target=_music_job_worker,
-        args=(job_id, components, provider, tracks, options, _MUSIC_JOB_TIMEOUT),
+        args=(job_id, components, create_provider, tracks, options, _MUSIC_JOB_TIMEOUT),
         name=f"noveldl-music-{job_id[:8]}",
         daemon=True,
     ).start()

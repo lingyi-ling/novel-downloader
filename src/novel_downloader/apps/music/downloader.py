@@ -500,6 +500,117 @@ def download_many(
     return c["ok"], c["skip"], c["fail"], failed_pairs, failed_tracks
 
 
+def group_by_provider(tracks, platform=None):
+    """把曲目按 provider 分组，保留全局下标。
+
+    ``platform`` 非空时强制全部使用该平台（历史单平台调用）；否则用每
+    首歌自己的 ``provider``。返回 ``[(key, [(index, track), ...]), ...]``，
+    组顺序按首次出现顺序，便于进度条从左到右推进。
+    """
+    groups = {}
+    for index, track in enumerate(tracks):
+        key = str(platform or getattr(track, "provider", "") or "").strip()
+        groups.setdefault(key, []).append((index, track))
+    return list(groups.items())
+
+
+def download_mixed(
+    create_provider,
+    tracks,
+    opts,
+    workers=3,
+    on_result=None,
+    on_tick=None,
+    should_stop=None,
+    min_interval=0.2,
+    platform=None,
+):
+    """按歌曲所属平台分组下载，进度与结果下标仍对应传入的完整列表。
+
+    聚合搜索的结果可能来自多个平台（甚至同一行来自多个来源），单平台
+    的 :func:`download_many` 无法处理。这里按 provider 依次下载：每个
+    平台内部仍是并发；进度折算到全局下标；``on_result`` /
+    ``failed_tracks`` 返回原始的曲目对象。
+
+    ``platform`` 非空时忽略曲目自带的 provider（单平台界面的历史行为）。
+
+    返回值与 :func:`download_many` 相同：
+    ``(ok, skip, fail, failed_pairs, failed_tracks)``。
+    """
+    tracks = list(tracks)
+    total = len(tracks)
+    if total == 0:
+        return 0, 0, 0, [], []
+
+    groups = group_by_provider(tracks, platform)
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    failed_pairs, failed_tracks = [], []
+    base_done = 0
+
+    for key, items in groups:
+        if should_stop and should_stop():
+            break
+        provider = None
+        if key and create_provider is not None:
+            try:
+                provider = create_provider(key)
+            except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其它平台
+                for index, track in items:
+                    counts["fail"] += 1
+                    reason = f"平台不可用（{key}）：{exc}"
+                    failed_pairs.append((f"{track.name} - {track.artists}", reason))
+                    failed_tracks.append(track)
+                    if on_result:
+                        on_result(index, track, TrackResult("fail", reason))
+                base_done += len(items)
+                continue
+        if provider is None:
+            for index, track in items:
+                counts["fail"] += 1
+                reason = "缺少平台信息，请重新搜索后再下载"
+                failed_pairs.append((f"{track.name} - {track.artists}", reason))
+                failed_tracks.append(track)
+                if on_result:
+                    on_result(index, track, TrackResult("fail", reason))
+            base_done += len(items)
+            continue
+
+        group_tracks = [track for _index, track in items]
+        group_len = len(group_tracks)
+        group_base = base_done
+
+        def group_result(local_index, track, result, _items=items):
+            if on_result:
+                on_result(_items[local_index][0], track, result)
+
+        def group_tick(fraction, done_n, _base=group_base, _len=group_len):
+            if on_tick:
+                done = _base + min(_len, max(0, int(done_n)))
+                overall = (done / total) if total else 1.0
+                on_tick(min(1.0, overall), done)
+
+        ok, skip, fail, pairs, failed = download_many(
+            provider,
+            group_tracks,
+            opts,
+            workers=workers,
+            on_result=group_result,
+            on_tick=group_tick,
+            should_stop=should_stop,
+            min_interval=min_interval,
+        )
+        counts["ok"] += ok
+        counts["skip"] += skip
+        counts["fail"] += fail
+        failed_pairs.extend(pairs)
+        failed_tracks.extend(failed)
+        base_done += group_len
+
+    if on_tick and total:
+        on_tick(1.0, total)
+    return counts["ok"], counts["skip"], counts["fail"], failed_pairs, failed_tracks
+
+
 def human(size):
     for unit in ("B", "KB", "MB", "GB"):
         if size < 1024:

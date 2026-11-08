@@ -149,9 +149,14 @@ class WatchlistCheckRequest(BaseModel):
 
 
 class MusicSearchRequest(BaseModel):
-    """Body of ``POST /api/v1/music/search``."""
+    """Body of ``POST /api/v1/music/search``.
 
-    platform: str = Field(min_length=1)
+    ``platform`` may be ``"all"`` (the default) to search every registered
+    platform at once: results are merged per song, each row carrying
+    ``sources``. Responses then also include ``search_id`` and ``platforms``.
+    """
+
+    platform: str = Field(default="all", min_length=1)
     keyword: str = Field(min_length=1)
     limit: int = Field(default=20, ge=1)
     offset: int = Field(default=0, ge=0)
@@ -181,6 +186,8 @@ class MusicTrack(BaseModel):
     #: ``POST /api/v1/music/export``.
     path: str = ""
     lyric: str = ""
+    #: Platform keys that carry this song, best first (aggregate search only).
+    sources: list[str] = Field(default_factory=list)
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -190,10 +197,17 @@ class MusicDownloadRequest(BaseModel):
 
     At most :data:`MAX_MUSIC_TRACKS` tracks may be submitted per request; a
     larger list is rejected with ``422`` rather than queued.
+
+    When the tracks came from an aggregate search, echo that response's
+    ``search_id``: it lets the server restore the original provider objects
+    (their resolve data is not JSON-serialisable) instead of the reduced
+    dictionaries. ``platform="all"`` (the default) downloads each track on
+    its own ``provider``; an explicit platform key overrides that.
     """
 
-    platform: str = Field(min_length=1)
+    platform: str = Field(default="all", min_length=1)
     tracks: list[MusicTrack] = Field(min_length=1, max_length=MAX_MUSIC_TRACKS)
+    search_id: str | None = None
     level: str | None = None
     out_dir: str | None = None
 
@@ -204,8 +218,11 @@ class MusicExportRequest(BaseModel):
 
     ``out_path`` may be a file name or a directory. When omitted the playlist
     is written into the music settings' ``out_dir`` with a timestamped name.
+
+    Playlists only store file locations, so ``platform`` is informational and
+    accepts ``"all"`` for tracks that came from an aggregate search.
     """
 
-    platform: str = Field(min_length=1)
+    platform: str = Field(default="all", min_length=1)
     tracks: list[MusicTrack] = Field(min_length=1, max_length=MAX_MUSIC_TRACKS)
     out_path: str | None = None

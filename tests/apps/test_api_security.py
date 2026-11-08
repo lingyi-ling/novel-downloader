@@ -1174,6 +1174,7 @@ def _components(
         paths=_FakePaths(out_dir),
         download_options=_FakeOptions,
         download_many=download_many or (lambda *a, **k: (0, 0, 0, [], [])),
+        download_mixed=download_many or (lambda *a, **k: (0, 0, 0, [], [])),
         available_labels=lambda: [],
         create=lambda platform: provider,
         platform_note=lambda platform: "",

@@ -60,6 +60,7 @@ def _components(tmp_path: Any) -> SimpleNamespace:
             out_dir=out_dir, level=level
         ),
         download_many=_download_many,
+        download_mixed=_download_many,
         # The real ``export_m3u`` returns the playlist path, not a count.
         # Returning a path here keeps the handler honest: ``int(path)`` used
         # to raise ``ValueError`` (HTTP 500) against the real engine.

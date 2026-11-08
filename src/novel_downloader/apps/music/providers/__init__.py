@@ -6,6 +6,8 @@ v2.0 关键决策：
 - 新增平台只需 _reg 一行
 """
 
+from typing import Any, cast
+
 from . import creds  # noqa: F401
 from .base import MusicProvider, ResolveResult, Track  # noqa: F401
 from .health import health_check as health_check
@@ -58,24 +60,24 @@ def _sorted_items():
     return sorted(_REGISTRY.items(), key=sort_key)
 
 
-def available():
+def available() -> list[tuple[str, str]]:
     """返回按分组排序的 [(key, 显示名), ...]。"""
     return [(k, v[0]) for k, v in _sorted_items()]
 
 
-def available_labels():
+def available_labels() -> list[tuple[str, str]]:
     """返回按分组排序的 [(key, 下拉标签), ...]，标签形如「国内 · 网易云音乐」。"""
     return [(k, f"{group_of(k)} · {v[0]}") for k, v in _sorted_items()]
 
 
-def platform_note(key):
+def platform_note(key: str) -> str:
     """返回该平台的使用提示（如需账号/网络条件），没有则返回空串。"""
     return PLATFORM_NOTES.get(key, "")
 
 
-def create(key, **kwargs):
+def create(key: str, **kwargs: Any) -> MusicProvider:
     """按 key 创建 provider 实例。kwargs 透传给构造函数。"""
     if key not in _REGISTRY:
         raise KeyError(f"未知平台：{key}")
     _, builder = _REGISTRY[key]
-    return builder(**kwargs)
+    return cast("MusicProvider", builder(**kwargs))

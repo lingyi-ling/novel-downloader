@@ -293,6 +293,11 @@ class MusicdlProvider(MusicProvider):
         info = (track.extra or {}).get("info")
         if info is None:
             return ResolveResult(reason="缺少平台解析数据")
+        if isinstance(info, dict):
+            # 搜索结果可能经过 JSON 往返（桌面桥 / REST），SongInfo 会退化成
+            # 普通 dict；这种情况下拿不到 ``with_valid_download_url``。
+            # 明确提示重新搜索，而不是抛 AttributeError 让整批下载崩掉。
+            return ResolveResult(reason="搜索结果已失效，请重新搜索后再下载")
         if str(getattr(info, "protocol", "HTTP")).upper() == "HLS":
             return ResolveResult(reason="HLS 流暂不支持直链下载")
         if not info.with_valid_download_url:

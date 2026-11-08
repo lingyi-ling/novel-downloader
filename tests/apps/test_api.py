@@ -987,6 +987,7 @@ def _fake_music_components(download_many: Any, out_dir: Path) -> Any:
         paths=_FakePaths(out_dir),
         download_options=_FakeDownloadOptions,
         download_many=download_many,
+        download_mixed=download_many,
         available_labels=lambda: [],
         create=lambda platform: object(),
         platform_note=lambda platform: "",

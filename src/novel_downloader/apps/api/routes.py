@@ -963,6 +963,7 @@ class _MusicComponents:
     export_m3u: Any = None
     health_check: Any = None
     load_settings: Any = None
+    download_mixed: Any = None
 
 
 def _load_music_components() -> _MusicComponents:
@@ -981,6 +982,7 @@ def _load_music_components() -> _MusicComponents:
         from novel_downloader.apps.music.downloader import (
             DownloadOptions,
             download_many,
+            download_mixed,
             export_m3u,
         )
         from novel_downloader.apps.music.providers import (
@@ -1010,6 +1012,7 @@ def _load_music_components() -> _MusicComponents:
         export_m3u=export_m3u,
         health_check=health_check,
         load_settings=load_settings,
+        download_mixed=download_mixed,
     )
 
 
@@ -1076,6 +1079,49 @@ def _require_music_platform(components: _MusicComponents, platform: str) -> None
         )
 
 
+def _is_all_platforms(platform: str | None) -> bool:
+    """``platform`` 是否表示「全部平台」（``all`` 或空）。"""
+    from novel_downloader.apps.music.aggregate import is_all_platforms
+
+    return is_all_platforms(platform)
+
+
+def _music_search_timeout(request: Request) -> float:
+    """Aggregate search budget: the configured window, capped per platform."""
+    from novel_downloader.apps.music.aggregate import DEFAULT_TIMEOUT
+
+    configured = float(_blocking_timeout(request, "music_search"))
+    # Leave a little room before the outer request budget: the aggregate
+    # returns partial results at its own deadline instead of being cancelled.
+    return max(1.0, min(DEFAULT_TIMEOUT, configured - 1.0))
+
+
+def _resolve_music_tracks(
+    components: _MusicComponents, body: MusicDownloadRequest
+) -> list[Any]:
+    """
+    Rebuild the Tracks to download.
+
+    Provider resolve data (musicdl's ``SongInfo``, NetEase raw fields) does not
+    survive JSON, so a request that echoes ``search_id`` is resolved against
+    the in-process search cache instead. A stale/unknown id falls back to the
+    submitted dictionaries; those providers then report a clear
+    "search results expired, search again" error instead of crashing.
+    """
+    from novel_downloader.apps.music.trackcache import CACHE
+
+    submitted = [components.track_cls(**track.model_dump()) for track in body.tracks]
+    return CACHE.resolve(body.search_id, submitted)
+
+
+def _music_download_callable(components: _MusicComponents, platform: str) -> Any:
+    """Return ``create_provider`` for ``download_mixed``."""
+    if _is_all_platforms(platform):
+        return components.create
+    provider = _create_provider(components, platform)
+    return lambda _key: provider
+
+
 def _default_playlist_name() -> str:
     """Return a timestamped playlist file name."""
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
@@ -1118,7 +1164,10 @@ async def music_export(body: MusicExportRequest) -> dict[str, Any]:
     ``out_dir``. No network access or download happens here.
     """
     components = _load_music_components()
-    _require_music_platform(components, body.platform)
+    # Playlists only store file locations, so a mixed-platform selection is
+    # fine; "all" just means the caller did not pick a single platform.
+    if not _is_all_platforms(body.platform):
+        _require_music_platform(components, body.platform)
 
     tracks: list[Any] = []
     skipped = 0
@@ -1182,25 +1231,63 @@ async def music_health(
 @router.post("/music/search", tags=["music"])
 async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, Any]:
     """
-    Search a music platform. The blocking provider call runs in a thread.
+    Search one platform, or every platform at once (``platform="all"``).
+
+    A single-platform search keeps the historical ``{total, tracks}`` shape
+    (plus ``search_id``). An aggregate search merges the same song across
+    platforms, so each track carries ``sources`` and the response adds
+    ``platforms`` with per-platform counts/failures.
 
     Exceeding the configured budget returns ``504``.
     """
+    from novel_downloader.apps.music.aggregate import (
+        ALL_PLATFORM_KEY,
+        DEFAULT_PER_PLATFORM_LIMIT,
+        search_all,
+    )
+    from novel_downloader.apps.music.trackcache import CACHE
+
     components = _load_music_components()
+    if _is_all_platforms(body.platform):
+        result = await _with_timeout(
+            run_in_threadpool(
+                search_all,
+                body.keyword,
+                None,
+                body.limit,
+                per_platform_limit=max(DEFAULT_PER_PLATFORM_LIMIT, min(body.limit, 15)),
+                timeout=_music_search_timeout(request),
+            ),
+            _blocking_timeout(request, "music_search"),
+            "Music search",
+        )
+        payload = [asdict(track) for track in result.tracks]
+        return {
+            "total": result.total,
+            "tracks": payload,
+            "search_id": CACHE.put(result.tracks),
+            "platforms": [item.as_dict() for item in result.platforms],
+            "platform": ALL_PLATFORM_KEY,
+        }
+
     provider = _create_provider(components, body.platform)
 
-    def _run() -> tuple[int, list[dict[str, Any]]]:
+    def _run() -> tuple[int, list[Any]]:
         tracks, total = provider.search(
             body.keyword, limit=body.limit, offset=body.offset
         )
-        payload = [asdict(track) for track in tracks]
-        return int(total or len(payload)), payload
+        return int(total or len(tracks)), list(tracks)
 
     timeout = _blocking_timeout(request, "music_search")
     total, tracks = await _with_timeout(
         run_in_threadpool(_run), timeout, "Music search"
     )
-    return {"total": total, "tracks": tracks}
+    return {
+        "total": total,
+        "tracks": [asdict(track) for track in tracks],
+        "search_id": CACHE.put(tracks),
+        "platform": body.platform,
+    }
 
 
 @router.post("/music/download", tags=["music"])
@@ -1217,9 +1304,9 @@ async def music_download(
     is exceeded.
     """
     components = _load_music_components()
-    provider = _create_provider(components, body.platform)
+    create_provider = _music_download_callable(components, body.platform)
 
-    tracks = [components.track_cls(**track.model_dump()) for track in body.tracks]
+    tracks = _resolve_music_tracks(components, body)
     out_dir = (body.out_dir or "").strip() or str(
         components.paths.default_download_dir()
     )
@@ -1239,8 +1326,8 @@ async def music_download(
     try:
         ok, skip, fail, _failed_pairs, _failed_tracks = await _with_timeout(
             run_in_threadpool(
-                components.download_many,
-                provider,
+                components.download_mixed,
+                create_provider,
                 tracks,
                 options,
                 on_result=on_result,
@@ -1333,7 +1420,7 @@ def _music_job_set_progress(job_id: str, done: int) -> None:
 async def _run_music_job(
     job_id: str,
     components: _MusicComponents,
-    provider: Any,
+    create_provider: Any,
     tracks: list[Any],
     options: Any,
     timeout: float,
@@ -1369,8 +1456,8 @@ async def _run_music_job(
     try:
         await asyncio.wait_for(
             run_in_threadpool(
-                components.download_many,
-                provider,
+                components.download_mixed,
+                create_provider,
                 tracks,
                 options,
                 on_result=on_result,
@@ -1406,9 +1493,9 @@ async def create_music_job(
 ) -> dict[str, str]:
     """Queue a music download and return immediately with a job id."""
     components = _load_music_components()
-    provider = _create_provider(components, body.platform)
+    create_provider = _music_download_callable(components, body.platform)
 
-    tracks = [components.track_cls(**track.model_dump()) for track in body.tracks]
+    tracks = _resolve_music_tracks(components, body)
     out_dir = (body.out_dir or "").strip() or str(
         components.paths.default_download_dir()
     )
@@ -1434,7 +1521,7 @@ async def create_music_job(
         _run_music_job(
             job_id,
             components,
-            provider,
+            create_provider,
             tracks,
             options,
             _blocking_timeout(request, "music_download"),
