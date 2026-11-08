@@ -120,7 +120,9 @@ HEAVY_PLATFORMS = {
         "YouTube",
         _BASE + "youtube",
         "YouTubeMusicClient",
-        ("ytmusicapi", "node"),
+        # The vendored client searches through ytmusicapi; it never invokes
+        # Node itself (the old "node" requirement kept it hidden for nothing).
+        ("ytmusicapi",),
     ),
 }
 
@@ -300,6 +302,14 @@ class MusicdlProvider(MusicProvider):
             raise RuntimeError(
                 f"{self.display_name} 缺少可选依赖：{e.name or e}"
             ) from e
+        except AssertionError as e:
+            # 凭据型平台（TIDAL 等）在没配账号时会用断言拒绝构造客户端；
+            # 原文是英文，换成界面能直接展示的提示。
+            if "cookies are not configured" in str(e):
+                raise RuntimeError(
+                    f"{self.display_name} 需要先在「平台凭据」里配置账号信息"
+                ) from e
+            raise
         except Exception as e:
             # 平台接口不可达/变更时，把底层晦涩异常包成可读信息，界面直接可见
             raise RuntimeError(

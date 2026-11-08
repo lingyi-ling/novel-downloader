@@ -58,6 +58,16 @@ EXTRA_HIDDEN_IMPORTS: tuple[str, ...] = (
     "prettytable",
     "wcwidth",
     "prompt_toolkit",
+    # 重型音乐平台（TIDAL / YouTube Music / Apple Music / SoundCloud）
+    # 在 vendor 适配器里惰性导入，PyInstaller 无法从入口点发现。
+    "aigpy",
+    "ytmusicapi",
+    "pywidevine",
+    "pymp4",
+    "Unidecode",
+    "yaml",
+    "google.protobuf",
+    "Crypto",
 )
 
 

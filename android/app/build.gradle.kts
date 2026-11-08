@@ -41,8 +41,8 @@ android {
         applicationId = "com.lingyi.noveldl"
         minSdk = 26
         targetSdk = 35
-        versionCode = 36
-        versionName = "1.25.0"
+        versionCode = 37
+        versionName = "1.26.0"
         // Chaquopy requires explicit ABIs; arm64 covers modern phones, x86_64
         // keeps the emulator usable.
         ndk.abiFilters += listOf("arm64-v8a", "x86_64")
@@ -131,6 +131,14 @@ chaquopy {
             install("prettytable")
             install("wcwidth")
             install("prompt_toolkit")
+            // 重型平台依赖：TIDAL / YouTube Music / Apple Music / SoundCloud
+            install("aigpy")
+            install("ytmusicapi")
+            install("pywidevine")
+            install("pymp4")
+            install("Unidecode")
+            install("PyYAML")
+            install("protobuf")
         }
     }
     sourceSets {

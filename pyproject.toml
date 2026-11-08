@@ -69,6 +69,13 @@ music = [
     "prettytable",
     "wcwidth",
     "prompt_toolkit",
+    # 重型平台的可选依赖：缺一个整站就注册不了。
+    #   aigpy      -> TIDAL（vendor 模块 import 时就引用）
+    #   ytmusicapi -> YouTube Music（搜索走它，不需要 Node）
+    #   pywidevine -> Apple Music / SoundCloud 的 DRM 模块（解密仍需用户自备 CDM）
+    "aigpy",
+    "ytmusicapi",
+    "pywidevine",
 ]
 # Kept for the legacy desktop GUI (legacy/music_desktop/gui.py), which lives
 # outside the package and needs customtkinter to run.
@@ -91,6 +98,13 @@ music-desktop = [
     "prettytable",
     "wcwidth",
     "prompt_toolkit",
+    # 重型平台的可选依赖：缺一个整站就注册不了。
+    #   aigpy      -> TIDAL（vendor 模块 import 时就引用）
+    #   ytmusicapi -> YouTube Music（搜索走它，不需要 Node）
+    #   pywidevine -> Apple Music / SoundCloud 的 DRM 模块（解密仍需用户自备 CDM）
+    "aigpy",
+    "ytmusicapi",
+    "pywidevine",
 ]
 image-utils = [
     "brotli>=1.2.1",
