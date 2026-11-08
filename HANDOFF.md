@@ -1,15 +1,16 @@
-# 交接手册 · novel-downloader
+# 交接手册 · 书音 BookTone
 
-> 面向「下一个接手本项目的 AI」。
-> 只讲**项目周边**（环境、凭证、规范、当前状态、坑），不讲代码实现细节 —— 代码请自行阅读。
-> 本文件为临时交接材料，**未纳入 git 版本控制**；交接完成后可自行删除。
+> 面向下一个接手本仓库的会话。只写**当前真实状态、坑、下一步**；项目规则以 `AGENTS.md` 为准。
+> 本文件替换 2026-10-17 的旧交接材料（旧版描述的 NiceGUI `novel-web` 已经移除，别再去 `apps/web/` 找东西）。
 
 ---
 
 ## 0. 一句话现状
 
-仓库：`c:\Users\lingy\Desktop\闲散项目\下载器`（Windows，PowerShell 5）
-一句话：**「Web UI 重写为 Claude/Anthropic 风格」的代码改动已全部完成、静态检查与全量测试全绿，但浏览器端视觉验收被用户中断，尚未提交推送。**
+- **版本 v1.22.1**，分支 `main`，工作区干净；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.22.1>（8 个资产）
+- 全量测试 **8959 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
+- 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
+- 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
 ---
 
@@ -17,253 +18,230 @@
 
 | 项 | 值 |
 | --- | --- |
-| 工作目录（必须） | `c:\Users\lingy\Desktop\闲散项目\下载器` |
-| 虚拟环境解释器 | `.venv\Scripts\python.exe`（Python **3.12.10**） |
-| 包安装方式 | 源码可编辑安装，`novel_downloader` 指向 `src/novel_downloader` |
-| 默认分支 | `main`，跟踪 `origin/main` |
-| 远程仓库 | `https://github.com/lingyi-ling/novel-downloader.git` |
+| 工作目录 | `c:\Users\lingy\Desktop\闲散项目\下载器` |
+| 解释器 | `.venv\Scripts\python.exe`（Python 3.12） |
+| 安装方式 | 源码可编辑安装（`novel_downloader` → `src/novel_downloader`） |
+| 入口 | `novel-cli` / `novel-api` / `novel-desktop`（`pyproject.toml [project.scripts]`） |
 | 许可证 | **MIT**（`LICENSE`，Copyright (c) 2025 Saudade Z） |
+| git 身份 | 已配置：`lingyi-ling <316542251+lingyi-ling@users.noreply.github.com>` |
 
-**为什么工作目录必须是项目根**：页面模块在导入时按**相对路径**解析配置（`settings.toml`、`./downloads`、`./logs`），
-`apps/web/main.py::setup_app` 特意把 `import ...pages` 放在函数内部，就是为了保证 CWD 已固定。换目录启动会读到错误配置。
-
-```powershell
-# 启动 Web UI（默认端口 8080；被占用时换端口，例如 8090）
-.venv\Scripts\python.exe -m novel_downloader.apps.web.main --port 8090
+```bash
+.venv/Scripts/python.exe -m pytest tests -q
+.venv/Scripts/python.exe -m ruff check src tests scripts
+.venv/Scripts/python.exe -m ruff format --check src tests scripts
+.venv/Scripts/python.exe -m mypy src
 ```
 
-三个入口（`[project.scripts]`）：
+### 启动
 
-| 命令 | 入口 | 说明 |
-| --- | --- | --- |
-| `novel-cli` | `apps.cli.main:cli_main` | 命令行主入口 |
-| `novel-web` | `apps.web.main:web_main` | Web UI（可选依赖 `[web-ui]`） |
-| `novel-desktop` | `apps.desktop.main:desktop_main` | 桌面窗口（可选依赖 `[desktop]`，复用 `setup_app(native=True)`） |
+```bash
+# 桌面端（源码）
+.venv/Scripts/python.exe -m novel_downloader.apps.desktop
+# 已打包（最近一次 release 构建的 onedir）
+./dist/NovelDownloader/NovelDownloader.exe
 
-可选依赖组（`pyproject.toml`）：`web-ui` / `desktop` / `image-utils` / `httpx` / `curl_cffi` / `all-backends` / `all` / `docs` / `tests` / `ci` / `dev`。
+# REST API
+.venv/Scripts/novel-api.exe --port 8811 --rate-limit 0
+```
+
+### Android（本机无 emulator / adb）
+
+SDK 位于 `android/local.properties` 指向的 `C:/Android/sdk`：
+
+```bash
+cd android
+./gradlew.bat compileDebugKotlin --no-daemon --console=plain
+./gradlew.bat testDebugUnitTest --no-daemon --console=plain
+./gradlew.bat assembleDebug --no-daemon --console=plain
+```
+
+**只能编译 + 单测 + 构建 APK**，无法跑 UI。任何"手机上能不能用"的结论都必须在有设备时复核。
 
 ---
 
-## 2. Git 凭证与提交规范 ⚠️ 重点
+## 2. 收尾流水线（用户已授权全自动）
 
-### 2.1 身份：本机**没有**配置 user.name / user.email
+按 `AGENTS.md`：门禁 → 提交 → 推送；`website/` 变了 → `scripts/deploy_site.py` + curl 逐字节校验；版本号变了 → `scripts/release.py`。
 
-实测结论（重要）：
+### 发布网络坑（每次都会遇到）
 
-- `git config user.name` → **空**
-- `git config user.email` → **空**
-- 仓库级 `.git/config` 里**也没有**这两项（只有 remote / branch 配置）
-- 但历史提交作者均已是 `lingyi-ling <316542251+lingyi-ling@users.noreply.github.com>`
+- 国内环境经常 **`github.com:443` 不通，但 `api.github.com` 正常**。构建、上传、创建 release 都走 API，只有 `git push` 走 github.com。
+- `release.py` 已有兜底：tag 推送失败时改用 `POST /git/refs` 创建引用（指向 **tag 自身提交**，不是 HEAD）。若 REST 报 `Object does not exist`，说明 tag 指向的提交还没推上远端——先把 main 推上去。
+- **不要 `release.py | tail`**：管道退出码是 `tail` 的，会把失败吞成 0。用：
+  ```bash
+  .venv/Scripts/python.exe -u scripts/release.py > /tmp/rel.log 2>&1
+  tail -20 /tmp/rel.log
+  ```
+- 大资产（APK 60–75 MB）上传可能 `HTTP 408 Upload body timed out`，构建成功后断点续跑：
+  ```bash
+  .venv/Scripts/python.exe -u scripts/release.py --skip-build > /tmp/rel.log 2>&1
+  ```
+  已上传且 digest 一致的资产会跳过。
+- `git push` 失败通常重试几轮就好（曾连续失败 6 次后成功）；本机没有 `gh`，GitHub 相关 API 操作用 Python `urllib` + `git credential fill` 取令牌。
 
-⇒ **提交时必须显式用 `-c` 覆盖身份，否则会因「不知道你是谁」而失败或写错作者**：
+### 官网
 
-```powershell
-git -c user.name="lingyi-ling" -c user.email="316542251+lingyi-ling@users.noreply.github.com" commit -F "$env:TEMP\commit-msg.txt"
-```
+- 目录 `website/`（纯静态），线上 <http://43.165.170.43/noveldl/>，服务器路径 `/var/www/noveldl`
+- 部署：`.venv/Scripts/python.exe scripts/deploy_site.py`
+- 校验：`curl -s http://43.165.170.43/noveldl/index.html -o /tmp/l && cmp /tmp/l website/index.html`
 
-### 2.2 PowerShell 5 约束（提交信息不能用 heredoc）
+---
 
-PowerShell 5 不支持 heredoc，也**不支持 `&&`**。两种写法二选一：
+## 3. 代码地图
 
-```powershell
-# 写法 A：临时文件 + git commit -F（推荐，ascii/中文都稳）
-Set-Content -Path "$env:TEMP\commit-msg.txt" -Value "feat(web): restyle UI in a warm Claude-like theme" -Encoding utf8
-git -c user.name="lingyi-ling" -c user.email="316542251+lingyi-ling@users.noreply.github.com" commit -F "$env:TEMP\commit-msg.txt"
-
-# 写法 B：多条命令用 ; 串联（不要用 &&）
-git add a.py; git add b.py; git commit -F "$env:TEMP\commit-msg.txt"
-```
-
-### 2.3 推送认证链路（凭证存在哪里）
-
-| 层 | 实际值 |
+| 需求 | 位置 |
 | --- | --- |
-| 仓库级 credential helper | **未配置** |
-| 全局级 credential helper | **未配置** |
-| **系统级** credential helper | `manager`（Git Credential Manager，见 `git config --system --list`） |
-| Windows 凭据管理器 | 存在条目 `LegacyGeneric:target=git:https://github.com`，**User = `lingyi-ling`**（令牌/密码即存于此） |
-| `~/.git-credentials` | **不存在**（没有明文凭据文件） |
-| `GIT_ASKPASS` | 被设为 Trae CN IDE 的 askpass shim：`...\Trae CN\resources\app\extensions\git\dist\askpass.sh`（凭据弹窗经 IDE 转发） |
+| 站点插件 | `src/novel_downloader/plugins/sites/<site>/`（fetcher / parser / client / searcher） |
+| 下载生命周期 | `plugins/mixins/download.py` |
+| 聚合搜索 | `plugins/search.py`（`_search_one` 每站点硬截止、`_abandon` 不等待取消） |
+| 任务队列 + 持久化 | `apps/core/task_manager.py` |
+| 桌面桥 + 前端 | `apps/desktop/webview_app.py`、`web_assets.py`（单文件 HTML/CSS/JS） |
+| Android 独立引擎 | `apps/embedded/server.py`（stdlib HTTP，路由必须镜像 REST） |
+| REST API | `apps/api/routes.py` + `schemas.py` |
+| 音乐引擎 | `apps/music/`（`providers/musicdl.py` 包装 vendored 平台） |
+| 官网 | `website/` |
 
-⇒ 推送认证**依赖 Windows 凭据管理器里那条 `git:https://github.com` 条目**。若报 403 / 认证失败：
-多半是令牌失效，需要用户重新授权（重新授权后**要开新会话**新令牌才生效）。
+### 必须成对修改
 
-### 2.4 网络：推送依赖用户侧 VPN/代理
-
-- 环境变量 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 全部为**空** ⇒ git 不会自动走代理。
-- 全局 git 已做慢链路调优（说明这条链路历史上很慢/不稳）：
-  `http.version=HTTP/1.1`、`http.postbuffer=2147483647`（2GB）、`http.lowspeedlimit=0`、`http.lowspeedtime=999999`、`safe.directory=*`。
-- **历史故障**：曾出现「关闭 VPN 后 `git push` 失败」的情况。推送前先确认用户的 VPN/代理处于开启状态。
-- 全局还有 `credential.https://gitee.com.provider=generic`（仅为 gitee 配置，与 github 推送无关）。
-
-### 2.5 不要用 `gh` CLI
-
-本机**未安装 `gh`**（`Get-Command gh` 报 CommandNotFound）。
-GitHub 相关操作若需要 API 能力，走 IDE 的 **GitHub 插件（MCP 工具）**；但提交/推送本身走 git CLI 即可。
-注意：该 GitHub 连接器**缺少仓库创建权限**（重新授权后需开新会话才能生效，否则持续 403）。
-
-### 2.6 提交信息与版本规范
-
-- 使用 **Conventional Commits**（`commitizen` / `cz_conventional_commits`），`commitizen-branch` 钩子挂在 **pre-push**。
-- 版本号唯一来源：`src/novel_downloader/__init__.py` 的 `__version__`；tag 形如 `v$version`；CHANGELOG 增量维护。
-- 提交前先看 `git log --oneline -6` 对齐现有风格（示例：`feat(search): ...`、`test(config): ...`、`chore(release): ...`）。
+- **新增 REST 路由** → 同步 `apps/embedded/server.py` 的 `ROUTES`，否则 `tests/apps/test_contract_parity.py` 失败。
+- **新增用户可见字符串** → `webview_app._i18n_catalog()` 加 `t("...")`；然后
+  `update_pot.py` → `update_po.py`（手填 zh_CN、删 `#, fuzzy`）→ `compile_mo.py`。
+  前端 `data-i18n` 的 key 由该目录下发，漏了 `test_i18n_catalog_covers_every_html_key` 会失败。
+- **新增音乐可选依赖** → 三处同步：`pyproject.toml` 的 `music`/`music-desktop` extras、`android/app/build.gradle.kts` 的 Chaquopy `pip { install(...) }`、`packaging/_spec_common.py` 的 `EXTRA_HIDDEN_IMPORTS`。
+- 文档自检命令：`docs/guide/troubleshooting*.md` 里有一行检查完整音乐依赖集合的 `python -c`，加依赖时顺手更新。
 
 ---
 
-## 3. 质量门禁（提交前必须全绿）
+## 4. 最近几轮做了什么（避免重复劳动）
 
-```powershell
-.venv\Scripts\python.exe -m ruff check src tests
-.venv\Scripts\python.exe -m ruff format --check src tests
-.venv\Scripts\python.exe -m mypy src
-.venv\Scripts\python.exe -m pytest -q
-```
+### 番茄完全匿名可用
 
-- **基线**：`4200 passed, 25 skipped`（本次改动后实测一致）。测试有 2 条 aiohttp `DeprecationWarning`，属既有噪声，不算失败。
-- 配置要点（`pyproject.toml`）：
-  - ruff：`line-length = 88`、`target-version = py311`、`quote-style = double`，
-    规则集 `E, F, B, C4, I, UP, SIM` ⇒ **`E501` 生效，且对字符串字面量内部同样生效**（写 CSS/SQL 等长文本时要注意换行）。
-  - mypy：`strict = true`，两处例外 —— `novel_downloader.apps.web.*` 关闭 `untyped-decorator`（NiceGUI 装饰器无类型），
-    `novel_downloader.libs.image_utils` 关闭 `call-overload`。
-  - pytest：`pythonpath = ["src"]`、`testpaths = ["tests"]`、`addopts = --strict-markers`。
-- pre-commit 钩子（`.pre-commit-config.yaml`）：ruff-check(`--fix`) → ruff-format → 空白/EOF/yaml/json/toml/大文件(>200KB)/换行符 → mypy → commitizen。
-  注意 `check-yaml` **排除 `mkdocs.yml`**（该文件含 `!!python/...` 标签）。
+- 设备自注册 `register.py`、`x-argus` `argus.py`、`x-ladon` `ladon.py` 全部本地生成，与抓包逐字节一致。
+- App 搜索接口免登录、无浏览器；首次搜索自动注册并落盘 `<cache>/fanqienovel/device.json`。
+- 分类浏览：榜单页 `rankCategoryTypeList` 给分类；书目走 `GET /api/library/book_list?app_id=2503&category_id=…&gender=…&offset=0&limit=20&word_count=0&sort=0`，**无需签名**，但 `word_count=0&sort=0` 缺一不可。
+- ⚠️ **书名/作者是 PUA 字体混淆**，必须靠详情页回填（`_fill_book_metadata`）。不要因为"接口看起来是明文"把它删掉。
+- 协议细节：`docs/notes/fanqie-client-protocol.md`。
 
-### 已知坑：编辑器/工具会自动重排 Python 文件
+### 搜索速度
 
-观测到过多次「**未编辑的** Python 文件被自动格式化」导致 `ruff format --check` 失败（长行被展开、尾随换行被增删）。
-⇒ 提交前必跑 `ruff format --check src tests`；如有漂移，用 `ruff format` 还原后再提交。
+- `search(timeout=…)` 是**每站点墙钟预算**：超时站点丢弃，整体 ≈ 预算（5s → 约 5.2s，之前 116s）。
+- Windows proactor 的取消可能延迟，所以超时后不 await 卡住的任务，只发取消并回收异常。
+- 桌面端用 `search_async` + `search_progress` 轮询，首屏约 0.2s。
 
----
+### 底层加固
 
-## 4. i18n 与文档
+- `BaseFetcher.fetch` 重试传输错误、4xx 不重试、遵守 `Retry-After`；`get_chapter` 不再叠加请求层预算。
+- 分页有 `MAX_PAGES` + 重复页检测；存储 worker 崩溃不卡生产者；坏插件只跳过自己；限流器锁内预留槽位。
+- 封面/字体/raw 页面落盘、失败账本追加走 `asyncio.to_thread`；`curl_cffi` 有 `max_clients`。
 
-### 4.1 运行时多语言（Babel）
+### 队列持久化
 
-- 所有**用户可见字符串**必须走 `from novel_downloader.infra.i18n import t`，写成 `t("...")`。
-- msgid 必须存在于：`src/novel_downloader/locales/zh_CN/LC_MESSAGES/messages.po`
-- 当前语言：**zh_CN（默认）** + 英语；运行时 `get_language()` / `set_language()` 同进程切换（切换后 `ui.navigate.reload()`）。
-- 工具链（跨平台，用 Babel 不用 GNU gettext）：
-  - `python scripts/update_pot.py` → 重建 `locales/messages.pot`
-  - `python scripts/update_po.py` → 合并进 `.po`
-  - `python scripts/compile_mo.py` → 生成 `.mo`
-- **`.mo` 是构建产物**：已 git-ignore，由 `setup.py` 在打包时重新生成；不要提交 `.mo`。
-- 常用其它脚本：`scripts/gen_site_docs.py`、`scripts/check_sites_health.py`、`scripts/site_data_tool.py`、
-  `scripts/i18n_strings.py`、`scripts/clean_cache.py`。
+- `<应用数据目录>/tasks.json`：原子写、1.5s 节流、`close()` 补写。
+- `manager.start()` 在 API lifespan、桌面 `bridge.start_services()`、内嵌引擎 `start_server()` 调用；恢复任务一律回 `queued`，章节缓存让下载从断点继续。
+- 默认关闭（`persist=True` / `state_path=…` 才开），测试与一次性 CLI 不受影响。
 
-### 4.2 文档站（mkdocs）
+### Android 音乐
 
-- `mkdocs-material` + **`mkdocs-static-i18n`**，采用**后缀式**多语言文件（如 `foo.md` / `foo.en.md`），导航翻译集中在 `mkdocs.yml`。
-- 文档图片在 `docs/assets/images/`（Web UI 截图会随 UI 改版而过时）。
-- 根 `README.md` / `README.en.md` 为双语入口。
+- 独立引擎已接真实引擎（platforms / search / health / export / download / jobs）。
+- 音频写 `<output>/music/`，`/downloads/music/<name>` 暴露回环地址；结果带 `download_url`，Kotlin 交给 `DownloadManager` 落到公共下载目录。
+- 依赖已从 5 个补到 17 个（`m3u8`、`emoji`、`bleach`、`filetype`、`puremagic`、`fake-useragent`、`json-repair`、`tinytag`、`tabulate`、`prettytable`、`wcwidth`、`prompt_toolkit`）。
+
+### UI
+
+- 单文件 `web_assets.py`：设计令牌、壳、控件、卡片、音乐、Toast、弹窗都在这里。
+- 结果卡片有封面 + 首字回落；队列行有 2px 状态色条；支持 `prefers-reduced-motion`。
+- **DOM id / `data-*` / 桥接方法名是测试契约**，重构不要改；结构断言在 `tests/apps/test_desktop_app.py`。
+- 窗口几何恢复按当前显示器裁剪（`window_state.clamp_geometry(geometry, bounds)`）；多显示器负坐标保留。
 
 ---
 
-## 5. 许可证红线（硬约束）
+## 5. 已知缺口（按优先级）
 
-- 项目**只允许 MIT 基底**：现有 `LICENSE` 为 MIT（Copyright (c) 2025 Saudade Z）。
-- **禁止**引入 AGPL-3.0 / GPL-3.0 等项目作为基底或直接复制其代码、规则文件 —— 传染性许可会污染整个项目。
-- 架构基底：`saudadez21/novel-downloader`（MIT）；借鉴 `so-novel`（书源规则思路）、`go-novel-dl`（多源聚合思路），
-  **只借鉴设计、不直接复制代码/规则文件**。
-
----
-
-## 6. 运行时配置与数据位置
-
-| 项 | 位置 / 说明 |
-| --- | --- |
-| 默认配置 | 仓库内 `settings.toml`；用户级配置走 `platformdirs` |
-| 配置隔离（测试用） | 环境变量 **`NOVEL_HOME`**：指向空目录可让配置类测试在任何机器上稳定（勿依赖宿主本地状态） |
-| 导出目录 | `general.output_dir`，默认 `./downloads`；Web 端以 `/downloads/<file>` 静态挂载 |
-| 日志 | `general.debug.log_dir`，默认 `./logs`；本次运行日志 `logs\novel_downloader.log` |
-| 番茄登录 Cookie | 统一缓存于缓存目录的 `fanqienovel/aiohttp.cookies`；可通过 `FANQIENOVEL_COOKIE` 环境变量、`novel-cli login`、或 Web 搜索页登录按钮三种方式写入 |
-| Web 端口 | 默认 8080；被占用时须显式换端口（本次实测用 **8090**） |
+1. **歌单 / m3u8 导出没有 UI 入口**。引擎、CLI（`novel-cli music export-m3u8`）、REST `POST /api/v1/music/export` 都支持，但桌面网页和 Android Compose 都没有按钮。这是用户最近一次问到的"缺 m3u8"的真正含义。
+2. **Android 音乐未真机验证**。有设备后：开独立引擎 → 音乐页 → 选平台搜一首 → 任务完成 → 确认公共「下载」目录出现文件。
+3. **重依赖平台不可用**：TIDAL（`aigpy`/`pywidevine`/`av`）、YouTube Music（`ytmusicapi`）、SoundCloud HLS（需外部 `N_m3u8DL-RE`）、歌词转写（`faster_whisper`）未打包；这些平台可能搜得到、下不了。
+4. **SQLite 每章提交仍在事件循环上**（`storage_batch_size=1`）。连接有线程亲和性，改 `to_thread` 要 `check_same_thread=False` + 锁，风险 > 收益，暂缓。
+5. **桌面 `#detail` 在 <1180px 窗口隐藏**（媒体查询），窄窗口看不到详情面板，可改折叠抽屉。
+6. **许可证文案不一致**：`LICENSE` 是 MIT，但官网页脚写 Apache-2.0。改之前先问用户。
+7. **旧文档/截图**：`docs/assets/images/` 里部分截图来自已删除的 NiceGUI Web UI，可能与现状不符；不要拿它们当验收依据。
 
 ---
 
-## 7. 当前未提交状态（下一个 AI 请从这里接手）
+## 6. 视觉验收方法（不依赖真机）
 
-`git status`（截至交接时）：
+Chromium 路径：
 
 ```
- M src/novel_downloader/apps/web/components/navigation.py
- M src/novel_downloader/apps/web/pages/download.py
- M src/novel_downloader/apps/web/pages/history.py
- M src/novel_downloader/apps/web/pages/progress.py
- M src/novel_downloader/apps/web/pages/search.py
- M src/novel_downloader/apps/web/services/client_dialog.py
-?? src/novel_downloader/apps/web/theme.py      ← 本次新增（唯一的 UI 主题模块）
-?? .trae/                                     ← IDE 本地目录（含已批准的 UI 重写计划书）
+C:\Users\lingy\AppData\Local\ms-playwright\chromium-1228\chrome-win64\chrome.exe
 ```
 
-最后提交：`3c81147 test(config): make the missing-config test host-independent`
+步骤：
 
-### 已完成
+1. 把 `web_assets.APP_HTML` 写进临时目录的 `index.html`；
+2. 在 `<body` 前注入假的 `window.pywebview.api`，给每个桥方法返回 canned 数据；
+3. `python -m http.server` 起服务；
+4. 截图：
+   ```bash
+   chrome --headless=new --disable-gpu --no-sandbox --hide-scrollbars \
+     --window-size=1440,900 --virtual-time-budget=6000 \
+     --screenshot=C:\abs\path\shot.png http://127.0.0.1:PORT/index.html
+   ```
 
-- 新增 `src/novel_downloader/apps/web/theme.py`：Claude 风格设计令牌 + Quasar 覆盖 CSS（暖米白 / 珊瑚橙 / 衬线标题 / 1px 细描边、去投影），
-  纯 CSS 实现、**明暗两套**，通过 `ui.add_css(..., shared=True)` 全站生效，**未新增任何依赖**。
-- 改写顶栏与 4 个页面 + 登录弹窗的**外观**（`classes()` / `props()` 级别），**功能逻辑零改动**。
-- 验证：`ruff check` / `ruff format --check` / `mypy src` / `pytest -q` **全部通过**（4200 passed, 25 skipped）。
+坑：
 
-### 未完成（唯一遗留）
-
-- **浏览器端视觉验收被用户中断**：原计划用浏览器子代理在 8090 上逐页截图（`/`、`/download`、`/progress`、`/history`）并核对明/暗两套主题。
-- 服务已停止（端口 8090 无监听、无 python 进程残留），无需清理。
-- 建议的收尾动作：启动服务 → 人工/浏览器过一遍上述 4 个页面的**明暗两套主题** → 若观感 OK 即按 §2 规范提交并推送。
-
-### 尚未做的文档同步
-
-- `docs/guide/web-examples.md` 与 `.en.md` 内嵌的 UI 截图（`docs/assets/images/NiceGUI_*.png`）仍是**旧蓝色主题**，改版后已过时，需要重新截图替换。
-- 同页排序默认值描述写的是 `Priority`，而代码默认已是 `Quality`（优选）——顺带可修正。
+- `--screenshot` 必须 **Windows 绝对路径**，否则报"系统找不到指定的路径"；
+- 截图前注入 `<style>*{animation:none!important;transition:none!important}</style>`，否则会拍到 `pageIn` 的半透明帧；
+- 从 Git Bash 用 `&`/后台任务启动真实桌面端，窗口可能以最小化出现；用 `Start-Process` 或正常双击。最小化窗口的 `GetWindowRect` 返回 `-25600,-25600 159x27`，用 `ShowWindow(h, 9)` 还原。
 
 ---
 
-## 8. 用户偏好与协作注意事项
+## 7. 容易踩的测试坑
 
-- 用户偏好**基于 MIT 开源项目做二次开发**、**借鉴多个成熟项目的设计**而非复制代码；**授权助手自主决定技术选型**，并要求**后续提交自动完成**（做完即提交推送，不必反复确认）。
-- 改动落地后要按仓库规范**自己完成 lint/format/mypy/pytest 并提交推送**，不要留「待用户手动提交」的状态。
-- ⚠️ **不要擅自接管用户的浏览器**：本次用户**主动中断**了浏览器自动化子代理（未说明原因），
-  推测其不希望 AI 驱动本机浏览器/弹窗。需要视觉验收时，优先请用户自己看一眼，或先征求同意再自动化。
-- **仓库不留临时探查产物**：临时文件放 `$env:TEMP`，收尾时清理；不要把草稿/调试输出留在仓库里。
-- 未经验证的站点规则**不要提交到仓库**（避免制造假覆盖）；站点规则需用真实登录凭证现场验证后再合并。
-
----
-
-## 9. AI 记忆（Trae）位置
-
-Trae 会在会话开始时自动注入记忆，下一个 AI 一般无需手动读取；如需深入排查历史决策：
-
-| 文件 | 用途 |
-| --- | --- |
-| `c:\Users\lingy\.trae-cn\memory\user_profile.md` | 跨项目用户画像（偏好、技术栈） |
-| `c:\Users\lingy\.trae-cn\memory\projects\-c-Users-lingy-Desktop-----------p2-21544417cd86e586cb30\project_memory.md` | 本项目规则、约束、约定、经验教训 |
-| 同目录 `YYYYMMDD\topics.md` + `session_memory_<id>.jsonl` | 按日期的议题摘要与逐条会话记忆 |
+- `tests/apps/test_contract_parity.py`：REST 与内嵌路由一一对应；音乐端点必须真实存在（不是桩）。
+- `tests/test_i18n_coverage.py`：`t()` 的每个 msgid 都要有非空、非 fuzzy 的 zh_CN 翻译。
+- `tests/apps/test_desktop_app.py`：断言 HTML 结构、桥接方法名和若干 JS 片段（如 `if (st.error) throw new Error(st.error);`）。改模板先跑这套。
+- 测试必须 hermetic：`NOVEL_HOME` 指到 tmp；不要依赖 cwd 里有某个文件（历史上踩过）。
+- 全量约 3 分钟；prioritise 局部测试再跑全量。
 
 ---
 
-## 10. 常用命令速查
+## 8. 用户偏好与边界
 
-```powershell
-# 环境
-.venv\Scripts\python.exe -V
+- 要求**一口气做完、不要问**，能查证就自己查证；token 充足。
+- 逆向那两个番茄客户端包是**作者授权**的（用户原话：都是 linuxdo 的佬友）。
+- 不提交任何凭据 / token / keystore / 签名私钥；破坏性 git 操作（改写历史、强推、删 release）必须先征得同意。
+- 发布/部署无需逐步确认，但**失败必须如实说**（上传 408、网络中断、未真机验证都要写清楚）。
+- 中文回复；conventional commits。
+- 用户会直接打开桌面端试用，遇到报错会发截图——先看 `%LOCALAPPDATA%\novel_downloader\logs\novel-desktop.log`。
 
-# 启动 Web UI（工作目录必须是项目根）
-.venv\Scripts\python.exe -m novel_downloader.apps.web.main --port 8090
+---
 
-# 质量门禁（提交前）
-.venv\Scripts\python.exe -m ruff check src tests
-.venv\Scripts\python.exe -m ruff format --check src tests
-.venv\Scripts\python.exe -m mypy src
-.venv\Scripts\python.exe -m pytest -q
+## 9. 快速冒烟
 
-# 翻译
-.venv\Scripts\python.exe scripts\update_pot.py
-.venv\Scripts\python.exe scripts\update_po.py
-.venv\Scripts\python.exe scripts\compile_mo.py
+```bash
+# 番茄搜索（免登录、App 接口）
+.venv/Scripts/novel-cli.exe search -s fanqienovel 斗破 --json --timeout 5 | head -20
 
-# 提交（PowerShell 5：不要用 && ，不要用 heredoc）
-git add <files>
-Set-Content -Path "$env:TEMP\commit-msg.txt" -Value "feat(web): ..." -Encoding utf8
-git -c user.name="lingyi-ling" -c user.email="316542251+lingyi-ling@users.noreply.github.com" commit -F "$env:TEMP\commit-msg.txt"
-git push            # 需用户侧 VPN/代理已开启
+# 分类浏览
+.venv/Scripts/novel-cli.exe browse fanqienovel --categories
+
+# API（另开进程）
+.venv/Scripts/novel-api.exe --port 8811 --rate-limit 0
+curl -s "http://127.0.0.1:8811/api/v1/browse/categories?site=fanqienovel" | head -c 200
+
+# 音乐平台连通性（含 5sing / 咪咕 / 酷我 等）
+.venv/Scripts/novel-cli.exe music health --json
+
+# 官网线上校验
+curl -s http://43.165.170.43/noveldl/index.html -o /tmp/live.html && cmp /tmp/live.html website/index.html && echo OK
 ```
+
+---
+
+## 10. 下一步建议
+
+如果用户没有新指示，按 §5 的顺序推进：
+
+1. 桌面音乐页 + Android 音乐页各加一个「导出歌单」，调用已有 `/api/v1/music/export`（桌面走桥接，Android 走 Retrofit）。
+2. 用真机验证 Android 音乐下载到公共 Downloads。
+3. 处理许可证文案不一致（先问用户是 MIT 还是 Apache-2.0）。
