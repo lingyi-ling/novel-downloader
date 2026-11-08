@@ -7,6 +7,8 @@ Abstract base class providing common utilities for site-specific searchers.
 """
 
 import abc
+import asyncio
+import logging
 from typing import ClassVar
 from urllib.parse import quote_plus, urljoin
 
@@ -14,11 +16,26 @@ import aiohttp
 
 from novel_downloader.schemas import SearchResult
 
+logger = logging.getLogger(__name__)
+
 
 class BaseSearcher(abc.ABC):
     site_name: ClassVar[str]
     priority: ClassVar[int] = 1000
     BASE_URL: ClassVar[str] = ""
+
+    #: Fetch failures that mean "this site is unavailable right now" rather
+    #: than "our code is broken": blocked/poisoned DNS, connection refused or
+    #: reset, TLS/HTTP errors (403/404/5xx) and timeouts.  An aggregate search
+    #: fans out over every site, so these happen on every run and must not
+    #: flood the log with ERROR records; they are logged as WARNING instead.
+    #: Anything else is an unexpected defect and keeps ERROR level.
+    EXPECTED_FETCH_ERRORS: ClassVar[tuple[type[BaseException], ...]] = (
+        aiohttp.ClientError,
+        asyncio.TimeoutError,
+        TimeoutError,
+        OSError,
+    )
 
     #: Set by the search orchestrator when the caller asked for this site
     #: explicitly (e.g. ``--site``). Searchers whose site is slow or intrusive
@@ -100,6 +117,36 @@ class BaseSearcher(abc.ABC):
             except LookupError:
                 continue
         return data.decode("utf-8", errors="ignore")
+
+    def _log_fetch_failure(self, keyword: str, url: str, exc: BaseException) -> None:
+        """
+        Log a failed site fetch at a level that matches its cause.
+
+        Aggregate searches intentionally tolerate unreachable sites, so an
+        expected transport failure (timeout, connection/DNS error, TLS or an
+        HTTP error status raised by ``raise_for_status``) is logged as a
+        warning: one search must not produce dozens of ERROR lines for sites
+        that are merely blocked or down.  Any other exception is a real defect
+        and keeps the historical ERROR level, now with a traceback.
+
+        :param keyword: Search term being fetched.
+        :param url: Endpoint that failed.
+        :param exc: The exception raised by the request.
+        """
+        if isinstance(exc, self.EXPECTED_FETCH_ERRORS):
+            logger.warning(
+                "Failed to fetch HTML for keyword '%s' from '%s': %s",
+                keyword,
+                url,
+                exc,
+            )
+            return
+        logger.error(
+            "Failed to fetch HTML for keyword '%s' from '%s'",
+            keyword,
+            url,
+            exc_info=True,
+        )
 
     @staticmethod
     def _first_str(xs: list[str], replaces: list[tuple[str, str]] | None = None) -> str:

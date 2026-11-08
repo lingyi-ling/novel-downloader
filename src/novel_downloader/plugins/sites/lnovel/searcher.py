@@ -39,18 +39,17 @@ class LnovelSearcher(BaseSearcher):
             self.SEARCH_URL, {"q%5Bname_start%5D": self._quote(keyword)}
         )
         headers = {**self.session.headers, "Referer": self.BASE_URL + "/books"}
+        last_exc: BaseException | None = None
         for _ in range(self._ATTEMPTS):
             try:
                 async with self.session.get(url, headers=headers) as resp:
                     resp.raise_for_status()
                     return await self._response_to_str(resp)
-            except Exception:
+            except Exception as exc:
+                last_exc = exc
                 continue
-        logger.error(
-            "Failed to fetch search results for keyword '%s' from '%s'",
-            keyword,
-            url,
-        )
+        if last_exc is not None:
+            self._log_fetch_failure(keyword, url, last_exc)
         return ""
 
     def _parse_html(

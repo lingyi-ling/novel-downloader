@@ -133,12 +133,8 @@ class N17kSearcher(BaseSearcher):
                     resp.raise_for_status()
                     text = await self._response_to_str(resp)
             return text
-        except Exception:
-            logger.error(
-                "Failed to fetch HTML for keyword '%s' from '%s'",
-                keyword,
-                self.SEARCH_URL,
-            )
+        except Exception as exc:
+            self._log_fetch_failure(keyword, self.SEARCH_URL, exc)
             return ""
 
     def _parse_html(

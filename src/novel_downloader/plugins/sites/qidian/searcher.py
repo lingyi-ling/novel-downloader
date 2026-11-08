@@ -36,12 +36,8 @@ class QidianSearcher(BaseSearcher):
             async with self.session.get(url, cookies=cookies) as resp:
                 resp.raise_for_status()
                 return await self._response_to_str(resp)
-        except Exception:
-            logger.error(
-                "Failed to fetch HTML for keyword '%s' from '%s'",
-                keyword,
-                url,
-            )
+        except Exception as exc:
+            self._log_fetch_failure(keyword, url, exc)
             return ""
 
     def _parse_html(

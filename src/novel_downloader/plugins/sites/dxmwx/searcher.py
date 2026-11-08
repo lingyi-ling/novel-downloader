@@ -5,15 +5,11 @@ novel_downloader.plugins.sites.dxmwx.searcher
 
 """
 
-import logging
-
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
-
-logger = logging.getLogger(__name__)
 
 
 @registrar.register_searcher()
@@ -29,12 +25,8 @@ class DxmwxSearcher(BaseSearcher):
             async with self.session.get(url) as resp:
                 resp.raise_for_status()
                 return await self._response_to_str(resp)
-        except Exception:
-            logger.error(
-                "Failed to fetch HTML for keyword '%s' from '%s'",
-                keyword,
-                self.SEARCH_URL,
-            )
+        except Exception as exc:
+            self._log_fetch_failure(keyword, url, exc)
             return ""
 
     def _parse_html(
