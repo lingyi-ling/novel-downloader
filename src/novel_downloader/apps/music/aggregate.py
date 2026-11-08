@@ -19,6 +19,7 @@ JSON 可序列化的），所以搜索结果要配合 :mod:`trackcache` 使用�
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import multiprocessing
 import os
@@ -57,11 +58,22 @@ ALL_PLATFORM_KEY = "all"
 DEFAULT_PER_PLATFORM_LIMIT = 8
 
 #: 聚合搜索默认墙钟预算（秒）。超时的平台按失败上报，已回来的结果照常合并。
-DEFAULT_TIMEOUT = 6.0
+DEFAULT_TIMEOUT = 5.0
 
 #: 失败平台的熔断时长（秒）。一次聚合搜索里绝大多数平台只是被墙/已失效；
 #: 记住这个结果，后续搜索直接跳过，避免每次都为同一批死站等满预算。
 FAILURE_TTL = 600.0
+
+#: 「慢且空」平台的观察窗口。连续两次超过 2.5 秒还一条结果都没有的平台，
+#: 短暂跳过 5 分钟：它们贡献为零，却会把每次搜索拖到预算上限。
+SLOW_EMPTY_MS = 2000
+SLOW_EMPTY_STREAK = 2
+SLOW_EMPTY_TTL = 300.0
+
+#: 首个「有结果」的平台返回后，再等这么久就收工：剩下的基本是慢站，
+#: 而它们多数返回空；继续等只会让用户盯着进度条。未完成的平台不记为失败
+#: （它们可能只是慢），下次搜索照常参与。
+EARLY_EXIT_GRACE = 2.0
 
 #: 搜索线程数上限。每个平台一个线程：以前固定 10 个 worker 会让队列里的
 #: 平台饿死——前 10 个恰好全是卡死的站时，netease 这种 1 秒就能返回的
@@ -85,43 +97,119 @@ _SEARCH_PRIORITY = (
     "audius",
 )
 
-#: 平台 key -> 熔断到期时间（monotonic）。
-_FAILED_UNTIL: dict[str, float] = {}
+#: 平台名 -> ``{"ok": bool, "last_ms": int, "failed_until": epoch 秒}``。
+#: 落盘到 ``<音乐数据目录>/search_stats.json``：重启后仍然知道哪些站是死的，
+#: 第一次搜索就不会再为同一批被墙平台等满预算。
+_STATS: dict[str, dict[str, Any]] | None = None
 _FAILURE_LOCK = threading.Lock()
 
 
+def _stats_file() -> Any:
+    from .paths import music_data_dir
+
+    return music_data_dir() / "search_stats.json"
+
+
+def _load_stats() -> dict[str, dict[str, Any]]:
+    global _STATS
+    if _STATS is not None:
+        return _STATS
+    data: dict[str, dict[str, Any]] = {}
+    try:
+        with _stats_file().open(encoding="utf-8") as fh:
+            raw = json.load(fh)
+        platforms = raw.get("platforms") if isinstance(raw, dict) else None
+        if isinstance(platforms, dict):
+            for key, value in platforms.items():
+                if not isinstance(value, dict):
+                    continue
+                data[str(key)] = {
+                    "ok": bool(value.get("ok")),
+                    "last_ms": int(value.get("last_ms") or 0),
+                    "failed_until": float(value.get("failed_until") or 0.0),
+                }
+    except (OSError, ValueError, TypeError):
+        data = {}
+    _STATS = data
+    return data
+
+
+def _save_stats() -> None:
+    """Best-effort atomic write; never let stats break a search."""
+    data = _load_stats()
+    target = _stats_file()
+    tmp = target.with_suffix(".tmp")
+    try:
+        with _FAILURE_LOCK:
+            payload = {"version": 1, "platforms": dict(data)}
+        with tmp.open("w", encoding="utf-8", newline="\n") as fh:
+            json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, target)
+    except (OSError, ValueError, TypeError):
+        logger.debug("music aggregate: could not persist search stats", exc_info=True)
+
+
 def _breaker_open(key: str, now: float | None = None) -> bool:
-    """该平台是否还在熔断期（最近一次聚合搜索失败过）。"""
-    stamp = now if now is not None else time.monotonic()
+    """该平台是否在熔断期（失败或连续「慢且空」）。"""
+    stamp = now if now is not None else time.time()
     with _FAILURE_LOCK:
-        until = _FAILED_UNTIL.get(key, 0.0)
+        entry = _load_stats().get(key)
+        if entry is None:
+            return False
+        until = float(entry.get("failed_until") or 0.0)
         if until <= stamp:
-            _FAILED_UNTIL.pop(key, None)
+            entry["failed_until"] = 0.0
             return False
         return True
 
 
-def _record_failure(key: str) -> None:
+def _record_failure(key: str, elapsed_ms: int = 0) -> None:
     with _FAILURE_LOCK:
-        _FAILED_UNTIL[key] = time.monotonic() + FAILURE_TTL
+        entry = _load_stats().setdefault(key, {})
+        entry.update(
+            ok=False,
+            last_ms=int(elapsed_ms or 0),
+            failed_until=time.time() + FAILURE_TTL,
+        )
 
 
-def _record_success(key: str) -> None:
+def _record_success(key: str, elapsed_ms: int = 0, count: int = 0) -> None:
     with _FAILURE_LOCK:
-        _FAILED_UNTIL.pop(key, None)
+        entry = _load_stats().setdefault(key, {})
+        slow_empty = int(elapsed_ms or 0) >= SLOW_EMPTY_MS and int(count) == 0
+        streak = int(entry.get("empty_streak") or 0) + 1 if slow_empty else 0
+        entry.update(
+            ok=True,
+            last_ms=int(elapsed_ms or 0),
+            empty_streak=streak,
+            failed_until=0.0,
+        )
+        if streak >= SLOW_EMPTY_STREAK:
+            entry["failed_until"] = time.time() + SLOW_EMPTY_TTL
+            logger.info(
+                "music aggregate: %s keeps returning nothing slowly; skipping for %gs",
+                key,
+                SLOW_EMPTY_TTL,
+            )
 
 
 def clear_failure_cache() -> None:
     """清空平台熔断记录（健康检查成功或用户手动重试时使用）。"""
+    global _STATS
     with _FAILURE_LOCK:
-        _FAILED_UNTIL.clear()
+        _STATS = {}
+    _save_stats()
 
 
 def failed_platforms() -> list[str]:
     """当前处于熔断期的平台（调试/界面提示用）。"""
-    now = time.monotonic()
+    now = time.time()
     with _FAILURE_LOCK:
-        return [key for key, until in _FAILED_UNTIL.items() if until > now]
+        return [
+            key
+            for key, entry in _load_stats().items()
+            if float(entry.get("failed_until") or 0.0) > now
+        ]
 
 
 def _ordered_keys(keys: list[str]) -> list[str]:
@@ -396,6 +484,18 @@ def search_all(
     finished = threading.Event()
     results: dict[str, tuple[list[Track], int] | BaseException] = {}
     timeouts: set[str] = set()
+    first_hit: list[float] = []
+    closed = [False]
+    early_stop = [False]
+    early_timer: list[threading.Timer] = []
+
+    def end_early() -> None:
+        """Stop waiting for the slow tail once a usable batch is on screen."""
+        with state_lock:
+            if closed[0]:
+                return
+            early_stop[0] = True
+            finished.set()
 
     def snapshot() -> AggregateResult:
         """Merge whatever has arrived so far (caller must hold no lock)."""
@@ -423,16 +523,28 @@ def search_all(
         )
         return AggregateResult(tracks=merged, platforms=outcomes, total=len(merged))
 
-    def record(key: str, outcome: tuple[list[Track], int] | BaseException) -> None:
+    def record(
+        key: str, outcome: tuple[list[Track], int] | BaseException, elapsed_ms: int
+    ) -> None:
         with state_lock:
+            if closed[0]:
+                return
             results[key] = outcome
+            if not isinstance(outcome, BaseException) and outcome[0] and not first_hit:
+                first_hit.append(time.monotonic())
+                # Start the grace clock now instead of waiting for the next
+                # platform to finish: the tail may take the whole budget.
+                timer = threading.Timer(EARLY_EXIT_GRACE, end_early)
+                timer.daemon = True
+                timer.start()
+                early_timer.append(timer)
             done = len(results) >= len(keys)
             if done:
                 finished.set()
         if isinstance(outcome, BaseException):
-            _record_failure(key)
+            _record_failure(key, elapsed_ms)
         else:
-            _record_success(key)
+            _record_success(key, elapsed_ms, len(outcome[0]))
         if on_update is not None:
             try:
                 on_update(snapshot())
@@ -440,11 +552,12 @@ def search_all(
                 logger.debug("music aggregate: on_update failed", exc_info=True)
 
     def worker(key: str) -> None:
+        started = time.monotonic()
         try:
             outcome: tuple[list[Track], int] | BaseException = run_one(key)
         except BaseException as exc:  # noqa: BLE001 - 单平台失败不影响全局
             outcome = exc
-        record(key, outcome)
+        record(key, outcome, int((time.monotonic() - started) * 1000))
 
     threads = [
         threading.Thread(
@@ -458,13 +571,21 @@ def search_all(
     # 拦住；它们的结果也不会再被使用。
     finished.wait(deadline_seconds)
 
+    for timer in early_timer:
+        timer.cancel()
+
     with state_lock:
-        for key in keys:
-            if results.get(key) is None:
+        closed[0] = True
+        missing = [key for key in keys if results.get(key) is None]
+        if early_stop[0]:
+            # The tail is simply omitted: not a success, not a failure, and
+            # not recorded in the breaker (it may have been mid-request).
+            pass
+        else:
+            for key in missing:
                 timeouts.add(key)
                 results[key] = TimeoutError(f"搜索超时（{deadline_seconds:g}s）")
-    for key in timeouts:
-        _record_failure(key)
+        _save_stats()
 
     final = snapshot()
     return AggregateResult(
@@ -528,7 +649,10 @@ def search_all_isolated(
     timeout = max(0.1, float(timeout))
     kwargs = {
         "keyword": text,
-        "platforms": keys,
+        # Keep "all platforms" as ``None`` in the child: passing an explicit
+        # list would disable the failure breaker, undoing the whole point of
+        # the persisted platform stats.
+        "platforms": platforms,
         "limit": limit,
         "per_platform_limit": per_platform_limit,
         "timeout": timeout,

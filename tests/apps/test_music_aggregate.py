@@ -507,3 +507,55 @@ def test_download_mixed_keeps_failure_when_no_alternative_works(
     assert (ok, fail) == (0, 1)
     assert pairs and pairs[0][1] == "VIP 专属"
     assert failed == [primary]
+
+
+def test_breaker_survives_a_process_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Platform health is persisted, so a restarted app does not re-probe dead sites."""
+    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path))
+    previous = aggregate._STATS
+    aggregate._STATS = None
+    try:
+        aggregate._record_failure("dead", 6012)
+        aggregate._save_stats()
+
+        aggregate._STATS = None  # simulate a fresh process
+        assert aggregate._breaker_open("dead") is True
+        assert aggregate.failed_platforms() == ["dead"]
+
+        aggregate.clear_failure_cache()
+        assert aggregate._breaker_open("dead") is False
+    finally:
+        aggregate._STATS = previous
+
+
+def test_search_all_returns_early_after_a_usable_batch(
+    monkeypatch: pytest.MonkeyPatch, clean_breaker: Any
+) -> None:
+    """A slow tail must not hold the whole search past the first usable batch."""
+    monkeypatch.setattr(aggregate, "EARLY_EXIT_GRACE", 0.1)
+    monkeypatch.setattr(
+        aggregate, "available", lambda: [("fast", "快"), ("slow", "慢")]
+    )
+
+    class Fast:
+        def search(self, keyword: str, limit: int = 30, offset: int = 0):
+            return [_track(keyword, "A", "fast")], 1
+
+    class Slow:
+        def search(self, keyword: str, limit: int = 30, offset: int = 0):
+            time.sleep(1.5)
+            return [_track(keyword, "B", "slow")], 1
+
+    providers = {"fast": Fast(), "slow": Slow()}
+    monkeypatch.setattr(aggregate, "create", lambda key, **kw: providers[key])
+
+    started = time.monotonic()
+    result = aggregate.search_all("晴天", timeout=5.0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert [item.platform for item in result.platforms] == ["fast"]
+    # The omitted platform was not judged: it may simply have been mid-request.
+    assert aggregate._breaker_open("slow") is False
