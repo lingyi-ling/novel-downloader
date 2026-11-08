@@ -7,8 +7,8 @@
 
 ## 0. 一句话现状
 
-- **版本 v1.22.1**，分支 `main`，工作区干净；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.22.1>（8 个资产）
-- 全量测试 **8959 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
+- **版本 v1.23.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.23.0>
+- 全量测试 **9004 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
@@ -122,10 +122,13 @@ cd android
 - ⚠️ **书名/作者是 PUA 字体混淆**，必须靠详情页回填（`_fill_book_metadata`）。不要因为"接口看起来是明文"把它删掉。
 - 协议细节：`docs/notes/fanqie-client-protocol.md`。
 
-### 搜索速度
+### 搜索速度与质量
 
 - `search(timeout=…)` 是**每站点墙钟预算**：超时站点丢弃，整体 ≈ 预算（5s → 约 5.2s，之前 116s）。
-- Windows proactor 的取消可能延迟，所以超时后不 await 卡住的任务，只发取消并回收异常。
+- Windows proactor 的取消可能延迟，所以超时后不 await 卡住的任务；取消后给 0.35s 有界宽限再退出 session，否则日志会刷 `Task was destroyed` / `Unclosed client session`。
+- **quality 排序默认过滤相关性 < 0.45**（`min_relevance`，传 `None` 关闭）：无关结果不再混入，衍生作保留；永不返回空页。非 quality 排序不过滤。
+- 同站同 `book_id` 的重复行自动折叠；跨站重复由「合并同名书」处理，桌面端该开关**默认开启**。
+- 站点失败日志统一走 `BaseSearcher._log_fetch_failure()`：超时/被墙记 WARNING，只有真实异常才是 ERROR。
 - 桌面端用 `search_async` + `search_progress` 轮询，首屏约 0.2s。
 
 ### 底层加固
@@ -157,13 +160,14 @@ cd android
 
 ## 5. 已知缺口（按优先级）
 
-1. **歌单 / m3u8 导出没有 UI 入口**。引擎、CLI（`novel-cli music export-m3u8`）、REST `POST /api/v1/music/export` 都支持，但桌面网页和 Android Compose 都没有按钮。这是用户最近一次问到的"缺 m3u8"的真正含义。
-2. **Android 音乐未真机验证**。有设备后：开独立引擎 → 音乐页 → 选平台搜一首 → 任务完成 → 确认公共「下载」目录出现文件。
+1. **Android 音乐未真机验证**。有设备后：开独立引擎 → 音乐页 → 选平台搜一首 → 任务完成 → 确认公共「下载」目录出现文件；再点「导出歌单」确认 `.m3u8` 落地。
+2. **Android 搜索结果不持久化本地路径**：下载完成后才回填，App 重启后要重新下载才能导出歌单（可考虑服务端搜索返回 `path` 或在客户端缓存）。
 3. **重依赖平台不可用**：TIDAL（`aigpy`/`pywidevine`/`av`）、YouTube Music（`ytmusicapi`）、SoundCloud HLS（需外部 `N_m3u8DL-RE`）、歌词转写（`faster_whisper`）未打包；这些平台可能搜得到、下不了。
 4. **SQLite 每章提交仍在事件循环上**（`storage_batch_size=1`）。连接有线程亲和性，改 `to_thread` 要 `check_same_thread=False` + 锁，风险 > 收益，暂缓。
-5. **桌面 `#detail` 在 <1180px 窗口隐藏**（媒体查询），窄窗口看不到详情面板，可改折叠抽屉。
+5. **作者查询会丢掉无作者字段的行**：相关性过滤对 `author=""` 且书名不含关键词的行打 0 分，实测会少 1-2 个来源胶囊；若要补偿，需产品决策。
 6. **许可证文案不一致**：`LICENSE` 是 MIT，但官网页脚写 Apache-2.0。改之前先问用户。
 7. **旧文档/截图**：`docs/assets/images/` 里部分截图来自已删除的 NiceGUI Web UI，可能与现状不符；不要拿它们当验收依据。
+8. **8 个站点在本机被 DNS 污染**（mangg_net / dxmwx / esjzone / kadokado / syosetu / westnovel / westnovel_sub / yodu）：外部网络核实站点存活、解析正确，本机需换网络或代理才能搜到。
 
 ---
 
