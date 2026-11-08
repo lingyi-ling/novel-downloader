@@ -7,8 +7,8 @@
 
 ## 0. 一句话现状
 
-- **版本 v1.24.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.24.0>
-- 全量测试 **9034 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
+- **版本 v1.25.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.25.0>
+- 全量测试 **9046 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
@@ -155,9 +155,14 @@ cd android
 ### 音乐统一搜索
 
 - 默认 `platform="all"`：`apps/music/aggregate.py` 并发搜全部平台，同名同歌手合并，`sources` 列出来源；`platforms` 返回每站 `ok/count/error`。
+- **每个平台一个线程**（最多 32），不要再改回固定 worker 数：曾因固定 10 个 worker，前 10 个恰全是卡死平台，netease 在队列里第 11 位永远轮不到，表现为「搜完是空的」。
+- **失败熔断 10 分钟**（`FAILURE_TTL`）：聚合模式跳过最近失败的平台，重复搜索从 6s 降到 1–3s；显式 `platforms=` 不跳过。
+- **渐进式结果**：`search_all(on_update=...)` 每完成一个平台回调一次快照；桌面用 `music_search_async` + `music_search_progress` 轮询，首屏约 0.9s。
 - **下载必须回传 `search_id`**：musicdl 的 `extra["info"]`（`SongInfo`）无法 JSON 往返，服务端用 `apps/music/trackcache.py` 取回原始 Track。缓存默认 32 条 / 30 分钟。
-- 混合平台下载用 `download_mixed`：按 `track.provider` 分组，进度/结果索引仍对应传入列表。
-- CLI 的一次性聚合搜索走 `search_all_isolated`（子进程 + `terminate`）：vendor 内部线程池不是 daemon，个别平台无视超时会把进程退出拖住；桌面/API/内嵌引擎用进程内 `search_all`。
+- 混合平台下载用 `download_mixed`：按 `track.provider` 分组；主来源失败会回退到 `_alternatives`（合并时挂在原始 Track 上的进程内属性），失败回调只发一次。
+- 平台可用性由依赖决定：`tidal` 需要 `aigpy`，缺包时**不注册**（`LIGHT_PLATFORMS`）。
+- CLI 的一次性聚合搜索走 `search_all_isolated`（子进程 + `terminate`）；`music` 子命令结束时 `os._exit`（测试进程内会跳过），否则 vendor 的非 daemon 线程会把退出拖到分钟级。
+- 健康检查并发、单站 6s；CLI 全部平台约 7s（以前逐站 15s 串行）。
 
 ### UI
 
