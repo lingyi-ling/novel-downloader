@@ -434,6 +434,24 @@ def test_clamp_geometry_enforces_the_minimum_size() -> None:
     )
 
 
+def test_clamp_geometry_fits_a_window_saved_on_a_larger_screen() -> None:
+    """A 1550-wide window must not reopen clipped on a 1536-wide panel."""
+    geometry = wstate.WindowGeometry(1550, 838, 26, 26)
+
+    fitted = wstate.clamp_geometry(geometry, (0, 0, 1536, 864))
+
+    assert (fitted.width, fitted.height) == (1536, 838)
+    assert (fitted.x, fitted.y) == (0, 26)
+
+
+def test_clamp_geometry_keeps_negative_multi_monitor_origins() -> None:
+    geometry = wstate.WindowGeometry(1200, 800, -1200, 0)
+
+    fitted = wstate.clamp_geometry(geometry, (-1200, 0, 3120, 1080))
+
+    assert (fitted.x, fitted.y) == (-1200, 0)
+
+
 def test_clamp_geometry_keeps_usable_sizes_and_position() -> None:
     geometry = wstate.WindowGeometry(1100, 720, -40, 30)
     assert wstate.clamp_geometry(geometry) == geometry
@@ -1607,7 +1625,9 @@ def test_run_webview_app_restores_negative_window_origins() -> None:
 
     source = Path(wa.__file__).read_text(encoding="utf-8")
     assert "max(geometry.x, 0)" not in source
-    assert "visible_origin(" in source
+    # Geometry is fitted to the current monitors instead of being clamped at
+    # zero; ``clamp_geometry`` keeps legitimate negative origins.
+    assert "clamp_geometry(geometry, _virtual_screen_rect())" in source
     assert "_virtual_screen_rect()" in source
 
 

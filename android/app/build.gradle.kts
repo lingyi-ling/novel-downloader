@@ -41,8 +41,8 @@ android {
         applicationId = "com.lingyi.noveldl"
         minSdk = 26
         targetSdk = 35
-        versionCode = 32
-        versionName = "1.22.0"
+        versionCode = 33
+        versionName = "1.22.1"
         // Chaquopy requires explicit ABIs; arm64 covers modern phones, x86_64
         // keeps the emulator usable.
         ndk.abiFilters += listOf("arm64-v8a", "x86_64")
@@ -119,6 +119,18 @@ chaquopy {
             install("Pillow")
             install("qrcode")
             install("websocket-client")
+            install("m3u8")
+            install("emoji")
+            install("bleach")
+            install("filetype")
+            install("puremagic")
+            install("fake-useragent")
+            install("json-repair")
+            install("tinytag")
+            install("tabulate")
+            install("prettytable")
+            install("wcwidth")
+            install("prompt_toolkit")
         }
     }
     sourceSets {

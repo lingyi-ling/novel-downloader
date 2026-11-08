@@ -61,20 +61,36 @@ class WindowGeometry:
     y: int | None = None
 
 
-def clamp_geometry(geometry: WindowGeometry) -> WindowGeometry:
+def clamp_geometry(
+    geometry: WindowGeometry,
+    bounds: tuple[int, int, int, int] | None = None,
+) -> WindowGeometry:
     """
-    Enforce the minimum window size (:data:`MIN_WINDOW_WIDTH` x
-    :data:`MIN_WINDOW_HEIGHT`); the position is passed through unchanged.
+    Fit a geometry to the window-size rules and the connected monitors.
+
+    The minimum size always applies. When *bounds* (the virtual desktop
+    rectangle) is supplied, an oversized window is shrunk to the screen and
+    an origin that would push the bottom-right corner off-screen is moved
+    just far enough to bring it back — a geometry saved on a 2560-wide
+    monitor must not reopen wider than a 1536-wide laptop panel.
 
     :param geometry: The geometry to clamp.
-    :return: A geometry whose width/height are never below the minimum.
+    :param bounds: ``(x, y, width, height)`` of the virtual desktop, or
+        ``None`` when the metrics are unavailable.
+    :return: A geometry whose size respects the minimum and, when known,
+        the current screen.
     """
-    return WindowGeometry(
-        width=max(geometry.width, MIN_WINDOW_WIDTH),
-        height=max(geometry.height, MIN_WINDOW_HEIGHT),
-        x=geometry.x,
-        y=geometry.y,
-    )
+    width = max(geometry.width, MIN_WINDOW_WIDTH)
+    height = max(geometry.height, MIN_WINDOW_HEIGHT)
+    x, y = geometry.x, geometry.y
+    if bounds is not None:
+        bx, by, bw, bh = bounds
+        width = min(width, max(MIN_WINDOW_WIDTH, bw))
+        height = min(height, max(MIN_WINDOW_HEIGHT, bh))
+        if x is not None and y is not None:
+            x = max(bx, min(x, bx + bw - width))
+            y = max(by, min(y, by + bh - height))
+    return WindowGeometry(width=width, height=height, x=x, y=y)
 
 
 def _coerce_int(value: Any) -> int | None:

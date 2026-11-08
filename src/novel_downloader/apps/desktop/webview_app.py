@@ -2265,8 +2265,8 @@ def run_webview_app() -> int:
     import webview
 
     from novel_downloader.apps.desktop.window_state import (
+        clamp_geometry,
         load_window_geometry,
-        visible_origin,
         window_state_file,
     )
 
@@ -2277,18 +2277,20 @@ def run_webview_app() -> int:
     bridge = ApiBridge()
     bridge.start_services()
     geometry = load_window_geometry(window_state_file())
+    if geometry is not None:
+        # Fit the saved geometry to the *current* monitors: a window saved on
+        # a larger screen must not reopen with its right edge (and the
+        # primary buttons) clipped off-screen.
+        geometry = clamp_geometry(geometry, _virtual_screen_rect())
     kwargs: dict[str, Any] = {
         "width": geometry.width if geometry else 1220,
         "height": geometry.height if geometry else 800,
         "min_size": (980, 640),
     }
     if geometry is not None and geometry.x is not None and geometry.y is not None:
-        # Negative origins address monitors left of/above the primary, so the
-        # position is restored as stored; it is only dropped when it no longer
-        # lands on any connected monitor (the saved one was unplugged).
-        origin = visible_origin(geometry.x, geometry.y, _virtual_screen_rect())
-        if origin is not None:
-            kwargs["x"], kwargs["y"] = origin
+        # Negative origins address monitors left of/above the primary; the
+        # clamp above already kept them inside the virtual desktop.
+        kwargs["x"], kwargs["y"] = geometry.x, geometry.y
 
     window = webview.create_window(
         "书音 BookTone",

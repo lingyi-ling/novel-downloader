@@ -1,3 +1,18 @@
+## v1.22.1 (2026-11-08)
+
+### Fix
+
+- **music**: 补齐平台适配器在模块加载时就会 import 的可选依赖。之前 `[music]` 只声明了 5 个包，5sing / 咪咕 / 酷我 / 千千 / 哔哩哔哩 / JOOX 等平台在搜索前就抛 `缺少可选依赖：m3u8 / emoji / bleach / tabulate ...`
+  - 新增：`m3u8`、`emoji`、`bleach`、`filetype`、`puremagic`、`fake-useragent`、`json-repair`、`tinytag`、`tabulate`、`prettytable`、`wcwidth`、`prompt_toolkit`
+  - 同步到 `pyproject` 的 `music` / `music-desktop` extras、Android 的 Chaquopy pip 列表、PyInstaller 的 hidden imports
+  - 文档里的依赖自检一行命令改为检查完整集合
+- **desktop**: 恢复窗口几何时按当前显示器裁剪。之前在 2560 宽屏上保存的窗口在 1536 宽的笔记本上会重开成超出屏幕，右侧按钮被裁掉；现在尺寸与原点都会被收进虚拟桌面，多显示器的负坐标仍然保留
+
+### Test
+
+- 新增 2 例窗口几何裁剪（大屏保存/负坐标多屏）；更新启动源码断言
+- 全量 `pytest` 8959 passed；`ruff` / `format` / `mypy` 全过
+
 ## v1.22.0 (2026-11-08)
 
 ### Feature

@@ -54,6 +54,21 @@ music = [
     "pillow>=13.0",
     "qrcode",
     "websocket-client",
+    # Imported at module load by the vendored platform adapters; without them
+    # the 5sing / migu / kuwo / qianqian / bilibili / joox providers fail with
+    # "缺少可选依赖" before a single request is made.
+    "m3u8",
+    "emoji",
+    "bleach",
+    "filetype",
+    "puremagic",
+    "fake-useragent",
+    "json-repair",
+    "tinytag",
+    "tabulate",
+    "prettytable",
+    "wcwidth",
+    "prompt_toolkit",
 ]
 # Kept for the legacy desktop GUI (legacy/music_desktop/gui.py), which lives
 # outside the package and needs customtkinter to run.
@@ -64,6 +79,18 @@ music-desktop = [
     "pillow>=13.0",
     "qrcode",
     "websocket-client",
+    "m3u8",
+    "emoji",
+    "bleach",
+    "filetype",
+    "puremagic",
+    "fake-useragent",
+    "json-repair",
+    "tinytag",
+    "tabulate",
+    "prettytable",
+    "wcwidth",
+    "prompt_toolkit",
 ]
 image-utils = [
     "brotli>=1.2.1",

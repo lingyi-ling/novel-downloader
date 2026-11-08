@@ -50,7 +50,7 @@ If `curl` returns `403` or `5xx`, the site is sensitive to the current network f
 Check whether the optional backends are installed:
 
 ```bash
-python -c "import importlib.util as u; print('httpx', bool(u.find_spec('httpx'))); print('curl_cffi', bool(u.find_spec('curl_cffi')))"
+python -c "import importlib.util as u; mods=["mutagen", "pathvalidate", "PIL", "qrcode", "websocket", "m3u8", "emoji", "bleach", "filetype", "puremagic", "fake_useragent", "json_repair", "tinytag", "tabulate", "prettytable", "wcwidth", "prompt_toolkit"]; print([m for m in mods if not u.find_spec(m)])"
 ```
 
 **Fix**:

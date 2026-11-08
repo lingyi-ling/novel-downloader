@@ -43,6 +43,21 @@ EXTRA_HIDDEN_IMPORTS: tuple[str, ...] = (
     f"{PACKAGE}.apps.browser",
     # ``from novel_downloader.apps.login import ...`` inside the login command
     f"{PACKAGE}.apps.login",
+    # Third-party modules imported by the vendored music adapters. They are
+    # reached through hidden-import trees, so PyInstaller cannot discover
+    # them by walking the entry point alone.
+    "m3u8",
+    "emoji",
+    "bleach",
+    "filetype",
+    "puremagic",
+    "fake_useragent",
+    "json_repair",
+    "tinytag",
+    "tabulate",
+    "prettytable",
+    "wcwidth",
+    "prompt_toolkit",
 )
 
 
