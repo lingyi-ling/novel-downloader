@@ -17,7 +17,7 @@ __all__ = [
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -27,7 +27,12 @@ from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
 from novel_downloader.infra.i18n import t
 from novel_downloader.plugins.base.searcher import BaseSearcher
 from novel_downloader.plugins.grouping import group_results
-from novel_downloader.plugins.ranking import detect_query_intent, sort_results
+from novel_downloader.plugins.ranking import (
+    detect_query_intent,
+    filter_by_relevance,
+    normalize_text,
+    sort_results,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.plugins.search_cache import SearchCache, build_key
 from novel_downloader.schemas import SearchResult
@@ -59,9 +64,24 @@ class GroupedSearchResult(SearchResult, total=False):
 #: searchers could burst past a single site's tolerance.
 _MAX_CONNECTIONS_PER_HOST = 8
 _MAX_CONNECTIONS_TOTAL = 64
+
 #: Reuse DNS answers for a whole search session instead of resolving the same
 #: host once per request.
 _DNS_CACHE_SECONDS = 300
+
+#: Default relevance floor for ``sort="quality"``.  It is deliberately
+#: conservative: unrelated rows that merely share a character or two with the
+#: keyword score below 0.45, while genuine derivatives ("斗破苍穹之雷霆震碎")
+#: score around 0.7 and survive.  See
+#: :func:`~novel_downloader.plugins.ranking.filter_by_relevance`.
+DEFAULT_MIN_RELEVANCE = 0.45
+
+#: Upper bound (seconds) on how long cancelled site tasks may take to unwind
+#: after the per-site deadline.  Cancellation is only a *request* -- on the
+#: Windows proactor loop an in-flight socket or name-resolution operation can
+#: delay its delivery -- so the aggregate waits for the corpses, but only for
+#: this long: one stuck site must not stretch the search past its budget.
+_ABANDON_GRACE = 0.35
 
 
 def _make_connector() -> aiohttp.TCPConnector:
@@ -190,18 +210,52 @@ def _timeout_error(budget: float) -> TimeoutError:
     return TimeoutError(t("Search timed out after {budget:g}s").format(budget=budget))
 
 
-def _abandon(task: asyncio.Task[Any]) -> None:
-    """
-    Cancel a site task and stop caring about it.
+def _cancel_pending(
+    tasks: Iterable[asyncio.Task[Any]],
+) -> set[asyncio.Task[Any]]:
+    """Request cancellation for every unfinished task and return that set."""
+    pending = {task for task in tasks if not task.done()}
+    for task in pending:
+        task.cancel()
+    return pending
 
-    Cancellation is a *request*: a socket operation already in flight can
-    delay its delivery (notably with the Windows proactor loop), so awaiting
-    the task would let one stuck site stretch the aggregate past its budget.
-    The done-callback consumes whatever the abandoned task eventually raises,
-    keeping "exception was never retrieved" warnings out of the log.
+
+async def _drain(
+    tasks: Iterable[asyncio.Task[Any]],
+    deadline: float,
+) -> None:
     """
-    task.cancel()
-    task.add_done_callback(_consume_task)
+    Wait -- bounded by an ``asyncio`` loop time -- for tasks to unwind.
+
+    ``cancel()`` only *requests* cancellation: a task blocked in a socket
+    operation may not observe it until the transport is closed (notably on the
+    Windows proactor loop, where completion ports can delay delivery).  Closing
+    the session immediately afterwards used to destroy such a task while it
+    was still pending, which produced ``Task was destroyed but it is pending!``
+    and ``Unclosed client session`` / ``Unclosed connector`` noise.  Waiting
+    for the cancelled tasks before returning keeps those warnings at zero.
+
+    Every wait is clipped to the time left before ``deadline``, so a task that
+    ignores cancellation cannot stretch the caller's wall clock at all.  Tasks
+    that are still pending at the deadline get a done-callback that will
+    retrieve (and discard) their eventual exception, so they cannot leak an
+    ``exception was never retrieved`` warning later.
+    """
+    loop = asyncio.get_running_loop()
+    tasks = tuple(tasks)
+    remaining = {task for task in tasks if not task.done()}
+    while remaining:
+        budget = deadline - loop.time()
+        if budget <= 0:
+            break
+        await asyncio.wait(remaining, timeout=budget)
+        remaining = {task for task in remaining if not task.done()}
+
+    for task in tasks:
+        if task.done():
+            _consume_task(task)
+        else:
+            task.add_done_callback(_consume_task)
 
 
 def _consume_task(task: asyncio.Task[Any]) -> None:
@@ -380,6 +434,48 @@ def _merged_results(
     return merged
 
 
+def _dedupe_exact(results: list[SearchResult]) -> list[SearchResult]:
+    """
+    Fold exact same-book duplicates, keeping the first occurrence.
+
+    Two rows are the same book when they come from the same site and either
+    share a non-empty ``book_id``, or -- for rows without an id -- share the
+    same normalized title and author.  Cross-site copies are deliberately
+    *not* folded here: that is what ``group=True`` is for.
+
+    The input list is returned unchanged when nothing was duplicated, so a
+    fresh cache snapshot is only copied when it actually needs a copy.
+    """
+    seen_ids: set[tuple[str, str]] = set()
+    seen_titles: set[tuple[str, str, str]] = set()
+    kept: list[SearchResult] = []
+    for result in results:
+        site = str(result.get("site") or "")
+        book_id = str(result.get("book_id") or "")
+        title = normalize_text(result.get("title"))
+        author = normalize_text(result.get("author"))
+
+        if book_id:
+            key = (site, book_id)
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+        elif title:
+            title_key = (site, title, author)
+            if title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
+        kept.append(result)
+
+    if len(kept) == len(results):
+        return results
+    logger.debug(
+        "search: dropped %d duplicate row(s) from the aggregate",
+        len(results) - len(kept),
+    )
+    return kept
+
+
 def _finalize(
     results: list[SearchResult],
     *,
@@ -388,15 +484,24 @@ def _finalize(
     order: str | None,
     limit: int | None,
     group: bool,
+    min_relevance: float | None = None,
 ) -> list[SearchResult]:
     """
-    Rank ``results`` for this caller, then group and/or slice as requested.
+    Rank ``results`` for this caller, then filter, group and/or slice.
 
-    Grouping happens after ranking (merged entries inherit the ranked order)
-    and before ``limit``, so with ``group=True`` the limit counts books rather
-    than raw rows.  The flat branch keeps the historical contract of returning
-    the ranked input list itself; the grouped branch always builds fresh
-    entries, which keeps the search cache shareable between both modes.
+    The steps run in this order:
+
+    1. exact duplicate rows are folded (see :func:`_dedupe_exact`);
+    2. the list is ranked (grouping and limiting both build on that order);
+    3. for ``sort="quality"`` only, rows below ``min_relevance`` are dropped
+       (see :func:`~novel_downloader.plugins.ranking.filter_by_relevance`);
+    4. same-book entries are grouped when requested;
+    5. ``limit`` is applied last, so with ``group=True`` it counts books
+       rather than raw rows.
+
+    Filtering happens per call and never rewrites the cached snapshot: the
+    filtered subset is a fresh list, while ranked order is re-applied on every
+    call anyway.
 
     Ranking is intent-aware: before scoring we decide whether the keyword
     looks more like a title or an author (see
@@ -406,16 +511,25 @@ def _finalize(
     resolved to ``"either"`` — the historical behaviour — whenever the
     evidence is too weak, and other sort keys ignore it entirely.
     """
-    intent = detect_query_intent(keyword, results) if sort == "quality" else "either"
-    sort_results(results, by=sort, order=order, keyword=keyword, intent=intent)
+    work = _dedupe_exact(results)
+    intent = detect_query_intent(keyword, work) if sort == "quality" else "either"
+    sort_results(work, by=sort, order=order, keyword=keyword, intent=intent)
+
+    if sort == "quality" and min_relevance is not None:
+        # Only quality sorting promises relevance; an explicit "words" or
+        # "update" ordering must not silently lose rows.
+        work = filter_by_relevance(
+            work, keyword, intent=intent, min_relevance=min_relevance
+        )
+
     if group:
-        merged = _merged_results(results, keyword)
+        merged = _merged_results(work, keyword)
         if limit is not None:
             merged = merged[:limit]
         return cast("list[SearchResult]", merged)
     if limit is not None:
-        return results[:limit]
-    return results
+        return work[:limit]
+    return work
 
 
 async def search(
@@ -430,6 +544,7 @@ async def search(
     *,
     on_event: Callable[[SearchEvent], None] | None = None,
     group: bool = False,
+    min_relevance: float | None = DEFAULT_MIN_RELEVANCE,
 ) -> list[SearchResult]:
     """
     Perform a search for the given keyword across one or more registered sites,
@@ -456,6 +571,14 @@ async def search(
     :param group: Fold same-book results into one merged entry per book (see
         :class:`GroupedSearchResult`); off by default, and never applied to
         :func:`search_stream`, whose per-site chunks stay flat.
+    :param min_relevance: Relevance floor (0..1) applied when
+        ``sort="quality"``, before grouping and before ``limit``.  Rows whose
+        keyword relevance falls below it are dropped, except that the result
+        set is never emptied: if nothing clears the floor, entries with any
+        positive relevance are kept, and if none has any, the input is
+        returned unchanged.  Pass ``None`` to keep every row (e.g. when the
+        caller sorts by word count or update date).  Ignored for other sort
+        keys.
     :return: A flat list of `SearchResult` objects.
     """
     if sites is not None and not sites:
@@ -477,6 +600,7 @@ async def search(
             order=order,
             limit=limit,
             group=group,
+            min_relevance=min_relevance,
         )
 
     classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
@@ -486,33 +610,49 @@ async def search(
 
     timeout_cfg = aiohttp.ClientTimeout(total=timeout)
     results: list[SearchResult] = []
+    site_tasks: dict[str, asyncio.Task[list[SearchResult]]] = {}
+    late: set[asyncio.Task[list[SearchResult]]] = set()
+    #: Loop time by which every cancelled site task must have unwound.  Set
+    #: inside the session block and reused after it closes (closing the
+    #: session is itself what unblocks some in-flight operations).
+    cleanup_deadline: float | None = None
 
     async with aiohttp.ClientSession(
         connector=_make_connector(),
         timeout=timeout_cfg,
         headers=DEFAULT_USER_HEADERS,
     ) as session:
-        plan = _prepare_searchers(
-            classes,
-            session,
-            sites=sites,
-            nsfw=nsfw,
-            on_event=on_event,
-        )
-        site_tasks: dict[str, asyncio.Task[list[SearchResult]]] = {}
-        for site, inst in plan.entries:
-            site_tasks[site] = asyncio.create_task(
-                _search_one(inst, keyword, per_site_limit, timeout),
-                name=f"{inst.__class__.__name__}.search",
+        try:
+            plan = _prepare_searchers(
+                classes,
+                session,
+                sites=sites,
+                nsfw=nsfw,
+                on_event=on_event,
             )
-        # One deadline for the whole fan-out: every site started together, so
-        # a site still running when the budget expires is a timeout, and the
-        # aggregate returns instead of waiting for it.
-        late: set[asyncio.Task[list[SearchResult]]] = set()
-        if site_tasks:
-            _, late = await asyncio.wait(site_tasks.values(), timeout=timeout)
-            for task in late:
-                _abandon(task)
+            for site, inst in plan.entries:
+                site_tasks[site] = asyncio.create_task(
+                    _search_one(inst, keyword, per_site_limit, timeout),
+                    name=f"{inst.__class__.__name__}.search",
+                )
+            # One deadline for the whole fan-out: every site started together,
+            # so a site still running when the budget expires is a timeout, and
+            # the aggregate returns instead of waiting for it.
+            if site_tasks:
+                _, late = await asyncio.wait(site_tasks.values(), timeout=timeout)
+        finally:
+            # Also reached when the caller cancels ``search`` itself: never
+            # leave a site task running against the session we are about to
+            # close.  The wait is bounded (see ``_drain``).
+            cleanup_deadline = asyncio.get_running_loop().time() + _ABANDON_GRACE
+            _cancel_pending(site_tasks.values())
+            await _drain(site_tasks.values(), cleanup_deadline)
+
+    if cleanup_deadline is not None:
+        # Closing the session may be what finally unblocks a cancelled site's
+        # in-flight socket operation; let those tasks observe it within the
+        # remaining grace.  This is a no-op when everything already finished.
+        await _drain(site_tasks.values(), cleanup_deadline)
 
     for site, _ in plan.entries:
         task = site_tasks[site]
@@ -549,6 +689,7 @@ async def search(
         order=order,
         limit=limit,
         group=group,
+        min_relevance=min_relevance,
     )
 
 
@@ -593,6 +734,9 @@ async def search_stream(
         return
 
     timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+    site_by_task: dict[asyncio.Task[list[SearchResult]], str] = {}
+    cleanup_deadline: float | None = None
+    accumulated: list[SearchResult] = []
     async with aiohttp.ClientSession(
         connector=_make_connector(),
         timeout=timeout_cfg,
@@ -607,7 +751,6 @@ async def search_stream(
         )
 
         pending: set[asyncio.Task[list[SearchResult]]] = set()
-        site_by_task: dict[asyncio.Task[list[SearchResult]], str] = {}
         for site, inst in plan.entries:
             task = asyncio.create_task(
                 _search_one(inst, keyword, per_site_limit, timeout),
@@ -616,11 +759,10 @@ async def search_stream(
             pending.add(task)
             site_by_task[task] = site
 
-        accumulated: list[SearchResult] = []
-        deadline = asyncio.get_running_loop().time() + timeout
+        search_deadline = asyncio.get_running_loop().time() + timeout
         try:
             while pending:
-                remaining = deadline - asyncio.get_running_loop().time()
+                remaining = search_deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     break
                 done, pending = await asyncio.wait(
@@ -656,19 +798,24 @@ async def search_stream(
                         accumulated.extend(payload)
                         yield payload
         finally:
-            # Cancel whatever is left and move on: awaiting the tasks would
-            # hand the wall clock back to a site whose socket operation is
-            # slow to observe the cancellation (see ``_abandon``).
-            for task in site_by_task:
-                if task.done():
-                    continue
-                _abandon(task)
+            # Cancel whatever is left and give it a bounded grace to unwind
+            # before the session closes; the wait is clipped to
+            # ``_ABANDON_GRACE`` so a slow-to-cancel site cannot stretch the
+            # stream (see ``_drain``).
+            cleanup_deadline = asyncio.get_running_loop().time() + _ABANDON_GRACE
+            for task in _cancel_pending(site_by_task):
                 _report_failure(
                     site_by_task[task],
                     _timeout_error(timeout),
                     plan.browser_sites,
                     on_event,
                 )
+            await _drain(site_by_task, cleanup_deadline)
+
+    if cleanup_deadline is not None:
+        # Closing the session can be what unblocks an in-flight operation of a
+        # cancelled site; give it the rest of the grace to observe that.
+        await _drain(site_by_task, cleanup_deadline)
 
     # Only reached on normal completion; cancelled/closed streams skip this.
     # Empty streams are not cached (transient failures must not be pinned).

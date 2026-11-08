@@ -49,6 +49,7 @@ __all__ = [
     "SORT_KEYS",
     "default_order",
     "detect_query_intent",
+    "filter_by_relevance",
     "normalize_text",
     "parse_update_date",
     "parse_word_count",
@@ -689,6 +690,40 @@ def sort_results(
     results.sort(key=key_fn, reverse=reverse)
 
 
+def filter_by_relevance(
+    results: Sequence[SearchResult],
+    keyword: str,
+    *,
+    intent: str = "either",
+    min_relevance: float,
+) -> list[SearchResult]:
+    """
+    Return the subset of ``results`` whose relevance clears ``min_relevance``.
+
+    The result set is never emptied:
+
+    * if at least one entry meets the threshold, only those entries are kept;
+    * otherwise every entry with any positive relevance (``> 0.0``) is kept;
+    * if even that set is empty, the input is returned verbatim.
+
+    The last two rules exist because a strict floor must never turn a page of
+    results into an empty one -- a user who typed a keyword would rather see
+    poor matches than nothing at all.
+
+    ``intent`` is forwarded to :func:`relevance_of`; an unknown value falls
+    back to ``"either"``.  The input sequence is only read: the returned list
+    is fresh, so cached snapshots stay pristine.
+    """
+    scored = [(relevance_of(item, keyword, intent=intent), item) for item in results]
+    kept = [item for relevance, item in scored if relevance >= min_relevance]
+    if kept:
+        return kept
+    with_any_match = [item for relevance, item in scored if relevance > 0.0]
+    if with_any_match:
+        return with_any_match
+    return list(results)
+
+
 def sort_results_with_intent(
     results: list[SearchResult],
     keyword: str,
@@ -719,23 +754,9 @@ def sort_results_with_intent(
     intent = detect_query_intent(keyword, results)
 
     if min_relevance is not None:
-        kept = [
-            item
-            for item in results
-            if relevance_of(item, keyword, intent=intent) >= min_relevance
-        ]
-        if not kept:
-            # Fall back to "anything that matches at all" rather than handing
-            # back an empty page just because the threshold was too strict.
-            kept = [
-                item
-                for item in results
-                if relevance_of(item, keyword, intent=intent) > 0.0
-            ]
-        if kept:
-            results[:] = kept
-        # Otherwise nothing is relevant: keep the input so the caller still
-        # sees the raw results (the historical "never clear the page" rule).
+        results[:] = filter_by_relevance(
+            results, keyword, intent=intent, min_relevance=min_relevance
+        )
 
     sort_results(
         results,

@@ -12,6 +12,7 @@ from novel_downloader.plugins.ranking import (
     INTENT_SHORT_MAX,
     INTENT_WEIGHTS,
     detect_query_intent,
+    filter_by_relevance,
     rank_score,
     relevance_of,
     sort_results,
@@ -286,3 +287,73 @@ def test_sort_results_accepts_intent_keyword() -> None:
     sort_results(results, keyword="土豆", intent="author", now=NOW)
 
     assert [r["book_id"] for r in results] == ["author", "title"]
+
+
+# --------------------------------------------------------------------------- #
+# filter_by_relevance
+# --------------------------------------------------------------------------- #
+def test_filter_by_relevance_keeps_rows_at_or_above_the_floor() -> None:
+    exact = _result(book_id="exact", title="斗破苍穹", author="天蚕土豆")
+    derivative = _result(book_id="deriv", title="斗破苍穹外传", author="别人")
+    unrelated = _result(book_id="none", title="三体", author="刘慈欣")
+
+    floor = relevance_of(derivative, "斗破苍穹", intent="either")
+
+    kept = filter_by_relevance(
+        [unrelated, derivative, exact],
+        "斗破苍穹",
+        intent="either",
+        min_relevance=floor,
+    )
+
+    # The floor is inclusive: a row whose relevance equals it survives.
+    assert kept == [derivative, exact]
+
+
+def test_filter_by_relevance_drops_rows_just_below_the_floor() -> None:
+    exact = _result(book_id="exact", title="斗破苍穹", author="天蚕土豆")
+    derivative = _result(book_id="deriv", title="斗破苍穹外传", author="别人")
+
+    floor = relevance_of(derivative, "斗破苍穹", intent="either") + 1e-6
+
+    kept = filter_by_relevance(
+        [derivative, exact], "斗破苍穹", intent="either", min_relevance=floor
+    )
+
+    assert kept == [exact]
+
+
+def test_filter_by_relevance_never_returns_an_empty_page() -> None:
+    # Nothing clears the floor -> fall back to "any positive relevance".
+    exact = _result(book_id="exact", title="斗破苍穹", author="天蚕土豆")
+    unrelated = _result(book_id="none", title="三体", author="刘慈欣")
+
+    kept = filter_by_relevance(
+        [unrelated, exact], "斗破苍穹", intent="either", min_relevance=1.5
+    )
+
+    assert kept == [exact]
+
+
+def test_filter_by_relevance_keeps_everything_when_nothing_matches() -> None:
+    first = _result(book_id="a", title="三体", author="刘慈欣")
+    second = _result(book_id="b", title="活着", author="余华")
+
+    kept = filter_by_relevance(
+        [first, second], "完全不存在的书名", intent="either", min_relevance=0.45
+    )
+
+    assert kept == [first, second]
+
+
+def test_filter_by_relevance_does_not_mutate_the_input() -> None:
+    results = [
+        _result(book_id="exact", title="斗破苍穹", author="天蚕土豆"),
+        _result(book_id="none", title="三体", author="刘慈欣"),
+    ]
+    snapshot = [dict(item) for item in results]
+
+    kept = filter_by_relevance(results, "斗破苍穹", intent="either", min_relevance=0.45)
+
+    assert kept == [results[0]]
+    assert results == snapshot

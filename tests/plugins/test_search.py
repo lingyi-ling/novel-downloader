@@ -3,7 +3,7 @@
 
 import asyncio
 from collections.abc import Callable, Iterator, Sequence
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -800,3 +800,442 @@ async def test_search_connector_bounds_per_host_connections() -> None:
         assert _MAX_CONNECTIONS_PER_HOST < _MAX_CONNECTIONS_TOTAL
     finally:
         await connector.close()
+
+
+# --------------------------------------------------------------------------- #
+# relevance filtering (on by default for sort="quality")
+# --------------------------------------------------------------------------- #
+
+
+def _search_result(
+    site: str, book_id: str, title: str, **overrides: object
+) -> SearchResult:
+    base: dict[str, object] = {
+        "site": site,
+        "book_id": book_id,
+        "book_url": f"https://example.com/{site}/{book_id}",
+        "cover_url": "",
+        "title": title,
+        "author": "作者",
+        "latest_chapter": "",
+        "update_date": "",
+        "word_count": "",
+        "priority": 1000,
+    }
+    base.update(overrides)
+    return cast("SearchResult", base)
+
+
+class _MixedRelevanceSearcher(BaseSearcher):
+    """Searcher returning one exact, one derivative and one unrelated book."""
+
+    site_name = "mixed"
+    fetches = 0
+
+    async def _fetch_html(self, keyword: str) -> str:
+        type(self).fetches += 1
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [
+            _search_result("mixed", "exact", "斗破苍穹", author="天蚕土豆"),
+            _search_result("mixed", "deriv", "斗破苍穹之雷霆震碎", author="别人"),
+            _search_result("mixed", "unrelated", "三体", author="刘慈欣"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_quality_search_drops_unrelated_rows_by_default(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MixedRelevanceSearcher])
+    )
+
+    results = await search("斗破苍穹")
+
+    # The unrelated book is gone; the genuine derivative survives (its
+    # relevance is ~0.7, well above the 0.45 floor).
+    assert [item["book_id"] for item in results] == ["exact", "deriv"]
+
+
+@pytest.mark.asyncio
+async def test_quality_search_can_disable_the_relevance_floor(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MixedRelevanceSearcher])
+    )
+
+    results = await search("斗破苍穹", min_relevance=None)
+
+    assert {item["book_id"] for item in results} == {"exact", "deriv", "unrelated"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sort", ["words", "update", "title"])
+async def test_non_quality_sorts_never_filter_rows(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None, sort: str
+) -> None:
+    # An explicit word-count/update/title ordering must not silently lose data.
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MixedRelevanceSearcher])
+    )
+
+    results = await search("斗破苍穹", sort=sort)
+
+    assert {item["book_id"] for item in results} == {"exact", "deriv", "unrelated"}
+
+
+@pytest.mark.asyncio
+async def test_relevance_filter_never_returns_an_empty_page(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    class _AllUnrelatedSearcher(_MixedRelevanceSearcher):
+        site_name = "unrelated_only"
+
+        def _parse_html(
+            self, html_str: str, limit: int | None = None
+        ) -> list[SearchResult]:
+            return [
+                _search_result("unrelated_only", "a", "三体", author="刘慈欣"),
+                _search_result("unrelated_only", "b", "活着", author="余华"),
+            ]
+
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_AllUnrelatedSearcher]),
+    )
+
+    results = await search("斗破苍穹")
+
+    # Nothing matches: the raw rows come back rather than an empty page.
+    assert {item["book_id"] for item in results} == {"a", "b"}
+
+
+@pytest.mark.asyncio
+async def test_relevance_filter_does_not_rewrite_the_cache_snapshot(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # The cache keeps every row; filtering is applied per call in _finalize.
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MixedRelevanceSearcher])
+    )
+
+    filtered = await search("斗破苍穹")
+    everything = await search("斗破苍穹", min_relevance=None)
+
+    assert len(filtered) == 2
+    assert len(everything) == 3
+    assert len(_cache_snapshot("斗破苍穹")) == 3
+
+
+# --------------------------------------------------------------------------- #
+# exact duplicate folding
+# --------------------------------------------------------------------------- #
+
+
+class _ExactDuplicateSearcher(_BookCopySearcher):
+    """One site returning the very same (site, book_id) row twice."""
+
+    site_name = "same"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        first = dict(super()._parse_html(html_str, limit)[0])
+        duplicate = dict(first)  # same site and book_id
+        other = _search_result("same", "other", "三体前传", author="刘慈欣")
+        return [first, duplicate, other]  # type: ignore[return-value]
+
+
+@pytest.mark.asyncio
+async def test_exact_duplicate_rows_are_folded(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_ExactDuplicateSearcher])
+    )
+
+    results = await search("三体")
+
+    assert sorted(item["book_id"] for item in results) == ["other", "same-1"]
+    # The cached snapshot is untouched, so a later call can still change its mind.
+    assert len(_cache_snapshot("三体")) == 3
+
+
+@pytest.mark.asyncio
+async def test_duplicate_folding_happens_before_the_limit(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # If ``limit`` were applied first, the two copies would consume both slots
+    # and the second book would disappear.
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_ExactDuplicateSearcher])
+    )
+
+    results = await search("三体", limit=2)
+
+    assert sorted(item["book_id"] for item in results) == ["other", "same-1"]
+
+
+@pytest.mark.asyncio
+async def test_folding_is_scoped_to_one_site(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # Same book on two sites is a *grouping* concern, not a dedupe one.
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BookCopySearcher, _StrongCopySearcher]),
+    )
+
+    results = await search("三体")
+
+    assert sorted(item["site"] for item in results) == ["alpha", "beta"]
+
+
+# --------------------------------------------------------------------------- #
+# filter -> group -> limit ordering
+# --------------------------------------------------------------------------- #
+
+
+class _FilterCopySearcher(_MixedRelevanceSearcher):
+    """A second site copy of the mixed catalogue (exact + derivative + noise)."""
+
+    site_name = "mixed2"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [
+            _search_result("mixed2", "exact", "斗破苍穹", author="天蚕土豆"),
+            _search_result("mixed2", "deriv", "斗破苍穹之雷霆震碎", author="别人"),
+            _search_result("mixed2", "unrelated", "三体", author="刘慈欣"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_filter_runs_before_grouping_and_limit(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_MixedRelevanceSearcher, _FilterCopySearcher]),
+    )
+
+    merged = await search("斗破苍穹", group=True, limit=1)
+
+    # The limit counts books after the unrelated row was filtered out; the one
+    # surviving book still carries both sites as sources.
+    assert len(merged) == 1
+    assert merged[0]["title"] == "斗破苍穹"
+    assert merged[0]["sources"] == ["mixed", "mixed2"]
+
+
+@pytest.mark.asyncio
+async def test_group_keeps_derivative_separate_from_the_exact_title(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_MixedRelevanceSearcher, _FilterCopySearcher]),
+    )
+
+    merged = await search("斗破苍穹", group=True)
+
+    assert [entry["title"] for entry in merged] == ["斗破苍穹", "斗破苍穹之雷霆震碎"]
+    assert all(len(entry["sources"]) == 2 for entry in merged)
+
+
+# --------------------------------------------------------------------------- #
+# cancelled site tasks are reaped before returning
+# --------------------------------------------------------------------------- #
+
+
+class _SlowCancelSearcher(_RecordingSearcher):
+    """Searcher whose cancellation is delivered with a short delay.
+
+    Mirrors the Windows proactor loop, where a cancel request can stay
+    unobserved for a moment while the cancellation is in flight.
+    """
+
+    site_name = "slow_cancel"
+
+    async def search(
+        self, keyword: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+            raise
+        return []
+
+
+class _ImmortalSearcher(_RecordingSearcher):
+    """Searcher that ignores cancellation for longer than the grace period."""
+
+    site_name = "immortal"
+
+    async def search(
+        self, keyword: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.sleep(30)
+            raise
+        return []
+
+
+def _site_tasks() -> set[asyncio.Task[Any]]:
+    """Every still-pending site search task in the running loop."""
+    return {
+        task
+        for task in asyncio.all_tasks()
+        if not task.done() and task.get_name().endswith(".search")
+    }
+
+
+@pytest.mark.asyncio
+async def test_timed_out_site_task_is_reaped_before_search_returns(
+    monkeypatch: pytest.MonkeyPatch,
+    _fresh_state: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import gc
+    import logging
+
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_RecordingSearcher, _SlowCancelSearcher]),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        results = await search(
+            "keyword", sites=["recorder", "slow_cancel"], timeout=0.05
+        )
+        gc.collect()
+        await asyncio.sleep(0)
+
+    assert [item["site"] for item in results] == ["recorder"]
+    # Nothing may still be running against the session that is now closed.
+    assert _site_tasks() == set()
+    assert not [record for record in caplog.records if record.name == "asyncio"]
+
+
+@pytest.mark.asyncio
+async def test_timed_out_site_task_is_reaped_before_stream_closes(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    import gc
+    import logging
+
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_RecordingSearcher, _SlowCancelSearcher]),
+    )
+
+    records: list[logging.LogRecord] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Collector()
+    logging.getLogger().addHandler(handler)
+    try:
+        chunks = [
+            chunk
+            async for chunk in search_stream(
+                "keyword", sites=["recorder", "slow_cancel"], timeout=0.05
+            )
+        ]
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+    assert [[item["site"] for item in chunk] for chunk in chunks] == [["recorder"]]
+    assert _site_tasks() == set()
+    assert not [record for record in records if record.name == "asyncio"]
+
+
+@pytest.mark.asyncio
+async def test_abandon_grace_bounds_a_site_that_ignores_cancellation(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    import time
+
+    from novel_downloader.plugins.search import _ABANDON_GRACE
+
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_RecordingSearcher, _ImmortalSearcher]),
+    )
+
+    started = time.perf_counter()
+    results = await search("keyword", sites=["recorder", "immortal"], timeout=0.05)
+    elapsed = time.perf_counter() - started
+
+    # The aggregate may wait for the grace once, never for the 30s sleep.
+    assert elapsed < 0.05 + 2 * _ABANDON_GRACE + 0.5
+    assert [item["site"] for item in results] == ["recorder"]
+    # Clean up the deliberately unkillable task so the loop can shut down.
+    for task in _site_tasks():
+        task.cancel()
+    await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_search_reaps_the_site_tasks(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # The caller may abandon a search (a new keyword typed, the window
+    # closed).  Cancellation must still leave no site task behind against the
+    # session that is about to close.
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_RecordingSearcher, _SlowCancelSearcher]),
+    )
+
+    task = asyncio.create_task(
+        search("keyword", sites=["recorder", "slow_cancel"], timeout=5)
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert _site_tasks() == set()
+
+
+@pytest.mark.asyncio
+async def test_closing_the_stream_reaps_the_site_tasks(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_RecordingSearcher, _SlowCancelSearcher]),
+    )
+
+    stream = search_stream("keyword", sites=["recorder", "slow_cancel"], timeout=5)
+    first = await stream.__anext__()
+    assert [item["site"] for item in first] == ["recorder"]
+
+    await stream.aclose()
+    await asyncio.sleep(0)
+
+    assert _site_tasks() == set()
