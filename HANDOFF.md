@@ -7,8 +7,8 @@
 
 ## 0. 一句话现状
 
-- **版本 v1.26.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.26.0>
-- 全量测试 **9046 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
+- **版本 v1.27.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.27.0>
+- 全量测试 **9049 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
@@ -130,6 +130,7 @@ cd android
 - `search(timeout=…)` 是**每站点墙钟预算**：超时站点丢弃，整体 ≈ 预算（5s → 约 5.2s，之前 116s）。
 - Windows proactor 的取消可能延迟，所以超时后不 await 卡住的任务；取消后给 0.35s 有界宽限再退出 session，否则日志会刷 `Task was destroyed` / `Unclosed client session`。
 - **quality 排序默认过滤相关性 < 0.45**（`min_relevance`，传 `None` 关闭）：无关结果不再混入，衍生作保留；永不返回空页。非 quality 排序不过滤。
+- 过滤作用在**合并后的书目**上（`group=True`）：作者查询时，同书的镜像站可能没有作者字段、单行相关性为 0，但它仍是下载来源，不再被误删。
 - 同站同 `book_id` 的重复行自动折叠；跨站重复由「合并同名书」处理，桌面端该开关**默认开启**。
 - 站点失败日志统一走 `BaseSearcher._log_fetch_failure()`：超时/被墙记 WARNING，只有真实异常才是 ERROR。
 - 桌面端用 `search_async` + `search_progress` 轮询，首屏约 0.2s。
@@ -156,8 +157,10 @@ cd android
 
 - 默认 `platform="all"`：`apps/music/aggregate.py` 并发搜全部平台，同名同歌手合并，`sources` 列出来源；`platforms` 返回每站 `ok/count/error`。
 - **每个平台一个线程**（最多 32），不要再改回固定 worker 数：曾因固定 10 个 worker，前 10 个恰全是卡死平台，netease 在队列里第 11 位永远轮不到，表现为「搜完是空的」。
-- **失败熔断 10 分钟**（`FAILURE_TTL`）：聚合模式跳过最近失败的平台，重复搜索从 6s 降到 1–3s；显式 `platforms=` 不跳过。
-- **渐进式结果**：`search_all(on_update=...)` 每完成一个平台回调一次快照；桌面用 `music_search_async` + `music_search_progress` 轮询，首屏约 0.9s。
+- **失败熔断 10 分钟**（`FAILURE_TTL`）：聚合模式跳过最近失败的平台；状态落盘 `<音乐数据目录>/search_stats.json`，**重启后仍然生效**（`tests/conftest.py` 把 `NOVEL_MUSIC_HOME` 指到临时目录，避免污染本机）
+- **慢且空的平台短暂跳过**：连续两次 ≥2s 且 0 结果，跳过 5 分钟（`SLOW_EMPTY_*`）
+- **首个可用批次后提前返回**：拿到非空结果后再等 `EARLY_EXIT_GRACE=2s` 就收工，慢尾不拖住搜索；被提前放弃的平台**不记为失败**（可能只是还在请求），下次照常参与
+- **渐进式结果**：`search_all(on_update=...)` 每完成一个平台回调一次快照；桌面用 `music_search_async` + `music_search_progress` 轮询，首屏约 0.7–0.9s，最终合并约 2.5s。
 - **下载必须回传 `search_id`**：musicdl 的 `extra["info"]`（`SongInfo`）无法 JSON 往返，服务端用 `apps/music/trackcache.py` 取回原始 Track。缓存默认 32 条 / 30 分钟。
 - 混合平台下载用 `download_mixed`：按 `track.provider` 分组；主来源失败会回退到 `_alternatives`（合并时挂在原始 Track 上的进程内属性），失败回调只发一次。
 - 平台可用性由依赖决定：`tidal` 需要 `aigpy`，缺包时**不注册**（`LIGHT_PLATFORMS`）。
