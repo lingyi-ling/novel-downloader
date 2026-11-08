@@ -1171,3 +1171,156 @@ class TestManifestSignature:
 
         assert result.error == "manifest-unavailable"
         assert api_hits == []
+
+
+# ---------------------------------------------------------------------------
+# install shape: portable copies replace their own folder
+# ---------------------------------------------------------------------------
+
+
+def test_select_asset_prefers_the_bundle_for_portable(tmp_path: Path) -> None:
+    setup = updater.ReleaseAsset(
+        "NovelDownloader-setup-1.0.0-x64.exe",
+        "https://example.test/setup.exe",
+        None,
+        None,
+    )
+    bundle = updater.ReleaseAsset(
+        "NovelDownloader-1.0.0-windows-x64.zip",
+        "https://example.test/bundle.zip",
+        None,
+        None,
+    )
+    assets = (setup, bundle)
+
+    assert updater.select_asset(assets, "windows-x64").name == setup.name
+    assert (
+        updater.select_asset(assets, "windows-x64", shape="portable").name
+        == bundle.name
+    )
+    assert (
+        updater.select_asset(assets, "windows-x64", shape="installer").name
+        == setup.name
+    )
+
+
+def test_manifest_selection_follows_the_install_shape() -> None:
+    platforms = {
+        "windows-x64-installer": {
+            "name": "setup.exe",
+            "url": "https://x/setup.exe",
+            "sha256": "a" * 64,
+            "size": 10,
+        },
+        "windows-x64-portable": {
+            "name": "bundle.zip",
+            "url": "https://x/b.zip",
+            "sha256": "b" * 64,
+            "size": 10,
+        },
+    }
+
+    installed = updater.select_manifest_asset(platforms, "windows-x64")
+    portable = updater.select_manifest_asset(platforms, "windows-x64", shape="portable")
+
+    assert installed is not None and installed.name == "setup.exe"
+    assert portable is not None and portable.name == "bundle.zip"
+
+
+def test_detect_install_shape_for_an_installed_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    installed = tmp_path / "Programs" / "NovelDownloader" / "NovelDownloader.exe"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b"x")
+    monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(updater.sys, "executable", str(installed))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+
+    assert updater.detect_install_shape() == "installer"
+
+
+def test_detect_install_shape_for_a_portable_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    portable = tmp_path / "Downloads" / "NovelDownloader" / "NovelDownloader.exe"
+    portable.parent.mkdir(parents=True)
+    portable.write_bytes(b"x")
+    monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(updater.sys, "executable", str(portable))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
+
+    assert updater.detect_install_shape() == "portable"
+
+
+# ---------------------------------------------------------------------------
+# resumable transfers
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, payload: bytes, status: int, length: int | None) -> None:
+        self._stream = io.BytesIO(payload)
+        self.status = status
+        self.headers = {}
+        if length is not None:
+            self.headers["Content-Length"] = str(length)
+
+    def read(self, size: int = -1) -> bytes:
+        return self._stream.read(size)
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+def test_download_asset_resumes_from_a_partial_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    final = tmp_path / "asset.bin"
+    part = final.with_name("asset.bin.part")
+    part.write_bytes(b"hello ")
+    requests: list[dict[str, str]] = []
+
+    def fake_urlopen(request: object, timeout: float = 0) -> _FakeResponse:
+        requests.append(dict(getattr(request, "headers", {})))
+        return _FakeResponse(b"world", 206, 5)
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+    progress: list[tuple[int, int]] = []
+    expected = hashlib.sha256(b"hello world").hexdigest()
+
+    written = updater.download_asset(
+        "https://example.test/asset.bin",
+        Path("asset.bin"),
+        expected_sha256=expected,
+        root=tmp_path,
+        resume=True,
+        progress=lambda got, total: progress.append((got, total)),
+    )
+
+    assert written == final
+    assert final.read_bytes() == b"hello world"
+    assert requests and requests[0].get("Range") == "bytes=6-"
+    assert progress[-1] == (11, 11)
+
+
+def test_download_asset_restarts_when_the_server_ignores_range(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    final = tmp_path / "asset.bin"
+    final.with_name("asset.bin.part").write_bytes(b"stale")
+
+    def fake_urlopen(_request: object, timeout: float = 0) -> _FakeResponse:
+        return _FakeResponse(b"fresh", 200, 5)
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+
+    written = updater.download_asset(
+        "https://example.test/asset.bin", Path("asset.bin"), root=tmp_path, resume=True
+    )
+
+    assert written == final
+    assert final.read_bytes() == b"fresh"

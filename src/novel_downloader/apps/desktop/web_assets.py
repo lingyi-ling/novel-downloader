@@ -894,6 +894,8 @@ $("#shortcut-btn").onclick = async () => {
 // "Later" hides it for this session (localStorage is never touched).
 const updates = { busy: false, dismissed: false, finished: false, state: null };
 let updatePollTimer = null;
+let updateDownloadPromise = null;
+const updateSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function applyUpdateState(st) {
   if (!st) return;
@@ -912,6 +914,50 @@ function applyUpdateState(st) {
   $("#update-notes").hidden = !(st.notes_url || st.url);
   $("#update-notes").classList.toggle("btn-primary", noAsset);
   $("#update-install").hidden = noAsset;
+  // An update may already be downloading in the background; follow it so the
+  // bar shows real bytes instead of a frozen size for minutes.
+  if (!noAsset && !st.downloaded) trackUpdateDownload();
+}
+
+function updateDownloadUi(st) {
+  const size = $("#update-size");
+  if (!size || !st) return;
+  const got = Number(st.received) || 0;
+  const total = Number(st.total) || 0;
+  if (st.active) {
+    const pct = total ? Math.min(100, Math.floor(got * 100 / total)) : 0;
+    size.textContent = total
+      ? `${pct}% · ${fmtSize(got)} / ${fmtSize(total)}`
+      : fmtSize(got);
+    return;
+  }
+  if (st.ok) { size.textContent = fmtSize(got || total); return; }
+  if (st.error) size.textContent = "";
+}
+
+function trackUpdateDownload() {
+  // One poll loop at a time; both the background download and the button use
+  // it, so clicks cannot spawn a second set of timers.
+  if (updateDownloadPromise) return updateDownloadPromise;
+  updateDownloadPromise = (async () => {
+    // The auto-download starts just after the check lands; give it a moment
+    // before concluding that nothing is running.
+    let idle = 0;
+    for (;;) {
+      let st = null;
+      try { st = await api("update_download_state"); } catch { st = null; }
+      if (!st) return { ok: false, error: "" };
+      updateDownloadUi(st);
+      if (!st.active) {
+        if (st.ok || st.error) return st;
+        if (idle++ >= 10) return st;
+        await updateSleep(500);
+        continue;
+      }
+      await updateSleep(500);
+    }
+  })().finally(() => { updateDownloadPromise = null; });
+  return updateDownloadPromise;
 }
 
 function setUpdateBusy(busy) {
@@ -971,10 +1017,31 @@ $("#update-install").onclick = async () => {
   if (!ready) btn.textContent = t("Downloading…");
   try {
     if (!ready) {
-      const dl = await api("download_update");
-      if (!dl || !dl.ok || !dl.path) {
-        toast((dl && dl.error) || t("Update download failed"), "err", 9000);
-        return;
+      // Non-blocking start + polling: the bridge call used to block for the
+      // whole 60 MB transfer with no feedback.
+      const canStartAsync = !!(
+        window.pywebview &&
+        window.pywebview.api &&
+        typeof window.pywebview.api.download_update_async === "function"
+      );
+      if (canStartAsync) {
+        started = await api("download_update_async");
+        if (started && started.error) {
+          toast(started.error, "err", 9000);
+          return;
+        }
+        const st = await trackUpdateDownload();
+        if (!st || !st.ok) {
+          toast((st && st.error) || t("Update download failed"), "err", 9000);
+          return;
+        }
+        updates.state = { ...(updates.state || {}), downloaded: true };
+      } else {
+        const dl = await api("download_update");
+        if (!dl || !dl.ok || !dl.path) {
+          toast((dl && dl.error) || t("Update download failed"), "err", 9000);
+          return;
+        }
       }
     }
     btn.textContent = t("Installing…");

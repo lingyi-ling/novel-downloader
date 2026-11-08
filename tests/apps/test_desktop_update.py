@@ -22,6 +22,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import inspect
+import os
 import threading
 import time
 from pathlib import Path
@@ -401,6 +402,7 @@ def test_download_update_verifies_and_records_the_file(
         *,
         root: Path,
         timeout: float,
+        **extra: Any,
     ) -> Path:
         seen.update(
             url=url,
@@ -442,6 +444,7 @@ def test_download_update_deletes_a_checksum_mismatch(
         *,
         root: Path,
         timeout: float,
+        **extra: Any,
     ) -> Path:
         target = Path(root) / Path(dest).name
         target.write_bytes(b"tampered bytes")
@@ -488,6 +491,7 @@ def test_concurrent_downloads_are_rejected(
         *,
         root: Path,
         timeout: float,
+        **extra: Any,
     ) -> Path:
         started.set()
         assert release.wait(5.0)
@@ -561,10 +565,11 @@ def test_install_update_refuses_a_zip_bundle(
     bridge = wa.ApiBridge()
     bridge._downloaded = wa._DownloadedUpdate(path=path, sha256=_SHA, name=path.name)
 
+    monkeypatch.setattr(wa, "detect_install_shape", lambda: "installer")
     result = bridge.install_update()
 
     assert result["ok"] is False
-    assert "extract" in result["error"].lower()
+    assert "portable" in result["error"].lower()
     assert not calls
     assert path.exists()
 
@@ -881,6 +886,7 @@ def test_download_update_accepts_an_https_asset(
         *,
         root: Path,
         timeout: float,
+        **extra: Any,
     ) -> Path:
         target = Path(root) / Path(dest).name
         target.write_bytes(_PAYLOAD)
@@ -907,6 +913,7 @@ def test_download_update_sanitises_a_traversal_asset_name(
         *,
         root: Path,
         timeout: float,
+        **extra: Any,
     ) -> Path:
         seen["dest"] = Path(dest)
         seen["root"] = Path(root)
@@ -1361,3 +1368,52 @@ def test_install_on_exit_refuses_a_modified_installer(
 
     assert calls == []
     assert not path.exists()
+
+
+def test_install_update_launches_the_portable_helper(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A zip on a portable copy is replaced by the PowerShell helper."""
+    calls = _recording_popen(monkeypatch)
+    _use_windows(monkeypatch)
+    monkeypatch.setattr(wa, "detect_install_shape", lambda: "portable")
+    monkeypatch.setattr(wa.shutil, "which", lambda name: "powershell.exe")
+    monkeypatch.setattr(wa.ApiBridge, "_schedule_exit", lambda self: None)
+    path = _write_updates_file(home, "NovelDownloader-9.0.0-windows-x64.zip", _PAYLOAD)
+    bridge = wa.ApiBridge()
+    bridge._downloaded = wa._DownloadedUpdate(path=path, sha256=_SHA, name=path.name)
+
+    result = bridge.install_update()
+
+    assert result["ok"] is True
+    assert result["portable"] is True
+    assert calls
+    argv = calls[0]
+    assert "-File" in argv
+    script = Path(argv[argv.index("-File") + 1])
+    assert script.name == "_apply_portable_update.ps1"
+    assert script.is_file()
+    assert "-Zip" in argv and str(path) in argv
+    assert "-ProcessId" in argv
+
+
+def test_prune_updates_removes_old_artefacts(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updates = Path(home).resolve() / wa._UPDATES_DIRNAME
+    updates.mkdir(parents=True, exist_ok=True)
+    old = updates / "NovelDownloader-setup-1.0.0-x64.exe"
+    old.write_bytes(b"old")
+    stale_part = updates / "asset.bin.part"
+    stale_part.write_bytes(b"partial")
+    fresh = updates / "NovelDownloader-setup-9.9.9-x64.exe"
+    fresh.write_bytes(b"new")
+    now = time.time()
+    os.utime(old, (now - 10 * 86400, now - 10 * 86400))
+    os.utime(stale_part, (now - 2 * 86400, now - 2 * 86400))
+
+    wa._prune_updates(updates)
+
+    assert not old.exists()
+    assert not stale_part.exists()
+    assert fresh.exists()
