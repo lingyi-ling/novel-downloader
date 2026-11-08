@@ -13,8 +13,8 @@ from .base import MusicProvider, ResolveResult, Track  # noqa: F401
 from .health import health_check as health_check
 from .musicdl import (  # noqa: F401
     GROUP_ORDER,
+    LIGHT_PLATFORMS,
     PLATFORM_NOTES,
-    PLATFORMS,
     MusicdlProvider,
     group_of,
     heavy_available,
@@ -35,8 +35,8 @@ def _netease_builder(**kwargs):
 
 _reg("netease", "网易云音乐", _netease_builder)
 
-# musicdl 平台（轻档 19 + 中档 5）
-for _k, (_disp, _mod, _cls) in PLATFORMS.items():
+# musicdl 平台（轻档 + 中档；依赖缺失的如 TIDAL 不注册）
+for _k, (_disp, _mod, _cls) in LIGHT_PLATFORMS.items():
     _reg(_k, _disp, (lambda k=_k, **kw: MusicdlProvider(key=k, **kw)))
 
 # 「重」档：仅当依赖（pywidevine / Node）已安装才注册

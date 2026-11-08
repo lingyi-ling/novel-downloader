@@ -52,6 +52,37 @@ PLATFORMS = {
     "soda": ("汽水音乐", _BASE + "soda", "SodaMusicClient"),
 }
 
+
+def _deps_ok(needs):
+    for dep in needs or ():
+        if dep == "node":
+            if not (shutil.which("node") or shutil.which("nodejs")):
+                return False
+        elif importlib.util.find_spec(dep) is None:
+            return False
+    return True
+
+
+#: 轻档平台里仍依赖额外可选包的（其余依赖由 base 的公共依赖保证）。
+#: TIDAL 的 vendor 模块在 import 时就 ``import aigpy``；缺包时如果照常注册，
+#: 用户会在平台列表里看到它，一搜就得到一个「缺少可选依赖」的报错。
+PLATFORM_DEPS = {
+    "tidal": ("aigpy",),
+}
+
+
+def _light_platforms():
+    """只保留依赖已满足的轻档平台。"""
+    return {
+        key: value
+        for key, value in PLATFORMS.items()
+        if _deps_ok(PLATFORM_DEPS.get(key, ()))
+    }
+
+
+#: 注册表实际可用的轻档平台（导入时求值一次）。
+LIGHT_PLATFORMS = _light_platforms()
+
 # 需要额外条件（账号凭据 / 可访问性）才能出结果的平台 -> 界面提示语
 PLATFORM_NOTES = {
     "qobuz": "Qobuz 需能访问 open.qobuz.com；当前网络不可达时会搜不到结果。",
@@ -95,16 +126,6 @@ HEAVY_PLATFORMS = {
 
 # 所有可构建的平台（重档也在内；是否注册由依赖可用性决定）
 ALL_PLATFORMS = {**PLATFORMS, **{k: v[:3] for k, v in HEAVY_PLATFORMS.items()}}
-
-
-def _deps_ok(needs):
-    for dep in needs or ():
-        if dep == "node":
-            if not (shutil.which("node") or shutil.which("nodejs")):
-                return False
-        elif importlib.util.find_spec(dep) is None:
-            return False
-    return True
 
 
 def heavy_available():

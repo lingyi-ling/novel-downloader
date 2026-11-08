@@ -7,6 +7,7 @@ v1.0 关键决策：
 """
 
 import contextlib
+import logging
 import os
 import re
 import threading
@@ -14,6 +15,7 @@ import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Any
 
 import requests
 
@@ -21,6 +23,8 @@ from novel_downloader.infra.i18n import t
 from novel_downloader.libs.filesystem import sanitize_filename
 
 from .weapi import UA, LoginExpired
+
+logger = logging.getLogger(__name__)
 
 _CHUNK = 64 * 1024
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
@@ -546,6 +550,9 @@ def download_mixed(
     counts = {"ok": 0, "skip": 0, "fail": 0}
     failed_pairs, failed_tracks = [], []
     base_done = 0
+    # 有备选来源的失败先不回调：回退成功时只上报一次成功，避免界面把
+    # 同一首歌记成「失败一次 + 成功一次」。
+    deferred_failures: dict[int, tuple[Any, Any]] = {}
 
     for key, items in groups:
         if should_stop and should_stop():
@@ -561,7 +568,11 @@ def download_mixed(
                     failed_pairs.append((f"{track.name} - {track.artists}", reason))
                     failed_tracks.append(track)
                     if on_result:
-                        on_result(index, track, TrackResult("fail", reason))
+                        result = TrackResult("fail", reason)
+                        if getattr(track, "_alternatives", ()):
+                            deferred_failures[index] = (track, result)
+                        else:
+                            on_result(index, track, result)
                 base_done += len(items)
                 continue
         if provider is None:
@@ -571,7 +582,11 @@ def download_mixed(
                 failed_pairs.append((f"{track.name} - {track.artists}", reason))
                 failed_tracks.append(track)
                 if on_result:
-                    on_result(index, track, TrackResult("fail", reason))
+                    result = TrackResult("fail", reason)
+                    if getattr(track, "_alternatives", ()):
+                        deferred_failures[index] = (track, result)
+                    else:
+                        on_result(index, track, result)
             base_done += len(items)
             continue
 
@@ -580,8 +595,13 @@ def download_mixed(
         group_base = base_done
 
         def group_result(local_index, track, result, _items=items):
-            if on_result:
-                on_result(_items[local_index][0], track, result)
+            if not on_result:
+                return
+            index = _items[local_index][0]
+            if result.status == "fail" and getattr(track, "_alternatives", ()):
+                deferred_failures[index] = (track, result)
+                return
+            on_result(index, track, result)
 
         def group_tick(fraction, done_n, _base=group_base, _len=group_len):
             if on_tick:
@@ -605,6 +625,64 @@ def download_mixed(
         failed_pairs.extend(pairs)
         failed_tracks.extend(failed)
         base_done += group_len
+
+    # 主来源失败时回退到同曲的其它平台。聚合搜索把备选来源挂在原始 Track
+    # 的 ``_alternatives`` 上（进程内对象，不参与序列化）；单平台搜索没有
+    # 备选，这一段自然跳过。
+    if failed_tracks:
+        index_of = {id(track): index for index, track in enumerate(tracks)}
+        for track in list(failed_tracks):
+            alternatives = [
+                alt
+                for alt in getattr(track, "_alternatives", ()) or ()
+                if alt is not track and alt.id
+            ]
+            if not alternatives:
+                continue
+            if should_stop and should_stop():
+                break
+            for alt in alternatives:
+                provider = None
+                if create_provider is not None and alt.provider:
+                    try:
+                        provider = create_provider(alt.provider)
+                    except Exception:  # noqa: BLE001 - 换下一个来源
+                        provider = None
+                if provider is None:
+                    continue
+                try:
+                    result = download_track(provider, alt, opts, stop_flag=should_stop)
+                except LoginExpired:
+                    raise
+                except Exception:  # noqa: BLE001 - 换下一个来源
+                    continue
+                if result.status not in ("ok", "skip"):
+                    continue
+                counts["fail"] -= 1
+                counts["ok" if result.status == "ok" else "skip"] += 1
+                track.path = result.path
+                label = f"{track.name} - {track.artists}"
+                for position, (name, _reason) in enumerate(failed_pairs):
+                    if name == label:
+                        del failed_pairs[position]
+                        break
+                failed_tracks.remove(track)
+                index = index_of.get(id(track), 0)
+                deferred_failures.pop(index, None)
+                if on_result:
+                    on_result(index, track, result)
+                logger.info(
+                    "music: %s failed on %s, downloaded from fallback %s",
+                    track.name,
+                    track.provider,
+                    alt.provider,
+                )
+                break
+
+    # 没被回退救回来的失败，现在补上唯一一次回调。
+    if on_result:
+        for index, (track, result) in sorted(deferred_failures.items()):
+            on_result(index, track, result)
 
     if on_tick and total:
         on_tick(1.0, total)

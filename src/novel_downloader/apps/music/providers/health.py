@@ -34,7 +34,7 @@ def health_check(
     platform: str,
     keyword: str = "test",
     *,
-    timeout: float = 15.0,
+    timeout: float = 6.0,
     limit: int = 1,
 ) -> dict[str, Any]:
     """检查某平台能否完成一次搜索。

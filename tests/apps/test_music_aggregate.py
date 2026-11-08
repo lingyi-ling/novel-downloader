@@ -339,3 +339,171 @@ def test_download_mixed_isolates_create_failures(
 
     assert (ok, fail) == (0, 1)
     assert "依赖缺失" in pairs[0][1]
+
+
+# ---------------------------------------------------------------------------
+# progressive updates, circuit breaker, download fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def clean_breaker() -> Any:
+    aggregate.clear_failure_cache()
+    yield
+    aggregate.clear_failure_cache()
+
+
+def test_search_all_reports_partial_results(
+    monkeypatch: pytest.MonkeyPatch, clean_breaker: Any
+) -> None:
+    """Every finished platform triggers a snapshot, not just the end."""
+    monkeypatch.setattr(
+        aggregate, "available", lambda: [("fast", "快"), ("slow", "慢")]
+    )
+
+    class Fast:
+        def search(self, keyword: str, limit: int = 30, offset: int = 0):
+            return [_track(keyword, "A", "fast")], 1
+
+    class Slow:
+        def search(self, keyword: str, limit: int = 30, offset: int = 0):
+            time.sleep(0.15)
+            return [_track(keyword, "B", "slow")], 1
+
+    providers = {"fast": Fast(), "slow": Slow()}
+    monkeypatch.setattr(aggregate, "create", lambda key, **kw: providers[key])
+
+    snapshots: list[aggregate.AggregateResult] = []
+    result = aggregate.search_all("晴天", on_update=snapshots.append)
+
+    assert result.tracks
+    assert snapshots
+    first = snapshots[0]
+    assert len(first.tracks) == 1
+    assert [item.platform for item in first.platforms] == ["fast"]
+    assert len(snapshots[-1].tracks) == 2
+
+
+def test_search_all_skips_platforms_that_failed_before(
+    monkeypatch: pytest.MonkeyPatch, clean_breaker: Any
+) -> None:
+    """A dead platform is skipped on the next aggregate search (breaker)."""
+    monkeypatch.setattr(
+        aggregate, "available", lambda: [("good", "好"), ("dead", "死")]
+    )
+    calls: list[str] = []
+
+    class Good:
+        def search(self, keyword: str, limit: int = 30, offset: int = 0):
+            return [_track(keyword, "A", "good")], 1
+
+    def create(key: str, **kwargs: Any) -> Any:
+        calls.append(key)
+        if key == "dead":
+            raise RuntimeError("连接失败")
+        return Good()
+
+    monkeypatch.setattr(aggregate, "create", create)
+
+    first = aggregate.search_all("晴天")
+    # The failure is still reported once; it is only skipped on later calls.
+    assert {item.platform for item in first.platforms} == {"good", "dead"}
+    assert next(item for item in first.platforms if item.platform == "dead").ok is False
+    assert calls == ["good", "dead"]
+
+    calls.clear()
+    second = aggregate.search_all("晴天")
+    assert calls == ["good"]  # dead is in the breaker window
+    assert [item.platform for item in second.platforms] == ["good"]
+
+    calls.clear()
+    aggregate.search_all("晴天", platforms=["good", "dead"])
+    assert calls == ["good", "dead"]  # explicit selection retries
+
+
+def test_merge_attaches_in_memory_alternatives() -> None:
+    netease = _track("晴天", "周杰伦", "netease")
+    qq = _track("晴天", "周杰伦", "qq", cover="http://c.jpg")
+    kugou = _track("晴天", "周杰伦", "kugou")
+
+    merged = aggregate.merge_tracks(
+        [("netease", [netease]), ("qq", [qq]), ("kugou", [kugou])], "晴天"
+    )
+
+    primary = merged[0]
+    alternatives = getattr(primary, "_alternatives", [])
+    assert primary is qq
+    assert {track.provider for track in alternatives} == {"netease", "kugou"}
+
+
+def test_download_mixed_falls_back_to_another_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novel_downloader.apps.music import downloader
+
+    primary = _track("晴天", "周杰伦", "netease")
+    alternative = _track("晴天", "周杰伦", "qq")
+    primary.__dict__["_alternatives"] = [alternative]
+
+    def fake_download_many(
+        provider: Any, tracks: list[Track], opts: Any, *, on_result: Any, **_kw: Any
+    ) -> tuple[int, int, int, list[Any], list[Any]]:
+        on_result(0, tracks[0], _Result("fail", "VIP 专属"))
+        return 0, 0, 1, [(f"{primary.name} - {primary.artists}", "VIP 专属")], [primary]
+
+    def fake_download_track(
+        provider: Any, track: Track, opts: Any, **_kw: Any
+    ) -> _Result:
+        assert provider == "qq"
+        track.path = "/music/qing.mp3"
+        return _Result("ok", "", "/music/qing.mp3")
+
+    monkeypatch.setattr(downloader, "download_many", fake_download_many)
+    monkeypatch.setattr(downloader, "download_track", fake_download_track)
+
+    results: list[tuple[int, str]] = []
+    ok, skip, fail, pairs, failed = download_mixed(
+        lambda key: key,
+        [primary],
+        None,
+        on_result=lambda index, _track, result: results.append((index, result.status)),
+    )
+
+    assert (ok, skip, fail) == (1, 0, 0)
+    assert pairs == []
+    assert failed == []
+    assert primary.path == "/music/qing.mp3"
+    assert results[-1] == (0, "ok")
+
+
+def test_download_mixed_keeps_failure_when_no_alternative_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novel_downloader.apps.music import downloader
+
+    primary = _track("晴天", "周杰伦", "netease")
+    alternative = _track("晴天", "周杰伦", "qq")
+    primary.__dict__["_alternatives"] = [alternative]
+
+    monkeypatch.setattr(
+        downloader,
+        "download_many",
+        lambda provider, tracks, opts, *, on_result, **_kw: (
+            0,
+            0,
+            1,
+            [(f"{primary.name} - {primary.artists}", "VIP 专属")],
+            [primary],
+        ),
+    )
+    monkeypatch.setattr(
+        downloader,
+        "download_track",
+        lambda provider, track, opts, **_kw: _Result("fail", "无版权"),
+    )
+
+    ok, _skip, fail, pairs, failed = download_mixed(lambda key: key, [primary], None)
+
+    assert (ok, fail) == (0, 1)
+    assert pairs and pairs[0][1] == "VIP 专属"
+    assert failed == [primary]

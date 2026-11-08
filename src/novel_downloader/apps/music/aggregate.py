@@ -24,7 +24,9 @@ import multiprocessing
 import os
 import re
 import threading
+import time
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
@@ -41,6 +43,8 @@ __all__ = [
     "is_all_platforms",
     "merge_tracks",
     "normalize_text",
+    "clear_failure_cache",
+    "failed_platforms",
     "search_all",
     "search_all_isolated",
 ]
@@ -53,10 +57,85 @@ ALL_PLATFORM_KEY = "all"
 DEFAULT_PER_PLATFORM_LIMIT = 8
 
 #: 聚合搜索默认墙钟预算（秒）。超时的平台按失败上报，已回来的结果照常合并。
-DEFAULT_TIMEOUT = 12.0
+DEFAULT_TIMEOUT = 6.0
 
-#: 同时在跑的平台数量上限：每个平台内部还有自己的请求线程池。
-_MAX_WORKERS = 10
+#: 失败平台的熔断时长（秒）。一次聚合搜索里绝大多数平台只是被墙/已失效；
+#: 记住这个结果，后续搜索直接跳过，避免每次都为同一批死站等满预算。
+FAILURE_TTL = 600.0
+
+#: 搜索线程数上限。每个平台一个线程：以前固定 10 个 worker 会让队列里的
+#: 平台饿死——前 10 个恰好全是卡死的站时，netease 这种 1 秒就能返回的
+#: 平台根本轮不到执行，整次搜索看起来「什么都没搜到」。
+MAX_SEARCH_THREADS = 32
+
+#: 聚合搜索时优先启动的平台：能快速返回、结果质量也稳定的站排前面，
+#: 这样渐进式界面能在一秒内出第一批结果。
+_SEARCH_PRIORITY = (
+    "netease",
+    "qq",
+    "kugou",
+    "kuwo",
+    "migu",
+    "qianqian",
+    "joox",
+    "fivesing",
+    "bilibili",
+    "suno",
+    "jamendo",
+    "audius",
+)
+
+#: 平台 key -> 熔断到期时间（monotonic）。
+_FAILED_UNTIL: dict[str, float] = {}
+_FAILURE_LOCK = threading.Lock()
+
+
+def _breaker_open(key: str, now: float | None = None) -> bool:
+    """该平台是否还在熔断期（最近一次聚合搜索失败过）。"""
+    stamp = now if now is not None else time.monotonic()
+    with _FAILURE_LOCK:
+        until = _FAILED_UNTIL.get(key, 0.0)
+        if until <= stamp:
+            _FAILED_UNTIL.pop(key, None)
+            return False
+        return True
+
+
+def _record_failure(key: str) -> None:
+    with _FAILURE_LOCK:
+        _FAILED_UNTIL[key] = time.monotonic() + FAILURE_TTL
+
+
+def _record_success(key: str) -> None:
+    with _FAILURE_LOCK:
+        _FAILED_UNTIL.pop(key, None)
+
+
+def clear_failure_cache() -> None:
+    """清空平台熔断记录（健康检查成功或用户手动重试时使用）。"""
+    with _FAILURE_LOCK:
+        _FAILED_UNTIL.clear()
+
+
+def failed_platforms() -> list[str]:
+    """当前处于熔断期的平台（调试/界面提示用）。"""
+    now = time.monotonic()
+    with _FAILURE_LOCK:
+        return [key for key, until in _FAILED_UNTIL.items() if until > now]
+
+
+def _ordered_keys(keys: list[str]) -> list[str]:
+    """把优先平台提到前面，其余保持注册表顺序。"""
+    priority = {key: index for index, key in enumerate(_SEARCH_PRIORITY)}
+    fallback = {key: index for index, key in enumerate(_platform_order())}
+    return sorted(
+        keys,
+        key=lambda key: (
+            priority.get(key, len(priority) + fallback.get(key, len(fallback))),
+            fallback.get(key, 0),
+        ),
+    )
+
 
 #: 平台侧用来表示「未知」的占位值。
 _UNKNOWN = frozenset({"", "未知歌曲", "未知歌手", "未知专辑", "unknown", "n/a", "-"})
@@ -210,6 +289,10 @@ def merge_tracks(
             if provider and provider not in sources:
                 sources.append(provider)
         primary.sources = sources
+        # 下载回退用：主来源失败时按顺序尝试同曲的其它平台。挂在对象上而
+        # 不是 dataclass 字段，序列化（asdict / JSON）不会带出去，只有进程内
+        # 的原始 Track（含 trackcache 里的对象）能读到。
+        primary.__dict__["_alternatives"] = [pair[1] for pair in rest]
         merged.append(primary)
 
     needle = normalize_text(keyword)
@@ -251,20 +334,30 @@ def search_all(
     *,
     per_platform_limit: int = DEFAULT_PER_PLATFORM_LIMIT,
     timeout: float = DEFAULT_TIMEOUT,
-    workers: int = _MAX_WORKERS,
+    workers: int = MAX_SEARCH_THREADS,
+    on_update: Callable[[AggregateResult], None] | None = None,
+    skip_failed: bool | None = None,
 ) -> AggregateResult:
     """
     并发搜索多个平台并合并结果。
 
     ``platforms=None`` 搜索全部已注册平台。 单个平台的异常（缺依赖、
     网络不可达、解析失败）只记为该项的 ``error``，不影响其它平台。
+    聚合模式下最近失败过的平台会被跳过（:data:`FAILURE_TTL`），所以连续
+    搜索时不会每次都为一排被墙的站等满预算。显式指定 ``platforms`` 时
+    不跳过，方便用户手动重试。
+
+    ``on_update`` 每完成一个平台就收到一次当前快照，界面可以先把结果画
+    出来，而不是等所有平台都结束。
 
     :param keyword: 搜索词。
     :param platforms: 平台 key 列表；``None`` 为全部。
     :param limit: 合并后最多返回多少首。
     :param per_platform_limit: 每个平台取多少条原始结果。
     :param timeout: 整体墙钟预算（秒）；超时的平台按失败上报。
-    :param workers: 同时搜索的平台数。
+    :param workers: 并发线程上限；每个平台一个线程，避免队列饿死。
+    :param on_update: 渐进式回调，收到 ``(部分结果)``。
+    :param skip_failed: 是否跳过熔断中的平台；``None`` 表示仅在聚合模式跳过。
     :return: :class:`AggregateResult`。
     """
     text = str(keyword or "").strip()
@@ -274,50 +367,90 @@ def search_all(
     keys = _select_platforms(platforms)
     if not keys:
         return AggregateResult()
+    explicit = platforms is not None
+    skip = (not explicit) if skip_failed is None else bool(skip_failed)
+    if skip:
+        keys = [key for key in keys if not _breaker_open(key)]
+        if not keys:
+            # 所有平台都在熔断期：给用户一次完整的重试机会，而不是直接空结果。
+            clear_failure_cache()
+            keys = _select_platforms(platforms)
+    keys = _ordered_keys(keys)
+
     per_platform = max(1, int(per_platform_limit))
     deadline_seconds = max(0.1, float(timeout))
+    # 平台自己的请求超时要比整体预算短：到点后后台请求很快自行结束。
+    read_timeout = max(1.0, min(4.0, deadline_seconds - 0.5))
 
     def run_one(key: str) -> tuple[list[Track], int]:
-        # musicdl 平台支持 (connect, read) 超时；把它们压到低于整体预算，
-        # 这样即便调用方到点返回，后台请求也会很快结束，不会在解释器退出
-        # 时把进程拖住（vendor 内部的线程池不是 daemon）。netease 等不接
-        # 受该参数的 provider 退回默认构造。
         try:
-            provider = create(key, timeout=(4.0, 8.0))
+            # 单请求 4s、最多重试一次：vendor 的默认重试次数会把 4s 放大成
+            # 十几秒，整次聚合搜索就会被一个慢站拖满预算。
+            provider = create(key, timeout=(2.5, read_timeout), max_retries=1)
         except TypeError:
             provider = create(key)
         tracks, total = provider.search(text, limit=per_platform)
         return list(tracks or ()), int(total or len(tracks or ()))
 
-    outcomes: dict[str, PlatformOutcome] = {}
-    groups: list[tuple[str, list[Track]]] = []
-
-    # 手写 daemon 线程池，而不是 ThreadPoolExecutor：后者的工作线程不是
-    # daemon，某个平台无视取消（比如 socket 读数卡在 45s 的平台超时上）
-    # 会把整个进程的退出一起拖住——CLI 一次性命令尤其明显。
-    pending = list(keys)
-    pending_lock = threading.Lock()
+    state_lock = threading.Lock()
     finished = threading.Event()
     results: dict[str, tuple[list[Track], int] | BaseException] = {}
+    timeouts: set[str] = set()
 
-    def worker() -> None:
-        while True:
-            with pending_lock:
-                if not pending:
-                    return
-                key = pending.pop(0)
+    def snapshot() -> AggregateResult:
+        """Merge whatever has arrived so far (caller must hold no lock)."""
+        with state_lock:
+            completed = dict(results)
+        outcomes: list[PlatformOutcome] = []
+        groups: list[tuple[str, list[Track]]] = []
+        for key in keys:
+            outcome = completed.get(key)
+            if outcome is None:
+                continue
+            if isinstance(outcome, BaseException):
+                outcomes.append(
+                    PlatformOutcome(key, False, error=_short_error(outcome))
+                )
+                continue
+            tracks, _total = outcome
+            outcomes.append(PlatformOutcome(key, True, count=len(tracks)))
+            if tracks:
+                groups.append((key, tracks))
+        merged = merge_tracks(
+            sorted(groups, key=lambda pair: _platform_position(pair[0])),
+            text,
+            limit=limit,
+        )
+        return AggregateResult(tracks=merged, platforms=outcomes, total=len(merged))
+
+    def record(key: str, outcome: tuple[list[Track], int] | BaseException) -> None:
+        with state_lock:
+            results[key] = outcome
+            done = len(results) >= len(keys)
+            if done:
+                finished.set()
+        if isinstance(outcome, BaseException):
+            _record_failure(key)
+        else:
+            _record_success(key)
+        if on_update is not None:
             try:
-                outcome: tuple[list[Track], int] | BaseException = run_one(key)
-            except BaseException as exc:  # noqa: BLE001 - 单平台失败不影响全局
-                outcome = exc
-            with pending_lock:
-                results[key] = outcome
-                if len(results) >= len(keys):
-                    finished.set()
+                on_update(snapshot())
+            except Exception:  # noqa: BLE001 - 界面回调失败不影响搜索
+                logger.debug("music aggregate: on_update failed", exc_info=True)
+
+    def worker(key: str) -> None:
+        try:
+            outcome: tuple[list[Track], int] | BaseException = run_one(key)
+        except BaseException as exc:  # noqa: BLE001 - 单平台失败不影响全局
+            outcome = exc
+        record(key, outcome)
 
     threads = [
-        threading.Thread(target=worker, name=f"music-search-{index}", daemon=True)
-        for index in range(max(1, min(int(workers), len(keys))))
+        threading.Thread(
+            target=worker, args=(key,), name=f"music-search-{key}", daemon=True
+        )
+        for key in keys[: max(1, int(workers))]
     ]
     for thread in threads:
         thread.start()
@@ -325,27 +458,18 @@ def search_all(
     # 拦住；它们的结果也不会再被使用。
     finished.wait(deadline_seconds)
 
-    with pending_lock:
+    with state_lock:
         for key in keys:
-            outcome = results.get(key)
-            if outcome is None:
-                outcomes[key] = PlatformOutcome(
-                    key, False, error=f"搜索超时（{deadline_seconds:g}s）"
-                )
-            elif isinstance(outcome, BaseException):
-                outcomes[key] = PlatformOutcome(key, False, error=_short_error(outcome))
-            else:
-                tracks, _total = outcome
-                outcomes[key] = PlatformOutcome(key, True, count=len(tracks))
-                groups.append((key, tracks))
+            if results.get(key) is None:
+                timeouts.add(key)
+                results[key] = TimeoutError(f"搜索超时（{deadline_seconds:g}s）")
+    for key in timeouts:
+        _record_failure(key)
 
-    merged = merge_tracks(
-        sorted(groups, key=lambda pair: _platform_position(pair[0])),
-        text,
-        limit=limit,
+    final = snapshot()
+    return AggregateResult(
+        tracks=final.tracks, platforms=final.platforms, total=final.total
     )
-    ordered = [outcomes[key] for key in keys if key in outcomes]
-    return AggregateResult(tracks=merged, platforms=ordered, total=len(merged))
 
 
 def _short_error(exc: BaseException) -> str:

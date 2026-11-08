@@ -142,7 +142,7 @@ def test_health_check_falls_back_when_create_rejects_timeout(
     result = health_check("netease-like")
 
     assert result["ok"] is True
-    assert calls == [{"timeout": (5.0, 15.0)}, {}]
+    assert calls == [{"timeout": (5.0, 6.0)}, {}]
 
 
 def test_health_check_does_not_misclassify_search_keyerror(
