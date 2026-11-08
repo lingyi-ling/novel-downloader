@@ -32,6 +32,29 @@ def _compiled_catalogs() -> None:
     )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_music_home(tmp_path_factory: pytest.TempPathFactory) -> object:
+    """
+    Keep music runtime data out of the developer's real profile.
+
+    The aggregate search persists per-platform health to
+    ``<music data dir>/search_stats.json``; without this it would write to
+    ``%LOCALAPPDATA%`` and leak state between runs (and machines).
+    """
+    import os
+
+    key = "NOVEL_MUSIC_HOME"
+    previous = os.environ.get(key)
+    os.environ[key] = str(tmp_path_factory.mktemp("music-home"))
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
 @pytest.fixture(autouse=True)
 def _force_english_locale(monkeypatch: pytest.MonkeyPatch) -> None:
     """
