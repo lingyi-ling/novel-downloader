@@ -7,7 +7,7 @@
 
 ## 0. 一句话现状
 
-- **版本 v1.25.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.25.0>
+- **版本 v1.26.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.26.0>
 - 全量测试 **9046 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
@@ -177,7 +177,10 @@ cd android
 
 1. **Android 音乐未真机验证**。有设备后：开独立引擎 → 音乐页 → 选平台搜一首 → 任务完成 → 确认公共「下载」目录出现文件；再点「导出歌单」确认 `.m3u8` 落地。
 2. **Android 搜索结果不持久化本地路径**：下载完成后才回填，App 重启后要重新下载才能导出歌单（可考虑服务端搜索返回 `path` 或在客户端缓存）。
-3. **重依赖平台不可用**：TIDAL（`aigpy`/`pywidevine`/`av`）、YouTube Music（`ytmusicapi`）、SoundCloud HLS（需外部 `N_m3u8DL-RE`）、歌词转写（`faster_whisper`）未打包；这些平台可能搜得到、下不了。
+3. **重型平台已打包，但仍受账号/DRM 限制**：`aigpy`（TIDAL）、`ytmusicapi`（YouTube Music）、`pywidevine`（Apple Music / SoundCloud）已进 extras、PyInstaller 与 Chaquopy，平台数 24 → 28
+   - TIDAL 必须先在「平台凭据」配置账号 token，否则搜索会提示「需要先配置账号信息」
+   - Apple Music / SoundCloud 的 DRM 解密需要用户自备 CDM（`.wvd`），SoundCloud HLS 还需要外部 `N_m3u8DL-RE`；**只打包依赖不等于能解密**
+   - 歌词转写（`faster_whisper`）仍然不打包：模型 + ctranslate2 有数百 MB，且只影响「无歌词时自动转写」，不影响搜索/下载
 4. **SQLite 每章提交仍在事件循环上**（`storage_batch_size=1`）。连接有线程亲和性，改 `to_thread` 要 `check_same_thread=False` + 锁，风险 > 收益，暂缓。
 5. **作者查询会丢掉无作者字段的行**：相关性过滤对 `author=""` 且书名不含关键词的行打 0 分，实测会少 1-2 个来源胶囊；若要补偿，需产品决策。
 6. **许可证文案不一致**：`LICENSE` 是 MIT，但官网页脚写 Apache-2.0。改之前先问用户。

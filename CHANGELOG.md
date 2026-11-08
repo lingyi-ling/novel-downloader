@@ -1,3 +1,16 @@
+## v1.26.0 (2026-11-08)
+
+### Build
+
+- **重型音乐平台依赖全部打包**：`aigpy`（TIDAL）、`ytmusicapi`（YouTube Music）、`pywidevine`（Apple Music / SoundCloud）加入 `music` / `music-desktop` extras、PyInstaller hidden imports 与 Android Chaquopy 列表，平台数 24 → **28**
+  - YouTube 不再要求外部 Node：vendor 客户端实际只用 `ytmusicapi`，旧的 `node` 依赖条件把它白白隐藏了
+  - TIDAL 未配置账号时给出中文提示「需要先在「平台凭据」里配置账号信息」，不再是英文断言
+- **不打包 `faster_whisper`**：仅用于「没有歌词时自动转写」，模型 + ctranslate2 体积数百 MB，不影响搜索/下载；需要时用 `pip install faster-whisper` 单独启用
+
+### Note
+
+- 打包依赖 ≠ 绕过限制：TIDAL 需要账号 token；Apple Music / SoundCloud 的 DRM 解密需要用户自备 CDM（`.wvd`），SoundCloud HLS 还需要外部 `N_m3u8DL-RE`。这些平台现在能注册、能搜索，下载是否成功取决于上述条件。
+
 ## v1.25.0 (2026-11-08)
 
 ### Fix
