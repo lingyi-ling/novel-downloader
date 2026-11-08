@@ -413,7 +413,10 @@ def _report_completion(
 
 
 def _merged_results(
-    results: Sequence[SearchResult], keyword: str
+    results: Sequence[SearchResult],
+    keyword: str,
+    *,
+    groups: Sequence[Any] | None = None,
 ) -> list[GroupedSearchResult]:
     """
     Fold ranked ``results`` into one merged entry per book.
@@ -422,9 +425,14 @@ def _merged_results(
     on ties) enriched with ``sources``: the site keys of every source of the
     book, best first, duplicates dropped.  The input sequence is only read,
     so cached snapshots stay pristine.
+
+    ``groups`` lets the caller pass groups it already built (and possibly
+    filtered by relevance); when omitted they are computed here.
     """
     merged: list[GroupedSearchResult] = []
-    for group in group_results(results, keyword=keyword):
+    for group in (
+        groups if groups is not None else group_results(results, keyword=keyword)
+    ):
         sites: list[str] = []
         for entry in group.sources:
             site = str(entry.get("site") or "")
@@ -493,10 +501,13 @@ def _finalize(
 
     1. exact duplicate rows are folded (see :func:`_dedupe_exact`);
     2. the list is ranked (grouping and limiting both build on that order);
-    3. for ``sort="quality"`` only, rows below ``min_relevance`` are dropped
-       (see :func:`~novel_downloader.plugins.ranking.filter_by_relevance`);
-    4. same-book entries are grouped when requested;
-    5. ``limit`` is applied last, so with ``group=True`` it counts books
+    3. with ``group=True`` the rows are grouped, and the relevance floor is
+       applied to each book's primary row (a mirror site's alternate entry
+       may look irrelevant on its own while the book is clearly relevant);
+       without grouping the floor is applied to the rows themselves
+       (``sort="quality"`` only, see
+       :func:`~novel_downloader.plugins.ranking.filter_by_relevance`);
+    4. ``limit`` is applied last, so with ``group=True`` it counts books
        rather than raw rows.
 
     Filtering happens per call and never rewrites the cached snapshot: the
@@ -515,18 +526,34 @@ def _finalize(
     intent = detect_query_intent(keyword, work) if sort == "quality" else "either"
     sort_results(work, by=sort, order=order, keyword=keyword, intent=intent)
 
+    if group:
+        # Group first, then apply the relevance floor to each book's *primary*
+        # row.  Filtering raw rows first would drop alternate sources whose
+        # title does not literally contain the keyword (an author search keeps
+        # the author's books under ``author`` intent, but a mirror site's row
+        # may carry an empty author field and would look irrelevant on its
+        # own).  The group survives as long as its best row is relevant.
+        groups = group_results(work, keyword=keyword)
+        if sort == "quality" and min_relevance is not None:
+            primaries = filter_by_relevance(
+                [group.primary for group in groups],
+                keyword,
+                intent=intent,
+                min_relevance=min_relevance,
+            )
+            keep = {id(primary) for primary in primaries}
+            groups = [group for group in groups if id(group.primary) in keep]
+        merged = _merged_results(work, keyword, groups=groups)
+        if limit is not None:
+            merged = merged[:limit]
+        return cast("list[SearchResult]", merged)
+
     if sort == "quality" and min_relevance is not None:
         # Only quality sorting promises relevance; an explicit "words" or
         # "update" ordering must not silently lose rows.
         work = filter_by_relevance(
             work, keyword, intent=intent, min_relevance=min_relevance
         )
-
-    if group:
-        merged = _merged_results(work, keyword)
-        if limit is not None:
-            merged = merged[:limit]
-        return cast("list[SearchResult]", merged)
     if limit is not None:
         return work[:limit]
     return work
