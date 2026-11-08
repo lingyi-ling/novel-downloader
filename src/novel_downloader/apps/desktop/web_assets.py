@@ -517,6 +517,31 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
   text-overflow: ellipsis; user-select: text;
 }
 
+/* Inline search status. Aggregate searches routinely have a few dead
+   platforms; that is page copy, not an error toast per platform. */
+.search-note { margin: 6px 2px 0; font-size: 12px; color: var(--text-3); min-height: 15px; }
+.search-note.warn { color: var(--yellow); }
+
+/* Download failures: the reason stays on screen, with a one-click retry. */
+.fail-note {
+  display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap;
+  margin: 0 2px 12px; padding: 10px 12px;
+  background: var(--red-bg); border-radius: var(--radius-md);
+  font-size: 12px; color: var(--text-2);
+}
+.fail-note-main { flex: 1 1 260px; min-width: 0; }
+.fail-note-title { font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.fail-row { display: flex; gap: 8px; min-width: 0; line-height: 1.55; }
+.fail-row .fail-name {
+  flex: 0 1 auto; min-width: 0; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fail-row .fail-reason {
+  flex: 1 1 auto; min-width: 0; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fail-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+
 /* ============================================================ modal */
 .modal-mask {
   position: fixed; inset: 0; background: rgba(15, 23, 42, .45);
@@ -698,6 +723,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
               <button class="btn btn-primary" id="btn-m-search" style="height:48px"><span class="spin" id="m-spin"></span><span data-i18n="Search">Search</span></button>
             </div>
             <div class="hint" id="m-note" style="margin-top:9px"></div>
+            <div class="search-note" id="m-search-note"></div>
             <div class="section-head"><span data-i18n="Results">Results</span><span class="count-chip" id="m-count">0</span>
               <div class="spacer" style="flex:1"></div>
               <button class="btn btn-sm btn-ghost" id="btn-m-export"><svg class="icon"><use href="#i-down"/></svg><span data-i18n="Export playlist (.m3u8)">Export playlist (.m3u8)</span></button>
@@ -714,6 +740,16 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
               </div>
               <button class="btn btn-ghost btn-sm" id="m-export-copy" data-i18n="Copy">Copy</button>
               <button class="btn btn-ghost btn-sm" id="m-export-open"><svg class="icon"><use href="#i-folder"/></svg><span data-i18n="Open">Open</span></button>
+            </div>
+            <div class="fail-note" id="m-failures" hidden>
+              <div class="fail-note-main">
+                <div class="fail-note-title" id="m-fail-title"></div>
+                <div id="m-fail-list"></div>
+              </div>
+              <div class="fail-actions">
+                <button class="btn btn-primary btn-sm" id="btn-m-retry"><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Retry failed">Retry failed</span></button>
+                <button class="btn btn-ghost btn-sm" id="m-fail-close" title="Close" aria-label="Close" data-i18n-title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+              </div>
             </div>
             <div id="m-tracks"></div>
           </div>
@@ -1371,8 +1407,9 @@ $("#btn-refresh-hist").onclick = refreshHistory;
 $("#btn-open-dl").onclick = () => api("open_downloads_dir").catch(() => {});
 
 /* ================================================================ music */
-const music = { tracks: [], selected: new Set(), downloading: false, note: "", batch: [], searchId: "", labels: {} };
+const music = { tracks: [], selected: new Set(), downloading: false, note: "", batch: [], searchId: "", labels: {}, userTouched: false, failedItems: [] };
 let musicInited = false;
+let musicSearchToken = 0;
 async function initMusic() {
   if (musicInited) { renderHealth(); return; }
   musicInited = true;
@@ -1415,32 +1452,106 @@ async function updateMusicNote() {
 async function doMusicSearch() {
   const kw = $("#m-q").value.trim();
   if (!kw) return;
+  // Token: a newer search supersedes this run, so late polls cannot
+  // overwrite the newer rows.
+  const token = ++musicSearchToken;
+  const platform = $("#m-platform").value;
   $("#m-spin").classList.add("on");
   $("#btn-m-search").disabled = true;
+  $("#btn-m-dl").disabled = true;
+  music.userTouched = false;
+  music.searchId = "";
+  music.failedItems = [];
+  hideMusicFailures();
+  applyMusicTracks([]);
+  musicSearchNote(t("Searching…"), false);
+  const started = performance.now();
   try {
-    const data = await call("music_search", $("#m-platform").value, kw, 30);
-    if (!data) return;
-    if (data.error) {
-      toast(data.error, "err");
+    const job = await api("music_search_async", platform, kw, 30);
+    if (token !== musicSearchToken) return;
+    if (!job) { musicSearchNote("", false); return; }
+    let state = null;
+    if (job.done) {
+      // A single platform answers synchronously and carries its rows.
+      state = { done: true, tracks: job.tracks || [], platforms: [], result_id: job.result_id || "", error: job.error || "" };
+      applyMusicTracks(state.tracks);
+    }
+    while (!state || !state.done) {
+      // Poll while the remaining platforms answer: the fastest ones land in
+      // under a second instead of waiting for the slowest (or dead) ones.
+      await new Promise(resolve => setTimeout(resolve, 250));
+      if (token !== musicSearchToken) return;
+      state = await api("music_search_progress", job.search_id || job.result_id);
+      if (!state) break;
+      if (token !== musicSearchToken) return;
+      const tracks = state.tracks || [];
+      applyMusicTracks(tracks);
+      if (!state.done) {
+        const secs = ((performance.now() - started) / 1000).toFixed(1);
+        let note = t("Received results from {n} platforms…").replace("{n}", (state.platforms || []).length);
+        const failed = (state.platforms || []).filter(p => !p.ok).length;
+        if (failed) note += " · " + t("{n} platforms did not respond").replace("{n}", failed);
+        note += " · " + t("{n} results in {s}s").replace("{n}", tracks.length).replace("{s}", secs);
+        musicSearchNote(note, false);
+      }
+      if (state.done) break;
+    }
+    if (token !== musicSearchToken) return;
+    if (!state) { musicSearchNote("", false); return; }
+    if (state.error) {
+      // Only an overall failure is a toast; per-platform failures stay inline.
       music.searchId = "";
-      music.tracks = [];
-      renderTracks();
-      $("#m-count").textContent = "0";
+      musicSearchNote("", false);
+      toast(state.error, "err", 7000);
       return;
     }
-    music.tracks = data.tracks || [];
-    // The bridge keeps the original provider objects; the id lets the download
-    // call get them back instead of the JSON copies.
-    music.searchId = data.search_id || "";
-    music.note = data.note || "";
-    music.selected = new Set(music.tracks.map((_, i) => i).filter(i => !music.tracks[i].vip));
-    renderTracks();
-    $("#m-count").textContent = music.tracks.length;
-    if (data.note) toast(data.note, "info");
+    // Downloads only ever use the cached result id, never partial rows.
+    music.searchId = state.result_id || "";
+    const failed = (state.platforms || []).filter(p => !p.ok).length;
+    const secs = ((performance.now() - started) / 1000).toFixed(1);
+    if (!state.tracks || !state.tracks.length) {
+      musicSearchNote(failed ? t("{n} platforms did not respond").replace("{n}", failed) : "", !!failed);
+      toast(t("No results"), "warn");
+      return;
+    }
+    let note = t("{n} results in {s}s").replace("{n}", state.tracks.length).replace("{s}", secs);
+    if (failed) note += " · " + t("{n} platforms did not respond").replace("{n}", failed);
+    musicSearchNote(note, !!failed);
+  } catch (e) {
+    if (token === musicSearchToken) {
+      musicSearchNote("", false);
+      toast(String(e && e.message || e), "err", 7000);
+    }
   } finally {
-    $("#m-spin").classList.remove("on");
-    $("#btn-m-search").disabled = false;
+    if (token === musicSearchToken) {
+      $("#m-spin").classList.remove("on");
+      $("#btn-m-search").disabled = false;
+      $("#btn-m-dl").disabled = music.downloading || !music.searchId || !music.selected.size;
+    }
   }
+}
+function musicSearchNote(text, warn) {
+  const el = $("#m-search-note");
+  el.textContent = text || "";
+  el.classList.toggle("warn", !!warn);
+}
+function musicTrackKey(tr) {
+  return [tr && tr.provider, tr && tr.id, tr && tr.name, tr && tr.artists].map(v => String(v || "")).join("\u0001");
+}
+function applyMusicTracks(tracks) {
+  // Manual picks survive re-sorts: rows are matched by identity, not index,
+  // because every partial snapshot merges and reorders the list.
+  const keep = music.userTouched
+    ? new Set([...music.selected].map(i => musicTrackKey(music.tracks[i])))
+    : null;
+  music.tracks = tracks || [];
+  if (keep) {
+    music.selected = new Set(music.tracks.map((tr, i) => i).filter(i => keep.has(musicTrackKey(music.tracks[i]))));
+  } else {
+    music.selected = new Set(music.tracks.map((_, i) => i).filter(i => !music.tracks[i].vip));
+  }
+  renderTracks();
+  $("#m-count").textContent = music.tracks.length;
 }
 function platformShortLabel(key) {
   const label = String((music.labels || {})[key] || "");
@@ -1480,11 +1591,15 @@ $("#m-tracks").addEventListener("change", e => {
   if (!cb) return;
   const i = +cb.dataset.i;
   if (cb.checked) music.selected.add(i); else music.selected.delete(i);
+  music.userTouched = true;
+  $("#btn-m-dl").disabled = music.downloading || !music.searchId || !music.selected.size;
 });
 $("#btn-m-selall").onclick = () => {
+  music.userTouched = true;
   if (music.selected.size === music.tracks.length) music.selected.clear();
   else music.tracks.forEach((_, i) => music.selected.add(i));
   renderTracks();
+  $("#btn-m-dl").disabled = music.downloading || !music.searchId || !music.selected.size;
 };
 $("#btn-m-search").onclick = doMusicSearch;
 $("#m-q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.isComposing) doMusicSearch(); });
@@ -1495,6 +1610,8 @@ $("#btn-m-dl").onclick = async () => {
   // race past the guard and ask the bridge to start a second batch.
   const btn = $("#btn-m-dl");
   btn.disabled = true;
+  music.failedItems = [];
+  hideMusicFailures();
   let started = false;
   try {
     const indexes = [...music.selected].sort((a, b) => a - b);
@@ -1514,6 +1631,62 @@ $("#btn-m-dl").onclick = async () => {
   }
 };
 $("#btn-m-stop").onclick = () => api("music_stop").catch(() => {});
+
+/* Download failures stay on screen with their reason: the summary toast alone
+   never told the user which track failed or why. Only the first rows are
+   listed; "retry failed" resubmits exactly those rows with the same search id. */
+const MUSIC_FAIL_ROWS = 8;
+function hideMusicFailures() {
+  music.failedItems = [];
+  const box = $("#m-failures");
+  if (box) box.hidden = true;
+  const list = $("#m-fail-list");
+  if (list) list.innerHTML = "";
+}
+function showMusicFailures(items) {
+  music.failedItems = (items || []).slice();
+  if (!music.failedItems.length) { hideMusicFailures(); return; }
+  $("#m-fail-title").textContent = t("{n} tracks failed").replace("{n}", music.failedItems.length);
+  $("#m-fail-list").innerHTML = music.failedItems.slice(0, MUSIC_FAIL_ROWS).map(it => `
+    <div class="fail-row">
+      <span class="fail-name" title="${esc(it.name)}">${esc(it.name)}</span>
+      <span class="fail-reason" title="${esc(it.reason)}">— ${esc(it.reason)}</span>
+    </div>`).join("") +
+    (music.failedItems.length > MUSIC_FAIL_ROWS ? `<div class="hint">+${music.failedItems.length - MUSIC_FAIL_ROWS}</div>` : "");
+  $("#btn-m-retry").disabled = false;
+  $("#m-failures").hidden = false;
+}
+$("#m-fail-close").onclick = () => hideMusicFailures();
+$("#btn-m-retry").onclick = async () => {
+  if (music.downloading || !music.failedItems.length) return;
+  // ``index`` is a position in the batch submitted last time; map it back to
+  // the row it came from (unchanged selection is an identity mapping).
+  const rows = music.failedItems
+    .map(it => (music.batch && music.batch[it.index] != null) ? music.batch[it.index] : it.index)
+    .filter(i => music.tracks[i]);
+  if (!rows.length) { hideMusicFailures(); return; }
+  const btn = $("#btn-m-retry");
+  btn.disabled = true;
+  let started = false;
+  hideMusicFailures();
+  try {
+    const indexes = [...new Set(rows)].sort((a, b) => a - b);
+    music.batch = indexes;
+    const tracks = indexes.map(i => music.tracks[i]);
+    const r = await call("music_download", $("#m-platform").value, tracks, null, music.searchId || null);
+    if (r && r.ok !== false) {
+      started = true;
+      music.downloading = true;
+      $("#btn-m-stop").hidden = false;
+      $("#m-progress").hidden = false;
+      $("#m-progress").classList.add("indeterminate");
+      $("#btn-m-dl").disabled = true;
+      pollMusic();
+    } else if (r && r.error) toast(r.error, "warn");
+  } finally {
+    if (!started) btn.disabled = false;
+  }
+};
 
 /* Playlist export: only tracks that already carry a local file path can be
    written (the engine does not download anything here). The written path is
@@ -1595,14 +1768,20 @@ function pollMusic() {
         if (music.downloading) {
           music.downloading = false;
           $("#btn-m-stop").hidden = true;
-          $("#btn-m-dl").disabled = false;
+          $("#btn-m-dl").disabled = !music.searchId || !music.selected.size;
+          $("#m-dl-label").textContent = t("Download selected");
           $("#m-progress").classList.remove("indeterminate");
           $("#m-progress").querySelector("i").style.width = "0%";
           setTimeout(() => { $("#m-progress").hidden = true; }, 600);
+          // Which rows failed (and why) is page content, not a toast.
+          showMusicFailures(st && Array.isArray(st.failed_items) ? st.failed_items : []);
           if (st && st.summary) toast(st.summary, st.failed ? "warn" : "ok", 6000);
         }
         return;
       }
+      // A poll that started before the job finished can resolve afterwards;
+      // writing its fraction now would resurrect a completed progress bar.
+      if (!music.downloading) return;
       const bar = $("#m-progress");
       bar.hidden = false;
       bar.classList.remove("indeterminate");

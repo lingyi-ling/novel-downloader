@@ -62,6 +62,12 @@ SEARCH_SITE_TIMEOUT = 6.0
 SEARCH_WAIT_TIMEOUT = 180.0
 #: Simultaneous probes while checking every music platform.
 HEALTH_WORKERS = 8
+#: Budget for one music health probe, in seconds.  A platform that cannot
+#: answer a one-result search in five seconds is reported as unhealthy instead
+#: of holding the panel open for the old 15 s default.
+HEALTH_CHECK_TIMEOUT = 5.0
+#: Progressive music searches kept for polling; older ones are evicted first.
+MUSIC_SEARCH_LIMIT = 8
 #: Upper bound for awaiting task-manager coroutines.
 TASK_WAIT_TIMEOUT = 30.0
 
@@ -429,6 +435,13 @@ def _i18n_catalog() -> dict[str, str]:
             "The search results expired — search again before downloading"
         ),
         "Search a song to begin": t("Search a song to begin"),
+        # progressive aggregate search + download failure panel
+        "Received results from {n} platforms…": t(
+            "Received results from {n} platforms…"
+        ),
+        "{n} platforms did not respond": t("{n} platforms did not respond"),
+        "{n} tracks failed": t("{n} tracks failed"),
+        "Retry failed": t("Retry failed"),
         "A download is already running": t("A download is already running"),
         "Music extras are not installed": t("Music extras are not installed"),
         "Downloaded {n} tracks": t("Downloaded {n} tracks"),
@@ -775,6 +788,9 @@ class ApiBridge:
         # Local paths of the submitted batch, aligned by index; the front end
         # merges them back onto its search rows for playlist export.
         self._music_paths: list[str] = []
+        # Failed rows of the last download batch, ordered by track index; the
+        # front end renders them with a "retry failed" button.
+        self._music_failed_items: list[dict[str, Any]] = []
         # health check state
         self._health_rows: dict[str, dict[str, Any]] = {}
         self._health_thread: threading.Thread | None = None
@@ -788,6 +804,8 @@ class ApiBridge:
         self._exit_callback: Callable[[], None] | None = None
         # progressive search state, keyed by search id (polled by the page)
         self._searches: dict[str, dict[str, Any]] = {}
+        # progressive music searches, keyed by their own search id
+        self._music_searches: dict[str, dict[str, Any]] = {}
 
     def start_services(self) -> None:
         """
@@ -2113,6 +2131,164 @@ class ApiBridge:
             "search_id": funcs["CACHE"].put(tracks),
         }
 
+    def music_search_async(
+        self, platform: str, keyword: str, limit: int = 30
+    ) -> dict[str, Any]:
+        """
+        Start an aggregate search and return the id the page polls.
+
+        Aggregating 20+ platforms takes several seconds, so waiting for the
+        slowest one made the page look frozen and often empty. Here every
+        platform's arrival updates the shared state (``on_update``), and the
+        front end redraws while the rest are still running.
+
+        A concrete platform is answered synchronously (providers are fast);
+        its state is stored as already done so both paths poll the same way.
+
+        :param platform: ``"all"``/empty for every platform, else a platform key.
+        :param keyword: The search term.
+        :param limit: Maximum number of merged rows returned.
+        """
+        funcs = _music_funcs()
+        text = str(keyword or "").strip()
+        try:
+            wanted = max(1, int(limit))
+        except (TypeError, ValueError):
+            wanted = 30
+
+        search_id = uuid4().hex
+        state: dict[str, Any] = {
+            "tracks": [],
+            "platforms": [],
+            "done": False,
+            "error": "",
+            "elapsed": 0.0,
+            "result_id": "",
+            "partial": False,
+            "started": time.perf_counter(),
+        }
+        with self._lock:
+            self._store_music_search(search_id, state)
+
+        if funcs is None:
+            with self._lock:
+                state["error"] = t("Music extras are not installed")
+                state["done"] = True
+                state["elapsed"] = 0.0
+            return {"search_id": search_id, "done": True, "error": state["error"]}
+
+        if not text:
+            with self._lock:
+                state["done"] = True
+            return {"search_id": search_id, "done": True}
+
+        if not funcs["is_all_platforms"](platform):
+            # One platform: the existing synchronous call is quick and keeps
+            # the single-platform error contract (the page may toast it).
+            result = self.music_search(platform, text, wanted)
+            with self._lock:
+                state["tracks"] = list(result.get("tracks") or [])
+                state["error"] = str(result.get("error") or "")
+                state["result_id"] = str(result.get("search_id") or "")
+                state["done"] = True
+                state["elapsed"] = time.perf_counter() - float(state["started"])
+            return {
+                "search_id": search_id,
+                "done": True,
+                "tracks": state["tracks"],
+                "result_id": state["result_id"],
+                "error": state["error"],
+            }
+
+        def on_update(partial: Any) -> None:
+            """Receive one aggregate snapshot (called from search threads)."""
+            tracks = [_music_track_dict(track) for track in list(partial.tracks or ())]
+            platforms = [item.as_dict() for item in list(partial.platforms or ())]
+            with self._lock:
+                # Late callbacks from a cancelled/timed-out search must not
+                # overwrite the final, cache-backed result.
+                if state["done"]:
+                    return
+                state["tracks"] = tracks
+                state["platforms"] = platforms
+                state["partial"] = bool(platforms)
+                state["elapsed"] = time.perf_counter() - float(state["started"])
+
+        def work() -> None:
+            try:
+                result = funcs["search_all"](
+                    text,
+                    None,
+                    wanted,
+                    timeout=SEARCH_SITE_TIMEOUT,
+                    on_update=on_update,
+                )
+                tracks = list(result.tracks)
+                result_id = str(funcs["CACHE"].put(tracks))
+                with self._lock:
+                    state["tracks"] = [_music_track_dict(track) for track in tracks]
+                    state["platforms"] = [
+                        item.as_dict() for item in list(result.platforms or ())
+                    ]
+                    state["result_id"] = result_id
+                    state["error"] = ""
+                    # Mark done in the same critical section: a late platform
+                    # thread calling ``on_update`` afterwards must not replace
+                    # the rows the cache was built from.
+                    state["done"] = True
+                    state["partial"] = False
+            except Exception as exc:  # noqa: BLE001 - reported through the poll
+                logger.exception("Aggregate music search crashed")
+                with self._lock:
+                    state["error"] = format_error(exc)
+            finally:
+                with self._lock:
+                    state["done"] = True
+                    state["partial"] = False
+                    state["elapsed"] = time.perf_counter() - float(state["started"])
+
+        threading.Thread(
+            target=work, name="novel-desktop-music-search", daemon=True
+        ).start()
+        return {"search_id": search_id, "done": False}
+
+    def _store_music_search(self, search_id: str, state: dict[str, Any]) -> None:
+        """Remember a progressive search, evicting the oldest one (lock held)."""
+        while len(self._music_searches) >= MUSIC_SEARCH_LIMIT:
+            self._music_searches.pop(next(iter(self._music_searches)), None)
+        self._music_searches[search_id] = state
+
+    def music_search_progress(self, search_id: str) -> dict[str, Any]:
+        """
+        Poll a progressive music search.
+
+        The snapshot is copied under the lock so the page can redraw while the
+        worker keeps updating the shared state. Unknown ids (evicted, or a
+        page reload) answer ``done`` with no rows instead of raising.
+        """
+        key = str(search_id or "")
+        with self._lock:
+            state = self._music_searches.get(key)
+            if state is None:
+                return {
+                    "done": True,
+                    "tracks": [],
+                    "platforms": [],
+                    "result_id": "",
+                    "error": "",
+                    "elapsed": 0.0,
+                    "partial": False,
+                }
+            return {
+                "done": bool(state["done"]),
+                "tracks": list(state["tracks"]),
+                "platforms": list(state["platforms"]),
+                "result_id": str(state["result_id"]),
+                "error": str(state["error"]),
+                "elapsed": float(state["elapsed"]),
+                "partial": bool(state["partial"]),
+            }
+
     def music_download(
         self,
         platform: str,
@@ -2141,6 +2317,7 @@ class ApiBridge:
             self._music_summary = ""
             self._music_failed = False
             self._music_paths = [""] * len(tracks)
+            self._music_failed_items = []
             self._music_stop.clear()
 
         worker = threading.Thread(
@@ -2169,6 +2346,9 @@ class ApiBridge:
         # every counter is updated under the bridge lock: an unlocked ``+=``
         # loses results whenever two tracks finish concurrently.
         counts = {"ok": 0, "skip": 0, "fail": 0}
+        # index in the submitted batch -> why it failed; a successful fallback
+        # source later clears its entry (``download_mixed`` re-reports it).
+        failed: dict[int, dict[str, Any]] = {}
         try:
             funcs = _music_funcs()
             if funcs is None:
@@ -2214,6 +2394,8 @@ class ApiBridge:
                 path = str(
                     getattr(_track, "path", "") or getattr(result, "path", "") or ""
                 )
+                reason = str(getattr(result, "reason", "") or "")
+                name = str(getattr(_track, "name", "") or "")
                 with self._lock:
                     counts[key] += 1
                     # Exactly one increment per finished track: the count is
@@ -2221,6 +2403,12 @@ class ApiBridge:
                     self._music_done += 1
                     if 0 <= index < len(self._music_paths) and path:
                         self._music_paths[index] = path
+                    if key == "fail":
+                        failed[index] = {"index": index, "name": name, "reason": reason}
+                    else:
+                        # A fallback source succeeded (or a retry landed):
+                        # the row is no longer a failure.
+                        failed.pop(index, None)
 
             def on_tick(fraction: float, _done: int) -> None:
                 with self._lock:
@@ -2241,14 +2429,29 @@ class ApiBridge:
             )
         except Exception as exc:  # noqa: BLE001 - reported through the poll
             logger.exception("Music download crashed")
+            reason = format_error(exc)
             with self._lock:
                 counts["fail"] += 1
                 self._music_failed = True
-                self._music_summary = format_error(exc)
+                self._music_summary = reason
+                if not failed and not self._music_done:
+                    # Nothing ran (expired search id, missing extras): every
+                    # submitted row failed for the same reason, so the retry
+                    # panel still has something to offer.
+                    for index, raw in enumerate(tracks):
+                        name = (
+                            str(raw.get("name") or "") if isinstance(raw, dict) else ""
+                        )
+                        failed[index] = {
+                            "index": index,
+                            "name": name,
+                            "reason": reason,
+                        }
         finally:
             with self._lock:
                 self._music_active = False
                 self._music_fraction = 1.0
+                self._music_failed_items = [failed[index] for index in sorted(failed)]
                 if not self._music_summary:
                     if counts["fail"] == 0 and counts["skip"] == 0:
                         self._music_summary = t("Downloaded {n} tracks").replace(
@@ -2290,6 +2493,9 @@ class ApiBridge:
                 "summary": self._music_summary,
                 "failed": self._music_failed,
                 "paths": list(self._music_paths),
+                # Indexes refer to the track list handed to the most recent
+                # ``music_download`` call, in that order.
+                "failed_items": [dict(item) for item in self._music_failed_items],
             }
 
     def music_stop(self) -> dict[str, Any]:
@@ -2409,7 +2615,9 @@ class ApiBridge:
                 def probe(key: str) -> None:
                     with gate:
                         try:
-                            result = funcs["health_check"](key)
+                            result = funcs["health_check"](
+                                key, timeout=HEALTH_CHECK_TIMEOUT
+                            )
                         except Exception as exc:  # noqa: BLE001 - per-platform
                             result = {
                                 "ok": False,

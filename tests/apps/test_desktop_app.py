@@ -1331,6 +1331,224 @@ def test_bridge_music_search_single_platform_returns_search_id(
     assert [row["name"] for row in result["tracks"]] == ["Solo"]
 
 
+def test_bridge_music_search_async_streams_partial_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each platform's arrival is visible before the aggregate search ends."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    aggregate = pytest.importorskip("novel_downloader.apps.music.aggregate")
+    base = pytest.importorskip("novel_downloader.apps.music.providers.base")
+
+    first = base.Track(provider="netease", id="1", name="Song", artists="Artist")
+    first.sources = ["netease"]
+    second = base.Track(provider="qq", id="2", name="Song", artists="Artist")
+    second.sources = ["netease", "qq"]
+    release = threading.Event()
+
+    def fake_search_all(
+        keyword: str,
+        platforms: Any = None,
+        limit: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        on_update = kwargs["on_update"]
+        assert (keyword, platforms, limit) == ("Song", None, 30)
+        assert kwargs["timeout"] == wa.SEARCH_SITE_TIMEOUT
+        on_update(
+            aggregate.AggregateResult(
+                tracks=[first],
+                platforms=[aggregate.PlatformOutcome("netease", True, count=1)],
+                total=1,
+            )
+        )
+        # Keep the search open until the test has observed the partial state.
+        assert release.wait(5.0)
+        final = aggregate.AggregateResult(
+            tracks=[first, second],
+            platforms=[
+                aggregate.PlatformOutcome("netease", True, count=1),
+                aggregate.PlatformOutcome("qq", False, error="timeout"),
+            ],
+            total=2,
+        )
+        on_update(final)
+        return final
+
+    class _Cache:
+        def put(self, tracks: Iterable[Any]) -> str:
+            return "sid-final"
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "is_all_platforms": aggregate.is_all_platforms,
+            "search_all": fake_search_all,
+            "CACHE": _Cache(),
+        },
+    )
+
+    bridge = wa.ApiBridge()
+    started = bridge.music_search_async("all", "Song", 30)
+    assert started["done"] is False
+    assert started["search_id"]
+
+    partial = None
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        snapshot = bridge.music_search_progress(started["search_id"])
+        if snapshot["tracks"] and not snapshot["done"]:
+            partial = snapshot
+            break
+        time.sleep(0.01)
+    assert partial is not None, "the first platform never became visible"
+    assert partial["partial"] is True
+    assert partial["result_id"] == ""
+    assert [row["name"] for row in partial["tracks"]] == ["Song"]
+    assert [row["platform"] for row in partial["platforms"]] == ["netease"]
+
+    release.set()
+    final = bridge.music_search_progress(started["search_id"])
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not final["done"]:
+        time.sleep(0.01)
+        final = bridge.music_search_progress(started["search_id"])
+    assert final["done"] is True
+    assert final["error"] == ""
+    assert final["result_id"] == "sid-final"
+    assert [row["name"] for row in final["tracks"]] == ["Song", "Song"]
+    assert [item["platform"] for item in final["platforms"]] == ["netease", "qq"]
+    assert final["platforms"][1]["ok"] is False
+    assert final["elapsed"] >= 0.0
+
+
+def test_bridge_music_search_async_single_platform_completes_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concrete platform answers in one call; polling still works."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    aggregate = pytest.importorskip("novel_downloader.apps.music.aggregate")
+    base = pytest.importorskip("novel_downloader.apps.music.providers.base")
+    track = base.Track(provider="netease", id="7", name="Solo", artists="Artist")
+
+    class _Provider:
+        def search(self, keyword: str, limit: int = 30) -> Any:
+            assert (keyword, limit) == ("Solo", 5)
+            return [track], 1
+
+    class _Cache:
+        def put(self, tracks: Any) -> str:
+            assert list(tracks) == [track]
+            return "sid-one"
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "is_all_platforms": aggregate.is_all_platforms,
+            "create": lambda _key: _Provider(),
+            "CACHE": _Cache(),
+        },
+    )
+
+    bridge = wa.ApiBridge()
+    result = bridge.music_search_async("netease", "Solo", 5)
+    assert result["done"] is True
+    assert result["result_id"] == "sid-one"
+    assert [row["name"] for row in result["tracks"]] == ["Solo"]
+
+    snapshot = bridge.music_search_progress(result["search_id"])
+    assert snapshot["done"] is True
+    assert snapshot["result_id"] == "sid-one"
+    assert snapshot["tracks"] == result["tracks"]
+
+
+def test_bridge_music_search_progress_unknown_id_is_done() -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    snapshot = wa.ApiBridge().music_search_progress("does-not-exist")
+    assert snapshot["done"] is True
+    assert snapshot["tracks"] == []
+    assert snapshot["platforms"] == []
+    assert snapshot["result_id"] == ""
+    assert snapshot["error"] == ""
+    assert snapshot["elapsed"] == 0.0
+
+
+def test_bridge_music_status_reports_failed_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failures carry their row index and reason; a fallback clears the row."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    aggregate = pytest.importorskip("novel_downloader.apps.music.aggregate")
+
+    @dataclass
+    class _FakeTrack:
+        provider: str = ""
+        id: str = ""
+        name: str = ""
+
+    def fake_mixed(
+        _create_provider: Any, tracks: Any, _opts: Any, **kwargs: Any
+    ) -> tuple[int, int, int, list[object], list[object]]:
+        on_result = kwargs["on_result"]
+        on_result(0, tracks[0], SimpleNamespace(status="ok", path="a.mp3", reason=""))
+        on_result(
+            1,
+            tracks[1],
+            SimpleNamespace(status="fail", path="", reason="HTTP 403"),
+        )
+        return 1, 0, 1, [], []
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "Track": _FakeTrack,
+            "create": lambda _key: None,
+            "download_mixed": fake_mixed,
+            "is_all_platforms": aggregate.is_all_platforms,
+        },
+    )
+    monkeypatch.setattr(wa.ApiBridge, "_music_options", staticmethod(lambda _l: None))
+
+    bridge = wa.ApiBridge()
+    assert (
+        bridge.music_download("netease", [{"name": "good"}, {"name": "bad"}])["ok"]
+        is True
+    )
+    status = _wait_for_music_idle(bridge)
+    assert status["failed"] is True
+    assert status["failed_items"] == [{"index": 1, "name": "bad", "reason": "HTTP 403"}]
+
+    # The aggregate fallback re-reports the same row as successful: the entry
+    # must disappear instead of pointing at a track that did download.
+    def fake_fallback(
+        _create_provider: Any, tracks: Any, _opts: Any, **kwargs: Any
+    ) -> tuple[int, int, int, list[object], list[object]]:
+        on_result = kwargs["on_result"]
+        on_result(0, tracks[0], SimpleNamespace(status="fail", reason="first"))
+        on_result(0, tracks[0], SimpleNamespace(status="ok", path="b.mp3"))
+        return 1, 0, 0, [], []
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "Track": _FakeTrack,
+            "create": lambda _key: None,
+            "download_mixed": fake_fallback,
+            "is_all_platforms": aggregate.is_all_platforms,
+        },
+    )
+    assert bridge.music_download("netease", [{"name": "recovered"}])["ok"] is True
+    status = _wait_for_music_idle(bridge)
+    assert status["failed_items"] == []
+
+
 def test_bridge_music_download_uses_cached_tracks_for_all_platforms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1901,7 +2119,7 @@ def test_app_html_call_helper_toasts_instead_of_rejecting() -> None:
 def test_app_html_search_surfaces_payload_errors() -> None:
     """A failed aggregate search must not render as "No results"."""
     assert "if (st.error) throw new Error(st.error);" in APP_HTML
-    assert 'toast(data.error, "err");' in APP_HTML
+    assert 'toast(state.error, "err", 7000);' in APP_HTML
 
 
 def test_app_html_search_streams_results_while_sites_answer() -> None:
@@ -1942,10 +2160,69 @@ def test_app_html_music_platform_defaults_to_all() -> None:
 
 def test_app_html_music_search_and_download_carry_the_search_id() -> None:
     """The search id is what lets the bridge recover the original tracks."""
-    assert 'music.searchId = data.search_id || "";' in APP_HTML
+    assert 'api("music_search_async", platform, kw, 30)' in APP_HTML
+    assert 'api("music_search_progress", job.search_id || job.result_id)' in APP_HTML
+    # Downloads only start once the final, cached result id has arrived.
+    assert 'music.searchId = state.result_id || "";' in APP_HTML
     assert (
         'call("music_download", $("#m-platform").value, tracks, null, '
         "music.searchId || null)" in APP_HTML
+    )
+
+
+def test_app_html_music_search_is_progressive_and_supersedable() -> None:
+    """Poll every 250 ms, redraw partials, and let a newer search win."""
+    assert "let musicSearchToken = 0;" in APP_HTML
+    assert "const token = ++musicSearchToken;" in APP_HTML
+    assert "if (token !== musicSearchToken) return;" in APP_HTML
+    assert "await new Promise(resolve => setTimeout(resolve, 250));" in APP_HTML
+    assert "function applyMusicTracks(tracks)" in APP_HTML
+    assert 'id="m-search-note"' in APP_HTML
+    assert "function musicSearchNote(text, warn)" in APP_HTML
+    assert 't("Received results from {n} platforms…")' in APP_HTML
+    # Aggregate platform failures are inline page copy, never a toast.
+    assert 't("{n} platforms did not respond")' in APP_HTML
+    assert 'toast(t("{n} platforms did not respond")' not in APP_HTML
+    # The download button stays disabled until the final result id arrives.
+    assert '$("#btn-m-dl").disabled = true;' in APP_HTML
+    assert (
+        '$("#btn-m-dl").disabled = music.downloading || !music.searchId '
+        "|| !music.selected.size;" in APP_HTML
+    )
+
+
+def test_app_html_music_keeps_manual_selection_across_partials() -> None:
+    """Partial snapshots are re-sorted; manual picks follow their identity."""
+    match = re.search(r"function applyMusicTracks\(tracks\) \{[\s\S]*?\n\}", APP_HTML)
+    assert match, "applyMusicTracks() is missing from the front end"
+    handler = match.group(0)
+    assert "music.userTouched" in handler
+    assert "musicTrackKey(music.tracks[i])" in handler
+    assert "keep.has(musicTrackKey(music.tracks[i]))" in handler
+    assert "music.userTouched = true;" in APP_HTML
+
+
+def test_app_html_music_download_failures_offer_reason_and_retry() -> None:
+    """Failed rows stay on the page with a retry that reuses the search id."""
+    assert 'id="m-failures"' in APP_HTML
+    assert 'id="m-fail-title"' in APP_HTML
+    assert 'id="m-fail-list"' in APP_HTML
+    assert 'id="m-fail-close"' in APP_HTML
+    assert 'id="btn-m-retry"' in APP_HTML
+    assert 'data-i18n="Retry failed"' in APP_HTML
+    assert "const MUSIC_FAIL_ROWS = 8;" in APP_HTML
+    assert "music.failedItems.slice(0, MUSIC_FAIL_ROWS)" in APP_HTML
+    assert "function showMusicFailures(items)" in APP_HTML
+    assert "function hideMusicFailures()" in APP_HTML
+    handler = _js_handler('$("#btn-m-retry").onclick')
+    assert (
+        'call("music_download", $("#m-platform").value, tracks, null, '
+        "music.searchId || null)" in handler
+    )
+    # The poll turns the bridge's failed_items into the panel.
+    assert (
+        "showMusicFailures(st && Array.isArray(st.failed_items) ? "
+        "st.failed_items : []);" in APP_HTML
     )
 
 
