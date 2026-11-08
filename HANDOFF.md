@@ -7,8 +7,8 @@
 
 ## 0. 一句话现状
 
-- **版本 v1.23.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.23.0>
-- 全量测试 **9004 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
+- **版本 v1.24.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.24.0>
+- 全量测试 **9034 passed / 32 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
@@ -99,6 +99,9 @@ cd android
 | Android 独立引擎 | `apps/embedded/server.py`（stdlib HTTP，路由必须镜像 REST） |
 | REST API | `apps/api/routes.py` + `schemas.py` |
 | 音乐引擎 | `apps/music/`（`providers/musicdl.py` 包装 vendored 平台） |
+| 音乐统一搜索 | `apps/music/aggregate.py`（并发 + 合并 + `search_all_isolated`） |
+| 音乐曲目缓存 | `apps/music/trackcache.py`（`search_id` → 原始 Track，JSON 往返后仍能解析直链） |
+| 混合平台下载 | `apps/music/downloader.py: download_mixed` |
 | 官网 | `website/` |
 
 ### 必须成对修改
@@ -148,6 +151,13 @@ cd android
 - 独立引擎已接真实引擎（platforms / search / health / export / download / jobs）。
 - 音频写 `<output>/music/`，`/downloads/music/<name>` 暴露回环地址；结果带 `download_url`，Kotlin 交给 `DownloadManager` 落到公共下载目录。
 - 依赖已从 5 个补到 17 个（`m3u8`、`emoji`、`bleach`、`filetype`、`puremagic`、`fake-useragent`、`json-repair`、`tinytag`、`tabulate`、`prettytable`、`wcwidth`、`prompt_toolkit`）。
+
+### 音乐统一搜索
+
+- 默认 `platform="all"`：`apps/music/aggregate.py` 并发搜全部平台，同名同歌手合并，`sources` 列出来源；`platforms` 返回每站 `ok/count/error`。
+- **下载必须回传 `search_id`**：musicdl 的 `extra["info"]`（`SongInfo`）无法 JSON 往返，服务端用 `apps/music/trackcache.py` 取回原始 Track。缓存默认 32 条 / 30 分钟。
+- 混合平台下载用 `download_mixed`：按 `track.provider` 分组，进度/结果索引仍对应传入列表。
+- CLI 的一次性聚合搜索走 `search_all_isolated`（子进程 + `terminate`）：vendor 内部线程池不是 daemon，个别平台无视超时会把进程退出拖住；桌面/API/内嵌引擎用进程内 `search_all`。
 
 ### UI
 
@@ -232,6 +242,9 @@ C:\Users\lingy\AppData\Local\ms-playwright\chromium-1228\chrome-win64\chrome.exe
 # API（另开进程）
 .venv/Scripts/novel-api.exe --port 8811 --rate-limit 0
 curl -s "http://127.0.0.1:8811/api/v1/browse/categories?site=fanqienovel" | head -c 200
+
+# 音乐统一搜索（默认全部平台）
+.venv/Scripts/novel-cli.exe music search 晴天 --limit 8 --json
 
 # 音乐平台连通性（含 5sing / 咪咕 / 酷我 等）
 .venv/Scripts/novel-cli.exe music health --json

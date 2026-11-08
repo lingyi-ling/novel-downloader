@@ -1,3 +1,31 @@
+## v1.24.0 (2026-11-08)
+
+### Feature
+
+- **音乐统一搜索**：桌面端、Android、CLI 与 REST 默认搜索**全部平台**，不再强制先选一个平台
+  - 每个平台并发搜索，同一首歌（同名同歌手）折叠成一行，`sources` 列出命中的平台（最佳来源在前，会员曲目自动靠后）
+  - 平台级失败不会影响其它平台：响应带 `platforms`（每个平台的 `ok/count/error`）
+  - REST：`POST /api/v1/music/search` 的 `platform` 可省略或传 `all`；单平台请求保持原有形状
+  - CLI：`music search` / `music download` 的 `--platform` 默认 `all`；`--json` 增加 `sources` 与 `platforms`
+  - 桌面/Android：平台下拉新增「全部平台」并默认选中，结果行显示来源平台胶囊
+- **混合平台下载**：`platform=all` 时每首歌按自己的 `provider` 下载（`download_mixed`），进度与结果顺序仍对应原列表
+
+### Fix
+
+- **musicdl 平台下载必失败**：搜索结果经 JSON 往返后 `extra["info"]` 退化成 dict，`resolve()` 抛 `AttributeError`
+  - 新增进程内曲目缓存：搜索响应带 `search_id`，下载/任务请求回传后取回原始 Track 对象
+  - 缓存过期时返回「搜索结果已失效，请重新搜索」，不再整批崩溃
+  - 桌面端序列化时不再把不可往返的 `extra` 送过桥
+- **桌面单平台音乐搜索**：`provider.search()` 返回 `(tracks, total)` 元组，旧代码直接迭代元组，单平台搜索一直拿不到结果
+- **CLI 聚合搜索退出卡死**：musicdl 内部线程池不是 daemon，个别平台无视超时会拖住进程退出。聚合搜索改在子进程执行（CLI 入口补 `multiprocessing.freeze_support()`），拿到结果立即结束子进程
+- 修正 `sources` 顺序：主来源在前，其余按平台注册顺序，结果不再受平台返回先后影响
+
+### Test
+
+- 新增 `tests/apps/test_music_aggregate.py`（17 例）：合并/排序/来源、平台失败隔离、超时、缓存 TTL/LRU、混合平台下载
+- 更新 CLI/API/桌面音乐测试
+- 全量 `pytest` **9034 passed / 32 skipped**；`ruff`、`format`、`mypy` 全绿；Android `compileDebugKotlin` + `testDebugUnitTest` 通过
+
 ## v1.23.0 (2026-11-08)
 
 ### Feature
