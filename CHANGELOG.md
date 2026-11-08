@@ -1,3 +1,22 @@
+## v1.28.0 (2026-11-08)
+
+### Feature
+
+- **便携版自动更新**：更新器现在会识别安装形态（`installer` / `portable` / `source`），便携版下载 zip 而不是 setup，退出后由 PowerShell 辅助脚本等待进程结束、解压覆盖当前文件夹并重新启动——不再悄悄装出第二份到 `%LOCALAPPDATA%`
+- **更新进度**：新增 `download_update_async` + `update_download_state`，侧栏显示 `42% · 24.1 MB / 57.6 MB`，后台自动下载也能看到进度，不再只有一个「Downloading…」
+- **断点续传与重试**：更新下载使用 HTTP `Range` 复用 `.part`，失败自动重试 3 次（60 MB 资产在抖动链路上不用从头再来）
+
+### Fix
+
+- 更新目录自动清理：`.part` 超过 1 天、下载包超过 7 天会被删除（那个 23 字节的残留 `setup.exe` 也会被清掉）
+- 便携版 zip 在主程序退出后才解压，文件锁不会再导致覆盖失败；复制带 10 次重试
+- 修复 `download_update` 在「已有下载进行中」时自锁（非重入锁内回调自身）导致的卡死
+
+### Test
+
+- 新增：安装形态识别、便携/安装两种资产选择、断点续传（服务器支持/忽略 Range）、便携安装启动参数、更新目录清理
+- 全量 `pytest` **9056 passed / 32 skipped**；`ruff`、`format`、`mypy` 全绿
+
 ## v1.27.0 (2026-11-08)
 
 ### Performance
