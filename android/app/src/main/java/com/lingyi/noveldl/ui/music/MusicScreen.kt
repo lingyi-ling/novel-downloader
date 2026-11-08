@@ -51,8 +51,10 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
+import com.lingyi.noveldl.data.EmbeddedEngine
 import com.lingyi.noveldl.data.HistoryDownloader
 import com.lingyi.noveldl.data.HistoryFile
 import com.lingyi.noveldl.data.MusicHealthItem
@@ -110,6 +112,11 @@ fun MusicScreen(onMessage: (String) -> Unit) {
     // entry drives the badge next to the picker.
     var healthByPlatform by remember { mutableStateOf<Map<String, MusicHealthItem>>(emptyMap()) }
     var healthChecking by remember { mutableStateOf(false) }
+    val exportViewModel: MusicExportViewModel = viewModel()
+    var exporting by remember { mutableStateOf(false) }
+    // Kept on screen after the snackbar fades so the user can note/verify
+    // where the playlist was written.
+    var lastExportPath by remember { mutableStateOf<String?>(null) }
 
     // Checks the selected platform on entry and again on every switch. The
     // 1s delay debounces rapid switching: restarting this effect cancels the
@@ -300,6 +307,25 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                                     ),
                                 )
                             }
+                        // Job results come back in submission order (the engine
+                        // sorts them by the original track index), so result i
+                        // belongs to chosen[i]. Remember the written paths on
+                        // the visible search results so "export playlist" can
+                        // use them without searching/downloading again.
+                        val pathsById = chosen.mapIndexedNotNull { index, track ->
+                            job.results
+                                .getOrNull(index)
+                                ?.path
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { path -> track.id to path }
+                        }.toMap()
+                        if (pathsById.isNotEmpty()) {
+                            tracks = tracks.map { track ->
+                                pathsById[track.id]?.let { path ->
+                                    track.copy(path = path)
+                                } ?: track
+                            }
+                        }
                         onMessage(context.getString(R.string.music_job_done, ok, skip, fail))
                         jobRunning = false
                         return@launch
@@ -315,6 +341,66 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                         return@launch
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * Exports the current search results that carry a local path as an M3U8
+     * playlist. Every edge case reports a snackbar message instead of failing
+     * silently: no results, no downloaded tracks, engine not started or
+     * without music support, and write errors.
+     */
+    fun exportPlaylist() {
+        if (exporting) return
+        if (!Api.isConfigured()) {
+            onMessage(
+                context.getString(
+                    R.string.music_export_unavailable,
+                    Api.NOT_CONFIGURED_MESSAGE,
+                ),
+            )
+            return
+        }
+        if (Api.baseUrl == EmbeddedEngine.BASE_URL &&
+            (!EmbeddedEngine.isStarted || EmbeddedEngine.lastError != null)
+        ) {
+            onMessage(context.getString(R.string.music_export_engine_unavailable))
+            return
+        }
+        exporting = true
+        scope.launch {
+            try {
+                when (val outcome = exportViewModel.export(selectedPlatform, tracks)) {
+                    MusicExportOutcome.NoResults ->
+                        onMessage(context.getString(R.string.music_export_no_results))
+                    MusicExportOutcome.NoLocalPaths ->
+                        onMessage(context.getString(R.string.music_export_no_local_paths))
+                    is MusicExportOutcome.Unavailable ->
+                        onMessage(
+                            context.getString(
+                                R.string.music_export_unavailable,
+                                outcome.reason,
+                            ),
+                        )
+                    is MusicExportOutcome.Failed ->
+                        onMessage(
+                            context.getString(R.string.music_export_failed, outcome.reason),
+                        )
+                    is MusicExportOutcome.Success -> {
+                        lastExportPath = outcome.path
+                        onMessage(
+                            context.getString(
+                                R.string.music_export_done,
+                                outcome.path,
+                                outcome.written,
+                                outcome.skipped,
+                            ),
+                        )
+                    }
+                }
+            } finally {
+                exporting = false
             }
         }
     }
@@ -366,6 +452,26 @@ fun MusicScreen(onMessage: (String) -> Unit) {
             Button(onClick = { downloadSelected() }, enabled = !jobRunning) {
                 Text(stringResource(R.string.music_download_selected))
             }
+        }
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = { exportPlaylist() },
+            enabled = !exporting,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                stringResource(
+                    if (exporting) R.string.music_exporting else R.string.music_export_playlist,
+                ),
+            )
+        }
+        lastExportPath?.let { path ->
+            Spacer(Modifier.height(4.dp))
+            Text(
+                stringResource(R.string.music_export_last_path, path),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         if (jobRunning) {
             Spacer(Modifier.height(8.dp))

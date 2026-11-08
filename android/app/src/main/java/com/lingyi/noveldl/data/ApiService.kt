@@ -56,6 +56,10 @@ interface ApiService {
     @POST("api/v1/music/jobs")
     suspend fun createMusicJob(@Body body: MusicJobRequest): MusicJobCreated
 
+    /** Writes an M3U8 playlist for tracks that already have a local `path`. */
+    @POST("api/v1/music/export")
+    suspend fun musicExport(@Body body: MusicExportRequest): MusicExportResponse
+
     @GET("api/v1/music/jobs/{job_id}")
     suspend fun musicJob(@Path("job_id") jobId: String): MusicJob
 

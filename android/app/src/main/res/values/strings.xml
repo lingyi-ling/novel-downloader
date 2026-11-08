@@ -118,6 +118,15 @@
     <string name="music_health_checking">正在检查平台连通性…</string>
     <string name="music_health_ok">平台可用，耗时 %1$d ms</string>
     <string name="music_health_failed">平台不可用：%1$s</string>
+    <string name="music_export_playlist">导出歌单</string>
+    <string name="music_exporting">正在导出歌单…</string>
+    <string name="music_export_no_results">没有可导出的搜索结果，请先搜索歌曲</string>
+    <string name="music_export_no_local_paths">搜索结果中没有已下载（带本地路径）的歌曲，请先下载</string>
+    <string name="music_export_done">歌单已导出：%1$s（%2$d 首，跳过 %3$d 首）</string>
+    <string name="music_export_last_path">最近导出的歌单：%1$s</string>
+    <string name="music_export_failed">导出歌单失败：%1$s</string>
+    <string name="music_export_unavailable">导出歌单不可用：%1$s</string>
+    <string name="music_export_engine_unavailable">音乐引擎尚未就绪，请稍后重试或检查设置</string>
 
     <!-- 追更 -->
     <string name="follow_add">添加</string>

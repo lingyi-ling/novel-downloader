@@ -111,6 +111,15 @@
     <string name="music_health_checking">Checking platform connectivity…</string>
     <string name="music_health_ok">Platform reachable in %1$d ms</string>
     <string name="music_health_failed">Platform unavailable: %1$s</string>
+    <string name="music_export_playlist">Export playlist</string>
+    <string name="music_exporting">Exporting playlist…</string>
+    <string name="music_export_no_results">No search results to export; search for songs first</string>
+    <string name="music_export_no_local_paths">None of the search results has been downloaded (no local path); download first</string>
+    <string name="music_export_done">Playlist exported: %1$s (%2$d tracks, %3$d skipped)</string>
+    <string name="music_export_last_path">Last exported playlist: %1$s</string>
+    <string name="music_export_failed">Playlist export failed: %1$s</string>
+    <string name="music_export_unavailable">Playlist export unavailable: %1$s</string>
+    <string name="music_export_engine_unavailable">The music engine is not ready yet; retry shortly or check Settings</string>
 
     <string name="follow_add">Add</string>
     <string name="follow_add_dialog_title">Follow a book</string>

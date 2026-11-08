@@ -134,6 +134,11 @@ data class MusicTrack(
     val duration_s: Int = 0,
     val cover_url: String = "",
     val vip: Boolean = false,
+    /**
+     * Local file populated by the downloader (or by the caller); the server
+     * uses it for `POST /api/v1/music/export` and skips tracks without one.
+     */
+    val path: String = "",
 )
 
 /**
@@ -202,6 +207,39 @@ data class MusicJob(
     val results: List<MusicJobResult> = emptyList(),
     val error: String? = null,
 )
+
+/**
+ * Body of `POST /api/v1/music/export`.
+ *
+ * Each track must carry a local [MusicTrack.path]; tracks without one are
+ * counted in `skipped` by the server instead of failing the request.
+ * [out_path] may be a file (`.m3u` / `.m3u8`) or a directory; when omitted the
+ * server writes into the music settings' output directory.
+ */
+@Serializable
+data class MusicExportRequest(
+    val platform: String,
+    val tracks: List<MusicTrack>,
+    val out_path: String? = null,
+)
+
+/**
+ * Response of `POST /api/v1/music/export`.
+ *
+ * The REST API reports `tracks_written`, the embedded engine reports
+ * `written` (same value); both are read so either transport works.
+ */
+@Serializable
+data class MusicExportResponse(
+    val path: String = "",
+    val tracks_written: Int = 0,
+    val written: Int = 0,
+    val skipped: Int = 0,
+) {
+    /** Written track count, whichever field the server used. */
+    val writtenCount: Int
+        get() = if (written > 0) written else tracks_written
+}
 
 @Serializable
 data class WatchEntry(
