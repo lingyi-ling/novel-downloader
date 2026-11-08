@@ -61,6 +61,7 @@ import com.lingyi.noveldl.data.MusicHealthItem
 import com.lingyi.noveldl.data.MusicJobProgress
 import com.lingyi.noveldl.data.MusicJobRequest
 import com.lingyi.noveldl.data.MusicPlatform
+import com.lingyi.noveldl.data.MUSIC_ALL_PLATFORMS
 import com.lingyi.noveldl.data.MusicSearchRequest
 import com.lingyi.noveldl.data.MusicTrack
 import com.lingyi.noveldl.data.SelectionStore
@@ -86,13 +87,17 @@ fun MusicScreen(onMessage: (String) -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val selectionStore = remember(context) { SelectionStore(context) }
     var platforms by remember { mutableStateOf<List<MusicPlatform>>(emptyList()) }
-    // Restored from the last session; the API list refreshes it if needed.
+    // Restored from the last session; "all" stays the default when nothing
+    // valid was saved, so an aggregate search needs no setup.
     var selectedPlatform by rememberSaveable {
-        mutableStateOf(selectionStore.selectedPlatform())
+        mutableStateOf(selectionStore.selectedPlatform().ifBlank { MUSIC_ALL_PLATFORMS })
     }
     var menuExpanded by remember { mutableStateOf(false) }
     var keyword by remember { mutableStateOf("") }
     var tracks by remember { mutableStateOf<List<MusicTrack>>(emptyList()) }
+    // Echoed to the download/job request so the server can restore the
+    // original provider objects (musicdl data does not survive JSON).
+    var searchId by remember { mutableStateOf("") }
     // Paged search state: platform-reported hit total, whether the end of the
     // result list was reached, and whether the last "load more" attempt failed.
     var totalHits by remember { mutableIntStateOf(0) }
@@ -117,13 +122,20 @@ fun MusicScreen(onMessage: (String) -> Unit) {
     // Kept on screen after the snackbar fades so the user can note/verify
     // where the playlist was written.
     var lastExportPath by remember { mutableStateOf<String?>(null) }
+    val allPlatformLabel = stringResource(R.string.music_platform_all)
+    val platformLabels = remember(platforms) { platforms.associate { it.key to it.label } }
 
     // Checks the selected platform on entry and again on every switch. The
     // 1s delay debounces rapid switching: restarting this effect cancels the
     // pending probe before the request is sent.
     LaunchedEffect(selectedPlatform) {
         val platform = selectedPlatform
-        if (platform.isEmpty()) return@LaunchedEffect
+        // The health endpoint only knows concrete platform keys; probing
+        // "all" would be rejected (REST) or fan out to every platform.
+        if (platform.isEmpty() || platform == MUSIC_ALL_PLATFORMS) {
+            healthChecking = false
+            return@LaunchedEffect
+        }
         healthChecking = true
         delay(MUSIC_HEALTH_DEBOUNCE_MS)
         val outcome = Api.call {
@@ -154,8 +166,10 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                 platforms = it.platforms
                 error = null
                 val keys = it.platforms.map { platform -> platform.key }
-                if (selectedPlatform.isEmpty() || selectedPlatform !in keys) {
-                    selectedPlatform = it.platforms.firstOrNull()?.key.orEmpty()
+                // Keep "all" (or a still-valid saved key); fall back to the
+                // aggregate default rather than an arbitrary first platform.
+                if (selectedPlatform != MUSIC_ALL_PLATFORMS && selectedPlatform !in keys) {
+                    selectedPlatform = MUSIC_ALL_PLATFORMS
                     selectionStore.saveSelectedPlatform(selectedPlatform)
                 }
             }
@@ -171,6 +185,17 @@ fun MusicScreen(onMessage: (String) -> Unit) {
         loadingMore = false
         loadMoreFailed = false
         selected = emptySet()
+        searchId = ""
+    }
+
+    fun selectPlatform(key: String) {
+        menuExpanded = false
+        if (key != selectedPlatform) {
+            selectedPlatform = key
+            selectionStore.saveSelectedPlatform(key)
+            // Paged results belong to the old platform.
+            resetSearchResults()
+        }
     }
 
     fun search() {
@@ -195,6 +220,9 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                 .onSuccess {
                     if (generation != searchGeneration) return@onSuccess
                     tracks = MusicPaging.merge(emptyList(), it.tracks)
+                    // Keep the first page's id: the download request only
+                    // accepts one and provider resolve data is per search.
+                    searchId = it.search_id
                     totalHits = it.total
                     endReached =
                         !MusicPaging.hasMore(tracks.size, it.total, it.tracks.size, 0, MUSIC_PAGE_SIZE)
@@ -266,7 +294,11 @@ fun MusicScreen(onMessage: (String) -> Unit) {
         scope.launch {
             val created = Api.call {
                 Api.service().createMusicJob(
-                    MusicJobRequest(platform = selectedPlatform, tracks = chosen),
+                    MusicJobRequest(
+                        platform = selectedPlatform,
+                        tracks = chosen,
+                        search_id = searchId.ifBlank { null },
+                    ),
                 )
             }.getOrElse {
                 error = it.message
@@ -409,23 +441,22 @@ fun MusicScreen(onMessage: (String) -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box {
                 Button(onClick = { menuExpanded = true }) {
-                    val label = platforms.firstOrNull { it.key == selectedPlatform }?.label
-                        ?: stringResource(R.string.music_platform)
+                    val label = when (selectedPlatform) {
+                        MUSIC_ALL_PLATFORMS -> allPlatformLabel
+                        else -> platforms.firstOrNull { it.key == selectedPlatform }?.label
+                            ?: stringResource(R.string.music_platform)
+                    }
                     Text(label)
                 }
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text(allPlatformLabel) },
+                        onClick = { selectPlatform(MUSIC_ALL_PLATFORMS) },
+                    )
                     platforms.forEach { platform ->
                         DropdownMenuItem(
                             text = { Text(platform.label) },
-                            onClick = {
-                                menuExpanded = false
-                                if (platform.key != selectedPlatform) {
-                                    selectedPlatform = platform.key
-                                    selectionStore.saveSelectedPlatform(platform.key)
-                                    // Paged results belong to the old platform.
-                                    resetSearchResults()
-                                }
-                            },
+                            onClick = { selectPlatform(platform.key) },
                         )
                     }
                 }
@@ -544,6 +575,16 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            // Aggregate rows list every platform that carries
+                            // the song; single-platform rows fall back to provider.
+                            val sourceLabel = MusicSources.label(track, platformLabels)
+                            if (sourceLabel.isNotEmpty()) {
+                                Text(
+                                    stringResource(R.string.music_sources, sourceLabel),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                         if (track.vip) {
                             Text(

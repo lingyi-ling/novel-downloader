@@ -156,5 +156,46 @@ class MusicSearchApiTest {
         assertEquals("夜曲", track.name)
         assertEquals("", track.artists)
         assertEquals(1, page.total)
+        // Single-platform responses carry no aggregate metadata.
+        assertEquals("", page.search_id)
+        assertTrue(track.sources.isEmpty())
+        assertTrue(page.platforms.isEmpty())
+    }
+
+    @Test
+    fun aggregateSearchDefaultsToAllAndParsesSearchIdSourcesAndPlatforms() = runBlocking {
+        server.enqueue(
+            json(
+                """
+                {"total":1,
+                 "tracks":[{"provider":"netease","id":"1","name":"晴天","artists":"周杰伦",
+                            "album":"叶惠美","duration_s":269,"vip":false,
+                            "sources":["netease","qq"]}],
+                 "search_id":"sid-abc",
+                 "platform":"all",
+                 "platforms":[{"platform":"netease","ok":true,"count":1,"error":""},
+                              {"platform":"qq","ok":false,"count":0,"error":"timeout"}]}
+                """.trimIndent(),
+            ),
+        )
+        Api.configure(baseUrl(), null)
+
+        // No explicit platform: the model default ("all") must still be sent.
+        val page = Api.call {
+            Api.service().musicSearch(
+                MusicSearchRequest(keyword = "晴天", limit = MUSIC_PAGE_SIZE, offset = 0),
+            )
+        }.getOrThrow()
+
+        val body = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        assertEquals("all", body["platform"]!!.jsonPrimitive.content)
+        assertEquals("sid-abc", page.search_id)
+        assertEquals("all", page.platform)
+        assertEquals(listOf("netease", "qq"), page.tracks.single().sources)
+        assertEquals(2, page.platforms.size)
+        assertEquals("netease", page.platforms[0].platform)
+        assertTrue(page.platforms[0].ok)
+        assertEquals(1, page.platforms[0].count)
+        assertEquals("timeout", page.platforms[1].error)
     }
 }

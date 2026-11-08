@@ -96,6 +96,8 @@
     <string name="notification_task_failed_text">%1$s failed to download</string>
 
     <string name="music_platform">Platform</string>
+    <string name="music_platform_all">All platforms</string>
+    <string name="music_sources">Sources: %1$s</string>
     <string name="music_keyword_hint">Song keyword</string>
     <string name="music_search_button">Search songs</string>
     <string name="music_tracks">%1$d songs</string>

@@ -50,9 +50,15 @@ interface ApiService {
     @GET("api/v1/music/platforms")
     suspend fun musicPlatforms(): MusicPlatformsResponse
 
+    /**
+     * Searches one platform, or every platform when `platform = "all"`.
+     * Aggregate responses carry `search_id`, per-track `sources` and
+     * per-platform outcomes; the `search_id` must be echoed when downloading.
+     */
     @POST("api/v1/music/search")
     suspend fun musicSearch(@Body body: MusicSearchRequest): MusicSearchResponse
 
+    /** Queues a download; `body.search_id` restores the original search tracks. */
     @POST("api/v1/music/jobs")
     suspend fun createMusicJob(@Body body: MusicJobRequest): MusicJobCreated
 

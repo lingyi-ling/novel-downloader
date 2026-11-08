@@ -103,6 +103,8 @@
 
     <!-- 音乐 -->
     <string name="music_platform">平台</string>
+    <string name="music_platform_all">全部平台</string>
+    <string name="music_sources">来源：%1$s</string>
     <string name="music_keyword_hint">歌曲关键词</string>
     <string name="music_search_button">搜索歌曲</string>
     <string name="music_tracks">共 %1$d 首</string>

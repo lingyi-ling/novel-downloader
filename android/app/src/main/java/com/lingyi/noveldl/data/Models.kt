@@ -124,6 +124,9 @@ data class MusicPlatformsResponse(
     val platforms: List<MusicPlatform> = emptyList(),
 )
 
+/** `platform` value meaning "search/download every registered platform". */
+const val MUSIC_ALL_PLATFORMS: String = "all"
+
 @Serializable
 data class MusicTrack(
     val provider: String = "",
@@ -135,6 +138,12 @@ data class MusicTrack(
     val cover_url: String = "",
     val vip: Boolean = false,
     /**
+     * Platform keys that carry this song, best source first. Only aggregate
+     * (`platform = "all"`) searches populate it; single-platform responses
+     * omit the field and it falls back to [provider] in the UI.
+     */
+    val sources: List<String> = emptyList(),
+    /**
      * Local file populated by the downloader (or by the caller); the server
      * uses it for `POST /api/v1/music/export` and skips tracks without one.
      */
@@ -144,6 +153,8 @@ data class MusicTrack(
 /**
  * Body of `POST /api/v1/music/search`.
  *
+ * [platform] defaults to `"all"` (the server also defaults it when omitted);
+ * it is always encoded so an aggregate search is explicit on the wire.
  * `limit`/`offset` use [EncodeDefault] with [EncodeDefault.Mode.ALWAYS] so the
  * pagination parameters stay on the wire even when they equal their defaults
  * (`Api`'s serializer skips plain defaults), and so the server can page as
@@ -152,16 +163,36 @@ data class MusicTrack(
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class MusicSearchRequest(
-    val platform: String,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val platform: String = MUSIC_ALL_PLATFORMS,
     val keyword: String,
     @EncodeDefault(EncodeDefault.Mode.ALWAYS) val limit: Int = 20,
     @EncodeDefault(EncodeDefault.Mode.ALWAYS) val offset: Int = 0,
 )
 
+/** One platform's outcome in an aggregate search response. */
+@Serializable
+data class MusicSearchPlatform(
+    val platform: String = "",
+    val ok: Boolean = false,
+    val count: Int = 0,
+    val error: String = "",
+)
+
+/**
+ * Response of `POST /api/v1/music/search`.
+ *
+ * [search_id] must be echoed to `POST /api/v1/music/download` and
+ * `POST /api/v1/music/jobs` (as `search_id`) so the server can restore the
+ * original provider objects; their resolve data cannot survive a JSON round
+ * trip. [platforms] is only present for aggregate searches.
+ */
 @Serializable
 data class MusicSearchResponse(
     val total: Int = 0,
     val tracks: List<MusicTrack> = emptyList(),
+    val search_id: String = "",
+    val platform: String = "",
+    val platforms: List<MusicSearchPlatform> = emptyList(),
 )
 
 /** One probe of `GET /api/v1/music/health` (per-platform connectivity). */
@@ -173,10 +204,21 @@ data class MusicHealthItem(
     val error: String = "",
 )
 
+/**
+ * Body of `POST /api/v1/music/download` and `POST /api/v1/music/jobs`.
+ *
+ * With `platform = "all"` every track is downloaded from its own [MusicTrack.provider];
+ * an explicit platform key overrides that. [search_id] is the `search_id` from the
+ * aggregate search response and lets the server resolve the original provider
+ * objects; when it is null the field is omitted and the server falls back to the
+ * submitted track dictionaries.
+ */
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class MusicJobRequest(
-    val platform: String,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val platform: String = MUSIC_ALL_PLATFORMS,
     val tracks: List<MusicTrack>,
+    val search_id: String? = null,
     val level: String? = null,
 )
 
@@ -218,7 +260,7 @@ data class MusicJob(
  */
 @Serializable
 data class MusicExportRequest(
-    val platform: String,
+    val platform: String = MUSIC_ALL_PLATFORMS,
     val tracks: List<MusicTrack>,
     val out_path: String? = null,
 )
