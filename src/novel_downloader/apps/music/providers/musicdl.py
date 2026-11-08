@@ -101,10 +101,16 @@ PLATFORM_NOTES = {
         "Spotify 需能访问 open.spotify.com，且下载依赖第三方服务；当前环境通常不可达。"
     ),
     "apple": (
-        "Apple Music 需账号 + DRM 设备密钥(pywidevine)，本机需能访问 music.apple.com。"
+        "Apple Music 需账号；DRM 解密需要自备 CDM（.wvd 设备文件），"
+        "本机还需能访问 music.apple.com。"
     ),
-    "soundcloud": "SoundCloud 需安装 pywidevine，且本机需能访问 soundcloud.com。",
-    "youtube": "YouTube 需本机安装 Node 运行时，且需能访问 youtube.com。",
+    "soundcloud": (
+        "SoundCloud 搜索可用；DRM/HLS 下载需要自备 CDM（.wvd）与外部 N_m3u8DL-RE。"
+    ),
+    "youtube": (
+        "YouTube Music 搜索走 ytmusicapi（已随安装包提供）；下载依赖第三方解析服务，"
+        "当前网络可能不可达。"
+    ),
 }
 
 # 「重」档：装了依赖才注册。needs 里 "node" 表示需要外部 Node 可执行文件。
