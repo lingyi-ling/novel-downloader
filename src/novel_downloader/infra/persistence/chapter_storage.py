@@ -110,19 +110,26 @@ class ChapterStorage:
         content = data["content"]
         extra_json = json.dumps(data["extra"], ensure_ascii=False)
 
-        self.conn.execute(
-            """
-            INSERT INTO chapters (id, title, content, need_refetch, extra)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                title=excluded.title,
-                content=excluded.content,
-                need_refetch=excluded.need_refetch,
-                extra=excluded.extra
-            """,
-            (chap_id, title, content, int(need_refetch), extra_json),
-        )
-        self.conn.commit()
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO chapters (id, title, content, need_refetch, extra)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    title=excluded.title,
+                    content=excluded.content,
+                    need_refetch=excluded.need_refetch,
+                    extra=excluded.extra
+                """,
+                (chap_id, title, content, int(need_refetch), extra_json),
+            )
+            self.conn.commit()
+        except Exception:
+            # A failed row must not stay in an open transaction: a later
+            # ``commit`` would persist a chapter the caller was told failed.
+            with contextlib.suppress(sqlite3.Error):
+                self.conn.rollback()
+            raise
         self._refetch_flags[chap_id] = need_refetch
 
     def upsert_chapters(
@@ -147,19 +154,27 @@ class ChapterStorage:
             extra_json = json.dumps(chapter["extra"], ensure_ascii=False)
             records.append((chap_id, title, content, int(need_refetch), extra_json))
 
-        self.conn.executemany(
-            """
-            INSERT INTO chapters (id, title, content, need_refetch, extra)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                title=excluded.title,
-                content=excluded.content,
-                need_refetch=excluded.need_refetch,
-                extra=excluded.extra
-            """,
-            records,
-        )
-        self.conn.commit()
+        try:
+            self.conn.executemany(
+                """
+                INSERT INTO chapters (id, title, content, need_refetch, extra)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    title=excluded.title,
+                    content=excluded.content,
+                    need_refetch=excluded.need_refetch,
+                    extra=excluded.extra
+                """,
+                records,
+            )
+            self.conn.commit()
+        except Exception:
+            # SQLite keeps a partial ``executemany`` in the open transaction;
+            # rolling back keeps the database in step with ``_refetch_flags``
+            # (which is only published below, after the commit).
+            with contextlib.suppress(sqlite3.Error):
+                self.conn.rollback()
+            raise
 
         # Publish the flags only after the rows are durably written.
         for chapter in data:

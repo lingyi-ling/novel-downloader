@@ -1,5 +1,5 @@
 import json
-from pathlib import Path
+import os
 
 import pytest
 
@@ -132,19 +132,20 @@ def test_save_is_atomic_when_write_fails(tmp_path, monkeypatch):
     mgr.set_language("en_US")
     original = f.read_text(encoding="utf-8")
 
-    def crashing_write_text(self, data, encoding=None, errors=None, newline=None):
-        # Simulate a crash mid-write: half the payload reaches the disk.
-        with open(self, "w", encoding=encoding, newline=newline) as fh:
-            fh.write(data[: max(len(data) // 2, 1)])
+    def _failing_replace(src, dst):
+        # Simulate a crash right before the atomic swap: the write of the
+        # temporary file may even have completed, but the previous state must
+        # still win and no half-written file may be left behind.
         raise OSError("simulated disk failure")
 
-    monkeypatch.setattr(Path, "write_text", crashing_write_text)
+    monkeypatch.setattr(os, "replace", _failing_replace)
     with pytest.raises(OSError, match="simulated disk failure"):
         mgr.set_language("zh_CN")
 
     # The previously persisted state must survive the failed save untouched.
     assert f.read_text(encoding="utf-8") == original
     assert json.loads(f.read_text(encoding="utf-8"))["lang"] == "en_US"
+    assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
 
 
 def test_save_leaves_no_temp_files_behind(tmp_path):

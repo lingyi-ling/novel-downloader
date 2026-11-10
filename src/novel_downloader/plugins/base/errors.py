@@ -6,8 +6,9 @@ novel_downloader.plugins.base.errors
 Typed request failures shared by the fetcher and the download mixin.
 
 ``BaseSession`` normalises transport problems to the builtin ``TimeoutError`` /
-``ConnectionError``. The fetcher adds two subclasses so callers can tell an
-*already retried* failure from a fresh one:
+``ConnectionError``. The fetcher adds typed errors so callers can tell an
+*already retried* failure from a fresh one -- and a deterministic failure from a
+transient one:
 
 * :class:`TransportError` — the fetcher spent its retry budget on a transport
   problem (timeout, reset, DNS); retrying again one level up would multiply the
@@ -16,6 +17,10 @@ Typed request failures shared by the fetcher and the download mixin.
   refused to retry (a deterministic 4xx) or a retryable one whose budget was
   spent. ``status`` lets the caller report ``http_404`` instead of a misleading
   "network down".
+* :class:`RedirectLimitError` — the redirect chain exceeded the session limit.
+  Like a deterministic 4xx, the same request would follow the same chain again,
+  so neither the fetcher nor a chapter-level retry loop may spend attempts on
+  it.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from __future__ import annotations
 __all__ = [
     "RETRYABLE_STATUS",
     "HttpStatusError",
+    "RedirectLimitError",
     "TransportError",
     "is_transient_error",
 ]
@@ -46,6 +52,27 @@ class TransportError(ConnectionError):
 
     def __init__(self, url: str, reason: BaseException) -> None:
         super().__init__(f"Request to {url} failed: {reason}")
+        self.url = url
+        self.reason = reason
+
+
+class RedirectLimitError(Exception):
+    """
+    The redirect chain exceeded the session's limit.
+
+    Deliberately *not* a :class:`ConnectionError` (which the retry logic treats
+    as transient): the chain is deterministic, so another attempt would only
+    repeat it. ``retryable = False`` states that explicitly for the whole-task
+    retry policy as well.
+    """
+
+    retryable: bool = False
+
+    def __init__(self, url: str, reason: BaseException | None = None) -> None:
+        message = f"Too many redirects for {url}"
+        if reason is not None:
+            message = f"{message}: {reason}"
+        super().__init__(message)
         self.url = url
         self.reason = reason
 

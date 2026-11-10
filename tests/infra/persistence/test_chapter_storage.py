@@ -157,6 +157,53 @@ def test_upsert_chapters_partial_failure_keeps_cache_consistent(
 # ---------------------------------------------------------------------
 
 
+def test_a_failed_batch_does_not_leak_rows_into_the_next_commit(
+    tmp_storage: ChapterStorage,
+):
+    """A batch that failed half-way must be rolled back before the next write.
+
+    SQLite keeps the partial ``executemany`` work in an open transaction.  A
+    later successful commit would otherwise persist those rows while the
+    in-memory flag cache (correctly) does not know about them, so a chapter
+    the caller considers missing would be on disk and ``SUCCEEDED`` would
+    disagree with the database.
+    """
+    good = _make_chapter(1)
+    other = _make_chapter(2)
+    later = _make_chapter(3)
+
+    class HalfWritingConn:
+        """Proxy that inserts the first row, then fails without committing."""
+
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def executemany(self, sql: str, records: object) -> None:
+            first = next(iter(records))  # type: ignore[arg-type,call-overload]
+            self._conn.execute(sql, first)
+            raise sqlite3.OperationalError("disk I/O error")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._conn, name)
+
+    real_conn = tmp_storage._conn
+    assert real_conn is not None
+    tmp_storage._conn = HalfWritingConn(real_conn)  # type: ignore[assignment]
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            tmp_storage.upsert_chapters([good, other])
+    finally:
+        tmp_storage._conn = real_conn
+
+    # The next commit must not smuggle the half-written row in.
+    tmp_storage.upsert_chapters([later])
+
+    assert tmp_storage.get_chapter("chap1") is None
+    assert tmp_storage.get_chapter("chap2") is None
+    assert tmp_storage.get_chapter("chap3") is not None
+    assert tmp_storage.existing_ids() == {"chap3"}
+
+
 def test_dirty_and_clean_ids(tmp_storage: ChapterStorage):
     clean = _make_chapter(1)
     dirty = _make_chapter(2)

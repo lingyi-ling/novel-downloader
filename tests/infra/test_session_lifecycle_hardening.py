@@ -272,3 +272,48 @@ async def test_session_operations_do_not_log_cookie_values(
 
     assert secret not in caplog.text
     assert all(record.name.startswith("novel_downloader") for record in caplog.records)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.asyncio
+async def test_close_survives_caller_cancellation(
+    backend: str, cfg: FetcherConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling ``close()`` must not strand the backend's connection pool.
+
+    The facade detaches the backend before awaiting its shutdown, so a caller
+    cancelled at that point would otherwise drop the only handle to a pool
+    that never finished closing.  The shutdown is shielded: the caller still
+    sees ``CancelledError`` immediately, while the backend keeps closing.
+    """
+    session = _create(backend, cfg)
+    await session.init()
+    raw = session._session
+    assert raw is not None
+
+    close_attr = "aclose" if backend == "httpx" else "close"
+    original = getattr(type(raw), close_attr)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def slow_close(self: Any, *args: Any, **kwargs: Any) -> None:
+        started.set()
+        await release.wait()
+        await original(self, *args, **kwargs)
+        finished.set()
+
+    monkeypatch.setattr(type(raw), close_attr, slow_close)
+
+    closer = asyncio.create_task(session.close())
+    await started.wait()
+    closer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closer
+
+    # The reference is detached, so a concurrent close remains a no-op ...
+    assert session._session is None
+    # ... but the shielded shutdown is still running and completes on its own.
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=5)

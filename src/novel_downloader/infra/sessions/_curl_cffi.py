@@ -45,6 +45,7 @@ from .base import (
     as_connection_error,
     as_timeout_error,
     as_too_many_redirects_error,
+    close_backend_session,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -93,11 +94,13 @@ class CurlCffiSession(BaseSession):
 
         Safe to call repeatedly and concurrently: the backend reference is
         detached before awaiting so a second caller becomes a no-op.  This
-        matters for curl_cffi, whose ``AsyncSession.close`` cannot run twice.
+        matters for curl_cffi, whose ``AsyncSession.close`` cannot run twice;
+        the shielded close also keeps a cancelled caller from aborting the
+        shutdown after the reference is gone.
         """
         session, self._session = self._session, None
         if session is not None:
-            await session.close()
+            await close_backend_session(session.close())
 
     async def get(
         self,
