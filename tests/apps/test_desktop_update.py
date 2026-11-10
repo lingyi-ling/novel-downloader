@@ -733,6 +733,29 @@ def test_update_state_survives_a_broken_preference_read(
     assert state["auto_check"] is True
 
 
+def test_update_state_reports_the_downloaded_size(
+    prefs: dict[str, Any], home: Path, tmp_path: Path
+) -> None:
+    """The bar shows the bytes already on disk, not a stale asset size."""
+    prefs["auto_check_updates"] = False
+    path = tmp_path / "ready.exe"
+    path.write_bytes(_PAYLOAD)
+    bridge = wa.ApiBridge()
+    assert bridge.update_state()["downloaded"] is False
+    assert bridge.update_state()["downloaded_size"] == 0
+
+    bridge._downloaded = wa._DownloadedUpdate(  # noqa: SLF001 - state injection
+        path=path, sha256=_SHA, name=path.name
+    )
+    state = bridge.update_state()
+    assert state["downloaded"] is True
+    assert state["downloaded_size"] == len(_PAYLOAD)
+
+    # A file removed behind the app's back must not break the poll.
+    path.unlink()
+    assert bridge.update_state()["downloaded_size"] == 0
+
+
 def test_download_and_install_survive_unexpected_errors(
     prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1243,7 +1266,31 @@ def test_app_html_resets_the_buttons_after_a_failed_install() -> None:
     final_block = handler.split("} finally {", 1)[1].split("};", 1)[0]
     assert "if (!updates.finished)" in final_block
     assert "setUpdateBusy(false);" in final_block
-    assert 'btn.textContent = t("Download and install");' in final_block
+    # A failed install keeps the downloaded installer, so the reset must
+    # restore "Install and restart" rather than offer the download again.
+    assert (
+        "setUpdateInstallLabel(!!(updates.state && updates.state.downloaded));"
+        in final_block
+    )
+
+
+def test_app_html_declares_the_async_update_result() -> None:
+    """The boot script runs under "use strict": an implicit global throws."""
+    assert '"use strict";' in APP_HTML
+    assert 'const started = await api("download_update_async");' in APP_HTML
+    handler = APP_HTML.split('$("#update-install").onclick', 1)[1]
+    assert "\n        started = await" not in handler
+
+
+def test_app_html_offers_install_when_the_update_is_already_downloaded() -> None:
+    """The label and size follow the downloaded state instead of the asset."""
+    assert "function setUpdateInstallLabel(downloaded)" in APP_HTML
+    assert 't("Install and restart")' in APP_HTML
+    assert "setUpdateInstallLabel(downloaded);" in APP_HTML
+    # The label is refreshed when a background transfer finishes late.
+    assert "setUpdateInstallLabel(true);" in APP_HTML
+    assert "downloaded_size: done.received || done.total || 0" in APP_HTML
+    assert "st.downloaded_size || st.asset_size" in APP_HTML
 
 
 def test_app_html_update_check_failures_are_silent() -> None:
