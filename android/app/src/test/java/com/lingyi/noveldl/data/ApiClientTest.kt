@@ -242,8 +242,9 @@ class ApiClientTest {
         val result = Api.call { Api.service().health() }
 
         assertTrue(result.isFailure)
-        val message = result.exceptionOrNull()?.message ?: ""
-        assertTrue("unexpected message: $message", message.startsWith("网络错误"))
+        val failure = result.exceptionOrNull() as ApiFailure
+        assertEquals(ApiErrorCode.NETWORK, failure.code)
+        assertTrue("missing detail: ${failure.detail}", failure.detail.isNotBlank())
     }
 
     @Test
@@ -255,8 +256,10 @@ class ApiClientTest {
         val result = Api.call { Api.service().health() }
 
         assertTrue(result.isFailure)
-        val message = result.exceptionOrNull()?.message ?: ""
-        assertTrue("unexpected message: $message", message.startsWith("网络错误"))
+        assertEquals(
+            ApiErrorCode.NETWORK,
+            (result.exceptionOrNull() as ApiFailure).code,
+        )
     }
 
     @Test
@@ -267,7 +270,41 @@ class ApiClientTest {
 
         assertTrue(result.isFailure)
         assertNotNull(result.exceptionOrNull())
-        assertEquals(Api.NOT_CONFIGURED_MESSAGE, result.exceptionOrNull()?.message ?: "")
+        // The data layer reports a code; strings.xml owns the wording.
+        assertEquals(
+            ApiErrorCode.NOT_CONFIGURED,
+            (result.exceptionOrNull() as ApiFailure).code,
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // A failed connection to the on-device engine is not a wrong remote
+    // address: standalone mode starts the Python server asynchronously, so the
+    // first requests can race its bootstrap. Report readiness instead of a raw
+    // "connection refused".
+    // ------------------------------------------------------------------
+
+    @Test
+    fun embeddedEngineTransportFailureReportsAReadinessCode() {
+        val failure = Api.transportFailure(
+            EmbeddedEngine.BASE_URL,
+            java.io.IOException("refused"),
+        )
+
+        assertEquals(ApiErrorCode.ENGINE_UNREACHABLE, failure.code)
+        // The raw socket text is kept only as a diagnostic detail.
+        assertEquals("refused", failure.detail)
+    }
+
+    @Test
+    fun remoteTransportFailureIsANetworkErrorWithTheSocketDetail() {
+        val failure = Api.transportFailure(
+            "http://10.0.2.2:8081/",
+            java.io.IOException("Connection refused"),
+        )
+
+        assertEquals(ApiErrorCode.NETWORK, failure.code)
+        assertEquals("Connection refused", failure.detail)
     }
 
     // ------------------------------------------------------------------
@@ -376,8 +413,9 @@ class ApiClientTest {
         val result = Api.call { Api.service().health() }
 
         assertTrue(result.isFailure)
-        val message = result.exceptionOrNull()?.message ?: ""
-        assertTrue("unexpected message: $message", message.startsWith("响应格式错误"))
+        val failure = result.exceptionOrNull() as ApiFailure
+        assertEquals(ApiErrorCode.BAD_RESPONSE, failure.code)
+        assertTrue("missing detail: ${failure.detail}", failure.detail.isNotBlank())
     }
 
     @Test

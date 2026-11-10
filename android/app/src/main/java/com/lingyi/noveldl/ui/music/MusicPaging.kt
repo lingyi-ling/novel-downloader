@@ -19,15 +19,21 @@ const val MUSIC_PAGE_SIZE = 20
 object MusicPaging {
 
     /**
-     * Appends [page] to [current], dropping tracks whose [MusicTrack.id] is
-     * already present (first occurrence wins, order preserved). Returns
-     * [current] itself when the page adds nothing, so callers can compare
-     * sizes to detect a page that contributed no new tracks.
+     * Appends [page] to [current], dropping tracks already present (first
+     * occurrence wins, order preserved). Identity is
+     * [MusicJobResults.trackKey] (`provider` + `id`), never the id alone: an
+     * aggregate search returns rows from several platforms, and two of them
+     * routinely use the same numeric song id for different songs — deduping by
+     * id would silently drop one row, while the source label and download
+     * request would then point at the wrong platform.
+     *
+     * Returns [current] itself when the page adds nothing, so callers can
+     * compare sizes to detect a page that contributed no new tracks.
      */
     fun merge(current: List<MusicTrack>, page: List<MusicTrack>): List<MusicTrack> {
         if (page.isEmpty()) return current
-        val seen = current.mapTo(HashSet()) { it.id }
-        val additions = page.filter { seen.add(it.id) }
+        val seen = current.mapTo(HashSet()) { MusicJobResults.trackKey(it) }
+        val additions = page.filter { seen.add(MusicJobResults.trackKey(it)) }
         return if (additions.isEmpty()) current else current + additions
     }
 

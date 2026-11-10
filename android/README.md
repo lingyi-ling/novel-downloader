@@ -3,7 +3,7 @@
 原生 Android 客户端（Kotlin + Jetpack Compose），通过本机的 **本地 REST API**（`novel-api`）工作：
 搜索、下载任务队列、历史文件、多平台音乐下载。
 
-当前版本：**1.1.0**（`versionCode 2`，与主项目 `novel_downloader.__version__` 一致）。
+当前版本：**1.28.1**（`versionCode 40`，与主项目 `novel_downloader.__version__` 一致）。
 
 ## 环境要求
 
@@ -73,7 +73,7 @@ keytool -genkeypair -v -keystore android/release.jks -alias noveldl \
 | 搜索 | 关键字 + 站点过滤（逗号分隔，留空=全部 57 个站点），结果一键入队 |
 | 任务 | 进行中 / 排队 / 完成分区，进度条与章节数，2 秒自动刷新，可取消 |
 | 历史 | 导出文件列表（名称/大小/时间），点击经系统 DownloadManager 下载到公共 Downloads 目录；设置了 API 密钥时自动附加 `X-API-Key` 请求头 |
-| 音乐 | 25 个平台，搜索、多选、创建下载任务并轮询进度 |
+| 音乐 | 28 个平台，搜索、多选、创建下载任务并轮询进度 |
 | 设置 | API 地址与密钥（DataStore 持久化） |
 
 ## 说明

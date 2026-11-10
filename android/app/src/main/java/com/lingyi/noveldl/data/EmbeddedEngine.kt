@@ -22,11 +22,28 @@ object EmbeddedEngine {
     private var started = false
 
     @Volatile
+    private var ready = false
+
+    @Volatile
     var lastError: String? = null
         private set
 
+    /**
+     * Whether the bootstrap was scheduled. This becomes true *before* the
+     * interpreter has started and the loopback port is listening, so it only
+     * means "will not be scheduled twice" — use [isReady] to decide whether a
+     * request can succeed.
+     */
     val isStarted: Boolean
         get() = started
+
+    /**
+     * Whether the bootstrap finished successfully and the loopback server is
+     * listening. Stays false while starting and after a failed start (see
+     * [lastError]).
+     */
+    val isReady: Boolean
+        get() = ready
 
     /**
      * Boots the engine at most once per process. Safe (and cheap) to call on
@@ -71,6 +88,7 @@ object EmbeddedEngine {
                 {
                     try {
                         bootstrap()
+                        ready = true
                     } catch (t: Throwable) {
                         lastError = t.message ?: t.javaClass.simpleName
                     }
@@ -85,6 +103,7 @@ object EmbeddedEngine {
     internal fun resetForTest() {
         synchronized(this) {
             started = false
+            ready = false
             lastError = null
         }
     }

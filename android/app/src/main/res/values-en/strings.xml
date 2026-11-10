@@ -23,6 +23,12 @@
     <string name="state_ready">Ready</string>
     <string name="section_count">%1$s (%2$d)</string>
 
+    <string name="api_error_not_configured">The API is not configured. Enter an API address in Settings first.</string>
+    <string name="api_error_engine_unreachable">The built-in engine is not ready yet (starting or failed to start). Try again shortly; if it keeps failing, check the standalone engine status in Settings.</string>
+    <string name="api_error_network">Network error: %1$s</string>
+    <string name="api_error_bad_response">Invalid response format: %1$s</string>
+    <string name="api_error_unknown">Request failed: %1$s</string>
+
     <string name="search_hint">Enter a keyword</string>
     <string name="search_sites_hint">Search sites (empty = all)</string>
     <string name="search_sites_all">All sites</string>
@@ -87,6 +93,16 @@
     <string name="history_download_no_manager">System download service unavailable</string>
     <string name="history_download_unknown_error">Unknown error</string>
     <string name="history_download_custom_done">Saved to %1$s: %2$s</string>
+    <string name="history_download_http_error">Server returned HTTP %1$d; the file was not saved</string>
+    <string name="history_download_network_error">Network error; check the connection or API address</string>
+    <string name="download_error_no_space">Not enough storage space</string>
+    <string name="download_error_file">Could not write the file; check the download folder permission or free space</string>
+    <string name="download_error_file_exists">A file with the same name already exists</string>
+    <string name="download_error_http_data">The server response was interrupted</string>
+    <string name="download_error_http_code">The server returned an error status</string>
+    <string name="download_error_redirects">Too many redirects</string>
+    <string name="download_error_cannot_resume">The download could not be resumed</string>
+    <string name="download_error_unknown">Unknown error</string>
 
     <string name="notification_channel_tasks">Task alerts</string>
     <string name="notification_channel_tasks_desc">Alerts when a download task completes or fails</string>
@@ -107,6 +123,9 @@
     <string name="music_job_progress">Downloading %1$d/%2$d</string>
     <string name="music_job_done">Done: %1$d succeeded, %2$d skipped, %3$d failed</string>
     <string name="music_job_failed">Job failed: %1$s</string>
+    <string name="music_job_fail_reason">Reason: %1$s</string>
+    <string name="music_job_save_failed">%1$d file(s) could not be saved to this device: %2$s</string>
+    <string name="music_job_server_files">Done; the files are kept on the server: %1$s</string>
     <string name="music_no_selection">Select songs first</string>
     <string name="music_vip">VIP</string>
     <string name="music_unknown_artist">Unknown artist</string>
@@ -122,6 +141,7 @@
     <string name="music_export_failed">Playlist export failed: %1$s</string>
     <string name="music_export_unavailable">Playlist export unavailable: %1$s</string>
     <string name="music_export_engine_unavailable">The music engine is not ready yet; retry shortly or check Settings</string>
+    <string name="music_export_engine_failed">The music engine failed to start: %1$s</string>
 
     <string name="follow_add">Add</string>
     <string name="follow_add_dialog_title">Follow a book</string>

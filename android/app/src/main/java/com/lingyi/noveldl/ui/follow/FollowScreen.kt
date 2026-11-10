@@ -38,6 +38,7 @@ import com.lingyi.noveldl.data.WatchCheckItem
 import com.lingyi.noveldl.data.WatchEntry
 import com.lingyi.noveldl.data.WatchlistAddRequest
 import com.lingyi.noveldl.data.WatchlistCheckRequest
+import com.lingyi.noveldl.ui.apiErrorMessage
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,7 +70,7 @@ fun FollowScreen(onMessage: (String) -> Unit) {
                 books = it.books
                 error = null
             }
-            .onFailure { error = it.message }
+            .onFailure { error = apiErrorMessage(context, it) }
         refreshing = false
     }
 
@@ -91,7 +92,7 @@ fun FollowScreen(onMessage: (String) -> Unit) {
                     showAddDialog = false
                     refreshNow()
                 }
-                .onFailure { error = it.message }
+                .onFailure { error = apiErrorMessage(context, it) }
             adding = false
         }
     }
@@ -111,7 +112,7 @@ fun FollowScreen(onMessage: (String) -> Unit) {
                     onMessage(context.getString(R.string.follow_remove_done))
                     refreshNow()
                 }
-                .onFailure { onMessage(context.getString(R.string.state_error, it.message ?: "")) }
+                .onFailure { onMessage(context.getString(R.string.state_error, apiErrorMessage(context, it))) }
         }
     }
 
@@ -128,7 +129,7 @@ fun FollowScreen(onMessage: (String) -> Unit) {
                     )
                     refreshNow()
                 }
-                .onFailure { onMessage(context.getString(R.string.state_error, it.message ?: "")) }
+                .onFailure { onMessage(context.getString(R.string.state_error, apiErrorMessage(context, it))) }
             checking = false
         }
     }
@@ -153,7 +154,7 @@ fun FollowScreen(onMessage: (String) -> Unit) {
                     )
                 }
                 .onFailure {
-                    onMessage(context.getString(R.string.state_error, it.message ?: ""))
+                    onMessage(context.getString(R.string.state_error, apiErrorMessage(context, it)))
                 }
         }
     }

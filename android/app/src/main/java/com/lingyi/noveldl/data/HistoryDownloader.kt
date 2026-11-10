@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -120,7 +121,12 @@ object HistoryDownloader {
                     .build()
                 client.newCall(builder.build()).execute().use { response ->
                     if (!response.isSuccessful) {
-                        throw IllegalStateException("HTTP ${response.code}")
+                        throw IllegalStateException(
+                            context.getString(
+                                R.string.history_download_http_error,
+                                response.code,
+                            ),
+                        )
                     }
                     val body = response.body
                         ?: throw IllegalStateException(
@@ -136,6 +142,15 @@ object HistoryDownloader {
                 }
                 fileName
             }.let { Result.success(it) }
+        } catch (e: IOException) {
+            // Never leave a half-written document behind.
+            created?.let { runCatching { it.delete() } }
+            Result.failure(
+                IllegalStateException(
+                    context.getString(R.string.history_download_network_error),
+                    e,
+                ),
+            )
         } catch (e: Exception) {
             // Never leave a half-written document behind.
             created?.let { runCatching { it.delete() } }

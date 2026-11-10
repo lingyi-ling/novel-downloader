@@ -66,6 +66,7 @@ import com.lingyi.noveldl.data.encodeSelectedSites
 import com.lingyi.noveldl.data.selectedSitesParam
 import com.lingyi.noveldl.data.siteSummary
 import com.lingyi.noveldl.data.toggleSiteSelection
+import com.lingyi.noveldl.ui.apiErrorMessage
 import kotlinx.coroutines.launch
 
 @Composable
@@ -125,7 +126,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 siteLabels = it.search
                 sitesError = null
             }
-            .onFailure { sitesError = it.message }
+            .onFailure { sitesError = apiErrorMessage(context, it) }
         sitesLoading = false
     }
 
@@ -154,7 +155,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                     results = it.results
                     total = it.total
                 }
-                .onFailure { error = it.message }
+                .onFailure { error = apiErrorMessage(context, it) }
             loading = false
         }
     }
@@ -169,7 +170,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                     results = it.results
                     total = it.total
                 }
-                .onFailure { error = it.message }
+                .onFailure { error = apiErrorMessage(context, it) }
             loading = false
         }
     }
@@ -181,7 +182,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
         scope.launch {
             Api.call { Api.service().browseCategories(browseSite) }
                 .onSuccess { categories = it.groups }
-                .onFailure { categoriesError = it.message }
+                .onFailure { categoriesError = apiErrorMessage(context, it) }
             categoriesLoading = false
         }
     }
@@ -204,7 +205,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                     results = it.results
                     total = it.total
                 }
-                .onFailure { error = it.message }
+                .onFailure { error = apiErrorMessage(context, it) }
             loading = false
         }
     }
@@ -222,7 +223,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             }.onSuccess {
                 onMessage(context.getString(R.string.search_task_added))
             }.onFailure {
-                onMessage(context.getString(R.string.state_error, it.message ?: ""))
+                onMessage(context.getString(R.string.state_error, apiErrorMessage(context, it)))
             }
         }
     }
@@ -242,7 +243,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                     onMessage(context.getString(R.string.search_follow_added))
                 }
                 .onFailure {
-                    onMessage(context.getString(R.string.state_error, it.message ?: ""))
+                    onMessage(context.getString(R.string.state_error, apiErrorMessage(context, it)))
                 }
         }
     }
