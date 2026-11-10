@@ -64,4 +64,4 @@ https://www.haiwaishubao.com/book/102659/5335635.html
 
 * 站点适配器位于 `plugins/sites/haiwaishubao/`，已注册下载；实测详情页、目录分页、章节分页均可抓取并解析。
 * 站点主域名 `www.haiwaishubao.com` 当前 301 跳转至 `www.haiwaishubao1.com`，抓取时会自动跟随跳转。
-* 搜索未注册：搜索请求为 POST，旧域名 301 跳转后 `aiohttp` 会改为 GET 并丢失表单，返回空结果；新域名直连搜索也受 30 秒限流且未返回可用结果。
+* 搜索器（`searcher.py`）已实现并注册到插件注册表，但站点未列入 `SEARCH_SUPPORT_SITES`：搜索请求为 POST，旧域名 301 跳转后 `aiohttp` 会改为 GET 并丢失表单，返回空结果；新域名直连搜索也受 30 秒限流且未返回可用结果。

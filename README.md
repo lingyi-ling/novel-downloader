@@ -20,7 +20,7 @@
 ## 功能特性
 
 - **多站点搜索:** 覆盖 59 个搜索站点与 84 个下载站点, 支持聚合搜索、排序与结果筛选
-- **内置更新:** 桌面 / CLI / 安卓每日检查新版本, 下载后先做 SHA-256 校验再交付安装; 安卓走系统安装器, 不静默安装
+- **内置更新:** 桌面 / CLI / 安卓每日检查新版本, 下载后先做 SHA-256 校验; 桌面退出时自动安装 (安装版原地覆盖, 便携版替换当前目录), 安卓走系统安装器, 不静默安装
 - **下载队列与进度:** 支持断点续爬、队列调度与实时进度显示
 - **多格式导出:** TXT / EPUB / HTML
 - **历史导出:** 从已下载的书目中随时重新导出
@@ -29,11 +29,11 @@
 - **可插拔 HTTP 后端:** `aiohttp` / `httpx` / `curl_cffi`
 - **文本处理流水线:** 去广告、繁简转换、自动翻译等
 - **图片章节与混淆章节支持 (可选)**
-- **多平台音乐下载:** 支持 25 个音乐平台的搜索与下载
+- **多平台音乐下载:** 支持 28 个音乐平台；默认聚合搜索全部平台, 同一首歌合并为一行并标注来源, 支持歌单导出 (M3U8)
 - **插件系统:** 可扩展站点解析器、导出器、Pipeline 等
 - **规则书源 (Book Source):** 新增站点只需写 JSON 规则，无需编写 Python 代码
 - **CLI + 本地 REST API + 桌面客户端:** `novel-cli`、`novel-api`、`novel-desktop` 共享同一服务层
-- **Android 客户端:** 原生 Kotlin/Compose App（`android/`），通过本地 API 连接电脑端
+- **Android 客户端:** 原生 Kotlin/Compose App（`android/`），可连接电脑端 API；也可开启「独立引擎」在本机运行完整服务层（书与音乐均在手机本地）
 
 ---
 
@@ -109,8 +109,8 @@ novel-cli download https://www.example.com/book/123/
 # 使用站点 + 书籍 ID
 novel-cli download --site n23qb 12282
 
-# 搜索并下载音乐
-novel-cli music search "关键词" --platform netease
+# 搜索并下载音乐（默认搜索全部平台, 同一首歌合并为一行）
+novel-cli music search "关键词"
 novel-cli music download "关键词" --pick 1
 ```
 

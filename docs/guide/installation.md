@@ -45,6 +45,16 @@ pybabel compile -d src/novel_downloader/locales
 pip install .
 ```
 
+### Windows 桌面安装版 (Inno Setup)
+
+从 GitHub Releases 下载 `NovelDownloader-setup-<version>-x64.exe` 时，安装行为如下：
+
+* **按当前用户安装**，默认目录为 `%LOCALAPPDATA%\Programs\NovelDownloader`，不需要管理员权限（`PrivilegesRequired=lowest`）。更新器按这个默认路径识别安装版；安装到别处会被当作便携版处理。
+* **升级**直接原地覆盖安装目录；安装器会先删除旧版的 `_internal` 再写入新文件，避免已移除的插件目录残留。应用内更新会以静默参数启动同一个安装器。
+* **运行中的实例**由命名互斥量 `NovelDownloader-UpdateMutex` 识别，安装器会先关闭旧进程再替换文件。
+* **卸载**只移除安装目录和快捷方式，不会删除 `%LOCALAPPDATA%\novel_downloader` 下的配置、下载记录、缓存和登录态；需要彻底清理时请手动删除该目录（其中包含账号凭据，删除前请确认）。
+* **免安装 (便携) 版**解压到任意目录即可使用，配置、日志、缓存和登录态同样保存在 `%LOCALAPPDATA%\novel_downloader`（可用 `NOVEL_HOME` 覆盖），不会写进程序目录。
+
 ---
 
 ## 可选功能与依赖说明
@@ -97,8 +107,8 @@ pip install "novel-downloader[music]"
 # 列出可用平台
 novel-cli music platforms
 
-# 搜索歌曲
-novel-cli music search "关键词" --platform netease
+# 搜索歌曲 (默认搜索全部平台; 加 --platform netease 可只搜网易云)
+novel-cli music search "关键词"
 
 # 下载指定的搜索结果
 novel-cli music download "关键词" --pick 1

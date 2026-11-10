@@ -20,6 +20,7 @@ Supports resumable crawling, download queues with progress, multi-format exporti
 ## Features
 
 * Multi-site search: 59 search sites and 84 download sites, with aggregate search, ranking, and filtering
+* Built-in updates: desktop, CLI and Android check daily; downloads are SHA-256 verified before use. The desktop installs on quit (installer replaces in place, portable replaces its own folder); Android hands the APK to the system installer and never installs silently
 * Download queue and progress: resumable crawling, queue scheduling, and live progress
 * Export to TXT, EPUB, and HTML
 * History export: re-export previously downloaded books at any time
@@ -28,11 +29,11 @@ Supports resumable crawling, download queues with progress, multi-format exporti
 * Pluggable HTTP backends: `aiohttp`, `httpx`, `curl_cffi`
 * Text processing pipeline: ad removal, zh conversion, translation, etc.
 * Optional support for image chapters and obfuscated content
-* Multi-platform music download: search and download across 25 music platforms
+* Multi-platform music download: 28 music platforms, with all-platform aggregate search that merges the same song into one row with its sources, plus M3U8 playlist export
 * Plugin system for site parsers, exporters, and processing pipelines
 * Rule-driven book sources: add a site with a JSON rule, no Python code required
 * CLI + local REST API + desktop client: `novel-cli`, `novel-api`, and `novel-desktop` share the same service layer
-* Android client: native Kotlin/Compose app (`android/`) that talks to the local API
+* Android client: native Kotlin/Compose app (`android/`) that can talk to a PC-side API or run the full service layer on-device via its optional standalone engine (books and music alike)
 
 ---
 
@@ -112,8 +113,8 @@ novel-cli download https://www.example.com/book/123/
 # Using site + book ID
 novel-cli download --site n23qb 12282
 
-# Search and download music
-novel-cli music search "keyword" --platform netease
+# Search and download music (default: every platform, same song merged into one row)
+novel-cli music search "keyword"
 novel-cli music download "keyword" --pick 1
 ```
 
@@ -129,7 +130,7 @@ After installing the `api` extra, start the local-only REST service with `novel-
 novel-api
 ```
 
-See [Local REST API](docs/guide/api.md) for endpoints, authentication, and request examples.
+See [Local REST API](docs/guide/api.en.md) for endpoints, authentication, and request examples.
 
 ---
 

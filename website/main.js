@@ -7,6 +7,13 @@ const $$ = (s) => [...document.querySelectorAll(s)];
 /* ------------------------------------------------ theme (persisted) */
 const root = document.documentElement;
 const themeColorMetas = $$('meta[name="theme-color"]');
+const reduceMotion = window.matchMedia
+  ? window.matchMedia("(prefers-reduced-motion: reduce)")
+  : { matches: false };
+function syncThemeBtn() {
+  const btn = $("#theme-btn");
+  if (btn) btn.setAttribute("aria-pressed", String(root.dataset.theme === "dark"));
+}
 function syncThemeColor() {
   const bg = root.dataset.theme === "dark" ? "#0b1220" : "#f7f9fc";
   // once the user picks a theme manually, drop the media hints so the
@@ -25,18 +32,20 @@ if (storedTheme === "dark" || storedTheme === "light") {
 } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
   root.dataset.theme = "dark";
 }
+syncThemeBtn();
 $("#theme-btn").addEventListener("click", () => {
   const next = root.dataset.theme === "dark" ? "light" : "dark";
   root.dataset.theme = next;
   try { localStorage.setItem("noveldl-theme", next); } catch { /* private mode */ }
   syncThemeColor();
+  syncThemeBtn();
 });
 
 /* ------------------------------------------------ i18n (zh source of truth, data-en swap) */
 const langBtn = $("#lang-btn");
 const META_DESC = {
-  zh: "异步、模块化、可扩展的小说下载工具链：84 个下载站点、59 个搜索源、25 个音乐平台，CLI / REST API / Windows 桌面 / Android 四端同源。",
-  en: "Async, modular, extensible novel-downloading toolkit: 84 download sites, 59 search sources and 25 music platforms — CLI, REST API, Windows desktop and Android share one service layer.",
+  zh: "异步、模块化、可扩展的小说下载工具链：84 个下载站点、59 个搜索源、28 个音乐平台，CLI / REST API / Windows 桌面 / Android 四端同源。",
+  en: "Async, modular, extensible novel-downloading toolkit: 84 download sites, 59 search sources and 28 music platforms — CLI, REST API, Windows desktop and Android share one service layer.",
 };
 function currentLang() {
   try { return localStorage.getItem("noveldl-lang") || "zh"; } catch { return "zh"; }
@@ -50,8 +59,8 @@ function applyLang(lang) {
     el.innerHTML = isEn ? el.dataset.en : el.dataset.zh;
   });
   document.title = isEn
-    ? "Novel Downloader — aggregate search · async downloads · four clients"
-    : "Novel Downloader — 多站点聚合 · 异步下载 · 四端同源";
+    ? "BookTone — aggregate search · async downloads · four clients"
+    : "书音 BookTone — 多站点聚合 · 异步下载 · 四端同源";
   const metaDesc = document.querySelector('meta[name="description"]');
   if (metaDesc) metaDesc.setAttribute("content", META_DESC[isEn ? "en" : "zh"]);
   // keep control labels in the active language for screen readers
@@ -60,12 +69,17 @@ function applyLang(lang) {
     ["theme-btn", "切换主题", "Toggle theme"],
     ["burger-btn", "打开菜单", "Open menu"],
     ["to-top", "回到顶部", "Back to top"],
+    ["appwin", "书音 BookTone 桌面客户端预览", "BookTone desktop app preview"],
     ["start-tabs", "快速开始方式", "Quick start options"],
   ];
   labels.forEach(([id, zh, en]) => {
     const el = document.getElementById(id);
     if (el) el.setAttribute("aria-label", isEn ? en : zh);
   });
+  const stars = document.getElementById("gh-stars");
+  if (stars && stars.dataset.count) {
+    stars.setAttribute("aria-label", starsLabel(stars.dataset.count));
+  }
 }
 // hreflang deep link: ?lang=zh / ?lang=en wins once and is persisted
 (() => {
@@ -143,6 +157,10 @@ if ("IntersectionObserver" in window) {
 const counters = $$("[data-count]");
 const animateCount = (el) => {
   const target = Number(el.dataset.count) || 0;
+  if (reduceMotion.matches) {
+    el.textContent = String(target);
+    return;
+  }
   const started = performance.now();
   const duration = 900;
   const tick = (now) => {
@@ -228,7 +246,7 @@ if (toTop) {
     { passive: true },
   );
   toTop.addEventListener("click", () =>
-    window.scrollTo({ top: 0, behavior: "smooth" }),
+    window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" }),
   );
 }
 
@@ -263,6 +281,9 @@ async function ghJson(path, cacheKey) {
 function formatStars(n) {
   return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
+function starsLabel(n) {
+  return n + (currentLang() === "en" ? " GitHub stars" : " 个 GitHub 星标");
+}
 const starsEl = $("#gh-stars");
 if (starsEl) {
   ghJson("/repos/lingyi-ling/novel-downloader", "gh-repo")
@@ -271,7 +292,8 @@ if (starsEl) {
       if (typeof d.stargazers_count === "number" && n) {
         n.textContent = formatStars(d.stargazers_count);
         starsEl.hidden = false;
-        starsEl.setAttribute("aria-label", d.stargazers_count + " GitHub stars");
+        starsEl.dataset.count = String(d.stargazers_count);
+        starsEl.setAttribute("aria-label", starsLabel(d.stargazers_count));
       }
     })
     .catch(() => {});

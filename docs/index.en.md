@@ -72,9 +72,11 @@ Core features include:
 
 ### Multi-platform Music Download
 
-* Supports 25 music platforms (NetEase, QQ Music, Kugou, Kuwo, Migu, Spotify, TIDAL, and more)
+* Supports 28 music platforms (NetEase, QQ Music, Kugou, Kuwo, Migu, Spotify, TIDAL, and more)
+* All-platform aggregate search by default: the same song merges into one row with its sources; a single platform can still be targeted
 * Keyword search per platform, then download by result index or song ID
 * Optional audio quality level; output directory and tag embedding follow the music settings
+* M3U8 playlist export and per-platform connectivity health checks
 * `--json` output for scripts and third-party integrations
 
 ---
@@ -212,14 +214,17 @@ pip install "novel-downloader[music]"
 # List available platforms
 novel-cli music platforms
 
-# Search for songs
+# Search for songs (default: every platform, same song merged into one row)
+novel-cli music search "keyword"
+
+# Search NetEase only
 novel-cli music search "keyword" --platform netease
 
 # Download a chosen search result
 novel-cli music download "keyword" --pick 1
 ```
 
-For option details, see: [CLI Usage Guide - music subcommand](guide/cli-examples.md#7-music-subcommand).
+For option details, see: [CLI Usage Guide - music subcommand](guide/cli-examples.en.md#7-music-subcommand).
 
 ---
 

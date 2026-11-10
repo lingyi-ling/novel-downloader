@@ -37,6 +37,14 @@ novel-cli update --json    # machine-readable output
 - Windows: double-click `NovelDownloader-setup-<version>-x64.exe`
 - Other platforms: extract the archive and replace the installed files
 
+## Desktop auto-update
+
+The desktop app checks once every 24 hours by default; a newer version is downloaded in the background and the sidebar shows byte-level progress. Transfers use an HTTP `Range` request to reuse the existing `.part` file, so an interrupted download resumes instead of starting over, with up to 3 retries.
+
+- **Installer build**: on quit, the verified Inno Setup installer starts silently and replaces the installation directory in place, then restarts the app.
+- **Portable build**: the downloaded asset is a zip; after the app exits, a PowerShell helper waits for the process to end, expands the zip over the current folder and restarts the app, rather than installing a second copy into `%LOCALAPPDATA%`.
+- Leftover `.part` files older than a day and finished packages older than a week are pruned from the update folder.
+
 ## What gets verified
 
 1. The download URL in the manifest must be **HTTPS**;

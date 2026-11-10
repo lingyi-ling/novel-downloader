@@ -100,7 +100,7 @@ X-API-Key: my-secret
 | `POST` | `/api/v1/watchlist/check` | 检查追更书籍的新章节，不启动下载。 |
 | `GET` | `/api/v1/history` | 列出导出目录中的 `txt`/`epub` 文件。 |
 | `GET` | `/api/v1/music/platforms` | 音乐平台列表与使用提示。 |
-| `POST` | `/api/v1/music/search` | 在指定音乐平台搜索歌曲。 |
+| `POST` | `/api/v1/music/search` | 在一个平台或全部平台搜索歌曲（`platform` 默认 `all`）。 |
 | `POST` | `/api/v1/music/download` | 同步下载一首或多首歌曲。 |
 | `POST` | `/api/v1/music/jobs` | 创建异步音乐下载任务，返回 `202 {job_id}`。 |
 | `GET` | `/api/v1/music/jobs/{job_id}` | 查询异步音乐任务状态与进度。 |
@@ -543,28 +543,48 @@ curl -s -X POST "$BASE/api/v1/login/requests/<req_id>" \
 }
 ```
 
-`POST /api/v1/music/search`：
+`POST /api/v1/music/search` 默认搜索全部已注册平台；`platform` 可省略或传 `all`：
 
 ```json
-{"platform": "netease", "keyword": "晴天", "limit": 20}
+{"platform": "all", "keyword": "晴天", "limit": 20}
 ```
 
-响应中的 `tracks` 使用统一的 Track 结构，可直接原样传给下载端点。
+全部平台搜索会并发查询，同一首歌合并为一行，`tracks[].sources` 列出命中的平台 key（最佳来源在前）。响应额外包含 `search_id` 与 `platforms` 统计：
+
+```json
+{
+  "platform": "all",
+  "total": 2,
+  "search_id": "9f2c1b0a9d8e4f7c8b6a5d4e",
+  "tracks": [
+    {"id": "186016", "name": "晴天", "artists": "周杰伦", "provider": "netease", "sources": ["netease", "qq"]}
+  ],
+  "platforms": [
+    {"platform": "netease", "ok": true, "count": 1, "error": ""},
+    {"platform": "qq", "ok": true, "count": 1, "error": ""}
+  ]
+}
+```
+
+单平台请求（如 `"platform": "netease"`）保持 `{"total", "tracks", "search_id", "platform"}` 形状。`tracks` 使用统一的 Track 结构，可直接原样传给下载端点；`search_id` 建议一并回传（见下）。
 
 `POST /api/v1/music/download`：
 
 ```json
 {
-  "platform": "netease",
-  "tracks": [{"id": "186016", "name": "晴天", "artists": "周杰伦"}],
+  "platform": "all",
+  "search_id": "9f2c1b0a9d8e4f7c8b6a5d4e",
+  "tracks": [{"id": "186016", "name": "晴天", "artists": "周杰伦", "sources": ["netease", "qq"]}],
   "level": "exhigh",
   "out_dir": "D:/Music"
 }
 ```
 
-`level` 可选 `hires`、`lossless`、`exhigh`、`higher`、`standard`；
-`out_dir` 省略时使用音乐模块的默认下载目录。单次请求最多提交 `200` 首曲目
-（`tracks` 超限返回 `422`）。
+- `platform` 默认 `all`：每首歌按自己的 `provider` 下载；显式传平台 key 会覆盖该行为。
+- `search_id` 取自搜索响应。搜索结果里的直链解析数据无法经 JSON 往返，回传它可让服务端取回原始 Track 对象；缓存保留 30 分钟、最多 32 份，过期或进程重启后需重新搜索。
+- `level` 可选 `hires`、`lossless`、`exhigh`、`higher`、`standard`；
+  `out_dir` 省略时使用音乐模块的默认下载目录。单次请求最多提交 `200` 首曲目
+  （`tracks` 超限返回 `422`）。
 
 响应：
 
@@ -594,8 +614,9 @@ curl -s -X POST "$BASE/api/v1/music/jobs" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-        "platform": "netease",
-        "tracks": [{"id": "186016", "name": "晴天", "artists": "周杰伦"}],
+        "platform": "all",
+        "search_id": "9f2c1b0a9d8e4f7c8b6a5d4e",
+        "tracks": [{"id": "186016", "name": "晴天", "artists": "周杰伦", "sources": ["netease", "qq"]}],
         "level": "exhigh",
         "out_dir": "D:/Music"
       }'
@@ -665,7 +686,7 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
 - `out_path` 以 `.m3u` / `.m3u8` 结尾时视为文件路径；其他值视为目录，
   并在其中生成 `playlist-<UTC 时间戳>.m3u8`。
 - 省略 `out_path` 时写入音乐设置的 `out_dir`（`music settings out_dir`）。
-- `platform` 必须是 `/music/platforms` 返回的 key，否则返回 `400`。
+- `platform` 可传 `all`（聚合搜索的结果混在一起时使用）；传具体平台 key 时会校验，未知 key 返回 `400`。歌单只记录文件位置，因此这个字段不影响写入内容。
 
 响应：
 

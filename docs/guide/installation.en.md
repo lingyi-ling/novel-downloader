@@ -45,6 +45,16 @@ Install:
 pip install .
 ```
 
+### Windows Desktop Installer (Inno Setup)
+
+When you download `NovelDownloader-setup-<version>-x64.exe` from GitHub Releases:
+
+* **Per-user install**, by default into `%LOCALAPPDATA%\Programs\NovelDownloader`; no administrator rights are required (`PrivilegesRequired=lowest`). The updater recognizes this default path as an installer copy; a copy installed elsewhere is treated as portable.
+* **Upgrade** overwrites the install directory in place. Setup deletes the old `_internal` before writing the new build, so plugin directories removed from the product do not linger. The in-app updater launches the same installer with silent flags.
+* **A running instance** is identified by the named mutex `NovelDownloader-UpdateMutex`; Setup closes the old process before replacing files.
+* **Uninstall** removes only the install directory and shortcuts. It does not delete configuration, download history, caches, or login state under `%LOCALAPPDATA%\novel_downloader`. To remove everything, delete that directory manually (it contains account credentials, so review it first).
+* **Portable (no-install) builds** can be extracted to any directory. Configuration, logs, caches, and login state still live in `%LOCALAPPDATA%\novel_downloader` (overridable with `NOVEL_HOME`) and are not written into the program folder.
+
 ---
 
 ## Optional Features and Dependencies
@@ -97,8 +107,8 @@ pip install "novel-downloader[music]"
 # List available platforms
 novel-cli music platforms
 
-# Search for songs
-novel-cli music search "keyword" --platform netease
+# Search for songs (default: every platform; add --platform netease for NetEase only)
+novel-cli music search "keyword"
 
 # Download a chosen search result
 novel-cli music download "keyword" --pick 1

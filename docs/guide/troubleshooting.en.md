@@ -359,14 +359,14 @@ python -c "import importlib.util as u; print('mutagen', bool(u.find_spec('mutage
 
 3. Some platforms have extra requirements:
 
-   * Apple Music / SoundCloud need `pywidevine`.
-   * YouTube needs `ytmusicapi` and an executable Node (`node` or `nodejs`).
+   * Apple Music / SoundCloud need `pywidevine`; DRM decryption also needs your own CDM (a `.wvd` device file), and SoundCloud's HLS downloads need an external `N_m3u8DL-RE`.
+   * YouTube search needs `ytmusicapi` (not Node); downloads rely on a third-party parsing service and fail when it is unreachable.
    * Some HLS/streaming formats need `ffmpeg` installed on the system.
 
    Check:
 
    ```bash
-   python -c "import importlib.util as u, shutil; print('pywidevine', bool(u.find_spec('pywidevine'))); print('ytmusicapi', bool(u.find_spec('ytmusicapi'))); print('node', shutil.which('node') or shutil.which('nodejs')); print('ffmpeg', shutil.which('ffmpeg'))"
+   python -c "import importlib.util as u, shutil; print('pywidevine', bool(u.find_spec('pywidevine'))); print('ytmusicapi', bool(u.find_spec('ytmusicapi'))); print('ffmpeg', shutil.which('ffmpeg'))"
    ```
 
 4. Platforms that need account credentials (such as Spotify, TIDAL, and Soda Music) also require cookies or tokens in the platform credentials; otherwise search may return nothing.
@@ -434,7 +434,112 @@ curl -x http://127.0.0.1:7890 -I https://www.google.com
 
 ---
 
-## 8. Still Stuck?
+## 8. Some Music Platforms Do Not Respond / Are Very Slow in Aggregate Search
+
+**Symptoms**: searching "all platforms" returns only a few songs after the progress bar finishes; some platforms never return anything, or the whole search waits out the budget. Searching that platform explicitly may still work.
+
+**How it works** (`apps/music/aggregate.py`):
+
+* Each platform runs in its own thread, and the aggregate search has a wall-clock budget: 5 seconds by default (`DEFAULT_TIMEOUT`), with 6 seconds passed by the desktop progressive aggregate search (`SEARCH_SITE_TIMEOUT`).
+* As soon as one platform returns results, the search waits 2 more seconds and stops (`EARLY_EXIT_GRACE`); platforms that have not answered are skipped for this search and are not counted as failures.
+* A platform that raises, or that still has not answered when the budget runs out, is recorded as failed and short-circuited for **10 minutes** (`FAILURE_TTL`), during which aggregate searches skip it; platforms skipped by the 2-second early exit are not marked as failures.
+* Two consecutive searches that take ≥2 seconds and return zero results mark the platform as "slow and empty", skipping it for **5 minutes** (`SLOW_EMPTY_STREAK` / `SLOW_EMPTY_TTL`).
+* This state is written to `search_stats.json` in the music data directory and survives a restart. The default is `%LOCALAPPDATA%\novel_downloader\music\search_stats.json`; set `NOVEL_MUSIC_HOME` to replace the whole music data directory.
+
+**Diagnose**:
+
+1. Verify one platform first; an explicitly selected platform bypasses the breaker:
+
+   ```bash
+   novel-cli music search "keyword" --platform netease --limit 5
+   ```
+
+2. Wait 10 minutes (failure) or 5 minutes (slow-and-empty) for automatic recovery. You can also quit every client and delete `search_stats.json`; the next search recreates it.
+3. To keep your settings but start from a clean state, point `NOVEL_MUSIC_HOME` at an empty directory for one run:
+
+   ```bash
+   # Git Bash
+   export NOVEL_MUSIC_HOME="$TEMP/novel-music-clean"
+   ```
+
+   ```powershell
+   # PowerShell
+   $env:NOVEL_MUSIC_HOME = Join-Path $env:TEMP "novel-music-clean"
+   ```
+
+4. If every platform is in the breaker window, the code clears the cache once and retries automatically. If the result is still empty, check dependencies, credentials, and network as described in section 6.
+
+---
+
+## 9. Desktop Auto-update: Installer and Portable Copies Behave Differently
+
+**Symptoms**: the app exits after an update but is not upgraded; two copies appear after upgrading; or the update reports that PowerShell was not found.
+
+**How it works**:
+
+* The client first detects the install shape: an executable under `%LOCALAPPDATA%\Programs\NovelDownloader` is an **installer** copy, any other frozen folder is **portable**, and a source checkout is `source`.
+* An **installer** copy downloads `NovelDownloader-setup-<version>-x64.exe` and launches Inno Setup silently after exit, overwriting the install directory in place. Setup removes the old `_internal` before writing the new build and uses the named mutex `NovelDownloader-UpdateMutex` to close a running instance.
+* A **portable** copy downloads a zip. After exit, the PowerShell helper `updates/_apply_portable_update.ps1` waits for the process to end, expands the zip to `%TEMP%`, copies it over the current program folder, and restarts the app. It does not install a second copy into `%LOCALAPPDATA%`.
+* Portable updates need `powershell` or `pwsh`. If neither is found, the update aborts and asks you to extract the archive manually.
+
+**Diagnose**:
+
+1. Update packages live in `%LOCALAPPDATA%\novel_downloader\updates\`. After a failure the zip/installer is usually still there; for a portable copy you can extract it over the folder containing `NovelDownloader.exe` and start the app manually.
+2. Cleanup rules: unfinished `.part` files are kept for 1 day, complete installers/zips for 7 days, then removed automatically.
+3. If PowerShell is missing: manually extract the zip from `updates\` and copy every file over the current program folder.
+4. If the upgrade seems ineffective or two copies exist: check whether both `%LOCALAPPDATA%\Programs\NovelDownloader` and a portable folder exist, and confirm which one you launched. The `v...` label at the bottom of the sidebar is the running version.
+5. Logs are in `%LOCALAPPDATA%\novel_downloader\logs\novel-desktop.log`; search for `Launched the update installer` or `Launched the portable update helper` to confirm that the updater actually started.
+
+See [Installation](./installation.en.md) for how install, upgrade, and uninstall treat user data.
+
+---
+
+## 10. TIDAL / YouTube / Apple Music / SoundCloud: Searchable Does Not Mean Downloadable
+
+**Symptoms**: these platforms appear in the list, but search is empty, only previews are returned, or download fails with an HLS-not-supported or no-downloadable-link error (the UI currently shows the Chinese reason strings `HLS 流暂不支持直链下载` / `该平台未返回可下载直链`).
+
+**What to know**:
+
+* Dependencies are bundled: the desktop installer and `pip install "novel-downloader[music]"` both include `aigpy` (TIDAL), `ytmusicapi` (YouTube), and `pywidevine` (DRM for Apple Music / SoundCloud). Node is not required.
+* "Searchable" and "downloadable" are separate: these platforms try to resolve a downloadable direct link during search. When no link is available, the list may be empty or contain only previews.
+* **TIDAL**: you must configure a token JSON in the platform credentials, otherwise search is empty. Credentials live under the `tidal` key in `<music data dir>/platform_creds.json`; the default is `%LOCALAPPDATA%\novel_downloader\music\platform_creds.json`. The legacy music desktop tool has a "Platform credentials" dialog that writes this file, or you can edit the JSON directly.
+* **Apple Music**: an account is required for full tracks; without one you usually get preview clips only. Access to `music.apple.com` is also required.
+* **SoundCloud**: search works; DRM/HLS tracks need your own CDM (`.wvd` device file) and an external `N_m3u8DL-RE`.
+* For these four musicdl platforms, the built-in downloader accepts only non-HLS direct links: resolution rejects HLS (m3u8) immediately with the HLS-not-supported reason. Therefore, even with a CDM and `N_m3u8DL-RE`, DRM/HLS tracks from Apple Music / SoundCloud cannot be downloaded in-app; use an external tool that supports Widevine and `N_m3u8DL-RE`. TIDAL / YouTube work only when the platform returns an HTTP direct link.
+
+**Verify**:
+
+```bash
+novel-cli music platforms
+novel-cli music search "keyword" --platform tidal --limit 5
+```
+
+* The platform is missing from the list: a dependency or registration condition is unmet (for example, TIDAL is not registered without `aigpy`).
+* It is listed but search is empty: check credentials and network first.
+* Search works but download fails: read the error. The HLS-not-supported and no-downloadable-direct-link reasons are expected limits of this version, not network failures.
+
+See section 6 for dependency installation and self-check commands.
+
+---
+
+## 11. Clicking Download in Search Results Says "Site and book ID are required"
+
+**Symptoms**: clicking Download or Follow on a search result card shows "Site and book ID are required", even though the card displays a title and a site.
+
+**Cause**: before v1.28.1 the desktop page put the site in `data-add` / `data-follow`, but the click handler read `dataset.site`, so it always got an empty string. v1.28.1 reads `dataset.add` / `dataset.follow` instead, restoring both download and follow.
+
+**Fix**:
+
+1. Upgrade to v1.28.1 or newer. The `v...` label at the bottom of the sidebar is the running version; if an installer copy and a portable copy coexist, confirm you launched the upgraded one.
+2. If it still happens after upgrading, collect:
+   * the version shown at the bottom of the sidebar;
+   * the log at `%LOCALAPPDATA%\novel_downloader\logs\novel-desktop.log`;
+   * the site key, the search keyword, and whether every result for that keyword fails.
+3. If only one site's results fail while others work, that site's search results may not contain a book ID (the card's `data-bid` is empty). Empty arguments are rejected before the task queue, so `Failed to queue` will not appear in the log; include the site and keyword in the issue.
+
+---
+
+## 12. Still Stuck?
 
 Include the following information when opening an issue:
 

@@ -85,6 +85,7 @@ svg { display: block; }
   height: 60px; display: flex; align-items: center; gap: 22px;
 }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.01em; }
+.brand-name { white-space: nowrap; }
 .brand-name small {
   font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
   color: var(--text-3); margin-left: 6px;
@@ -98,7 +99,7 @@ svg { display: block; }
 .brand-mark.small { width: 24px; height: 24px; border-radius: 7px; }
 .brand-mark.small svg { width: 14px; height: 14px; }
 .nav-links { margin-left: auto; display: flex; gap: 22px; font-size: 14.5px; font-weight: 500; color: var(--text-2); }
-.nav-links a { transition: color .15s ease; }
+.nav-links a { transition: color .15s ease; white-space: nowrap; }
 .nav-links a:hover { color: var(--accent-ink); }
 .icon-btn {
   width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 10px;
@@ -181,12 +182,21 @@ svg { display: block; }
 @media (max-width: 900px) {
   .grid-3 { grid-template-columns: repeat(2, 1fr); }
   .grid-4 { grid-template-columns: repeat(2, 1fr); }
+  /* 761-900px is the tightest desktop nav (English labels wrap otherwise) */
+  .nav-inner { gap: 14px; }
+  .nav-links { gap: 14px; font-size: 13.5px; }
 }
 @media (max-width: 560px) {
   .grid-3, .grid-4 { grid-template-columns: 1fr; }
   .hero-inner { padding: 64px 20px 52px; }
   .section { padding: 60px 0; }
   .nav-links a:not(:last-child) { display: none; }
+}
+
+@media (max-width: 420px) {
+  /* brand + language + theme + menu must fit a 320px viewport */
+  .nav-inner { padding: 0 16px; gap: 12px; }
+  .brand-name small { display: none; }
 }
 
 /* ============================================================ cards */
@@ -238,7 +248,7 @@ svg { display: block; }
   background: var(--code-bg); border-radius: 16px;
   box-shadow: var(--shadow-2); overflow: hidden;
 }
-.tab-bar { display: flex; gap: 4px; padding: 10px 12px 0; border-bottom: 1px solid rgba(255,255,255,.08); }
+.tab-bar { display: flex; flex-wrap: wrap; gap: 4px; padding: 10px 12px 0; border-bottom: 1px solid rgba(255,255,255,.08); }
 .tab {
   appearance: none; border: none; background: none; cursor: pointer;
   color: #8291a9; font: 600 13.5px/1 inherit;
@@ -255,6 +265,12 @@ svg { display: block; }
   color: var(--code-text);
 }
 .tab-panel .c { color: #8291a9; user-select: none; }
+/* only rendered when JS is off: the tab bar is hidden, so say why every
+   panel is stacked open */
+.noscript-note {
+  padding: 12px 16px; font-size: 12.5px; line-height: 1.6;
+  color: #c7d3e3; border-bottom: 1px solid rgba(255,255,255,.08);
+}
 
 /* ============================================================ footer cta */
 .footer-cta {
@@ -276,14 +292,14 @@ svg { display: block; }
 .foot-links a:hover { color: var(--accent-ink); }
 .foot-note { font-size: 12.5px; color: var(--text-3); line-height: 1.8; }
 .foot-legal { font-size: 12.5px; color: var(--text-3); line-height: 1.8; }
+@media (max-width: 560px) {
+  /* keep the last legal line clear of the fixed back-to-top button */
+  .footer-inner { padding-bottom: 92px; }
+}
 
 /* ============================================================ reveal */
 .reveal { opacity: 0; transform: translateY(18px); transition: opacity .6s ease, transform .6s cubic-bezier(.2,.7,.3,1); }
 .reveal.in { opacity: 1; transform: none; }
-@media (prefers-reduced-motion: reduce) {
-  .reveal { opacity: 1; transform: none; transition: none; }
-  html { scroll-behavior: auto; }
-}
 
 /* ============================================================ skip link */
 .skip-link {
@@ -293,6 +309,9 @@ svg { display: block; }
   transition: top .2s ease;
 }
 .skip-link:focus { top: 0; }
+/* the skip target only scrolls into view: a ring around the whole page body
+   reads as a rendering bug rather than a focus cue */
+#main:focus-visible { outline: none; }
 
 /* ============================================================ gh chips */
 .gh-chip {
@@ -313,6 +332,7 @@ svg { display: block; }
   border: 1px solid var(--border); background: var(--card);
   color: var(--text-2); font: 700 12.5px/1 inherit; letter-spacing: .04em;
   cursor: pointer; transition: color .15s, border-color .15s;
+  white-space: nowrap;
 }
 .lang-btn:hover { color: var(--accent-ink); border-color: var(--accent); }
 .burger { display: none; }
@@ -447,3 +467,13 @@ svg { display: block; }
 .to-top.show { opacity: 1; transform: none; pointer-events: auto; }
 .to-top:hover { color: var(--accent-ink); border-color: var(--accent); }
 .to-top svg { width: 19px; height: 19px; }
+
+/* ============================================================ reduced motion
+   Last in the file on purpose: it must win over the animations and
+   transitions declared above. */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .reveal { opacity: 1; transform: none; transition: none; }
+  .aw-progress i { animation: none; }
+  .card, .client-card, .appwin, .to-top, .btn, .tab, .faq summary::after { transition: none; }
+}
