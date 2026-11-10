@@ -13,11 +13,13 @@ from novel_downloader.plugins.ranking import (
     INTENT_WEIGHTS,
     detect_query_intent,
     filter_by_relevance,
+    normalize_text,
     rank_score,
     relevance_of,
     sort_results,
     sort_results_with_intent,
 )
+from novel_downloader.plugins.search_cache import build_key
 from novel_downloader.schemas import SearchResult
 
 NOW = datetime(2024, 6, 15, 12, 0, 0)
@@ -290,6 +292,197 @@ def test_sort_results_accepts_intent_keyword() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# two-level ordering under a decided intent
+#
+# ``rank_score`` is a weighted sum (relevance 55% + metadata 45%), so a row
+# whose *title* merely equals the searched author's name can outscore that
+# author's own rows when those rows carry no cover / word count / update date.
+# Ordering therefore ranks by the primary field's match tier first and only
+# then by ``rank_score`` -- but only for a decided intent on ``"quality"``.
+# --------------------------------------------------------------------------- #
+def _rich_collision() -> SearchResult:
+    """A title-collision row with every optional metadata field filled in."""
+    return _result(
+        site="a",
+        book_id="collision",
+        title="天蚕土豆",
+        author="路人甲",
+        word_count="300万字",
+        update_date="2024-06-14",
+        cover_url="https://example.com/c.jpg",
+        latest_chapter="第100章",
+        priority=5,
+    )
+
+
+def _sparse_author_work() -> SearchResult:
+    """The searched author's own book, with every optional field missing."""
+    return _result(
+        site="b",
+        book_id="author",
+        title="斗破苍穹",
+        author="天蚕土豆",
+        word_count="",
+        update_date="",
+        cover_url="",
+        latest_chapter="",
+        priority=1000,
+    )
+
+
+def test_author_intent_sparse_author_work_beats_rich_title_collision() -> None:
+    collision = _rich_collision()
+    author_book = _sparse_author_work()
+    keyword = "天蚕土豆"
+
+    # The weighted sum alone still prefers the metadata-rich collision ...
+    assert rank_score(collision, keyword, intent="author", now=NOW) > rank_score(
+        author_book, keyword, intent="author", now=NOW
+    )
+
+    # ... yet the primary-field tier puts the sparse author hit first.
+    results = [collision, author_book]
+    sort_results(results, keyword=keyword, intent="author", now=NOW)
+
+    assert [r["book_id"] for r in results] == ["author", "collision"]
+
+
+def test_title_intent_sparse_title_beats_rich_author_hit() -> None:
+    keyword = "重生之都市修仙"
+    title_hit = _result(
+        site="b",
+        book_id="title",
+        title=keyword,
+        author="某作者",
+        word_count="",
+        update_date="",
+        cover_url="",
+        latest_chapter="",
+        priority=1000,
+    )
+    derivative = _result(
+        site="c",
+        book_id="deriv",
+        title=f"{keyword}外传",
+        author="别人",
+        word_count="",
+        update_date="",
+        priority=1000,
+    )
+    author_hit = _result(
+        site="a",
+        book_id="author",
+        title="无关书名",
+        author=keyword,
+        word_count="300万字",
+        update_date="2024-06-14",
+        cover_url="https://example.com/c.jpg",
+        latest_chapter="第100章",
+        priority=5,
+    )
+
+    # Mirror of the author case: the rich row wins the weighted sum ...
+    assert rank_score(author_hit, keyword, intent="title", now=NOW) > rank_score(
+        title_hit, keyword, intent="title", now=NOW
+    )
+
+    # ... but tier order (exact > prefix > no hit) decides the sort.
+    results = [author_hit, derivative, title_hit]
+    sort_results(results, keyword=keyword, intent="title", now=NOW)
+
+    assert [r["book_id"] for r in results] == ["title", "deriv", "author"]
+
+
+def test_either_intent_keeps_metadata_weighted_order() -> None:
+    # ``"either"`` must stay byte-for-byte historical: the explicit path and
+    # the default path both keep preferring the metadata-rich collision.
+    collision = _rich_collision()
+    author_book = _sparse_author_work()
+
+    explicit = [collision, author_book]
+    sort_results(explicit, keyword="天蚕土豆", intent="either", now=NOW)
+    assert [r["book_id"] for r in explicit] == ["collision", "author"]
+
+    default = [collision, author_book]
+    sort_results(default, keyword="天蚕土豆", now=NOW)
+    assert [r["book_id"] for r in default] == [r["book_id"] for r in explicit]
+
+
+def test_same_primary_tier_still_orders_by_quality_score() -> None:
+    # Both rows are exact author matches, so tier cannot separate them and the
+    # existing score ordering (rich/fresh first) must still apply.
+    rich = _result(
+        site="a",
+        book_id="rich",
+        title="斗破苍穹",
+        author="天蚕土豆",
+        word_count="300万字",
+        update_date="2024-06-14",
+        cover_url="https://example.com/c.jpg",
+        latest_chapter="第100章",
+        priority=5,
+    )
+    sparse = _result(
+        site="b",
+        book_id="sparse",
+        title="武动乾坤",
+        author="天蚕土豆",
+        word_count="",
+        update_date="",
+        cover_url="",
+        latest_chapter="",
+        priority=1000,
+    )
+
+    results = [sparse, rich]
+    sort_results(results, keyword="天蚕土豆", intent="author", now=NOW)
+
+    assert [r["book_id"] for r in results] == ["rich", "sparse"]
+
+
+def test_primary_match_tiers_sort_exact_prefix_contains_partial_none() -> None:
+    keyword = "土豆"
+    fields = {
+        "exact": "土豆",
+        "prefix": "土豆丝",
+        "contains": "天蚕土豆",
+        "partial": "土",
+        "none": "某作者",
+    }
+    results = [
+        _result(book_id=name, title="无关书名", author=author)
+        for name, author in fields.items()
+    ]
+
+    sort_results(results, keyword=keyword, intent="author", now=NOW)
+
+    assert [r["book_id"] for r in results] == [
+        "exact",
+        "prefix",
+        "contains",
+        "partial",
+        "none",
+    ]
+
+
+def test_explicit_update_sort_ignores_primary_match_tier() -> None:
+    # An explicit "update" ordering must not be reshuffled by intent/tier.
+    fresh_collision = _rich_collision()
+    old_exact = _result(
+        site="b",
+        book_id="old-exact",
+        title="斗破苍穹",
+        author="天蚕土豆",
+        update_date="2020-01-01",
+    )
+
+    results = [old_exact, fresh_collision]
+    sort_results(results, by="update", keyword="天蚕土豆", intent="author", now=NOW)
+
+    assert [r["book_id"] for r in results] == ["collision", "old-exact"]
+
+
+# --------------------------------------------------------------------------- #
 # filter_by_relevance
 # --------------------------------------------------------------------------- #
 def test_filter_by_relevance_keeps_rows_at_or_above_the_floor() -> None:
@@ -357,3 +550,69 @@ def test_filter_by_relevance_does_not_mutate_the_input() -> None:
 
     assert kept == [results[0]]
     assert results == snapshot
+
+
+# --------------------------------------------------------------------------- #
+# full-width / half-width folding
+# --------------------------------------------------------------------------- #
+def test_normalize_text_folds_full_width_forms() -> None:
+    # Japanese/light-novel sites routinely serve Latin titles and pen names in
+    # full-width forms.  They must compare equal to the half-width spelling a
+    # user types.
+    assert normalize_text("ＡＢＣ１２３") == "abc123"
+    assert normalize_text("ＳＡＯ") == normalize_text("sao")
+    assert normalize_text("Ｒｅｋｉ") == "reki"
+    # Decomposed accents are composed before the non-word characters go.
+    assert normalize_text("Cafe\u0301") == "café"
+
+
+def test_full_width_query_matches_half_width_title_exactly() -> None:
+    item = _result(title="ABC123", author="Reki")
+
+    assert relevance_of(item, "ＡＢＣ１２３") == pytest.approx(1.0)
+    assert relevance_of(item, "ＡＢＣ１２３") == relevance_of(item, "ABC123")
+
+
+def test_full_width_author_query_is_detected_as_author() -> None:
+    results = [
+        _result(title="Sword Art Online", author="Ｒｅｋｉ"),
+        _result(title="Accel World", author="Reki"),
+    ]
+
+    assert detect_query_intent("reki", results) == "author"
+    assert relevance_of(results[0], "reki", intent="author") == relevance_of(
+        results[0], "Ｒｅｋｉ", intent="author"
+    )
+
+
+def test_sort_results_with_intent_handles_full_width_author() -> None:
+    title_collision = _result(book_id="title", title="Reki", author="路人")
+    author_book = _result(book_id="author", title="Sword Art Online", author="Ｒｅｋｉ")
+
+    results = [title_collision, author_book]
+    sort_results_with_intent(results, "reki", now=NOW)
+
+    assert [r["book_id"] for r in results] == ["author", "title"]
+
+
+def test_build_key_folds_full_width_keyword() -> None:
+    # The cache identity must use the same normalisation as ranking, otherwise
+    # the two spellings would fetch twice.
+    assert build_key("ＡＢＣ", None) == build_key("abc", None)
+
+
+def test_build_key_normalizes_site_keys() -> None:
+    # Site keys arrive from CLI flags, settings files and UIs, so case and
+    # stray whitespace must not create separate cache entries.  This mirrors
+    # the registry's own ``strip().lower()`` normalization.
+    canonical = build_key("k", ["qidian"])
+    assert build_key("k", ["Qidian"]) == canonical
+    assert build_key("k", [" Qidian "]) == canonical
+    assert build_key("k", ["qidian", "QIDIAN "]) == canonical
+    assert canonical.sites == ("qidian",)
+
+
+def test_build_key_keeps_distinct_normalized_sites_apart() -> None:
+    # Normalization must not collapse genuinely different sites.
+    assert build_key("k", ["qidian"]) != build_key("k", ["fanqie"])
+    assert build_key("k", ["qidian", "fanqie"]) == build_key("k", ["fanqie", "Qidian"])

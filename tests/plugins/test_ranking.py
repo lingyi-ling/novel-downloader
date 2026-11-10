@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime, timedelta
 
 import pytest
@@ -69,6 +70,41 @@ def test_parse_word_count_unknown_is_none() -> None:
     assert parse_word_count(None) is None
 
 
+def test_parse_word_count_folds_full_width_forms() -> None:
+    # Sites routinely serve counts in full-width digits/punctuation.  NFKC
+    # folding must happen *before* the number is parsed: "１．２万字" used to
+    # match only the leading "１" and report 1.0.
+    assert parse_word_count("１．２万字") == 12000.0
+    assert parse_word_count("１２．３万字") == 123000.0
+    assert parse_word_count("１２３４") == 1234.0
+    assert parse_word_count("１，２３４") == 1234.0
+
+
+def test_parse_word_count_does_not_invent_numbers() -> None:
+    # Folding must not turn a non-numeric marker into a number.
+    assert parse_word_count("字数未知") is None
+    assert parse_word_count("暂无数据") is None
+    assert parse_word_count("abc") is None
+    assert parse_word_count("全本完结") is None
+    assert parse_word_count("－") is None  # full-width hyphen -> "-"
+
+
+def test_parse_word_count_reads_first_number_anywhere() -> None:
+    # Current (deliberately permissive) semantics: ``re.search`` takes the
+    # first number in the string, wherever it sits.  This keeps label-prefixed
+    # values that real extractors do produce ("总字数：123万字") working, at the
+    # cost of reading a chapter number when the site puts one in the same
+    # field ("第123章" -> 123).  No bundled site feeds chapter text through
+    # ``word_count`` (every searcher selects a dedicated count element, a
+    # string such as "12.3万字", or splits "12.3万字 | 连载" first), so the
+    # permissive behaviour is recorded here rather than changed without
+    # evidence of a real page shape that needs it.
+    assert parse_word_count("第123章") == 123.0
+    assert parse_word_count("已更新至第123章") == 123.0
+    assert parse_word_count("总字数：12.3万字") == 123000.0
+    assert parse_word_count("共 1,234 字") == 1234.0
+
+
 # --------------------------------------------------------------------------- #
 # parse_update_date
 # --------------------------------------------------------------------------- #
@@ -76,8 +112,37 @@ def test_parse_update_date_absolute_iso() -> None:
     assert parse_update_date("2024-05-01") == datetime(2024, 5, 1)
 
 
+def test_parse_update_date_absolute_dot_with_time() -> None:
+    assert parse_update_date("2024.05.01 10:00") == datetime(2024, 5, 1, 10, 0)
+    assert parse_update_date("2024.5.1 3:4:5") == datetime(2024, 5, 1, 3, 4, 5)
+    assert parse_update_date("2024.05.01") == datetime(2024, 5, 1)
+    assert parse_update_date("2024.13.1 10:00") is None
+
+
 def test_parse_update_date_absolute_cjk() -> None:
     assert parse_update_date("2024年5月1日") == datetime(2024, 5, 1)
+
+
+def test_parse_update_date_folds_full_width_forms() -> None:
+    # Full-width digits/separators are folded before parsing, just like
+    # parse_word_count: "２０２４年５月１日" used to return None because
+    # ``_CJK_DATE_RE`` is ASCII-only.
+    assert parse_update_date("２０２４年５月１日") == datetime(2024, 5, 1)
+    assert parse_update_date("２０２４年５月１日 １０：００") == datetime(
+        2024, 5, 1, 10, 0
+    )
+    assert parse_update_date("２０２４－０５－０１") == datetime(2024, 5, 1)
+    assert parse_update_date("２０２４/５/１") == datetime(2024, 5, 1)
+    assert parse_update_date("２０２４．５．１ １０：００") == datetime(
+        2024, 5, 1, 10, 0
+    )
+
+
+def test_parse_update_date_full_width_time_only_is_not_a_date() -> None:
+    # NFKC rewrites "：" as ":", but a time of day is still not an absolute
+    # date: neither spelling may be mistaken for one.
+    assert parse_update_date("１２：３０", now=NOW) is None
+    assert parse_update_date("12:30", now=NOW) is None
 
 
 def test_parse_update_date_relative_days() -> None:
@@ -397,6 +462,8 @@ _REFERENCE_FORMATS = (
     "%Y/%m/%d %H:%M:%S",
     "%Y/%m/%d %H:%M",
     "%Y/%m/%d",
+    "%Y.%m.%d %H:%M:%S",
+    "%Y.%m.%d %H:%M",
     "%Y.%m.%d",
     "%Y年%m月%d日 %H:%M:%S",
     "%Y年%m月%d日 %H:%M",
@@ -410,7 +477,11 @@ _REFERENCE_AGO = re.compile(
 
 
 def _reference_parse_update_date(value: object, now: datetime) -> datetime | None:
-    text = str(value if value is not None else "").strip()
+    # The production parser folds full-width forms before trying anything;
+    # mirror that preprocessing so this reference still models "normalized
+    # input, original try-everything order".
+    text = unicodedata.normalize("NFKC", str(value if value is not None else ""))
+    text = text.strip()
     if text.casefold() in _REFERENCE_NULL_TOKENS:
         return None
     for fmt in _REFERENCE_FORMATS:
@@ -485,6 +556,8 @@ def _reference_parse_update_date(value: object, now: datetime) -> datetime | Non
         "2024/13/01",
         "2024.5.1",
         "2024.05.01",
+        "2024.5.1 3:4",
+        "2024.05.01 10:00:00",
         "2024.13.1",
         "2024年5月1日",
         "2024年5月1日 3:4",
