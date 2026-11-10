@@ -6,6 +6,7 @@ novel_downloader.plugins.sites.n23qb.searcher
 """
 
 import logging
+from urllib.parse import urlsplit
 
 from lxml import html
 
@@ -50,12 +51,19 @@ class N23qbSearcher(BaseSearcher):
         """
         doc = html.fromstring(html_str)
 
-        book_url = cls._first_str(doc.xpath("//meta[@property='og:url']/@content"))
-        if not book_url:
+        raw_url = cls._first_str(doc.xpath("//meta[@property='og:url']/@content"))
+        if not raw_url:
             return []
+        book_url = cls._abs_url(raw_url)
 
-        # 'https://www.23qb.com/book/9268/' -> "9268"
-        book_id = book_url.split("book/", 1)[-1].strip("/")
+        # 'https://www.23qb.com/book/9268/' -> "9268".  Parse the path (not
+        # the raw string) so a query string or a relative og:url still works.
+        path = urlsplit(book_url).path
+        book_id = (
+            path.split("book/", 1)[-1].strip("/")
+            if "book/" in path
+            else path.rstrip("/").rsplit("/", 1)[-1]
+        )
 
         cover_rel = cls._first_str(
             doc.xpath("//div[contains(@class,'novel-cover')]//img/@data-src")
@@ -125,8 +133,9 @@ class N23qbSearcher(BaseSearcher):
             if limit is not None and idx >= limit:
                 break
 
-            # '/book/9138/' -> "9138"
-            book_id = href.rstrip("/").split("/")[-1]
+            # '/book/9138/' -> "9138"; absolute hrefs and query strings
+            # resolve to the same id.
+            book_id = urlsplit(href).path.rstrip("/").rsplit("/", 1)[-1]
             book_url = cls._abs_url(href)
 
             title = cls._first_str(

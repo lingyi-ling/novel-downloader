@@ -5,6 +5,7 @@ novel_downloader.plugins.sites.biquge345.searcher
 """
 
 import logging
+from urllib.parse import urlsplit
 
 from lxml import html
 
@@ -51,7 +52,9 @@ class Biquge345Searcher(BaseSearcher):
             if limit is not None and idx >= limit:
                 break
 
-            book_id = href.strip("/").split("/")[-1] or href
+            # Last path segment only (absolute or relative href, optional
+            # query string); the raw href used to leak ``?from=...`` into it.
+            book_id = urlsplit(href).path.rstrip("/").rsplit("/", 1)[-1] or href
             book_url = self._abs_url(href)
 
             title = self._first_str(row.xpath('./span[@class="name"]/a/text()'))

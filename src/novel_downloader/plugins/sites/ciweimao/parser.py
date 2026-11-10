@@ -5,11 +5,14 @@ novel_downloader.plugins.sites.ciweimao.parser
 """
 
 import logging
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import resolve_url
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.plugins.utils.ciweimao import CiweimaoChapterMixin
 from novel_downloader.schemas import (
@@ -22,6 +25,10 @@ from novel_downloader.schemas import (
 
 logger = logging.getLogger(__name__)
 
+#: ``/chapter/113111634`` (relative, absolute or protocol relative, optional
+#: query/fragment).  Chapter ids are numeric on this site.
+_CHAPTER_PATH_RE = re.compile(r"(?:^|/)chapter/(\d+)")
+
 
 @registrar.register_parser()
 class CiweimaoParser(CiweimaoChapterMixin, BaseParser):
@@ -30,6 +37,7 @@ class CiweimaoParser(CiweimaoChapterMixin, BaseParser):
     """
 
     site_name: str = "ciweimao"
+    BASE_URL: str = "https://www.ciweimao.com"
 
     def parse_book_info(
         self,
@@ -57,18 +65,24 @@ class CiweimaoParser(CiweimaoChapterMixin, BaseParser):
                 info_tree.xpath('//h1[@class="title"]/span/a/text()')
             )
 
-        cover_url = self._first_str(
-            info_tree.xpath('//meta[@property="og:image"]/@content')
+        # ``og:image`` is usually absolute, but the fallback ``div.cover`` link
+        # is often protocol-relative or root-relative; media downloads need an
+        # absolute URL.
+        cover_url = resolve_url(
+            info_tree,
+            self._first_str(info_tree.xpath('//meta[@property="og:image"]/@content'))
+            or self._first_str(info_tree.xpath('//div[@class="cover"]//img/@src')),
+            fallback_base=self.BASE_URL,
         )
-        if not cover_url:
-            cover_url = self._first_str(
-                info_tree.xpath('//div[@class="cover"]//img/@src')
-            )
 
-        update_time = self._first_str(
+        # The line is "最后更新：<latest chapter> [ YYYY-MM-DD HH:MM:SS ]"; the
+        # timestamp is the only part of it that belongs in ``update_time``.
+        update_line = self._first_str(
             info_tree.xpath('//p[@class="update-time"]/text()'),
             replaces=[("最后更新：", "")],
         )
+        stamp = re.search(r"\[\s*([^\]]+?)\s*\]", update_line)
+        update_time = stamp.group(1) if stamp else update_line
 
         word_count = self._first_str(
             info_tree.xpath('//p[@class="book-grade"]/b[last()]/text()')
@@ -102,6 +116,10 @@ class CiweimaoParser(CiweimaoChapterMixin, BaseParser):
         # --- Volumes & Chapters ---
         volumes: list[VolumeInfoDict] = []
         vol_idx: int = 1
+        # A chapter can be listed twice (e.g. repeated in an overlapping
+        # volume block); the downloader keys chapters by id, so keep the first
+        # occurrence and its lock marker.
+        seen: set[str] = set()
 
         for vol in catalog_tree.xpath('//div[contains(@class,"book-chapter-box")]'):
             elems = vol.xpath('.//h4[contains(@class,"sub-tit")]')
@@ -115,7 +133,16 @@ class CiweimaoParser(CiweimaoChapterMixin, BaseParser):
                 if not href:
                     continue
 
-                chapter_id = href.strip("/").rsplit("/", 1)[-1]
+                # ``/chapter/113111634?from=1`` -> 113111634; links without a
+                # numeric chapter id (``/chapter/``, ``javascript:``) are not
+                # chapters and must not turn into bogus download URLs.
+                match = _CHAPTER_PATH_RE.search(urlsplit(href).path)
+                if match is None:
+                    continue
+                chapter_id = match.group(1)
+                if chapter_id in seen:
+                    continue
+                seen.add(chapter_id)
                 title = a.text_content().strip()
 
                 # accessibility: locked if contains icon-lock
@@ -124,18 +151,21 @@ class CiweimaoParser(CiweimaoChapterMixin, BaseParser):
                 chapters.append(
                     {
                         "title": title,
-                        "url": href,
+                        "url": f"{self.BASE_URL}/chapter/{chapter_id}",
                         "chapterId": chapter_id,
                         "accessible": accessible,
                     }
                 )
 
-            volumes.append(
-                {
-                    "volume_name": vol_name,
-                    "chapters": chapters,
-                }
-            )
+            # A block with no usable chapter link carries no volume information.
+            if chapters:
+                volumes.append(
+                    {
+                        "volume_name": vol_name,
+                        "chapters": chapters,
+                    }
+                )
+                vol_idx += 1
 
         if not volumes:
             return None

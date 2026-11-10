@@ -16,3 +16,4 @@ class BiquguoParser(Biquge1Parser):
     """
 
     site_name: str = "biquguo"
+    BASE_URL: str = "https://www.biquguo.com/"

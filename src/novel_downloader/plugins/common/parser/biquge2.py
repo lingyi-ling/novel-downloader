@@ -6,12 +6,11 @@ novel_downloader.plugins.common.parser.biquge2
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
 from novel_downloader.plugins.common.parser._utils import (
     chapter_id_from_href,
     dedupe_chapters,
+    parse_html_tree,
     resolve_url,
     strip_label,
     strip_page_marker,
@@ -43,7 +42,9 @@ class Biquge2Parser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         # --- Metadata ---
         book_name = self._first_str(tree.xpath('//div[@id="info"]/h1/text()'))
@@ -141,7 +142,9 @@ class Biquge2Parser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         title = self._first_str(tree.xpath('//div[@class="content"]/h1//text()'))
         if not title:

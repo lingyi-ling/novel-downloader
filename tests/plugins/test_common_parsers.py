@@ -15,6 +15,7 @@ import pytest
 from novel_downloader.plugins.common.parser._utils import (
     chapter_id_from_href,
     dedupe_chapters,
+    parse_html_tree,
     resolve_url,
     strip_label,
     strip_page_marker,
@@ -107,6 +108,52 @@ def test_dedupe_chapters_keeps_first_occurrence() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# URL/base normalisation shared by every family
+# --------------------------------------------------------------------------- #
+def test_resolve_url_document_base_keeps_its_directory() -> None:
+    class _Tree:
+        def xpath(self, query: str) -> list[str]:
+            if "og:url" in query:
+                return ["https://www.example.com/book/1.html"]
+            return []
+
+    assert resolve_url(_Tree(), "img/a.jpg") == "https://www.example.com/book/img/a.jpg"
+    assert resolve_url(_Tree(), "/img/a.jpg") == "https://www.example.com/img/a.jpg"
+    assert (
+        resolve_url(_Tree(), "img/a.jpg?v=2")
+        == "https://www.example.com/book/img/a.jpg?v=2"
+    )
+
+
+def test_resolve_url_drops_query_when_treating_base_as_a_directory() -> None:
+    class _Tree:
+        def xpath(self, query: str) -> list[str]:
+            if "og:url" in query:
+                return ["https://www.example.com/book/1/?from=list"]
+            return []
+
+    assert (
+        resolve_url(_Tree(), "img/a.jpg") == "https://www.example.com/book/1/img/a.jpg"
+    )
+    assert resolve_url(_Tree(), "/img/a.jpg") == "https://www.example.com/img/a.jpg"
+
+
+def test_resolve_url_origin_only_base() -> None:
+    class _Tree:
+        def xpath(self, query: str) -> list[str]:
+            return []
+
+    assert (
+        resolve_url(_Tree(), "img/a.jpg", fallback_base="https://www.example.com")
+        == "https://www.example.com/img/a.jpg"
+    )
+    assert (
+        resolve_url(_Tree(), "/img/a.jpg", fallback_base="//www.example.com")
+        == "https://www.example.com/img/a.jpg"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # shared failure shapes
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("parser_cls", _ALL_PARSERS)
@@ -123,6 +170,56 @@ def test_no_chapter_list_returns_none(parser_cls: Any) -> None:
     parser = parser_cls(_config())
 
     assert parser.parse_book_info(["<html><body><h1>空目录</h1></body></html>"]) is None
+
+
+#: Payloads that are *not* a document: an anti-bot doctype shell, an XML
+#: prolog with an encoding declaration, a JSON error body and a plain-text
+#: interstitial.  ``lxml.html.fromstring`` raises on the first two; a parser
+#: must degrade to ``None`` like it does for an empty page.
+_HOSTILE_PAYLOADS = [
+    "<!DOCTYPE html>",
+    '<?xml version="1.0" encoding="gbk"?>',
+    '{"code": 403, "msg": "blocked"}',
+    "Checking your browser before accessing",
+    "<html><head><script src='/challenge.js'></script></head><body></body></html>",
+]
+
+
+@pytest.mark.parametrize("parser_cls", _ALL_PARSERS)
+@pytest.mark.parametrize("payload", _HOSTILE_PAYLOADS)
+def test_non_document_payloads_return_none(parser_cls: Any, payload: str) -> None:
+    parser = parser_cls(_config())
+
+    assert parser.parse_book_info([payload]) is None
+    assert parser.parse_chapter_content([payload], chapter_id="1") is None
+
+
+def test_parse_html_tree_rejects_non_documents_and_strips_bom() -> None:
+    assert parse_html_tree("") is None
+    assert parse_html_tree("   \n\t") is None
+    assert parse_html_tree("<!DOCTYPE html>") is None
+    assert parse_html_tree('<?xml version="1.0" encoding="gbk"?>') is None
+
+    tree = parse_html_tree("\ufeff" + _BIQUGE1_INFO)
+    assert tree is not None
+    assert tree.xpath('//meta[@property="og:novel:book_name"]/@content') == [
+        "书名 & 卷一"
+    ]
+
+
+def test_truncated_document_keeps_the_metadata_that_did_arrive() -> None:
+    """A page cut off mid-tag still yields the fields already present."""
+    parser = _Biquge2(_config())
+    truncated = (
+        '<html><body><div id="info"><h1>半截书名</h1>'
+        '<div class="listmain"><dl><dt>正文</dt><dd><a href="/b/1.html">第一章'
+    )
+
+    info = parser.parse_book_info([truncated])
+
+    assert info is not None
+    assert info["book_name"] == "半截书名"
+    assert [c["chapterId"] for c in info["volumes"][0]["chapters"]] == ["1"]
 
 
 # --------------------------------------------------------------------------- #
@@ -392,6 +489,27 @@ def test_biquge2_chapter_without_content_returns_none() -> None:
     assert parser.parse_chapter_content([page], chapter_id="1") is None
 
 
+def test_biquge2_parses_gbk_decoded_page() -> None:
+    """The fetcher hands parsers ``str``; GBK pages must survive decoding."""
+    text = _BIQUGE2_INFO.encode("gbk").decode("gbk")
+    info = _Biquge2(_config()).parse_book_info([text])
+
+    assert info is not None
+    assert info["book_name"] == "书名乙"
+    assert info["author"] == "作者乙"
+    assert info["summary"] == "简介一\n简介二"
+    assert info["cover_url"] == "https://cdn.example.com/b2.jpg"
+
+
+def test_biquge2_parses_utf8_page_with_bom() -> None:
+    text = "\ufeff" + _BIQUGE2_INFO
+    info = _Biquge2(_config()).parse_book_info([text])
+
+    assert info is not None
+    assert info["book_name"] == "书名乙"
+    assert [c["chapterId"] for c in info["volumes"][0]["chapters"]] == ["1", "2", "3"]
+
+
 # --------------------------------------------------------------------------- #
 # biquge3 (og: meta + #list direct <a><dd> + #content/#booktxt)
 # --------------------------------------------------------------------------- #
@@ -473,6 +591,45 @@ def test_biquge3_variant_with_single_dt_and_rel_chapter() -> None:
 
     assert info is not None
     assert [c["chapterId"] for c in info["volumes"][0]["chapters"]] == ["1", "2"]
+
+
+def test_biquge3_cover_uses_site_base_url_when_page_has_no_og_url() -> None:
+    """BASE_URL is the last-resort base for a root-relative cover."""
+
+    class _Biquge3WithBase(_Biquge3):
+        BASE_URL = "https://m.example.com"
+
+    page = """
+    <html><head>
+      <meta property="og:image" content="/img/c.jpg"/>
+    </head><body>
+      <div id="list"><dl>
+        <dt>目录</dt>
+        <dd><a href="/du/1.html">第一章</a></dd>
+      </dl></div>
+    </body></html>
+    """
+
+    info = _Biquge3WithBase(_config()).parse_book_info([page])
+
+    assert info is not None
+    assert info["cover_url"] == "https://m.example.com/img/c.jpg"
+
+
+def test_biquge3_parses_gbk_decoded_chapter() -> None:
+    page = """
+    <html><body>
+      <h1 class="bookname">第一章 起风</h1>
+      <div id="content"><div id="booktxt"><p>第一段</p><p>第二段</p></div></div>
+    </body></html>
+    """
+    text = page.encode("gbk").decode("gbk")
+
+    chapter = _Biquge3(_config()).parse_chapter_content([text], chapter_id="1")
+
+    assert chapter is not None
+    assert chapter["title"] == "第一章 起风"
+    assert chapter["content"] == "第一段\n第二段"
 
 
 _BIQUGE3_CHAPTER = """

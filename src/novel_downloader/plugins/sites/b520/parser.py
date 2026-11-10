@@ -35,6 +35,10 @@ class B520Parser(BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         tree = html.fromstring(raw_pages[0])
 
         book_name = self._first_str(tree.xpath('//div[@id="info"]/h1/text()'))
@@ -91,6 +95,11 @@ class B520Parser(BaseParser):
     ) -> ChapterDict | None:
         if not raw_pages:
             return None
+
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         tree = html.fromstring(raw_pages[0])
 
         title = self._first_str(tree.xpath('//div[@class="bookname"]/h1/text()'))

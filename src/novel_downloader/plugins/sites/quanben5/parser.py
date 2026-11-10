@@ -6,6 +6,7 @@ novel_downloader.plugins.sites.quanben5.parser
 """
 
 from typing import Any
+from urllib.parse import urlsplit
 
 from lxml import html
 
@@ -35,6 +36,10 @@ class Quanben5Parser(BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         tree = html.fromstring(raw_pages[0])
         book_name = self._first_str(tree.xpath("//h3/span/text()"))
         author = self._first_str(
@@ -54,8 +59,12 @@ class Quanben5Parser(BaseParser):
             link = li.xpath(".//a")[0]
             href = link.get("href", "").strip()
             title = self._first_str(link.xpath(".//span/text()"))
-            # '/n/toutian/83840.html' -> '83840'
-            chapter_id = href.rstrip(".html").split("/")[-1]
+            # '/n/toutian/83840.html' -> '83840'.  Only the last path segment
+            # is the id: query strings and trailing slashes must not leak in,
+            # and ``rstrip(".html")`` would also eat a slug ending in h/t/m/l.
+            chapter_id = (
+                urlsplit(href).path.rstrip("/").rsplit("/", 1)[-1].removesuffix(".html")
+            )
             chapters.append({"title": title, "url": href, "chapterId": chapter_id})
 
         if not chapters:
@@ -80,6 +89,10 @@ class Quanben5Parser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        if not raw_pages:
+            return None
+
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 

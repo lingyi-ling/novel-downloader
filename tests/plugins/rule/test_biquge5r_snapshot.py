@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from novel_downloader.plugins.rule import load_rules, resolve_url
+from novel_downloader.plugins.rule.engine import extract, parse_page, select
 from novel_downloader.plugins.rule.fetcher import RuleFetcher
 from novel_downloader.plugins.rule.model import Rule
 from novel_downloader.plugins.rule.parser import RuleParser
@@ -213,6 +214,35 @@ def test_search_stage_maps_every_field() -> None:
     assert second["update_date"] == "2026-09-01"
     assert second["latest_chapter"] == "最新章节：完本"
     assert second["priority"] == 46
+
+
+def test_search_url_prefers_the_cover_link_then_falls_back_to_the_title() -> None:
+    """The shipped rule uses field-level ``fallback``, not a CSS union.
+
+    ``dt a`` is the cover link and comes first; when it is absent (or has no
+    ``href``) the ``dd h3 a`` title link must win.  That is the same order the
+    ``biquge5`` plugin applies in Python (``./dt/a/@href`` or
+    ``./dd/h3/a/@href``), but independent of document order.
+    """
+    rule = _rule()
+    assert rule.search is not None
+    url_field = rule.search.fields["url"]
+
+    assert url_field.selector == "dt a"
+    assert [alt.selector for alt in url_field.fallback] == ["dd h3 a"]
+    assert url_field.fallback[0].attr == "href"  # inherited from the parent
+
+    page = f"""
+    <html><body>
+      <div class="col-12 col-md-6"><dl>
+        <dt><a><img src="/files/article/image/0/143/143.jpg"></a></dt>
+        <dd><h3><a href="/{BOOK_ID}/">斗破苍穹</a></h3></dd>
+      </dl></div>
+    </body></html>
+    """
+    row = select(parse_page(page), rule.search.item)[0]
+
+    assert extract(row, url_field) == f"/{BOOK_ID}/"
 
 
 def test_search_stage_result_book_id_drives_the_detail_url() -> None:

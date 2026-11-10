@@ -565,10 +565,10 @@ class FanqienovelSearcher(BaseSearcher):
             return []
 
         results: list[SearchResult] = []
-        for idx, item in enumerate(items):
+        for item in items:
             if not isinstance(item, dict):
                 continue
-            if limit is not None and idx >= limit:
+            if limit is not None and len(results) >= limit:
                 break
 
             book_id = str(item.get("book_id") or "")
@@ -590,7 +590,7 @@ class FanqienovelSearcher(BaseSearcher):
                     latest_chapter=str(item.get("last_chapter_title") or "-"),
                     update_date=self._format_time(item.get("last_chapter_time")),
                     word_count=str(item.get("word_count") or "-"),
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
 

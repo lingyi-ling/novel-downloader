@@ -55,7 +55,7 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from typing import Any
-from urllib.parse import quote, unquote, urljoin
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
 from lxml import etree
 from lxml import html as lxml_html
@@ -83,6 +83,8 @@ __all__ = [
     "JS_STEP_HELPERS",
     "render",
     "abs_url",
+    "http_url",
+    "is_fetchable_url",
 ]
 
 _NESTED_HTML_RE = re.compile(r"<!DOCTYPE.*?>", re.I | re.S)
@@ -90,8 +92,11 @@ _NESTED_HTML_RE = re.compile(r"<!DOCTYPE.*?>", re.I | re.S)
 # a ``{name}`` placeholder used by :func:`render` (single pass)
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 
-# a single dot-path segment: ``key``, ``key[2]``, ``key[*]`` or ``[0]``
+#: A single dot-path segment: ``key``, ``key[2]``, ``key[*]`` or ``[0]``
 _SEGMENT_RE = re.compile(r"^([^\[\]]*)(?:\[([^\]]*)\])?$")
+
+#: Schemes a scraped link may use before it reaches the fetcher.
+_HTTP_SCHEMES = frozenset({"http", "https"})
 
 
 def strip_nested_html(s: str) -> str:
@@ -692,3 +697,27 @@ def abs_url(base: str, url: str) -> str:
     if url.startswith(("http://", "https://")):
         return url
     return urljoin(base, url)
+
+
+def is_fetchable_url(url: str) -> bool:
+    """Whether ``url`` may be handed to the HTTP client (http(s) or relative)."""
+    scheme = urlsplit(url).scheme.lower()
+    return not scheme or scheme in _HTTP_SCHEMES
+
+
+def http_url(base: str, url: str) -> str:
+    """
+    Resolve ``url`` against ``base`` but only return an HTTP(S) target.
+
+    Page content is untrusted, so a scraped link such as
+    ``javascript:alert(1)``, ``data:text/html,...`` or ``file:///etc/passwd``
+    must never be handed to the fetcher as if it were a chapter or book URL.
+    Such a link is reported as "no URL" (empty string) and the caller skips the
+    item, exactly as it would for a missing ``href``.  Relative results are
+    kept: a rule without ``base_url`` still needs them, and they fail to fetch
+    like any other relative URL.
+    """
+    resolved = abs_url(base, url)
+    if not resolved or not is_fetchable_url(resolved):
+        return ""
+    return resolved

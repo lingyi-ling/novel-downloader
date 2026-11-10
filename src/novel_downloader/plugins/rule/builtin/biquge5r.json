@@ -11,9 +11,10 @@
     "method": "GET",
     "item": "div.col-12.col-md-6 dl",
     "priority": 45,
+    "book_id_regex": "/([\\d_]+)/?(?:[?#].*)?$",
     "fields": {
       "title": {"selector": "dd h3 a", "attr": "text"},
-      "url": {"selector": "dt a", "attr": "href"},
+      "url": {"selector": "dt a", "attr": "href", "fallback": ["dd h3 a"]},
       "cover": {"selector": "dt a img", "attr": "src"},
       "author": {"selector": "dd.book_other span", "attr": "text"},
       "latest": {"selector": "dd.book_other a", "attr": "text"},
@@ -44,8 +45,8 @@
     "chapters": {
       "item": "div.book_list2 a",
       "title": {"attr": "text"},
-      "url": {"attr": "href"},
-      "id_regex": "/(\\d+)\\.html"
+      "url": {"attr": "href", "regex": "^([^?#]+)", "group": 1},
+      "id_regex": "([^/?#]+?)\\.[^/?#]*(?:[?#].*)?$"
     }
   },
 

@@ -10,7 +10,7 @@ import re
 from typing import ClassVar
 from urllib.parse import unquote, urlencode, urlparse
 
-from lxml import html
+from lxml import etree, html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
 from novel_downloader.schemas import SearchResult
@@ -33,16 +33,21 @@ class SososhuSearcher(BaseSearcher):
         }
         try:
             return await self._fetch(self.SEARCH_URL, params=params)
-        except Exception:
+        except Exception as exc:
             logger.error(
-                "Failed to fetch HTML for keyword '%s' from '%s'",
+                "Failed to fetch HTML for keyword '%s' from '%s': %s",
                 keyword,
                 self.SEARCH_URL,
+                exc,
             )
             return ""
 
     async def _fetch(self, url: str, params: dict[str, str]) -> str:
-        full_url = self._build_url(url, params)
+        # Percent-encode the query.  A raw keyword can contain ``&``, ``#``,
+        # ``+`` or non-ASCII characters; keeping it unencoded split the query
+        # into extra parameters (``site`` was no longer the last one) or
+        # truncated everything after ``#``.
+        full_url = f"{url}?{urlencode(params)}" if params else url
         parsed = urlparse(full_url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         referer = full_url
@@ -68,7 +73,7 @@ class SososhuSearcher(BaseSearcher):
 
         logger.debug("sososhu encountered anti-bot page, trying to verify...")
 
-        nonce_match = re.search(r"var\s+nonce\s*=\s*(\d+)", resp_text)
+        nonce_match = re.search(r"var\s+nonce\s*=\s*['\"]?(\d+)", resp_text)
         if not nonce_match:
             logger.debug("Could not find nonce in verification page")
             return resp_text
@@ -102,7 +107,15 @@ class SososhuSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        if not (html_str or "").strip():
+            return []
+        try:
+            doc = html.fromstring(html_str)
+        except (etree.ParserError, ValueError):
+            # Anti-bot shells such as ``<!DOCTYPE html>`` and JSON error
+            # bodies are not documents; treat them like an empty result page.
+            logger.debug("sososhu returned an unparseable page; no results")
+            return []
         rows = doc.xpath(
             "//div[contains(@class,'so_list')]//div[contains(@class,'hot')]//div[contains(@class,'item')]"
         )
@@ -113,7 +126,9 @@ class SososhuSearcher(BaseSearcher):
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
+            # Count produced results, not source rows: a row without a link
+            # must not silently shrink the page below ``limit``.
+            if limit is not None and len(results) >= limit:
                 break
 
             book_url = self._restore_url(self._abs_url(href))
@@ -121,9 +136,12 @@ class SososhuSearcher(BaseSearcher):
 
             title = self._first_str(row.xpath(".//dl/dt/a[1]/text()"))
             author = self._first_str(row.xpath(".//dl/dt/span[1]/text()"))
-            cover_url = self._first_str(
+            cover_rel = self._first_str(
                 row.xpath(".//div[contains(@class,'image')]//img/@src")
             )
+            # Every other searcher absolutises the cover; a relative ``/img``
+            # path is unusable for the UI and for cover download.
+            cover_url = self._abs_url(cover_rel) if cover_rel else ""
 
             results.append(
                 SearchResult(

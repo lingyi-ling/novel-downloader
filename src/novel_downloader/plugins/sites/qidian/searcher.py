@@ -59,7 +59,13 @@ class QidianSearcher(BaseSearcher):
             if limit is not None and idx >= limit:
                 break
 
+            # The visible ``src`` is a lazy-load placeholder on the search
+            # page; the real cover lives in ``data-original``.
             cover_url = self._first_str(
+                item.xpath(
+                    './/div[contains(@class,"book-img-box")]//img/@data-original'
+                )
+            ) or self._first_str(
                 item.xpath('.//div[contains(@class,"book-img-box")]//img/@src')
             )
             book_url = self._abs_url(book_url)

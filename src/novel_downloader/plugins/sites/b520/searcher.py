@@ -6,6 +6,7 @@ novel_downloader.plugins.sites.b520.searcher
 """
 
 import logging
+from urllib.parse import urlsplit
 
 from lxml import html
 
@@ -20,14 +21,19 @@ logger = logging.getLogger(__name__)
 class B520Searcher(BaseSearcher):
     site_name = "b520"
     priority = 30
-    BASE_URL = "http://www.b520.cc/"
-    SEARCH_URL = "http://www.b520.cc/modules/article/search.php"
+    # ``www.b520.cc`` no longer serves ``/modules/article/search.php`` (it
+    # 301s to a non-existent ``search.html`` and returns 404).  ``b5200.org``,
+    # linked from b520.cc's own header, now redirects to ``www.bqg6.xyz``,
+    # which is the same book database and still implements that search
+    # endpoint, so both search and book fetching use it.
+    BASE_URL = "https://www.bqg6.xyz/"
+    SEARCH_URL = "https://www.bqg6.xyz/modules/article/search.php"
 
     async def _fetch_html(self, keyword: str) -> str:
         params = {"searchkey": keyword}
         headers = {
             **self.session.headers,
-            "Referer": "http://www.b520.cc/",
+            "Referer": self.BASE_URL,
         }
         try:
             async with self.session.get(
@@ -54,7 +60,10 @@ class B520Searcher(BaseSearcher):
             if limit is not None and idx >= limit:
                 break
 
-            book_id = href.strip("/").split("/")[-1]
+            # Last path segment only: the same page can serve absolute links
+            # or links carrying a query string, and neither may leak into the
+            # id used for book/chapter URLs.
+            book_id = urlsplit(href).path.rstrip("/").rsplit("/", 1)[-1]
             book_url = self._abs_url(href)
 
             title = self._first_str(row.xpath(".//td[1]/a[1]/text()"))

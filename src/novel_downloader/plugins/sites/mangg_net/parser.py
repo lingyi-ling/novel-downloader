@@ -16,3 +16,4 @@ class ManggNetParser(Biquge1Parser):
     """
 
     site_name: str = "mangg_net"
+    BASE_URL: str = "https://www.mangg.net/"
