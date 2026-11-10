@@ -402,8 +402,28 @@ def _write_plain(markup_text: str) -> None:
 
 
 def emit(text: str) -> None:
-    """Write machine-readable data to stdout, untouched by rich formatting."""
-    print(text)
+    """
+    Write machine-readable data to stdout, untouched by rich formatting.
+
+    The data stream is UTF-8 by contract (``json.dumps(..., ensure_ascii=False)``
+    keeps CJK and emoji readable). On Windows a redirected stdout uses the
+    legacy code page (cp936/cp1252/...), where ``print`` raises
+    ``UnicodeEncodeError`` for a song title with an emoji and the command dies
+    with a traceback after an otherwise successful search. Fall back to the
+    byte buffer with an explicit UTF-8 encoding; the text path is kept for
+    streams that can encode the payload (terminals, test capture objects).
+    """
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        buffer = getattr(sys.stdout, "buffer", None)
+        if buffer is None:
+            raise
+        # Flush the text layer first so the byte write cannot overtake it.
+        with suppress(OSError, ValueError):
+            sys.stdout.flush()
+        buffer.write((text + "\n").encode("utf-8"))
+        buffer.flush()
 
 
 def info(message: str) -> None:

@@ -18,7 +18,14 @@ from novel_downloader.infra.i18n import t
 from novel_downloader.plugins import registrar
 
 from ..ui_adapters import CLIExportUI
-from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail, parse_book_args
+from .base import (
+    EXIT_FAILURE,
+    EXIT_USAGE,
+    Command,
+    expand_path,
+    fail,
+    parse_book_args,
+)
 
 
 class ExportCmd(Command):
@@ -72,7 +79,7 @@ class ExportCmd(Command):
         site: str | None = args.site
         stage: str | None = args.stage
         book_ids: list[str] = list(args.book_ids or [])
-        config_path: Path | None = Path(args.config) if args.config else None
+        config_path: Path | None = expand_path(args.config) if args.config else None
         formats: list[str] | None = args.format
 
         config_data = load_or_init_config(config_path)

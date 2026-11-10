@@ -27,7 +27,7 @@ from ..ui_adapters import (
     CLILoginUI,
     CLIProcessUI,
 )
-from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail
+from .base import EXIT_FAILURE, EXIT_USAGE, Command, expand_path, fail
 
 if TYPE_CHECKING:
     from novel_downloader.plugins.search import SearchEvent
@@ -124,7 +124,7 @@ class SearchCmd(Command):
         timeout = max(0.1, float(args.timeout))
         result_sort: str = args.sort
         group_results_flag: bool = bool(args.group)
-        config_path: Path | None = Path(args.config) if args.config else None
+        config_path: Path | None = expand_path(args.config) if args.config else None
 
         config_data = load_or_init_config(config_path)
         if config_data is None:
@@ -179,6 +179,20 @@ class SearchCmd(Command):
                 )
                 ui.info(summary.format(done=done, failed=failed, skipped=skipped))
 
+            def _every_site_failed() -> bool:
+                """
+                True when every site that reported an outcome failed.
+
+                An empty result set is a successful search only while at least
+                one site actually answered: "all sites down" used to exit 0 and
+                look exactly like "no match", which hides an outage from every
+                script and CI job. A site that was skipped (browser-assisted)
+                is not an answer, so it does not count as success either.
+                """
+                answered = any(e.kind == "completed" for e in events)
+                refused = any(e.kind == "failed" for e in events)
+                return refused and not answered
+
             if as_json:
                 results = await search(
                     keyword=keyword,
@@ -191,7 +205,11 @@ class SearchCmd(Command):
                     group=group_results_flag,
                 )
                 _print_search_summary()
+                # The document is emitted first so a machine consumer still
+                # gets its (empty) payload; the non-zero exit reports the outage.
                 ui.emit(json.dumps(list(results), ensure_ascii=False, indent=2))
+                if _every_site_failed():
+                    raise SystemExit(EXIT_FAILURE)
                 return
 
             with ui.status(t("Searching for '{keyword}'...").format(keyword=keyword)):
@@ -208,6 +226,11 @@ class SearchCmd(Command):
             _print_search_summary()
 
             if not results:
+                if _every_site_failed():
+                    # Every selected site reported an error: that is an outage,
+                    # not "no such book". The per-site failure lines were
+                    # already printed by ``_on_event`` above.
+                    raise SystemExit(EXIT_FAILURE)
                 ui.warn(t("No results found for '{keyword}'.").format(keyword=keyword))
                 return
 

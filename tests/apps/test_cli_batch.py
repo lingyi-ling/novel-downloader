@@ -1412,6 +1412,88 @@ def test_out_moves_the_raw_data_directory_with_the_exports(
     assert seen["raw"] == (out / "raw_data").resolve()
 
 
+def test_out_expands_environment_variables(
+    tmp_path: Path,
+    offline: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    messages: _Messages,
+) -> None:
+    """``--out`` accepts shell-style variables, not just ``~``.
+
+    Windows expands neither ``~`` nor POSIX ``$VAR`` (it spells variables
+    ``%VAR%``), so the CLI has to expand the value itself or the exports land
+    in a directory literally named ``%VAR%``.
+    """
+    source = _write(tmp_path / "books.txt", "斗破苍穹 天蚕土豆\n")
+    _install_search(monkeypatch, {"斗破苍穹": [_result()]})
+    out = tmp_path / "from-env"
+    monkeypatch.setenv("BATCH_OUT_DIR", str(out))
+    ref = "%BATCH_OUT_DIR%" if sys.platform.startswith("win") else "$BATCH_OUT_DIR"
+    seen: dict[str, Path] = {}
+
+    def _fake_download(
+        adapter: Any, _site: str, _book_ids: Any
+    ) -> batch.DownloadReport:
+        seen["out"] = adapter.get_output_dir()
+        return batch.DownloadReport()
+
+    monkeypatch.setattr(batch, "_download_site", _fake_download)
+
+    BatchCmd.run(
+        _parse_args(
+            "--file",
+            str(source),
+            "--download",
+            "--out",
+            f"{ref}/books",
+            "--not-found",
+            str(tmp_path / "nf"),
+        )
+    )
+
+    assert seen["out"] == (out / "books").resolve()
+    assert any(str(seen["out"]) in message for message in messages.info)
+
+
+def test_input_file_expands_environment_variables(
+    tmp_path: Path,
+    offline: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folder = tmp_path / "inputs"
+    folder.mkdir()
+    _write(folder / "books.txt", "斗破苍穹 天蚕土豆\n")
+    calls = _install_search(monkeypatch, {"斗破苍穹": [_result()]})
+    monkeypatch.setenv("BATCH_IN_DIR", str(folder))
+    ref = "%BATCH_IN_DIR%" if sys.platform.startswith("win") else "$BATCH_IN_DIR"
+
+    BatchCmd.run(_parse_args("--file", f"{ref}/books.txt"))
+
+    # The file was found and read: a literal ``%VAR%`` path would have been a
+    # usage error before any search ran.
+    assert calls == [("斗破苍穹", None)]
+
+
+def test_not_found_path_expands_environment_variables(
+    tmp_path: Path,
+    offline: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write(tmp_path / "books.txt", "不存在的书 某人\n")
+    _install_search(monkeypatch, {})
+    folder = tmp_path / "reports"
+    monkeypatch.setenv("BATCH_REPORT_DIR", str(folder))
+    ref = (
+        "%BATCH_REPORT_DIR%" if sys.platform.startswith("win") else "$BATCH_REPORT_DIR"
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        BatchCmd.run(_parse_args("--file", str(source), "--not-found", f"{ref}/nf.txt"))
+
+    assert excinfo.value.code == 1
+    assert (folder / "nf.txt").is_file()
+
+
 # ---------------------------------------------------------------------------
 # Adversarial review: exit codes
 # ---------------------------------------------------------------------------

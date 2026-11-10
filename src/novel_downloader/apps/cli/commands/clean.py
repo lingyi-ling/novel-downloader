@@ -20,10 +20,42 @@ from .base import (
     EXIT_FAILURE,
     EXIT_USAGE,
     Command,
+    expand_path,
     fail,
     localize_help,
     parse_book_args,
 )
+
+
+def _validated_site(site: str) -> str:
+    """
+    Return ``site`` when it is usable as one directory name, else exit 2.
+
+    ``--site`` is joined onto the cache/raw-data root and the result is handed
+    to ``shutil.rmtree``. A value such as ``..``, ``../..`` or ``/etc`` would
+    therefore delete a directory *outside* the application's data -- the one
+    place a cleanup command must never reach. Real site keys are plain
+    identifiers (``b520``, ``fanqienovel``), so an escaping value is a bad
+    argument (usage error), not a runtime failure.
+
+    :param site: Raw ``--site`` value (or an interactively entered key).
+    :return: The unchanged key when it is safe to join onto a base directory.
+    """
+    text = str(site)
+    path = Path(text)
+    unsafe = (
+        not text.strip()
+        or text in {".", ".."}
+        or "/" in text
+        or "\\" in text
+        or ":" in text
+        or path.is_absolute()
+        or path.name != text
+        or any(ord(char) < 32 for char in text)
+    )
+    if unsafe:
+        fail(t("Unsupported site: {site!r}").format(site=text), EXIT_USAGE)
+    return text
 
 
 class CleanCmd(Command):
@@ -106,7 +138,7 @@ class CleanLogsCmd(Command):
 
     @classmethod
     def run(cls, args: Namespace) -> None:
-        config_path: Path | None = Path(args.config) if args.config else None
+        config_path: Path | None = expand_path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
@@ -196,7 +228,7 @@ class CleanCacheCmd(Command):
 
     @classmethod
     def run(cls, args: Namespace) -> None:
-        config_path: Path | None = Path(args.config) if args.config else None
+        config_path: Path | None = expand_path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
@@ -206,8 +238,9 @@ class CleanCacheCmd(Command):
         cache_base = adapter.get_cache_dir()
 
         if args.site:
-            target_dir = cache_base / args.site
-            target_desc = t("site cache for '{site}'").format(site=args.site)
+            site = _validated_site(args.site)
+            target_dir = cache_base / site
+            target_desc = t("site cache for '{site}'").format(site=site)
         else:
             target_dir = cache_base
             target_desc = t("all site caches")
@@ -306,7 +339,7 @@ class CleanBookCmd(Command):
 
     @classmethod
     def _remove_all(cls, args: Namespace) -> None:
-        config_path: Path | None = Path(args.config) if args.config else None
+        config_path: Path | None = expand_path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
@@ -316,8 +349,9 @@ class CleanBookCmd(Command):
         raw_data_base = adapter.get_raw_data_dir()
 
         if args.site:
-            target_dir = raw_data_base / args.site
-            desc = t("all data for site '{site}'").format(site=args.site)
+            site = _validated_site(args.site)
+            target_dir = raw_data_base / site
+            desc = t("all data for site '{site}'").format(site=site)
         else:
             target_dir = raw_data_base
             desc = t("all raw data for all sites")
@@ -367,8 +401,13 @@ class CleanBookCmd(Command):
             if not site:
                 fail(t("No site provided."), EXIT_USAGE)
 
+        # Also validated when typed at the prompt: the key reaches the client
+        # (and, for ``--all``, the raw-data path), so an escaping value must be
+        # refused just like a ``--site`` flag.
+        site = _validated_site(site)
+
         # Load config
-        config_path: Path | None = Path(args.config) if args.config else None
+        config_path: Path | None = expand_path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.

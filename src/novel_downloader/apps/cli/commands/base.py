@@ -5,8 +5,10 @@ novel_downloader.apps.cli.commands.base
 
 """
 
+import os
 from abc import ABC, abstractmethod
 from argparse import ArgumentParser, Namespace, _SubParsersAction
+from pathlib import Path
 from typing import NoReturn
 
 from novel_downloader.infra.i18n import t
@@ -17,6 +19,7 @@ __all__ = [
     "EXIT_SUCCESS",
     "EXIT_USAGE",
     "Command",
+    "expand_path",
     "fail",
     "localize_help",
     "parse_book_args",
@@ -47,6 +50,22 @@ def fail(message: str, code: int = EXIT_FAILURE) -> NoReturn:
 
     ui.error(message)
     raise SystemExit(code)
+
+
+def expand_path(value: str) -> Path:
+    """
+    Turn a user-supplied path into a ``Path`` with ``~``/env vars expanded.
+
+    Windows shells expand neither ``~`` nor POSIX ``$VAR`` (variables are
+    written ``%VAR%`` there), so an unexpanded ``--config ~/settings.toml``
+    used to be taken literally -- and ``load_or_init_config`` would then offer
+    to create a directory literally named ``~``. Expanding at the CLI boundary
+    keeps every command's path options working the same way on both platforms.
+
+    :param value: Raw command-line path.
+    :return: The same path with user/environment parts resolved.
+    """
+    return Path(os.path.expandvars(os.path.expanduser(str(value))))
 
 
 def localize_help(parser: ArgumentParser) -> None:

@@ -226,6 +226,19 @@ def _is_all_platforms(platform: str) -> bool:
     return is_all_platforms(platform)
 
 
+def _every_platform_failed(outcomes: list[Any]) -> bool:
+    """
+    Whether every platform in an aggregate search failed.
+
+    A genuinely empty result set (every platform answered with zero songs) is
+    a successful search; every platform erroring is not, and must not report
+    exit code 0 as if nothing had gone wrong.
+    """
+    return bool(outcomes) and all(
+        not bool(getattr(outcome, "ok", False)) for outcome in outcomes
+    )
+
+
 def _sources_text(track: Any) -> str:
     """Compact ``netease,qq`` source list for CLI tables."""
     sources = [str(key) for key in (getattr(track, "sources", None) or []) if key]
@@ -430,9 +443,11 @@ class MusicPlatformsCmd(Command):
         engine = _require_engine()
         labels = engine.labels()
         if getattr(args, "json", False):
-            import json
-
-            print(json.dumps(dict(labels), ensure_ascii=False))
+            # ``ui.emit`` (not ``print``): platform labels are localized (e.g.
+            # "国内 · 网易云音乐"), and a redirected Windows stdout uses a
+            # legacy code page where the raw ``print`` path raises
+            # ``UnicodeEncodeError``. ``emit`` falls back to UTF-8 bytes.
+            ui.emit(json.dumps(dict(labels), ensure_ascii=False))
             return
         if not labels:
             ui.warn(t("No music platforms are available."))
@@ -519,9 +534,24 @@ class MusicSearchCmd(Command):
             if outcomes:
                 payload["platforms"] = [item.as_dict() for item in outcomes]
             ui.emit(json.dumps(payload, ensure_ascii=False, indent=2))
+            if _every_platform_failed(outcomes):
+                raise SystemExit(EXIT_FAILURE)
             return
 
+        # Per-platform errors belong on screen even when the merged list is
+        # empty; only then can the user tell "nothing matches" apart from
+        # "every platform is down".
+        for outcome in outcomes:
+            if not outcome.ok:
+                ui.warn(
+                    t("Platform {platform} failed: {error}").format(
+                        platform=outcome.platform, error=outcome.error
+                    )
+                )
+
         if not tracks:
+            if _every_platform_failed(outcomes):
+                raise SystemExit(EXIT_FAILURE)
             ui.warn(t("No results found for '{keyword}'.").format(keyword=keyword))
             return
 
@@ -530,13 +560,6 @@ class MusicSearchCmd(Command):
                 count=len(tracks), keyword=keyword
             )
         )
-        for outcome in outcomes:
-            if not outcome.ok:
-                ui.warn(
-                    t("Platform {platform} failed: {error}").format(
-                        platform=outcome.platform, error=outcome.error
-                    )
-                )
         _render_tracks(tracks, show_sources=_is_all_platforms(platform))
 
 
@@ -611,21 +634,31 @@ class MusicDownloadCmd(Command):
         platform = str(args.platform)
         limit = max(1, int(args.limit))
         settings = engine.settings.load_settings()
-        out_dir = str(
-            args.out or settings.get("out_dir") or engine.default_download_dir()
+        out_dir = _expand_path(
+            str(args.out or settings.get("out_dir") or engine.default_download_dir())
         )
         level = str(args.level or settings.get("level") or "exhigh")
         workers = max(1, int(settings.get("workers") or 3))
 
         all_platforms = _is_all_platforms(platform)
         provider = None
+        outcomes: list[Any] = []
         if all_platforms:
-            tracks, _total, _outcomes = _search_all(keyword, limit, show_status=True)
+            tracks, _total, outcomes = _search_all(keyword, limit, show_status=True)
         else:
             provider = _create_provider(engine, platform)
             _print_platform_note(engine, platform)
             tracks, _total = _search(engine, provider, keyword, limit, show_status=True)
         if not tracks:
+            for outcome in outcomes:
+                if not outcome.ok:
+                    ui.warn(
+                        t("Platform {platform} failed: {error}").format(
+                            platform=outcome.platform, error=outcome.error
+                        )
+                    )
+            if _every_platform_failed(outcomes):
+                raise SystemExit(EXIT_FAILURE)
             ui.warn(t("No results found for '{keyword}'.").format(keyword=keyword))
             return
 
@@ -707,11 +740,16 @@ class MusicDownloadCmd(Command):
 
         for name, reason in failed_pairs:
             ui.warn(t("Failed: {name} ({reason})").format(name=name, reason=reason))
-        ui.success(
-            t("Done: {ok} succeeded, {skip} skipped, {fail} failed").format(
-                ok=ok, skip=skip, fail=fail
-            )
+        failed_total = int(fail or 0)
+        summary = t("Done: {ok} succeeded, {skip} skipped, {fail} failed").format(
+            ok=ok, skip=skip, fail=fail
         )
+        if failed_total > 0:
+            # A batch with failed songs is a failed run: scripts must not see
+            # exit 0 while some downloads were silently missing.
+            ui.warn(summary)
+            raise SystemExit(EXIT_FAILURE)
+        ui.success(summary)
 
 
 # ---------------------------------------------------------------------------
@@ -721,16 +759,58 @@ class MusicDownloadCmd(Command):
 #: Characters that cannot appear in a Windows/Unix file name.
 _ILLEGAL_FILENAME = re.compile(r'[<>:"/\|?*\x00-\x1f]')
 
+#: Windows DOS device names that cannot be used as a file stem, even with an
+#: extension: ``AUX.m3u8`` fails with ENOENT and ``CON.m3u8`` silently opens
+#: the console device instead of creating a file.
+_RESERVED_FILENAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
+
+#: Extensions the downloader can write; used to find an already-downloaded
+#: track when ``export-m3u`` gets a fresh search result (no ``Track.path``).
+_AUDIO_EXTENSIONS = frozenset(
+    {
+        ".aac",
+        ".aiff",
+        ".alac",
+        ".ape",
+        ".flac",
+        ".m4a",
+        ".m4b",
+        ".mp3",
+        ".mp4",
+        ".ogg",
+        ".opus",
+        ".wav",
+        ".wma",
+    }
+)
+
+
+def _expand_path(value: str) -> str:
+    """Expand ``~``/environment variables in a user-supplied path."""
+    return os.path.expandvars(os.path.expanduser(str(value)))
+
 
 def _playlist_filename(keyword: str) -> str:
     """Build a safe ``<keyword>.m3u8`` file name."""
     stem = _ILLEGAL_FILENAME.sub("_", keyword).strip().rstrip(". ")
+    if stem.split(".", 1)[0].upper() in _RESERVED_FILENAMES:
+        stem = f"_{stem}"
     return f"{stem[:120] or 'playlist'}.m3u8"
 
 
 def _default_playlist_path(keyword: str, out_dir: str) -> str:
     """Return the default playlist path inside the music output directory."""
     return os.path.join(out_dir, _playlist_filename(keyword))
+
+
+def _track_path(track: Any) -> str:
+    """Return the local file path recorded on ``track``, if it is usable."""
+    path = getattr(track, "path", "")
+    return path.strip() if isinstance(path, str) else ""
 
 
 def _split_playable(tracks: list[Any]) -> tuple[list[Any], list[Any]]:
@@ -743,12 +823,78 @@ def _split_playable(tracks: list[Any]) -> tuple[list[Any], list[Any]]:
     ready: list[Any] = []
     skipped: list[Any] = []
     for track in tracks:
-        path = getattr(track, "path", "")
-        if isinstance(path, str) and path.strip():
+        if _track_path(track):
             ready.append(track)
         else:
             skipped.append(track)
     return ready, skipped
+
+
+def _find_downloaded_file(track: Any, out_dir: str, split_folder: bool) -> str:
+    """
+    Locate an already-downloaded file for a fresh search result.
+
+    A search always returns new ``Track`` objects with an empty ``path``, so
+    the playlist export needs to look the file up by the downloader's naming
+    convention. Returns ``""`` when nothing matches.
+    """
+    from novel_downloader.apps.music.downloader import (
+        DownloadOptions,
+        build_dir,
+        build_stem,
+    )
+
+    options = DownloadOptions(out_dir=out_dir, split_folder=split_folder)
+    folder = build_dir(options, track)
+    stem = build_stem(track)  # type: ignore[no-untyped-call]
+    stem_key = os.path.normcase(stem)
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        return ""
+
+    matches: list[tuple[int, str, str]] = []
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+        except OSError:
+            continue
+        base, ext = os.path.splitext(entry.name)
+        if ext.lower() not in _AUDIO_EXTENSIONS:
+            continue
+        base_key = os.path.normcase(base)
+        if base_key == stem_key:
+            matches.append((0, entry.name, entry.path))
+        elif base_key.startswith(stem_key + " ["):
+            # ``build_stem [id].ext``: the fallback name for same-titled songs.
+            matches.append((1, entry.name, entry.path))
+    if not matches:
+        return ""
+    # Deterministic pick: the plain name first, then the id-suffixed fallback.
+    return sorted(matches)[0][2]
+
+
+def _resolve_playable(
+    tracks: list[Any], out_dir: str, *, split_folder: bool
+) -> tuple[list[Any], list[Any]]:
+    """
+    Fill ``track.path`` from the music library, then split playable tracks.
+
+    ``export-m3u`` searches again instead of relying on an in-memory download
+    session, so this is what makes the command usable: already downloaded
+    files are matched by artist/album folder and ``name - artist`` stem.
+    """
+    for track in tracks:
+        if _track_path(track):
+            continue
+        found = _find_downloaded_file(track, out_dir, split_folder)
+        if found:
+            try:
+                track.path = found
+            except (AttributeError, TypeError):  # read-only/odd track object
+                continue
+    return _split_playable(tracks)
 
 
 class MusicExportM3uCmd(Command):
@@ -808,7 +954,13 @@ class MusicExportM3uCmd(Command):
             )
         )
 
-        ready, skipped = _split_playable(tracks)
+        settings = engine.settings.load_settings()
+        out_dir = _expand_path(
+            str(settings.get("out_dir") or engine.default_download_dir())
+        )
+        split_folder = bool(settings.get("split_folder", True))
+
+        ready, skipped = _resolve_playable(tracks, out_dir, split_folder=split_folder)
         if skipped:
             ui.warn(
                 t(
@@ -825,9 +977,9 @@ class MusicExportM3uCmd(Command):
             )
             raise SystemExit(EXIT_FAILURE)
 
-        settings = engine.settings.load_settings()
-        out_dir = str(settings.get("out_dir") or engine.default_download_dir())
-        out_path = str(args.out or _default_playlist_path(keyword, out_dir))
+        out_path = _expand_path(
+            str(args.out or _default_playlist_path(keyword, out_dir))
+        )
 
         try:
             playlist = engine.export_m3u(ready, out_path)

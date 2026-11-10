@@ -25,7 +25,14 @@ from ..ui_adapters import (
     CLILoginUI,
     CLIProcessUI,
 )
-from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail, parse_book_args
+from .base import (
+    EXIT_FAILURE,
+    EXIT_USAGE,
+    Command,
+    expand_path,
+    fail,
+    parse_book_args,
+)
 
 #: Failure lines shown by the default (warning-only) report.
 _MAX_LISTED_FAILURES = 5
@@ -152,7 +159,7 @@ class DownloadCmd(Command):
     def run(cls, args: Namespace) -> None:
         as_json = bool(getattr(args, "as_json", False))
         strict = bool(getattr(args, "strict", False))
-        config_path: Path | None = Path(args.config) if args.config else None
+        config_path: Path | None = expand_path(args.config) if args.config else None
         site: str | None = args.site
         formats: list[str] | None = args.format
 

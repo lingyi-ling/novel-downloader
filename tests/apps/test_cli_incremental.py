@@ -349,6 +349,67 @@ def test_sources_add_url_installs_rule(
     assert calls == [("https://example.com/rules/demo.json", 15.0)]
 
 
+def test_sources_add_url_uses_a_portable_staging_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The staging file must never use a user-supplied (possibly reserved) name.
+
+    ``--name CON`` (or a URL ending in ``/nul.json``) would otherwise create a
+    DOS device name in the temporary directory, which Windows cannot open.
+    The requested name is forwarded to ``install_rule`` instead, where it is
+    sanitized before it becomes a real file name.
+    """
+    rule_dir = tmp_path / "rules"
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(rule_dir))
+    _patch_urlopen(monkeypatch, _builtin_rule_bytes())
+
+    import novel_downloader.plugins.rule as rule_pkg
+
+    seen: dict[str, Any] = {}
+
+    def fake_install(data: Any, name: str | None = None, **_kw: Any) -> Path:
+        seen["staging"] = Path(data).name
+        seen["name"] = name
+        return rule_dir / "rule_CON.json"
+
+    monkeypatch.setattr(rule_pkg, "install_rule", fake_install)
+
+    args = _parser(SourcesCmd).parse_args(
+        [
+            "sources",
+            "add",
+            "--url",
+            "https://example.com/rules/nul.json",
+            "--name",
+            "CON",
+        ]
+    )
+    args.func(args)
+
+    assert seen["staging"] == "rule.json"
+    assert seen["name"] == "CON"
+
+
+def test_sources_add_url_sanitizes_a_reserved_target_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    rule_dir = tmp_path / "rules"
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(rule_dir))
+    _patch_urlopen(monkeypatch, _builtin_rule_bytes())
+
+    args = _parser(SourcesCmd).parse_args(
+        ["sources", "add", "--url", "https://example.com/rules/nul.json"]
+    )
+    args.func(args)
+
+    # ``install_rule`` prefixes a reserved device name (the same rule it
+    # applies to every other caller); the file is loadable instead of being
+    # redirected to the Windows NUL device.
+    assert (rule_dir / "rule_nul.json").is_file()
+
+
 def test_sources_add_url_rejects_oversized_payload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

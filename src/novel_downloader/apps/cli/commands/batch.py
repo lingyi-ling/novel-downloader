@@ -64,7 +64,7 @@ from novel_downloader.plugins import registrar
 from novel_downloader.plugins.ranking import normalize_text
 from novel_downloader.schemas import BookConfig, SearchResult
 
-from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail
+from .base import EXIT_FAILURE, EXIT_USAGE, Command, expand_path, fail
 
 #: Guards against a pathological line being used as a search keyword or
 #: written back verbatim into the not-found file.
@@ -234,7 +234,7 @@ class BatchCmd(Command):
         if not file_arg and not from_not_found:
             fail(t("Provide --file or --from-not-found."), EXIT_USAGE)
 
-        input_path = Path(str(file_arg or from_not_found))
+        input_path = expand_path(str(file_arg or from_not_found))
         if not input_path.is_file():
             fail(
                 t("Input file not found: {path}").format(path=str(input_path)),
@@ -276,7 +276,7 @@ class BatchCmd(Command):
 
         _report_input_problems(parsed)
 
-        config_path = Path(args.config) if args.config else None
+        config_path = expand_path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
@@ -284,7 +284,10 @@ class BatchCmd(Command):
 
         out_dir: Path | None = None
         if args.out:
-            out_dir = Path(args.out).expanduser().resolve()
+            # ``~`` and environment variables are expanded here (Windows shells
+            # expand neither), so ``--out %TEMP%/books`` and ``--out ~/books``
+            # mean the same directory on every platform.
+            out_dir = expand_path(args.out).resolve()
             general = dict(config_data.get("general") or {})
             general["output_dir"] = str(out_dir)
             # ``--out`` is the user saying "put this run's data here", so the
@@ -718,7 +721,7 @@ def _report_input_problems(parsed: ParsedBatch) -> None:
 def _not_found_path(override: str | None, site: str | None) -> Path:
     """Resolve ``--not-found`` or the default ``logs/not_found_<site>.txt``."""
     if override:
-        return Path(override).expanduser()
+        return expand_path(override)
     # Both separators are stripped on every platform, not just the one the
     # running OS treats as a separator: a site key is untrusted input and a
     # name that is safe on POSIX today must not escape when the log directory
@@ -736,7 +739,7 @@ def _not_found_path(override: str | None, site: str | None) -> Path:
 def _same_path(left: Path, right: Path) -> bool:
     """True when two paths resolve to the same file."""
     try:
-        return left.expanduser().resolve() == right.expanduser().resolve()
+        return expand_path(str(left)).resolve() == expand_path(str(right)).resolve()
     except OSError:  # pragma: no cover - resolve() rarely fails on bad paths
         return False
 
