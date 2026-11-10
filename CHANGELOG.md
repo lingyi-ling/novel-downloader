@@ -1,3 +1,44 @@
+## v1.29.0 (2026-11-10)
+
+一次大规模的并行加固（30 个独立改进批次），覆盖搜索、站点、CLI、桌面、Android、下载管线、打包与文档。
+
+### Feature
+
+- **搜索去重与排序**：装饰性标题（`[网游]`、`【完结】`、`（精校版）` 等）在「作者相同 + 核心标题完全相等」时保守合并；作者/书名意图下改为「主字段命中档位优先，再按质量分」排序
+- **搜索缓存**：加锁、`put` 前清理过期条目、纯标点关键词不再碰撞、聚合搜索把站点集合与浏览器辅助配置纳入 key
+- **规则书源**：支持字段级 `fallback`；补 1 MiB 文件上限、fallback/json_body 深度上限、`javascript:`/`file:` URL 过滤、正则 RecursionError 兜底
+- **Android**：音乐搜索/任务/导出状态提升到 Activity 级 ViewModel（切 Tab 不丢）；跨页下载按 `search_id` 分组提交；错误码资源化；分页去重改为 `provider+id`
+- **自动更新**：下载支持 Range 续传、3 次重试、1 GiB 上限、HTTPS→HTTP 降级拒绝、失败清理 `.part`
+
+### Fix
+
+- **静默丢章**：停止下载时队列满会取消存储线程，最多丢 10 章且仍计成功；改为排空队列 + 在途章节回填 + 无法落盘的章节进失败账本
+- **队列恢复**：`close()` 早于 `start()` 会清空持久队列；并发 flush 可互相覆盖；同名 task_id 恢复成两个任务；终态任务残留在 pending 会重下
+- **章节存储**：`executemany` 半写后 commit 会带入库半截行；缺章修复时缓存的章节被当作干净跳过（导出得到密文）
+- **搜索**：`search_stream` 缓存命中破坏「每片一个站点」；全半角不折叠导致分组/排序/缓存不一致；`AggregateResult.total` 在 limit 下语义错误
+- **音乐 API**：`extra`（含下载 cookie/SongInfo）随 REST/内嵌回包泄漏；歌单导出与下载目录可任意写；job 错误回显底层异常；活跃 job 超限会弹掉仍在运行的任务
+- **站点**：mangg 家族/ciweimao/yibige/qqbook 的 book_id/chapter_id 被 query 污染；空页面崩溃；qidian 正文残留 `</p>`；qimao 缓存后空标题；shuhaige 分页顺序
+- **CLI**：`clean --site ..` 可删除缓存目录外的文件（路径穿越）；下载失败仍 exit 0；Windows 重定向下 `--json` 遇 emoji 崩溃；`export-m3u` 全新搜索永远导不出
+- **桌面**：搜索结果点下载/追更读错 dataset 键（v1.28.1）；严格模式下更新按钮未声明变量导致手动安装不可用；下载页「已完成」混入取消任务；打开路径失败静默
+- **更新器**：`download_asset` 失败残留 `.part`；重定向可能降级到明文 HTTP；下载无大小上限
+- **会话/限流**：调用方取消时 session 关闭被中断；限流器取消后预留名额不归还
+
+### Build / CI
+
+- Windows exe 写入真实 FileVersion/ProductVersion；安装器升级清理旧 `_internal`（防止旧插件目录复活）
+- 新增 `check_versions.py`（版本三处一致）与 `verify_frozen.py`（三端产物冒烟）；CI 补 Python 3.12、`image-utils` extras、超时与权限
+- PyInstaller 补齐 numpy/Pillow/fontTools 载荷
+
+### Docs / Site
+
+- 文档与官网同步 28 个音乐平台、统一搜索、自动更新、Android 独立引擎；新增英文 API 文档与 4 条排查条目
+- 官网修 320px 横向溢出、标签裁切、页脚遮挡、no-JS 内容、`prefers-reduced-motion`、对比度与 i18n 覆盖；JSON-LD/robots/sitemap 校正
+
+### Test
+
+- 新增约 500 个测试（站点链路、故障注入、并发、路径穿越、缓存、Android ViewModel 等）
+- 全量 `pytest` **9536 passed / 30 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿；Android `compileDebugKotlin` + `testDebugUnitTest`（310 tests）通过
+
 ## v1.28.1 (2026-11-08)
 
 ### Fix

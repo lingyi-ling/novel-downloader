@@ -8,7 +8,7 @@
 ## 0. 一句话现状
 
 - **版本 v1.28.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.28.0>
-- 全量测试 **9059 passed / 30 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
+- 全量测试 **9536 passed / 30 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
@@ -95,6 +95,12 @@ ovel_downloader` 不受影响
 - 下载：`download_update_async` + `update_download_state` 提供字节进度；`download_asset(resume=True, attempts=3)` 支持 Range 续传
 - 清理：`updates/` 里 `.part` 1 天、安装包/zip 7 天后自动删除
 - 仍是未启用状态：清单签名（`TRUSTED_UPDATE_KEYS` 为空）。启用后必须每次都发布 `latest.json`，且私钥丢失会导致无法再签新清单
+
+### 并行改进批次（2026-11-10）
+
+- 一次 30 个独立槽位的并行加固；进度与各槽位结论见 `build/agent-loop/state.json`（gitignore）
+- 重点：搜索去重/排序/缓存、站点 ID 规范化、规则引擎限制、CLI 路径穿越、音乐 API 数据泄漏与路径约束、队列恢复/章节存储事务、停止丢章、更新器大小/重定向/续传
+- 若继续循环：保持每槽位目录隔离；每 ~30 个完成停补位，跑一次全量门禁再提交/发版
 
 ### 官网
 
