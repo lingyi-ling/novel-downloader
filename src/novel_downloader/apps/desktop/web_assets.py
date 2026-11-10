@@ -450,6 +450,9 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 
 .empty { text-align: center; color: var(--text-3); padding: 64px 20px; }
 .empty svg.icon { width: 34px; height: 34px; opacity: .35; margin-bottom: 10px; }
+/* The retry button lives inside .empty; the 34px glyph above is for the
+   illustration only and would blow the button up. */
+.empty .btn svg.icon { width: 14px; height: 14px; opacity: 1; margin: 0; }
 .empty .t { font-size: 13.5px; font-weight: 600; color: var(--text-2); }
 .empty .s { font-size: 12px; margin-top: 3px; }
 
@@ -713,6 +716,8 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
     <section class="page" id="page-music">
       <div class="topbar">
         <div><h1 data-i18n="Music">Music</h1><div class="sub" data-i18n="Search and download across 25 music platforms">Search and download across 25 music platforms</div></div>
+        <div class="spacer"></div>
+        <button class="btn btn-ghost" id="btn-m-open"><svg class="icon"><use href="#i-folder"/></svg><span data-i18n="Open music folder">Open music folder</span></button>
       </div>
       <div class="scroll">
         <div class="music-grid">
@@ -821,6 +826,20 @@ async function call(method, ...args) {
   return undefined;
 }
 
+/* Opening a file or folder is a side effect the bridge reports as a boolean:
+   the target may have been moved or deleted since the list was drawn, and the
+   click would otherwise look like a no-op. Never swallow that answer. */
+async function openPath(path) {
+  let ok;
+  try { ok = await api("open_path", path); }
+  catch (err) { toast((err && err.message) || String(err), "err", 7000); return false; }
+  if (ok === false) {
+    toast(t("Could not open {path}").replace("{path}", path), "err", 7000);
+    return false;
+  }
+  return true;
+}
+
 function toast(msg, kind = "info", ms = 3800, onclick = null) {
   const box = document.createElement("div");
   box.className = "toast " + kind;
@@ -897,6 +916,13 @@ let updatePollTimer = null;
 let updateDownloadPromise = null;
 const updateSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+function setUpdateInstallLabel(downloaded) {
+  // Once the verified installer is on disk the click only launches it; the
+  // old label promised a download that would otherwise run a second time.
+  const btn = $("#update-install");
+  if (btn) btn.textContent = downloaded ? t("Install and restart") : t("Download and install");
+}
+
 function applyUpdateState(st) {
   if (!st) return;
   updates.state = st;
@@ -907,16 +933,30 @@ function applyUpdateState(st) {
   // A release can be newer without shipping anything for this platform; say
   // so instead of showing an update with no way to act on it.
   const noAsset = !st.asset_name;
+  const downloaded = !!st.downloaded;
   $("#update-text").textContent = noAsset
     ? t("No package for this platform in v{ver}; open the release page").replace("{ver}", st.latest || "")
     : t("Update available: v{ver}").replace("{ver}", st.latest || "");
-  $("#update-size").textContent = st.asset_size ? fmtSize(st.asset_size) : "";
+  $("#update-size").textContent = downloaded
+    ? fmtSize(st.downloaded_size || st.asset_size)
+    : (st.asset_size ? fmtSize(st.asset_size) : "");
   $("#update-notes").hidden = !(st.notes_url || st.url);
   $("#update-notes").classList.toggle("btn-primary", noAsset);
   $("#update-install").hidden = noAsset;
+  setUpdateInstallLabel(downloaded);
   // An update may already be downloading in the background; follow it so the
-  // bar shows real bytes instead of a frozen size for minutes.
-  if (!noAsset && !st.downloaded) trackUpdateDownload();
+  // bar shows real bytes instead of a frozen size for minutes. When it is
+  // already on disk there is nothing to follow.
+  if (!noAsset && !downloaded) {
+    trackUpdateDownload().then(done => {
+      if (!done || !done.ok) return;
+      // The transfer finished after the check payload was built: flip the bar
+      // to the install state instead of re-downloading on the next click.
+      updates.state = { ...(updates.state || {}), downloaded: true, downloaded_size: done.received || done.total || 0 };
+      setUpdateInstallLabel(true);
+      $("#update-size").textContent = fmtSize(done.received || done.total || 0);
+    }).catch(() => {});
+  }
 }
 
 function updateDownloadUi(st) {
@@ -1025,7 +1065,9 @@ $("#update-install").onclick = async () => {
         typeof window.pywebview.api.download_update_async === "function"
       );
       if (canStartAsync) {
-        started = await api("download_update_async");
+        // ``started`` must be declared: the page runs under "use strict", where
+        // assigning to an undeclared name throws and aborted the install.
+        const started = await api("download_update_async");
         if (started && started.error) {
           toast(started.error, "err", 9000);
           return;
@@ -1035,14 +1077,16 @@ $("#update-install").onclick = async () => {
           toast((st && st.error) || t("Update download failed"), "err", 9000);
           return;
         }
-        updates.state = { ...(updates.state || {}), downloaded: true };
+        updates.state = { ...(updates.state || {}), downloaded: true, downloaded_size: st.received || st.total || 0 };
       } else {
         const dl = await api("download_update");
         if (!dl || !dl.ok || !dl.path) {
           toast((dl && dl.error) || t("Update download failed"), "err", 9000);
           return;
         }
+        updates.state = { ...(updates.state || {}), downloaded: true };
       }
+      setUpdateInstallLabel(true);
     }
     btn.textContent = t("Installing…");
     const res = await api("install_update");
@@ -1057,7 +1101,9 @@ $("#update-install").onclick = async () => {
   } finally {
     if (!updates.finished) {
       setUpdateBusy(false);
-      btn.textContent = t("Download and install");
+      // A failed install keeps the downloaded file, so the button must offer
+      // the install again rather than another download.
+      setUpdateInstallLabel(!!(updates.state && updates.state.downloaded));
     }
   }
 };
@@ -1369,10 +1415,21 @@ $("#q-group").addEventListener("change", () => store.set("merge_same_book", $("#
 let taskTimer = null;
 const knownStatus = new Map();
 function renderTasks(snap) {
+  // While a cancelled run is being cleaned up the manager can report the same
+  // task in two buckets for one poll. The terminal record is the truth: drop
+  // the duplicate instead of drawing the same book twice under two headings.
+  const done = snap.completed || [];
+  const settled = new Set(done.map(k => k.task_id));
+  const seen = new Set();
+  const take = list => (list || []).filter(k => {
+    if (!k || settled.has(k.task_id) || seen.has(k.task_id)) return false;
+    seen.add(k.task_id);
+    return true;
+  });
   const groups = [
-    ["live", t("Active"), (snap.running || []).concat(snap.processing || [], snap.exporting || [])],
-    ["queued", t("Queued"), snap.queued || []],
-    ["done", t("Completed"), snap.completed || []],
+    ["live", t("Active"), take((snap.running || []).concat(snap.processing || [], snap.exporting || []))],
+    ["queued", t("Queued"), take(snap.queued)],
+    ["done", t("Finished"), done],
   ];
   const liveCount = groups[0][2].length + groups[1][2].length;
   const badge = $("#badge-live");
@@ -1380,7 +1437,7 @@ function renderTasks(snap) {
   badge.textContent = liveCount;
   if (currentPage !== "download") return;
   const body = $("#tasks-body");
-  if (liveCount === 0 && (snap.completed || []).length === 0) {
+  if (liveCount === 0 && groups[2][2].length === 0) {
     body.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-down"/></svg><div class="t">${esc(t("Nothing in the queue"))}</div><div class="s">${esc(t("Search for a book and press Download"))}</div></div>`;
     return;
   }
@@ -1435,18 +1492,42 @@ $("#tasks-body").addEventListener("click", async e => {
   const c = e.target.closest("[data-cancel]");
   const r = e.target.closest("[data-retry]");
   const f = e.target.closest("[data-open-file]");
-  if (c) { await call("cancel_task", c.dataset.cancel); refreshTasks(); }
-  else if (r) { await call("retry_task", r.dataset.retry); refreshTasks(); }
-  else if (f) { api("open_path", f.dataset.openFile).catch(() => {}); }
+  // Both mutations answer ``{ok: false}`` instead of throwing: the task may
+  // have finished between two 1.2 s polls, or a retry may find no site/book id.
+  // Saying so is the only way the click stops looking dead.
+  if (c) {
+    const res = await call("cancel_task", c.dataset.cancel);
+    if (res && res.ok === false) toast(t("This task has already finished"), "warn");
+    refreshTasks();
+  } else if (r) {
+    const res = await call("retry_task", r.dataset.retry);
+    if (res && res.ok === false) toast(t("Could not retry this task"), "err");
+    refreshTasks();
+  } else if (f) { openPath(f.dataset.openFile); }
 });
 $("#btn-refresh-tasks").onclick = refreshTasks;
+
+/* A failed load must not look like an empty folder, and it must offer the
+   retry instead of leaving the user to hunt for the Refresh button. Shared by
+   the history and follow lists. */
+function renderLoadFailure(body, message) {
+  body.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-x"/></svg>
+    <div class="t">${esc(t("Could not load this list"))}</div>
+    <div class="s">${esc(message)}</div>
+    <button class="btn btn-ghost btn-sm" style="margin-top:12px" data-reload><svg class="icon"><use href="#i-refresh"/></svg>${esc(t("Retry"))}</button>
+  </div>`;
+}
 
 /* ================================================================ history */
 async function refreshHistory() {
   const body = $("#hist-body");
   try {
     const items = await api("get_history");
-    $("#hist-sub").textContent = t("{n} files in {dir}").replace("{n}", items.length).replace("{dir}", await api("get_data_dir") || "");
+    // The sub-line is decoration: a failing get_data_dir must not replace a
+    // perfectly good file list with an error panel.
+    let dir = "";
+    try { dir = (await api("get_data_dir")) || ""; } catch { dir = ""; }
+    $("#hist-sub").textContent = t("{n} files in {dir}").replace("{n}", items.length).replace("{dir}", dir);
     if (!items.length) {
       body.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-hist"/></svg><div class="t">${esc(t("No exported books yet"))}</div><div class="s">${esc(t("Files land here when a download finishes"))}</div></div>`;
       return;
@@ -1463,15 +1544,24 @@ async function refreshHistory() {
         </div>
       </div>`).join("");
   } catch (e) {
-    body.innerHTML = `<div class="empty"><div class="t">${esc(String(e && e.message || e))}</div></div>`;
+    $("#hist-sub").textContent = "";
+    renderLoadFailure(body, String(e && e.message || e));
   }
 }
 $("#hist-body").addEventListener("click", e => {
+  if (e.target.closest("[data-reload]")) { refreshHistory(); return; }
   const f = e.target.closest("[data-open-file]");
-  if (f) api("open_path", f.dataset.openFile).catch(() => {});
+  if (f) openPath(f.dataset.openFile);
 });
 $("#btn-refresh-hist").onclick = refreshHistory;
-$("#btn-open-dl").onclick = () => api("open_downloads_dir").catch(() => {});
+$("#btn-open-dl").onclick = async () => {
+  // The bridge creates the folder on demand and reports why it could not be
+  // opened; a silent button that never reacts is worse than an error toast.
+  const r = await call("open_downloads_dir");
+  if (r && r.ok === false) {
+    toast(t("Could not open the download folder: {error}").replace("{error}", r.error || t("Unknown error")), "err", 7000);
+  }
+};
 
 /* ================================================================ music */
 const music = { tracks: [], selected: new Set(), downloading: false, note: "", batch: [], searchId: "", labels: {}, userTouched: false, failedItems: [] };
@@ -1529,6 +1619,10 @@ async function doMusicSearch() {
   music.userTouched = false;
   music.searchId = "";
   music.failedItems = [];
+  // Indexes in ``batch`` belong to the rows of the previous search. Keeping
+  // them while the list is replaced would let a still-running download (or a
+  // retry) write its paths onto unrelated tracks.
+  music.batch = [];
   hideMusicFailures();
   applyMusicTracks([]);
   musicSearchNote(t("Searching…"), false);
@@ -1699,6 +1793,23 @@ $("#btn-m-dl").onclick = async () => {
 };
 $("#btn-m-stop").onclick = () => api("music_stop").catch(() => {});
 
+/* The music folder is resolved by the bridge (stored out_dir, else the
+   platform default) and created on demand. A silent failure would leave the
+   user with nothing but a button that does nothing, so report it. */
+$("#btn-m-open").onclick = async () => {
+  const btn = $("#btn-m-open");
+  btn.disabled = true;
+  try {
+    const r = await call("open_music_dir");
+    if (!r || !r.ok) {
+      const reason = (r && r.error) || t("Unknown error");
+      toast(t("Could not open the music folder: {error}").replace("{error}", reason), "err", 7000);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+};
+
 /* Download failures stay on screen with their reason: the summary toast alone
    never told the user which track failed or why. Only the first rows are
    listed; "retry failed" resubmits exactly those rows with the same search id. */
@@ -1784,7 +1895,7 @@ $("#btn-m-export").onclick = async () => {
     const r = await call("music_export", $("#m-platform").value, ready);
     if (r && r.ok) {
       showExportNote(r);
-      toast(t("Playlist saved to {path}").replace("{path}", r.path), "ok", 9000, () => api("open_path", r.path).catch(() => {}));
+      toast(t("Playlist saved to {path}").replace("{path}", r.path), "ok", 9000, () => openPath(r.path));
     } else if (r && r.error) {
       toast(r.error, "err", 7000);
     }
@@ -1813,7 +1924,7 @@ $("#m-export-copy").onclick = async () => {
 };
 $("#m-export-open").onclick = () => {
   const path = $("#m-export-path").value;
-  if (path) api("open_path", path).catch(() => {});
+  if (path) openPath(path);
 };
 
 let musicPoll = null;
@@ -1901,18 +2012,23 @@ async function refreshFollow() {
         </div>
       </div>`).join("");
   } catch (e) {
-    body.innerHTML = `<div class="empty"><div class="t">${esc(String(e && e.message || e))}</div></div>`;
+    renderLoadFailure(body, String(e && e.message || e));
   }
 }
 $("#follow-body").addEventListener("click", async e => {
+  if (e.target.closest("[data-reload]")) { refreshFollow(); return; }
   const d = e.target.closest("[data-fdl]");
   const u = e.target.closest("[data-unfollow]");
   if (d) {
     const r = await call("add_task", d.dataset.fdl, d.dataset.bid, d.dataset.title);
     if (r && r.ok) { toast(t("Queued: {title}").replace("{title}", d.dataset.title), "ok"); showPage("download"); }
     else if (r && r.error) toast(r.error, "err");
+    else if (r && r.ok === false) toast(t("Could not queue this book"), "err");
   } else if (u) {
-    await call("remove_watch", u.dataset.unfollow, u.dataset.bid);
+    // ``remove_watch`` answers ``{ok: false}`` when the store cannot be
+    // written; ignoring it left the row on screen with no explanation.
+    const r = await call("remove_watch", u.dataset.unfollow, u.dataset.bid);
+    if (r && r.ok === false) toast(t("Could not remove this book from the follow list"), "err", 6000);
     refreshFollow();
   }
 });

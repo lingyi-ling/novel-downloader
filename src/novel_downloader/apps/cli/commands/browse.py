@@ -22,7 +22,7 @@ from novel_downloader.infra.config import ConfigAdapter
 from novel_downloader.infra.i18n import t
 from novel_downloader.plugins import registrar
 
-from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail
+from .base import EXIT_FAILURE, EXIT_USAGE, Command, expand_path, fail
 
 #: ``--gender`` spellings mapped onto the site's numeric audience code.
 _GENDERS = {"male": "1", "female": "2", "1": "1", "2": "2"}
@@ -80,7 +80,13 @@ class BrowseCmd(Command):
         limit = max(1, int(args.limit))
         as_json = bool(args.as_json)
 
-        config_path: Path | None = Path(args.config) if args.config else None
+        # ``--json`` prints and exits before any selection happens, so ``--first``
+        # would be silently ignored. Reject the pair like ``search`` does instead
+        # of accepting a flag that cannot have its documented effect.
+        if as_json and args.first:
+            fail(t("--json and --first cannot be combined."), EXIT_USAGE)
+
+        config_path: Path | None = expand_path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
             raise SystemExit(EXIT_FAILURE)

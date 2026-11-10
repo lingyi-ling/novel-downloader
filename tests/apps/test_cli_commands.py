@@ -1199,3 +1199,280 @@ def test_sources_add_missing_file_is_usage_error(
 
     assert excinfo.value.code == 2
     assert any("not found" in message for message in messages.error)
+
+
+# ---------------------------------------------------------------------------
+# search: "every site failed" is a failure, not an empty result set
+# ---------------------------------------------------------------------------
+
+
+def _search_env(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Stub config loading and logging so ``search`` never touches the disk."""
+    from novel_downloader.apps.cli.commands import search as search_module
+
+    monkeypatch.setattr(
+        search_module, "load_or_init_config", lambda *_a, **_k: {"general": {}}
+    )
+    monkeypatch.setattr(search_module.ui, "setup_logging", lambda **_k: None)
+    return search_module
+
+
+def _search_args(argv: list[str]) -> argparse.Namespace:
+    from novel_downloader.apps.cli.commands.search import SearchCmd
+
+    return _parser(SearchCmd).parse_args(["search", *argv])
+
+
+def test_search_every_site_failed_exits_one_and_keeps_json_pure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from novel_downloader.plugins.search import SearchEvent
+
+    _search_env(monkeypatch)
+
+    async def fake_search(**kwargs: Any) -> list[Any]:
+        on_event = kwargs["on_event"]
+        on_event(SearchEvent(site="b520", kind="failed", message="timeout"))
+        on_event(SearchEvent(site="qidian", kind="failed", message="refused"))
+        return []
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    args = _search_args(["--json", "斗破苍穹"])
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    # An outage must not look like "no such book": exit 1, and the (empty)
+    # document is still emitted so a machine consumer can parse stdout.
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == []
+    assert "0 site(s) completed / 2 failed" in captured.err
+
+
+def test_search_every_site_failed_exits_one_without_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novel_downloader.plugins.search import SearchEvent
+
+    search_module = _search_env(monkeypatch)
+    messages = _capture_ui(monkeypatch, search_module)
+
+    async def fake_search(**kwargs: Any) -> list[Any]:
+        kwargs["on_event"](SearchEvent(site="b520", kind="failed", message="timeout"))
+        return []
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    args = _search_args(["斗破苍穹"])
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    assert excinfo.value.code == 1
+    # The per-site failure line is the diagnostic; the misleading "no results"
+    # warning is not printed for an outage.
+    assert not any("No results found" in message for message in messages.warn)
+
+
+def test_search_partial_site_failure_is_not_an_outage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novel_downloader.plugins.search import SearchEvent
+
+    search_module = _search_env(monkeypatch)
+    messages = _capture_ui(monkeypatch, search_module)
+
+    async def fake_search(**kwargs: Any) -> list[Any]:
+        on_event = kwargs["on_event"]
+        on_event(SearchEvent(site="b520", kind="failed", message="timeout"))
+        on_event(SearchEvent(site="qidian", kind="completed", result_count=0))
+        return []
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    args = _search_args(["斗破苍穹"])
+    args.func(args)  # one site answered: not an outage, so a normal exit
+
+    assert any("No results found" in message for message in messages.warn)
+
+
+def test_search_without_events_keeps_exit_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stubbed/legacy search that reports no events is still a success."""
+    search_module = _search_env(monkeypatch)
+    messages = _capture_ui(monkeypatch, search_module)
+
+    async def fake_search(**_kwargs: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    args = _search_args(["nothing"])
+    args.func(args)  # no SystemExit: an event-less stub cannot look like an outage
+
+    assert any("No results found" in message for message in messages.warn)
+
+
+def test_search_config_path_expands_environment_variables(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from novel_downloader.apps.cli.commands import search as search_module
+
+    monkeypatch.setenv("SEARCH_CFG_DIR", str(tmp_path))
+    monkeypatch.setattr(search_module.ui, "setup_logging", lambda **_k: None)
+    seen: dict[str, Path | None] = {}
+
+    def _load(path: Path | None) -> dict[str, Any]:
+        seen["path"] = path
+        return {"general": {}}
+
+    monkeypatch.setattr(search_module, "load_or_init_config", _load)
+
+    async def fake_search(**_kwargs: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    # Windows expands ``%VAR%``, POSIX expands ``$VAR``; the CLI must accept
+    # whichever form the user's shell leaves on the command line.
+    ref = "%SEARCH_CFG_DIR%" if os.name == "nt" else "$SEARCH_CFG_DIR"
+    raw = os.path.join(ref, "s.toml")
+    args = _search_args(["--config", raw, "x"])
+    args.func(args)
+
+    assert seen["path"] == Path(os.path.expandvars(raw))
+    assert str(seen["path"]).startswith(str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# doctor: an unbindable --port is a usage error, never a traceback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("port", ["-1", "0", "65536", "70000"])
+def test_doctor_rejects_out_of_range_port(
+    port: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from novel_downloader.apps.cli.commands import doctor as doctor_module
+    from novel_downloader.apps.cli.commands.doctor import DoctorCmd
+
+    messages = _capture_ui(monkeypatch, doctor_module)
+
+    args = _parser(DoctorCmd).parse_args(["doctor", f"--port={port}", "--json"])
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    assert excinfo.value.code == 2
+    assert any("Invalid input" in message for message in messages.error)
+    # The failure happens before any check runs, so no JSON document is left
+    # half-written on stdout.
+    assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# browse: --json exits before selection, so --first cannot be honoured
+# ---------------------------------------------------------------------------
+
+
+def test_browse_rejects_json_with_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novel_downloader.apps.cli.commands import browse as browse_module
+    from novel_downloader.apps.cli.commands.browse import BrowseCmd
+
+    messages = _capture_ui(monkeypatch, browse_module)
+
+    args = _parser(BrowseCmd).parse_args(["browse", "fanqienovel", "--json", "--first"])
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    assert excinfo.value.code == 2
+    assert any("cannot be combined" in message for message in messages.error)
+
+
+# ---------------------------------------------------------------------------
+# clean: --site is joined onto a data root before rmtree -- it must not escape
+# ---------------------------------------------------------------------------
+
+
+_ESCAPING_SITES = ["..", "../..", "b520/../..", "..\\..", "."]
+
+
+@pytest.mark.parametrize("site", _ESCAPING_SITES)
+def test_clean_cache_refuses_site_that_escapes_the_cache_directory(
+    site: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    (cache / "b520").mkdir(parents=True)
+    marker = tmp_path / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(
+        clean, "load_or_init_config", lambda *_a, **_k: _cache_config(tmp_path)
+    )
+    messages = _capture_ui(monkeypatch, clean)
+
+    args = _parser(CleanCmd).parse_args(["clean", "cache", "--site", site, "--yes"])
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    assert excinfo.value.code == 2
+    assert any("Unsupported site" in message for message in messages.error)
+    # Nothing outside (or inside) the cache was touched.
+    assert cache.is_dir()
+    assert (cache / "b520").is_dir()
+    assert marker.is_file()
+
+
+def test_clean_cache_refuses_absolute_site_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setattr(
+        clean, "load_or_init_config", lambda *_a, **_k: _cache_config(tmp_path)
+    )
+    messages = _capture_ui(monkeypatch, clean)
+
+    args = _parser(CleanCmd).parse_args(
+        ["clean", "cache", "--site", str(tmp_path), "--yes"]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    assert excinfo.value.code == 2
+    assert any("Unsupported site" in message for message in messages.error)
+    assert cache.is_dir()
+    assert tmp_path.is_dir()
+
+
+def test_clean_book_all_refuses_site_that_escapes_the_raw_data_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    raw = tmp_path / "raw"
+    (raw / "b520").mkdir(parents=True)
+    monkeypatch.setattr(
+        clean,
+        "load_or_init_config",
+        lambda *_a, **_k: _general_config(tmp_path, raw_data_dir=str(raw)),
+    )
+    messages = _capture_ui(monkeypatch, clean)
+
+    args = _parser(CleanCmd).parse_args(
+        ["clean", "book", "--all", "--site", "..", "--yes"]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    assert excinfo.value.code == 2
+    assert any("Unsupported site" in message for message in messages.error)
+    assert raw.is_dir()
+    assert (raw / "b520").is_dir()

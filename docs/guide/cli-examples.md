@@ -564,7 +564,7 @@ novel-cli music health [-h] [--platform KEY] [--keyword KEYWORD]
 
 **General Options**
 
-* `--platform KEY`: 音乐平台标识, 默认为 `netease` (网易云音乐); 完整列表见 `novel-cli music platforms`
+* `--platform KEY`: 音乐平台标识。`search` 与 `download` 默认 `all` (聚合搜索全部平台, 同一首歌合并为一行并标注来源), 也可传具体平台 key; `export-m3u` 默认 `netease`。完整列表见 `novel-cli music platforms`
 * `--limit N`, `-l N`: 最大结果数, 默认 `20`
 
 **platforms**
@@ -577,13 +577,17 @@ novel-cli music platforms
 
 **search**
 
-按关键字搜索歌曲, 输出结果表格 (序号、标题、歌手、专辑、时长、是否 VIP):
+按关键字搜索歌曲, 默认搜索全部平台。结果表格包含序号、标题、歌手、专辑、时长、是否 VIP; 全部平台模式下额外显示来源平台:
 
 ```bash
+# 搜索全部平台 (默认)
+novel-cli music search "关键词" --limit 10
+
+# 只搜索网易云音乐
 novel-cli music search "关键词" --platform netease --limit 10
 ```
 
-* `--json`: 以 JSON 输出搜索结果 (包含 `platform`、`keyword`、`total` 与 `tracks` 列表) 后退出, 便于脚本消费
+* `--json`: 以 JSON 输出搜索结果 (包含 `platform`、`keyword`、`total` 与 `tracks` 列表) 后退出, 便于脚本消费; 聚合搜索时额外包含每个平台的 `sources` 与响应级 `platforms` 统计
 
 ```bash
 novel-cli music search "关键词" --json
@@ -603,7 +607,7 @@ novel-cli music search "关键词" --json
 
 **export-m3u**
 
-把搜索结果导出为 M3U 歌单, 不下载音频:
+把搜索到的**已下载**曲目写成 M3U 歌单, 不下载音频。只有带本地文件路径的曲目会写入; 没有路径的曲目计入跳过, 一首都没有时命令失败:
 
 * `--keyword KEYWORD, -k KEYWORD` (必填): 用于搜索待添加歌曲的关键词
 * `--out FILE`: 歌单路径, 默认 `<输出目录>/<关键词>.m3u8`
@@ -633,8 +637,11 @@ novel-cli music health --platform netease
 # 查看可用平台
 novel-cli music platforms
 
-# 在网易云音乐搜索
+# 搜索全部平台 (默认)
 novel-cli music search "关键词"
+
+# 只搜网易云音乐
+novel-cli music search "关键词" --platform netease
 
 # 在 QQ 音乐搜索并输出 JSON
 novel-cli music search "关键词" --platform qq --json
@@ -990,7 +997,7 @@ novel-cli update --json
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
 | `sources list` | `--json` | 数组, 每项含 `site_key`、`name`、`search`、`hosts`、`origin`; 加 `--check` 时 `status` 才有值 (否则为 `null`); 加 `--probe` 时额外含 `latency_ms`、`http_status` (探测不到时为 `null`) |
 | `update` | `--json` | 单个对象, 固定含 `current`、`latest`、`available`、`asset_name`、`asset_size`、`sha256`、`download_path`、`error` 八个字段; 无对应值时除 `current`/`available` 外为 `null` (或 `latest` 为空串) |
-| `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}` |
+| `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}`; `platform=all` (默认) 时 `tracks[].sources` 列出命中平台, 并额外返回 `platforms` 统计 |
 | `follow list` | `--json` | 数组, 每项含 `site`、`book_id`、`title`、`last_chapter`、`updated_at` |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` |
 

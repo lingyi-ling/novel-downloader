@@ -16,3 +16,7 @@ class Biquge5Parser(Biquge1Parser):
     """
 
     site_name: str = "biquge5"
+    #: Fallback base for root-relative / protocol-relative ``og:image`` values
+    #: on pages that carry no ``og:url``/canonical link (the fetcher already
+    #: builds every request URL from the same origin).
+    BASE_URL: str = "https://www.biquge5.com/"

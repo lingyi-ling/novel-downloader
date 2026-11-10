@@ -355,14 +355,14 @@ python -c "import importlib.util as u; print('mutagen', bool(u.find_spec('mutage
 
 3. 部分平台有额外要求：
 
-   * Apple Music / SoundCloud 需要 `pywidevine`。
-   * YouTube 需要 `ytmusicapi` 和可执行的 Node（`node` 或 `nodejs`）。
+   * Apple Music / SoundCloud 需要 `pywidevine`；DRM 解密还需自备 CDM（`.wvd` 设备文件），SoundCloud 的 HLS 下载还需要外部 `N_m3u8DL-RE`。
+   * YouTube 搜索需要 `ytmusicapi`（不需要 Node）；下载依赖第三方解析服务，网络不可达时会失败。
    * 部分 HLS/流媒体格式需要系统安装 `ffmpeg`。
 
    检查：
 
    ```bash
-   python -c "import importlib.util as u, shutil; print('pywidevine', bool(u.find_spec('pywidevine'))); print('ytmusicapi', bool(u.find_spec('ytmusicapi'))); print('node', shutil.which('node') or shutil.which('nodejs')); print('ffmpeg', shutil.which('ffmpeg'))"
+   python -c "import importlib.util as u, shutil; print('pywidevine', bool(u.find_spec('pywidevine'))); print('ytmusicapi', bool(u.find_spec('ytmusicapi'))); print('ffmpeg', shutil.which('ffmpeg'))"
    ```
 
 4. 需要账号凭据的平台（如 Spotify、TIDAL、汽水音乐）还要在平台凭据中配置 Cookie 或 token，否则搜索可能为空。
@@ -430,7 +430,112 @@ curl -x http://127.0.0.1:7890 -I https://www.google.com
 
 ---
 
-## 8. 仍有问题？
+## 8. 音乐聚合搜索里部分平台没反应 / 很慢
+
+**现象**：选择「全部平台」搜索时，进度条走完只回来几首；某些平台一直没有结果，或者整次搜索都要等到预算用完。单独指定该平台时却可能正常。
+
+**机制**（`apps/music/aggregate.py`）：
+
+* 每个平台一个独立线程，整次聚合搜索有墙钟预算：默认 5 秒（`DEFAULT_TIMEOUT`），桌面渐进式聚合搜索传入 6 秒（`SEARCH_SITE_TIMEOUT`）。
+* 只要有一个平台先返回结果，再等 2 秒就收工（`EARLY_EXIT_GRACE`）；没回来的平台本次直接略过，不计为失败。
+* 抛异常的平台，以及预算耗尽时仍未返回的平台，记为失败并熔断 **10 分钟**（`FAILURE_TTL`），期间聚合搜索会跳过它；因 2 秒早退被略过的平台不记失败。
+* 连续两次耗时 ≥2 秒且零结果，会被判为「慢且空」，跳过 **5 分钟**（`SLOW_EMPTY_STREAK` / `SLOW_EMPTY_TTL`）。
+* 这些状态写入音乐数据目录的 `search_stats.json`，重启后仍然生效。默认位置是 `%LOCALAPPDATA%\novel_downloader\music\search_stats.json`；设置 `NOVEL_MUSIC_HOME` 可以整体替换音乐数据目录。
+
+**排查**：
+
+1. 先单平台验证，显式指定平台时不会走熔断跳过：
+
+   ```bash
+   novel-cli music search "关键词" --platform netease --limit 5
+   ```
+
+2. 等 10 分钟（失败熔断）或 5 分钟（慢空跳过）自动恢复；也可以先退出所有客户端，再删除 `search_stats.json`，下次搜索会重建。
+3. 想保留原设置又要一个干净状态，可临时把 `NOVEL_MUSIC_HOME` 指向空目录：
+
+   ```bash
+   # Git Bash
+   export NOVEL_MUSIC_HOME="$TEMP/novel-music-clean"
+   ```
+
+   ```powershell
+   # PowerShell
+   $env:NOVEL_MUSIC_HOME = Join-Path $env:TEMP "novel-music-clean"
+   ```
+
+4. 如果所有平台都在熔断期，代码会自动清空一次缓存再重试；仍然全空时，按第 6 节检查依赖、凭据与网络。
+
+---
+
+## 9. 桌面自动更新：安装版与便携版行为不同
+
+**现象**：点更新后应用退出但没有升级；升级后出现两份程序；或者提示找不到 PowerShell。
+
+**机制**：
+
+* 客户端先判断安装形态：可执行文件位于 `%LOCALAPPDATA%\Programs\NovelDownloader` 视为**安装版**，其它已打包目录视为**便携版**；源码运行则是 `source`。
+* **安装版**下载 `NovelDownloader-setup-<version>-x64.exe`，退出后以静默参数启动 Inno Setup，原地覆盖安装目录。安装器会先删除 `_internal` 再写入新版本，并通过命名互斥量 `NovelDownloader-UpdateMutex` 关闭仍在运行的旧实例。
+* **便携版**下载 zip，退出后由 PowerShell 辅助脚本 `updates/_apply_portable_update.ps1` 等待进程结束，解压到 `%TEMP%` 再覆盖当前程序目录并重新启动；不会另装一份到 `%LOCALAPPDATA%`。
+* 便携版更新依赖 `powershell` 或 `pwsh`。两者都找不到时，更新会中止并提示手动解压。
+
+**排查**：
+
+1. 更新包在 `%LOCALAPPDATA%\novel_downloader\updates\`。失败后 zip/安装包通常仍在这里，便携版可以直接解压覆盖 `NovelDownloader.exe` 所在目录，再手动启动。
+2. 清理规则：`.part` 未完成文件保留 1 天，完整安装包/zip 保留 7 天，过期自动删除。
+3. 提示找不到 PowerShell：手动解压 `updates\` 里的 zip，把所有文件覆盖到当前程序目录。
+4. 怀疑升级没生效或出现两份：检查是否同时存在安装版目录 `%LOCALAPPDATA%\Programs\NovelDownloader` 和一个便携目录，确认自己启动的是哪一份。侧栏底部显示的 `v...` 是当前运行版本。
+5. 日志在 `%LOCALAPPDATA%\novel_downloader\logs\novel-desktop.log`，可搜索 `Launched the update installer` 或 `Launched the portable update helper` 确认更新器是否真正启动。
+
+安装、升级、卸载时的用户数据行为见[安装](./installation.md)一节。
+
+---
+
+## 10. TIDAL / YouTube / Apple Music / SoundCloud：能搜到不等于能下载
+
+**现象**：这些平台出现在列表里，但搜索为空、只返回试听，或下载时报「HLS 流暂不支持直链下载」「该平台未返回可下载直链」。
+
+**说明**：
+
+* 依赖已打包：桌面安装包和 `pip install "novel-downloader[music]"` 都包含 `aigpy`（TIDAL）、`ytmusicapi`（YouTube）、`pywidevine`（Apple Music / SoundCloud 的 DRM），不需要再装 Node。
+* 「能搜索」和「能下载」是两件事：这些平台在搜索阶段就会尝试解析可下载直链；拿不到直链时，列表可能为空，或只有试听片段。
+* **TIDAL**：必须在平台凭据里配置 token JSON，否则搜索为空。凭据保存在 `<音乐数据目录>/platform_creds.json` 的 `tidal` 键下；默认路径是 `%LOCALAPPDATA%\novel_downloader\music\platform_creds.json`。旧版音乐桌面工具有「平台凭据」对话框可写入，也可以按 JSON 直接编辑。
+* **Apple Music**：需要账号才能拿到完整曲目；没有账号通常只有预览片段，且需要能访问 `music.apple.com`。
+* **SoundCloud**：搜索可用；DRM/HLS 曲目需要自备 CDM（`.wvd`）与外部 `N_m3u8DL-RE`。
+* 对这四个 musicdl 平台，内置下载器只接受非 HLS 的直链：解析时遇到 HLS(m3u8) 会直接返回「HLS 流暂不支持直链下载」。因此即使准备了 CDM 和 `N_m3u8DL-RE`，Apple Music / SoundCloud 的 DRM/HLS 曲目也不能在应用内下载，需要用支持 Widevine 与 `N_m3u8DL-RE` 的外部工具。TIDAL / YouTube 只有在平台返回 HTTP 直链时才能下载。
+
+**验证**：
+
+```bash
+novel-cli music platforms
+novel-cli music search "关键词" --platform tidal --limit 5
+```
+
+* 平台列表里没有它：说明依赖或注册条件不满足（例如缺 `aigpy` 时 TIDAL 不会注册）。
+* 能看到但搜索为空：先查凭据与网络。
+* 能搜到但下载失败：看错误原文；「HLS 流暂不支持直链下载」「该平台未返回可下载直链」都属于当前版本的预期限制，不是网络故障。
+
+依赖安装与自检命令见第 6 节。
+
+---
+
+## 11. 搜索结果点「下载」提示「站点和书籍 ID 不能为空」
+
+**现象**：在搜索结果卡片点「下载」或「追更」，弹出「站点和书籍 ID 不能为空」，但卡片上明明有书名和站点。
+
+**原因**：v1.28.1 之前的桌面页面把站点写在 `data-add` / `data-follow` 属性上，点击处理却读取 `dataset.site`，永远取到空字符串。v1.28.1 已改为读取 `dataset.add` / `dataset.follow`，下载和追更恢复正常。
+
+**解决**：
+
+1. 升级到 v1.28.1 或更高版本。侧栏底部的 `v...` 是当前运行版本；安装版和便携版并存时，确认启动的是刚升级的那一份。
+2. 如果升级后仍出现，收集以下信息：
+   * 侧栏底部显示的版本号；
+   * 日志 `%LOCALAPPDATA%\novel_downloader\logs\novel-desktop.log`；
+   * 出问题的站点 key、搜索关键词，以及同一关键词下是否所有结果都失败。
+3. 如果只有某个站点的结果失败、其它站点正常，可能是该站点的搜索结果本身没有返回书籍 ID（卡片的 `data-bid` 为空）。空参数在进入任务队列前就被拦下，日志中不会出现 `Failed to queue`；这类情况请在 Issue 中附上站点和关键词。
+
+---
+
+## 12. 仍有问题？
 
 带上下面的信息提交 Issue：
 

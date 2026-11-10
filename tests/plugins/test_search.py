@@ -125,6 +125,17 @@ class _RaisingSearcher(_RecordingSearcher):
         raise RuntimeError("site down")
 
 
+class _EmptyResultSearcher(_RecordingSearcher):
+    """Searcher that succeeds but reports no rows at all."""
+
+    site_name = "empty"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return []
+
+
 class _MultiResultSearcher(BaseSearcher):
     """Searcher returning one strong and one weak candidate."""
 
@@ -277,6 +288,64 @@ async def test_duplicate_site_selection_shares_cache_with_singleton(
 
     first = await search("keyword", sites=["recorder", "recorder"])
     second = await search("keyword", sites=["recorder"])
+
+    assert _RecordingSearcher.calls == 1
+    assert first == second == [_stub_result("recorder", "1")]
+
+
+# --------------------------------------------------------------------------- #
+# cache-key site normalization
+# --------------------------------------------------------------------------- #
+def test_build_key_prefixes_digit_leading_site_like_the_registry() -> None:
+    from novel_downloader.plugins.search_cache import build_key
+
+    # The registry cannot import a module whose name starts with a digit, so it
+    # prefixes "n": both spellings resolve to the plugin ``plugins.sites.n1foo``
+    # and must therefore share one cache entry instead of hitting the site
+    # twice.
+    assert build_key("k", ["1foo"]).sites == ("n1foo",)
+    assert build_key("k", ["1foo"]) == build_key("k", ["n1foo"])
+    assert build_key("k", [" 1FOO "]) == build_key("k", ["N1FOO"])
+
+
+def test_build_key_site_rule_matches_registry_normalization() -> None:
+    from novel_downloader.plugins.search_cache import build_key
+
+    for name in ("1foo", "n1foo", "Foo", " foo ", "23qb", "n23qb"):
+        assert build_key("k", [name]).sites == (registrar._normalize_key(name),)
+
+
+def test_build_key_keeps_different_sites_apart() -> None:
+    from novel_downloader.plugins.search_cache import build_key
+
+    # The digit prefix must not collapse genuinely different site keys.
+    assert build_key("k", ["1foo"]) != build_key("k", ["2foo"])
+    assert build_key("k", ["1foo"]) != build_key("k", ["foo"])
+    assert build_key("k", ["n1foo"]) != build_key("k", ["nfoo"])
+
+
+@pytest.mark.asyncio
+async def test_digit_leading_site_alias_shares_cache(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # End-to-end: the registry resolves "1recorder" and "n1recorder" to the same
+    # plugin key, so the two spellings build one cache key and the searcher runs
+    # once even though the caller spelled the site differently.
+    def _classes(
+        sites: Any = None, *, load_all_if_none: bool = True
+    ) -> list[type[BaseSearcher]]:
+        if not sites:
+            return [_RecordingSearcher]
+        return [
+            _RecordingSearcher
+            for site in sites
+            if registrar._normalize_key(str(site)) == "n1recorder"
+        ]
+
+    monkeypatch.setattr(registrar, "get_searcher_classes", _classes)
+
+    first = await search("keyword", sites=["1recorder"])
+    second = await search("keyword", sites=["n1recorder"])
 
     assert _RecordingSearcher.calls == 1
     assert first == second == [_stub_result("recorder", "1")]
@@ -437,6 +506,23 @@ async def test_cache_hit_ranks_and_slices_per_call(
 
     asc = await search("keyword", sort="words", order="asc", limit=1)
     assert [r["book_id"] for r in asc] == ["weak"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_never_reorders_or_drops_from_the_cache_snapshot(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # ``_finalize`` sorts (and may dedupe) *its* list; the cached snapshot must
+    # stay in fetch order so a later call can rank it differently.
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MultiResultSearcher])
+    )
+
+    await search("keyword")  # the fresh call ranks its own copy
+    assert [r["book_id"] for r in _cache_snapshot("keyword")] == ["weak", "strong"]
+
+    await search("keyword", sort="words", order="desc")
+    assert [r["book_id"] for r in _cache_snapshot("keyword")] == ["weak", "strong"]
 
 
 # --------------------------------------------------------------------------- #
@@ -651,11 +737,125 @@ async def test_group_on_cache_hit_merges_cached_snapshot(
 def _cache_snapshot(keyword: str) -> list[SearchResult]:
     """Read the shared cache's entry for ``keyword`` (test introspection)."""
     import novel_downloader.plugins.search as search_module
-    from novel_downloader.plugins.search_cache import build_key
 
-    cached = search_module._CACHE.get(build_key(keyword, None, 5, False, 5.0))
+    # An aggregate key now includes a configuration fingerprint; rebuild it
+    # through the same helper ``search`` uses so the probe finds the entry.
+    classes = registrar.get_searcher_classes(None, load_all_if_none=True)
+    key = search_module._build_cache_key(keyword, None, 5, False, 5.0, classes=classes)
+    cached = search_module._CACHE.get(key)
     assert cached is not None
     return cached
+
+
+def test_finalize_group_merges_decorated_duplicate_titles() -> None:
+    """A decorative ``[网游]`` prefix must not leave a duplicate book row."""
+    from novel_downloader.plugins.search import _finalize
+
+    results: list[SearchResult] = [
+        {
+            "site": "alpha",
+            "book_id": "plain",
+            "title": "斗罗",
+            "author": "甲",
+            "word_count": "1万字",
+            "url": "https://alpha/1",
+        },
+        {
+            "site": "beta",
+            "book_id": "decorated",
+            "title": "[网游]斗罗",
+            "author": "甲",
+            "word_count": "300万字",
+            "url": "https://beta/2",
+        },
+        {
+            "site": "gamma",
+            "book_id": "other",
+            "title": "另一本书",
+            "author": "乙",
+            "word_count": "1万字",
+            "url": "https://gamma/3",
+        },
+    ]
+
+    merged = _finalize(
+        results,
+        keyword="",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=True,
+    )
+
+    by_title = {entry["title"]: entry["sources"] for entry in merged}
+    assert by_title == {"[网游]斗罗": ["beta", "alpha"], "另一本书": ["gamma"]}
+
+
+@pytest.mark.asyncio
+async def test_stream_cache_hit_keeps_per_site_chunks(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # ``search()`` warms the shared cache with the raw per-site snapshot.  A
+    # later ``search_stream`` must still honour the chunk contract -- one chunk
+    # per site -- instead of yielding the whole snapshot as one mixed batch.
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BookCopySearcher, _StrongCopySearcher]),
+    )
+
+    await search("三体")
+
+    chunks = [chunk async for chunk in search_stream("三体")]
+
+    assert len(chunks) == 2
+    assert {tuple(item["site"] for item in chunk) for chunk in chunks} == {
+        ("alpha",),
+        ("beta",),
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_cache_hit_chunks_match_a_fresh_run(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BookCopySearcher, _StrongCopySearcher]),
+    )
+
+    def _shape(chunks: list[list[SearchResult]]) -> list[tuple[str, ...]]:
+        return sorted(tuple(item["book_id"] for item in chunk) for chunk in chunks)
+
+    fresh = [chunk async for chunk in search_stream("三体")]
+    cached = [chunk async for chunk in search_stream("三体")]
+
+    assert _shape(cached) == _shape(fresh)
+    # Every cached chunk still belongs to exactly one site.
+    assert all(len({item["site"] for item in chunk}) == 1 for chunk in cached)
+
+
+@pytest.mark.asyncio
+async def test_stream_cache_hit_omits_sites_that_returned_no_rows(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # The snapshot stores rows, not per-site slots, so a site that succeeded
+    # with zero results has no chunk -- neither in a fresh run nor on a cache
+    # hit (the contract is "one non-empty list per site").
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_RecordingSearcher, _EmptyResultSearcher]),
+    )
+
+    await search("keyword")
+    assert _RecordingSearcher.calls == 1
+
+    chunks = [chunk async for chunk in search_stream("keyword")]
+
+    assert chunks == [[_stub_result("recorder", "1")]]
+    assert _RecordingSearcher.calls == 1  # served from the cache, no refetch
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +892,39 @@ def test_finalize_ranks_an_author_query_by_author() -> None:
     )
 
     assert results[0]["title"] == "斗破苍穹"
+
+
+def test_finalize_sparse_author_work_beats_rich_title_collision() -> None:
+    """Richer metadata on a title collision must not defeat intent ranking."""
+    from novel_downloader.plugins.search import _finalize
+
+    collision: SearchResult = {
+        "site": "a",
+        "title": "天蚕土豆",
+        "author": "路人甲",
+        "word_count": "300万字",
+        "update_date": "2024-06-14",
+        "cover_url": "https://a/c.jpg",
+        "latest_chapter": "第100章",
+        "priority": 5,
+    }
+    author_book: SearchResult = {
+        "site": "b",
+        "title": "斗破苍穹",
+        "author": "天蚕土豆",
+    }
+
+    ranked = _finalize(
+        [collision, author_book],
+        keyword="天蚕土豆",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=False,
+    )
+
+    # The author's own (metadata-sparse) book wins; the collision follows.
+    assert [entry["title"] for entry in ranked] == ["斗破苍穹", "天蚕土豆"]
 
 
 def test_finalize_non_quality_sorts_ignore_query_intent() -> None:

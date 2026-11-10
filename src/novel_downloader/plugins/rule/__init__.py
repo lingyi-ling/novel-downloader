@@ -84,6 +84,11 @@ class RefreshResult(TypedDict):
 
 _BUILTIN_PKG = "novel_downloader.plugins.rule.builtin"
 
+#: Largest rule file accepted from disk.  A rule document is configuration, so
+#: a file this big is either an accident or an attempt to exhaust memory before
+#: JSON validation can reject it.  The remote fetcher uses the same 1 MiB cap.
+_MAX_RULE_FILE_BYTES = 1024 * 1024
+
 _rules: dict[str, Rule] = {}
 _meta: dict[str, dict[str, str]] = {}  # site_key -> {"origin": ..., "file": ...}
 _host_map: dict[str, str] = {}
@@ -137,8 +142,28 @@ def _load_payload(text: str, origin: str, filename: str) -> None:
         logger.info("Rule source '%s' overridden by %s rule", key, origin)
     _rules[key] = rule
     _meta[key] = {"origin": origin, "file": filename}
-    for host in rule.hosts:
-        _host_map[host] = key
+    # ``_host_map`` is rebuilt from the final ``_rules`` once every directory
+    # has been scanned (see ``load_rules``): updating it here would leave the
+    # hosts of an overridden rule pointing at the replacement source.
+
+
+def _read_rule_text(path: Path) -> str:
+    """
+    Read one rule file, refusing an oversized one before loading it.
+
+    :raises RuleError: when the file exceeds :data:`_MAX_RULE_FILE_BYTES`.
+    :raises OSError: when the file cannot be read.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0  # let ``read_text`` report the real problem
+    if size > _MAX_RULE_FILE_BYTES:
+        raise RuleError(
+            f"{path}: rule file is too large "
+            f"({size} bytes, limit {_MAX_RULE_FILE_BYTES})"
+        )
+    return path.read_text(encoding="utf-8-sig")
 
 
 def _is_ignored(filename: str) -> bool:
@@ -174,9 +199,15 @@ def load_rules(*, force: bool = False) -> dict[str, Rule]:
             if _is_ignored(path.name):
                 continue
             try:
-                _load_payload(path.read_text(encoding="utf-8-sig"), "user", str(path))
-            except OSError as e:
-                logger.warning("Could not read rule file %s: %s", path, e)
+                _load_payload(_read_rule_text(path), "user", str(path))
+            except (OSError, RuleError) as e:
+                logger.warning("Could not load rule file %s: %s", path, e)
+
+    # Rebuild from the surviving rules only, so a rule that overrode another
+    # one does not inherit (or leave behind) the overridden rule's hosts.
+    for key, rule in _rules.items():
+        for host in rule.hosts:
+            _host_map[host] = key
 
     _loaded = True
     logger.debug("Loaded %d rule-based source(s)", len(_rules))
@@ -287,7 +318,7 @@ def install_rule(
     elif isinstance(data, (str, Path)):
         path = Path(data)
         try:
-            text = path.read_text(encoding="utf-8-sig")
+            text = _read_rule_text(path)
         except OSError as e:
             raise RuleError(
                 t("cannot read {path}: {err}").format(path=path, err=e)
@@ -447,12 +478,16 @@ def refresh_rules(names: Sequence[str] | None = None) -> RefreshResult:
             matched.update({path.name.lower(), stem.lower()})
 
             try:
-                text = path.read_text(encoding="utf-8-sig")
+                text = _read_rule_text(path)
             except OSError as e:
                 if _selected(wanted, path.name, stem):
                     failed[stem] = t("cannot read {path}: {err}").format(
                         path=path, err=e
                     )
+                continue
+            except RuleError as e:
+                if _selected(wanted, path.name, stem):
+                    failed[stem] = str(e)
                 continue
 
             try:

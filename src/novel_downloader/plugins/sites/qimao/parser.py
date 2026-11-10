@@ -152,9 +152,23 @@ class QimaoParser(BaseParser):
         if not paragraphs:
             return None
 
+        # The catalog is not always parsed in the same process: ``get_book_info``
+        # reuses cached metadata for a day, so a resumed download never runs
+        # ``parse_book_info`` and ``_chapter_titles`` is empty.  The reader
+        # page carries the title in ``<h2 class="chapter-title">``, so fall
+        # back to it instead of emitting a chapter with a blank title.
+        title = self._chapter_titles.get(chapter_id, "")
+        if not title:
+            page_tree = html.fromstring(raw_pages[0])
+            title = self._first_str(
+                page_tree.xpath('//h2[contains(@class,"chapter-title")]/text()')
+            )
+            if title:
+                self._chapter_titles[chapter_id] = title
+
         return {
             "id": chapter_id,
-            "title": self._chapter_titles.get(chapter_id, ""),
+            "title": title,
             "content": "\n".join(paragraphs),
             "extra": {"site": self.site_name},
         }

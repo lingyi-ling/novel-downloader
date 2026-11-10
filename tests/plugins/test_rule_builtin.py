@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from novel_downloader.plugins.rule import iter_rules, load_rules
+from novel_downloader.plugins.rule.engine import extract, parse_page, select
 from novel_downloader.plugins.rule.model import Field, Rule, RuleError, parse_rule
 
 _BUILTIN_PKG = "novel_downloader.plugins.rule.builtin"
@@ -74,8 +75,59 @@ _CHAPTER_KEYS = {
 }
 _CHAPTERS_KEYS = {"item", "title", "url", "id_regex", "id_group", "volume_name"}
 _PAGES_KEYS = {"url", "start", "max_pages"}
-_FIELD_KEYS = {"selector", "attr", "regex", "group", "multi", "replace", "default"}
+# Keep in sync with ``model._FIELD_KEYS`` (a contract test below fails on
+# drift): a shipped source may use every option the loader accepts.
+_FIELD_KEYS = {
+    "selector",
+    "attr",
+    "regex",
+    "group",
+    "multi",
+    "replace",
+    "default",
+    "steps",
+    "fallback",
+}
 _RESOLVE_KEYS = {"book", "chapter"}
+
+
+# A minimal rule shaped like a shipped source that needs a field-level
+# ``fallback``: prefer the cover link, fall back to the title link when the
+# cover has no ``href`` (exactly the ``biquge5r`` search layout).
+FALLBACK_FIXTURE: dict[str, Any] = {
+    "site_key": "fallback_fixture",
+    "site_name": "fallback fixture",
+    "base_url": "https://example.test",
+    "hosts": ["example.test"],
+    "search": {
+        "url": "https://example.test/search.php?q={keyword}",
+        "item": "dl",
+        "fields": {
+            "title": {"selector": "dd h3 a", "attr": "text"},
+            "url": {
+                "selector": "dt a",
+                "attr": "href",
+                "fallback": ["dd h3 a"],
+            },
+        },
+    },
+    "chapter": {
+        "url": "{base_url}/{book_id}/{chapter_id}.html",
+        "content": {"selector": "article"},
+    },
+}
+
+FALLBACK_SEARCH_HTML = """
+<html><body>
+  <dl>
+    <dt><a href="/1_2/"><img src="/covers/1_2.jpg"></a></dt>
+    <dd><h3><a href="/1_2/">第一本</a></h3></dd>
+  </dl>
+  <dl>
+    <dd><h3><a href="/3_4/">第二本</a></h3></dd>
+  </dl>
+</body></html>
+"""
 
 
 def _read_raw(name: str) -> dict[str, Any]:
@@ -94,6 +146,17 @@ def _assert_known_keys(mapping: dict[str, Any], allowed: set[str], where: str) -
     assert not unknown, f"{where} has unknown keys (possible typo): {sorted(unknown)}"
 
 
+def _assert_fallback_chain(chain: Any, where: str) -> None:
+    """Validate a ``fallback`` chain: selector strings or independent specs."""
+    if chain is None:
+        return
+    assert isinstance(chain, list), f"{where} must be a list"
+    for index, item in enumerate(chain):
+        if isinstance(item, dict):
+            _assert_known_keys(item, _FIELD_KEYS, f"{where}[{index}]")
+            _assert_fallback_chain(item.get("fallback"), f"{where}[{index}].fallback")
+
+
 def _assert_field_map(mapping: Any, where: str) -> None:
     """Validate a ``{name: field-spec}`` mapping (or bare-string field)."""
     if not isinstance(mapping, dict):
@@ -101,6 +164,7 @@ def _assert_field_map(mapping: Any, where: str) -> None:
     for name, spec in mapping.items():
         if isinstance(spec, dict):
             _assert_known_keys(spec, _FIELD_KEYS, f"{where}.{name}")
+            _assert_fallback_chain(spec.get("fallback"), f"{where}.{name}.fallback")
 
 
 def test_at_least_one_builtin_rule_is_shipped() -> None:
@@ -257,3 +321,36 @@ def test_a_builtin_rule_invalid_document_is_rejected() -> None:
     """Guard: rule parsing really does reject malformed builtin-shaped input."""
     with pytest.raises(RuleError):
         parse_rule({"site_key": "broken"}, source="broken.json")
+
+
+def test_field_key_whitelist_matches_the_model_schema() -> None:
+    """The integrity whitelist must accept every key the loader accepts.
+
+    A stale copy of ``_FIELD_KEYS`` rejected a legitimate ``fallback`` in
+    ``biquge5r`` and forced an unreadable CSS union; drift is now a failure.
+    """
+    from novel_downloader.plugins.rule.model import _FIELD_KEYS as MODEL_KEYS
+
+    assert set(MODEL_KEYS) == _FIELD_KEYS, (
+        "tests/plugins/test_rule_builtin.py::_FIELD_KEYS drifted from "
+        "model._FIELD_KEYS; update the whitelist instead of working around it"
+    )
+
+
+def test_a_field_fallback_is_allowed_and_resolves() -> None:
+    """A shipped rule may rely on ``fallback``; the engine must honour it."""
+    _assert_known_keys(FALLBACK_FIXTURE, _TOP_LEVEL_KEYS, "fallback_fixture: top level")
+    _assert_field_map(
+        FALLBACK_FIXTURE["search"]["fields"], "fallback_fixture: search.fields"
+    )
+
+    rule = parse_rule(FALLBACK_FIXTURE, source="fallback_fixture.json")
+    assert rule.search is not None
+    url_field = rule.search.fields["url"]
+    assert [alt.selector for alt in url_field.fallback] == ["dd h3 a"]
+    # a bare selector string inherits the parent field's ``attr``
+    assert url_field.fallback[0].attr == "href"
+
+    tree = parse_page(FALLBACK_SEARCH_HTML)
+    rows = select(tree, rule.search.item)
+    assert [extract(row, url_field) for row in rows] == ["/1_2/", "/3_4/"]

@@ -9,6 +9,7 @@ import json
 import logging
 import random
 import time
+from urllib.parse import urlsplit
 
 from lxml import html
 
@@ -90,8 +91,9 @@ class Quanben5Searcher(BaseSearcher):
             if limit is not None and idx >= limit:
                 break
 
-            # '/n/douposanqian/' -> "douposanqian"
-            book_id = href.rstrip("/").split("/")[-1]
+            # '/n/douposanqian/' -> "douposanqian"; query strings and absolute
+            # hrefs resolve to the same slug.
+            book_id = urlsplit(href).path.rstrip("/").rsplit("/", 1)[-1]
             book_url = self._abs_url(href)
 
             cover_rel = self._first_str(row.xpath(".//div[@class='pic']//img/@src"))

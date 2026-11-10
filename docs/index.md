@@ -72,9 +72,11 @@
 
 ### 多平台音乐下载
 
-* 支持 25 个音乐平台 (网易云、QQ 音乐、酷狗、酷我、咪咕、Spotify、TIDAL 等)
+* 支持 28 个音乐平台 (网易云、QQ 音乐、酷狗、酷我、咪咕、Spotify、TIDAL 等)
+* 默认聚合搜索全部平台, 同一首歌合并为一行并标注来源; 也可指定单个平台
 * 平台关键字搜索与按序号/歌曲 ID 下载
 * 可选音质档位, 输出目录与标签写入遵循音乐设置
+* 歌单导出 (M3U8) 与平台连通性健康检查
 * 提供 `--json` 输出, 便于脚本与第三方程序消费
 
 ---
@@ -212,7 +214,10 @@ pip install "novel-downloader[music]"
 # 查看可用平台
 novel-cli music platforms
 
-# 搜索歌曲
+# 搜索歌曲 (默认搜索全部平台, 同一首歌合并为一行)
+novel-cli music search "关键词"
+
+# 只搜索网易云音乐
 novel-cli music search "关键词" --platform netease
 
 # 下载指定的搜索结果

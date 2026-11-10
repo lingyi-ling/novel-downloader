@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -1057,18 +1058,17 @@ def test_prune_music_jobs_evicts_finished_first(
         assert "failed-1" not in api_routes._MUSIC_JOBS
 
 
-def test_prune_music_jobs_drops_oldest_when_all_active(
+def test_prune_music_jobs_never_evicts_active_records(
     monkeypatch: pytest.MonkeyPatch, clean_music_jobs: Any
 ) -> None:
+    """Active jobs keep their record: eviction would orphan the worker."""
     monkeypatch.setattr(api_routes, "MAX_MUSIC_JOBS", 2)
     with api_routes._MUSIC_JOBS_LOCK:
         api_routes._MUSIC_JOBS["first"] = _job("running")
         api_routes._MUSIC_JOBS["second"] = _job("queued")
         api_routes._prune_music_jobs_locked()
 
-        assert len(api_routes._MUSIC_JOBS) == 1
-        assert "first" not in api_routes._MUSIC_JOBS
-        assert "second" in api_routes._MUSIC_JOBS
+        assert set(api_routes._MUSIC_JOBS) == {"first", "second"}
 
 
 @pytest.mark.asyncio
@@ -1103,6 +1103,412 @@ async def test_create_music_job_keeps_table_bounded(
 
     with api_routes._MUSIC_JOBS_LOCK:
         assert len(api_routes._MUSIC_JOBS) <= 2
+
+
+# ---------------------------------------------------------------------------
+# Music job concurrency cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_music_jobs_reject_beyond_active_limit(
+    make_app: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    clean_music_jobs: Any,
+) -> None:
+    """A fifth concurrent job is refused with 429; running records survive."""
+    gate = threading.Event()
+
+    def blocking_download(
+        provider: Any, tracks: list[Any], options: Any, *, on_result: Any
+    ) -> tuple[int, int, int, list[Any], list[Any]]:
+        gate.wait(5.0)
+        return len(tracks), 0, 0, [], []
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(download_many=blocking_download, out_dir=tmp_path),
+    )
+    monkeypatch.setattr(api_routes, "MAX_ACTIVE_MUSIC_JOBS", 4)
+
+    app = make_app()
+    created: list[str] = []
+    async with _client(app) as client:
+        for _ in range(4):
+            response = await client.post(
+                "/api/v1/music/jobs",
+                json={"platform": "demo", "tracks": [{"id": "1"}]},
+            )
+            assert response.status_code == 202
+            created.append(response.json()["job_id"])
+
+        refused = await client.post(
+            "/api/v1/music/jobs",
+            json={"platform": "demo", "tracks": [{"id": "1"}]},
+        )
+        assert refused.status_code == 429
+        assert "limit 4" in refused.json()["detail"]
+
+        # No running job was evicted to make room for the refused one.
+        with api_routes._MUSIC_JOBS_LOCK:
+            assert all(job_id in api_routes._MUSIC_JOBS for job_id in created)
+
+        gate.set()
+        for job_id in created:
+            payload = await _wait_for_job(client, job_id)
+            assert payload["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# Music export path confinement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_music_export_rejects_path_outside_music_dir(
+    make_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An absolute target outside ``out_dir`` is a 400, and is not echoed."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    outside = tmp_path / "elsewhere" / "escape.m3u8"
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(out_dir=music_dir),
+    )
+
+    app = make_app()
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/music/export",
+            json={
+                "platform": "all",
+                "tracks": [{"id": "1", "path": "song.mp3"}],
+                "out_path": str(outside),
+            },
+        )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "m3u" in detail
+    # Neither the absolute path nor its directory may reach the client.
+    assert "escape.m3u8" not in response.text
+    assert str(tmp_path) not in response.text
+    assert not outside.exists()
+
+
+@pytest.mark.asyncio
+async def test_music_export_rejects_dotdot_escape(
+    make_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``..`` cannot climb out of the configured music directory."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(out_dir=music_dir),
+    )
+
+    app = make_app()
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/music/export",
+            json={
+                "platform": "all",
+                "tracks": [{"id": "1", "path": "song.mp3"}],
+                "out_path": "../../escape.m3u8",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "escape.m3u8" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_music_export_accepts_a_directory_inside_music_dir(
+    make_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A directory target gets a timestamped ``playlist-*.m3u8`` inside it."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    playlists = music_dir / "playlists"
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(out_dir=music_dir),
+    )
+
+    app = make_app()
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/music/export",
+            json={
+                "platform": "all",
+                "tracks": [{"id": "1", "path": "song.mp3"}],
+                "out_path": str(playlists),
+            },
+        )
+
+    assert response.status_code == 200
+    written = Path(response.json()["path"])
+    assert written.parent == playlists.resolve()
+    assert written.name.startswith("playlist-")
+    assert written.suffix == ".m3u8"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["escape.txt", "escape.json", "escape.mp3"])
+async def test_music_export_rejects_non_playlist_suffix(
+    name: str, make_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(out_dir=tmp_path),
+    )
+
+    app = make_app()
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/music/export",
+            json={
+                "platform": "all",
+                "tracks": [{"id": "1", "path": "song.mp3"}],
+                "out_path": str(tmp_path / name),
+            },
+        )
+
+    assert response.status_code == 400
+    assert name not in response.text
+
+
+# ---------------------------------------------------------------------------
+# Music download out_dir confinement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/v1/music/download", "/api/v1/music/jobs"])
+async def test_music_download_rejects_out_dir_outside_music_dir(
+    path: str, make_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An absolute ``out_dir`` outside the allowed roots is a 400, not echoed."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    outside = tmp_path / "elsewhere"
+
+    def must_not_download(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("engine must not run for a rejected out_dir")
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(out_dir=music_dir, download_many=must_not_download),
+    )
+
+    app = make_app()
+    async with _client(app) as client:
+        response = await client.post(
+            path,
+            json={
+                "platform": "demo",
+                "tracks": [{"id": "1"}],
+                "out_dir": str(outside),
+            },
+        )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "out_dir" in detail
+    assert "elsewhere" not in response.text
+    assert str(tmp_path) not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/v1/music/download", "/api/v1/music/jobs"])
+async def test_music_download_rejects_dotdot_escape(
+    path: str, make_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``..`` cannot climb out of the configured music directory."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(out_dir=music_dir),
+    )
+
+    app = make_app()
+    async with _client(app) as client:
+        response = await client.post(
+            path,
+            json={
+                "platform": "demo",
+                "tracks": [{"id": "1"}],
+                "out_dir": "../../escape",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "escape" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_music_download_accepts_a_subdirectory_inside_music_dir(
+    make_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A subdirectory below ``out_dir`` is resolved and handed to the engine."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    album_dir = music_dir / "albums" / "2026"
+    calls: dict[str, Any] = {}
+
+    def fake_download(
+        provider: Any, tracks: list[Any], options: Any, *, on_result: Any
+    ) -> tuple[int, int, int, list[Any], list[Any]]:
+        calls["out_dir"] = options.data["out_dir"]
+        return 0, 0, 0, [], []
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(out_dir=music_dir, download_many=fake_download),
+    )
+
+    app = make_app()
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/music/download",
+            json={
+                "platform": "demo",
+                "tracks": [{"id": "1"}],
+                "out_dir": str(album_dir),
+            },
+        )
+
+    assert response.status_code == 200
+    assert calls["out_dir"] == str(album_dir.resolve())
+
+
+@pytest.mark.asyncio
+async def test_music_download_defaults_to_the_configured_out_dir(
+    make_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An omitted ``out_dir`` resolves to the settings value, not the cwd."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    calls: dict[str, Any] = {}
+
+    def fake_download(
+        provider: Any, tracks: list[Any], options: Any, *, on_result: Any
+    ) -> tuple[int, int, int, list[Any], list[Any]]:
+        calls["out_dir"] = options.data["out_dir"]
+        return 0, 0, 0, [], []
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(out_dir=music_dir, download_many=fake_download),
+    )
+
+    app = make_app()
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/music/download",
+            json={"platform": "demo", "tracks": [{"id": "1"}]},
+        )
+
+    assert response.status_code == 200
+    assert calls["out_dir"] == str(music_dir.resolve())
+
+
+@pytest.mark.asyncio
+async def test_music_download_reason_drops_url_query_and_fragment(
+    make_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Signed URL parameters never reach the client inside ``reason``."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    secret = "token=SECRET-SIGNATURE&expires=1"
+
+    def fake_download(
+        provider: Any, tracks: list[Any], options: Any, *, on_result: Any
+    ) -> tuple[int, int, int, list[Any], list[Any]]:
+        on_result(
+            0,
+            tracks[0],
+            SimpleNamespace(
+                status="fail",
+                reason=f"HTTP 403 for https://cdn.example.com/a.mp3?{secret}#frag",
+                path="",
+                bytes_=0,
+            ),
+        )
+        return 0, 0, 1, [], []
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(out_dir=music_dir, download_many=fake_download),
+    )
+
+    app = make_app()
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/music/download",
+            json={"platform": "demo", "tracks": [{"id": "1"}]},
+        )
+
+    assert response.status_code == 200
+    item = response.json()["results"][0]
+    assert item["reason"] == "HTTP 403 for https://cdn.example.com/a.mp3"
+    assert "SECRET-SIGNATURE" not in response.text
+    assert "expires=1" not in response.text
+    assert "frag" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# Music job error sanitisation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_music_job_error_does_not_leak_exception_text(
+    make_app: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    clean_music_jobs: Any,
+) -> None:
+    """A failed job reports the exception class, never its message."""
+
+    def exploding_download(
+        provider: Any, tracks: list[Any], options: Any, *, on_result: Any
+    ) -> tuple[int, int, int, list[Any], list[Any]]:
+        raise RuntimeError("provider exploded at /home/victim/.secret-token")
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _components(download_many=exploding_download, out_dir=tmp_path),
+    )
+
+    app = make_app()
+    async with _client(app) as client:
+        created = await client.post(
+            "/api/v1/music/jobs",
+            json={"platform": "demo", "tracks": [{"id": "1"}]},
+        )
+        assert created.status_code == 202
+        payload = await _wait_for_job(client, created.json()["job_id"])
+
+    assert payload["status"] == "failed"
+    assert "RuntimeError" in payload["error"]
+    assert "provider exploded" not in payload["error"]
+    assert "secret-token" not in str(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -1167,6 +1573,8 @@ def _components(
     search: Any = None,
     download_many: Any = None,
     out_dir: Path,
+    export_m3u: Any = None,
+    load_settings: Any = None,
 ) -> Any:
     """Build a ``_MusicComponents`` bundle backed by fakes."""
     provider = SimpleNamespace(search=search or (lambda keyword, limit: ([], 0)))
@@ -1179,6 +1587,8 @@ def _components(
         create=lambda platform: provider,
         platform_note=lambda platform: "",
         track_cls=_FakeTrack,
+        export_m3u=export_m3u or (lambda tracks, target: str(target)),
+        load_settings=load_settings or (lambda: {"out_dir": str(out_dir)}),
     )
 
 

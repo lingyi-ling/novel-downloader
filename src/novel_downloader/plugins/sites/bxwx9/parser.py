@@ -16,3 +16,4 @@ class Bxwx9Parser(Biquge1Parser):
     """
 
     site_name: str = "bxwx9"
+    BASE_URL: str = "https://www.bxwx9.org/"

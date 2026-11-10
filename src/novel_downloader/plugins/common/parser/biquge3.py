@@ -6,12 +6,11 @@ novel_downloader.plugins.common.parser.biquge3
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
 from novel_downloader.plugins.common.parser._utils import (
     chapter_id_from_href,
     dedupe_chapters,
+    parse_html_tree,
     resolve_url,
     strip_page_marker,
 )
@@ -33,6 +32,9 @@ class Biquge3Parser(BaseParser):
         r"^本章未完[，,].*下一页.*$",
         r"^第\(\d+/\d+\)页$",
     }
+    #: Fallback base for root-relative covers on pages without an
+    #: ``og:url``/canonical link.  Empty means "keep the raw value".
+    BASE_URL: str = ""
 
     def parse_book_info(
         self,
@@ -43,7 +45,9 @@ class Biquge3Parser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         book_name = self._first_str(
             tree.xpath('//meta[@property="og:novel:book_name"]/@content')
@@ -54,6 +58,7 @@ class Biquge3Parser(BaseParser):
         cover_url = resolve_url(
             tree,
             self._first_str(tree.xpath('//meta[@property="og:image"]/@content')),
+            fallback_base=self.BASE_URL,
         )
         update_time = self._first_str(
             tree.xpath('//meta[@property="og:novel:update_time"]/@content')
@@ -137,7 +142,9 @@ class Biquge3Parser(BaseParser):
         paragraphs: list[str] = []
 
         for curr_html in raw_pages:
-            tree = html.fromstring(curr_html)
+            tree = parse_html_tree(curr_html)
+            if tree is None:
+                continue
 
             if not title:
                 title = self._first_str(

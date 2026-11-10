@@ -6,9 +6,11 @@ novel_downloader.infra.sessions.base
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import types
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Self, TypedDict, Unpack
 
@@ -16,6 +18,51 @@ from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
 from novel_downloader.schemas import FetcherConfig
 
 from .response import BaseResponse
+
+logger = logging.getLogger(__name__)
+
+#: Backend shutdowns that outlived the caller that started them.  Kept as a
+#: module-level strong reference: an un-awaited task is only weakly held by the
+#: event loop, so without this a shielded close could be garbage-collected
+#: mid-shutdown and leak the very connections it exists to release.
+_PENDING_CLOSES: set[asyncio.Task[None]] = set()
+
+
+def _on_close_done(task: asyncio.Task[None]) -> None:
+    """Forget a finished shielded close and surface its failure."""
+    _PENDING_CLOSES.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Error while closing HTTP session backend: %s", exc)
+
+
+async def close_backend_session(
+    close: Coroutine[Any, Any, None],
+) -> None:
+    """
+    Run a backend's ``close``/``aclose`` without losing it to cancellation.
+
+    The facade's ``close`` detaches the backend reference before awaiting so a
+    concurrent second caller is a no-op.  Without shielding, cancelling that
+    caller (a cancellation propagating through ``async with session`` during
+    shutdown is enough) would abort the backend shutdown after the reference
+    was already dropped: the connection pool's sockets then stay open until
+    garbage collection, with no handle left to retry the close.
+
+    The close itself runs in a task and is shielded from the caller, so the
+    caller still observes cancellation immediately while the pool is released
+    in the background.  A failing close still propagates to a normal caller;
+    its error is logged when the caller was already cancelled.
+
+    :param close: Backend shutdown coroutine, e.g. ``session.close()``.
+    """
+    task = asyncio.ensure_future(close)
+    _PENDING_CLOSES.add(task)
+    task.add_done_callback(_on_close_done)
+    await asyncio.shield(task)
+
 
 #: Unified redirect policy for every backend.  aiohttp and curl_cffi follow
 #: redirects by default while httpx does not; the session facade exposes one

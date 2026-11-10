@@ -18,7 +18,11 @@ from novel_downloader.infra.persistence.download_ledger import (
     utc_now_iso,
 )
 from novel_downloader.libs.time_utils import async_jitter_sleep
-from novel_downloader.plugins.base.errors import HttpStatusError, TransportError
+from novel_downloader.plugins.base.errors import (
+    HttpStatusError,
+    RedirectLimitError,
+    TransportError,
+)
 from novel_downloader.schemas import (
     BookConfig,
     BookInfoDict,
@@ -149,6 +153,13 @@ class DownloadMixin:
         ledger (``chapter.failures.jsonl``) and counted in the returned summary
         instead of being skipped silently.
 
+        ``succeeded`` counts chapters that are actually on disk (plus cached
+        ones that were skipped): the storage worker is stopped by *draining*
+        its bounded queue, and anything it could not save -- a wedged worker, a
+        cancellation that overruns the drain deadline -- is ledgered as a
+        failure.  A downloaded chapter can therefore never appear in
+        ``succeeded`` without having been persisted.
+
         The ledger is *per run*: :meth:`DownloadLedger.begin_run` wipes the
         previous run's records before the first chapter is attempted, so after
         this call the file lists exactly the chapters this run could not fetch.
@@ -227,7 +238,9 @@ class DownloadMixin:
         chapter_meta = self._dl_chapter_meta(vols)
         done = 0
         skipped = 0
+        stored = 0
         failures: list[ChapterFailureDict] = []
+        failed_ids: set[str] = set()
 
         async def bump(n: int = 1) -> None:
             nonlocal done
@@ -237,6 +250,12 @@ class DownloadMixin:
 
         async def record_failure(chapter_id: str, reason: str, attempts: int) -> None:
             """Record a failed chapter in the summary and in the ledger."""
+            if chapter_id in failed_ids:
+                # A chapter can be diagnosed twice on a broken path (a failed
+                # batch flush that is then salvaged); it is still one failed
+                # chapter, and the counters must say so exactly once.
+                return
+            failed_ids.add(chapter_id)
             title, url = chapter_meta.get(chapter_id, ("", ""))
             failed_at = utc_now_iso()
             failures.append(
@@ -277,17 +296,24 @@ class DownloadMixin:
         save_q: asyncio.Queue[ChapterDict | StopToken] = asyncio.Queue(maxsize=10)
         batches: dict[bool, list[ChapterDict]] = {False: [], True: []}
         sem = asyncio.Semaphore(self.workers)
+        # Chapters a producer has fetched but not yet handed to ``save_q``.
+        # A cancellation can strike between the two; tracking them lets the
+        # shutdown path store them (or report them) instead of counting them
+        # as successes that never reached disk.
+        in_flight: dict[asyncio.Task[None], ChapterDict] = {}
 
         def _batch(need_refetch: bool) -> list[ChapterDict]:
             return batches[need_refetch]
 
         async def flush_batch(need_refetch: bool) -> None:
+            nonlocal stored
             batch = _batch(need_refetch)
             if not batch:
                 return
             try:
                 # need_refetch=True for encrypted, False for plain
                 storage.upsert_chapters(batch, need_refetch=need_refetch)
+                stored += len(batch)
             except Exception as e:
                 logger.error(
                     "Storage batch upsert failed (site=%s, book=%s, size=%d, need_refetch=%s): %s",  # noqa: E501
@@ -315,6 +341,8 @@ class DownloadMixin:
         # Set when the storage worker hit an unrecoverable error. Producers
         # keep enqueuing, so the worker must keep draining: a dead consumer
         # with a bounded queue would otherwise block every producer forever.
+        # Every chapter that can no longer be written is ledgered, never
+        # silently dropped (it would otherwise be counted as a success).
         storage_error: list[BaseException] = []
 
         async def storage_worker() -> None:
@@ -323,15 +351,18 @@ class DownloadMixin:
                 if isinstance(item, StopToken):
                     break
                 if storage_error:
+                    await record_failure(
+                        item["id"], f"storage_error: {storage_error[0]}", 1
+                    )
+                    await bump(1)
                     continue
 
                 try:
                     need = self._dl_check_refetch(item)
-                    bucket = _batch(need)
-                    bucket.append(item)
-                    if len(bucket) >= self._storage_batch_size:
-                        await flush_batch(need)
                 except Exception as exc:  # noqa: BLE001 - must not kill the queue
+                    # The site hook is the only step that can fail before the
+                    # chapter has been handed to a batch; stop trusting storage
+                    # but keep draining so no producer blocks on the queue.
                     storage_error.append(exc)
                     logger.error(
                         "Storage worker failed (site=%s, book=%s): %s",
@@ -340,7 +371,26 @@ class DownloadMixin:
                         exc,
                     )
                     await record_failure(item["id"], f"storage_error: {exc}", 1)
-            if not storage_error:
+                    await bump(1)
+                    continue
+                bucket = _batch(need)
+                bucket.append(item)
+                if len(bucket) >= self._storage_batch_size:
+                    await flush_batch(need)
+
+            if storage_error:
+                # Batches still buffered will never be written: account for
+                # them instead of leaving them between the counters.
+                for need in (False, True):
+                    batch = _batch(need)
+                    for chap in batch:
+                        await record_failure(
+                            chap["id"], f"storage_error: {storage_error[0]}", 1
+                        )
+                    size = len(batch)
+                    batch.clear()
+                    await bump(size)
+            else:
                 await flush_all()
 
         async def producer(cid: str) -> None:
@@ -372,7 +422,15 @@ class DownloadMixin:
                     )
                     await bump(1)
                 else:
+                    # Remember the chapter across the (possibly suspending)
+                    # hand-off, so a cancel in the middle of ``put`` does not
+                    # lose what was already downloaded.
+                    task = asyncio.current_task()
+                    if task is not None:
+                        in_flight[task] = chap
                     await save_q.put(chap)
+                    if task is not None:
+                        in_flight.pop(task, None)
 
                 await async_jitter_sleep(
                     base=self._request_interval,
@@ -384,25 +442,89 @@ class DownloadMixin:
         with ChapterStorage(raw_base, filename="chapter.raw.sqlite") as storage:
             storage_task = asyncio.create_task(storage_worker())
 
-            def signal_stop() -> bool:
-                """Ask the worker to finish; never block on a full queue."""
+            async def put_with_deadline(
+                item: ChapterDict | StopToken, timeout: float
+            ) -> bool:
+                """Queue *item* within *timeout*; False when the queue is wedged."""
+                put = asyncio.ensure_future(save_q.put(item))
                 try:
-                    save_q.put_nowait(STOP)
-                    return True
-                except asyncio.QueueFull:
-                    return False
-
-            async def join_storage(timeout: float | None = None) -> None:
-                """Wait for the worker to drain, cancelling it on overrun."""
-                try:
-                    if timeout is None:
-                        await storage_task
-                    else:
-                        await asyncio.wait_for(storage_task, timeout=timeout)
+                    await asyncio.wait_for(put, timeout)
                 except TimeoutError:
-                    logger.warning("Storage worker did not exit, cancelling.")
-                    storage_task.cancel()
-                    await asyncio.gather(storage_task, return_exceptions=True)
+                    put.cancel()
+                    await asyncio.gather(put, return_exceptions=True)
+                    return False
+                return True
+
+            async def hand_off_in_flight() -> None:
+                """Queue chapters fetched by a producer that was cancelled."""
+                for task, chap in list(in_flight.items()):
+                    if not await put_with_deadline(chap, 10):
+                        # Left in ``in_flight``: the final salvage reports it
+                        # instead of pretending it was saved.
+                        continue
+                    in_flight.pop(task, None)
+
+            async def salvage_unsaved(reason: str) -> None:
+                """
+                Ledger chapters that will never reach storage.
+
+                Only called once the worker is gone (see the ``finally``
+                below): the queue, the batches and the producers' hand-off
+                slots are then stable and can be drained safely.
+                """
+                while True:
+                    try:
+                        item = save_q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if not isinstance(item, StopToken):
+                        await record_failure(item["id"], reason, 1)
+                for need in (False, True):
+                    batch = _batch(need)
+                    for chap in batch:
+                        await record_failure(chap["id"], reason, 1)
+                    batch.clear()
+                for chap in in_flight.values():
+                    await record_failure(chap["id"], reason, 1)
+                in_flight.clear()
+
+            async def abandon_storage() -> None:
+                """Cancel a wedged worker and account for what it left behind."""
+                storage_task.cancel()
+                await asyncio.gather(storage_task, return_exceptions=True)
+                await salvage_unsaved(
+                    "storage_error: download stopped before the chapter was saved"
+                )
+
+            async def stop_storage(timeout: float) -> None:
+                """
+                Signal the worker to drain the queue, then wait for it to exit.
+
+                The stop token goes through a *blocking* put: the worker keeps
+                consuming, so a slot always frees up unless it is dead. The old
+                ``put_nowait`` treated a full queue as "cancel the worker",
+                silently discarding up to ``maxsize`` already-downloaded
+                chapters (which the summary then counted as successes).
+                """
+                if not await put_with_deadline(STOP, timeout):
+                    logger.warning(
+                        "Storage worker did not accept the stop signal "
+                        "(site=%s, book=%s); cancelling.",
+                        self._site,
+                        book_id,
+                    )
+                    await abandon_storage()
+                    return
+                try:
+                    await asyncio.wait_for(storage_task, timeout)
+                except TimeoutError:
+                    logger.warning(
+                        "Storage worker did not exit in time (site=%s, book=%s); "
+                        "cancelling.",
+                        self._site,
+                        book_id,
+                    )
+                    await abandon_storage()
 
             try:
                 tasks = [asyncio.create_task(producer(cid)) for cid in plan]
@@ -415,27 +537,30 @@ class DownloadMixin:
                     for task in tasks:
                         task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
-                    if signal_stop():
-                        await join_storage(timeout=10)
-                    else:
-                        storage_task.cancel()
-                        await asyncio.gather(storage_task, return_exceptions=True)
+                    # A producer cancelled between "chapter fetched" and "queued"
+                    # would otherwise leave a downloaded chapter unaccounted.
+                    await hand_off_in_flight()
+                    await stop_storage(timeout=10)
                     raise
                 except BaseException:
                     # A producer raised: cancel its siblings so none of them
-                    # stays blocked on a bounded queue, then propagate.
+                    # stays blocked on a bounded queue, then propagate. The
+                    # final ``finally`` ledgers anything still unsaved.
                     for task in tasks:
                         task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
                     raise
 
-                if not signal_stop():
-                    storage_task.cancel()
-                await join_storage(timeout=30)
+                await stop_storage(timeout=30)
             finally:
                 if not storage_task.done():
                     storage_task.cancel()
-                    await asyncio.gather(storage_task, return_exceptions=True)
+                await asyncio.gather(storage_task, return_exceptions=True)
+                # Whatever is still in memory after this point will never be
+                # written; it must be reported, not inferred into ``succeeded``.
+                await salvage_unsaved(
+                    "storage_error: download stopped before the chapter was saved"
+                )
 
         # ---- done ---
         failed = len(failures)
@@ -443,7 +568,11 @@ class DownloadMixin:
             book_id=book_id,
             site=self._site,
             total=total,
-            succeeded=total - failed,
+            # ``stored`` (flushed batches) plus cached skips; failures cover
+            # every chapter that was fetched but not persisted, including the
+            # ones salvaged from a stopped worker, so the invariant
+            # ``total == succeeded + failed`` cannot hide a dropped chapter.
+            succeeded=stored + skipped,
             failed=failed,
             skipped=skipped,
             failures=failures,
@@ -650,6 +779,19 @@ class DownloadMixin:
                 )
                 _LAST_FAILURE.set(_ChapterFailure(f"http_{e.status}", 1))
                 return None
+            except RedirectLimitError as e:
+                # Deterministic (the same chain repeats), so it is terminal
+                # exactly like a 4xx: retrying here would only re-walk it.
+                logger.warning(
+                    "Too many redirects for chapter (site=%s, book=%s, "
+                    "chapter=%s); not retrying: %s",
+                    self._site,
+                    book_id,
+                    chapter_id,
+                    e,
+                )
+                _LAST_FAILURE.set(_ChapterFailure("too_many_redirects", 1))
+                return None
             except TransportError as e:
                 # Same reasoning: the fetcher's retry budget is the one that
                 # counts for network trouble.
@@ -733,7 +875,24 @@ class DownloadMixin:
                             prev_cid,
                         )
                         continue
-                    storage.upsert_chapter(data)
+                    # Store it with the same flag the download pipeline would
+                    # use: marking an encrypted/font-encoded chapter as clean
+                    # would make the later producers skip it and the exporter
+                    # treat its raw body as final.  A failing hook is treated
+                    # conservatively as "needs refetch".
+                    try:
+                        need_refetch = self._dl_check_refetch(data)
+                    except Exception as exc:  # noqa: BLE001 - never lose the chapter
+                        logger.warning(
+                            "Refetch check failed during repair (site=%s, "
+                            "book=%s, prev=%s): %s",
+                            self._site,
+                            book_id,
+                            prev_cid,
+                            exc,
+                        )
+                        need_refetch = True
+                    storage.upsert_chapter(data, need_refetch=need_refetch)
                     await async_jitter_sleep(
                         self._request_interval,
                         mul_spread=1.1,

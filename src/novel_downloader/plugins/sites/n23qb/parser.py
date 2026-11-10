@@ -6,10 +6,12 @@ novel_downloader.plugins.sites.n23qb.parser
 """
 
 from typing import Any
+from urllib.parse import urlsplit
 
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import resolve_url
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -25,12 +27,17 @@ class N23qbParser(BaseParser):
     """
 
     site_name: str = "n23qb"
+    BASE_URL: str = "https://www.23qb.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        if len(raw_pages) < 2:
+            return None
+
+        raw_pages = self._usable_pages(raw_pages)
         if len(raw_pages) < 2:
             return None
 
@@ -41,8 +48,15 @@ class N23qbParser(BaseParser):
         author = self._first_str(
             info_tree.xpath('//a[contains(@href,"/author/")]/@title')
         )
-        cover_url = self._first_str(
-            info_tree.xpath('//div[@class="novel-cover"]//img/@data-src')
+        cover_url = resolve_url(
+            info_tree,
+            self._first_str(
+                info_tree.xpath('//div[@class="novel-cover"]//img/@data-src')
+            )
+            or self._first_str(
+                info_tree.xpath('//div[@class="novel-cover"]//img/@src')
+            ),
+            fallback_base=self.BASE_URL,
         )
         serial_status = self._first_str(
             info_tree.xpath(
@@ -85,7 +99,12 @@ class N23qbParser(BaseParser):
                     if href == "javascript:cid(0)":
                         href = ""
                     chapter_id = (
-                        href.split("/")[-1].replace(".html", "") if href else ""
+                        urlsplit(href)
+                        .path.rstrip("/")
+                        .rsplit("/", 1)[-1]
+                        .removesuffix(".html")
+                        if href
+                        else ""
                     )
                     current_volume["chapters"].append(
                         {
@@ -121,6 +140,11 @@ class N23qbParser(BaseParser):
     ) -> ChapterDict | None:
         if not raw_pages:
             return None
+
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         tree = html.fromstring(raw_pages[0])
 
         # Content paragraphs

@@ -34,6 +34,7 @@ from novel_downloader.plugins.rule.engine import (
     body_fingerprint,
     extract,
     extract_multi,
+    http_url,
     parse_page,
     preprocess,
     select,
@@ -967,3 +968,240 @@ def test_is_desc_applies_to_the_volume_order_too() -> None:
         "第二章",
         "第一章",
     ]
+
+
+# --------------------------------------------------------------------------- #
+# F. untrusted rule documents: bounded nesting, schemes and types
+# --------------------------------------------------------------------------- #
+DEEP_REGEX = "(" * 2000 + "a+" + ")" * 2000 + "+"
+
+
+def test_deeply_nested_fallback_is_a_rule_error_not_recursion_error() -> None:
+    """A 64-level ``fallback`` chain used to raise a bare ``RecursionError``."""
+    node: Any = {"selector": "span"}
+    for _ in range(64):
+        node = {"selector": "a", "fallback": [node]}
+
+    with pytest.raises(RuleError, match="fallback nested deeper"):
+        Field.from_dict(node)
+    with pytest.raises(RuleError, match="fallback nested deeper"):
+        parse_rule(
+            {
+                "site_key": "demo",
+                "chapter": {"url": "u", "content": node},
+            }
+        )
+
+
+def test_fallback_nesting_within_the_limit_still_parses() -> None:
+    node: Any = {"selector": "span"}
+    for _ in range(3):
+        node = {"selector": "a", "fallback": [node]}
+
+    fld = Field.from_dict(node)
+    nested = fld
+    for _ in range(3):
+        nested = nested.fallback[0]
+
+    assert nested.selector == "span"
+
+
+def test_deeply_nested_field_regex_is_a_rule_error_not_recursion_error() -> None:
+    """``re.compile`` raises ``RecursionError`` (not ``re.error``) on this."""
+    with pytest.raises(RuleError, match="nested too deeply"):
+        Field.from_dict({"selector": "a", "regex": DEEP_REGEX})
+
+
+def test_deeply_nested_rule_regex_is_a_rule_error_not_recursion_error() -> None:
+    with pytest.raises(RuleError, match="nested too deeply"):
+        parse_rule(
+            {
+                "site_key": "demo",
+                "chapter": {"url": "u", "drop": [DEEP_REGEX]},
+            }
+        )
+
+
+def test_over_nested_json_body_is_rejected() -> None:
+    body: Any = {"leaf": 1}
+    for _ in range(64):
+        body = {"n": body}
+
+    with pytest.raises(RuleError, match="nesting deeper"):
+        parse_rule(
+            {
+                "site_key": "demo",
+                "search": {
+                    "url": "https://demo.example/s",
+                    "json_body": body,
+                },
+                "chapter": {"url": "u"},
+            }
+        )
+
+
+def test_circular_json_body_is_rejected_instead_of_hanging() -> None:
+    body: dict[str, Any] = {}
+    body["self"] = body
+
+    with pytest.raises(RuleError, match="circular"):
+        parse_rule(
+            {
+                "site_key": "demo",
+                "search": {
+                    "url": "https://demo.example/s",
+                    "json_body": body,
+                },
+                "chapter": {"url": "u"},
+            }
+        )
+
+
+@pytest.mark.parametrize("bad", ["true", "false", 1, 0])
+def test_multi_must_be_a_boolean(bad: Any) -> None:
+    """``"false"`` is truthy; accepting it would silently flip the option."""
+    with pytest.raises(RuleError, match="must be a boolean"):
+        Field.from_dict({"selector": "a", "multi": bad})
+
+
+def test_non_string_rule_keys_are_rejected_readably() -> None:
+    payload: Any = {"site_key": "demo", "chapter": {"url": "u"}, 1: "x"}
+
+    with pytest.raises(RuleError, match="unknown key"):
+        parse_rule(payload)
+    with pytest.raises(RuleError, match="unknown key"):
+        Field.from_dict({"selector": "a", 2: "x"})
+
+
+EVIL_URL = "file:///etc/passwd"
+
+
+@pytest.mark.parametrize(
+    "sections",
+    [
+        pytest.param({"chapter": {"url": EVIL_URL}}, id="chapter"),
+        pytest.param({"book": {"url": EVIL_URL, "chapters": {"item": "a"}}}, id="book"),
+        pytest.param(
+            {
+                "search": {"url": "javascript:alert(1)", "item": "a"},
+                "chapter": {"url": "u"},
+            },
+            id="search",
+        ),
+        pytest.param(
+            {
+                "book": {
+                    "url": "u",
+                    "chapters": {"item": "a"},
+                    "pages": {"url": "ftp://example.test/index_{page}.html"},
+                }
+            },
+            id="book.pages",
+        ),
+    ],
+)
+def test_every_url_template_rejects_a_non_http_scheme(
+    sections: dict[str, Any],
+) -> None:
+    with pytest.raises(RuleError, match="unsupported URL scheme"):
+        parse_rule({"site_key": "demo", **sections})
+
+
+def test_base_url_rejects_a_non_http_scheme() -> None:
+    with pytest.raises(RuleError, match="unsupported URL scheme"):
+        parse_rule(
+            {
+                "site_key": "demo",
+                "base_url": "file:///tmp",
+                "chapter": {"url": "u"},
+            }
+        )
+
+
+def test_relative_url_templates_stay_valid() -> None:
+    rule = parse_rule(
+        {
+            "site_key": "demo",
+            "base_url": "https://demo.example",
+            "chapter": {"url": "/c/{chapter_id}.html"},
+        }
+    )
+
+    assert rule.chapter is not None
+    assert rule.chapter.url == "/c/{chapter_id}.html"
+
+
+def test_http_url_only_returns_navigable_targets() -> None:
+    assert http_url(BASE, "javascript:alert(1)") == ""
+    assert http_url(BASE, "file:///etc/passwd") == ""
+    assert http_url(BASE, "data:text/html,x") == ""
+    assert http_url(BASE, "mailto:a@b.example") == ""
+    assert http_url(BASE, "  javascript:alert(1)  ") == ""
+    assert http_url(BASE, "/c/1.html") == f"{BASE}/c/1.html"
+    assert http_url(BASE, "//cdn.example/a") == "https://cdn.example/a"
+    assert http_url(BASE, "http://other.example/a") == "http://other.example/a"
+    assert http_url(BASE, "") == ""
+
+
+def test_chapter_links_with_unsafe_schemes_are_skipped() -> None:
+    page = (
+        "<div>"
+        '<a class="chapter" href="javascript:alert(1)">坏</a>'
+        '<a class="chapter" href="file:///etc/passwd">也坏</a>'
+        '<a class="chapter" href="/c/1.html">好</a>'
+        "</div>"
+    )
+
+    info = make_parser(parse_rule(_book_rule())).parse_book_info([page])
+
+    assert info is not None
+    assert [c["url"] for c in info["volumes"][0]["chapters"]] == [f"{BASE}/c/1.html"]
+
+
+def test_search_results_with_unsafe_schemes_are_skipped() -> None:
+    from novel_downloader.plugins.rule.searcher import RuleSearcher
+
+    rule = parse_rule(
+        {
+            "site_key": "demo",
+            "base_url": BASE,
+            "search": {
+                "url": "https://demo.example/s?q={keyword}",
+                "item": "div.r",
+                "fields": {
+                    "title": {"selector": "a", "attr": "text"},
+                    "url": {"selector": "a", "attr": "href"},
+                },
+            },
+            "chapter": {"url": "{base_url}/c/{chapter_id}.html"},
+        }
+    )
+    cls = type(
+        "RuleSearcher_demo",
+        (RuleSearcher,),
+        {"_rule": rule, "site_name": "demo", "BASE_URL": BASE, "priority": 1},
+    )
+    searcher = cls(session=None)  # type: ignore[arg-type]
+
+    html = (
+        '<div class="r"><a href="javascript:alert(1)">bad</a></div>'
+        '<div class="r"><a href="/b/1/">ok</a></div>'
+    )
+
+    assert [r["title"] for r in searcher._parse_html(html)] == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_fetcher_refuses_a_rendered_non_http_url() -> None:
+    """A value substituted into a whole-placeholder template is re-checked."""
+    rule = parse_rule(
+        {
+            "site_key": "demo",
+            "base_url": BASE,
+            "chapter": {"url": "{chapter_id}"},
+        }
+    )
+    fetcher = _StubFetcher(rule, {})
+
+    with pytest.raises(RuleError, match="non-HTTP"):
+        await fetcher.fetch_chapter_content("7", "file:///etc/passwd")

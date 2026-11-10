@@ -16,6 +16,7 @@ __all__ = [
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ from novel_downloader.plugins.ranking import (
     sort_results,
 )
 from novel_downloader.plugins.registry import registrar
-from novel_downloader.plugins.search_cache import SearchCache, build_key
+from novel_downloader.plugins.search_cache import CacheKey, SearchCache, build_key
 from novel_downloader.schemas import SearchResult
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,56 @@ def _site_key(cls: type[BaseSearcher]) -> str:
     return cls.__name__.lower()
 
 
+def _aggregate_config_fingerprint(
+    classes: Sequence[type[BaseSearcher]],
+    browser_sites: frozenset[str],
+) -> str:
+    """
+    Fingerprint the configuration an aggregate search (``sites=None``) depends on.
+
+    Only the *participating* sites matter: the registry's searcher classes
+    minus the browser-assisted ones (an aggregate skips those, see
+    :func:`_prepare_searchers`).  The browser-assisted set is folded in
+    separately so moving a site into or out of that set -- which changes
+    whether it runs at all -- invalidates a cached snapshot too.
+
+    The digest is short and opaque; it is never shown to users, only compared.
+    """
+    participating = sorted({_site_key(cls) for cls in classes} - browser_sites)
+    payload = "\x1f".join(participating) + "\x1e" + ",".join(sorted(browser_sites))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _build_cache_key(
+    keyword: str,
+    sites: Sequence[str] | None,
+    per_site_limit: int,
+    nsfw: bool,
+    timeout: float,
+    *,
+    classes: Sequence[type[BaseSearcher]],
+) -> CacheKey:
+    """
+    Build the cache key shared by :func:`search` and :func:`search_stream`.
+
+    Explicit selections keep their historical identity (site set + query
+    parameters).  An aggregate selection additionally carries the current
+    configuration fingerprint, so a registry/browser-settings change does not
+    keep serving a snapshot gathered from a different set of sites.
+    """
+    fingerprint = None
+    if sites is None:
+        fingerprint = _aggregate_config_fingerprint(classes, _browser_assisted_sites())
+    return build_key(
+        keyword,
+        sites,
+        per_site_limit,
+        nsfw,
+        timeout,
+        config_fingerprint=fingerprint,
+    )
+
+
 async def _search_one(
     searcher: BaseSearcher,
     keyword: str,
@@ -281,6 +332,7 @@ def _prepare_searchers(
     sites: Sequence[str] | None,
     nsfw: bool,
     on_event: Callable[[SearchEvent], None] | None,
+    browser_sites: frozenset[str] | None = None,
 ) -> _SearchPlan:
     """
     Instantiate the searchers to run and emit browser-assistance events.
@@ -297,7 +349,9 @@ def _prepare_searchers(
     -- is reported as a per-site ``"failed"`` event instead of aborting the
     whole aggregate.
     """
-    browser_sites = _browser_assisted_sites()
+    browser_sites = (
+        _browser_assisted_sites() if browser_sites is None else browser_sites
+    )
     explicit = sites is not None
     entries: list[tuple[str, BaseSearcher]] = []
     seen_classes: set[type[BaseSearcher]] = set()
@@ -442,6 +496,24 @@ def _merged_results(
     return merged
 
 
+def _chunks_by_site(results: Sequence[SearchResult]) -> list[list[SearchResult]]:
+    """
+    Split a flat merged snapshot into per-site chunks, first-seen order.
+
+    A cache hit must honour :func:`search_stream`'s chunk contract just like a
+    fresh run: one list per site, never a single batch mixing every site.
+    ``search()`` and ``search_stream`` both store results site by site, so the
+    cached snapshot already consists of contiguous per-site runs; this groups
+    them explicitly (and merges any accidental repeats) instead of relying on
+    that layout.
+    """
+    buckets: dict[str, list[SearchResult]] = {}
+    for result in results:
+        site = str(result.get("site") or "")
+        buckets.setdefault(site, []).append(result)
+    return list(buckets.values())
+
+
 def _dedupe_exact(results: list[SearchResult]) -> list[SearchResult]:
     """
     Fold exact same-book duplicates, keeping the first occurrence.
@@ -518,9 +590,11 @@ def _finalize(
     looks more like a title or an author (see
     :func:`~novel_downloader.plugins.ranking.detect_query_intent`).  For
     ``by="quality"`` this stops a book whose *title* merely contains an
-    author's name from outranking that author's own books.  The intent is
-    resolved to ``"either"`` — the historical behaviour — whenever the
-    evidence is too weak, and other sort keys ignore it entirely.
+    author's name from outranking that author's own books: the primary
+    field's match tier is the outer sort key, so a sparse-metadata author hit
+    still beats a metadata-rich collision.  The intent is resolved to
+    ``"either"`` — the historical behaviour — whenever the evidence is too
+    weak, and other sort keys ignore it entirely.
     """
     work = _dedupe_exact(results)
     intent = detect_query_intent(keyword, work) if sort == "quality" else "either"
@@ -599,9 +673,12 @@ async def search(
         :class:`GroupedSearchResult`); off by default, and never applied to
         :func:`search_stream`, whose per-site chunks stay flat.
     :param min_relevance: Relevance floor (0..1) applied when
-        ``sort="quality"``, before grouping and before ``limit``.  Rows whose
-        keyword relevance falls below it are dropped, except that the result
-        set is never emptied: if nothing clears the floor, entries with any
+        ``sort="quality"``.  Without grouping it is applied to the rows before
+        ``limit``; with ``group=True`` the rows are grouped first and the floor
+        is applied to each book's primary row (a mirror site's alternate entry
+        may look irrelevant on its own while the book is clearly relevant).
+        Rows/books that fall below it are dropped, except that the result set
+        is never emptied: if nothing clears the floor, entries with any
         positive relevance are kept, and if none has any, the input is
         returned unchanged.  Pass ``None`` to keep every row (e.g. when the
         caller sorts by word count or update date).  Ignored for other sort
@@ -614,7 +691,13 @@ async def search(
         # selection must be short-circuited here.
         return []
 
-    key = build_key(keyword, sites, per_site_limit, nsfw, timeout)
+    # Resolve the participating classes before the cache lookup: an aggregate
+    # key needs their identity (see ``_build_cache_key``), and a hot
+    # configuration change must not keep serving an old snapshot.
+    classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
+    key = _build_cache_key(
+        keyword, sites, per_site_limit, nsfw, timeout, classes=classes
+    )
     cached = _CACHE.get(key)
     if cached is not None:
         # Cache holds the merged, unranked snapshot: rank/group/slice per call
@@ -629,8 +712,6 @@ async def search(
             group=group,
             min_relevance=min_relevance,
         )
-
-    classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
 
     if not classes:
         return []
@@ -750,13 +831,20 @@ async def search_stream(
         # An explicit empty selection searches nothing (see ``search``).
         return
 
-    key = build_key(keyword, sites, per_site_limit, nsfw, timeout)
+    # Same ordering as ``search``: resolve classes first so an aggregate key
+    # can carry the configuration fingerprint, then consult the shared cache.
+    classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
+    key = _build_cache_key(
+        keyword, sites, per_site_limit, nsfw, timeout, classes=classes
+    )
     cached = _CACHE.get(key)
     if cached is not None:
-        yield cached
+        # Keep the per-site chunk contract on a cache hit: yielding the whole
+        # snapshot as one batch would mix every site into a single chunk.
+        for chunk in _chunks_by_site(cached):
+            yield chunk
         return
 
-    classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
     if not classes:
         return
 

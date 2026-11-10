@@ -359,7 +359,8 @@ async def test_music_export_writes_playlist_and_counts_skipped(
     monkeypatch.setattr(
         api_routes,
         "_load_music_components",
-        lambda: _music_components(out_dir=tmp_path / "music"),
+        # The export target must stay inside the configured music directory.
+        lambda: _music_components(out_dir=tmp_path),
     )
 
     async with _client(app) as client:

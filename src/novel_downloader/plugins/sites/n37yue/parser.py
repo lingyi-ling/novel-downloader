@@ -16,3 +16,4 @@ class N37yueParser(Biquge1Parser):
     """
 
     site_name: str = "n37yue"
+    BASE_URL: str = "https://www.37yue.com/"

@@ -44,6 +44,9 @@ class TokenBucketRateLimiter:
         token afterwards, so every concurrent waiter computed the same delay
         and fired at the same instant — ``max_rps`` was silently ignored as
         soon as ``workers`` > 1.
+
+        A caller cancelled while sleeping returns its reservation, so a
+        cancelled request does not keep costing later callers a slot.
         """
         async with self.lock:
             now = time.monotonic()
@@ -59,4 +62,15 @@ class TokenBucketRateLimiter:
             jitter = random.uniform(-self.jitter_strength, self.jitter_strength)
             total_wait = max(0.0, wait_time + jitter)
 
-        await asyncio.sleep(total_wait)
+        try:
+            await asyncio.sleep(total_wait)
+        except asyncio.CancelledError:
+            # The slot was reserved above, so a caller cancelled while
+            # sleeping would keep charging the bucket for a request that is
+            # never sent (every later caller waits one extra interval, and
+            # repeated cancellations throttle the whole session).  Give the
+            # reservation back; the bucket may legitimately hold other
+            # callers' reservations, hence the ``min`` rather than a reset.
+            async with self.lock:
+                self.tokens = min(self.capacity, self.tokens + 1.0)
+            raise

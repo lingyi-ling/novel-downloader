@@ -109,7 +109,7 @@ When the toggle is on, the app starts the local engine at launch before initiali
 Notes:
 
 - **Music works in standalone mode**: the engine bundles requests / mutagen / Pillow / qrcode / websocket-client / m3u8 / emoji and friends. Tracks are written to the engine directory first and then handed to the system DownloadManager, so they land in the public Downloads folder.
-- **Larger APK**: bundling the Python runtime and its dependencies (aiohttp, lxml, cssselect, pycryptodome, rich, platformdirs, and more) grows the APK from about 12 MB to roughly 70 MB (the music extras add several MB).
+- **Larger APK**: bundling the Python runtime and its dependencies (aiohttp, lxml, cssselect, pycryptodome, rich, platformdirs, and more) grows the APK from about 12 MB to roughly 68 MB (the music extras add several MB).
 - The embedded engine binds to the loopback address `127.0.0.1` only, so it is reachable by the app itself and not by other devices on the LAN.
 
 ## Security Notes

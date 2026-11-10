@@ -41,7 +41,7 @@ https://m.bixiange.top/wxxz/20921/
 URL:
 
 ```
-https://m.bixiange.me/wxxz/20921/index/1.html
+https://m.bixiange.top/wxxz/20921/index/1.html
 ```
 
 * Book ID: `wxxz-20921`
@@ -55,6 +55,7 @@ https://m.bixiange.me/wxxz/20921/index/1.html
 
 ## 适配器注册状态
 
-* 适配器位于 `plugins/sites/bixiange/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），并在 `DOWNLOAD_SUPPORT_SITES` 中注册。
-* **旧域名 `m.bixiange.me` 已无 DNS 解析（NXDOMAIN）**，现有适配器无法连接，因此未注册搜索。
-* 站点已迁移至 `m.bixiange.top`（备用 `www.bixiange.xyz`），实测详情页与章节页仍可被现有解析器解析；待适配器更新域名后再验证搜索。
+* 适配器位于 `plugins/sites/bixiange/`（`fetcher.py` / `parser.py` / `searcher.py` 齐全），已在 `DOWNLOAD_SUPPORT_SITES` / `SEARCH_SUPPORT_SITES` 中注册。
+* 旧域名 `m.bixiange.me` 已无 DNS 解析（NXDOMAIN）；适配器已切换到 `m.bixiange.top`，搜索器与下载器均使用新域名。
+* 搜索关键词按 GBK 编码提交；GBK 字节数超过 20 的关键词会被站点当作无结果，下载器会在 GBK 字符边界截断到 20 字节以内再查询。
+* 站点对同一 Cookie 会话内的两次搜索有 15 秒间隔限制；聚合搜索每次新建会话，正常使用不会触发。

@@ -564,7 +564,7 @@ novel-cli music health [-h] [--platform KEY] [--keyword KEYWORD]
 
 **General Options**
 
-* `--platform KEY`: music platform key, defaults to `netease`; run `novel-cli music platforms` for the full list
+* `--platform KEY`: music platform key. `search` and `download` default to `all` (aggregate search across every platform, merging the same song into one row with its sources); a concrete key still works. `export-m3u` defaults to `netease`. Run `novel-cli music platforms` for the full list
 * `--limit N`, `-l N`: maximum number of results, defaults to `20`
 
 **platforms**
@@ -577,13 +577,17 @@ novel-cli music platforms
 
 **search**
 
-Search songs by keyword and print a result table (index, title, artist, album, duration, VIP):
+Search songs by keyword; every platform is searched by default. The result table shows index, title, artist, album, duration and VIP; the all-platform mode adds a sources column:
 
 ```bash
+# Search every platform (default)
+novel-cli music search "keyword" --limit 10
+
+# Search NetEase only
 novel-cli music search "keyword" --platform netease --limit 10
 ```
 
-* `--json`: print the search results as JSON (`platform`, `keyword`, `total`, and a `tracks` list) and exit, for script consumption
+* `--json`: print the search results as JSON (`platform`, `keyword`, `total`, and a `tracks` list) and exit, for script consumption; in aggregate mode each track also carries `sources` and the response includes a `platforms` summary
 
 ```bash
 novel-cli music search "keyword" --json
@@ -603,7 +607,7 @@ When neither `--pick` nor `--yes` is given and the terminal is interactive, a pa
 
 **export-m3u**
 
-Export search results as an M3U playlist without downloading any audio:
+Write the search results that have **already been downloaded** to an M3U playlist; no audio is downloaded. Only tracks with a local file path are written, those without one are skipped, and the command fails when none can be written:
 
 * `--keyword KEYWORD, -k KEYWORD` (required): keyword used to search for the songs to add
 * `--out FILE`: playlist path, defaults to `<output directory>/<keyword>.m3u8`
@@ -633,8 +637,11 @@ novel-cli music health --platform netease
 # List available platforms
 novel-cli music platforms
 
-# Search on NetEase
+# Search every platform (default)
 novel-cli music search "keyword"
+
+# Search NetEase only
+novel-cli music search "keyword" --platform netease
 
 # Search on QQ Music and output JSON
 novel-cli music search "keyword" --platform qq --json
@@ -992,7 +999,7 @@ With `--json`:
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
 | `sources list` | `--json` | Array with `site_key`, `name`, `search`, `hosts`, `origin`; `status` is populated only with `--check` (otherwise `null`); with `--probe` each item also carries `latency_ms` and `http_status` (`null` when unreachable) |
 | `update` | `--json` | One object with exactly eight keys: `current`, `latest`, `available`, `asset_name`, `asset_size`, `sha256`, `download_path`, `error`; absent values are `null` (or an empty string for `latest`) |
-| `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}` |
+| `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}`; with `platform=all` (the default) each track carries `sources` and the response also includes a `platforms` summary |
 | `follow list` | `--json` | Array with `site`, `book_id`, `title`, `last_chapter`, `updated_at` |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` |
 

@@ -42,7 +42,11 @@ for extra_path in (SPEC_DIR, SRC_DIR):
 
 from PyInstaller.utils.hooks import collect_data_files  # noqa: E402
 
-from _spec_common import EXCLUDES, collect_common  # noqa: E402
+from _spec_common import (  # noqa: E402
+    EXCLUDES,
+    collect_common,
+    write_version_resource,
+)
 
 # The icon is taken from the packaged resources module so that renaming or
 # moving the asset cannot silently produce an icon-less bundle.
@@ -64,6 +68,18 @@ WEBVIEW_MODULES: tuple[str, ...] = (
 )
 
 datas, hiddenimports = collect_common(SRC_DIR)
+
+# Windows version resource: FileVersion/ProductVersion come from
+# ``novel_downloader.__version__`` (the same string the installer and the
+# update manifest use).  It is written into PyInstaller's work directory so no
+# generated file ever appears in the source tree.  On non-Windows builds
+# PyInstaller ignores the ``version=`` argument.
+VERSION_FILE = write_version_resource(
+    Path(workpath),  # noqa: F821 - provided by PyInstaller when it runs a spec
+    SRC_DIR,
+    app_name=APP_NAME,
+    description="NovelDownloader desktop client",
+)
 
 # ``collect_data_files`` is the canonical PyInstaller collection (locales,
 # resources, builtin rules, py.typed, the vendored musicdl SOURCE.txt); the
@@ -115,6 +131,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(ICON_PATH) if ICON_PATH.is_file() else None,
+    version=str(VERSION_FILE),
 )
 
 coll = COLLECT(

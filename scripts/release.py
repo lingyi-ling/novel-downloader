@@ -34,10 +34,12 @@ What a full run does, in order:
    that differs is deleted and re-uploaded.  Re-running a finished release
    therefore does nothing but a GET.
 
-``--dry-run`` prints the whole plan (notes, commands, assets) and executes
-nothing: no subprocess, no network.  ``--skip-build`` reuses an existing
+``--dry-run`` prints the whole plan (notes, commands, assets and the platforms
+``latest.json`` would advertise) and executes nothing: no subprocess, no
+network.  ``--skip-build`` reuses an existing
 ``dist/release/novel-downloader-<version>-*/`` directory, which is how a run
-that died midway (e.g. network drop) is resumed without rebuilding.
+that died midway (e.g. network drop) is resumed without rebuilding; assets
+already uploaded in that run are skipped by SHA-256 on the next attempt.
 
 Exit codes: 0 success; 2 for a ``ReleaseError`` (bad input, failed build,
 API error) and for argparse usage errors.
@@ -78,6 +80,11 @@ UPLOAD_TIMEOUT = 900.0
 UPLOAD_ATTEMPTS = 4
 UPLOAD_BACKOFF = (4.0, 8.0, 16.0)
 CREDENTIAL_TIMEOUT = 30.0
+#: ``git ls-remote`` / ``git push`` touch github.com (a different service from
+#: api.github.com).  A blocked host can hang them for minutes, so bound both
+#: and fall back to the REST API instead.
+GIT_REMOTE_TIMEOUT = 60.0
+PUSH_TIMEOUT = 300.0
 GRADLE_TIMEOUT = 2700.0
 # PyInstaller builds of three bundles take tens of minutes: no timeout.
 BUILD_TIMEOUT: float | None = None
@@ -501,6 +508,123 @@ def _manifest_builder() -> Any:
     return _MANIFEST_MODULE
 
 
+def _manifest_payload(assets: list[AssetSpec], tag: str, slug: str) -> dict[str, Any]:
+    """The release-shaped payload ``build_update_manifest`` classifies."""
+    builder = _manifest_builder()
+    return {
+        "html_url": f"https://github.com/{slug}/releases/tag/{tag}",
+        "assets": [
+            {
+                "name": asset.name,
+                "browser_download_url": builder.expected_url(slug, tag, asset.name),
+                "digest": f"sha256:{asset.sha256}",
+                "size": asset.path.stat().st_size,
+            }
+            for asset in assets
+            if asset.name != "latest.json"
+        ],
+    }
+
+
+def validate_latest_manifest(
+    document: dict[str, Any],
+    assets: list[AssetSpec],
+    *,
+    version: str,
+    tag: str,
+    slug: str,
+) -> None:
+    """
+    Cross-check ``latest.json`` against the files about to be uploaded.
+
+    ``build_update_manifest`` trusts the payload it is given; here the payload
+    is written by this script, so the manifest must agree with the bytes on
+    disk in three ways before it is published:
+
+    * identity: the document is for this version, tag and repository;
+    * integrity: every advertised ``sha256``/``size`` is the local file's;
+    * coverage: every content asset is advertised, and nothing else is.
+
+    A mismatch means clients would download the wrong file, or never be
+    offered an update at all, so this raises :class:`ReleaseError`.
+    :raises ReleaseError: when the document and the assets disagree.
+    """
+    builder = _manifest_builder()
+    for field, expected in (("version", version), ("tag", tag), ("repo", slug)):
+        if document.get(field) != expected:
+            raise ReleaseError(
+                f"latest.json {field} is {document.get(field)!r}, expected {expected!r}"
+            )
+
+    platforms = document.get("platforms")
+    if not isinstance(platforms, dict) or not platforms:
+        raise ReleaseError("latest.json advertises no platforms")
+
+    by_name = {asset.name: asset for asset in assets if asset.name != "latest.json"}
+    advertised: set[str] = set()
+    for key in sorted(platforms):
+        entry = platforms[key]
+        if not isinstance(entry, dict):
+            raise ReleaseError(f"latest.json platform {key!r} is not an object")
+        name = entry.get("name")
+        if not isinstance(name, str) or name not in by_name:
+            raise ReleaseError(
+                f"latest.json platform {key!r} advertises unknown asset {name!r}"
+            )
+        asset = by_name[name]
+        want_url = builder.expected_url(slug, tag, name)
+        if entry.get("url") != want_url:
+            raise ReleaseError(
+                f"latest.json platform {key!r} points at {entry.get('url')!r}, "
+                f"expected {want_url!r}"
+            )
+        digest = str(entry.get("sha256") or "").lower()
+        if digest != asset.sha256.lower():
+            raise ReleaseError(
+                f"latest.json platform {key!r} advertises sha256 {digest or '<none>'}, "
+                f"but {name} hashes to {asset.sha256}"
+            )
+        if entry.get("size") != asset.path.stat().st_size:
+            raise ReleaseError(
+                f"latest.json platform {key!r} advertises size "
+                f"{entry.get('size')!r}, but {name} is "
+                f"{asset.path.stat().st_size} bytes"
+            )
+        advertised.add(name)
+
+    missing = sorted(name for name in by_name if name not in advertised)
+    if missing:
+        raise ReleaseError("latest.json would not advertise: " + ", ".join(missing))
+
+
+def build_manifest_document(
+    assets: list[AssetSpec], version: str, tag: str, slug: str
+) -> dict[str, Any]:
+    """
+    Build the ``latest.json`` document in memory (no file, no network).
+
+    Used both by the real release (before writing) and by ``--dry-run``,
+    which prints the platforms it would advertise without touching the
+    release directory.
+    """
+    builder = _manifest_builder()
+    payload = _manifest_payload(assets, tag, slug)
+    try:
+        document: dict[str, Any] = builder.build_manifest(
+            payload,
+            version=version,
+            tag=tag,
+            repo=slug,
+            notes_url=payload["html_url"],
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced as a release error
+        raise ReleaseError(f"cannot build latest.json: {exc}") from exc
+    # Every advertised URL must point at the tag being released: a manifest
+    # carrying another release's URLs would send clients to the wrong file.
+    validate_latest_manifest(document, assets, version=version, tag=tag, slug=slug)
+    return document
+
+
 def build_latest_manifest(
     assets: list[AssetSpec],
     release_dir: Path,
@@ -515,32 +639,12 @@ def build_latest_manifest(
 
     The document is derived from the files about to be uploaded, never from
     build-time state: if a bundle was not built, its platform simply has no
-    entry, instead of pointing at last release's file.
+    entry, instead of pointing at last release's file.  The bytes written are
+    re-parsed and re-validated so a serialisation bug cannot publish a
+    manifest different from the one checked above.
     """
     builder = _manifest_builder()
-    payload: dict[str, Any] = {
-        "html_url": f"https://github.com/{slug}/releases/tag/{tag}",
-        "assets": [
-            {
-                "name": asset.name,
-                "browser_download_url": builder.expected_url(slug, tag, asset.name),
-                "digest": f"sha256:{asset.sha256}",
-                "size": asset.path.stat().st_size,
-            }
-            for asset in assets
-            if asset.name != "latest.json"
-        ],
-    }
-    try:
-        document = builder.build_manifest(
-            payload,
-            version=version,
-            tag=tag,
-            repo=slug,
-            notes_url=payload["html_url"],
-        )
-    except Exception as exc:  # noqa: BLE001 - surfaced as a release error
-        raise ReleaseError(f"cannot build latest.json: {exc}") from exc
+    document = build_manifest_document(assets, version, tag, slug)
     if sign_key is not None:
         try:
             seed = sign_key.read_text(encoding="ascii").strip()
@@ -548,18 +652,16 @@ def build_latest_manifest(
         except Exception as exc:  # noqa: BLE001 - any failure aborts
             raise ReleaseError(f"cannot sign latest.json: {exc}") from exc
         print(f"==> latest.json signed (key id {document.get('key_id')})")
-    # Every advertised URL must point at the tag being released: a manifest
-    # carrying another release's URLs would send clients to the wrong file.
-    for key, entry in document["platforms"].items():
-        want = builder.expected_url(slug, tag, entry["name"])
-        if entry["url"] != want:
-            raise ReleaseError(
-                f"latest.json platform {key!r} points at {entry['url']!r}, "
-                f"expected {want!r}"
-            )
 
     target = release_dir / "latest.json"
     target.write_bytes(builder.manifest_bytes(document))
+    try:
+        written = json.loads(target.read_text(encoding="utf-8"))
+    except ValueError as exc:  # pragma: no cover - canonical JSON cannot fail
+        raise ReleaseError(
+            f"latest.json is not valid JSON after writing: {exc}"
+        ) from exc
+    validate_latest_manifest(written, assets, version=version, tag=tag, slug=slug)
     print(f"==> latest.json: {len(document['platforms'])} platform(s) for v{version}")
     return AssetSpec(target, target.name, _sha256_file(target))
 
@@ -751,9 +853,21 @@ class GitHubClient:
             message = (
                 payload.get("message") if isinstance(payload, dict) else None
             ) or raw[:200].decode("utf-8", "replace")
+            # GitHub reports exhausted primary and secondary rate limits as
+            # 403 (not 429); those are worth retrying, like a 5xx.
+            rate_limited = (
+                status == 403
+                and isinstance(payload, dict)
+                and (
+                    "rate limit" in str(payload.get("message") or "").lower()
+                    or str(payload.get("documentation_url") or "").endswith(
+                        "rate-limiting"
+                    )
+                )
+            )
             error = (
                 TransientAPIError
-                if status in {429, 500, 502, 503, 504}
+                if status in {429, 500, 502, 503, 504} or rate_limited
                 else ReleaseError
             )
             raise error(f"GitHub API {method} {url} returned HTTP {status}: {message}")
@@ -774,14 +888,28 @@ class GitHubClient:
             return None
         return self._json(reply, f"release lookup for {tag}")
 
+    def get_tag_ref_sha(self, tag: str) -> str | None:
+        """The commit a remote tag ref points at, or ``None`` when absent."""
+        url = f"{self._api}/repos/{self._slug}/git/ref/tags/{quote(tag)}"
+        reply = self._request("GET", url, expected=(200, 404))
+        if reply.status == 404:
+            return None
+        payload = self._json(reply, f"tag ref {tag}")
+        target = payload.get("object")
+        if isinstance(target, dict) and isinstance(target.get("sha"), str):
+            return str(target["sha"])
+        return None
+
     def ensure_tag_ref(self, tag: str, sha: str) -> None:
         """
-        Point ``refs/tags/<tag>`` at *sha*, tolerating an existing ref.
+        Point ``refs/tags/<tag>`` at *sha*, tolerating an identical existing ref.
 
         Used as the fallback when ``git push`` cannot reach github.com (the
         git endpoint and the REST host are separate services, and only the
-        latter may be reachable). A 422 whose message says the ref already
-        exists is success; any other 422 is a real error.
+        latter may be reachable).  A 422 saying the ref already exists is only
+        success when it points at *sha*: a tag left over from an earlier
+        attempt at a different commit would publish this build's assets under
+        another commit, so that is a hard error.
         """
         url = f"{self._api}/repos/{self._slug}/git/refs"
         reply = self._request(
@@ -796,6 +924,13 @@ class GitHubClient:
                 message = str(reply.payload.get("message") or "")
             if "already exists" not in message.lower():
                 raise ReleaseError(f"could not create tag ref {tag}: {message}")
+            existing = self.get_tag_ref_sha(tag)
+            if existing is not None and existing != sha:
+                raise ReleaseError(
+                    f"tag {tag} already exists on the remote at {existing[:12]}, "
+                    f"but this release needs {sha[:12]}; delete or move the tag "
+                    "before releasing"
+                )
 
     def create_release(
         self,
@@ -909,12 +1044,26 @@ def sync_assets(
 
     for asset in assets:
         existing = remote.get(asset.name)
-        if existing is not None and _remote_digest(existing) == asset.sha256:
-            print(f"  asset {asset.name}: up to date, skipping")
-            continue
         if existing is not None:
-            print(f"  asset {asset.name}: digest differs, replacing")
-            client.delete_asset(int(existing["id"]))
+            remote_digest = _remote_digest(existing)
+            if remote_digest == asset.sha256:
+                print(f"  asset {asset.name}: up to date, skipping")
+                continue
+            if remote_digest is None:
+                # GitHub only reports a digest for assets uploaded after the
+                # feature shipped; without one the bytes cannot be compared,
+                # so the only safe action is a replace.
+                print(f"  asset {asset.name}: no remote digest, replacing to be safe")
+            else:
+                print(f"  asset {asset.name}: digest differs, replacing")
+            try:
+                asset_id = int(existing["id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ReleaseError(
+                    f"release asset {asset.name!r} has no usable id; cannot "
+                    "replace it through the API"
+                ) from exc
+            client.delete_asset(asset_id)
         client.upload_asset(str(release.get("upload_url", "")), asset)
 
     intended = {asset.name for asset in assets}
@@ -996,12 +1145,28 @@ def tag_exists_local(repo_root: Path, tag: str) -> bool:
 
 
 def remote_tag_exists(repo_root: Path, tag: str) -> bool:
-    """Whether *tag* is already on the origin remote (one network query)."""
-    proc = _run(
-        ["git", "ls-remote", "origin", f"refs/tags/{tag}"],
-        cwd=repo_root,
-        check=False,
-    )
+    """
+    Whether *tag* is already on the origin remote (one network query).
+
+    ``github.com`` being unreachable must not abort the release: the query is
+    bounded by :data:`GIT_REMOTE_TIMEOUT`, and any failure is reported and
+    treated as "not there yet".  The subsequent push then fails over to the
+    REST API (see :func:`push_tag`), which may still be reachable.
+    """
+    try:
+        proc = _run(
+            ["git", "ls-remote", "origin", f"refs/tags/{tag}"],
+            cwd=repo_root,
+            timeout=GIT_REMOTE_TIMEOUT,
+            check=False,
+        )
+    except ReleaseError as exc:
+        print(
+            f"warning: could not query origin for tag {tag} ({exc}); "
+            "assuming it is not pushed yet",
+            file=sys.stderr,
+        )
+        return False
     return bool(proc.stdout.strip())
 
 
@@ -1014,7 +1179,14 @@ def create_tag(repo_root: Path, tag: str) -> None:
     _run(["git", "tag", tag], cwd=repo_root)
 
 
-def push_tag(repo_root: Path, tag: str, token: str | None, slug: str) -> None:
+def push_tag(
+    repo_root: Path,
+    tag: str,
+    token: str | None,
+    slug: str,
+    *,
+    api_base: str = GITHUB_API,
+) -> None:
     """
     Push *tag* to origin.
 
@@ -1022,6 +1194,12 @@ def push_tag(repo_root: Path, tag: str, token: str | None, slug: str) -> None:
     URL — the token is redacted wherever the command is printed.  Without
     one, plain ``git push`` lets git resolve credentials through its own
     credential helper chain (the same store ``git credential fill`` reads).
+
+    ``github.com:443`` and ``api.github.com`` are different services: when
+    only the latter is reachable, the tag ref is created through the REST API
+    instead of failing the whole release after a successful build.  The
+    ``api_base`` override is honoured so a dry run / GitHub Enterprise setup
+    stays consistent with the rest of the release.
     """
     if token:
         url = f"https://x-access-token:{token}@{GITHUB_HOST}/{slug}.git"
@@ -1030,21 +1208,28 @@ def push_tag(repo_root: Path, tag: str, token: str | None, slug: str) -> None:
         command = ["git", "push", "origin", tag]
     _announce(command)
     try:
-        _run(command, cwd=repo_root)
+        _run(command, cwd=repo_root, timeout=PUSH_TIMEOUT)
         return
-    except ReleaseError:
+    except ReleaseError as exc:
         if not token:
             raise
-        # github.com:443 and api.github.com are different services; when only
-        # the latter is reachable, create the ref through REST instead of
-        # failing the whole release after a successful build.
+        print(f"git push failed ({exc}); creating the tag ref through the REST API")
         # The ref must point at the tag's own commit: HEAD may be ahead of it
         # (a docs commit after the build), and GitHub rejects unknown objects.
         target = _run(
             ["git", "rev-parse", f"{tag}^{{commit}}"], cwd=repo_root
         ).stdout.strip()
-        print("git push failed; creating the tag ref through the REST API")
-        GitHubClient(slug, token).ensure_tag_ref(tag, target)
+        if not target:
+            raise ReleaseError(
+                f"cannot resolve {tag} to a commit; refusing the REST fallback"
+            ) from exc
+        try:
+            GitHubClient(slug, token, api_base=api_base).ensure_tag_ref(tag, target)
+        except ReleaseError as api_exc:
+            raise ReleaseError(
+                f"tag {tag} could not be pushed with git ({exc}) nor created "
+                f"through the REST API ({api_exc})"
+            ) from api_exc
 
 
 # ---------------------------------------------------------------------------
@@ -1122,7 +1307,10 @@ def _dry_run(
     sums = release_dir / "SHA256SUMS.txt" if release_dir else "(not built yet)"
     print(f"  3. Sums     : merge APK/installer checksums into {sums}")
     print(f"  4. Tag      : git tag {tag} (skipped if it already exists)")
-    print(f"  5. Push     : git push origin {tag} (skipped if already on the remote)")
+    print(
+        f"  5. Push     : git push origin {tag} (skipped if already on the "
+        "remote; falls back to the REST tag ref when github.com is unreachable)"
+    )
     flags = ""
     if args.draft:
         flags += ", draft"
@@ -1139,8 +1327,30 @@ def _dry_run(
         print("      SHA256SUMS.txt (after the merge)")
         if (release_dir / "manifest.json").is_file():
             print("      manifest.json")
+        # The updater manifest is rebuilt from these assets on a real run;
+        # build it in memory here so the plan shows exactly which platforms
+        # clients would be offered (no file is written, nothing is fetched).
+        slug = args.repo or "OWNER/REPO"
+        try:
+            document = build_manifest_document(assets, version, tag, slug)
+        except ReleaseError as exc:
+            print(f"      latest.json  NOT GENERATED: {exc}")
+        else:
+            keys = ", ".join(sorted(document["platforms"]))
+            print(
+                f"      latest.json  ({len(document['platforms'])} platform(s): {keys})"
+            )
+            if args.repo is None:
+                print("                   (OWNER/REPO from origin at release time)")
+            if args.sign_key is not None:
+                print(
+                    f"                   would be signed with key file: {args.sign_key}"
+                )
+            else:
+                print("                   unsigned (pass --sign-key to sign)")
     else:
         print("  7. Assets   : (produced by step 1; nothing built yet)")
+        print("      latest.json is rebuilt from the produced assets")
     print()
     print("Re-run without --dry-run to execute the plan.")
     return 0
@@ -1327,7 +1537,7 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     if remote_tag_exists(repo_root, tag):
         print(f"==> Tag {tag} is already on the remote, skipping push")
     else:
-        push_tag(repo_root, tag, token, slug)
+        push_tag(repo_root, tag, token, slug, api_base=args.api_base)
 
     # 6. Release + assets ----------------------------------------------------
     client = GitHubClient(slug, token, api_base=args.api_base)

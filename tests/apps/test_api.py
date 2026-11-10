@@ -1117,7 +1117,9 @@ async def test_music_job_reports_failure(
     payload = await _wait_for_job(client, job_id)
 
     assert payload["status"] == "failed"
-    assert "boom" in payload["error"]
+    # Only the exception class is exposed; the message stays in the log.
+    assert "RuntimeError" in payload["error"]
+    assert "boom" not in payload["error"]
     assert payload["progress"] == {"done": 0, "total": 1}
 
 

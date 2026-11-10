@@ -142,9 +142,12 @@ def test_corrupt_rewrite_drops_the_previous_cookies(tmp_path) -> None:
     store.load_all()
     assert store.cache == {"sid": "old"}
 
-    # Simulate a crash mid-write: valid JSON is gone.
+    # Simulate a crash mid-write: valid JSON is gone.  Move the mtime forward
+    # explicitly: a rewrite that lands in the same filesystem timestamp tick is
+    # (correctly) treated as cached, which would make this test clock-dependent.
     path.write_text('{"broken":', encoding="utf-8")
-    os.utime(path, None)
+    stat = path.stat()
+    os.utime(path, (stat.st_atime, stat.st_mtime + 1.0))
     store.load_all()
 
     assert store.cache == {}

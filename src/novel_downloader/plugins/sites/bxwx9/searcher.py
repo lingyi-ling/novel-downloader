@@ -19,5 +19,5 @@ class Bxwx9Searcher(ManggNetSearcher):
     @staticmethod
     def _url_to_id(url: str) -> str:
         # "/b/70/70316/" -> "70-70316"
-        parts = url.strip("/").split("/")
-        return "-".join(parts[1:])
+        parts = ManggNetSearcher._url_path(url).strip("/").split("/")
+        return "-".join(parts[1:]) if len(parts) > 1 else parts[0]

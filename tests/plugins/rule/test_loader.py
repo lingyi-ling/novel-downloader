@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,10 @@ def _clean_rule_state() -> Any:
     """Every test starts and ends with rules loaded from the real locations."""
     reload_rules()
     yield
+    # Drop the per-test override *before* reloading: fixture teardown can run
+    # before ``monkeypatch`` restores the environment, and a reload that still
+    # saw the temp dir would leak an override into the next module.
+    os.environ.pop("NOVEL_RULES_DIR", None)
     reload_rules()
 
 
@@ -291,3 +296,74 @@ def test_resolve_url_is_host_case_insensitive() -> None:
 def test_resolve_url_returns_none_for_unknown_host_or_path() -> None:
     assert resolve_url("unknown.example", "/0_143/") is None
     assert resolve_url("www.biquge5.com", "/not-a-book") is None
+
+
+# --------------------------------------------------------------------------- #
+# oversized / path-escaping inputs
+# --------------------------------------------------------------------------- #
+def test_oversized_rule_file_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A huge file must be refused before its contents are parsed."""
+    from novel_downloader.plugins.rule import _MAX_RULE_FILE_BYTES
+
+    payload = json.dumps(_demo_rule("huge"))
+    padding = " " * (_MAX_RULE_FILE_BYTES + 1)
+    (tmp_path / "huge.json").write_text(payload + padding, encoding="utf-8")
+    _write_rule(tmp_path, "small.json", _demo_rule("small"))
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(tmp_path))
+
+    rules = reload_rules()
+
+    assert "small" in rules
+    assert "huge" not in rules
+
+
+def test_install_rule_rejects_an_oversized_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from novel_downloader.plugins.rule import _MAX_RULE_FILE_BYTES
+
+    install_dir = tmp_path / "installed"
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(install_dir))
+    big = tmp_path / "big.json"
+    big.write_text(
+        json.dumps(_demo_rule("big")) + " " * (_MAX_RULE_FILE_BYTES + 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuleError, match="too large"):
+        install_rule(big)
+
+    assert not install_dir.exists() or not any(install_dir.iterdir())
+
+
+def test_install_rule_name_cannot_escape_the_install_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_dir = tmp_path / "installed"
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(install_dir))
+
+    target = install_rule(_demo_rule("demo"), name="../../evil")
+
+    assert target.parent == install_dir
+    assert target.name == "evil.json"
+    assert target.is_file()
+
+
+def test_override_does_not_keep_the_old_rule_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replacement rule must not leave the old hosts resolvable."""
+    _write_rule(tmp_path, "override.json", _demo_rule("biquge5r"))
+    monkeypatch.setenv("NOVEL_RULES_DIR", str(tmp_path))
+
+    reload_rules()
+
+    assert resolve_url("demo.example", "/book/7/") == {
+        "site_key": "biquge5r",
+        "book_id": "7",
+        "chapter_id": None,
+    }
+    # The builtin's host now belongs to no loaded rule.
+    assert resolve_url("www.biquge5.com", "/0_143/") is None

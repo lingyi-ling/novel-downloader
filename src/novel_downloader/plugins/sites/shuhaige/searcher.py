@@ -7,6 +7,7 @@ novel_downloader.plugins.sites.shuhaige.searcher
 
 import logging
 import time
+from urllib.parse import urlsplit
 
 from lxml import html
 
@@ -68,7 +69,11 @@ class ShuhaigeSearcher(BaseSearcher):
             if limit is not None and idx >= limit:
                 break
 
-            book_id = href.strip("/").split("/")[0]
+            # Book pages live at ``/<id>/``.  Use the first path segment and
+            # drop the query so absolute hrefs (where splitting the raw
+            # string yields ``https:``) resolve to the same id as relative
+            # ones.
+            book_id = urlsplit(href).path.strip("/").split("/")[0]
             book_url = self._abs_url(href)
 
             title = self._first_str(

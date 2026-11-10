@@ -19,4 +19,4 @@ class Biquge5Searcher(ManggNetSearcher):
     @staticmethod
     def _url_to_id(url: str) -> str:
         # "/84_84873/" -> "84_84873"
-        return url.strip("/")
+        return ManggNetSearcher._url_path(url).strip("/")

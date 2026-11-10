@@ -20,11 +20,13 @@ from typing import Any, Literal, Self
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS, IMAGE_HEADERS
 from novel_downloader.infra.i18n import t
 from novel_downloader.infra.sessions import create_session
+from novel_downloader.infra.sessions.base import TooManyRedirectsError
 from novel_downloader.libs.filesystem import font_filename, image_filename, write_file
 from novel_downloader.libs.time_utils import async_jitter_sleep
 from novel_downloader.plugins.base.errors import (
     RETRYABLE_STATUS,
     HttpStatusError,
+    RedirectLimitError,
     TransportError,
 )
 from novel_downloader.plugins.utils.rate_limiter import TokenBucketRateLimiter
@@ -187,6 +189,17 @@ class BaseFetcher(abc.ABC):
                 await self._rate_limiter.wait()
             try:
                 resp = await self.session.get(url, **kwargs)
+            except TooManyRedirectsError as exc:
+                # Media is best-effort: an unusable redirect target must not
+                # abort the chapter (or the whole book) that referenced it, and
+                # repeating the same chain cannot change the answer.
+                logger.warning(
+                    "Too many redirects (site=%s) %s: %s",
+                    self.site_name,
+                    url,
+                    exc,
+                )
+                return None
             except (TimeoutError, ConnectionError) as exc:
                 if attempt < self._retry_times:
                     logger.info(
@@ -416,6 +429,18 @@ class BaseFetcher(abc.ABC):
                 await self._rate_limiter.wait()
             try:
                 resp = await self.session.get(url, encoding=encoding, **kwargs)
+            except TooManyRedirectsError as exc:
+                # A redirect loop is deterministic: the next attempt walks the
+                # same chain.  Raise the typed, non-retryable failure the
+                # chapter loop understands instead of leaving a bare backend
+                # exception for its generic ``except Exception`` retry.
+                logger.warning(
+                    "Too many redirects (site=%s) %s: %s",
+                    self.site_name,
+                    url,
+                    exc,
+                )
+                raise RedirectLimitError(url, exc) from exc
             except (TimeoutError, ConnectionError) as exc:
                 # Transport trouble is exactly what the retry budget is for;
                 # the previous version only retried HTTP statuses, so one

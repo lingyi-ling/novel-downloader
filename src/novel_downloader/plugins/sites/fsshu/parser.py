@@ -16,3 +16,4 @@ class FsshuParser(Biquge1Parser):
     """
 
     site_name: str = "fsshu"
+    BASE_URL: str = "https://www.fsshu.com/"

@@ -8,12 +8,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pure "load more" paging rules: append-with-dedup by track id and the
+ * Pure "load more" paging rules: append-with-dedup by `provider + id` and the
  * stop/continue decision for the next page request.
  */
 class MusicPagingTest {
 
-    private fun track(id: String) = MusicTrack(provider = "netease", id = id, name = "song-$id")
+    private fun track(id: String, provider: String = "netease") =
+        MusicTrack(provider = provider, id = id, name = "song-$id")
 
     // ---------- merge: append without duplicates ----------
 
@@ -37,6 +38,41 @@ class MusicPagingTest {
         val merged = MusicPaging.merge(current, page)
 
         assertEquals(listOf("1", "2", "3", "5"), merged.map { it.id })
+    }
+
+    @Test
+    fun mergeKeepsSameNumericIdFromDifferentProviders() {
+        // An aggregate search returns the same song id from two platforms.
+        // They are different rows (different provider, source label and
+        // download request), so neither may be dropped as a duplicate.
+        val netease = track("100", provider = "netease")
+        val qq = track("100", provider = "qq")
+
+        val merged = MusicPaging.merge(listOf(netease), listOf(qq))
+
+        assertEquals(2, merged.size)
+        assertEquals(listOf("netease", "qq"), merged.map { it.provider })
+        assertEquals(listOf("100", "100"), merged.map { it.id })
+    }
+
+    @Test
+    fun mergeOnlyDedupesTheSameProviderAndIdPair() {
+        val current = listOf(track("1", provider = "netease"), track("2", provider = "qq"))
+        val page = listOf(
+            // Exact repeats: dropped.
+            track("1", provider = "netease"),
+            track("2", provider = "qq"),
+            // Same ids under the other provider: kept.
+            track("2", provider = "netease"),
+            track("1", provider = "qq"),
+        )
+
+        val merged = MusicPaging.merge(current, page)
+
+        assertEquals(
+            listOf("netease" to "1", "qq" to "2", "netease" to "2", "qq" to "1"),
+            merged.map { it.provider to it.id },
+        )
     }
 
     @Test

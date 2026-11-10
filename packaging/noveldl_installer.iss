@@ -37,6 +37,19 @@ CloseApplications=yes
 AppMutex=NovelDownloader-UpdateMutex
 RestartApplications=no
 
+[InstallDelete]
+; PyInstaller onedir keeps every module/resource below _internal\.  Inno only
+; overwrites files that exist in the new build, so an upgrade would otherwise
+; keep files that this version no longer ships -- including old
+; novel_downloader\plugins\sites\* directories, which the plugin registry
+; enumerates from disk at start-up (removed plugins would reappear).  Remove
+; the payload directory before [Files] copies the new one.  User data never
+; lives here: the desktop app chdirs to %LOCALAPPDATA%\novel_downloader, and
+; uninstall still removes nothing outside {app}.
+; Residual risk: an install interrupted between this delete and the copy
+; leaves the app unusable until Setup is run again (no user data is lost).
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Tasks]
 Name: "desktopicon"; \
     Description: "{cm:CreateDesktopIcon}"; \

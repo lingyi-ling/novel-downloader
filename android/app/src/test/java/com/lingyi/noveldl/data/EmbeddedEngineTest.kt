@@ -107,4 +107,46 @@ class EmbeddedEngineTest {
         assertTrue(second.await(5, TimeUnit.SECONDS))
         assertEquals(2, runs.get())
     }
+
+    // ------------------------------------------------------------------
+    // `isStarted` only means "scheduled"; callers that gate a request on the
+    // engine being usable need `isReady`, which flips after the bootstrap
+    // (Python interpreter + loopback server) actually finished.
+    // ------------------------------------------------------------------
+
+    @Test(timeout = 10_000)
+    fun engineIsNotReadyWhileTheBootstrapIsStillRunning() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+
+        EmbeddedEngine.ensureStarted("/engine/home") {
+            entered.countDown()
+            release.await(2, TimeUnit.SECONDS)
+        }
+
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+        assertTrue("scheduled", EmbeddedEngine.isStarted)
+        assertFalse("bootstrap still running", EmbeddedEngine.isReady)
+
+        release.countDown()
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (!EmbeddedEngine.isReady && System.nanoTime() < deadline) {
+            Thread.sleep(10)
+        }
+        assertTrue("bootstrap finished", EmbeddedEngine.isReady)
+    }
+
+    @Test(timeout = 10_000)
+    fun failedBootstrapNeverBecomesReady() {
+        EmbeddedEngine.ensureStarted("/engine/home") {
+            throw IllegalStateException("boom")
+        }
+
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (EmbeddedEngine.lastError == null && System.nanoTime() < deadline) {
+            Thread.sleep(10)
+        }
+        assertEquals("boom", EmbeddedEngine.lastError)
+        assertFalse(EmbeddedEngine.isReady)
+    }
 }

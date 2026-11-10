@@ -19,4 +19,5 @@ class FsshuSearcher(ManggNetSearcher):
     @staticmethod
     def _url_to_id(url: str) -> str:
         # "/biquge/95_95624/" -> "95_95624"
-        return url.strip("/").split("/")[-1]
+        path = ManggNetSearcher._url_path(url).strip("/")
+        return path.split("/")[-1]

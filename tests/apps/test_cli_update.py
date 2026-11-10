@@ -16,6 +16,8 @@ reach GitHub.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import os
 import sys
@@ -106,12 +108,13 @@ def _capture_ui(monkeypatch: pytest.MonkeyPatch) -> _Messages:
 def _asset(
     name: str = "NovelDownloader-setup-1.5.0-x64.exe",
     *,
+    url: str | None = None,
     size: int | None = 2048,
     sha256: str | None = SHA,
 ) -> updater.ReleaseAsset:
     return updater.ReleaseAsset(
         name=name,
-        url=f"https://example.invalid/{name}",
+        url=url if url is not None else f"https://example.invalid/{name}",
         size=size,
         sha256=sha256,
     )
@@ -284,6 +287,37 @@ def test_json_without_update_is_clean(
     assert doc["download_path"] is None
 
 
+def test_json_stdout_is_a_single_parseable_document(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End to end through ``cli_main``: nothing but the document on stdout."""
+    _patch_check(monkeypatch, _info())
+    monkeypatch.setattr(sys, "argv", ["novel-cli", "update", "--json"])
+
+    cli_main_module.cli_main()
+
+    captured = capsys.readouterr()
+    doc = json.loads(captured.out)
+    assert doc["available"] is True
+    assert doc["asset_name"] == "NovelDownloader-setup-1.5.0-x64.exe"
+    assert captured.err == ""
+
+
+def test_json_check_failure_keeps_stdout_parseable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_check(monkeypatch, None, error="unreachable")
+    monkeypatch.setattr(sys, "argv", ["novel-cli", "update", "--json"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main_module.cli_main()
+
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["error"] == "unreachable"
+    assert captured.err == ""
+
+
 # ---------------------------------------------------------------------------
 # novel-cli update --yes
 # ---------------------------------------------------------------------------
@@ -454,6 +488,229 @@ def test_interactive_confirm_downloads(
     _run(["update"])
 
     assert "Downloaded and verified" in messages.text()
+
+
+# ---------------------------------------------------------------------------
+# the real download path, offline (fake transport, real helper)
+# ---------------------------------------------------------------------------
+
+
+class _Response(io.BytesIO):
+    """Minimal ``urlopen`` response: ``read`` plus the headers updater inspects."""
+
+    status = 200
+    headers: dict[str, str] = {}
+
+
+def _serve(payload: bytes) -> Any:
+    """A fake ``urlopen`` returning ``payload`` as a context manager."""
+
+    def _open(*_args: object, **_kwargs: object) -> _Response:
+        return _Response(payload)
+
+    return _open
+
+
+def _real_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the real ``download_asset`` against a local fake transport."""
+    monkeypatch.setattr(update_module, "download_asset", updater.download_asset)
+    monkeypatch.delenv(update_module.MIRROR_ENV_VAR, raising=False)
+
+
+def _forbid_execution(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Make every process-launch sink fail the test, returning a call log."""
+    calls: list[object] = []
+
+    def _sink(name: str) -> Any:
+        def _record(*args: object, **kwargs: object) -> Any:
+            calls.append((name, args, kwargs))
+            raise AssertionError(f"novel-cli update must not call {name}")
+
+        return _record
+
+    for target in ("subprocess.Popen", "subprocess.run", "subprocess.call"):
+        monkeypatch.setattr(target, _sink(target))
+    monkeypatch.setattr(os, "system", _sink("os.system"))
+    # Present on Windows only; ``raising=False`` keeps the test portable.
+    monkeypatch.setattr(os, "startfile", _sink("os.startfile"), raising=False)
+    return calls
+
+
+@pytest.mark.parametrize("flags", [["--check"], ["--json"], ["--check", "--json"]])
+def test_check_paths_never_download_or_create_the_update_directory(
+    monkeypatch: pytest.MonkeyPatch, flags: list[str]
+) -> None:
+    """``--check`` and JSON-only runs are strictly read-only."""
+    _patch_check(monkeypatch, _info())
+    messages = _capture_ui(monkeypatch)
+    downloads: list[int] = []
+    monkeypatch.setattr(
+        update_module,
+        "download_asset",
+        lambda *a, **k: downloads.append(1) or Path("unused"),
+    )
+
+    _run(["update", *flags])
+
+    assert downloads == []
+    assert not update_module.updates_dir().exists()
+    if "--json" in flags:
+        assert _json_doc(messages)["download_path"] is None
+
+
+def test_bad_digest_is_deleted_and_never_executed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checksum mismatch must leave no file behind and launch nothing."""
+    _patch_check(monkeypatch, _info(asset=_asset(sha256="0" * 64)))
+    messages = _capture_ui(monkeypatch)
+    _real_download(monkeypatch)
+    monkeypatch.setattr("urllib.request.urlopen", _serve(b"tampered bytes"))
+    executed = _forbid_execution(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["update", "--yes"])
+
+    assert excinfo.value.code == 1
+    assert "checksum" in messages.text()
+    updates = update_module.updates_dir()
+    assert updates.is_dir()
+    # Both the final name and the ``.part`` staging file are gone.
+    assert list(updates.iterdir()) == []
+    assert executed == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../../evil.exe",
+        "nested/../../../evil.exe",
+        pytest.param(
+            "C:/Windows/evil.exe",
+            marks=pytest.mark.skipif(
+                sys.platform != "win32", reason="drive-absolute path is Windows-only"
+            ),
+        ),
+    ],
+)
+def test_escaping_asset_name_is_refused_before_the_transfer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    _patch_check(monkeypatch, _info(asset=_asset(name=name)))
+    messages = _capture_ui(monkeypatch)
+    _real_download(monkeypatch)
+
+    def _boom(*_args: object, **_kwargs: object) -> Any:
+        raise AssertionError("a path that escapes updates/ must not be fetched")
+
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+    executed = _forbid_execution(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["update", "--yes"])
+
+    assert excinfo.value.code == 1
+    assert "outside" in messages.text()
+    # ``NOVEL_HOME`` lives below ``tmp_path``; the escaping name targeted it.
+    assert not list(tmp_path.rglob("evil.exe"))
+    assert executed == []
+
+
+def test_verified_download_lands_inside_updates_and_is_not_executed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"PK\x03\x04 portable bundle"
+    digest = hashlib.sha256(payload).hexdigest()
+    asset = _asset(name="NovelDownloader-1.5.0-windows-x64.zip", sha256=digest)
+    _patch_check(monkeypatch, _info(asset=asset))
+    messages = _capture_ui(monkeypatch)
+    _real_download(monkeypatch)
+    monkeypatch.setattr("urllib.request.urlopen", _serve(payload))
+    executed = _forbid_execution(monkeypatch)
+
+    _run(["update", "--yes"])
+
+    updates = update_module.updates_dir()
+    landed = updates / asset.name
+    assert landed.read_bytes() == payload
+    assert landed.resolve().is_relative_to(updates.resolve())
+    assert not landed.with_name(f"{landed.name}.part").exists()
+    assert "Downloaded and verified" in messages.text()
+    assert "Nothing was run or installed" in messages.text()
+    assert executed == []
+
+
+def test_non_installer_asset_is_never_executed_or_unpacked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI only fetches files: a script is stored, never launched."""
+    payload = b"console.log('not an installer')"
+    digest = hashlib.sha256(payload).hexdigest()
+    asset = _asset(name="update.js", sha256=digest)
+    _patch_check(monkeypatch, _info(asset=asset))
+    messages = _capture_ui(monkeypatch)
+    _real_download(monkeypatch)
+    monkeypatch.setattr("urllib.request.urlopen", _serve(payload))
+    executed = _forbid_execution(monkeypatch)
+
+    _run(["update", "--yes"])
+
+    stored = update_module.updates_dir() / asset.name
+    assert stored.read_bytes() == payload
+    assert "Downloaded and verified" in messages.text()
+    assert "Nothing was run or installed" in messages.text()
+    assert executed == []
+
+
+def test_plaintext_http_asset_is_refused_before_the_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A feed-supplied ``http://`` URL is never downloaded, even after a "yes"."""
+    asset = _asset(
+        name="NovelDownloader-setup-1.5.0-x64.exe",
+        url="http://example.invalid/NovelDownloader-setup-1.5.0-x64.exe",
+    )
+    _patch_check(monkeypatch, _info(asset=asset))
+    messages = _capture_ui(monkeypatch)
+    downloads: list[int] = []
+    monkeypatch.setattr(
+        update_module,
+        "download_asset",
+        lambda *a, **k: downloads.append(1) or Path("unused"),
+    )
+    monkeypatch.setattr(
+        cli_ui,
+        "confirm",
+        lambda *a, **k: pytest.fail("an insecure asset must not prompt"),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["update"])
+
+    assert excinfo.value.code == 1
+    assert "insecure" in messages.text().lower()
+    assert downloads == []
+
+
+def test_json_yes_plaintext_http_reports_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset = _asset(url="http://example.invalid/NovelDownloader-setup.exe")
+    _patch_check(monkeypatch, _info(asset=asset))
+    messages = _capture_ui(monkeypatch)
+    monkeypatch.setattr(
+        update_module,
+        "download_asset",
+        lambda *a, **k: pytest.fail("an insecure asset must not be downloaded"),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["update", "--json", "--yes"])
+
+    assert excinfo.value.code == 1
+    doc = _json_doc(messages)
+    assert doc["error"] == update_module.INSECURE_URL_ERROR
+    assert doc["download_path"] is None
 
 
 # ---------------------------------------------------------------------------

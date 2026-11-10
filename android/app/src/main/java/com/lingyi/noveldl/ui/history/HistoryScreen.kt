@@ -41,6 +41,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.lingyi.noveldl.R
+import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiSettings
 import com.lingyi.noveldl.data.DownloadTarget
@@ -88,10 +89,13 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                             appContext.getString(
                                 R.string.history_download_failed,
                                 fileName,
-                                appContext.getString(
-                                    R.string.history_download_failure_reason,
-                                    reason,
-                                ),
+                                // Name the common causes (space, file write,
+                                // HTTP) instead of only the numeric code.
+                                downloadFailureReasonRes(reason)?.let(appContext::getString)
+                                    ?: appContext.getString(
+                                        R.string.history_download_failure_reason,
+                                        reason,
+                                    ),
                             ),
                         )
                     else -> Unit
@@ -120,7 +124,7 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                     files = it.files
                     error = null
                 }
-                .onFailure { error = it.message }
+                .onFailure { error = apiErrorMessage(context, it) }
             loading = false
         }
     }

@@ -5,6 +5,7 @@ novel_downloader.plugins.sites.ciweimao.searcher
 """
 
 import logging
+from urllib.parse import urlsplit
 
 from lxml import html
 
@@ -54,29 +55,40 @@ class CiweimaoSearcher(BaseSearcher):
         rows = doc.xpath("//li[@data-book-id]")
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
-            if limit is not None and idx >= limit:
+        for row in rows:
+            if limit is not None and len(results) >= limit:
                 break
 
-            href = self._first_str(row.xpath('./a[@class="cover"]/@href'))
+            href = self._first_str(row.xpath('./a[contains(@class,"cover")]/@href'))
+            if not href:
+                href = self._first_str(
+                    row.xpath('.//p[contains(@class,"tit")]/a[1]/@href')
+                )
             if not href:
                 continue
 
-            # 'https://www.ciweimao.com/book/100177159' -> "100177159"
-            book_id = href.rstrip("/").rsplit("/", 1)[-1]
-            book_url = self._abs_url(href)
+            # 'https://www.ciweimao.com/book/100177159?from=list' -> "100177159"
+            path = urlsplit(href).path
+            book_id = path.rstrip("/").rsplit("/", 1)[-1]
+            if not book_id:
+                continue
+            book_url = self._abs_url(path.rstrip("/"))
 
             title = self._first_str(
-                row.xpath('./div[@class="cnt"]/p[@class="tit"]/a[1]/@title')
-            ) or self._first_str(
-                row.xpath('./div[@class="cnt"]/p[@class="tit"]/a[1]//text()')
-            )
+                row.xpath('.//p[contains(@class,"tit")]/a[1]/@title')
+            ) or self._first_str(row.xpath('.//p[contains(@class,"tit")]/a[1]//text()'))
 
-            author = self._first_str(row.xpath('./div[@class="cnt"]/p[2]/a[1]//text()'))
+            author = self._first_str(
+                row.xpath(
+                    './div[contains(@class,"cnt")]/p[contains(.,"作者")]/a[1]//text()'
+                )
+            ) or self._first_str(
+                row.xpath('./div[contains(@class,"cnt")]/p[2]/a[1]//text()')
+            )
 
             update_line = self._join_strs(
                 row.xpath(
-                    './div[@class="cnt"]/p[starts-with('
+                    './div[contains(@class,"cnt")]/p[starts-with('
                     'normalize-space(.),"最近更新")]/text()'
                 ),
                 replaces=[("最近更新：", ""), ("最近更新:", "")],
@@ -85,10 +97,10 @@ class CiweimaoSearcher(BaseSearcher):
             update_date = update_date.strip()
             latest_chapter = latest.strip()
 
-            cover_rel = self._first_str(row.xpath('./a[@class="cover"]/img/@src'))
+            cover_rel = self._first_str(
+                row.xpath('./a[contains(@class,"cover")]/img/@src')
+            )
             cover_url = self._abs_url(cover_rel) if cover_rel else ""
-
-            prio = self.priority + idx
 
             results.append(
                 SearchResult(
@@ -101,7 +113,7 @@ class CiweimaoSearcher(BaseSearcher):
                     latest_chapter=latest_chapter or "-",
                     update_date=update_date or "-",
                     word_count="-",
-                    priority=prio,
+                    priority=self.priority + len(results),
                 )
             )
         return results

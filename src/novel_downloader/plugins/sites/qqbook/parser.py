@@ -10,7 +10,9 @@ import base64
 import json
 import logging
 import re
+from html import unescape
 from typing import Any
+from urllib.parse import urlsplit
 
 from lxml import html
 
@@ -60,6 +62,13 @@ class QqbookParser(YuewenQDFontMixin, BaseParser):
         r"window\.__NUXT__\s*=\s*([\s\S]*?);?\s*<\/script>",
         re.S,
     )
+
+    # Chapter bodies are HTML (the same pipeline feeds the font-CSS renderer),
+    # so free chapters used to hand ``<p>`` markup straight to the exporter.
+    # Convert block boundaries to newlines first, then drop inline styling.
+    _RE_BR = re.compile(r"<br\b[^>]*>", re.IGNORECASE)
+    _RE_CLOSE_P = re.compile(r"</p\b[^>]*>", re.IGNORECASE)
+    _RE_TAG = re.compile(r"<[^>]*>")
 
     def __init__(self, config: ParserConfig) -> None:
         """
@@ -157,7 +166,10 @@ class QqbookParser(YuewenQDFontMixin, BaseParser):
         ) or self._first_str(info_tree.xpath('//meta[@property="og:url"]/@content'))
         book_id = ""
         if read_url:
-            book_id = read_url.rstrip("/").split("/")[-1]
+            # Last path segment only: a trailing slash or ``?from=...`` must
+            # not become part of the id used to build chapter URLs.
+            path = urlsplit(read_url).path.rstrip("/")
+            book_id = path.rsplit("/", 1)[-1]
 
         # Chapters from the book_list
         data = catalog_dict.get("data") or []
@@ -291,6 +303,8 @@ class QqbookParser(YuewenQDFontMixin, BaseParser):
                 if resources:
                     extra["resources"] = resources
 
+        content = self._parse_normal(content)
+
         if not content:
             logger.warning(
                 "QQbook chapter %s :: content empty after decryption/font-mapping",
@@ -304,6 +318,21 @@ class QqbookParser(YuewenQDFontMixin, BaseParser):
             "content": content,
             "extra": extra,
         }
+
+    def _parse_normal(self, raw_html: str) -> str:
+        """
+        Turn a plain (non font-encrypted) chapter body into text paragraphs.
+
+        :param raw_html: Chapter HTML from ``currentContent.content``.
+        :return: Paragraphs joined by newlines, markup and entities removed.
+        """
+        if not raw_html:
+            return ""
+        text = self._RE_BR.sub("\n", raw_html)
+        text = self._RE_CLOSE_P.sub("\n", text)
+        text = self._RE_TAG.sub("", text)
+        paragraphs = [unescape(line).strip() for line in text.splitlines()]
+        return "\n".join(p for p in paragraphs if p)
 
     def _parse_encrypted(
         self,

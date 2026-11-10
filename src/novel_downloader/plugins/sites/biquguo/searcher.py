@@ -19,4 +19,4 @@ class BiquguoSearcher(ManggNetSearcher):
     @staticmethod
     def _url_to_id(url: str) -> str:
         # "/84/84829/" -> "84-84829"
-        return url.strip("/").replace("/", "-")
+        return ManggNetSearcher._url_path(url).strip("/").replace("/", "-")

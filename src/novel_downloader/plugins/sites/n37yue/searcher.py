@@ -19,4 +19,4 @@ class N37yueSearcher(ManggNetSearcher):
     @staticmethod
     def _url_to_id(url: str) -> str:
         # "/84/84936/" -> "84-84936"
-        return url.strip("/").replace("/", "-")
+        return ManggNetSearcher._url_path(url).strip("/").replace("/", "-")

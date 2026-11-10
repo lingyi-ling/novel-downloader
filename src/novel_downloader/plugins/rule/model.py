@@ -93,6 +93,7 @@ import json
 import re
 from dataclasses import dataclass, field, replace
 from typing import Any
+from urllib.parse import urlsplit
 
 from novel_downloader.infra.i18n import t
 from novel_downloader.schemas import FetcherConfig
@@ -117,6 +118,21 @@ __all__ = [
 
 class RuleError(ValueError):
     """Raised when a rule document is structurally invalid."""
+
+
+#: Maximum nesting depth of a ``fallback`` chain (one level per dict spec).
+#: A deeply nested chain would otherwise exhaust the Python stack while the
+#: rule is validated (``RecursionError`` instead of a :class:`RuleError`).
+_MAX_FALLBACK_DEPTH = 16
+
+#: Maximum nesting depth accepted inside a ``search.json_body`` object.
+_MAX_JSON_DEPTH = 32
+
+#: A ``{name}`` placeholder inside a URL template (see ``engine.render``).
+_URL_PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
+
+#: Schemes a rule may fetch from.  Relative templates (no scheme) are fine.
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 
 
 # --------------------------------------------------------------------------- #
@@ -144,6 +160,11 @@ def loads_rule_json(text: str | bytes, *, source: str = "<memory>") -> dict[str,
     """
     try:
         data: Any = json.loads(text, object_pairs_hook=_pairs_without_duplicates)
+    except RecursionError as e:
+        # ``json`` recurses once per nesting level; a hostile document could
+        # otherwise surface a bare ``RecursionError`` (the caller's ``except
+        # RuleError`` would miss it and one bad file would abort the scan).
+        raise RuleError(f"{source}: rule JSON is nested too deeply") from e
     except ValueError as e:
         raise RuleError(
             t("{source}: invalid JSON: {error}").format(source=source, error=e)
@@ -240,6 +261,71 @@ def _as_number(value: Any, *, where: str) -> float | None:
     if number != number or number == float("inf"):
         raise RuleError(f"{where} must be a finite number, got {value!r}")
     return number
+
+
+def _check_json_depth(value: Any, *, limit: int, where: str) -> None:
+    """
+    Reject an over-nested / self-referential JSON-like value.
+
+    ``RuleSearcher._render_body`` walks ``json_body`` recursively, so a
+    pathological nesting depth (or a cycle injected through a programmatic
+    mapping) would raise ``RecursionError`` at request time.  The walk below is
+    iterative and detects a container that is its own ancestor.
+    """
+    stack: list[tuple[Any, int, bool]] = [(value, 1, False)]
+    on_path: set[int] = set()
+    while stack:
+        node, depth, leaving = stack.pop()
+        if leaving:
+            on_path.discard(id(node))
+            continue
+        if depth > limit:
+            raise RuleError(f"{where}: nesting deeper than {limit} levels")
+        if isinstance(node, dict):
+            marker = id(node)
+            if marker in on_path:
+                raise RuleError(f"{where}: circular structure")
+            on_path.add(marker)
+            stack.append((node, depth, True))
+            stack.extend((child, depth + 1, False) for child in node.values())
+        elif isinstance(node, (list, tuple)):
+            marker = id(node)
+            if marker in on_path:
+                raise RuleError(f"{where}: circular structure")
+            on_path.add(marker)
+            stack.append((node, depth, True))
+            stack.extend((child, depth + 1, False) for child in node)
+
+
+def _check_url_template(value: Any, *, where: str, allow_empty: bool = False) -> str:
+    """
+    Validate a URL template (``search.url``, ``book.url``, ...) and return it.
+
+    Templates are expanded by :func:`~.engine.render` and the result is handed
+    to the HTTP client, so a *literal* non-HTTP scheme is rejected at load time
+    (``file:///etc/passwd``, ``javascript:...``, ``ftp://...``).  ``{name}``
+    placeholders are removed before the scheme is inspected, so the common
+    ``{base_url}/book/{book_id}/`` form stays valid; ``base_url`` itself is
+    validated separately in :func:`parse_rule`.  Relative and protocol-relative
+    templates are allowed -- the site origin fills them in.
+    """
+    if not isinstance(value, str):
+        raise RuleError(f"{where} must be a URL string, got {type(value).__name__}")
+    text = value.strip()
+    if not text:
+        if allow_empty:
+            return ""
+        raise RuleError(f"{where} must be a non-empty URL template")
+    if _HEADER_CTRL_RE.search(text):
+        raise RuleError(f"{where} must not contain control characters")
+    probe = _URL_PLACEHOLDER_RE.sub("", text)
+    scheme = urlsplit(probe).scheme.lower()
+    if scheme and scheme not in _ALLOWED_URL_SCHEMES:
+        raise RuleError(
+            f"{where}: unsupported URL scheme {scheme!r} "
+            "(rule URLs may only use http/https; a relative path is allowed)"
+        )
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -516,7 +602,18 @@ def _check_regex(pattern: Any, *, where: str) -> str | None:
         re.compile(pattern)
     except re.error as e:
         raise RuleError(f"{where}: invalid regex {pattern!r}: {e}") from e
-    risk = regex_backtracking_risk(pattern)
+    except RecursionError as e:
+        # ``sre_parse`` recurses into nested groups; the error is not a
+        # ``re.error``, so it used to escape as a bare ``RecursionError``.
+        raise RuleError(
+            f"{where}: regex {pattern!r} is nested too deeply to be validated"
+        ) from e
+    try:
+        risk = regex_backtracking_risk(pattern)
+    except RecursionError as e:
+        raise RuleError(
+            f"{where}: regex {pattern!r} is nested too deeply to be validated"
+        ) from e
     if risk is not None:
         raise RuleError(
             f"{where}: regex {pattern!r} risks catastrophic backtracking: {risk}"
@@ -650,9 +747,22 @@ _BOOK_FIELD_NAMES = {
 }
 
 
+def _unknown_keys(data: dict[str, Any], allowed: set[str]) -> list[Any]:
+    """Keys outside ``allowed`` (typos), plus any non-string key."""
+    return sorted(
+        (
+            key
+            for key in data
+            if not isinstance(key, str)
+            or (key not in allowed and not key.startswith("_"))
+        ),
+        key=str,
+    )
+
+
 def _reject_unknown(data: dict[str, Any], allowed: set[str], *, where: str) -> None:
     """Reject keys outside ``allowed`` (typos) unless prefixed with ``_``."""
-    unknown = sorted(k for k in data if k not in allowed and not k.startswith("_"))
+    unknown = _unknown_keys(data, allowed)
     if unknown:
         raise RuleError(
             f"{where}: unknown key {unknown[0]!r} "
@@ -664,7 +774,7 @@ def _check_field_names(
     fields: dict[str, Any], allowed: set[str], *, where: str
 ) -> None:
     """Reject field names the engine would silently ignore."""
-    unknown = sorted(k for k in fields if k not in allowed and not k.startswith("_"))
+    unknown = _unknown_keys(fields, allowed)
     if unknown:
         raise RuleError(
             f"{where}: unknown field {unknown[0]!r} "
@@ -985,6 +1095,12 @@ class Field:
         if self.regex:
             try:
                 self._pattern = re.compile(self.regex, re.S)
+            except RecursionError as e:
+                # Deeply nested groups exhaust ``sre_parse``'s recursion before
+                # it can report a normal ``re.error``.
+                raise RuleError(
+                    f"field regex {self.regex!r} is nested too deeply to compile"
+                ) from e
             except (re.error, TypeError) as e:
                 # TypeError covers a non-string ``regex`` (e.g. a number/list).
                 raise RuleError(
@@ -994,11 +1110,16 @@ class Field:
                 ) from e
             # ``Field`` is the one place that compiles a rule regex without
             # going through ``_check_regex``; apply the same DoS guard here.
-            risk = (
-                regex_backtracking_risk(self.regex)
-                if isinstance(self.regex, str)
-                else None
-            )
+            try:
+                risk = (
+                    regex_backtracking_risk(self.regex)
+                    if isinstance(self.regex, str)
+                    else None
+                )
+            except RecursionError as e:
+                raise RuleError(
+                    f"field regex {self.regex!r} is nested too deeply to analyse"
+                ) from e
             if risk is not None:
                 raise RuleError(
                     f"field regex {self.regex!r} risks catastrophic backtracking: "
@@ -1006,7 +1127,7 @@ class Field:
                 )
 
     @classmethod
-    def from_dict(cls, data: Any, *, where: str = "field") -> Field:
+    def from_dict(cls, data: Any, *, where: str = "field", _depth: int = 0) -> Field:
         if isinstance(data, str):
             return cls(selector=data)
         if not isinstance(data, dict):
@@ -1034,13 +1155,13 @@ class Field:
                 _as_int(data.get("group"), 1, where=f"{where} 'group'"),
                 where=f"{where} 'group'",
             ),
-            multi=bool(data.get("multi", False)),
+            multi=_as_bool(data.get("multi"), False, where=f"{where} 'multi'"),
             replace=_as_replace(data.get("replace")),
             default=_as_str(data.get("default")),
             steps=_as_steps(data.get("steps"), where=f"{where}.steps"),
         )
         fld.fallback = _as_fallback(
-            data.get("fallback"), fld, where=f"{where}.fallback"
+            data.get("fallback"), fld, where=f"{where}.fallback", depth=_depth
         )
         return fld
 
@@ -1050,19 +1171,25 @@ class Field:
         return value
 
 
-def _as_fallback(value: Any, base: Field, *, where: str) -> list[Field]:
+def _as_fallback(value: Any, base: Field, *, where: str, depth: int = 0) -> list[Field]:
     """
     Normalize a ``fallback`` chain.
 
     A string inherits every option of ``base`` (``attr``, ``regex``,
     ``group``, ``replace``, ``steps``) and only swaps the selector; a dict is
     an independent :class:`Field`.  The inherited copy deliberately drops
-    ``base.fallback`` so a self-referencing chain cannot recurse forever.
+    ``base.fallback`` so a self-referencing chain cannot recurse forever, and
+    the nesting depth is bounded so a hostile document fails as a
+    :class:`RuleError` instead of a ``RecursionError``.
     """
     if value is None:
         return []
     if not isinstance(value, (list, tuple)):
         raise RuleError(f"{where} must be a list")
+    if depth >= _MAX_FALLBACK_DEPTH:
+        raise RuleError(
+            f"{where}: fallback nested deeper than {_MAX_FALLBACK_DEPTH} levels"
+        )
     out: list[Field] = []
     for index, item in enumerate(value):
         if isinstance(item, str):
@@ -1070,7 +1197,9 @@ def _as_fallback(value: Any, base: Field, *, where: str) -> list[Field]:
                 raise RuleError(f"{where}[{index}] must be a non-empty selector")
             out.append(replace(base, selector=item, fallback=[]))
         elif isinstance(item, dict):
-            out.append(Field.from_dict(item, where=f"{where}[{index}]"))
+            out.append(
+                Field.from_dict(item, where=f"{where}[{index}]", _depth=depth + 1)
+            )
         else:
             raise RuleError(
                 f"{where}[{index}] must be a selector string or object, "
@@ -1115,6 +1244,10 @@ class SearchRule:
         json_body = data.get("json_body")
         if json_body is not None and not isinstance(json_body, dict):
             raise RuleError(t("search.json_body must be an object"))
+        if json_body is not None:
+            _check_json_depth(
+                json_body, limit=_MAX_JSON_DEPTH, where="search.json_body"
+            )
         raw_data = data.get("data")
         if raw_data is not None and not isinstance(raw_data, dict):
             raise RuleError("search.data must be an object")
@@ -1122,7 +1255,7 @@ class SearchRule:
         if data.get("method") is not None and not isinstance(data["method"], str):
             raise RuleError("search.method must be a string")
         return cls(
-            url=_as_str(data["url"]),
+            url=_check_url_template(data["url"], where="search.url"),
             method=method.upper(),
             data={str(k): _as_str(v) for k, v in (raw_data or {}).items()},
             json_body=json_body,
@@ -1232,13 +1365,13 @@ class PagesRule:
     @classmethod
     def from_dict(cls, data: Any) -> PagesRule:
         if isinstance(data, str):
-            return cls(url=data)
+            return cls(url=_check_url_template(data, where="pages.url"))
         if not isinstance(data, dict) or not data.get("url"):
             raise RuleError(t("pages rule requires a 'url'"))
         _reject_unknown(data, _PAGES_KEYS, where="pages")
         raw_max = data.get("max_pages")
         return cls(
-            url=_as_str(data["url"]),
+            url=_check_url_template(data["url"], where="pages.url"),
             start=_as_int(data.get("start"), 2, where="pages.start"),
             max_pages=(
                 None
@@ -1272,7 +1405,7 @@ class BookRule:
             raise RuleError("book.fields must be an object")
         _check_field_names(raw_fields, _BOOK_FIELD_NAMES, where="book.fields")
         return cls(
-            url=_as_str(data["url"]),
+            url=_check_url_template(data["url"], where="book.url"),
             fields={
                 k: Field.from_dict(v, where=f"book.fields.{k}")
                 for k, v in raw_fields.items()
@@ -1314,7 +1447,7 @@ class ChapterRule:
         if container is not None and not isinstance(container, str):
             raise RuleError("chapter.container must be a string")
         return cls(
-            url=_as_str(data["url"]),
+            url=_check_url_template(data["url"], where="chapter.url"),
             content=Field.from_dict(
                 data.get("content", {"selector": "body"}), where="chapter.content"
             ),
@@ -1450,7 +1583,9 @@ def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
         site_key=site_key,
         site_name=_as_str(data.get("site_name")),
         priority=_as_int(data.get("priority"), 200, where="priority"),
-        base_url=_as_str(data.get("base_url")),
+        base_url=_check_url_template(
+            _as_str(data.get("base_url")), where="base_url", allow_empty=True
+        ),
         encoding=_as_str(data.get("encoding"), "utf-8"),
         format=_check_format(_as_str(data.get("format"), "html").lower()),
         hosts=[h.lower() for h in _as_str_list(data.get("hosts"), where="hosts")],

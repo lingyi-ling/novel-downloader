@@ -596,10 +596,16 @@ class SourcesCmd(Command):
 
         stem = _rule_name(name, url) or rule.site_key
         with tempfile.TemporaryDirectory(prefix="novel-rule-") as tmp:
-            temp_path = Path(tmp) / f"{stem}.json"
+            # The staging file gets a fixed, portable name: ``--name CON`` (or a
+            # URL whose basename is a DOS device name such as ``nul.json``)
+            # would otherwise create a *reserved* file name here, which Windows
+            # refuses to open (or redirects to the console device). The target
+            # name is passed explicitly instead, so ``install_rule`` sanitizes
+            # it exactly as it would sanitize the staging file's stem.
+            temp_path = Path(tmp) / "rule.json"
             temp_path.write_text(text, encoding="utf-8")
             try:
-                target = install_rule(temp_path, force=force)
+                target = install_rule(temp_path, name=stem, force=force)
             except RuleError as e:
                 fail(t("Could not install {path}: {err}").format(path=url, err=e))
 

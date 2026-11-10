@@ -18,7 +18,7 @@ from urllib.parse import quote_plus, urlsplit
 from novel_downloader.plugins.base.searcher import BaseSearcher
 from novel_downloader.schemas import SearchResult
 
-from .engine import abs_url, extract, parse_page, render, select
+from .engine import abs_url, extract, http_url, parse_page, render, select
 from .model import Rule
 
 logger = logging.getLogger(__name__)
@@ -133,7 +133,7 @@ class RuleSearcher(BaseSearcher):
             if limit is not None and idx >= limit:
                 break
 
-            book_url = abs_url(base, field("url", item))
+            book_url = http_url(base, field("url", item))
             if not book_url:
                 continue
 

@@ -10,6 +10,8 @@ import contextlib
 import json
 import logging
 import os
+import tempfile
+import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Coroutine
@@ -55,6 +57,10 @@ def default_tasks_state_path() -> Path:
 #: Schema version of that file; unknown versions are ignored (the queue is
 #: rebuilt empty) instead of being mis-read.
 TASKS_STATE_VERSION = 1
+
+#: Statuses that mean "this task is over".  A task persisted with one of them
+#: belongs to the completed history, never back in the pending queue.
+_TERMINAL_STATUSES = frozenset({Status.COMPLETED, Status.FAILED, Status.CANCELLED})
 
 #: How many finished tasks are written to disk (the in-memory deque is capped
 #: at :data:`MAX_COMPLETED_TASKS` anyway).
@@ -162,6 +168,20 @@ def _failure_message(error: BaseException, retries: int) -> str:
     return message
 
 
+def _as_count(value: Any) -> int:
+    """
+    Coerce a persisted counter (``int``/``float``/numeric string) to ``int``.
+
+    A garbled field -- hand-edited JSON, a partially written value -- must not
+    abort the restore of the whole queue, so anything unparsable becomes ``0``.
+    """
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)
+
+
 class TaskManager:
     """
     A multi-site task manager:
@@ -211,9 +231,18 @@ class TaskManager:
         self._persist = bool(persist) or state_path is not None
         self._state_path = Path(state_path) if state_path is not None else None
         self._started = False
+        self._closed = False
         self._restored = False
         self._dirty = False
         self._flush_task: asyncio.Task[None] | None = None
+
+        #: Monotonic snapshot number (event-loop thread only) and the newest
+        #: number actually on disk (guarded by ``_write_lock``).  Overlapping
+        #: flushes -- the background flusher racing ``close()`` -- must never
+        #: let an older snapshot replace a newer one.
+        self._write_seq = 0
+        self._written_seq = 0
+        self._write_lock = threading.Lock()
 
         # ``None`` means "resolve from config, fall back to the default".
         self._max_download_retries = max_download_retries
@@ -259,10 +288,10 @@ class TaskManager:
         data already on disk is reused, so a resumed download continues where
         it left off.
         """
-        if self._started:
+        if self._started or self._closed:
             return
         async with self._lock:
-            if self._started:
+            if self._started or self._closed:
                 return
             self._started = True
             if self._persist and self._state_path is None:
@@ -279,9 +308,20 @@ class TaskManager:
     async def add_task(self, *, title: str, site: str, book_id: str) -> DownloadTask:
         """
         Add a new task and ensure a worker for its site is running.
+
+        Also restores the persisted queue the first time it runs, so a queue
+        added to before the app's explicit ``start()`` is never lost.  The call
+        is idempotent for an *active* book: enqueuing the same ``(site,
+        book_id)`` while it is queued, running or being processed returns the
+        existing task instead of downloading the book twice.  A book that has
+        already finished can be enqueued again (an intentional re-download).
         """
-        task = DownloadTask(title=title, site=site, book_id=book_id)
+        await self.start()
         async with self._lock:
+            existing = self._find_active_locked(site, book_id)
+            if existing is not None:
+                return existing
+            task = DownloadTask(title=title, site=site, book_id=book_id)
             self.pending[site].append(task)
             self._spawn_worker_locked(site)
             self._mark_dirty()
@@ -346,17 +386,41 @@ class TaskManager:
         }
 
     async def close(self) -> None:
-        """Cancel or gracefully finish all workers before shutdown."""
-        if self._flush_task is not None:
-            self._flush_task.cancel()
-            await asyncio.gather(self._flush_task, return_exceptions=True)
+        """
+        Cancel or gracefully finish all workers before shutdown.
+
+        Serialised with :meth:`start` (both take the manager lock) and
+        idempotent: a shutdown that races startup either waits for the restore
+        to finish or prevents the start from spawning workers, and a second
+        call is a no-op.  If ``start()`` never ran, the persisted queue is
+        restored first so the final write cannot replace a saved queue with an
+        empty snapshot.
+        """
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            flush_task = self._flush_task
             self._flush_task = None
 
-        all_tasks = [*self._worker_tasks.values()]
-        if self._export_worker_task:
-            all_tasks.append(self._export_worker_task)
-        if self._process_worker_task:
-            all_tasks.append(self._process_worker_task)
+            all_tasks = [*self._worker_tasks.values()]
+            if self._export_worker_task:
+                all_tasks.append(self._export_worker_task)
+            if self._process_worker_task:
+                all_tasks.append(self._process_worker_task)
+
+            self._worker_tasks.clear()
+            self._export_worker_task = self._process_worker_task = None
+
+            if self._persist and self._state_path is None:
+                self._state_path = default_tasks_state_path()
+            # ``close()`` without ``start()`` must not write an empty queue over
+            # the one on disk: adopt whatever was persisted before flushing.
+            self._restore_locked()
+
+        if flush_task is not None:
+            flush_task.cancel()
+            await asyncio.gather(flush_task, return_exceptions=True)
 
         for worker_task in all_tasks:
             worker_task.cancel()
@@ -367,9 +431,6 @@ class TaskManager:
                 result, asyncio.CancelledError
             ):
                 print(f"Worker error during shutdown: {result!r}")
-
-        self._worker_tasks.clear()
-        self._export_worker_task = self._process_worker_task = None
 
         # A final write keeps the queue durable even if the last flush was
         # less than one interval ago.
@@ -399,16 +460,40 @@ class TaskManager:
 
         The snapshot is taken on the event loop (the queues are mutated there
         concurrently) and only the file write is handed to a worker thread.
+        Each snapshot carries a monotonically increasing number so a slow,
+        older write can never replace a newer one: ``close()`` and the
+        background flusher may both have a write in flight.
         """
         self._dirty = False
+        self._write_seq += 1
+        seq = self._write_seq
         try:
             payload = self._snapshot_payload()
-            await asyncio.to_thread(self._write_payload, payload)
+            await asyncio.to_thread(self._write_payload, payload, seq)
         except Exception:  # noqa: BLE001 - persistence must not kill the app
+            # Keep the queue dirty: a transient failure (Windows file lock,
+            # a failing disk momentarily unavailable) must be retried instead
+            # of silently dropping the last change.
+            self._dirty = True
             logger.warning("Could not persist the task queue", exc_info=True)
 
     def _restore_locked(self) -> None:
-        """Load the persisted queue (caller holds the lock)."""
+        """
+        Load the persisted queue (caller holds the lock).
+
+        A file that cannot be parsed, holds a non-mapping document or an
+        unknown schema is quarantined (``tasks.json.corrupt``) instead of being
+        silently overwritten by the next flush, so its bytes stay recoverable
+        and a downgrade to an older app version does not destroy a newer
+        queue.  Within a readable file:
+
+        * ``pending``/``completed`` that are not lists are ignored;
+        * entries without a usable ``site``/``book_id`` are skipped;
+        * a task repeated by ``task_id`` is restored once;
+        * a task that already reached a terminal status (a crash between
+          recording the outcome and the queue flush) is restored as finished
+          instead of being downloaded again.
+        """
         if self._restored:
             return
         self._restored = True
@@ -416,20 +501,51 @@ class TaskManager:
             return
         try:
             payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             logger.warning("Ignoring unreadable task queue at %s", self._state_path)
+            self._quarantine_queue_locked()
             return
         if (
             not isinstance(payload, dict)
             or payload.get("version") != TASKS_STATE_VERSION
         ):
             logger.warning("Ignoring task queue with an unknown schema")
+            self._quarantine_queue_locked()
             return
 
+        completed_entries = payload.get("completed")
+        if not isinstance(completed_entries, list):
+            if completed_entries is not None:
+                logger.warning("Ignoring non-list 'completed' section in task queue")
+            completed_entries = []
+        for entry in completed_entries:
+            task = self._task_from_payload(entry)
+            if task is not None:
+                self._append_completed(task)
+
         restored = 0
-        for entry in payload.get("pending") or []:
+        pending_entries = payload.get("pending")
+        if not isinstance(pending_entries, list):
+            if pending_entries is not None:
+                logger.warning("Ignoring non-list 'pending' section in task queue")
+            pending_entries = []
+        seen: set[str] = set(self._completed_ids)
+        for entry in pending_entries:
             task = self._task_from_payload(entry)
             if task is None:
+                continue
+            if task.task_id and task.task_id in seen:
+                logger.warning(
+                    "Skipping duplicated task %s in the persisted queue",
+                    task.task_id,
+                )
+                continue
+            if task.task_id:
+                seen.add(task.task_id)
+            if task.status in _TERMINAL_STATUSES:
+                # The outcome was already decided when the process died.
+                task.asyncio_task = None
+                self._append_completed(task)
                 continue
             # Anything that was mid-flight comes back as queued; on-disk
             # chapters are reused by the downloader.
@@ -437,14 +553,23 @@ class TaskManager:
             task.asyncio_task = None
             self.pending[task.site].append(task)
             restored += 1
-        for entry in payload.get("completed") or []:
-            task = self._task_from_payload(entry)
-            if task is not None:
-                self._append_completed(task)
         if restored:
             logger.info(
                 "Restored %d queued task(s) from %s", restored, self._state_path
             )
+
+    def _quarantine_queue_locked(self) -> None:
+        """
+        Move an unusable ``tasks.json`` aside (best effort).
+
+        The next flush writes a fresh file; without this the only copy of the
+        (possibly hand-edited or half-written) queue would be lost.
+        """
+        if self._state_path is None:
+            return
+        target = self._state_path.with_name(self._state_path.name + ".corrupt")
+        with contextlib.suppress(OSError):
+            os.replace(self._state_path, target)
 
     def _snapshot_payload(self) -> dict[str, Any]:
         """Serialise the queue (event-loop thread only)."""
@@ -464,27 +589,49 @@ class TaskManager:
             ],
         }
 
-    def _write_payload(self, payload: dict[str, Any]) -> None:
-        """Atomically write a prepared payload (runs in a worker thread)."""
+    def _write_payload(self, payload: dict[str, Any], seq: int) -> None:
+        """
+        Atomically write a prepared payload (runs in a worker thread).
+
+        Writes are serialised by :attr:`_write_lock` and tagged with the
+        snapshot number, so two overlapping flushes can neither interleave
+        bytes in one temporary file nor let the older snapshot win.  The
+        temporary name is unique per write; the payload is fsynced before it
+        is moved into place.
+        """
         if self._state_path is None:
             return
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._state_path.with_name(
-            f"{self._state_path.name}.{os.getpid()}.tmp"
-        )
-        tmp_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
-        try:
-            os.replace(tmp_path, self._state_path)
-        except OSError:
-            with contextlib.suppress(OSError):
-                tmp_path.unlink(missing_ok=True)
-            raise
+        with self._write_lock:
+            if seq <= self._written_seq:
+                # A newer snapshot is already on disk; never regress the queue.
+                return
+            parent = self._state_path.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            content = json.dumps(payload, ensure_ascii=False, indent=1)
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{self._state_path.name}.",
+                suffix=".tmp",
+                dir=str(parent),
+            )
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, self._state_path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
+                raise
+            self._written_seq = seq
 
     @staticmethod
     def _task_payload(task: DownloadTask) -> dict[str, Any]:
         """Serialise the fields a restored task needs."""
+        # ``dict(...)`` is a single C-level copy: the export worker thread may
+        # be mutating this mapping while the queue is being snapshotted.
+        exported_paths = dict(task.exported_paths)
         return {
             "task_id": task.task_id,
             "title": task.title,
@@ -496,9 +643,7 @@ class TaskManager:
             "error": task.error,
             "retry_count": task.retry_count,
             "export_stage": task.export_stage,
-            "exported_paths": {
-                fmt: str(path) for fmt, path in task.exported_paths.items()
-            },
+            "exported_paths": {fmt: str(path) for fmt, path in exported_paths.items()},
             "created_at": task.created_at,
             "finished_at": task.finished_at,
         }
@@ -533,30 +678,51 @@ class TaskManager:
             for fmt, value in raw_paths.items():
                 if isinstance(fmt, str) and isinstance(value, str):
                     paths[fmt] = Path(value)
-        try:
-            total = int(entry.get("chapters_total") or 0)
-            done = int(entry.get("chapters_done") or 0)
-        except (TypeError, ValueError):
-            total = done = 0
-        return DownloadTask(
-            title=str(entry.get("title") or book_id),
-            site=site,
-            book_id=book_id,
-            task_id=str(entry.get("task_id") or ""),
-            status=status,
-            chapters_total=max(0, total),
-            chapters_done=max(0, done),
-            error=str(entry["error"]) if entry.get("error") else None,
-            retry_count=int(entry.get("retry_count") or 0),
-            export_stage=(
+        total = _as_count(entry.get("chapters_total"))
+        done = _as_count(entry.get("chapters_done"))
+        retry_count = _as_count(entry.get("retry_count"))
+        kwargs: dict[str, Any] = {
+            "title": str(entry.get("title") or book_id),
+            "site": site,
+            "book_id": book_id,
+            "status": status,
+            "chapters_total": total,
+            "chapters_done": min(done, total) if total else done,
+            "error": str(entry["error"]) if entry.get("error") else None,
+            "retry_count": retry_count,
+            "export_stage": (
                 str(entry["export_stage"]) if entry.get("export_stage") else None
             ),
-            exported_paths=paths,
-            created_at=created_at,
-            finished_at=finished_at,
-        )
+            "exported_paths": paths,
+            "created_at": created_at,
+            "finished_at": finished_at,
+        }
+        raw_task_id = entry.get("task_id")
+        if isinstance(raw_task_id, str) and raw_task_id:
+            # A missing id would otherwise collapse every such entry onto the
+            # same (empty) id and hide real duplicates.
+            kwargs["task_id"] = raw_task_id
+        return DownloadTask(**kwargs)
 
     # ---------- internals ----------
+    def _find_active_locked(self, site: str, book_id: str) -> DownloadTask | None:
+        """Return the live task for ``(site, book_id)``, if one exists.
+
+        "Live" covers every stage a task can be in before it is finished:
+        queued, downloading, processing or waiting for export.  Caller holds
+        the lock.
+        """
+        for task in self.pending.get(site, ()):
+            if task.book_id == book_id:
+                return task
+        running = self.running.get(site)
+        if running is not None and running.book_id == book_id:
+            return running
+        for task in self._stage_tasks.values():
+            if task.site == site and task.book_id == book_id:
+                return task
+        return None
+
     def _append_completed(self, task: DownloadTask) -> None:
         """
         Record a finished task once, without duplicating a re-appended object.

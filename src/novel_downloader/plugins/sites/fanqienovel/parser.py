@@ -71,6 +71,10 @@ class FanqienovelParser(BaseParser):
         book_name = page.get("bookName") or ""
         author = page.get("authorName") or page.get("author") or ""
         cover_url = page.get("thumbUrl") or page.get("thumbUri") or ""
+        if isinstance(cover_url, str) and cover_url.startswith("//"):
+            # ``thumbUrl`` is sometimes protocol-relative; media downloads
+            # need an absolute URL.
+            cover_url = "https:" + cover_url
         update_time = page.get("lastPublishTime") or ""
         summary = page.get("abstract") or page.get("description") or ""
 
@@ -92,6 +96,9 @@ class FanqienovelParser(BaseParser):
         chapter_groups: list[list[dict[str, Any]]] = (
             page.get("chapterListWithVolume") or []
         )
+        # The payload occasionally repeats a chapter across two volume groups;
+        # keep the first occurrence so it is downloaded (and exported) once.
+        seen_ids: set[str] = set()
 
         for i, chapter_list in enumerate(chapter_groups):
             if not isinstance(chapter_list, list):
@@ -116,6 +123,11 @@ class FanqienovelParser(BaseParser):
             chapters: list[ChapterInfoDict] = []
             for ch in chapter_list:
                 chapter_id = str(ch.get("itemId") or "")
+                # An entry without an id cannot be fetched (the reader URL
+                # would be ``/reader/``), so it must not enter the catalog.
+                if not chapter_id or chapter_id in seen_ids:
+                    continue
+                seen_ids.add(chapter_id)
                 title = ch.get("title") or ""
                 accessible = not _is_locked(ch)
                 chapters.append(
@@ -127,12 +139,13 @@ class FanqienovelParser(BaseParser):
                     }
                 )
 
-            volumes.append(
-                {
-                    "volume_name": volume_name,
-                    "chapters": chapters,
-                }
-            )
+            if chapters:
+                volumes.append(
+                    {
+                        "volume_name": volume_name,
+                        "chapters": chapters,
+                    }
+                )
 
         if not volumes:
             return None

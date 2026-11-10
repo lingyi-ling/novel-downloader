@@ -30,7 +30,11 @@ download is an explicit second step.  Three flags control which half runs:
 The download always lands in ``app_home()/updates/`` (never the current
 directory) and every path decision is delegated to
 :mod:`novel_downloader.apps.common.updater`, which sanitises the file name,
-refuses non-HTTP(S) URLs and rejects an escaping path.
+refuses non-HTTP(S) URLs and rejects an escaping path.  The asset URL itself
+must be ``https://``: the shared helper also accepts plaintext ``http://``, but
+an update channel never needs it, and the desktop client applies the same rule.
+Nothing is executed, unpacked or installed by this command -- not even a
+downloaded ``.exe`` -- so there is no launch step to harden.
 
 Exit codes: ``0`` when the check succeeded (with or without an update), when
 the user declined the download, or after a successful download; ``1`` when the
@@ -61,10 +65,19 @@ from novel_downloader.infra.paths import app_home
 from .base import EXIT_FAILURE, Command
 from .storage import format_size
 
-__all__ = ["MIRROR_ENV_VAR", "UPDATES_DIRNAME", "UpdateCmd", "updates_dir"]
+__all__ = [
+    "INSECURE_URL_ERROR",
+    "MIRROR_ENV_VAR",
+    "UPDATES_DIRNAME",
+    "UpdateCmd",
+    "updates_dir",
+]
 
 #: Directory (below :func:`app_home`) the asset is written to.
 UPDATES_DIRNAME = "updates"
+
+#: JSON ``error`` value reported when the release points at a non-HTTPS URL.
+INSECURE_URL_ERROR = "insecure-url"
 
 #: Comma-separated mirror prefixes tried before the release URL, e.g.
 #: ``NOVEL_UPDATE_MIRROR="https://proxy.example/"``. An unset variable means
@@ -92,6 +105,16 @@ def _mirror_prefixes() -> list[str]:
     """Parse :data:`MIRROR_ENV_VAR` into ordered, non-empty prefixes."""
     raw = os.environ.get(MIRROR_ENV_VAR, "")
     return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _is_secure_url(url: str) -> bool:
+    """Whether ``url`` is an ``https://`` asset URL.
+
+    ``download_asset`` accepts both schemes, but the release feed is published
+    over HTTPS and the desktop client refuses plaintext.  Mirror prefixes are
+    a separate, explicit user choice and are not covered by this check.
+    """
+    return str(url or "").strip().lower().startswith("https://")
 
 
 def _payload(
@@ -265,6 +288,16 @@ class UpdateCmd(Command):
                     platform=detect_platform()
                 )
             )
+            raise SystemExit(EXIT_FAILURE)
+
+        if not _is_secure_url(asset.url):
+            # Mirror prefixes may be plaintext (the user configured them), but
+            # the release-provided URL never has to be.  Refuse before the
+            # prompt so an interactive "yes" cannot downgrade the transfer.
+            if as_json:
+                _emit_json(_payload(info, current=current, error=INSECURE_URL_ERROR))
+                raise SystemExit(EXIT_FAILURE)
+            ui.error(t("Refusing to download an update from an insecure source"))
             raise SystemExit(EXIT_FAILURE)
 
         if not asset.sha256:

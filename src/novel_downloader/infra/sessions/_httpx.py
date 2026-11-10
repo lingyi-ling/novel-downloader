@@ -20,6 +20,7 @@ from .base import (
     as_connection_error,
     as_timeout_error,
     as_too_many_redirects_error,
+    close_backend_session,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -69,11 +70,13 @@ class HttpxSession(BaseSession):
         Shutdown and clean up any resources.
 
         Safe to call repeatedly and concurrently: the backend reference is
-        detached before awaiting so a second caller becomes a no-op.
+        detached before awaiting so a second caller becomes a no-op.  The
+        backend close is shielded, so cancelling this caller cannot abort the
+        shutdown after the reference is gone.
         """
         session, self._session = self._session, None
         if session is not None and not session.is_closed:
-            await session.aclose()
+            await close_backend_session(session.aclose())
 
     async def get(
         self,

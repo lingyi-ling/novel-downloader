@@ -12,12 +12,14 @@ import retrofit2.Retrofit
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-/** Holds the Retrofit service and maps transport/HTTP failures to readable messages. */
+/**
+ * Holds the Retrofit service and classifies failures into [ApiErrorCode]s.
+ *
+ * No user-facing text lives here: the UI resolves the code through
+ * `apiErrorMessage(...)` so both languages stay in `strings.xml`.
+ */
 object Api {
     const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8081/"
-
-    /** Shown when the UI touches the API before the user configured it. */
-    const val NOT_CONFIGURED_MESSAGE: String = "API 未配置，请先在「设置」中填写 API 地址"
 
     /** Error bodies longer than this are not scanned for a `detail` field. */
     private const val MAX_ERROR_BODY_CHARS = 100_000
@@ -91,10 +93,15 @@ object Api {
     /** Whether [configure] has been called at least once. */
     fun isConfigured(): Boolean = service != null
 
-    fun service(): ApiService = service ?: throw IllegalStateException(NOT_CONFIGURED_MESSAGE)
+    fun service(): ApiService =
+        service ?: throw ApiFailure(ApiErrorCode.NOT_CONFIGURED)
 
     /**
      * Runs [block] and converts exceptions into a user-readable [Result].
+     *
+     * Failures are [ApiFailure]s carrying an [ApiErrorCode]; [ApiFailure]
+     * itself is passed through unchanged so a nested `Api.call` (or
+     * [service] throwing "not configured") keeps its original code.
      *
      * [CancellationException] is rethrown so that cancelled coroutines (a
      * LaunchedEffect restarting its poll, navigating away mid-request) stay
@@ -104,19 +111,48 @@ object Api {
         Result.success(block())
     } catch (e: CancellationException) {
         throw e
+    } catch (e: ApiFailure) {
+        Result.failure(e)
     } catch (e: HttpException) {
-        Result.failure(IllegalStateException(readableError(e), e))
+        Result.failure(ApiFailure(ApiErrorCode.HTTP, readableError(e), e))
     } catch (e: SerializationException) {
         // A 200 response whose body is not the expected JSON (proxy/captive
-        // portal HTML, empty bodies) surfaces as a decoding error; report it
-        // in the app's language instead of a raw kotlinx message.
-        val raw = e.message?.take(160)?.ifBlank { "非 JSON 响应" } ?: "非 JSON 响应"
-        Result.failure(IllegalStateException("响应格式错误：$raw", e))
+        // portal HTML, empty bodies) surfaces as a decoding error; keep the
+        // decoder's own text as the detail, the UI supplies the sentence.
+        val raw = e.message?.take(160)?.ifBlank { "not JSON" } ?: "not JSON"
+        Result.failure(ApiFailure(ApiErrorCode.BAD_RESPONSE, raw, e))
     } catch (e: IOException) {
-        Result.failure(IllegalStateException("网络错误：${e.message ?: e.javaClass.simpleName}", e))
+        Result.failure(transportFailure(baseUrl, e))
     } catch (e: Exception) {
-        Result.failure(IllegalStateException(e.message ?: e.javaClass.simpleName, e))
+        Result.failure(
+            ApiFailure(
+                ApiErrorCode.UNKNOWN,
+                e.message ?: e.javaClass.simpleName,
+                e,
+            ),
+        )
     }
+
+    /**
+     * Classifies a transport failure. A loopback request can only fail because
+     * the embedded engine has not bound its port yet (or died), which is a
+     * different situation from a wrong/unreachable remote address.
+     */
+    internal fun transportFailure(baseUrl: String, error: IOException): ApiFailure =
+        if (baseUrl == EmbeddedEngine.BASE_URL) {
+            ApiFailure(
+                ApiErrorCode.ENGINE_UNREACHABLE,
+                // Kept as a diagnostic detail; the UI shows its own sentence.
+                error.message ?: error.javaClass.simpleName,
+                error,
+            )
+        } else {
+            ApiFailure(
+                ApiErrorCode.NETWORK,
+                error.message ?: error.javaClass.simpleName,
+                error,
+            )
+        }
 
     private fun readableError(e: HttpException): String {
         val body = try {

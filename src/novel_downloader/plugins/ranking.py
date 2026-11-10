@@ -18,7 +18,10 @@ complete entries surface first::
 
 Keyword relevance is deliberately the dominant signal: an exact title match
 should outrank a merely similar (e.g. derivative) title even when the latter
-was updated more recently.
+was updated more recently.  Because relevance is one weighted sum though, a
+metadata-rich row could still overtake a genuine primary-field hit, so
+:func:`sort_results` orders ``by="quality"`` with a two-level key under a
+decided intent: primary-field match tier first, then the quality score.
 
 Because plain ``max(title, author)`` cannot tell a search for an author from a
 search for a title, :func:`detect_query_intent` first asks whether the result
@@ -34,6 +37,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
@@ -116,11 +120,28 @@ _INTENT_MARGIN = 0.15
 #: match is discounted to 0.9 so an equally strong title match always wins.
 _EITHER_AUTHOR_WEIGHT = 0.9
 
-#: Weight of the non-primary field once an intent has been decided.  Low
-#: enough that the primary field dominates (a contained ``"土豆"`` in an
-#: author must beat a book literally *titled* ``"土豆"`` under author intent),
-#: high enough that a book with no primary match still gets partial credit.
+#: Weight of the non-primary field once an intent has been decided.  It keeps
+#: a book with no primary match from scoring zero, but a weighted sum alone
+#: cannot guarantee primacy: metadata (word count, recency, cover, ...) is
+#: 45% of :func:`rank_score`, so a rich row whose *title* merely equals an
+#: author's name used to outrank that author's own sparse rows.  Ordering
+#: therefore uses the match tier of the primary field as the outer key (see
+#: :func:`_match_tier`); this weight only shapes the residual relevance.
 _INTENT_SECONDARY_WEIGHT = 0.6
+
+#: Intents whose primary field is a single named attribute; these are the
+#: intents that get the two-level (tier, score) ordering.
+_PRIMARY_FIELD = {"author": "author", "title": "title"}
+
+#: Match tiers, best first.  They mirror :func:`_match_score`'s branches
+#: exactly -- exact equality, prefix, containment, partial character coverage
+#: -- so the tier ordering and the relevance score can never disagree about
+#: *what kind* of match a pair is.
+_TIER_EXACT = 4
+_TIER_PREFIX = 3
+_TIER_CONTAINS = 2
+_TIER_PARTIAL = 1
+_TIER_NONE = 0
 
 _DAY = timedelta(days=1)
 
@@ -151,7 +172,11 @@ _SLASH_FORMATS = (
     "%Y/%m/%d %H:%M",
     "%Y/%m/%d",
 )
-_DOT_FORMATS = ("%Y.%m.%d",)
+_DOT_FORMATS = (
+    "%Y.%m.%d %H:%M:%S",
+    "%Y.%m.%d %H:%M",
+    "%Y.%m.%d",
+)
 _CJK_FORMATS = (
     "%Y年%m月%d日 %H:%M:%S",
     "%Y年%m月%d日 %H:%M",
@@ -159,7 +184,7 @@ _CJK_FORMATS = (
 )
 
 
-#: Fast-path shapes for the slash and CJK formats.  ``strptime`` accepts
+#: Fast-path shapes for the slash, dot and CJK formats.  ``strptime`` accepts
 #: 1-2 digit month/day/hour/minute/second fields and exactly four year digits;
 #: these patterns mirror that, so a successful match builds the same datetime.
 _SLASH_DATE_RE = re.compile(
@@ -170,7 +195,10 @@ _CJK_DATE_RE = re.compile(
     r"(\d{4})年(\d{1,2})月(\d{1,2})日(?: (\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?",
     re.ASCII,
 )
-_DOT_DATE_RE = re.compile(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", re.ASCII)
+_DOT_DATE_RE = re.compile(
+    r"(\d{4})\.(\d{1,2})\.(\d{1,2})(?: (\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?",
+    re.ASCII,
+)
 
 
 def _formats_for(text: str) -> tuple[str, ...]:
@@ -199,7 +227,7 @@ def _fast_parse_date(text: str) -> datetime | None:
     if match is None:
         return None
     parts = [int(part) if part else 0 for part in match.groups()]
-    if len(parts) == 3:  # date-only ".", slash and CJK patterns
+    if len(parts) == 3:  # date-only patterns (no time component parsed)
         year, month, day = parts
         hour = minute = second = 0
     else:
@@ -224,11 +252,23 @@ _UNIT_SCALE = {
 
 @lru_cache(maxsize=8192)
 def _normalize_cached(text: str) -> str:
+    # NFKC first: it folds full-width alphanumerics/spaces/punctuation onto
+    # their canonical half-width forms and composes decomposed accents, so a
+    # query typed in half-width matches a title/author served in full-width
+    # (and vice versa).  This mirrors ``apps.music.aggregate.normalize_text``;
+    # without it "ＡＢＣ" and "ABC" were treated as unrelated strings for
+    # relevance, de-duplication, grouping and cache keys alike.
+    text = unicodedata.normalize("NFKC", text)
     return _NON_WORD_RE.sub("", text.casefold())
 
 
 def normalize_text(value: object) -> str:
-    """Casefold ``value`` and strip everything but letters, digits and CJK."""
+    """
+    Casefold ``value`` and strip everything but letters, digits and CJK.
+
+    Full-width and half-width forms are folded together first, so ``"ＡＢＣ"``
+    and ``"ABC"`` normalise to the same key.
+    """
     return _normalize_cached(str(value if value is not None else ""))
 
 
@@ -239,8 +279,16 @@ def parse_word_count(value: object) -> float | None:
     Handles plain numbers (``"1234"``), thousands separators (``"1,234"``),
     decimals (``"12.3"``) and unit suffixes (``"12.3万字"`` -> 123000,
     ``"1.2M"`` -> 1200000, ``"3千字"`` -> 3000).
+
+    The text is NFKC-normalised before parsing, so the full-width spellings
+    sites actually serve -- ``"１．２万字"``, ``"１２３４"``, ``"１，２３４"`` --
+    yield the same numbers as their half-width counterparts instead of being
+    truncated at the first full-width separator (``"１．２万字"`` used to parse
+    as just ``1.0``).  A value without any digit still returns ``None``.
     """
-    text = str(value if value is not None else "").strip()
+    text = unicodedata.normalize(
+        "NFKC", str(value if value is not None else "")
+    ).strip()
     if text.casefold() in _NULL_TOKENS:
         return None
 
@@ -276,12 +324,23 @@ def parse_update_date(value: object, *, now: datetime | None = None) -> datetime
     """
     Parse a raw update-date string into a ``datetime``, or ``None``.
 
-    Both absolute formats (``2024-05-01``, ``2024/5/1``, ``2024年5月1日``,
-    ISO) and the relative keywords (``刚刚``/``昨天``/``前天``) / durations
-    such as ``"3天前"`` / ``"2个月前"`` are recognised; the two sets are
-    disjoint, so their internal evaluation order does not affect the result.
+    Both absolute formats (``2024-05-01``, ``2024/5/1``, ``2024.5.1 10:00``,
+    ``2024年5月1日``, ISO) and the relative keywords (``刚刚``/``昨天``/
+    ``前天``) / durations such as ``"3天前"`` / ``"2个月前"`` are recognised;
+    the two sets are disjoint, so their internal evaluation order does not
+    affect the result.
+
+    The text is NFKC-normalised before parsing -- like
+    :func:`parse_word_count` -- so the full-width spellings real sites serve
+    (``"２０２４年５月１日"``, ``"２０２４－０５－０１"``, ``"２０２４/５/１"``)
+    parse to the same date as their half-width counterparts.  Folding alone
+    cannot turn a time-of-day value into a date: ``"１２：３０"`` becomes
+    ``"12:30"``, which is not an absolute date format, so it still returns
+    ``None``.
     """
-    text = str(value if value is not None else "").strip()
+    text = unicodedata.normalize(
+        "NFKC", str(value if value is not None else "")
+    ).strip()
     if text.casefold() in _NULL_TOKENS:
         return None
 
@@ -355,6 +414,35 @@ def _match_score(
     if keyword in text:
         return contains
     return base * _coverage(keyword, text)
+
+
+def _match_tier(keyword: str, text: str) -> int:
+    """
+    Return the match tier of an already-normalised ``keyword`` against ``text``.
+
+    The branches are the same, in the same order, as :func:`_match_score`:
+    exact equality, prefix, containment, then partial character coverage.
+    Only the *kind* of match is reported (``_TIER_EXACT`` down to
+    ``_TIER_NONE``), so two rows in the same tier are still ordered by their
+    full :func:`rank_score`, while an empty or unrelated field always sorts
+    below any real hit regardless of metadata.
+    """
+    if not keyword or not text:
+        return _TIER_NONE
+    if text == keyword:
+        return _TIER_EXACT
+    if text.startswith(keyword):
+        return _TIER_PREFIX
+    if keyword in text:
+        return _TIER_CONTAINS
+    if _coverage(keyword, text) > 0.0:
+        return _TIER_PARTIAL
+    return _TIER_NONE
+
+
+def _primary_match_tier(keyword: str, result: SearchResult, field: str) -> int:
+    """Return :func:`_match_tier` for ``result``'s primary intent ``field``."""
+    return _match_tier(normalize_text(keyword), normalize_text(result.get(field)))
 
 
 @lru_cache(maxsize=8192)
@@ -460,8 +548,9 @@ def _relevance(
     * ``"either"`` (default) keeps the historical behaviour, i.e. the larger
       of ``title_score`` and ``author_score * 0.9``; output is unchanged.
     * ``"author"`` puts the author first: the title score is scaled down by
-      :data:`_INTENT_SECONDARY_WEIGHT`, so a genuine author hit outranks a
-      book whose *title* merely contains the same characters.
+      :data:`_INTENT_SECONDARY_WEIGHT`.  The score alone can still be
+      overtaken by metadata; the ordering guarantee lives in
+      :func:`sort_results`, which uses the author match tier as its outer key.
     * ``"title"`` is the mirror image, demoting the author score.
 
     Unknown intent values fall back to ``"either"``.
@@ -627,10 +716,21 @@ def sort_results(
     ``intent`` selects how title and author are weighted
     (:func:`_relevance`); the default ``"either"`` is the historical
     behaviour and leaves existing output unchanged.
+
+    Under ``by="quality"`` with a decided ``intent`` (``"title"``/``"author"``)
+    the key is two-level: the match tier of the intent's *primary* field
+    first (:func:`_match_tier`), then :func:`rank_score`.  A real primary-field
+    hit -- even on a row whose word count, update date and cover are all
+    missing -- therefore outranks any row that merely collides on the other
+    field, no matter how rich that row's metadata is.  Within one tier the
+    previous weighted score still decides.  ``"either"`` and every other
+    ``by`` keep the single score/explicit key untouched.
     """
     direction = order or default_order(by)
     reverse = direction == "desc"
     current = now or datetime.now()
+    resolved_intent = _normalize_intent(intent)
+    primary_field = _PRIMARY_FIELD.get(resolved_intent)
 
     def _words_key(result: SearchResult) -> float:
         words = parse_word_count(result.get("word_count"))
@@ -667,8 +767,15 @@ def sort_results(
     def _author_key(result: SearchResult) -> str:
         return normalize_text(result.get("author"))
 
+    def _quality_key(result: SearchResult) -> Any:
+        score = rank_score(result, keyword, intent=resolved_intent, now=current)
+        if primary_field is None:
+            # ``"either"``: historical single-score ordering, byte for byte.
+            return score
+        return (_primary_match_tier(keyword, result, primary_field), score)
+
     key_fns: dict[str, Callable[[SearchResult], Any]] = {
-        "quality": lambda r: rank_score(r, keyword, intent=intent, now=current),
+        "quality": _quality_key,
         "priority": _priority_key,
         "site": _site_key,
         "title": _title_key,

@@ -7,12 +7,11 @@ novel_downloader.plugins.common.parser.biquge1
 import re
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
 from novel_downloader.plugins.common.parser._utils import (
     chapter_id_from_href,
     dedupe_chapters,
+    parse_html_tree,
     resolve_url,
     strip_page_marker,
 )
@@ -45,7 +44,9 @@ class Biquge1Parser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         book_name = self._first_str(
             tree.xpath('//meta[@property="og:novel:book_name"]/@content')
@@ -82,7 +83,9 @@ class Biquge1Parser(BaseParser):
         # --- Volumes & Chapters ---
         chapters: list[ChapterInfoDict] = []
         for curr_html in raw_pages:
-            t = html.fromstring(curr_html)
+            t = parse_html_tree(curr_html)
+            if t is None:
+                continue
             chapters.extend(self._chapters_from_tree(t))
         chapters = dedupe_chapters(chapters)
 
@@ -124,7 +127,9 @@ class Biquge1Parser(BaseParser):
             [self._strip_nested_html(page) for page in raw_pages]
         )
         for curr_html in stripped_pages:
-            tree = html.fromstring(curr_html)
+            tree = parse_html_tree(curr_html)
+            if tree is None:
+                continue
             if not title:
                 title = self._clean_title(self._first_str(tree.xpath("//h1//text()")))
 

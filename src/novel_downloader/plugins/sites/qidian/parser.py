@@ -9,8 +9,10 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from html import unescape
 from typing import Any
+from urllib.parse import urlsplit
 
 from lxml import html
 
@@ -34,6 +36,15 @@ from novel_downloader.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Qidian's normal (non-font-encrypted) chapter body is a run of ``<p>``
+#: blocks.  Splitting on the opening tag alone used to leave the closing
+#: ``</p>`` in the text, so every paragraph of every plain chapter ended with
+#: literal markup.  Convert markup boundaries to newlines first, then strip
+#: the remaining tags (inner ``<span>``/``<em>`` styling, ``<br>``).
+_RE_BR = re.compile(r"<br\b[^>]*>", re.IGNORECASE)
+_RE_CLOSE_P = re.compile(r"</p\b[^>]*>", re.IGNORECASE)
+_RE_TAG = re.compile(r"<[^>]*>")
 
 QD_SCRIPT: AssetSpec = {
     "type": "local",
@@ -285,12 +296,13 @@ class QidianParser(YuewenQDFontMixin, BaseParser):
         """
         Extract structured chapter content from a normal Qidian page.
         """
-        parts = raw_html.split("<p>")
-        paragraphs = [unescape(p).strip() for p in parts if p.strip()]
-        chapter_text = "\n".join(paragraphs)
-        if not chapter_text:
+        if not raw_html:
             return ""
-        return chapter_text
+        text = _RE_BR.sub("\n", raw_html)
+        text = _RE_CLOSE_P.sub("\n", text)
+        text = _RE_TAG.sub("", text)
+        paragraphs = [unescape(line).strip() for line in text.splitlines()]
+        return "\n".join(p for p in paragraphs if p)
 
     def _parse_font_encrypted(
         self,
@@ -403,7 +415,10 @@ class QidianParser(YuewenQDFontMixin, BaseParser):
             for li in vol.xpath('.//ul[contains(@class,"volume-chapters")]/li'):
                 title = self._first_str(li.xpath('.//a[@class="chapter-name"]/text()'))
                 url = self._first_str(li.xpath('.//a[@class="chapter-name"]/@href'))
-                cid = url.rstrip("/").split("/")[-1] if url else ""
+                # The id is the last path segment; a query string must not
+                # become part of it (``.../123/?from=catalog`` -> ``123``).
+                path = urlsplit(url).path if url else ""
+                cid = path.rstrip("/").rsplit("/", 1)[-1]
                 locked = bool(li.xpath('.//em[contains(@class, "chapter-locked")]'))
                 chapters.append(
                     {

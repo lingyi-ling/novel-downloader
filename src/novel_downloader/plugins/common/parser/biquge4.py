@@ -8,12 +8,13 @@ import re
 from html import unescape
 from typing import Any
 
-from lxml import etree, html
+from lxml import etree
 
 from novel_downloader.plugins.base.parser import BaseParser
 from novel_downloader.plugins.common.parser._utils import (
     chapter_id_from_href,
     dedupe_chapters,
+    parse_html_tree,
     resolve_url,
     strip_page_marker,
 )
@@ -57,7 +58,9 @@ class Biquge4Parser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         # --- Basic meta extraction ---
         book_name = self._first_str(
@@ -225,9 +228,8 @@ class Biquge4Parser(BaseParser):
         return strip_page_marker(raw_title).strip()
 
     def _extract_paragraphs(self, raw_html: str) -> list[str]:
-        try:
-            tree = html.fromstring(raw_html)
-        except (ValueError, etree.ParserError):
+        tree = parse_html_tree(raw_html)
+        if tree is None:
             return self._extract_paragraphs_regex(raw_html)
 
         nodes = tree.xpath('//div[@id="novelcontent"]')

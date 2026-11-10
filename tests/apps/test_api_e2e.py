@@ -846,6 +846,111 @@ async def test_music_search_returns_tracks(
 
 
 @pytest.mark.asyncio
+async def test_music_search_hides_provider_private_data(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``extra`` (provider raw payloads/cookies) must never reach the client."""
+    from novel_downloader.apps.music.serialize import PUBLIC_TRACK_FIELDS
+
+    calls: list[dict[str, Any]] = []
+    track = _FakeTrack(
+        provider="netease",
+        id="186016",
+        name="晴天",
+        artists="周杰伦",
+        duration_s=269,
+        sources=["netease", "qq"],
+        extra={
+            "raw": {"cookie": "MUSIC_U=secret"},
+            "songinfo": object(),
+        },
+    )
+    # Process-local download fallback list: not a dataclass field, never serialised.
+    track.__dict__["_alternatives"] = [_FakeTrack(provider="qq", id="1")]
+    provider = _FakeMusicProvider(calls, ([track], 1))
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(create=lambda platform: provider),
+    )
+
+    response = await client.post(
+        f"{API}/music/search",
+        json={"platform": "netease", "keyword": "晴天", "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["search_id"]
+    assert len(payload["tracks"]) == 1
+    public = payload["tracks"][0]
+    assert "extra" not in public
+    assert "_alternatives" not in public
+    assert tuple(public) == PUBLIC_TRACK_FIELDS
+    assert public["provider"] == "netease"
+    assert public["id"] == "186016"
+    assert public["name"] == "晴天"
+    assert public["artists"] == "周杰伦"
+    assert public["duration_s"] == 269
+    assert public["sources"] == ["netease", "qq"]
+
+
+@pytest.mark.asyncio
+async def test_music_download_restores_tracks_from_search_id(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reduced (public) rows plus ``search_id`` still reach the engine intact."""
+    calls: list[dict[str, Any]] = []
+    original = _FakeTrack(
+        provider="netease",
+        id="186016",
+        name="晴天",
+        artists="周杰伦",
+        extra={"raw": {"cookie": "MUSIC_U=secret"}},
+    )
+    provider = _FakeMusicProvider(calls, ([original], 1))
+    captured: dict[str, Any] = {}
+
+    def fake_download_mixed(
+        create_provider: Any,
+        tracks: list[Any],
+        options: Any,
+        *,
+        on_result: Any,
+    ) -> tuple[int, int, int, list[Any], list[Any]]:
+        captured["tracks"] = tracks
+        return 0, 0, 0, [], []
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(
+            create=lambda platform: provider, download_mixed=fake_download_mixed
+        ),
+    )
+
+    searched = await client.post(
+        f"{API}/music/search",
+        json={"platform": "netease", "keyword": "晴天", "limit": 1},
+    )
+    payload = searched.json()
+    search_id = payload["search_id"]
+    submitted = payload["tracks"]  # exactly what a client echoes back
+
+    response = await client.post(
+        f"{API}/music/download",
+        json={"platform": "netease", "tracks": submitted, "search_id": search_id},
+    )
+
+    assert response.status_code == 200
+    assert captured["tracks"] == [original]
+    assert captured["tracks"][0] is original
+    assert captured["tracks"][0].extra == {"raw": {"cookie": "MUSIC_U=secret"}}
+
+
+@pytest.mark.asyncio
 async def test_music_download_returns_ordered_results(
     client: httpx.AsyncClient,
     tmp_path: Path,
@@ -878,7 +983,10 @@ async def test_music_download_returns_ordered_results(
     monkeypatch.setattr(
         api_routes,
         "_load_music_components",
-        lambda: _fake_music_components(download_mixed=fake_download_many),
+        lambda: _fake_music_components(
+            download_mixed=fake_download_many,
+            load_settings=lambda: {"out_dir": str(tmp_path)},
+        ),
     )
 
     response = await client.post(
@@ -935,7 +1043,10 @@ async def test_music_job_lifecycle(
     monkeypatch.setattr(
         api_routes,
         "_load_music_components",
-        lambda: _fake_music_components(download_mixed=fake_download_many),
+        lambda: _fake_music_components(
+            download_mixed=fake_download_many,
+            load_settings=lambda: {"out_dir": str(tmp_path)},
+        ),
     )
 
     created = await client.post(
@@ -976,7 +1087,14 @@ async def test_music_job_lifecycle(
 async def test_music_export_writes_m3u8_playlist(
     client: httpx.AsyncClient,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from novel_downloader.apps.music import settings as music_settings
+
+    # Exports are confined to the configured music directory.
+    monkeypatch.setattr(
+        music_settings, "load_settings", lambda: {"out_dir": str(tmp_path)}
+    )
     target = tmp_path / "favorites.m3u8"
 
     response = await client.post(

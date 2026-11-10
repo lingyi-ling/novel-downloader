@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Shared PyInstaller collection helpers for the novel-cli / novel-api specs.
+Shared PyInstaller collection helpers for the three app specs.
+
+It also builds the Windows version resource (``FileVersion`` /
+``ProductVersion``) from ``novel_downloader.__version__`` so every executable
+reports the same version as the package, the installer and ``latest.json``.
 
 The site plugins live in namespace-style directories (no ``__init__.py``) and
 are imported by name at runtime, so PyInstaller's static analysis and even
@@ -10,16 +14,24 @@ musicdl package, whose submodules are imported lazily by platform key and
 which cannot be fully imported at build time (some optional dependencies such
 as ``m3u8`` are intentionally absent).
 
-The helper is imported from both specs; PyInstaller executes specs with the
+The helper is imported from every spec; PyInstaller executes specs with the
 spec directory available via ``SPECPATH``.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
 PACKAGE = "novel_downloader"
+
+#: ``__version__ = "1.2.3"`` as written in ``novel_downloader/__init__.py``.
+_VERSION_RE = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
+
+#: Vendor name embedded in the Windows version resource of every executable.
+VENDOR = "lingyi-ling"
+LICENSE_TEXT = "MIT License"
 
 #: (source-relative directory, importable package name) pairs whose modules
 #: are selected at runtime rather than by a regular ``import`` statement.
@@ -33,8 +45,30 @@ DYNAMIC_TREES: tuple[tuple[str, str], ...] = (
     ),
 )
 
+#: The optional ``image-utils`` extra (``numpy``, ``Pillow``, ``fontTools``).
+#: PyInstaller's bundled hooks cover ``numpy`` and Pillow's image plugins, but
+#: ``fontTools`` has no hook: ``TTFont`` reaches its table modules through a
+#: generated import block, and a hook change could silently drop them.  The
+#: imports are lazy in the source tree (``libs/image_utils.py`` degrades to a
+#: clear RuntimeError when they are absent), so analysis of the entry point
+#: alone is not enough either -- the bundle must carry them explicitly.  None
+#: of the three packages ships data files that have to be collected.
+#: ``scripts/verify_frozen.py`` asserts these names exist in the built PYZ.
+IMAGE_STACK_HIDDEN_IMPORTS: tuple[str, ...] = (
+    "numpy",
+    "numpy.typing",
+    "PIL.Image",
+    "PIL.ImageOps",
+    "PIL.ImageDraw",
+    "PIL.ImageFont",
+    "fontTools",
+    "fontTools.ttLib",
+    "fontTools.ttLib.tables._p_o_s_t",
+)
+
 #: Modules imported dynamically by string (importlib.resources / lazy imports).
 EXTRA_HIDDEN_IMPORTS: tuple[str, ...] = (
+    *IMAGE_STACK_HIDDEN_IMPORTS,
     # ``importlib.resources.files("novel_downloader.locales")``
     f"{PACKAGE}.locales",
     # ``importlib.resources.files("novel_downloader.resources")``
@@ -201,3 +235,138 @@ def collect_common(src_dir: Path) -> tuple[list[tuple[str, str]], list[str]]:
     :param src_dir: Repository ``src/`` directory.
     """
     return project_datas(src_dir), common_hidden_imports(src_dir)
+
+
+# ---------------------------------------------------------------------------
+# Windows version resource (FileVersion / ProductVersion)
+# ---------------------------------------------------------------------------
+
+
+def read_package_version(src_dir: Path) -> str:
+    """
+    Return ``__version__`` from ``<src_dir>/novel_downloader/__init__.py``.
+
+    The source tree is read directly rather than importing the package: the
+    spec bundles the source tree, so it is the authority even when the running
+    interpreter has a different (e.g. non-editable) install.
+
+    :raises RuntimeError: when the package or its version string is missing.
+    """
+    init_py = Path(src_dir) / PACKAGE / "__init__.py"
+    if not init_py.is_file():
+        raise RuntimeError(f"package version file not found: {init_py}")
+    match = _VERSION_RE.search(init_py.read_text(encoding="utf-8"))
+    if match is None:
+        raise RuntimeError(f"no __version__ string in {init_py}")
+    return match.group(1)
+
+
+def version_numbers(version: str) -> tuple[int, int, int, int]:
+    """
+    Convert a PEP 440-ish version into the 4-tuple Windows expects.
+
+    Only the numeric release prefix counts: ``1.2.3`` becomes
+    ``(1, 2, 3, 0)`` and pre-release/local suffixes (``-rc1``, ``+build``)
+    are ignored, because the fixed ``VS_FIXEDFILEINFO`` fields have no room
+    for them.  Missing components are padded with zero.
+    """
+    core = re.split(r"[-+]", version.strip(), maxsplit=1)[0]
+    numbers: list[int] = []
+    for part in core.split(".")[:4]:
+        match = re.match(r"\d+", part)
+        numbers.append(int(match.group()) if match else 0)
+    numbers.extend([0] * (4 - len(numbers)))
+    return (numbers[0], numbers[1], numbers[2], numbers[3])
+
+
+def windows_version_resource(
+    version: str,
+    *,
+    app_name: str,
+    description: str | None = None,
+) -> str:
+    """
+    Render a PyInstaller ``version=`` resource file body for ``app_name``.
+
+    PyInstaller evaluates the file with its ``versioninfo`` classes in scope;
+    the layout below is the canonical one produced by ``grab_version.py``.
+    ``FileVersion``/``ProductVersion`` carry ``version`` verbatim while the
+    fixed fields carry :func:`version_numbers` (what Windows' file-properties
+    dialog and the installer's ``UninstallDisplayVersion`` read).
+    """
+    major, minor, build, revision = version_numbers(version)
+    fixed = f"({major}, {minor}, {build}, {revision})"
+    text = description or f"{app_name} application"
+    # Windows expects the launcher's file name here, not the bundle directory.
+    launcher = f"{app_name}.exe"
+    # ``repr`` keeps the template valid Python even if a name ever contains a
+    # quote; the values themselves are repository constants.
+    return f"""# Generated by packaging/_spec_common.py -- do not edit.
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={fixed},
+    prodvers={fixed},
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          '040904B0',
+          [
+            StringStruct('CompanyName', {VENDOR!r}),
+            StringStruct('FileDescription', {text!r}),
+            StringStruct('FileVersion', {version!r}),
+            StringStruct('InternalName', {app_name!r}),
+            StringStruct('LegalCopyright', {LICENSE_TEXT!r}),
+            StringStruct('OriginalFilename', {launcher!r}),
+            StringStruct('ProductName', {app_name!r}),
+            StringStruct('ProductVersion', {version!r}),
+          ],
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])]),
+  ],
+)
+"""
+
+
+def write_version_resource(
+    work_dir: Path,
+    src_dir: Path,
+    *,
+    app_name: str,
+    description: str | None = None,
+) -> Path:
+    """
+    Write the version resource for ``app_name`` under *work_dir* and return it.
+
+    The file lands in the PyInstaller work directory (``workpath`` inside a
+    spec), never in the source tree, so a build leaves no tracked file behind.
+    It is rewritten on every build, so a version bump cannot leave a stale
+    resource in place.
+
+    :param work_dir: PyInstaller's ``workpath`` for the current build.
+    :param src_dir: Repository ``src/`` directory.
+    :param app_name: Executable base name (``novel-cli``, ``NovelDownloader``).
+    :param description: Optional ``FileDescription`` string.
+    :return: Path of the written version resource file.
+    """
+    version = read_package_version(src_dir)
+    target = Path(work_dir) / "version_info" / f"{app_name}.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        windows_version_resource(
+            version,
+            app_name=app_name,
+            description=description,
+        ),
+        encoding="utf-8",
+    )
+    return target

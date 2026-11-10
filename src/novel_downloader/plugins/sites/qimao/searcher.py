@@ -70,8 +70,8 @@ class QimaoSearcher(BaseSearcher):
                 SearchResult(
                     site=self.site_name,
                     book_id=book_id,
-                    book_url=str(
-                        item.get("read_url") or f"{self.BASE_URL}/shuku/{book_id}/"
+                    book_url=self._abs_url(
+                        str(item.get("read_url") or f"{self.BASE_URL}/shuku/{book_id}/")
                     ),
                     cover_url=str(item.get("image_link") or ""),
                     title=str(item.get("title") or ""),

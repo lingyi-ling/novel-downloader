@@ -14,6 +14,8 @@ import os
 import shutil
 import tempfile
 
+import requests
+
 from .base import MusicProvider, ResolveResult, Track
 from .creds import get as get_cred
 
@@ -309,14 +311,25 @@ class MusicdlProvider(MusicProvider):
                 f"{self.display_name} 缺少可选依赖：{e.name or e}"
             ) from e
         except AssertionError as e:
-            # 凭据型平台（TIDAL 等）在没配账号时会用断言拒绝构造客户端；
-            # 原文是英文，换成界面能直接展示的提示。
-            if "cookies are not configured" in str(e):
+            # 凭据型平台（TIDAL / Deezer / SoundCloud 等）在凭据缺失或不完整
+            # 时会用断言拒绝构造客户端；原文是英文，换成界面能直接展示的
+            # 提示。不同 vendor 模块的措辞不一样（"cookies are not
+            # configured"、"arl should be configured"……），统一按
+            # “未配置”关键字识别。
+            message = str(e)
+            lowered = message.lower()
+            if "not configured" in lowered or "should be configured" in lowered:
                 raise RuntimeError(
                     f"{self.display_name} 需要先在「平台凭据」里配置账号信息"
                 ) from e
             raise
         except Exception as e:
+            # 超时不是“接口已变更”，单独给一句可操作的提示，别让用户去
+            # 怀疑平台失效。
+            if isinstance(e, (TimeoutError, requests.exceptions.Timeout)):
+                raise RuntimeError(
+                    f"{self.display_name} 搜索超时（请求超过时限），请稍后重试"
+                ) from e
             # 平台接口不可达/变更时，把底层晦涩异常包成可读信息，界面直接可见
             raise RuntimeError(
                 f"{self.display_name} 搜索失败（接口不可达或已变更）："

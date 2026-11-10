@@ -35,6 +35,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.lingyi.noveldl.R
+import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiSettings
 import com.lingyi.noveldl.data.DownloadTarget
@@ -51,6 +52,7 @@ import com.lingyi.noveldl.data.standaloneTargetUrl
 import com.lingyi.noveldl.data.toSitesSummary
 import com.lingyi.noveldl.data.treeUriDisplayName
 import com.lingyi.noveldl.ui.healthSummary
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -76,9 +78,14 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
 
     fun save() {
         scope.launch {
+            // Re-read the persisted mode instead of trusting the collected
+            // state: DataStore emits asynchronously, so a toggle followed
+            // quickly by Save could still see the old `standalone` value and
+            // point the app back at the remote URL.
+            val latest = store.settings.first()
             // In standalone mode the engine stays the API target; the typed
             // URL is persisted for when the user switches back.
-            val target = settings.configureTargetUrl(baseUrl)
+            val target = latest.configureTargetUrl(baseUrl)
             val usable = Api.configure(target, apiKey)
             store.save(baseUrl, apiKey)
             when {
@@ -100,14 +107,17 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
         if (testing) return
         testing = true
         scope.launch {
-            Api.configure(settings.configureTargetUrl(baseUrl), apiKey)
+            // Same freshness rule as save(): test the target the switch is
+            // actually in, not a possibly stale snapshot of the flow.
+            val latest = store.settings.first()
+            Api.configure(latest.configureTargetUrl(baseUrl), apiKey)
             Api.call { Api.service().health() }
                 .onSuccess {
                     health = healthSummary(it.status, it.version)
                     onMessage(context.getString(R.string.settings_test_ok, it.status, it.version))
                 }
                 .onFailure {
-                    onMessage(context.getString(R.string.state_error, it.message ?: ""))
+                    onMessage(context.getString(R.string.state_error, apiErrorMessage(context, it)))
                 }
             testing = false
         }
@@ -122,7 +132,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
                     sitesSummary = it.toSitesSummary()
                     sitesError = null
                 }
-                .onFailure { sitesError = it.message }
+                .onFailure { sitesError = apiErrorMessage(context, it) }
             sitesLoading = false
         }
     }
@@ -236,14 +246,17 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
                 checked = settings.standalone,
                 onCheckedChange = { enabled ->
                     scope.launch {
+                        // The persisted remote URL/API key for the "off"
+                        // direction, read fresh so a just-saved edit is used.
+                        val latest = store.settings.first()
                         store.saveStandalone(enabled)
                         if (enabled) EmbeddedEngine.ensureStarted(context)
                         // The toggle must take effect immediately: without
                         // reconfiguring, the app would keep talking to the
                         // previous base URL until the process restarts.
                         val usable = Api.configure(
-                            standaloneTargetUrl(enabled, settings),
-                            settings.apiKey,
+                            standaloneTargetUrl(enabled, latest),
+                            latest.apiKey,
                         )
                         if (enabled && !usable) {
                             // The engine URL is always valid; unreachable in

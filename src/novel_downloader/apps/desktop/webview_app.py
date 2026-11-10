@@ -301,6 +301,28 @@ def _default_playlist_name() -> str:
     return f"playlist-{stamp}{_DEFAULT_PLAYLIST_SUFFIX}"
 
 
+def _music_output_dir() -> Path:
+    """
+    Resolve the directory music downloads are written to.
+
+    Mirrors the engine: the stored ``out_dir`` when the user picked one,
+    otherwise the platform's default music directory.  The path is returned
+    verbatim (not created) so callers can decide what to do when it is absent.
+    """
+    from novel_downloader.apps.music.paths import default_download_dir
+    from novel_downloader.apps.music.settings import load_settings
+
+    try:
+        stored = load_settings()
+    except Exception:  # noqa: BLE001 - a broken settings file must not hide the UI
+        logger.debug("Could not load music settings", exc_info=True)
+        stored = {}
+    out_dir = stored.get("out_dir") if isinstance(stored, dict) else None
+    if out_dir and str(out_dir).strip():
+        return Path(str(out_dir).strip()).expanduser()
+    return Path(default_download_dir()).expanduser()
+
+
 def _playlist_target(out_path: str | None) -> Path:
     """
     Resolve where an exported playlist is written.
@@ -315,18 +337,7 @@ def _playlist_target(out_path: str | None) -> Path:
         if candidate.suffix.lower() in {".m3u", ".m3u8"}:
             return candidate
         return candidate / name
-
-    from novel_downloader.apps.music.paths import default_download_dir
-    from novel_downloader.apps.music.settings import load_settings
-
-    stored = load_settings()
-    out_dir = stored.get("out_dir") if isinstance(stored, dict) else None
-    base = (
-        Path(str(out_dir)).expanduser()
-        if out_dir
-        else Path(default_download_dir()).expanduser()
-    )
-    return base / name
+    return _music_output_dir() / name
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +413,7 @@ def _i18n_catalog() -> dict[str, str]:
             "New version {ver} is out — click to download"
         ),
         "Download and install": t("Download and install"),
+        "Install and restart": t("Install and restart"),
         "No package for this platform in v{ver}; open the release page": t(
             "No package for this platform in v{ver}; open the release page"
         ),
@@ -455,16 +467,31 @@ def _i18n_catalog() -> dict[str, str]:
         "Queued: {title}": t("Queued: {title}"),
         # download page
         "Active": t("Active"),
+        # The third bucket holds completed *and* failed/cancelled tasks, so it
+        # cannot be labelled "Completed".
+        "Finished": t("Finished"),
         "Nothing in the queue": t("Nothing in the queue"),
         "Search for a book and press Download": t(
             "Search for a book and press Download"
         ),
         "No tasks yet": t("No tasks yet"),
+        "This task has already finished": t("This task has already finished"),
+        "Could not retry this task": t("Could not retry this task"),
+        "Could not open {path}": t("Could not open {path}"),
+        "Could not open the download folder: {error}": t(
+            "Could not open the download folder: {error}"
+        ),
         # history page
         "{n} files in {dir}": t("{n} files in {dir}"),
         "No exported books yet": t("No exported books yet"),
         "Files land here when a download finishes": t(
             "Files land here when a download finishes"
+        ),
+        "Could not load this list": t("Could not load this list"),
+        # follow page
+        "Could not queue this book": t("Could not queue this book"),
+        "Could not remove this book from the follow list": t(
+            "Could not remove this book from the follow list"
         ),
         # music page
         "All platforms": t("All platforms"),
@@ -475,6 +502,14 @@ def _i18n_catalog() -> dict[str, str]:
             "The search results expired — search again before downloading"
         ),
         "Search a song to begin": t("Search a song to begin"),
+        "Open music folder": t("Open music folder"),
+        "Could not open the music folder: {error}": t(
+            "Could not open the music folder: {error}"
+        ),
+        "The system file manager could not open it": t(
+            "The system file manager could not open it"
+        ),
+        "Unknown error": t("Unknown error"),
         # progressive aggregate search + download failure panel
         "Received results from {n} platforms…": t(
             "Received results from {n} platforms…"
@@ -952,22 +987,31 @@ class ApiBridge:
         if isinstance(values, dict):
             _save_prefs(values)
 
-    def open_path(self, path: str) -> None:
-        """Open a file or directory with the OS default handler."""
+    def open_path(self, path: str) -> bool:
+        """
+        Open a file or directory with the OS default handler.
+
+        :return: ``True`` when the handler was launched.  A missing target or
+            a shell failure reports ``False`` so callers that show feedback
+            (the music page) can tell the user instead of failing silently.
+        """
         target = str(path or "").strip()
         if not target or not Path(target).exists():
-            return
+            return False
         try:
             if sys.platform == "win32":
                 startfile = getattr(os, "startfile", None)
-                if startfile is not None:
-                    startfile(target)  # noqa: S606 - user-initiated shell open
+                if startfile is None:
+                    return False
+                startfile(target)  # noqa: S606 - user-initiated shell open
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", target])  # noqa: S603
             else:
                 subprocess.Popen(["xdg-open", target])  # noqa: S603
         except OSError:
             logger.exception("Failed to open %s", target)
+            return False
+        return True
 
     def open_url(self, url: str) -> None:
         """Open an external URL in the default browser."""
@@ -975,8 +1019,17 @@ class ApiBridge:
         if target.startswith(("http://", "https://")):
             webbrowser.open(target)
 
-    def open_downloads_dir(self) -> None:
-        """Open the export directory in the file manager."""
+    def open_downloads_dir(self) -> dict[str, Any]:
+        """
+        Open (creating it if needed) the configured export directory.
+
+        Reports failures instead of returning ``None``: the page's "Open
+        folder" button has no other way to tell the user why nothing happened.
+
+        Never raises.
+
+        :return: ``{"ok", "path", "error"}``.
+        """
         try:
             from novel_downloader.infra.config import get_config_value
 
@@ -984,12 +1037,51 @@ class ApiBridge:
         except Exception:  # noqa: BLE001 - config may be missing on first run
             out_dir = Path("./downloads")
         out_dir = out_dir.expanduser()
-        if not out_dir.exists():
-            try:
+        try:
+            if not out_dir.exists():
                 out_dir.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                return
-        self.open_path(str(out_dir.resolve()))
+        except OSError as exc:
+            logger.warning("Could not create the download folder %s: %s", out_dir, exc)
+            return {"ok": False, "path": str(out_dir), "error": format_error(exc)}
+        resolved = str(out_dir.resolve())
+        if not self.open_path(resolved):
+            return {
+                "ok": False,
+                "path": resolved,
+                "error": t("The system file manager could not open it"),
+            }
+        return {"ok": True, "path": resolved, "error": None}
+
+    def open_music_dir(self) -> dict[str, Any]:
+        """
+        Open (creating it if needed) the directory music downloads land in.
+
+        The page has no other way to find this location: it is the stored
+        ``out_dir`` when set, otherwise the platform default.
+
+        Never raises.
+
+        :return: ``{"ok", "path", "error"}``.
+        """
+        try:
+            out_dir = _music_output_dir()
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Could not resolve the music folder", exc_info=True)
+            return {"ok": False, "path": "", "error": format_error(exc)}
+        try:
+            if not out_dir.exists():
+                out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("Could not create the music folder %s: %s", out_dir, exc)
+            return {"ok": False, "path": str(out_dir), "error": format_error(exc)}
+        resolved = str(out_dir.resolve())
+        if not self.open_path(resolved):
+            return {
+                "ok": False,
+                "path": resolved,
+                "error": t("The system file manager could not open it"),
+            }
+        return {"ok": True, "path": resolved, "error": None}
 
     def play_chime(self) -> None:
         """Play the task-completion notification sound (best effort)."""
@@ -1241,6 +1333,19 @@ class ApiBridge:
         with self._download_guard:
             return self._downloaded is not None
 
+    def _downloaded_update_size(self) -> int:
+        """Size of the verified update already on disk (0 when none)."""
+        with self._download_guard:
+            record = self._downloaded
+        if record is None:
+            return 0
+        try:
+            return int(record.path.stat().st_size)
+        except OSError:
+            # The file vanished between the claim and the stat: report 0 and
+            # let the install step surface the real error.
+            return 0
+
     def _install_on_exit(self) -> None:
         """Run a verified installer when the app is closing.
 
@@ -1364,6 +1469,7 @@ class ApiBridge:
             "error": cache.error if cache is not None else None,
             "pending": inflight,
             "downloaded": self._has_downloaded_update(),
+            "downloaded_size": self._downloaded_update_size(),
             "auto_check": _prefs_flag(stored, "auto_check_updates", True),
             "auto_install": _prefs_flag(stored, "auto_install_on_exit", True),
         }

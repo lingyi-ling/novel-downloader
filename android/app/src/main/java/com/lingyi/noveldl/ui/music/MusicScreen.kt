@@ -35,12 +35,10 @@ import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,26 +48,15 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
+import com.lingyi.noveldl.data.ApiErrorCode
 import com.lingyi.noveldl.data.EmbeddedEngine
-import com.lingyi.noveldl.data.HistoryDownloader
-import com.lingyi.noveldl.data.HistoryFile
 import com.lingyi.noveldl.data.MusicHealthItem
-import com.lingyi.noveldl.data.MusicJobProgress
-import com.lingyi.noveldl.data.MusicJobRequest
-import com.lingyi.noveldl.data.MusicPlatform
 import com.lingyi.noveldl.data.MUSIC_ALL_PLATFORMS
-import com.lingyi.noveldl.data.MusicSearchRequest
-import com.lingyi.noveldl.data.MusicTrack
-import com.lingyi.noveldl.data.SelectionStore
-import com.lingyi.noveldl.ui.MUSIC_JOB_POLL_INTERVAL_MS
-import com.lingyi.noveldl.ui.awaitResumed
+import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.ui.progressFraction
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /** Per-platform search budget sent to `GET /api/v1/music/health` (seconds). */
 private const val MUSIC_HEALTH_TIMEOUT_SECONDS = 5
@@ -80,56 +67,192 @@ private const val MUSIC_HEALTH_DEBOUNCE_MS = 1_000L
 /** Success tint for the health badge; Material3 has no semantic "ok" color. */
 private val HealthOkColor: Color = Color(0xFF388E3C)
 
+/**
+ * Music search + download screen.
+ *
+ * All three owners are Activity-scoped ViewModels passed in by the app shell:
+ * [searchModel] keeps the keyword, platform, loaded pages, `search_id` map and
+ * selection alive across tab switches and recomposition, [jobModel] keeps a
+ * running download alive, and [exportModel] keeps a playlist export running and
+ * remembers where the last one was written. Nothing is remembered locally
+ * except transient UI state (menu, health badge).
+ */
 @Composable
-fun MusicScreen(onMessage: (String) -> Unit) {
+fun MusicScreen(
+    jobModel: MusicJobViewModel,
+    searchModel: MusicSearchViewModel,
+    exportModel: MusicExportViewModel,
+    onMessage: (String) -> Unit,
+) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val selectionStore = remember(context) { SelectionStore(context) }
-    var platforms by remember { mutableStateOf<List<MusicPlatform>>(emptyList()) }
-    // Restored from the last session; "all" stays the default when nothing
-    // valid was saved, so an aggregate search needs no setup.
-    var selectedPlatform by rememberSaveable {
-        mutableStateOf(selectionStore.selectedPlatform().ifBlank { MUSIC_ALL_PLATFORMS })
-    }
+    val jobState by jobModel.state.collectAsState()
+    val search by searchModel.state.collectAsState()
+    val exportState by exportModel.state.collectAsState()
     var menuExpanded by remember { mutableStateOf(false) }
-    var keyword by remember { mutableStateOf("") }
-    var tracks by remember { mutableStateOf<List<MusicTrack>>(emptyList()) }
-    // Echoed to the download/job request so the server can restore the
-    // original provider objects (musicdl data does not survive JSON).
-    var searchId by remember { mutableStateOf("") }
-    // Paged search state: platform-reported hit total, whether the end of the
-    // result list was reached, and whether the last "load more" attempt failed.
-    var totalHits by remember { mutableIntStateOf(0) }
-    var endReached by remember { mutableStateOf(false) }
-    var loadingMore by remember { mutableStateOf(false) }
-    var loadMoreFailed by remember { mutableStateOf(false) }
-    var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var searching by remember { mutableStateOf(false) }
-    // Bumped on every new search / platform switch so responses of stale
-    // requests cannot merge into a freshly reset list.
-    var searchGeneration by remember { mutableIntStateOf(0) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var jobRunning by remember { mutableStateOf(false) }
-    var jobProgress by remember { mutableStateOf(MusicJobProgress()) }
-    var platformKey by remember { mutableIntStateOf(0) }
     // Health probe per platform, keyed by platform id; the selected platform's
     // entry drives the badge next to the picker.
     var healthByPlatform by remember { mutableStateOf<Map<String, MusicHealthItem>>(emptyMap()) }
     var healthChecking by remember { mutableStateOf(false) }
-    val exportViewModel: MusicExportViewModel = viewModel()
-    var exporting by remember { mutableStateOf(false) }
-    // Kept on screen after the snackbar fades so the user can note/verify
-    // where the playlist was written.
-    var lastExportPath by remember { mutableStateOf<String?>(null) }
     val allPlatformLabel = stringResource(R.string.music_platform_all)
-    val platformLabels = remember(platforms) { platforms.associate { it.key to it.label } }
+    val platformLabels = remember(search.platforms) {
+        search.platforms.associate { it.key to it.label }
+    }
+
+    fun downloadSelected() {
+        val chosen = search.tracks.filter { search.selected.contains(it.id) }
+        if (chosen.isEmpty()) {
+            onMessage(context.getString(R.string.music_no_selection))
+            return
+        }
+        // The ViewModel guards against a second tap while a job runs and
+        // splits the selection per page `search_id`: a cross-page selection
+        // becomes several jobs instead of one job whose later tracks fail
+        // with "search result expired". It also owns the job, so the watch
+        // is not cancelled when this screen leaves composition.
+        if (!jobModel.start(search.platform, chosen, search.searchIdsByTrack)) return
+    }
+
+    /**
+     * Starts the playlist export of the current search results that carry a
+     * local path. Every edge case reports a snackbar message instead of failing
+     * silently: no results, no downloaded tracks, engine not started or
+     * without music support, and write errors.
+     *
+     * The request itself lives in [MusicExportViewModel] (Activity scope), so
+     * switching tabs does not cancel it; its outcome is buffered and reported
+     * when the user comes back, and the path stays visible in [MusicExportUiState].
+     */
+    fun exportPlaylist() {
+        if (exportState.running) return
+        if (!Api.isConfigured()) {
+            onMessage(
+                context.getString(
+                    R.string.music_export_unavailable,
+                    apiErrorMessage(context, ApiErrorCode.NOT_CONFIGURED),
+                ),
+            )
+            return
+        }
+        if (Api.baseUrl == EmbeddedEngine.BASE_URL) {
+            val engineError = EmbeddedEngine.lastError
+            if (engineError != null) {
+                onMessage(context.getString(R.string.music_export_engine_failed, engineError))
+                return
+            }
+            // `isStarted` only means the bootstrap was scheduled; until it has
+            // finished the loopback port is not listening yet.
+            if (!EmbeddedEngine.isReady) {
+                onMessage(context.getString(R.string.music_export_engine_unavailable))
+                return
+            }
+        }
+        // The ViewModel snapshots the list: the export describes what the user
+        // sees now, not whatever a concurrent search replaces it with.
+        exportModel.start(search.platform, search.tracks)
+    }
+
+    // Export outcomes are buffered by the Activity-scoped ViewModel, so one
+    // that finishes while another tab is shown is still reported on return.
+    LaunchedEffect(exportModel) {
+        exportModel.incoming.collect { outcome ->
+            when (outcome) {
+                MusicExportOutcome.NoResults ->
+                    onMessage(context.getString(R.string.music_export_no_results))
+                MusicExportOutcome.NoLocalPaths ->
+                    onMessage(context.getString(R.string.music_export_no_local_paths))
+                is MusicExportOutcome.Unavailable ->
+                    onMessage(
+                        context.getString(
+                            R.string.music_export_unavailable,
+                            apiErrorMessage(context, outcome.error),
+                        ),
+                    )
+                is MusicExportOutcome.Failed ->
+                    onMessage(
+                        context.getString(
+                            R.string.music_export_failed,
+                            apiErrorMessage(context, outcome.error),
+                        ),
+                    )
+                is MusicExportOutcome.Success ->
+                    onMessage(
+                        context.getString(
+                            R.string.music_export_done,
+                            outcome.path,
+                            outcome.written,
+                            outcome.skipped,
+                        ),
+                    )
+            }
+        }
+    }
+
+    // The job is owned by the Activity-scoped ViewModel and its events are
+    // buffered, so a run that finishes while the user is on another tab still
+    // reports here when they come back.
+    LaunchedEffect(jobModel) {
+        jobModel.incoming.collect { event ->
+            when (event) {
+                is MusicJobEvent.Finished -> {
+                    onMessage(
+                        context.getString(
+                            R.string.music_job_done,
+                            event.counts.ok,
+                            event.counts.skipped,
+                            event.counts.failed,
+                        ),
+                    )
+                    // Counts alone do not explain a failure; surface the
+                    // engine's own reason (e.g. an expired search_id asks the
+                    // user to search again).
+                    if (event.counts.failed > 0) {
+                        event.firstFailure?.let { reason ->
+                            onMessage(
+                                context.getString(R.string.music_job_fail_reason, reason),
+                            )
+                        }
+                    }
+                    when {
+                        event.saveFailures > 0 -> onMessage(
+                            context.getString(
+                                R.string.music_job_save_failed,
+                                event.saveFailures,
+                                event.firstSaveFailure.orEmpty(),
+                            ),
+                        )
+                        // A non-null path with no downloadable result means the
+                        // job ran on a remote server: the files stay there.
+                        event.counts.ok > 0 && event.serverPath != null -> onMessage(
+                            context.getString(R.string.music_job_server_files, event.serverPath),
+                        )
+                    }
+                }
+                is MusicJobEvent.Failed -> onMessage(
+                    context.getString(R.string.music_job_failed, event.reason),
+                )
+            }
+        }
+    }
+
+    // Write finished downloads' local paths onto the visible rows (export
+    // needs them). Keyed by provider + id, so a later search of the same song
+    // is populated too instead of being re-downloaded. The ViewModel merges,
+    // which is why a list restored after a tab switch is exportable at once.
+    LaunchedEffect(jobState.paths) {
+        searchModel.applyPaths(jobState.paths)
+    }
+
+    // One catalog fetch per ViewModel, i.e. only while the screen is visible.
+    LaunchedEffect(searchModel) {
+        searchModel.ensurePlatforms()
+    }
 
     // Checks the selected platform on entry and again on every switch. The
     // 1s delay debounces rapid switching: restarting this effect cancels the
-    // pending probe before the request is sent.
-    LaunchedEffect(selectedPlatform) {
-        val platform = selectedPlatform
+    // pending probe before the request is sent. The badge is transient UI
+    // state, intentionally not part of the saved search state.
+    LaunchedEffect(search.platform) {
+        val platform = search.platform
         // The health endpoint only knows concrete platform keys; probing
         // "all" would be rejected (REST) or fan out to every platform.
         if (platform.isEmpty() || platform == MUSIC_ALL_PLATFORMS) {
@@ -141,7 +264,8 @@ fun MusicScreen(onMessage: (String) -> Unit) {
         val outcome = Api.call {
             Api.service().musicHealth(platform, MUSIC_HEALTH_TIMEOUT_SECONDS)
         }
-        if (platform != selectedPlatform) return@LaunchedEffect
+        // The platform may have changed while the probe was in flight.
+        if (searchModel.state.value.platform != platform) return@LaunchedEffect
         outcome
             .onSuccess { probes ->
                 probes.firstOrNull { it.platform == platform }?.let {
@@ -153,297 +277,20 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                     platform to MusicHealthItem(
                         platform = platform,
                         ok = false,
-                        error = it.message ?: "",
+                        error = apiErrorMessage(context, it),
                     )
                     )
             }
         healthChecking = false
     }
 
-    LaunchedEffect(platformKey) {
-        Api.call { Api.service().musicPlatforms() }
-            .onSuccess {
-                platforms = it.platforms
-                error = null
-                val keys = it.platforms.map { platform -> platform.key }
-                // Keep "all" (or a still-valid saved key); fall back to the
-                // aggregate default rather than an arbitrary first platform.
-                if (selectedPlatform != MUSIC_ALL_PLATFORMS && selectedPlatform !in keys) {
-                    selectedPlatform = MUSIC_ALL_PLATFORMS
-                    selectionStore.saveSelectedPlatform(selectedPlatform)
-                }
-            }
-            .onFailure { error = it.message }
-    }
-
-    /** Drops the current result page: new searches and platform switches start over. */
-    fun resetSearchResults() {
-        searchGeneration++
-        tracks = emptyList()
-        totalHits = 0
-        endReached = false
-        loadingMore = false
-        loadMoreFailed = false
-        selected = emptySet()
-        searchId = ""
-    }
-
-    fun selectPlatform(key: String) {
-        menuExpanded = false
-        if (key != selectedPlatform) {
-            selectedPlatform = key
-            selectionStore.saveSelectedPlatform(key)
-            // Paged results belong to the old platform.
-            resetSearchResults()
-        }
-    }
-
-    fun search() {
-        val query = keyword.trim()
-        if (query.isEmpty() || selectedPlatform.isEmpty() || searching) return
-        searching = true
-        error = null
-        resetSearchResults()
-        val generation = searchGeneration
-        val platform = selectedPlatform
-        scope.launch {
-            Api.call {
-                Api.service().musicSearch(
-                    MusicSearchRequest(
-                        platform = platform,
-                        keyword = query,
-                        limit = MUSIC_PAGE_SIZE,
-                        offset = 0,
-                    ),
-                )
-            }
-                .onSuccess {
-                    if (generation != searchGeneration) return@onSuccess
-                    tracks = MusicPaging.merge(emptyList(), it.tracks)
-                    // Keep the first page's id: the download request only
-                    // accepts one and provider resolve data is per search.
-                    searchId = it.search_id
-                    totalHits = it.total
-                    endReached =
-                        !MusicPaging.hasMore(tracks.size, it.total, it.tracks.size, 0, MUSIC_PAGE_SIZE)
-                }
-                .onFailure {
-                    if (generation == searchGeneration) error = it.message
-                }
-            searching = false
-        }
-    }
-
-    /**
-     * Loads the next page with `offset = 当前结果数` and appends it (deduped by
-     * track id). Guarded so a page is only ever requested when the previous
-     * search finished, no fetch is in flight and the end was not reached.
-     */
-    fun loadMore() {
-        val query = keyword.trim()
-        if (query.isEmpty() || selectedPlatform.isEmpty()) return
-        if (searching || loadingMore || endReached) return
-        loadingMore = true
-        loadMoreFailed = false
-        val generation = searchGeneration
-        val platform = selectedPlatform
-        val offset = tracks.size
-        scope.launch {
-            Api.call {
-                Api.service().musicSearch(
-                    MusicSearchRequest(
-                        platform = platform,
-                        keyword = query,
-                        limit = MUSIC_PAGE_SIZE,
-                        offset = offset,
-                    ),
-                )
-            }
-                .onSuccess { page ->
-                    if (generation != searchGeneration) return@onSuccess
-                    val previous = tracks.size
-                    tracks = MusicPaging.merge(tracks, page.tracks)
-                    totalHits = page.total
-                    endReached = !MusicPaging.hasMore(
-                        tracks.size,
-                        page.total,
-                        page.tracks.size,
-                        previous,
-                        MUSIC_PAGE_SIZE,
-                    )
-                }
-                .onFailure {
-                    if (generation == searchGeneration) {
-                        loadMoreFailed = true
-                        error = it.message
-                    }
-                }
-            if (generation == searchGeneration) loadingMore = false
-        }
-    }
-
-    fun downloadSelected() {
-        val chosen = tracks.filter { selected.contains(it.id) }
-        if (chosen.isEmpty()) {
-            onMessage(context.getString(R.string.music_no_selection))
-            return
-        }
-        if (jobRunning) return
-        jobRunning = true
-        error = null
-        scope.launch {
-            val created = Api.call {
-                Api.service().createMusicJob(
-                    MusicJobRequest(
-                        platform = selectedPlatform,
-                        tracks = chosen,
-                        search_id = searchId.ifBlank { null },
-                    ),
-                )
-            }.getOrElse {
-                error = it.message
-                jobRunning = false
-                return@launch
-            }
-            while (true) {
-                delay(MUSIC_JOB_POLL_INTERVAL_MS)
-                // Composition survives the activity being STOPPED, so this
-                // scope alone would keep polling in the background; the gate
-                // parks the watch until the app is foregrounded again.
-                lifecycleOwner.lifecycle.awaitResumed()
-                val job = Api.call { Api.service().musicJob(created.job_id) }
-                    .getOrElse {
-                        error = it.message
-                        jobRunning = false
-                        return@launch
-                    }
-                jobProgress = job.progress
-                when (job.status) {
-                    "done" -> {
-                        val ok = job.results.count { it.status == "ok" }
-                        val skip = job.results.count { it.status == "skip" }
-                        val fail = job.results.count { it.status == "fail" }
-                        // The engine wrote the files into app storage; hand
-                        // each one to DownloadManager so it lands in the
-                        // public Downloads folder like an exported book.
-                        job.results
-                            .filter { it.status == "ok" && it.download_url.isNotBlank() }
-                            .forEach { result ->
-                                val name = result.download_url.substringAfterLast('/')
-                                HistoryDownloader.enqueue(
-                                    context,
-                                    HistoryFile(
-                                        name = name,
-                                        ext = name.substringAfterLast('.', ""),
-                                        download_url = result.download_url,
-                                    ),
-                                )
-                            }
-                        // Job results come back in submission order (the engine
-                        // sorts them by the original track index), so result i
-                        // belongs to chosen[i]. Remember the written paths on
-                        // the visible search results so "export playlist" can
-                        // use them without searching/downloading again.
-                        val pathsById = chosen.mapIndexedNotNull { index, track ->
-                            job.results
-                                .getOrNull(index)
-                                ?.path
-                                ?.takeIf { it.isNotBlank() }
-                                ?.let { path -> track.id to path }
-                        }.toMap()
-                        if (pathsById.isNotEmpty()) {
-                            tracks = tracks.map { track ->
-                                pathsById[track.id]?.let { path ->
-                                    track.copy(path = path)
-                                } ?: track
-                            }
-                        }
-                        onMessage(context.getString(R.string.music_job_done, ok, skip, fail))
-                        jobRunning = false
-                        return@launch
-                    }
-                    "failed" -> {
-                        onMessage(
-                            context.getString(
-                                R.string.music_job_failed,
-                                job.error ?: job.status,
-                            ),
-                        )
-                        jobRunning = false
-                        return@launch
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Exports the current search results that carry a local path as an M3U8
-     * playlist. Every edge case reports a snackbar message instead of failing
-     * silently: no results, no downloaded tracks, engine not started or
-     * without music support, and write errors.
-     */
-    fun exportPlaylist() {
-        if (exporting) return
-        if (!Api.isConfigured()) {
-            onMessage(
-                context.getString(
-                    R.string.music_export_unavailable,
-                    Api.NOT_CONFIGURED_MESSAGE,
-                ),
-            )
-            return
-        }
-        if (Api.baseUrl == EmbeddedEngine.BASE_URL &&
-            (!EmbeddedEngine.isStarted || EmbeddedEngine.lastError != null)
-        ) {
-            onMessage(context.getString(R.string.music_export_engine_unavailable))
-            return
-        }
-        exporting = true
-        scope.launch {
-            try {
-                when (val outcome = exportViewModel.export(selectedPlatform, tracks)) {
-                    MusicExportOutcome.NoResults ->
-                        onMessage(context.getString(R.string.music_export_no_results))
-                    MusicExportOutcome.NoLocalPaths ->
-                        onMessage(context.getString(R.string.music_export_no_local_paths))
-                    is MusicExportOutcome.Unavailable ->
-                        onMessage(
-                            context.getString(
-                                R.string.music_export_unavailable,
-                                outcome.reason,
-                            ),
-                        )
-                    is MusicExportOutcome.Failed ->
-                        onMessage(
-                            context.getString(R.string.music_export_failed, outcome.reason),
-                        )
-                    is MusicExportOutcome.Success -> {
-                        lastExportPath = outcome.path
-                        onMessage(
-                            context.getString(
-                                R.string.music_export_done,
-                                outcome.path,
-                                outcome.written,
-                                outcome.skipped,
-                            ),
-                        )
-                    }
-                }
-            } finally {
-                exporting = false
-            }
-        }
-    }
-
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box {
                 Button(onClick = { menuExpanded = true }) {
-                    val label = when (selectedPlatform) {
+                    val label = when (search.platform) {
                         MUSIC_ALL_PLATFORMS -> allPlatformLabel
-                        else -> platforms.firstOrNull { it.key == selectedPlatform }?.label
+                        else -> search.platforms.firstOrNull { it.key == search.platform }?.label
                             ?: stringResource(R.string.music_platform)
                     }
                     Text(label)
@@ -451,12 +298,18 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                     DropdownMenuItem(
                         text = { Text(allPlatformLabel) },
-                        onClick = { selectPlatform(MUSIC_ALL_PLATFORMS) },
+                        onClick = {
+                            menuExpanded = false
+                            searchModel.selectPlatform(MUSIC_ALL_PLATFORMS)
+                        },
                     )
-                    platforms.forEach { platform ->
+                    search.platforms.forEach { platform ->
                         DropdownMenuItem(
                             text = { Text(platform.label) },
-                            onClick = { selectPlatform(platform.key) },
+                            onClick = {
+                                menuExpanded = false
+                                searchModel.selectPlatform(platform.key)
+                            },
                         )
                     }
                 }
@@ -464,39 +317,45 @@ fun MusicScreen(onMessage: (String) -> Unit) {
             Spacer(Modifier.width(12.dp))
             PlatformHealthBadge(
                 checking = healthChecking,
-                result = healthByPlatform[selectedPlatform],
+                result = healthByPlatform[search.platform],
             )
         }
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
-            value = keyword,
-            onValueChange = { keyword = it },
+            value = search.keyword,
+            onValueChange = searchModel::onKeywordChange,
             label = { Text(stringResource(R.string.music_keyword_hint)) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { search() }, enabled = !searching) {
+            Button(onClick = searchModel::search, enabled = !search.searching) {
                 Text(stringResource(R.string.music_search_button))
             }
-            Button(onClick = { downloadSelected() }, enabled = !jobRunning) {
+            Button(onClick = { downloadSelected() }, enabled = !jobState.running) {
                 Text(stringResource(R.string.music_download_selected))
             }
         }
         Spacer(Modifier.height(8.dp))
         Button(
             onClick = { exportPlaylist() },
-            enabled = !exporting,
+            enabled = !exportState.running,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(
                 stringResource(
-                    if (exporting) R.string.music_exporting else R.string.music_export_playlist,
+                    if (exportState.running) {
+                        R.string.music_exporting
+                    } else {
+                        R.string.music_export_playlist
+                    },
                 ),
             )
         }
-        lastExportPath?.let { path ->
+        // The last export path lives in the Activity-scoped ViewModel, so it is
+        // still shown after the snackbar faded or the tab was switched away.
+        exportState.lastPath?.let { path ->
             Spacer(Modifier.height(4.dp))
             Text(
                 stringResource(R.string.music_export_last_path, path),
@@ -504,68 +363,100 @@ fun MusicScreen(onMessage: (String) -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        if (jobRunning) {
+        // Export failures stay visible (and retryable) instead of only flashing
+        // by in a snackbar that is gone after a tab switch.
+        exportState.failure?.let { failure ->
+            val message = when (failure) {
+                is MusicExportOutcome.Unavailable -> stringResource(
+                    R.string.music_export_unavailable,
+                    apiErrorMessage(context, failure.error),
+                )
+                is MusicExportOutcome.Failed -> stringResource(
+                    R.string.music_export_failed,
+                    apiErrorMessage(context, failure.error),
+                )
+                else -> null
+            }
+            if (message != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    message,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { exportModel.retry() }) {
+                    Text(stringResource(R.string.action_retry))
+                }
+            }
+        }
+        if (jobState.running) {
             Spacer(Modifier.height(8.dp))
             Text(
                 stringResource(
                     R.string.music_job_progress,
-                    jobProgress.done,
-                    jobProgress.total,
+                    jobState.done,
+                    jobState.total,
                 ),
                 style = MaterialTheme.typography.bodySmall,
             )
             Spacer(Modifier.height(4.dp))
             LinearProgressIndicator(
-                progress = { progressFraction(jobProgress.done, jobProgress.total) },
+                progress = { progressFraction(jobState.done, jobState.total) },
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        error?.let {
+        // Job failures are shown next to the search errors: the job may end
+        // while the user is on another tab, but the state outlives the screen.
+        jobState.failure?.let { failure ->
             Spacer(Modifier.height(8.dp))
             Text(
-                stringResource(R.string.state_error, it),
+                stringResource(R.string.state_error, apiErrorMessage(context, failure)),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
-            TextButton(
-                onClick = {
-                    if (platforms.isEmpty()) {
-                        platformKey++
-                    } else {
-                        search()
-                    }
-                },
-            ) {
+            TextButton(onClick = { jobModel.retry() }) {
                 Text(stringResource(R.string.action_retry))
             }
         }
-        if (tracks.isNotEmpty()) {
+        search.error?.let { error ->
             Spacer(Modifier.height(8.dp))
             Text(
-                if (totalHits > 0) {
-                    stringResource(R.string.music_search_progress, tracks.size, totalHits)
+                stringResource(R.string.state_error, apiErrorMessage(context, error)),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            // Hidden when repeating the request would be a silent no-op
+            // (search / load-more without a keyword).
+            val retryTarget = MusicRetry.target(search.errorSource, search.keyword)
+            if (retryTarget != null) {
+                TextButton(onClick = { searchModel.retry(retryTarget) }) {
+                    Text(stringResource(R.string.action_retry))
+                }
+            }
+        }
+        if (search.tracks.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (search.totalHits > 0) {
+                    stringResource(R.string.music_search_progress, search.tracks.size, search.totalHits)
                 } else {
-                    stringResource(R.string.music_tracks, tracks.size)
+                    stringResource(R.string.music_tracks, search.tracks.size)
                 },
                 style = MaterialTheme.typography.bodySmall,
             )
         }
         Spacer(Modifier.height(8.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(tracks) { track ->
+            items(search.tracks) { track ->
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Checkbox(
-                            checked = selected.contains(track.id),
+                            checked = search.selected.contains(track.id),
                             onCheckedChange = { checked ->
-                                selected = if (checked) {
-                                    selected + track.id
-                                } else {
-                                    selected - track.id
-                                }
+                                searchModel.setSelected(track.id, checked)
                             },
                         )
                         Column(Modifier.weight(1f)) {
@@ -599,12 +490,12 @@ fun MusicScreen(onMessage: (String) -> Unit) {
             // "Load more" footer: once it scrolls into view the next page is
             // fetched automatically; it disappears entirely when the end of
             // the result list was reached.
-            if (tracks.isNotEmpty() && !endReached) {
+            if (search.tracks.isNotEmpty() && !search.endReached) {
                 item(key = "music-load-more") {
                     MusicLoadMoreFooter(
-                        loadingMore = loadingMore,
-                        failed = loadMoreFailed,
-                        onLoadMore = { loadMore() },
+                        loadingMore = search.loadingMore,
+                        failed = search.loadMoreFailed,
+                        onLoadMore = searchModel::loadMore,
                     )
                 }
             }

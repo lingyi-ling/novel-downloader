@@ -21,11 +21,12 @@ from novel_downloader.plugins.base.fetcher import BaseFetcher
 
 from .engine import (
     body_fingerprint,
+    is_fetchable_url,
     matches_stop_when,
     render,
     should_stop_pagination,
 )
-from .model import PagesRule, Rule
+from .model import PagesRule, Rule, RuleError
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,16 @@ class RuleFetcher(BaseFetcher):
     async def _get(
         self, url: str, extra_headers: dict[str, str] | None = None, **kwargs: Any
     ) -> str:
+        # A template's literal scheme is checked at load time, but a value
+        # substituted into it (``chapter_id``) can still make the *rendered*
+        # URL ``file://`` / ``javascript:`` when the template is just a
+        # placeholder.  Refuse it with a readable error instead of letting a
+        # backend-specific exception escape.
+        if not is_fetchable_url(url):
+            raise RuleError(
+                f"{self.site_name}: refusing non-HTTP URL {url!r} "
+                "(rendered rule URLs may only use http/https)"
+            )
         headers = {**self._rule.headers, **(extra_headers or {})}
         if headers:
             kwargs.setdefault("headers", headers)

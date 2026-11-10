@@ -1549,6 +1549,263 @@ def test_bridge_music_status_reports_failed_items(
     assert status["failed_items"] == []
 
 
+def test_bridge_music_retry_resubmits_only_the_failed_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed row retried alone succeeds and clears the failure panel.
+
+    The page keeps the search id and maps ``failed_items[*].index`` back to
+    its row through ``music.batch``; this pins the bridge half of that
+    contract: the retried batch is the single failed row and its status is
+    aligned at index 0.
+    """
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    aggregate = pytest.importorskip("novel_downloader.apps.music.aggregate")
+
+    @dataclass
+    class _FakeTrack:
+        provider: str = ""
+        id: str = ""
+        name: str = ""
+
+    submitted: list[list[str]] = []
+
+    def fake_mixed(
+        _create_provider: Any, tracks: Any, _opts: Any, **kwargs: Any
+    ) -> tuple[int, int, int, list[object], list[object]]:
+        names = [getattr(track, "name", "") for track in tracks]
+        submitted.append(names)
+        on_result = kwargs["on_result"]
+        if len(submitted) == 1:
+            on_result(0, tracks[0], SimpleNamespace(status="ok", path="a.mp3"))
+            on_result(1, tracks[1], SimpleNamespace(status="fail", reason="HTTP 403"))
+            return 1, 0, 1, [], []
+        # The retry submits the failed row alone; it now succeeds.
+        on_result(0, tracks[0], SimpleNamespace(status="ok", path="b.mp3"))
+        return 1, 0, 0, [], []
+
+    class _Cache:
+        def get(self, search_id: str) -> list[object] | None:
+            return [object()] if search_id == "sid" else None
+
+        def resolve(self, _search_id: str, tracks: Any) -> list[Any]:
+            return list(tracks)
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "Track": _FakeTrack,
+            "create": lambda _key: None,
+            "download_mixed": fake_mixed,
+            "is_all_platforms": aggregate.is_all_platforms,
+            "CACHE": _Cache(),
+        },
+    )
+    monkeypatch.setattr(wa.ApiBridge, "_music_options", staticmethod(lambda _l: None))
+
+    bridge = wa.ApiBridge()
+    rows = [{"name": "good"}, {"name": "bad"}]
+    assert bridge.music_download("netease", rows, None, "sid")["ok"] is True
+    first = _wait_for_music_idle(bridge)
+    assert first["failed_items"] == [{"index": 1, "name": "bad", "reason": "HTTP 403"}]
+
+    failed = first["failed_items"][0]
+    assert (
+        bridge.music_download("netease", [{"name": failed["name"]}], None, "sid")["ok"]
+        is True
+    )
+    second = _wait_for_music_idle(bridge)
+
+    assert submitted == [["good", "bad"], ["bad"]], "only the failed row is retried"
+    assert second["failed"] is False
+    assert second["failed_items"] == []
+    assert second["paths"] == ["b.mp3"]
+
+
+def test_bridge_open_music_dir_creates_and_opens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The music button opens the stored output directory, creating it."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    target = tmp_path / "music-out"
+    monkeypatch.setattr(wa, "_music_output_dir", lambda: target)
+    opened: list[str] = []
+    monkeypatch.setattr(
+        wa.ApiBridge, "open_path", lambda _self, path: opened.append(path) or True
+    )
+
+    result = wa.ApiBridge().open_music_dir()
+
+    assert result["ok"] is True
+    assert result["error"] is None
+    assert target.is_dir()
+    assert opened == [str(target.resolve())]
+
+
+def test_bridge_open_music_dir_reports_a_failed_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A file manager that cannot open must reach the user as a toast."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(wa, "_music_output_dir", lambda: tmp_path)
+    monkeypatch.setattr(wa.ApiBridge, "open_path", lambda _self, _path: False)
+
+    result = wa.ApiBridge().open_music_dir()
+
+    assert result["ok"] is False
+    assert result["path"] == str(tmp_path.resolve())
+    assert result["error"]
+
+
+def test_bridge_open_music_dir_reports_a_failed_mkdir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unwritable path must not raise across the bridge."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(wa, "_music_output_dir", lambda: blocker / "child")
+
+    result = wa.ApiBridge().open_music_dir()
+
+    assert result["ok"] is False
+    assert result["error"]
+
+
+def _stub_downloads_dir(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Point ``open_downloads_dir`` at ``target`` through the real setting."""
+    import novel_downloader.infra.config as config
+
+    monkeypatch.setattr(
+        config, "get_config_value", lambda *_a, **_k: str(target), raising=True
+    )
+
+
+def test_bridge_open_downloads_dir_reports_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The history "Open folder" button gets a result it can act on."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    target = tmp_path / "out"
+    _stub_downloads_dir(monkeypatch, target)
+    opened: list[str] = []
+    monkeypatch.setattr(
+        wa.ApiBridge, "open_path", lambda _self, path: opened.append(path) or True
+    )
+
+    result = wa.ApiBridge().open_downloads_dir()
+
+    assert result == {"ok": True, "path": str(target.resolve()), "error": None}
+    assert target.is_dir(), "the export folder is created on demand"
+    assert opened == [str(target.resolve())]
+
+
+def test_bridge_open_downloads_dir_reports_a_failed_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A file manager that refuses must not look like a successful click."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    target = tmp_path / "out"
+    _stub_downloads_dir(monkeypatch, target)
+    monkeypatch.setattr(wa.ApiBridge, "open_path", lambda _self, _path: False)
+
+    result = wa.ApiBridge().open_downloads_dir()
+
+    assert result["ok"] is False
+    assert result["path"] == str(target.resolve())
+    assert result["error"]
+
+
+def test_bridge_open_downloads_dir_reports_a_failed_mkdir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unwritable export path is reported, not raised."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    _stub_downloads_dir(monkeypatch, blocker / "child")
+    monkeypatch.setattr(wa.ApiBridge, "open_path", lambda _self, _path: True)
+
+    result = wa.ApiBridge().open_downloads_dir()
+
+    assert result["ok"] is False
+    assert result["error"]
+
+
+def test_bridge_open_downloads_dir_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A broken config must not break the button (falls back to ./downloads)."""
+    import novel_downloader.apps.desktop.webview_app as wa
+    import novel_downloader.infra.config as config
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("settings.toml is unreadable")
+
+    monkeypatch.setattr(config, "get_config_value", boom, raising=True)
+    monkeypatch.chdir(tmp_path)
+    opened: list[str] = []
+    monkeypatch.setattr(
+        wa.ApiBridge, "open_path", lambda _self, path: opened.append(path) or True
+    )
+
+    result = wa.ApiBridge().open_downloads_dir()
+
+    assert result["ok"] is True
+    assert (tmp_path / "downloads").is_dir()
+    assert opened and opened[0].endswith("downloads")
+
+
+def test_music_output_dir_prefers_the_stored_setting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The resolver mirrors the engine: settings out_dir, else the default."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    default = tmp_path / "default"
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.paths.default_download_dir", lambda: default
+    )
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.settings.load_settings", lambda: {}
+    )
+    assert wa._music_output_dir() == default
+
+    stored = tmp_path / "picked"
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.settings.load_settings",
+        lambda: {"out_dir": str(stored)},
+    )
+    assert wa._music_output_dir() == stored
+
+
+def test_music_output_dir_survives_a_broken_settings_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A corrupt settings file falls back to the platform default."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    default = tmp_path / "default"
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.paths.default_download_dir", lambda: default
+    )
+
+    def boom() -> dict[str, Any]:
+        raise ValueError("broken json")
+
+    monkeypatch.setattr("novel_downloader.apps.music.settings.load_settings", boom)
+
+    assert wa._music_output_dir() == default
+
+
 def test_bridge_music_download_uses_cached_tracks_for_all_platforms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2143,6 +2400,142 @@ def _js_handler(needle: str) -> str:
     return APP_HTML[start:end]
 
 
+# ---------------------------------------------------------------------------
+# Web front end (web_assets): download / history / follow feedback
+# ---------------------------------------------------------------------------
+
+
+def test_app_html_finished_bucket_is_not_labelled_completed() -> None:
+    """The third bucket holds failed and cancelled rows too."""
+    assert '["done", t("Finished"), done]' in APP_HTML
+    assert '["done", t("Completed")' not in APP_HTML
+
+
+def test_app_html_draws_a_task_in_one_bucket_only() -> None:
+    """A cancelled run can sit in ``running`` *and* ``completed`` for a poll."""
+    renderer = _js_handler("function renderTasks(snap)")
+    assert "const settled = new Set(done.map(k => k.task_id));" in renderer
+    assert "settled.has(k.task_id) || seen.has(k.task_id)" in renderer
+    # The terminal record wins, so the card stays under "Finished".
+    assert '["done", t("Finished"), done]' in renderer
+    # The empty state must look at the de-duplicated buckets, not the raw ones.
+    assert "if (liveCount === 0 && groups[2][2].length === 0)" in renderer
+
+
+def test_app_html_cancel_and_retry_report_rejected_requests() -> None:
+    """``{ok: false}`` from cancel/retry must explain the dead-looking click."""
+    handler = _js_handler('$("#tasks-body").addEventListener("click"')
+    stale_cancel = (
+        "if (res && res.ok === false) "
+        'toast(t("This task has already finished"), "warn");'
+    )
+    assert stale_cancel in handler
+    assert (
+        'if (res && res.ok === false) toast(t("Could not retry this task"), "err");'
+        in handler
+    )
+    # The card list is re-polled either way: the manager owns the truth.
+    assert handler.count("refreshTasks();") == 2
+    # Open-file goes through the reporting helper, not a bare api() call.
+    assert "openPath(f.dataset.openFile);" in handler
+
+
+def test_app_html_open_path_failures_are_never_swallowed() -> None:
+    """``open_path`` answers ``false`` for a vanished file; say so."""
+    assert "async function openPath(path)" in APP_HTML
+    helper = _js_handler("async function openPath(path)")
+    assert "if (ok === false)" in helper
+    assert 't("Could not open {path}")' in helper
+    assert 'throw new Error("bridge not ready")' not in helper
+    # Every open click funnels through the helper: no silent .catch(() => {}).
+    assert APP_HTML.count('api("open_path"') == 1
+    assert APP_HTML.count("openPath(") >= 5
+
+
+@pytest.mark.parametrize(
+    "needle",
+    [
+        '$("#tasks-body").addEventListener("click"',
+        '$("#hist-body").addEventListener("click"',
+        '$("#m-export-open").onclick',
+    ],
+)
+def test_app_html_open_buttons_use_the_reporting_helper(needle: str) -> None:
+    """Task exports, history rows and the playlist path all report failures."""
+    assert "openPath(" in _js_handler(needle)
+
+
+def test_app_html_open_download_folder_reports_failure() -> None:
+    """The history "Open folder" button must not be a silent no-op."""
+    handler = _js_handler('$("#btn-open-dl").onclick')
+    assert 'await call("open_downloads_dir")' in handler
+    assert "if (r && r.ok === false)" in handler
+    assert 't("Could not open the download folder: {error}")' in handler
+    assert 'r.error || t("Unknown error")' in handler
+
+
+def test_app_html_load_failure_panel_offers_a_retry() -> None:
+    """A failed list load is neither an empty state nor a dead end."""
+    assert "function renderLoadFailure(body, message)" in APP_HTML
+    helper = _js_handler("function renderLoadFailure(body, message)")
+    assert 't("Could not load this list")' in helper
+    assert "data-reload" in helper
+    assert "esc(message)" in helper, "the backend message must be escaped"
+    # Both list pages route their catch block through it…
+    assert APP_HTML.count("renderLoadFailure(body, String(e && e.message || e));") == 2
+    # …and both delegate the retry click back to their loader.
+    assert (
+        'if (e.target.closest("[data-reload]")) { refreshHistory(); return; }'
+        in APP_HTML
+    )
+    assert (
+        'if (e.target.closest("[data-reload]")) { refreshFollow(); return; }'
+        in APP_HTML
+    )
+
+
+def test_app_html_load_failure_panel_does_not_blow_up_the_button_icon() -> None:
+    """``.empty svg.icon`` is 34px; the retry button needs its own size."""
+    assert ".empty .btn svg.icon { width: 14px; height: 14px" in APP_HTML
+
+
+def test_app_html_history_subline_failure_keeps_the_list() -> None:
+    """``get_data_dir`` is decoration: failing it must not hide the files."""
+    assert (
+        'try { dir = (await api("get_data_dir")) || ""; } catch { dir = ""; }'
+        in APP_HTML
+    )
+    sentence = (
+        't("{n} files in {dir}").replace("{n}", items.length).replace("{dir}", dir)'
+    )
+    assert sentence in APP_HTML
+    # The sub-line is cleared when the list itself could not load.
+    assert '$("#hist-sub").textContent = "";' in APP_HTML
+
+
+def test_app_html_unfollow_failure_is_reported() -> None:
+    """``remove_watch`` answering ``{ok: false}`` left the row with no word."""
+    handler = _js_handler('$("#follow-body").addEventListener("click"')
+    assert 'await call("remove_watch", u.dataset.unfollow, u.dataset.bid);' in handler
+    failed_remove = (
+        "if (r && r.ok === false) "
+        'toast(t("Could not remove this book from the follow list"), "err", 6000);'
+    )
+    assert failed_remove in handler
+    # A rejected queue request is surfaced as well, not only ``r.error``.
+    assert (
+        'else if (r && r.ok === false) toast(t("Could not queue this book"), "err");'
+        in handler
+    )
+    # Dataset keys of the two row buttons exist in the template.
+    follow_row = (
+        'data-fdl="${esc(w.site)}" data-bid="${esc(w.book_id)}" '
+        'data-title="${esc(w.title)}"'
+    )
+    assert follow_row in APP_HTML
+    assert 'data-unfollow="${esc(w.site)}" data-bid="${esc(w.book_id)}"' in APP_HTML
+
+
 def test_app_html_music_download_guard_is_synchronous() -> None:
     """The download button disables before the await (double-click race)."""
     handler = _js_handler('$("#btn-m-dl").onclick')
@@ -2224,6 +2617,33 @@ def test_app_html_music_download_failures_offer_reason_and_retry() -> None:
         "showMusicFailures(st && Array.isArray(st.failed_items) ? "
         "st.failed_items : []);" in APP_HTML
     )
+
+
+def test_app_html_music_retry_maps_batch_indexes_back_to_rows() -> None:
+    """``failed_items[*].index`` is a position in the submitted batch."""
+    handler = _js_handler('$("#btn-m-retry").onclick')
+    # The bridge reports positions inside the last batch; the page translates
+    # them through ``music.batch`` before resubmitting.
+    assert "music.batch[it.index]" in handler
+    assert "music.tracks[i] ?" not in handler
+    assert "const indexes = [...new Set(rows)].sort((a, b) => a - b);" in handler
+    # A retry with nothing left to map must close the panel, not submit all.
+    assert "if (!rows.length) { hideMusicFailures(); return; }" in handler
+
+
+def test_app_html_music_search_drops_stale_batch_indexes() -> None:
+    """A new result list invalidates the indexes of the previous batch."""
+    assert "music.batch = [];\n  hideMusicFailures();" in APP_HTML
+
+
+def test_app_html_music_has_an_open_folder_button() -> None:
+    """The music page can reveal the folder its files land in."""
+    assert 'id="btn-m-open"' in APP_HTML
+    assert 'data-i18n="Open music folder"' in APP_HTML
+    handler = _js_handler('$("#btn-m-open").onclick')
+    assert 'await call("open_music_dir");' in handler
+    assert 't("Could not open the music folder: {error}")' in handler
+    assert "if (!r || !r.ok)" in handler
 
 
 def test_app_html_music_rows_prefer_sources_over_provider() -> None:

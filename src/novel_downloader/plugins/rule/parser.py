@@ -23,7 +23,15 @@ from novel_downloader.schemas import (
     VolumeInfoDict,
 )
 
-from .engine import abs_url, extract, extract_multi, parse_page, preprocess, select
+from .engine import (
+    abs_url,
+    extract,
+    extract_multi,
+    http_url,
+    parse_page,
+    preprocess,
+    select,
+)
 from .model import Rule, RuleError, Step
 
 logger = logging.getLogger(__name__)
@@ -145,7 +153,11 @@ class RuleParser(BaseParser):
                 href = extract(node, chapters_rule.url, fmt)
                 if not href:
                     continue
-                book_url = abs_url(base, href)
+                book_url = http_url(base, href)
+                if not book_url:
+                    # An empty href or a non-HTTP scheme (``javascript:``, ...)
+                    # is not a chapter link; skip it like a missing href.
+                    continue
                 if book_url in seen:
                     continue
                 seen.add(book_url)

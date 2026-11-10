@@ -20,12 +20,18 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -35,7 +41,10 @@ import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.SettingsStore
 import com.lingyi.noveldl.ui.follow.FollowScreen
 import com.lingyi.noveldl.ui.history.HistoryScreen
+import com.lingyi.noveldl.ui.music.MusicExportViewModel
+import com.lingyi.noveldl.ui.music.MusicJobViewModel
 import com.lingyi.noveldl.ui.music.MusicScreen
+import com.lingyi.noveldl.ui.music.MusicSearchViewModel
 import com.lingyi.noveldl.ui.search.SearchScreen
 import com.lingyi.noveldl.ui.settings.SettingsScreenView
 import com.lingyi.noveldl.ui.tasks.TasksScreen
@@ -64,6 +73,36 @@ fun NovelApp(store: SettingsStore) {
     val scope = rememberCoroutineScope()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val route = backStackEntry?.destination?.route ?: "search"
+
+    // The music download job is owned here, at Activity scope, instead of by
+    // the music composable: switching tabs (or recomposing the screen) used to
+    // cancel the watch and lose the progress line, and a stale screen could
+    // resubmit a job that was still running. The host lifecycle gates the
+    // poll loop so it parks while the app is in the background.
+    val musicJobs: MusicJobViewModel = viewModel(
+        factory = MusicJobViewModel.factory(LocalContext.current),
+    )
+    // Same lifetime for the search itself: the keyword, platform, loaded pages,
+    // search_id map and checkbox selection must survive a tab switch, otherwise
+    // coming back forces a fresh search and loses what was selected.
+    val musicSearch: MusicSearchViewModel = viewModel(
+        factory = MusicSearchViewModel.factory(LocalContext.current),
+    )
+    // The playlist export is also owned here: leaving the music tab used to
+    // cancel it (its scope was the composition) and drop the path it wrote.
+    val musicExport: MusicExportViewModel = viewModel()
+    val hostLifecycle = LocalLifecycleOwner.current
+    DisposableEffect(hostLifecycle, musicJobs) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> musicJobs.setForeground(true)
+                Lifecycle.Event.ON_PAUSE -> musicJobs.setForeground(false)
+                else -> Unit
+            }
+        }
+        hostLifecycle.lifecycle.addObserver(observer)
+        onDispose { hostLifecycle.lifecycle.removeObserver(observer) }
+    }
 
     val notify: (String) -> Unit = { message ->
         scope.launch { snackbarHostState.showSnackbar(message) }
@@ -122,7 +161,14 @@ fun NovelApp(store: SettingsStore) {
             composable("search") { SearchScreen(onMessage = notify) }
             composable("tasks") { TasksScreen(onMessage = notify) }
             composable("history") { HistoryScreen(store = store, onMessage = notify) }
-            composable("music") { MusicScreen(onMessage = notify) }
+            composable("music") {
+                MusicScreen(
+                    jobModel = musicJobs,
+                    searchModel = musicSearch,
+                    exportModel = musicExport,
+                    onMessage = notify,
+                )
+            }
             composable("follow") { FollowScreen(onMessage = notify) }
             composable("settings") { SettingsScreenView(store = store, onMessage = notify) }
         }

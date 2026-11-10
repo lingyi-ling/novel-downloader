@@ -48,7 +48,7 @@ from novel_downloader.infra.i18n import t
 from novel_downloader.infra.paths import app_home
 from novel_downloader.plugins import registrar
 
-from .base import EXIT_FAILURE, Command
+from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail
 from .storage import disk_free, format_size, scan_tree
 
 #: Minimum Python version supported by the project (``requires-python``).
@@ -771,6 +771,12 @@ class DoctorCmd(Command):
     @classmethod
     def run(cls, args: Namespace) -> None:
         port = int(args.port)
+        # ``socket.bind`` raises ``OverflowError`` (not ``OSError``) outside
+        # 0..65535, which used to escape as a traceback after half the checks
+        # had run -- and, with ``--json``, without any document on stdout. An
+        # unbindable port is a bad argument, so refuse it before anything runs.
+        if not 1 <= port <= 65535:
+            fail(t("Invalid input."), EXIT_USAGE)
         online = bool(getattr(args, "online", False))
         as_json = bool(getattr(args, "as_json", False))
         checks = collect_checks(port, online=True) if online else collect_checks(port)

@@ -548,7 +548,11 @@ def download_mixed(
 
     groups = group_by_provider(tracks, platform)
     counts = {"ok": 0, "skip": 0, "fail": 0}
-    failed_pairs, failed_tracks = [], []
+    # (track, reason) pairs, kept as objects so a rescued track can be removed
+    # by identity. Removing from two parallel lists by value/label is wrong
+    # when two different songs share the same "name - artist" label: the
+    # fallback then deleted the *other* track's failure row.
+    failure_records: list[tuple[Any, str]] = []
     base_done = 0
     # 有备选来源的失败先不回调：回退成功时只上报一次成功，避免界面把
     # 同一首歌记成「失败一次 + 成功一次」。
@@ -561,12 +565,13 @@ def download_mixed(
         if key and create_provider is not None:
             try:
                 provider = create_provider(key)
+            except LoginExpired:
+                raise
             except Exception as exc:  # noqa: BLE001 - 单平台失败不影响其它平台
                 for index, track in items:
                     counts["fail"] += 1
                     reason = f"平台不可用（{key}）：{exc}"
-                    failed_pairs.append((f"{track.name} - {track.artists}", reason))
-                    failed_tracks.append(track)
+                    failure_records.append((track, reason))
                     if on_result:
                         result = TrackResult("fail", reason)
                         if getattr(track, "_alternatives", ()):
@@ -579,8 +584,7 @@ def download_mixed(
             for index, track in items:
                 counts["fail"] += 1
                 reason = "缺少平台信息，请重新搜索后再下载"
-                failed_pairs.append((f"{track.name} - {track.artists}", reason))
-                failed_tracks.append(track)
+                failure_records.append((track, reason))
                 if on_result:
                     result = TrackResult("fail", reason)
                     if getattr(track, "_alternatives", ()):
@@ -622,20 +626,23 @@ def download_mixed(
         counts["ok"] += ok
         counts["skip"] += skip
         counts["fail"] += fail
-        failed_pairs.extend(pairs)
-        failed_tracks.extend(failed)
+        # ``download_many`` appends both lists under one lock, so their order
+        # is parallel; pair each failed track with its own reason.
+        for position, track in enumerate(failed):
+            reason = pairs[position][1] if position < len(pairs) else ""
+            failure_records.append((track, reason))
         base_done += group_len
 
     # 主来源失败时回退到同曲的其它平台。聚合搜索把备选来源挂在原始 Track
     # 的 ``_alternatives`` 上（进程内对象，不参与序列化）；单平台搜索没有
     # 备选，这一段自然跳过。
-    if failed_tracks:
+    if failure_records:
         index_of = {id(track): index for index, track in enumerate(tracks)}
-        for track in list(failed_tracks):
+        for failed_track, _reason in list(failure_records):
             alternatives = [
                 alt
-                for alt in getattr(track, "_alternatives", ()) or ()
-                if alt is not track and alt.id
+                for alt in getattr(failed_track, "_alternatives", ()) or ()
+                if alt is not failed_track and alt.id
             ]
             if not alternatives:
                 continue
@@ -646,6 +653,8 @@ def download_mixed(
                 if create_provider is not None and alt.provider:
                     try:
                         provider = create_provider(alt.provider)
+                    except LoginExpired:
+                        raise
                     except Exception:  # noqa: BLE001 - 换下一个来源
                         provider = None
                 if provider is None:
@@ -660,21 +669,21 @@ def download_mixed(
                     continue
                 counts["fail"] -= 1
                 counts["ok" if result.status == "ok" else "skip"] += 1
-                track.path = result.path
-                label = f"{track.name} - {track.artists}"
-                for position, (name, _reason) in enumerate(failed_pairs):
-                    if name == label:
-                        del failed_pairs[position]
+                failed_track.path = result.path
+                for position, (recorded, _recorded_reason) in enumerate(
+                    failure_records
+                ):
+                    if recorded is failed_track:
+                        del failure_records[position]
                         break
-                failed_tracks.remove(track)
-                index = index_of.get(id(track), 0)
+                index = index_of.get(id(failed_track), 0)
                 deferred_failures.pop(index, None)
                 if on_result:
-                    on_result(index, track, result)
+                    on_result(index, failed_track, result)
                 logger.info(
                     "music: %s failed on %s, downloaded from fallback %s",
-                    track.name,
-                    track.provider,
+                    failed_track.name,
+                    failed_track.provider,
                     alt.provider,
                 )
                 break
@@ -684,8 +693,20 @@ def download_mixed(
         for index, (track, result) in sorted(deferred_failures.items()):
             on_result(index, track, result)
 
+    failed_pairs = [
+        (f"{track.name} - {track.artists}", reason) for track, reason in failure_records
+    ]
+    failed_tracks = [track for track, _reason in failure_records]
+
     if on_tick and total:
-        on_tick(1.0, total)
+        # Finished a cancelled/partly-stopped batch? Report what was actually
+        # processed instead of claiming 100%: the UI must not show complete
+        # after the user hit stop.
+        processed = counts["ok"] + counts["skip"] + counts["fail"]
+        if processed >= total:
+            on_tick(1.0, total)
+        else:
+            on_tick(min(1.0, processed / total), processed)
     return counts["ok"], counts["skip"], counts["fail"], failed_pairs, failed_tracks
 
 

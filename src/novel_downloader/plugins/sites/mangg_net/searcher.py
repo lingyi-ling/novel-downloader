@@ -5,6 +5,8 @@ novel_downloader.plugins.sites.mangg_net.searcher
 
 """
 
+from urllib.parse import urlsplit
+
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
@@ -38,15 +40,15 @@ class ManggNetSearcher(BaseSearcher):
         )
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
+            if limit is not None and len(results) >= limit:
+                break
+
             href = self._first_str(row.xpath("./dt/a/@href")) or self._first_str(
                 row.xpath("./dd/h3/a/@href")
             )
             if not href:
                 continue
-
-            if limit is not None and idx >= limit:
-                break
 
             book_id = self._url_to_id(href)
             book_url = self._abs_url(href)
@@ -74,7 +76,7 @@ class ManggNetSearcher(BaseSearcher):
             )
 
             # Compute priority
-            prio = self.priority + idx
+            prio = self.priority + len(results)
 
             results.append(
                 SearchResult(
@@ -93,6 +95,21 @@ class ManggNetSearcher(BaseSearcher):
         return results
 
     @staticmethod
+    def _url_path(url: str) -> str:
+        """
+        Return the path of a search-result link.
+
+        The live pages link with relative paths (``/id84814/``), but a
+        protocol-relative or absolute URL must yield the same book id.
+        Query strings and fragments are dropped because the fetchers build
+        their own URLs from the id.
+        """
+        url = url.strip()
+        if url.startswith("//"):
+            url = "https:" + url
+        return urlsplit(url).path or url
+
+    @staticmethod
     def _url_to_id(url: str) -> str:
         # "/id84814/" -> "id84814"
-        return url.strip("/")
+        return ManggNetSearcher._url_path(url).strip("/")

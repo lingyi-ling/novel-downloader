@@ -36,6 +36,12 @@ CASES_SUCCESS = [
     SuccessCase("https://www.alphapolis.co.jp/novel/547686423/112003230/episode/10322710", "alphapolis", "547686423-112003230", "10322710"),
     SuccessCase("http://www.b520.cc/8_8187/", "b520", "8_8187", None),
     SuccessCase("http://www.b520.cc/8_8187/3899831.html", "b520", "8_8187", "3899831"),
+    # b520 migrated to bqg6.xyz (b5200.org redirects there); same book ids.
+    SuccessCase("https://www.bqg6.xyz/8_8187/", "b520", "8_8187", None),
+    SuccessCase("https://www.bqg6.xyz/8_8187/3899831.html", "b520", "8_8187", "3899831"),
+    SuccessCase("https://bqg6.xyz/8_8187/", "b520", "8_8187", None),
+    SuccessCase("https://www.b5200.org/8_8187/", "b520", "8_8187", None),
+    SuccessCase("https://b5200.org/8_8187/3899831.html", "b520", "8_8187", "3899831"),
     SuccessCase("https://www.biquge345.com/book/321301/", "biquge345", "321301", None),
     SuccessCase("https://www.biquge345.com/chapter/321301/37740966.html", "biquge345", "321301", "37740966"),
     SuccessCase("https://www.biquge5.com/9_9194/", "biquge5", "9_9194", None),

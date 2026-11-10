@@ -31,11 +31,25 @@ for extra_path in (SPEC_DIR, SRC_DIR):
     if str(extra_path) not in sys.path:
         sys.path.insert(0, str(extra_path))
 
-from _spec_common import CONSOLE_EXCLUDES, EXCLUDES, collect_common  # noqa: E402
+from _spec_common import (  # noqa: E402
+    CONSOLE_EXCLUDES,
+    EXCLUDES,
+    collect_common,
+    write_version_resource,
+)
 
 ICON_PATH = SRC_DIR / "novel_downloader" / "resources" / "icons" / "app.ico"
 
 datas, hiddenimports = collect_common(SRC_DIR)
+
+# FileVersion/ProductVersion from ``novel_downloader.__version__``.  Written
+# to PyInstaller's work directory (ignored on non-Windows builds).
+VERSION_FILE = write_version_resource(
+    Path(workpath),  # noqa: F821 - provided by PyInstaller when it runs a spec
+    SRC_DIR,
+    app_name=APP_NAME,
+    description="novel-api HTTP service",
+)
 # uvicorn's hook already does this, but explicit is safer across hook versions.
 hiddenimports += collect_submodules("uvicorn")
 hiddenimports += collect_submodules("fastapi")
@@ -74,6 +88,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(ICON_PATH) if ICON_PATH.is_file() else None,
+    version=str(VERSION_FILE),
 )
 
 coll = COLLECT(

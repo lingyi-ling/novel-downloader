@@ -207,6 +207,215 @@ def test_grouping_does_not_modify_results_even_for_weird_input() -> None:
     assert [dict(r) for r in results] == snapshot
 
 
+def test_full_width_and_half_width_titles_and_authors_merge() -> None:
+    # A Japanese/light-novel mirror may serve "ＳＡＯ" / "Ｒｅｋｉ" while the
+    # user's other source serves half-width "SAO" / "Reki".  They are the same
+    # book and must land in one group.
+    half = _result(book_id="1", title="SAO", author="Reki")
+    full = _result(book_id="2", site="beta", title="ＳＡＯ", author="Ｒｅｋｉ")
+
+    groups = group_results([half, full])
+
+    assert _shape(groups) == [("1", ["1", "2"])]
+
+
+def test_full_width_title_does_not_fuse_distinct_authors() -> None:
+    # Folding half/full-width must not weaken the author guard: the same title
+    # with a different author is still a different book.
+    first = _result(book_id="1", title="ＳＡＯ", author="Reki")
+    second = _result(book_id="2", site="beta", title="SAO", author="Other")
+
+    assert len(group_results([first, second])) == 2
+
+
+def test_full_width_folding_keeps_distinct_volumes_apart() -> None:
+    # NFKC folding is character-level, not "fold everything to one key":
+    # volume numbers spelled as full-width digits or circled digits keep
+    # their distinct numeric value and must stay separate books.
+    one = _result(book_id="1", title="书1")
+    two = _result(book_id="2", site="beta", title="书２")
+    circled_one = _result(book_id="3", site="gamma", title="第①卷")
+    circled_two = _result(book_id="4", site="delta", title="第②卷")
+
+    groups = group_results([one, two, circled_one, circled_two])
+
+    assert len(groups) == 4
+    assert {str(g.primary["book_id"]) for g in groups} == {"1", "2", "3", "4"}
+
+
+def test_full_width_author_folding_keeps_interleaved_unknown_with_first_author() -> (
+    None
+):
+    # Full-width and half-width spellings of one author fold together, while a
+    # genuinely different author stays split; an anonymous row in between
+    # attaches to the first cluster, as documented.
+    reki_full = _result(book_id="1", title="ＳＡＯ", author="Ｒｅｋｉ")
+    anonymous = _result(book_id="2", site="beta", title="SAO", author="")
+    other = _result(book_id="3", site="gamma", title="sao", author="Other")
+    reki_half = _result(book_id="4", site="delta", title="SAO", author="Reki")
+
+    groups = group_results([reki_full, anonymous, other, reki_half])
+
+    members = {
+        tuple(sorted(str(r["book_id"]) for r in group.sources)) for group in groups
+    }
+    assert members == {("1", "2", "4"), ("3",)}
+
+
+# --------------------------------------------------------------------------- #
+# decorative publication markers (second, conservative merge pass)
+# --------------------------------------------------------------------------- #
+def test_decorated_prefix_merges_with_plain_title() -> None:
+    plain = _result(
+        site="alpha",
+        book_id="plain",
+        title="斗罗：从武魂喷火龙开始！",
+        author="唐家三少",
+    )
+    decorated = _result(
+        site="beta",
+        book_id="decorated",
+        title="[网游]斗罗：从武魂喷火龙开始！",
+        author="唐家三少",
+    )
+
+    groups = group_results([plain, decorated])
+
+    assert _shape(groups) == [("plain", ["plain", "decorated"])]
+
+
+def test_decorative_prefixes_and_suffixes_merge() -> None:
+    plain = _result(
+        book_id="plain",
+        title="斗罗：从武魂喷火龙开始！",
+        author="唐家三少",
+    )
+    decorated = _result(
+        book_id="decorated",
+        title="【完结】（精校版）斗罗：从武魂喷火龙开始！（全本）[TXT]",
+        author="唐家三少",
+    )
+
+    groups = group_results([plain, decorated])
+
+    assert _shape(groups) == [("plain", ["plain", "decorated"])]
+
+
+def test_full_width_and_case_folded_decorations_merge() -> None:
+    plain = _result(book_id="plain", title="三体", author="刘慈欣")
+    decorated = _result(
+        book_id="decorated",
+        title="［ＴＸＴ］三体［精校版］",
+        author="刘慈欣",
+    )
+
+    groups = group_results([plain, decorated])
+
+    assert _shape(groups) == [("plain", ["plain", "decorated"])]
+
+
+def test_decorated_title_with_different_author_stays_separate() -> None:
+    known = _result(book_id="1", title="斗罗", author="甲")
+    other = _result(book_id="2", title="[网游]斗罗", author="乙")
+
+    groups = group_results([known, other])
+
+    assert _shape(groups) == [("1", ["1"]), ("2", ["2"])]
+
+
+def test_decorated_title_with_unknown_author_is_not_merged() -> None:
+    # Cross-title merging requires *both* authors to be non-empty and equal,
+    # unlike the exact-title pass where an unknown author joins the first group.
+    plain = _result(book_id="1", title="斗罗", author="甲")
+    anonymous = _result(book_id="2", title="[网游]斗罗", author="")
+    both_anonymous = _result(book_id="3", title="[全本]斗罗", author="")
+
+    groups = group_results([plain, anonymous, both_anonymous])
+
+    assert _shape(groups) == [("1", ["1"]), ("2", ["2"]), ("3", ["3"])]
+
+
+def test_decorated_volumes_with_different_numbers_stay_separate() -> None:
+    # Only whitelisted marker contents are stripped.  ``第①卷`` / ``第②卷``
+    # are real title text, so the two volumes remain distinct books.
+    first = _result(book_id="1", title="斗罗（第①卷）[网游]", author="甲")
+    second = _result(book_id="2", title="斗罗（第②卷）[网游]", author="甲")
+
+    groups = group_results([first, second])
+
+    assert _shape(groups) == [("1", ["1"]), ("2", ["2"])]
+
+
+def test_unlisted_bracket_content_is_not_stripped() -> None:
+    # A bracketed word that is part of the title (``同人``, ``上``) must not be
+    # treated as a publication marker.
+    plain = _result(book_id="1", title="斗罗", author="甲")
+    derivative = _result(book_id="2", title="[同人]斗罗", author="甲")
+    half_volume = _result(book_id="3", title="斗罗（上）", author="甲")
+
+    groups = group_results([plain, derivative, half_volume])
+
+    assert _shape(groups) == [("1", ["1"]), ("2", ["2"]), ("3", ["3"])]
+
+
+def test_decorated_merge_orders_sources_by_rank_and_group_by_primary() -> None:
+    weak = _result(
+        site="alpha",
+        book_id="weak",
+        title="斗罗",
+        author="甲",
+        word_count="1万字",
+    )
+    other = _result(
+        site="beta",
+        book_id="other",
+        title="另一本书",
+        author="乙",
+        word_count="300万字",
+    )
+    strong = _result(
+        site="gamma",
+        book_id="strong",
+        title="[网游]斗罗",
+        author="甲",
+        word_count="300万字",
+    )
+
+    groups = group_results([weak, other, strong])
+
+    # The other book's primary sits at input index 1, the merged 斗罗 group's
+    # primary (the decorated, stronger copy) at index 2.
+    assert _shape(groups) == [
+        ("other", ["other"]),
+        ("strong", ["strong", "weak"]),
+    ]
+
+
+def test_exact_title_grouping_still_merges_decorated_and_plain() -> None:
+    # The new pass must build on, not replace, exact-title grouping.
+    plain = _result(book_id="1", title="三体", author="刘慈欣")
+    punctuated = _result(book_id="2", title="《三体》", author="刘慈欣")
+    decorated = _result(book_id="3", title="[网游]三体", author="刘慈欣")
+    other_author = _result(book_id="4", title="三体", author="别人")
+
+    groups = group_results([plain, punctuated, decorated, other_author])
+
+    assert _shape(groups) == [("1", ["1", "2", "3"]), ("4", ["4"])]
+
+
+def test_ambiguous_core_cluster_is_not_merged() -> None:
+    # "网游斗罗" as a literal title normalises to the same exact-title key as
+    # "[网游]斗罗"; that cluster's entries disagree on the core, so it is kept
+    # whole and never merged with the plain "斗罗" book.
+    literal = _result(book_id="1", title="网游斗罗", author="甲")
+    decorated = _result(book_id="2", title="[网游]斗罗", author="甲")
+    plain = _result(book_id="3", title="斗罗", author="甲")
+
+    groups = group_results([literal, decorated, plain])
+
+    assert _shape(groups) == [("1", ["1", "2"]), ("3", ["3"])]
+
+
 # --------------------------------------------------------------------------- #
 # snapshot of the exact group layout
 # --------------------------------------------------------------------------- #

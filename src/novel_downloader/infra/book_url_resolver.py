@@ -140,7 +140,18 @@ def extract_alphapolis(path: str, query: str) -> BookURLInfo | None:
     return None
 
 
-@register_extractor(["www.b520.cc"])
+@register_extractor(
+    [
+        # ``www.b520.cc`` stopped serving search; ``b5200.org`` now redirects
+        # to ``www.bqg6.xyz``, which serves the same catalogue under the same
+        # book ids.  Users copy links from any of these hosts.
+        "www.b520.cc",
+        "www.bqg6.xyz",
+        "bqg6.xyz",
+        "www.b5200.org",
+        "b5200.org",
+    ]
+)
 def extract_b520(path: str, query: str) -> BookURLInfo | None:
     if m := re.search("^/(\\d+_\\d+)/(\\d+)\\.html$", path):
         return _make_info("b520", m.group(1), m.group(2))

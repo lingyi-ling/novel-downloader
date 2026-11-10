@@ -62,6 +62,7 @@ import com.lingyi.noveldl.data.downloadFileName
 import com.lingyi.noveldl.notifications.TaskNotifier
 import com.lingyi.noveldl.ui.TASKS_POLL_INTERVAL_MS
 import com.lingyi.noveldl.ui.awaitResumed
+import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.ui.pollWhileComposed
 import com.lingyi.noveldl.ui.taskStatusLabelRes
 import kotlinx.coroutines.launch
@@ -120,7 +121,7 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                     snapshot = response
                     error = null
                 }
-                .onFailure { error = it.message }
+                .onFailure { error = apiErrorMessage(context, it) }
             // Login-required sites park their task until credentials arrive;
             // the pending-request list rides along with the task poll.
             Api.call { Api.service().loginRequests() }
@@ -139,7 +140,7 @@ fun TasksScreen(onMessage: (String) -> Unit) {
         scope.launch {
             Api.call { Api.service().cancelTask(task.task_id) }
                 .onSuccess { if (it.ok) onMessage(context.getString(R.string.tasks_cancel_done)) }
-                .onFailure { onMessage(context.getString(R.string.state_error, it.message ?: "")) }
+                .onFailure { onMessage(context.getString(R.string.state_error, apiErrorMessage(context, it))) }
         }
     }
 
@@ -167,7 +168,7 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                 }
                 .onFailure {
                     onMessage(
-                        context.getString(R.string.tasks_retry_failed, it.message ?: ""),
+                        context.getString(R.string.tasks_retry_failed, apiErrorMessage(context, it)),
                     )
                 }
         }
@@ -216,7 +217,7 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                     onMessage(
                         context.getString(
                             R.string.login_submit_failed,
-                            it.message ?: "",
+                            apiErrorMessage(context, it),
                         ),
                     )
                 }

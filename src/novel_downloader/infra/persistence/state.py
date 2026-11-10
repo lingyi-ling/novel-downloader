@@ -11,6 +11,7 @@ __all__ = ["StateManager", "state_mgr"]
 import contextlib
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -80,19 +81,28 @@ class StateManager:
         """
         Save a configuration dictionary to the config file.
 
-        The payload is written to a sibling temporary file and moved into
-        place with :func:`os.replace`, so a crash mid-write can never leave a
-        truncated state file behind.
+        The payload is written to a unique sibling temporary file, flushed and
+        fsynced, then moved into place with :func:`os.replace`, so a crash
+        mid-write can never leave a truncated state file behind and two
+        concurrent saves cannot interleave bytes in one temporary file.
 
         :param data: A dict representing the full config state to be written.
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         content = json.dumps(self._data, ensure_ascii=False, indent=2)
-        tmp_path = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
-        tmp_path.write_text(content, encoding="utf-8")
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self._path.name}.",
+            suffix=".tmp",
+            dir=str(self._path.parent),
+        )
+        tmp_path = Path(tmp_name)
         try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(tmp_path, self._path)
-        except OSError:
+        except BaseException:
             with contextlib.suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
             raise

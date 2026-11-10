@@ -6,10 +6,16 @@ novel_downloader.plugins.sites.yibige.parser
 """
 
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    dedupe_chapters,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,6 +32,10 @@ class YibigeParser(BaseParser):
     """
 
     site_name: str = "yibige"
+    #: Last-resort base for relative media links; the book page's own
+    #: ``og:url`` wins when present so the traditional/regional hosts keep
+    #: working.
+    BASE_URL: str = "https://www.yibige.org/"
     ADS = {
         "首发无广告",
         "请分享",
@@ -59,8 +69,20 @@ class YibigeParser(BaseParser):
             info_tree.xpath("//div[@id='info']/p[a]/a/text()")
         )
 
-        cover_url = self._meta(info_tree, "og:image") or self._first_str(
-            info_tree.xpath("//div[@id='fmimg']//img/@src")
+        # The book page's own URL is the most reliable base for the catalogue
+        # links: the regional hosts (tw./sg./hk.) share the markup but not the
+        # hostname, and ``og:url`` reflects whichever host served the page.
+        book_base = (
+            self._meta(info_tree, "og:url")
+            or self._first_str(info_tree.xpath("//link[@rel='canonical']/@href"))
+            or self.BASE_URL
+        )
+
+        cover_url = resolve_url(
+            info_tree,
+            self._meta(info_tree, "og:image")
+            or self._first_str(info_tree.xpath("//div[@id='fmimg']//img/@src")),
+            fallback_base=book_base,
         )
 
         update_time = self._meta(info_tree, "og:novel:update_time").replace("T", " ")
@@ -74,25 +96,50 @@ class YibigeParser(BaseParser):
         # Summary: first paragraph under #intro
         summary = self._first_str(info_tree.xpath("//div[@id='intro']//p[1]/text()"))
 
-        # Category and tags
+        # Category and tags.  ``book:tag`` also carries SEO copies of the book
+        # name and author, so those are dropped instead of polluting the tags.
         book_type = self._meta(info_tree, "og:novel:category")
-        tags_set = set(self._meta_all(info_tree, "book:tag"))
-        if book_type:
-            tags_set.add(book_type)
-        tags = list(tags_set)
+        tags: list[str] = []
+        for tag in [book_type, *self._meta_all(info_tree, "book:tag")]:
+            tag = tag.strip()
+            if not tag or tag in (book_name, author):
+                continue
+            if tag not in tags:
+                tags.append(tag)
 
         # --- Chapters from the catalog page ---
+        # Links appear relative, absolute or protocol relative, sometimes with
+        # a query string or fragment; only the ``.html`` chapter pages are
+        # real entries (the catalogue also carries book/anchor links such as
+        # ``javascript:`` helpers).
         chapters: list[ChapterInfoDict] = []
         for a in catalog_tree.xpath("//div[@id='list']/dl/dd/a"):
             href = (a.get("href") or "").strip()
-            if not href:
+            if not href or href.lower().startswith(("javascript:", "#")):
+                continue
+            if not urlsplit(href).path.endswith(".html"):
                 continue
             title = (a.text_content() or "").strip()
             if not title:
                 continue
-            # /6238/2496.html -> 2496
-            chap_id = href.split("/")[-1].split(".")[0]
-            chapters.append({"title": title, "url": href, "chapterId": chap_id})
+            # /6238/2496.html?from=catalog -> 2496
+            chap_id = chapter_id_from_href(href)
+            if not chap_id:
+                continue
+            resolved = resolve_url(catalog_tree, href, fallback_base=book_base)
+            parts = urlsplit(resolved)
+            chapters.append(
+                {
+                    "title": title,
+                    # Canonical link: the query string / fragment of the
+                    # catalogue entry carries no chapter information.
+                    "url": urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")),
+                    "chapterId": chap_id,
+                }
+            )
+        # Some templates repeat the latest chapter in a second block; the
+        # downloader keys chapters by id, so keep the first occurrence only.
+        chapters = dedupe_chapters(chapters)
 
         if not chapters:
             return None

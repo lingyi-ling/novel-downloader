@@ -15,6 +15,9 @@ offline with a fake engine.
 from __future__ import annotations
 
 import argparse
+import io
+import json
+import os
 from types import SimpleNamespace
 from typing import Any
 
@@ -295,6 +298,12 @@ def test_is_logged_in_never_raises() -> None:
         ('a<b>:"c/d|e?f*g', "a_b___c_d_e_f_g.m3u8"),  # trailing _ is stripped
         ("   ", "playlist.m3u8"),
         ("x" * 200, "x" * 120 + ".m3u8"),
+        # Windows DOS device names cannot be created as files, even with an
+        # extension (``AUX.m3u8`` raises ENOENT).
+        ("CON", "_CON.m3u8"),
+        ("aux", "_aux.m3u8"),
+        ("COM1", "_COM1.m3u8"),
+        ("nul.txt", "_nul.txt.m3u8"),
     ],
 )
 def test_playlist_filename_sanitises(keyword: str, expected: str) -> None:
@@ -321,6 +330,79 @@ def test_split_playable_separates_local_and_missing_paths() -> None:
 
     assert ready == [ready_track]
     assert skipped == [blank_track, missing_track, non_string]
+
+
+def test_resolve_playable_finds_downloaded_file_by_naming_convention(
+    tmp_path, monkeypatch
+) -> None:
+    # A fresh search result has an empty ``path``; the file was written by the
+    # downloader as ``<out>/<artist>/<album>/<name> - <artist>.<ext>``.
+    folder = tmp_path / "Artist" / "Album"
+    folder.mkdir(parents=True)
+    audio = folder / "Song 1 - Artist.mp3"
+    audio.write_bytes(b"x")
+
+    track = _track(1)
+    ready, skipped = music._resolve_playable([track], str(tmp_path), split_folder=True)
+
+    assert ready == [track]
+    assert skipped == []
+    assert track.path == str(audio)
+
+
+def test_resolve_playable_uses_flat_folder_when_not_split(tmp_path) -> None:
+    audio = tmp_path / "Song 1 - Artist.flac"
+    audio.write_bytes(b"x")
+
+    track = _track(1)
+    ready, _skipped = music._resolve_playable(
+        [track], str(tmp_path), split_folder=False
+    )
+
+    assert ready == [track]
+    assert track.path == str(audio)
+
+
+def test_resolve_playable_prefers_plain_name_over_id_fallback(tmp_path) -> None:
+    folder = tmp_path / "Artist" / "Album"
+    folder.mkdir(parents=True)
+    plain = folder / "Song 1 - Artist.mp3"
+    plain.write_bytes(b"x")
+    (folder / "Song 1 - Artist [id1].mp3").write_bytes(b"y")
+
+    track = _track(1)
+    ready, _skipped = music._resolve_playable([track], str(tmp_path), split_folder=True)
+
+    assert ready == [track]
+    assert track.path == str(plain)
+
+
+def test_resolve_playable_keeps_existing_path_without_scanning(tmp_path) -> None:
+    track = _track(1, path="already/set.mp3")
+    ready, skipped = music._resolve_playable([track], str(tmp_path), split_folder=True)
+
+    assert ready == [track]
+    assert skipped == []
+    assert track.path == "already/set.mp3"
+
+
+def test_resolve_playable_ignores_non_audio_and_missing_folder(tmp_path) -> None:
+    folder = tmp_path / "Artist" / "Album"
+    folder.mkdir(parents=True)
+    (folder / "Song 1 - Artist.lrc").write_text("lyric", encoding="utf-8")
+
+    track = _track(1)
+    ready, skipped = music._resolve_playable([track], str(tmp_path), split_folder=True)
+    assert ready == []
+    assert skipped == [track]
+
+    # A non-existent output directory is not an error either.
+    missing = _track(2)
+    ready, skipped = music._resolve_playable(
+        [missing], str(tmp_path / "nope"), split_folder=True
+    )
+    assert ready == []
+    assert skipped == [missing]
 
 
 # --------------------------------------------------------------------------- #
@@ -429,12 +511,15 @@ def test_download_reports_failed_pairs(monkeypatch, capsys) -> None:
         download_result=(0, 0, 1, [("Song 1", "vip")], None),
     )
 
-    _run(
-        ["music", "download", "--platform", "netease", "hello", "--pick", "1"],
-        monkeypatch,
-        engine,
-    )
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            ["music", "download", "--platform", "netease", "hello", "--pick", "1"],
+            monkeypatch,
+            engine,
+        )
 
+    # A failed song must not look like a successful batch to scripts.
+    assert excinfo.value.code == 1
     combined = capsys.readouterr()
     text = combined.out + combined.err
     assert "Failed: Song 1 (vip)" in text
@@ -666,6 +751,28 @@ def test_require_engine_exits_with_install_hint(monkeypatch, capsys) -> None:
     assert "novel-downloader[music]" in capsys.readouterr().err
 
 
+def test_platforms_json_goes_through_ui_emit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``platforms --json`` must use ``ui.emit``, not a bare ``print``.
+
+    Labels are localized (``国内 · 网易云音乐``); ``ui.emit`` is the helper that
+    falls back to UTF-8 bytes when a redirected Windows stdout uses a legacy
+    code page. A raw ``print`` raises ``UnicodeEncodeError`` there and would
+    kill the command mid-document.
+    """
+    engine = FakeEngine(labels=[("netease", "国内 · 网易云音乐")])
+    emitted: list[str] = []
+    monkeypatch.setattr(music.ui, "emit", emitted.append)
+
+    _run(["music", "platforms", "--json"], monkeypatch, engine)
+
+    assert json.loads(emitted[0]) == {"netease": "国内 · 网易云音乐"}
+    # Nothing bypassed the emit path onto stdout.
+    assert capsys.readouterr().out == ""
+
+
 def test_search_empty_keyword_is_usage_error(monkeypatch, capsys) -> None:
     engine = FakeEngine()
 
@@ -693,3 +800,182 @@ def test_download_with_all_platforms_uses_mixed_downloader(
     assert engine.download_calls == []
     assert len(engine.mixed_calls) == 1
     assert engine.mixed_calls[0]["tracks"] == [track]
+
+
+# --------------------------------------------------------------------------- #
+# aggregate search failure visibility / exit codes
+# --------------------------------------------------------------------------- #
+
+
+def _outcome(platform: str, *, ok: bool, error: str = "") -> SimpleNamespace:
+    return SimpleNamespace(
+        platform=platform,
+        ok=ok,
+        count=0,
+        error=error,
+        as_dict=lambda: {
+            "platform": platform,
+            "ok": ok,
+            "count": 0,
+            "error": error,
+        },
+    )
+
+
+def test_search_json_all_platforms_failed_exits_one(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = FakeEngine()
+    failed = [
+        _outcome("netease", ok=False, error="timeout"),
+        _outcome("qq", ok=False, error="timeout"),
+    ]
+    monkeypatch.setattr(
+        music, "_search_all", lambda keyword, limit, *, show_status: ([], 0, failed)
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["music", "search", "hello", "--json"], monkeypatch, engine)
+
+    assert excinfo.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tracks"] == []
+    assert [item["ok"] for item in payload["platforms"]] == [False, False]
+
+
+def test_search_all_platforms_failed_reports_each_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = FakeEngine()
+    failed = [_outcome("netease", ok=False, error="timeout")]
+    monkeypatch.setattr(
+        music, "_search_all", lambda keyword, limit, *, show_status: ([], 0, failed)
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["music", "search", "hello"], monkeypatch, engine)
+
+    assert excinfo.value.code == 1
+    stderr = capsys.readouterr().err
+    # The per-platform reason must survive even though the merged list is
+    # empty (previously the early "no results" return swallowed it).
+    assert "Platform netease failed: timeout" in stderr
+
+
+def test_search_json_empty_results_with_healthy_platforms_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = FakeEngine()
+    healthy = [_outcome("netease", ok=True)]
+    monkeypatch.setattr(
+        music, "_search_all", lambda keyword, limit, *, show_status: ([], 0, healthy)
+    )
+
+    _run(["music", "search", "hello", "--json"], monkeypatch, engine)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tracks"] == []
+    assert payload["platforms"][0]["ok"] is True
+
+
+def test_download_all_platforms_failed_exits_one(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = FakeEngine()
+    failed = [_outcome("netease", ok=False, error="timeout")]
+    monkeypatch.setattr(
+        music, "_search_all", lambda keyword, limit, *, show_status: ([], 0, failed)
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["music", "download", "hello", "--yes"], monkeypatch, engine)
+
+    assert excinfo.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "Platform netease failed: timeout" in stderr
+    assert engine.mixed_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# paths and encoding
+# --------------------------------------------------------------------------- #
+
+
+def test_export_m3u_resolves_fresh_search_result_to_downloaded_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    folder = tmp_path / "Artist" / "Album"
+    folder.mkdir(parents=True)
+    audio = folder / "Song 1 - Artist.mp3"
+    audio.write_bytes(b"x")
+
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1)]), settings={"out_dir": str(tmp_path)}
+    )
+
+    _run(["music", "export-m3u", "-k", "hello"], monkeypatch, engine)
+
+    ready, out_path = engine.export_calls[0]
+    assert [track.path for track in ready] == [str(audio)]
+    assert out_path == os.path.join(str(tmp_path), "hello.m3u8")
+    assert "Exported 1 track(s)" in capsys.readouterr().err
+
+
+def test_download_expands_tilde_in_out_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = FakeEngine(provider=FakeProvider([_track(1)]))
+
+    _run(
+        [
+            "music",
+            "download",
+            "--platform",
+            "netease",
+            "hello",
+            "--pick",
+            "1",
+            "--out",
+            "~/MusicND",
+        ],
+        monkeypatch,
+        engine,
+    )
+
+    options = engine.download_calls[0]["options"]
+    assert options.out_dir == os.path.expanduser("~/MusicND")
+    assert options.out_dir != "~/MusicND"
+
+
+class _LegacyStdout:
+    """Stdout that behaves like a cp936 pipe and exposes a byte buffer."""
+
+    encoding = "gbk"
+
+    def __init__(self) -> None:
+        self.buffer = io.BytesIO()
+
+    def write(self, text: str) -> int:
+        raise UnicodeEncodeError("gbk", text, 0, max(1, len(text)), "illegal")
+
+    def flush(self) -> None:
+        pass
+
+
+def test_emit_falls_back_to_utf8_bytes_on_legacy_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novel_downloader.apps.cli import ui
+
+    stream = _LegacyStdout()
+    monkeypatch.setattr(ui.sys, "stdout", stream)
+
+    ui.emit('{"name": "🔥"}')
+
+    assert stream.buffer.getvalue().decode("utf-8") == '{"name": "🔥"}\n'
