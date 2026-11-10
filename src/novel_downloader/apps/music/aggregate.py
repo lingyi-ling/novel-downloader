@@ -23,6 +23,7 @@ import json
 import logging
 import multiprocessing
 import os
+import pickle
 import re
 import threading
 import time
@@ -34,6 +35,7 @@ from typing import Any
 
 from .providers import available, create
 from .providers.base import Track
+from .serialize import strip_url_query
 
 logger = logging.getLogger(__name__)
 
@@ -135,18 +137,35 @@ def _load_stats() -> dict[str, dict[str, Any]]:
 
 
 def _save_stats() -> None:
-    """Best-effort atomic write; never let stats break a search."""
-    data = _load_stats()
+    """Best-effort atomic write; never let stats break a search.
+
+    The whole snapshot + write happens under ``_FAILURE_LOCK``: concurrent
+    ``_record_failure`` / ``_record_success`` calls mutate the same nested
+    dicts, and serialising them while a key is being added used to raise
+    ``RuntimeError: dictionary changed size during iteration`` (not caught,
+    so it escaped into ``search_all``). Each save also uses a per-process,
+    per-thread temp file: two searches (or a forked worker) saving at the same
+    time must never interleave bytes in one ``.tmp`` and then ``os.replace``
+    the garbage over the real file.
+    """
     target = _stats_file()
-    tmp = target.with_suffix(".tmp")
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         with _FAILURE_LOCK:
-            payload = {"version": 1, "platforms": dict(data)}
-        with tmp.open("w", encoding="utf-8", newline="\n") as fh:
-            json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
-        os.replace(tmp, target)
-    except (OSError, ValueError, TypeError):
+            data = _load_stats()
+            # Shallow-copied mapping still shares the inner dicts; copy them
+            # too so the payload is a true snapshot.
+            payload = {
+                "version": 1,
+                "platforms": {key: dict(entry) for key, entry in data.items()},
+            }
+            with tmp.open("w", encoding="utf-8", newline="\n") as fh:
+                json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, target)
+    except Exception:  # noqa: BLE001 - stats must never break a search
         logger.debug("music aggregate: could not persist search stats", exc_info=True)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
 
 
 def _breaker_open(key: str, now: float | None = None) -> bool:
@@ -213,11 +232,17 @@ def failed_platforms() -> list[str]:
 
 
 def _ordered_keys(keys: list[str]) -> list[str]:
-    """把优先平台提到前面，其余保持注册表顺序。"""
+    """把优先平台提到前面，其余保持注册表顺序；重复项只保留第一次。"""
     priority = {key: index for index, key in enumerate(_SEARCH_PRIORITY)}
     fallback = {key: index for index, key in enumerate(_platform_order())}
+    unique: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
     return sorted(
-        keys,
+        unique,
         key=lambda key: (
             priority.get(key, len(priority) + fallback.get(key, len(fallback))),
             fallback.get(key, 0),
@@ -481,6 +506,7 @@ def search_all(
         return list(tracks or ()), int(total or len(tracks or ()))
 
     state_lock = threading.Lock()
+    callback_lock = threading.Lock()
     finished = threading.Event()
     results: dict[str, tuple[list[Track], int] | BaseException] = {}
     timeouts: set[str] = set()
@@ -519,9 +545,14 @@ def search_all(
         merged = merge_tracks(
             sorted(groups, key=lambda pair: _platform_position(pair[0])),
             text,
-            limit=limit,
+            limit=None,
         )
-        return AggregateResult(tracks=merged, platforms=outcomes, total=len(merged))
+        # ``total`` is the number of distinct songs before ``limit`` truncates
+        # the returned rows (this is what the UI shows as the match count).
+        total = len(merged)
+        if limit is not None:
+            merged = merged[: max(0, int(limit))]
+        return AggregateResult(tracks=merged, platforms=outcomes, total=total)
 
     def record(
         key: str, outcome: tuple[list[Track], int] | BaseException, elapsed_ms: int
@@ -547,7 +578,12 @@ def search_all(
             _record_success(key, elapsed_ms, len(outcome[0]))
         if on_update is not None:
             try:
-                on_update(snapshot())
+                # Serialise callbacks and take the snapshot *inside* the lock:
+                # several platform threads can finish at the same instant, and
+                # delivering an older snapshot after a newer one would make the
+                # UI's result list visibly shrink again.
+                with callback_lock:
+                    on_update(snapshot())
             except Exception:  # noqa: BLE001 - 界面回调失败不影响搜索
                 logger.debug("music aggregate: on_update failed", exc_info=True)
 
@@ -559,11 +595,26 @@ def search_all(
             outcome = exc
         record(key, outcome, int((time.monotonic() - started) * 1000))
 
+    # A bounded pool, not one thread per platform and not ``keys[:workers]``:
+    # slicing silently dropped every platform after the Nth (it was never
+    # started yet reported as timed out, or omitted entirely on early exit).
+    pool_lock = threading.Lock()
+    pending = list(keys)
+
+    def next_key() -> str | None:
+        with pool_lock:
+            if not pending or closed[0] or early_stop[0]:
+                return None
+            return pending.pop(0)
+
+    def pool_worker() -> None:
+        while (key := next_key()) is not None:
+            worker(key)
+
+    thread_count = max(1, min(int(workers), len(keys)))
     threads = [
-        threading.Thread(
-            target=worker, args=(key,), name=f"music-search-{key}", daemon=True
-        )
-        for key in keys[: max(1, int(workers))]
+        threading.Thread(target=pool_worker, name=f"music-search-{index}", daemon=True)
+        for index in range(thread_count)
     ]
     for thread in threads:
         thread.start()
@@ -574,6 +625,7 @@ def search_all(
     for timer in early_timer:
         timer.cancel()
 
+    timed_out: list[str] = []
     with state_lock:
         closed[0] = True
         missing = [key for key in keys if results.get(key) is None]
@@ -584,8 +636,17 @@ def search_all(
         else:
             for key in missing:
                 timeouts.add(key)
+                timed_out.append(key)
                 results[key] = TimeoutError(f"搜索超时（{deadline_seconds:g}s）")
-        _save_stats()
+
+    # A budget timeout *is* a failure: the platform never answered inside the
+    # window, so the next aggregate search should not pay the same budget for
+    # it again. Early-stopped platforms are deliberately excluded above --
+    # they may have been mid-request and are retried next time.
+    timeout_ms = int(deadline_seconds * 1000)
+    for key in timed_out:
+        _record_failure(key, timeout_ms)
+    _save_stats()
 
     final = snapshot()
     return AggregateResult(
@@ -596,7 +657,9 @@ def search_all(
 def _short_error(exc: BaseException) -> str:
     """把平台异常压成一行可读原因（完整堆栈由调用方按需记录）。"""
     message = str(exc).strip() or type(exc).__name__
-    return message[:200]
+    # Strip signed query strings *before* truncating, or a partially cut URL
+    # could still leak most of a token.
+    return strip_url_query(message)[:200]
 
 
 def _child_search(conn: Any, kwargs: dict[str, Any]) -> None:
@@ -672,22 +735,26 @@ def search_all_isolated(
         parent_conn.close()
         child_conn.close()
         logger.warning("music aggregate: cannot start worker (%s); running inline", exc)
+        # Pass ``platforms`` unchanged: substituting the resolved ``keys``
+        # would turn "all platforms" into an explicit list and disable the
+        # failure breaker for the inline fallback.
         return search_all(
             text,
-            keys,
+            platforms,
             limit,
             per_platform_limit=per_platform_limit,
             timeout=timeout,
         )
     child_conn.close()
 
-    payload: tuple[str, Any] | None = None
+    payload: Any = None
     try:
         # 子进程内部还有自己的 timeout；这里只等「启动 + 搜索 + 回传」。
         deadline = timeout + max(1.0, float(startup_grace))
         if parent_conn.poll(deadline):
             payload = parent_conn.recv()
-    except (EOFError, OSError):
+    except (EOFError, OSError, pickle.PickleError):
+        # A worker killed mid-send leaves a truncated pickle in the pipe.
         payload = None
     finally:
         parent_conn.close()
@@ -701,10 +768,17 @@ def search_all_isolated(
                 PlatformOutcome(key, False, error="搜索进程未返回结果") for key in keys
             ]
         )
+    if not isinstance(payload, tuple) or len(payload) != 2:
+        return AggregateResult(
+            platforms=[
+                PlatformOutcome(key, False, error="搜索进程返回了无效结果")
+                for key in keys
+            ]
+        )
     status, value = payload
     if status == "ok" and isinstance(value, AggregateResult):
         return value
-    message = str(value or "搜索进程失败")[:200]
+    message = strip_url_query(str(value or "搜索进程失败"))[:200]
     return AggregateResult(
         platforms=[PlatformOutcome(key, False, error=message) for key in keys]
     )

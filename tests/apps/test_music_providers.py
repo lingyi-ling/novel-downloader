@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import requests
 
 from novel_downloader.apps.music import providers
 from novel_downloader.apps.music.providers import health_check
@@ -356,3 +357,79 @@ def test_musicdl_resolve_success_passes_headers_and_ext() -> None:
     assert result.ext == "flac"
     assert result.http_headers == {"Referer": "http://fake.test/"}
     assert provider.lyric(track) == ("[00:01.00]lrc", "")
+
+
+# ---------------------------------------------------------------------------
+# MusicdlProvider: stable exception mapping
+# ---------------------------------------------------------------------------
+
+
+class _RaisingClient:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def search(self, **kwargs: Any) -> Any:
+        raise self.error
+
+
+def test_musicdl_search_maps_timeouts_to_a_readable_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow platform did not "change its interface"; say it timed out."""
+    provider = MusicdlProvider(key="migu")
+    monkeypatch.setattr(
+        provider,
+        "_get_client",
+        lambda: _RaisingClient(requests.exceptions.ReadTimeout("read timed out")),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.search("晴天")
+
+    message = str(excinfo.value)
+    assert "咪咕音乐" in message
+    assert "超时" in message
+    assert "接口不可达或已变更" not in message
+
+
+def test_musicdl_search_maps_vendor_credential_assertions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The vendored clients phrase missing credentials differently.
+
+    Deezer/SoundCloud assert ``"arl" should be configured`` rather than
+    TIDAL's ``cookies are not configured``; both must reach the user as the
+    actionable "配置账号信息" hint instead of a raw English AssertionError.
+    """
+    provider = MusicdlProvider(key="deezer")
+    monkeypatch.setattr(
+        provider,
+        "_get_client",
+        lambda: _RaisingClient(
+            AssertionError(
+                '"arl" should be configured, refer to https://musicdl.readthedocs.io/'
+            )
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.search("晴天")
+
+    message = str(excinfo.value)
+    assert "Deezer" in message
+    assert "配置账号信息" in message
+
+
+def test_musicdl_search_keeps_unrelated_assertions_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only credential-related asserts are rewritten; real bugs stay debuggable."""
+    provider = MusicdlProvider(key="migu")
+    monkeypatch.setattr(
+        provider,
+        "_get_client",
+        lambda: _RaisingClient(AssertionError("unexpected response shape")),
+    )
+
+    with pytest.raises(AssertionError, match="unexpected response shape"):
+        provider.search("晴天")

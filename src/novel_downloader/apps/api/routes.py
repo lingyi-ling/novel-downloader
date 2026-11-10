@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, TypeVar, cast
 from urllib.parse import quote
@@ -63,7 +63,6 @@ from .constants import (
     MSG_MUSIC_JOB_NOT_FOUND,
     MSG_MUSIC_PLATFORM_INIT_FAILED,
     MSG_MUSIC_UNAVAILABLE,
-    MSG_PLAYLIST_WRITE_FAILED,
     MSG_TASK_NOT_FOUND,
     MSG_TIMED_OUT,
     MSG_UNKNOWN_MUSIC_PLATFORM,
@@ -1058,9 +1057,6 @@ async def music_platforms() -> dict[str, Any]:
 #: Per-platform budget (seconds) used by ``GET /music/health``.
 DEFAULT_MUSIC_HEALTH_TIMEOUT = 5.0
 
-#: Default file name for playlists exported without an explicit ``out_path``.
-_DEFAULT_PLAYLIST_SUFFIX = ".m3u8"
-
 
 def _music_platform_keys(components: _MusicComponents) -> list[str]:
     """Return the registered platform keys in display order."""
@@ -1084,6 +1080,13 @@ def _is_all_platforms(platform: str | None) -> bool:
     from novel_downloader.apps.music.aggregate import is_all_platforms
 
     return is_all_platforms(platform)
+
+
+def _music_track_payload(track: Any) -> dict[str, Any]:
+    """Serialise one track for the wire, dropping provider-private ``extra``."""
+    from novel_downloader.apps.music.serialize import track_dict
+
+    return track_dict(track)
 
 
 def _music_search_timeout(request: Request) -> float:
@@ -1124,33 +1127,112 @@ def _music_download_callable(components: _MusicComponents, platform: str) -> Any
 
 def _default_playlist_name() -> str:
     """Return a timestamped playlist file name."""
-    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    return f"playlist-{stamp}{_DEFAULT_PLAYLIST_SUFFIX}"
+    from novel_downloader.apps.music.export_path import default_playlist_name
+
+    return default_playlist_name()
+
+
+def _music_allowed_roots(components: _MusicComponents) -> tuple[Path, list[Path]]:
+    """
+    Return ``(default_dir, allowed_roots)`` for music filesystem writes.
+
+    Downloads and playlist exports are confined to the music settings'
+    ``out_dir`` and the platform's download directory (whichever the user
+    configured).  A relative caller-supplied path is resolved against the
+    default directory, never against the daemon's working directory.
+    """
+    settings: Any = {}
+    loader = components.load_settings
+    if loader is not None:
+        try:
+            settings = loader()
+        except Exception as exc:  # noqa: BLE001 - a broken settings file must not 500
+            logger.warning("Could not load music settings: %s", exc)
+            settings = {}
+    out_dir = settings.get("out_dir") if isinstance(settings, dict) else None
+
+    roots: list[Path] = []
+    default_dir: Path | None = None
+    if out_dir:
+        default_dir = Path(str(out_dir)).expanduser()
+        roots.append(default_dir)
+    try:
+        platform_dir = Path(components.paths.default_download_dir()).expanduser()
+    except Exception as exc:  # noqa: BLE001 - platform dir lookup is best effort
+        logger.debug("Could not resolve the default music directory: %s", exc)
+        platform_dir = None
+    if platform_dir is not None:
+        roots.append(platform_dir)
+        if default_dir is None:
+            default_dir = platform_dir
+    if default_dir is None:
+        # No settings and no platform directory: cwd keeps the endpoint usable
+        # while still confining writes to one known root.
+        default_dir = Path.cwd()
+        roots.append(default_dir)
+    return default_dir, roots
 
 
 def _resolve_export_target(components: _MusicComponents, out_path: str | None) -> Path:
     """
-    Resolve the playlist destination.
+    Resolve and validate the playlist destination.
 
-    An explicit ``out_path`` ending in ``.m3u`` / ``.m3u8`` is used verbatim;
-    any other value is treated as a directory. Without ``out_path`` the file
-    is written into the music settings' ``out_dir`` (falling back to the
-    platform music directory).
+    Only ``.m3u`` / ``.m3u8`` files inside the configured music directories
+    are accepted; ``..`` and symlink escapes are rejected.  An ``out_path``
+    without a suffix is treated as a directory and gets a timestamped
+    ``playlist-*.m3u8`` file.  Invalid values raise HTTP 400 with a fixed
+    message (the rejected absolute path must not be echoed back).
     """
-    name = _default_playlist_name()
-    if out_path and out_path.strip():
-        candidate = Path(out_path.strip()).expanduser()
-        if candidate.suffix.lower() in {".m3u", ".m3u8"}:
-            return candidate
-        return candidate / name
+    from novel_downloader.apps.music.export_path import (
+        MSG_PLAYLIST_TARGET_INVALID,
+        PlaylistTargetError,
+        resolve_playlist_target,
+    )
 
-    settings = components.load_settings()
-    out_dir = settings.get("out_dir") if isinstance(settings, dict) else None
-    if out_dir:
-        base = Path(str(out_dir)).expanduser()
-    else:
-        base = Path(components.paths.default_download_dir()).expanduser()
-    return base / name
+    default_dir, roots = _music_allowed_roots(components)
+    try:
+        return resolve_playlist_target(
+            out_path,
+            base_dirs=roots,
+            default_dir=default_dir,
+            default_name=_default_playlist_name(),
+        )
+    except PlaylistTargetError as exc:
+        logger.warning("Rejected playlist out_path %r: %s", out_path, exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=MSG_PLAYLIST_TARGET_INVALID,
+        ) from exc
+
+
+def _resolve_music_out_dir(components: _MusicComponents, out_dir: str | None) -> Path:
+    """
+    Resolve and validate a download output directory.
+
+    The engine creates artist/album subdirectories below this path, so it must
+    stay inside the music settings' ``out_dir`` or the platform download
+    directory; ``..`` and symlink escapes are rejected.  An invalid value
+    raises HTTP 400 with a fixed message that never echoes the server path.
+    """
+    from novel_downloader.apps.music.export_path import (
+        MSG_OUT_DIR_INVALID,
+        OutDirTargetError,
+        resolve_output_dir,
+    )
+
+    default_dir, roots = _music_allowed_roots(components)
+    try:
+        return resolve_output_dir(
+            out_dir,
+            base_dirs=roots,
+            default_dir=default_dir,
+        )
+    except OutDirTargetError as exc:
+        logger.warning("Rejected music out_dir %r: %s", out_dir, exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=MSG_OUT_DIR_INVALID,
+        ) from exc
 
 
 @router.post("/music/export", tags=["music"])
@@ -1182,14 +1264,15 @@ async def music_export(body: MusicExportRequest) -> dict[str, Any]:
     try:
         written = await run_in_threadpool(components.export_m3u, tracks, target)
     except OSError as exc:
-        # The caller's own ``target`` is echoed back, but not the raw OS error
-        # (it may embed server-internal paths); the full reason is logged.
+        # Neither the raw OS error nor the resolved target is echoed back:
+        # both can embed server-internal absolute paths. The full reason is
+        # logged for the operator.
+        from novel_downloader.apps.music.export_path import MSG_PLAYLIST_WRITE_FAILED
+
         logger.warning("Playlist write failed for %s: %s", target, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=MSG_PLAYLIST_WRITE_FAILED.format(
-                target=target, error=type(exc).__name__
-            ),
+            detail=MSG_PLAYLIST_WRITE_FAILED.format(error=type(exc).__name__),
         ) from exc
 
     return {
@@ -1261,7 +1344,7 @@ async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, 
             _blocking_timeout(request, "music_search"),
             "Music search",
         )
-        payload = [asdict(track) for track in result.tracks]
+        payload = [_music_track_payload(track) for track in result.tracks]
         return {
             "total": result.total,
             "tracks": payload,
@@ -1284,7 +1367,7 @@ async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, 
     )
     return {
         "total": total,
-        "tracks": [asdict(track) for track in tracks],
+        "tracks": [_music_track_payload(track) for track in tracks],
         "search_id": CACHE.put(tracks),
         "platform": body.platform,
     }
@@ -1307,9 +1390,7 @@ async def music_download(
     create_provider = _music_download_callable(components, body.platform)
 
     tracks = _resolve_music_tracks(components, body)
-    out_dir = (body.out_dir or "").strip() or str(
-        components.paths.default_download_dir()
-    )
+    out_dir = str(_resolve_music_out_dir(components, body.out_dir))
     options = components.download_options(
         out_dir=out_dir,
         level=body.level or "exhigh",
@@ -1356,10 +1437,17 @@ async def music_download(
 
 
 def _music_result_item(result: Any) -> dict[str, Any]:
-    """Serialise one per-track download result."""
+    """Serialise one per-track download result.
+
+    Provider failure reasons frequently quote the failing request URL, whose
+    query string may carry signed tokens.  Those parts are stripped before the
+    value leaves the process; any logging upstream keeps the original text.
+    """
+    from novel_downloader.apps.music.serialize import strip_url_query
+
     return {
         "status": str(getattr(result, "status", "fail")),
-        "reason": str(getattr(result, "reason", "") or ""),
+        "reason": strip_url_query(str(getattr(result, "reason", "") or "")),
         "path": str(getattr(result, "path", "") or ""),
         "bytes": int(getattr(result, "bytes_", 0) or 0),
     }
@@ -1367,6 +1455,15 @@ def _music_result_item(result: Any) -> dict[str, Any]:
 
 #: How many music jobs (running or finished) are kept in memory.
 MAX_MUSIC_JOBS = 100
+
+#: Concurrent queued/running music jobs.  A job occupies a worker thread for
+#: its whole lifetime, so this bounds real concurrency as well as the table.
+MAX_ACTIVE_MUSIC_JOBS = 4
+
+#: Returned (HTTP 429) when ``MAX_ACTIVE_MUSIC_JOBS`` is reached.
+MSG_MUSIC_JOBS_BUSY = (
+    "Too many music jobs are already running (limit {limit}); retry later"
+)
 
 _TERMINAL_MUSIC_STATUSES = frozenset({"done", "failed"})
 
@@ -1382,16 +1479,28 @@ def _prune_music_jobs_locked() -> None:
     """
     Keep the job table bounded.
 
-    Caller must hold ``_MUSIC_JOBS_LOCK``. Finished jobs are evicted first;
-    if every retained job is still active, the oldest one is dropped.
+    Caller must hold ``_MUSIC_JOBS_LOCK``.  Only finished jobs are evicted: an
+    active record must never disappear from under its worker (clients would
+    poll a job that silently vanished, and the worker would keep running with
+    nothing to report to).  Active concurrency is capped separately by
+    ``MAX_ACTIVE_MUSIC_JOBS``.
     """
     while len(_MUSIC_JOBS) >= MAX_MUSIC_JOBS:
-        for job_id, job in _MUSIC_JOBS.items():
+        for job_id, job in list(_MUSIC_JOBS.items()):
             if job["status"] in _TERMINAL_MUSIC_STATUSES:
                 del _MUSIC_JOBS[job_id]
                 break
         else:
-            _MUSIC_JOBS.pop(next(iter(_MUSIC_JOBS)), None)
+            return
+
+
+def _active_music_jobs_locked() -> int:
+    """Number of queued/running jobs (caller must hold the lock)."""
+    return sum(
+        1
+        for job in _MUSIC_JOBS.values()
+        if job["status"] not in _TERMINAL_MUSIC_STATUSES
+    )
 
 
 def _music_job_update(job_id: str, **fields: Any) -> None:
@@ -1470,7 +1579,10 @@ async def _run_music_job(
         )
         return
     except Exception as exc:  # noqa: BLE001 - download engine errors
-        _finish_failed(f"{type(exc).__name__}: {exc}")
+        # Only the exception class reaches the client: the message may carry
+        # provider internals, signed URLs or credentials.  Log the full reason.
+        logger.warning("Music job %s failed: %s", job_id, exc)
+        _finish_failed(MSG_MUSIC_DOWNLOAD_FAILED.format(error=type(exc).__name__))
         return
 
     ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
@@ -1496,9 +1608,7 @@ async def create_music_job(
     create_provider = _music_download_callable(components, body.platform)
 
     tracks = _resolve_music_tracks(components, body)
-    out_dir = (body.out_dir or "").strip() or str(
-        components.paths.default_download_dir()
-    )
+    out_dir = str(_resolve_music_out_dir(components, body.out_dir))
     options = components.download_options(
         out_dir=out_dir,
         level=body.level or "exhigh",
@@ -1507,6 +1617,11 @@ async def create_music_job(
     job_id = uuid4().hex
     with _MUSIC_JOBS_LOCK:
         _prune_music_jobs_locked()
+        if _active_music_jobs_locked() >= MAX_ACTIVE_MUSIC_JOBS:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=MSG_MUSIC_JOBS_BUSY.format(limit=MAX_ACTIVE_MUSIC_JOBS),
+            )
         _MUSIC_JOBS[job_id] = {
             "job_id": job_id,
             "status": "queued",

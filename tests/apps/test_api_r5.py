@@ -254,7 +254,7 @@ async def test_music_export_500_detail_does_not_leak_exception_text(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The write-failure detail keeps the caller's target but not the OSError."""
+    """The write-failure detail names the exception class and nothing else."""
 
     internal = tmp_path / "internal" / "server-side-playlist.m3u8"
 
@@ -282,12 +282,13 @@ async def test_music_export_500_detail_does_not_leak_exception_text(
     assert response.status_code == 500
     detail = response.json()["detail"]
     assert isinstance(detail, str)
-    # The caller-supplied target is echoed back (it is their own input) ...
-    assert "playlist.m3u8" in detail
-    # ... while the raw OS error, with the server-internal path, is not.
     assert "PermissionError" in detail
+    # Neither the OS message (with the server-internal path) nor the resolved
+    # target may be echoed back.
     assert "Permission denied" not in response.text
     assert "server-side-playlist" not in response.text
+    assert "playlist.m3u8" not in response.text
+    # The full reason is preserved for the operator in the server log.
     assert any("Permission denied" in record.message for record in caplog.records)
 
 

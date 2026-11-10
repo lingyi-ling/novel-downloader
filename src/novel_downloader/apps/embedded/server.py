@@ -146,7 +146,10 @@ _MSG_MUSIC_UNAVAILABLE = (
 )
 _MSG_MUSIC_JOB_NOT_FOUND = "Music job not found: {job_id}"
 _MSG_UNKNOWN_MUSIC_PLATFORM = "Unknown music platform: {platform}. Available: {keys}"
-_MSG_PLAYLIST_WRITE_FAILED = "Could not write playlist {target}: {error}"
+_MSG_MUSIC_DOWNLOAD_FAILED = "Music download failed: {error}"
+_MSG_MUSIC_JOBS_BUSY = (
+    "Too many music jobs are already running (limit {limit}); retry later"
+)
 _MSG_TIMED_OUT = "{label} timed out after {timeout:g}s"
 _MSG_BROWSE_UNSUPPORTED = "Site '{site}' does not support browsing."
 
@@ -991,6 +994,9 @@ _MAX_MUSIC_TRACKS = 200
 _MUSIC_JOBS: dict[str, dict[str, Any]] = {}
 _MUSIC_JOBS_LOCK = threading.Lock()
 _MAX_MUSIC_JOBS = 100
+#: Concurrent queued/running jobs.  Each job owns a plain thread, so this is
+#: the real ceiling on worker threads (mirrors the REST API's limit).
+_MAX_ACTIVE_MUSIC_JOBS = 4
 _TERMINAL_MUSIC_STATUSES = frozenset({"done", "failed"})
 
 
@@ -1067,16 +1073,21 @@ def _music_track(components: Any, data: Any) -> Any:
     return components.track_cls(**{k: v for k, v in data.items() if k in allowed})
 
 
-def _music_output_dir() -> Path:
-    """Music files land beside the exported books, under ``music/``."""
-    from novel_downloader.apps.common.history_files import _output_dir
+def _music_track_payload(track: Any) -> dict[str, Any]:
+    """Serialise one track for the wire, dropping provider-private ``extra``.
 
-    target = _output_dir() / "music"
-    target.mkdir(parents=True, exist_ok=True)
-    return target
+    Shared with the REST API so both engines expose the same public fields;
+    ``extra`` holds non-JSON provider objects (musicdl ``SongInfo``, NetEase
+    raw payloads/cookies) and must never leave the process.
+    """
+    from novel_downloader.apps.music.serialize import track_dict
+
+    return track_dict(track)
 
 
 def _music_result_item(result: Any) -> dict[str, Any]:
+    from novel_downloader.apps.music.serialize import strip_url_query
+
     raw_path = str(getattr(result, "path", "") or "")
     download_url = ""
     if raw_path:
@@ -1088,7 +1099,9 @@ def _music_result_item(result: Any) -> dict[str, Any]:
             download_url = f"/downloads/music/{quote(name, safe='')}"
     return {
         "status": str(getattr(result, "status", "fail")),
-        "reason": str(getattr(result, "reason", "") or ""),
+        # Provider reasons can quote signed request URLs; strip the query and
+        # fragment before they cross the loopback boundary.
+        "reason": strip_url_query(str(getattr(result, "reason", "") or "")),
         "path": raw_path,
         "download_url": download_url,
         "bytes": int(getattr(result, "bytes_", 0) or 0),
@@ -1140,7 +1153,7 @@ def _handle_music_search(
             ),
             timeout=aggregate.DEFAULT_TIMEOUT,
         )
-        payload = [dataclasses.asdict(track) for track in result.tracks]
+        payload = [_music_track_payload(track) for track in result.tracks]
         return {
             "total": result.total,
             "tracks": payload,
@@ -1152,7 +1165,7 @@ def _handle_music_search(
     _require_music_platform(components, platform)
     provider = components.create(platform)
     tracks, total = provider.search(keyword, limit=limit, offset=offset)
-    payload = [dataclasses.asdict(track) for track in tracks]
+    payload = [_music_track_payload(track) for track in tracks]
     return {
         "total": int(total or len(payload)),
         "tracks": payload,
@@ -1225,12 +1238,80 @@ def _music_download_args(
     if isinstance(search_id, str) and search_id.strip():
         tracks = CACHE.resolve(search_id.strip(), tracks)
 
-    out_dir = str(body.get("out_dir") or "").strip() or str(_music_output_dir())
+    raw_out_dir = str(body.get("out_dir") or "").strip()
+    out_dir = str(_resolve_music_out_dir(components, raw_out_dir))
+    if not raw_out_dir:
+        # Preserve the historical behaviour: the default music directory is
+        # created eagerly, while a caller-supplied directory is left to the
+        # engine (which only creates it when a track is actually written).
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
     level = body.get("level")
     options = components.download_options(
         out_dir=out_dir, level=str(level) if level else "exhigh"
     )
     return platform, tracks, options
+
+
+def _music_export_dir() -> Path:
+    """Directory the embedded engine writes music files to by default.
+
+    No ``mkdir`` here: this runs on the validation path and must not create
+    directories just to reject a request.
+    """
+    from novel_downloader.apps.common.history_files import _output_dir
+
+    return Path(_output_dir()) / "music"
+
+
+def _music_allowed_roots(components: Any) -> tuple[Path, list[Path]]:
+    """Return ``(default_dir, allowed_roots)`` for embedded music writes."""
+    default_dir = _music_export_dir()
+    roots = [default_dir]
+    try:
+        roots.append(Path(components.paths.default_download_dir()).expanduser())
+    except Exception as exc:  # noqa: BLE001 - platform dir lookup is best effort
+        logger.debug("Could not resolve the default music directory: %s", exc)
+    return default_dir, roots
+
+
+def _resolve_music_out_dir(components: Any, out_dir: str | None) -> Path:
+    """Validate a download output directory (same policy as the REST API)."""
+    from novel_downloader.apps.music.export_path import (
+        MSG_OUT_DIR_INVALID,
+        OutDirTargetError,
+        resolve_output_dir,
+    )
+
+    default_dir, roots = _music_allowed_roots(components)
+    try:
+        return resolve_output_dir(
+            out_dir,
+            base_dirs=roots,
+            default_dir=default_dir,
+        )
+    except OutDirTargetError as exc:
+        logger.warning("Rejected embedded music out_dir %r: %s", out_dir, exc)
+        raise _ApiError(400, MSG_OUT_DIR_INVALID) from exc
+
+
+def _resolve_music_export_target(components: Any, out_path: str | None) -> Path:
+    """Validate the playlist destination (same policy as the REST API)."""
+    from novel_downloader.apps.music.export_path import (
+        MSG_PLAYLIST_TARGET_INVALID,
+        PlaylistTargetError,
+        resolve_playlist_target,
+    )
+
+    default_dir, roots = _music_allowed_roots(components)
+    try:
+        return resolve_playlist_target(
+            out_path,
+            base_dirs=roots,
+            default_dir=default_dir,
+        )
+    except PlaylistTargetError as exc:
+        logger.warning("Rejected embedded playlist out_path %r: %s", out_path, exc)
+        raise _ApiError(400, MSG_PLAYLIST_TARGET_INVALID) from exc
 
 
 def _handle_music_export(
@@ -1254,13 +1335,17 @@ def _handle_music_export(
     usable = [track for track in tracks if str(getattr(track, "path", "") or "")]
     skipped = len(tracks) - len(usable)
     out_path = str(body.get("out_path") or "").strip()
-    target = Path(out_path) if out_path else _music_output_dir() / "playlist.m3u8"
+    target = _resolve_music_export_target(components, out_path)
     try:
         written_path = components.export_m3u(usable, target)
     except OSError as exc:
+        from novel_downloader.apps.music.export_path import MSG_PLAYLIST_WRITE_FAILED
+
+        # Neither the resolved target nor the OS error text is sent to the
+        # client; both may contain server-internal absolute paths.
+        logger.warning("Embedded playlist write failed for %s: %s", target, exc)
         raise _ApiError(
-            500,
-            _MSG_PLAYLIST_WRITE_FAILED.format(target=target, error=type(exc).__name__),
+            500, MSG_PLAYLIST_WRITE_FAILED.format(error=type(exc).__name__)
         ) from exc
     # ``export_m3u`` returns the playlist path (mirroring the REST handler's
     # ``path`` field), not a count: ``int()`` on it made every real export
@@ -1308,13 +1393,30 @@ def _handle_music_download(
 
 
 def _prune_music_jobs_locked() -> None:
+    """
+    Drop finished jobs to keep the table bounded.
+
+    Caller must hold ``_MUSIC_JOBS_LOCK``.  Active (queued/running) records are
+    never evicted here: dropping them would orphan a live worker thread and let
+    clients poll a job that silently vanished.  The active count is capped
+    separately by ``_MAX_ACTIVE_MUSIC_JOBS``.
+    """
     while len(_MUSIC_JOBS) >= _MAX_MUSIC_JOBS:
-        for job_id, job in _MUSIC_JOBS.items():
+        for job_id, job in list(_MUSIC_JOBS.items()):
             if job["status"] in _TERMINAL_MUSIC_STATUSES:
                 del _MUSIC_JOBS[job_id]
                 break
         else:
-            _MUSIC_JOBS.pop(next(iter(_MUSIC_JOBS)), None)
+            return
+
+
+def _active_music_jobs_locked() -> int:
+    """Number of queued/running jobs (caller must hold the lock)."""
+    return sum(
+        1
+        for job in _MUSIC_JOBS.values()
+        if job["status"] not in _TERMINAL_MUSIC_STATUSES
+    )
 
 
 def _music_job_update(job_id: str, **fields: Any) -> None:
@@ -1364,11 +1466,14 @@ def _music_job_worker(
     try:
         components.download_mixed(create_provider, tracks, options, on_result=on_result)
     except Exception as exc:  # noqa: BLE001 - reported in the job record
+        # Only the exception class reaches the client: the message may carry
+        # internal paths or credentials.  The full reason stays in the log.
+        logger.warning("Embedded music job %s failed: %s", job_id, exc)
         if not expired:
             _music_job_update(
                 job_id,
                 status="failed",
-                error=f"{type(exc).__name__}: {exc}",
+                error=_MSG_MUSIC_DOWNLOAD_FAILED.format(error=type(exc).__name__),
                 finished_at=time.time(),
             )
         return
@@ -1395,6 +1500,11 @@ def _handle_music_jobs_post(
     job_id = uuid.uuid4().hex
     with _MUSIC_JOBS_LOCK:
         _prune_music_jobs_locked()
+        if _active_music_jobs_locked() >= _MAX_ACTIVE_MUSIC_JOBS:
+            raise _ApiError(
+                429,
+                _MSG_MUSIC_JOBS_BUSY.format(limit=_MAX_ACTIVE_MUSIC_JOBS),
+            )
         _MUSIC_JOBS[job_id] = {
             "job_id": job_id,
             "status": "queued",
