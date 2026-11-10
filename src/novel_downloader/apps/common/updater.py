@@ -80,6 +80,9 @@ DEFAULT_TIMEOUT = 8.0
 
 _USER_AGENT = "novel-downloader-updater"
 _CHUNK_SIZE = 1024 * 1024
+#: Hard ceiling for one asset transfer (the largest release asset is ~70 MiB).
+#: A hostile or broken manifest cannot make the client fill the disk.
+_MAX_ASSET_BYTES = 1024**3
 _MAX_FILENAME = 120
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -556,6 +559,7 @@ def download_asset(
     resume: bool = False,
     progress: Callable[[int, int], None] | None = None,
     attempts: int = 1,
+    max_bytes: int | None = None,
 ) -> Path:
     """
     Download one release asset to ``dest`` and verify its checksum.
@@ -587,6 +591,9 @@ def download_asset(
         when the server does not report a length.
     :param attempts: how many times a failed transfer is retried.  With
         ``resume`` the retry continues where the previous one stopped.
+    :param max_bytes: refusal threshold for the transfer (default 1 GiB).  A
+        manifest is remote data: without a bound, a crafted ``size``/body
+        could fill the disk.
     :return: the path actually written.
     :raises ValueError: for a non-HTTP URL, an escaping path or a bad digest.
     :raises OSError: when the transfer itself fails after every attempt.
@@ -620,6 +627,7 @@ def download_asset(
         with contextlib.suppress(Exception):
             progress(received, total)
 
+    limit = _MAX_ASSET_BYTES if max_bytes is None else max(1, int(max_bytes))
     tries = max(1, int(attempts))
     last_error: BaseException | None = None
     for attempt in range(1, tries + 1):
@@ -634,6 +642,20 @@ def download_asset(
                 resolved_url, headers=headers
             )
             with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+                # A redirect may downgrade HTTPS to plain HTTP; the digest
+                # still protects integrity, but not confidentiality.
+                final_url = ""
+                getter = getattr(response, "geturl", None)
+                if callable(getter):
+                    final_url = str(getter() or "")
+                if (
+                    resolved_url.lower().startswith("https://")
+                    and final_url
+                    and not final_url.lower().startswith("https://")
+                ):
+                    raise ValueError(
+                        "refusing an HTTPS download that redirected to plain HTTP"
+                    )
                 # A server that ignores Range answers 200 with the full body.
                 appending = offset > 0 and getattr(response, "status", 0) == 206
                 if not appending:
@@ -648,6 +670,10 @@ def download_asset(
                     total = offset + int(length) if length else 0
                 except (TypeError, ValueError):
                     total = 0
+                if total > limit:
+                    raise ValueError(
+                        f"{filename} is larger than the {limit} byte limit"
+                    )
                 received = offset
                 report(received, total)
                 with part.open("ab" if appending else "wb") as handle:
@@ -655,8 +681,12 @@ def download_asset(
                         chunk = response.read(_CHUNK_SIZE)
                         if not chunk:
                             break
-                        handle.write(chunk)
                         received += len(chunk)
+                        if received > limit:
+                            raise ValueError(
+                                f"{filename} is larger than the {limit} byte limit"
+                            )
+                        handle.write(chunk)
                         report(received, total)
             if expected_sha256 and not verify_sha256(part, expected_sha256):
                 # A stale partial from an older release can make a resumed
@@ -666,8 +696,9 @@ def download_asset(
             part.replace(final)
             return final
         except Exception as exc:  # noqa: BLE001 - retried below
-            if isinstance(exc, ValueError) and "checksum mismatch" in str(exc):
-                # A wrong digest is not transient; do not re-download.
+            if isinstance(exc, ValueError):
+                # Policy refusals (bad digest, oversized body, HTTPS->HTTP
+                # downgrade) are deterministic; retrying cannot help.
                 raise
             last_error = exc
             if attempt >= tries:

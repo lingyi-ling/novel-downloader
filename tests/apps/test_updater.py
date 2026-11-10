@@ -1324,3 +1324,58 @@ def test_download_asset_restarts_when_the_server_ignores_range(
 
     assert written == final
     assert final.read_bytes() == b"fresh"
+
+
+def test_download_asset_refuses_an_oversized_transfer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_urlopen(_request: object, timeout: float = 0) -> _FakeResponse:
+        return _FakeResponse(b"0123456789", 200, 10)
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(ValueError, match="larger than"):
+        updater.download_asset(
+            "https://example.test/asset.bin",
+            Path("asset.bin"),
+            root=tmp_path,
+            max_bytes=5,
+        )
+
+    assert not (tmp_path / "asset.bin").exists()
+    assert not (tmp_path / "asset.bin.part").exists()
+
+
+def test_download_asset_refuses_an_https_to_http_redirect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Downgraded(_FakeResponse):
+        def geturl(self) -> str:
+            return "http://mirror.test/asset.bin"
+
+    monkeypatch.setattr(
+        updater.urllib.request,
+        "urlopen",
+        lambda _request, timeout=0: Downgraded(b"payload", 200, 7),
+    )
+
+    with pytest.raises(ValueError, match="redirected to plain HTTP"):
+        updater.download_asset(
+            "https://example.test/asset.bin", Path("asset.bin"), root=tmp_path
+        )
+
+
+def test_failed_transfer_removes_the_partial_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def boom(_request: object, timeout: float = 0) -> _FakeResponse:
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", boom)
+
+    with pytest.raises(OSError):
+        updater.download_asset(
+            "https://example.test/asset.bin", Path("asset.bin"), root=tmp_path
+        )
+
+    assert not (tmp_path / "asset.bin.part").exists()
