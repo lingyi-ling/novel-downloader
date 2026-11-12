@@ -140,7 +140,7 @@ See [Local REST API](docs/guide/api.en.md) for endpoints, authentication, and re
 novel-desktop
 ```
 
-A graphical interface for search, the download queue, export history, and music downloads. Search results render 60 rows at a time with a "Show more" button, and playlist export asks before overwriting an existing file.
+A graphical interface for search, the download queue, export history, music downloads, and the settings page. The settings page edits the output folder, proxy, automatic updates, and appearance/language, saving them to `settings.toml`. Search results render 60 rows at a time with a "Show more" button, and playlist export asks before overwriting an existing file.
 
 ---
 
@@ -217,7 +217,7 @@ List and manage sources:
 novel-cli sources list --check
 
 # Validate a single rule file
-novel-cli sources check ./rules/example.json
+novel-cli sources check ./rules/_example-template.json
 
 # Search / download with a rule source
 novel-cli search "斗破苍穹" -s biquge5r
@@ -295,6 +295,8 @@ Do not use it for commercial or illegal activities.
 
 Users are responsible for complying with target sites' `robots.txt` and local regulations.
 The author assumes no liability for misuse.
+
+Thanks to the linuxdo community for its help during this project's development.
 
 ---
 

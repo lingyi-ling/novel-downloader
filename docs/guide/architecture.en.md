@@ -58,7 +58,7 @@ Dependencies flow in one direction: `apps/* → plugins/* → infra/* / libs/*`.
 
 | Entry point | Code location | Launch | Description |
 | --- | --- | --- | --- |
-| CLI | `apps/cli/main.py` | `novel-cli` | `argparse` subcommands: `download` / `search` / `follow` / `export` / `login` / `config` / `clean` / `storage` / `doctor` / `sources` / `music` |
+| CLI | `apps/cli/main.py` | `novel-cli` | `argparse` subcommands: `download` / `search` / `browse` / `follow` / `export` / `login` / `config` / `clean` / `storage` / `doctor` / `sources` / `music` / `completion` / `batch` / `update` |
 | REST API | `apps/api/main.py` | `novel-api` | FastAPI + uvicorn, default `127.0.0.1:8081`, route prefix `/api/v1` |
 | Desktop client | `apps/desktop/main.py` | `novel-desktop` | pywebview window hosting a single-file HTML front end (`web_assets.py`) driven by `webview_app.ApiBridge`; `AsyncEngine` in `apps/desktop/engine.py` owns a background asyncio event loop |
 | Android | `android/app/src/main/java/com/lingyi/noveldl/` | Gradle build | Calls the local API over HTTP; no direct Python dependency |
@@ -90,7 +90,7 @@ The command entry points are declared under `[project.scripts]` in `pyproject.to
 | Task model | `apps/core/models.py` | Task state and progress | `DownloadTask`, `Status` |
 | Follow list | `apps/core/watchlist.py` | Tracked books and their latest chapters | `WatchlistStore`, `WatchEntry` |
 | REST routes | `apps/api/routes.py` | `/api/v1/*` endpoints | `router`, `create_app()` |
-| Music | `apps/music/providers/` | Platform registry and lazy loading | `PLATFORMS`, `create()` |
+| Music | `apps/music/providers/` | Platform registry and lazy loading | `LIGHT_PLATFORMS`, `available_labels()`, `create()` |
 
 ---
 

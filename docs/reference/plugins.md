@@ -398,7 +398,7 @@ config_3 = "three"
 }
 ```
 
-> 现有内置处理器文档: 见 `docs/3-settings-schema.md#processors-配置`
+> 现有内置处理器文档: 见 [`设置项参考`](../guide/settings-reference.md) 与 [`处理器参考`](../guide/processors-reference.md)
 > 包括 `cleaner` (正则/替换) 、`zh_convert` (OpenCC 简繁转换) 、`corrector` (pycorrector 纠错, 效果因模型而异)。
 
 ---
@@ -410,7 +410,7 @@ config_3 = "three"
 * 站点会话：`@registrar.register_fetcher()`
 * 站点解析器：`@registrar.register_parser()`
 * 站点搜索器：`@registrar.register_searcher()`
-* 站点客户端：`@registrar.get_client()`
+* 站点客户端：`@registrar.register_client()`
 * 文本处理器：`@registrar.register_processor()`
 
 #### 1. 关键名如何确定

@@ -50,6 +50,9 @@ NOVEL_API_TOKEN=my-secret novel-api
 - OpenAPI JSON：<http://127.0.0.1:8081/openapi.json>
 - 导出文件静态目录：`/downloads/<文件名>`（对应配置 `general.output_dir`）
 
+> 绑定非回环地址（如 `0.0.0.0`）时，`/docs`、`/redoc` 与 `/openapi.json` 会自动关闭，
+> 避免把完整路由与参数表发布到局域网；`novel-api` 仅在回环监听时暴露它们。
+
 ## 鉴权
 
 未设置 token 时不校验，适用于仅绑定 localhost 的场景。
@@ -68,7 +71,7 @@ X-API-Key: my-secret
 缺失或错误返回 `401`：
 
 ```json
-{"detail": "Invalid or missing API token"}
+{"detail": "Invalid or missing API token. Send 'Authorization: Bearer <token>' or 'X-API-Key: <token>'."}
 ```
 
 ## 端点一览
@@ -114,7 +117,7 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 
 `task_id`、`title`、`site`、`book_id`、`status`、`chapters_done`、
 `chapters_total`、`progress`、`error`、`exported_paths`、`created_at`、
-`finished_at`。
+`finished_at`、`export_stage`。
 
 `status` 取值：`queued`、`running`、`processing`、`exporting`、
 `completed`、`cancelled`、`failed`。
@@ -131,7 +134,8 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
   "timeout": 5.0,
   "sort": "quality",
   "order": "desc",
-  "limit": 20
+  "limit": 20,
+  "group": false
 }
 ```
 
@@ -142,7 +146,11 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
   整个聚合搜索的耗时也大致等于这个值，而不是被最慢的站点拖住。
 - `sort` 可选 `quality`、`priority`、`site`、`title`、`author`、
   `words`、`update`。
+- `order` 可选 `asc` / `desc`；省略时使用该排序键的自然方向。
 - `limit` 为合并后的总结果上限。
+- `group` 默认为 `false`；设为 `true` 时把跨站点的同名书合并为一行，每行是
+  该书的最佳来源，并额外带一个 `sources` 数组列出所有命中的站点（最佳来源在前）。
+  外层结构仍是 `{total, results}`，不关心合并的客户端可保持默认值。
 - `keyword` 支持 2–4 个词的「书名 + 作者」式查询：空格（含全角）、`·`、
   `,`、`，`、`-` 会把关键词拆成多个 token，分别与标题、作者比较
   （例如 `"斗破苍穹 天蚕土豆"`）；整串关键词仍参与评分。多词拆分只影响
@@ -752,14 +760,16 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
 响应：
 
 ```json
-{"path": "D:/Music/playlists/favorites.m3u8", "tracks_written": 1, "skipped": 0}
+{"path": "D:/Music/playlists/favorites.m3u8", "tracks_written": 1, "skipped": 0, "written": 1}
 ```
+
+`written` 与 `tracks_written` 同值，是内嵌引擎/Android 客户端读取的兼容别名。
 
 ### 平台健康检查
 
 `GET /api/v1/music/health` 对每个平台做一次有界搜索（不解析直链、不下载）。
 省略 `platform` 时并发检查全部已注册平台；`timeout` 为单个平台的预算
-（默认 `5` 秒，范围 `1..60`）：
+（默认 `5` 秒，必须大于 `0` 且不超过 `60`）：
 
 ```json
 [
@@ -797,7 +807,8 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
     "error": null,
     "exported_paths": {"txt": "downloads/示例小说.txt"},
     "created_at": 1710000000.0,
-    "finished_at": 1710000100.0
+    "finished_at": 1710000100.0,
+    "export_stage": "raw"
   }
 }
 ```

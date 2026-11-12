@@ -77,12 +77,22 @@ adapter = ConfigAdapter(config)
 **Methods:**
 
 ```python
-get_fetcher_config(site: str)   -> FetcherConfig
-get_downloader_config(site: str)-> DownloaderConfig
-get_parser_config(site: str)    -> ParserConfig
-get_exporter_config(site: str)  -> ExporterConfig
-get_login_config(site: str)     -> dict[str, str]
-get_book_ids(site: str)         -> list[BookConfig]
+get_config()                     -> dict[str, Any]
+get_fetcher_config(site: str)    -> FetcherConfig
+get_parser_config(site: str)     -> ParserConfig
+get_client_config(site: str)     -> ClientConfig
+get_exporter_config(site: str)   -> ExporterConfig
+get_login_config(site: str)      -> dict[str, str]
+get_login_required(site: str)    -> bool
+get_export_fmt(site: str)        -> list[str]
+get_plugins_config()             -> dict[str, Any]
+get_processor_configs(site: str) -> list[ProcessorConfig]
+get_book_ids(site: str)          -> list[BookConfig]
+get_log_level()                  -> str
+get_log_dir()                    -> Path
+get_cache_dir()                  -> Path
+get_raw_data_dir()               -> Path
+get_output_dir()                 -> Path
 ```
 
 ---
@@ -111,8 +121,8 @@ Getting instances:
 ```python
 client = registrar.get_client("aaatxt")  # -> ClientProtocol
 
-fetcher = registrar.get_fetcher(site, FetcherConfig)  # -> FetcherProtocol
-parser = registrar.get_parser(site, ParserConfig)  # -> ParserProtocol
+fetcher = registrar.get_fetcher(site, FetcherConfig())  # -> FetcherProtocol
+parser = registrar.get_parser(site, ParserConfig())  # -> ParserProtocol
 ```
 
 > Site package naming requirement: `plugins.sites.<site_key>.<kind>`; if the first character is a digit, normalize it with an `n` prefix (e.g. `3xx` -> `n3xx`).
@@ -166,7 +176,7 @@ class BookInfoDict(TypedDict):
 ```python
 @dataclass
 class FetcherConfig:
-    request_interval: float = 2.0
+    request_interval: float = 0.5
     retry_times: int = 3
     backoff_factor: float = 2.0
     timeout: float = 10.0
@@ -174,14 +184,22 @@ class FetcherConfig:
     max_rps: float = 1000.0
     user_agent: str | None = None
     headers: dict[str, str] | None = None
+    impersonate: str | None = None
     verify_ssl: bool = True
+    http2: bool = True
+    proxy: str | None = None
+    proxy_user: str | None = None
+    proxy_pass: str | None = None
+    trust_env: bool = False
+    cache_dir: str = field(default_factory=default_cache_dir)  # <app_home>/cache
+    backend: str = "aiohttp"
     locale_style: str = "simplified"
 
 @dataclass
 class OCRConfig: ...
 @dataclass
 class ParserConfig:
-    cache_dir: str = "./novel_cache"
+    cache_dir: str = field(default_factory=default_cache_dir)  # <app_home>/cache
     use_truncation: bool = True
     enable_ocr: bool = False
     batch_size: int = 32
@@ -190,31 +208,39 @@ class ParserConfig:
     ocr_cfg: OCRConfig = field(default_factory=OCRConfig)
 
 @dataclass
-class TextCleanerConfig: ...
-@dataclass
 class ExporterConfig:
-    cache_dir: str = "./novel_cache"
-    raw_data_dir: str = "./raw_data"
-    output_dir: str = "./downloads"
-    check_missing: bool = True
-    clean_text: bool = True
-    make_txt: bool = True
-    make_epub: bool = False
-    make_md: bool = False
-    make_pdf: bool = False
+    render_missing_chapter: bool = True
     append_timestamp: bool = True
     filename_template: str = "{title}_{author}"
-    include_cover: bool = True
     include_picture: bool = True
     split_mode: str = "book"
-    cleaner_cfg: TextCleanerConfig = field(default_factory=TextCleanerConfig)
 
-class BookConfig(TypedDict):
+@dataclass
+class ClientConfig:
+    request_interval: float = 0.5
+    retry_times: int = 3
+    backoff_factor: float = 2.0
+    cache_dir: str = field(default_factory=default_cache_dir)
+    raw_data_dir: str = "./raw_data"
+    output_dir: str = "./downloads"
+    workers: int = 4
+    cache_book_info: bool = True
+    cache_chapter: bool = True
+    fetch_inaccessible: bool = False
+    save_html: bool = False
+    storage_batch_size: int = 1
+    fetcher_cfg: FetcherConfig = field(default_factory=FetcherConfig)
+    parser_cfg: ParserConfig = field(default_factory=ParserConfig)
+
+@dataclass(frozen=True, slots=True)
+class BookConfig:
     book_id: str
-    start_id: NotRequired[str]
-    end_id: NotRequired[str]
-    ignore_ids: NotRequired[list[str]]
+    start_id: str | None = None
+    end_id: str | None = None
+    ignore_ids: frozenset[str] = frozenset()
 ```
+
+> `default_cache_dir()` returns `cache/` under the application data directory (overridable with `NOVEL_HOME`), not `./novel_cache` in the current directory.
 
 ### Login and Search
 
@@ -241,6 +267,8 @@ class SearchResult(TypedDict):
     word_count: str
     priority: int
 ```
+
+> `POST /api/v1/search` and `novel-cli search --json` add read-only `rank_score` (`0..1`) and `match_tier` (`0..4`) to each row. They are response-derived annotations, not part of `SearchResult` itself, and are never written back to the cache.
 
 ---
 

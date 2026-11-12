@@ -93,12 +93,13 @@ novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end E
     * Enter a book ID (used together with `--site`)
     * Enter a book/chapter URL (the site and book ID are resolved automatically)
     * When omitted, `book_ids` is read from the configuration file
-* `--site SITE`: site key (e.g. `qidian`, `b520`, ...); can be omitted if a URL is passed directly
-* `--start START`: start chapter **unique ID** (only applied to the first `book_id`)
-* `--end`: end chapter **unique ID**, **inclusive** (only applied to the first `book_id`)
+    * Surrounding whitespace is stripped, so `" 123 "` and `"123"` name the same book and data directory; fully identical requests (same `book_id` and same `--start`/`--end`) are de-duplicated and downloaded once, while the same book with a different range remains a separate job
+* `--site SITE`: site key (e.g. `qidian`, `b520`, ...); can be omitted if a URL is passed directly; surrounding whitespace is stripped, and a blank value (`--site ""`) is a usage error (exit code `2`)
+* `--start START`: start chapter **unique ID** (only applied to the first `book_id`); surrounding whitespace is stripped, and a blank value is a usage error (exit code `2`) rather than being treated as "no range"
+* `--end`: end chapter **unique ID**, **inclusive** (only applied to the first `book_id`); whitespace handling is the same as `--start`
 * `--no-export`: download only, no export. When enabled, the export step is skipped
 * `--format FORMAT [FORMAT ...]`: export format: `txt` / `epub` / `html`; multiple values allowed; defaults to the setting in the configuration file
-* `--json`: print the result to stdout as JSON and exit (structure in the table at the end of this page)
+* `--json`: print indented multi-line JSON (`indent=2`) to stdout and exit (structure in the table at the end of this page)
 * `--strict`: exit non-zero if any chapter could not be downloaded; an incomplete book is not exported, and up to 20 failures are listed (the default only warns with the first 5)
 
 > `--start` / `--end` are used to temporarily download a subset of chapters, and only affect the **first** `book_id` provided on the command line.
@@ -239,7 +240,7 @@ Export downloaded novels to a specified format
 **Synopsis**
 
 ```bash
-novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CONFIG] [--start START] [--end END] [--stage STAGE] [--json] [book_ids ...]
+novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CONFIG] [--start START] [--end END] [--stage STAGE] [--out DIR] [--json] [book_ids ...]
 ```
 
 **Options**
@@ -251,6 +252,7 @@ novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CON
 * `--start START`: start chapter ID, applied only to the first book
 * `--end END`: end chapter ID, applied only to the first book
 * `--stage STAGE`: export stage (e.g. `raw`, `cleaner`); defaults to the last stage
+* `--out DIR`: override the export directory; only the finished files are affected. Raw data is still read from `general.raw_data_dir` and is never written or changed. When omitted, `general.output_dir` from the configuration is used. Supports `~` and environment variables; a missing directory (including its parents) is created automatically
 * `--json`: print the result to stdout as JSON and exit (structure in the table at the end of this page)
 
 **Examples**
@@ -263,6 +265,9 @@ novel-cli export --format epub
 
 # Specify the source site and export multiple books
 novel-cli export --site b520 12345 23456
+
+# Write the exported files to a custom directory (raw data is unchanged; the directory is created)
+novel-cli export --site b520 12345 --out ~/exports
 
 # Omit site and book_ids to enter interactive mode for selecting the site and books
 novel-cli export
@@ -403,7 +408,7 @@ For example, fonts shared across a site or parsing cache, etc.
 **Synopsis**
 
 ```bash
-novel-cli clean cache [-h] [--config CONFIG] [--site SITE] [-y]
+novel-cli clean cache [-h] [--config CONFIG] [--site SITE] [-y] [--dry-run] [--json]
 ```
 
 **Options**
@@ -415,6 +420,8 @@ novel-cli clean cache [-h] [--config CONFIG] [--site SITE] [-y]
   `:`, or control characters exit with a usage error (`2`) and never touch
   anything outside the cache root
 * `-y, --yes`: skip the confirmation prompt
+* `--dry-run`: report the paths that would be removed with their file counts/bytes, **without deleting anything** (zero deletion). It uses the same path validation as a real removal, so an escaping `--site` also exits with a usage error (`2`)
+* `--json`: print a single-line JSON report; requires `--dry-run` (otherwise exits `2`). Always contains `dry_run`, `command`, `site`, `book_id`, `book_ids`, `items`, `paths`, `files`, `bytes`; each `items[]` entry has `path`, `kind`, `files`, `bytes`
 
 **Examples**
 
@@ -430,6 +437,12 @@ novel-cli clean cache --site b520 -y
 
 # Specify the configuration file
 novel-cli clean cache --config ./settings.toml
+
+# Preview what would be removed (zero deletion), then clean for real
+novel-cli clean cache --site qidian --dry-run
+
+# Scripted use: a single-line JSON report
+novel-cli clean cache --site qidian --dry-run --json
 ```
 
 ---
@@ -454,7 +467,7 @@ novel-cli clean book [-h]
     [--start START] [--end END]
     [--stage STAGE]
     [--no-chapters] [--metadata] [--media] [--all]
-    [-y]
+    [-y] [--dry-run] [--json]
     [book_ids ...]
 ```
 
@@ -473,6 +486,8 @@ novel-cli clean book [-h]
 * `--media`: delete the media resource directory (images, etc.)
 * `--all`: delete **all raw data directories** of the book (ignoring other cleaning options); if `book_ids` is also omitted, clean the entire raw_data of the specified site / all sites
 * `-y, --yes`: skip the confirmation prompt
+* `--dry-run`: report the paths that would be removed with their file counts/bytes, **without deleting anything** (zero deletion). It uses the same path validation as a real removal (an escaping `--site` or an invalid `--stage` also exits `2`)
+* `--json`: print a single-line JSON report; requires `--dry-run` (otherwise exits `2`). Always contains `dry_run`, `command`, `site`, `book_id` (the ID when exactly one book is cleaned, otherwise `null`), `book_ids`, `items`, `paths`, `files`, `bytes`; each `items[]` entry has `path`, `kind`, `files`, `bytes`, and `kind` is `rows` when only chapter rows inside the database are removed while the database file itself stays
 
 **Examples**
 
@@ -500,6 +515,12 @@ novel-cli clean book --all
 
 # Skip the confirmation prompt
 novel-cli clean book --site qidian 1010868264 --all -y
+
+# Preview what an entire book would remove (zero deletion)
+novel-cli clean book --site qidian 1010868264 --all --dry-run
+
+# Preview all raw_data of a site as JSON
+novel-cli clean book --site qidian --all --dry-run --json
 ```
 
 > Tip: `--start/--end` accept a **chapter unique ID**, not the "N-th chapter" ordinal
@@ -558,7 +579,7 @@ pip install "novel-downloader[music]"
 ```bash
 novel-cli music [-h] {platforms,search,download,export-m3u,health} ...
 
-novel-cli music platforms
+novel-cli music platforms [-h] [--json]
 
 novel-cli music search [-h] [--platform KEY] [--limit N] [--json] keyword
 
@@ -570,20 +591,22 @@ novel-cli music download [-h] [--keyword KEYWORD] [--platform KEY] [--limit N]
 novel-cli music export-m3u [-h] --keyword KEYWORD [--platform KEY] [--limit N]
                            [--out FILE]
 
-novel-cli music health [-h] [--platform KEY] [--keyword KEYWORD]
+novel-cli music health [-h] [--platform KEY] [--keyword KEYWORD] [--json]
 ```
 
 **General Options**
 
 * `--platform KEY`: music platform key. `search` and `download` default to `all` (aggregate search across every platform, merging the same song into one row with its sources); a concrete key still works. `export-m3u` defaults to `netease`. Run `novel-cli music platforms` for the full list
+* Platform names are case-insensitive and also accept the display names printed by `music platforms` (e.g. `网易云音乐`, `国内 · 网易云音乐`) and common aliases (`163`, `NetEase`, `网易云`, ...). An unknown platform is a usage error (`2`) that lists the available keys.
 * `--limit N`, `-l N`: maximum number of results, defaults to `20`
 
 **platforms**
 
-List the available music platforms with their notes:
+List the available music platforms with their notes. `--json` prints a `{platform key: display name}` object for scripts:
 
 ```bash
 novel-cli music platforms
+novel-cli music platforms --json
 ```
 
 **search**
@@ -631,15 +654,20 @@ novel-cli music export-m3u --keyword "keyword" --platform netease --limit 10
 
 Run one bounded search per platform (1 result is enough) to check whether it can be reached; useful for troubleshooting network or platform problems. A search that succeeds but returns zero results still counts as healthy (for example, an auth-gated platform without configured credentials):
 
-* `--platform KEY`: check only the given platform; omit it to check every platform
+* `--platform KEY`: check only the given platform; omit it to check every platform. Accepts a platform key, display name, or alias (same rules as above)
 * `--keyword KEYWORD`: keyword used for the connectivity probe, defaults to `test`
+* `--json`: print one line of JSON, `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`; the field names match `GET /api/v1/music/health`. The command still exits `1` when any platform fails, after printing the complete JSON document
 
 ```bash
 # Check every platform
 novel-cli music health
 
-# Check NetEase only
+# Check NetEase only (key, display name, or alias)
 novel-cli music health --platform netease
+novel-cli music health --platform 网易云音乐
+
+# Scripted use: machine-readable output
+novel-cli music health --json
 ```
 
 **Examples**
@@ -774,10 +802,12 @@ Report the disk usage of the four application data directories, and optionally c
 | Downloads | `general.output_dir` |
 | Logs | `general.debug.log_dir` |
 
+Without a subcommand it reports disk usage; the `backup` / `restore` subcommands back up and restore chapter databases.
+
 **Synopsis**
 
 ```bash
-novel-cli storage [-h] [--json] [--clean] [-y]
+novel-cli storage [-h] [--json] [--clean] [-y] [--dry-run] [{backup,restore} ...]
 ```
 
 **Options**
@@ -785,7 +815,8 @@ novel-cli storage [-h] [--json] [--clean] [-y]
 * `--json`: print the statistics as JSON on stdout and exit.
 * `--clean`: print the table, then remove the existing data directories listed above (bulk equivalent of cleaning raw/cache/downloads/logs).
 * `-y, --yes`: skip the confirmation prompt used by `--clean`.
-* `--json` and `--clean` cannot be combined (exit code `2`).
+* `--dry-run`: only report the directories and sizes `--clean` would remove, **without deleting anything** (zero deletion). It uses the same path validation as a real clean; using it without `--clean` exits with a usage error (`2`). It can be combined with `--json` (structure in the table at the end of this page).
+* `--json` and `--clean` cannot be combined (exit code `2`) unless `--dry-run` is also given.
 
 **Examples**
 
@@ -796,6 +827,12 @@ novel-cli storage
 # Machine-readable output
 novel-cli storage --json
 
+# Preview what --clean would remove (zero deletion)
+novel-cli storage --clean --dry-run
+
+# Preview and print a single-line JSON report
+novel-cli storage --clean --dry-run --json
+
 # Remove all data directories (asks for confirmation)
 novel-cli storage --clean
 
@@ -803,7 +840,95 @@ novel-cli storage --clean
 novel-cli storage --clean -y
 ```
 
-The `--json` shape is `{ "raw": {...}, "cache": {...}, "downloads": {...}, "logs": {...}, "total": {...} }`; each directory object has `label`, `path`, `files`, and `bytes`, while `total` has only `files` and `bytes`.
+The `--json` shape is `{ "raw": {...}, "cache": {...}, "downloads": {...}, "logs": {...}, "total": {...} }`; each directory object has `label`, `path`, `files`, `bytes`, `free_bytes`, and `top` (per-subdirectory `name`/`files`/`bytes`), while `total` has `files`, `bytes`, `reclaimable_bytes`, and `reclaimable_files`.
+
+##### 9.1 storage backup Subcommand
+
+Take a consistent snapshot (SQLite online backup, including data still in the WAL) of every `chapter.<stage>.sqlite` under `raw_data` and write a UTC-timestamped copy that mirrors the `<site>/<book>` layout.
+
+**Synopsis**
+
+```bash
+novel-cli storage backup [-h] --out OUT [--json]
+```
+
+**Options**
+
+* `--out OUT`: directory that receives the backup files (required). Supports `~` and environment variables and is created when missing; each book produces `<out>/<site>/<book>/chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite`. An existing target file is never overwritten
+* `--json`: print a single-line JSON report with `command`, `ok`, `timestamp`, `out`, `count`, `bytes`, and `files[]` (`source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters`); with no databases to back up, `count` is `0` and `files` is an empty array
+
+The backup contains only the `chapter.<stage>.sqlite` files under `raw_data` (chapter text and metadata). It does **not** include `settings.toml`, cookies/tokens or other login state (they live in `cache_dir`), logs, images/media, or exported files. Restoring a backup therefore does not restore a login session; sign in again after moving to a new machine. The backup files are **plaintext** SQLite and may contain paid or private text, so keep them in a controlled directory and never commit them to Git or a public cloud drive.
+
+**Examples**
+
+```bash
+# Back up every chapter database
+novel-cli storage backup --out ~/novel-backups
+
+# Scripted use
+novel-cli storage backup --out ./backups --json
+```
+
+##### 9.2 storage restore Subcommand
+
+Restore a chapter database from a backup file. The file is validated first (SQLite integrity, schema version, required columns), then the target database is replaced atomically.
+
+**Synopsis**
+
+```bash
+novel-cli storage restore [-h] --from SOURCE [--to TARGET] [-y] [--json]
+```
+
+**Options**
+
+* `--from SOURCE`: backup file to restore (required)
+* `--to TARGET`: database path to write; it must be inside `raw_data_dir` and named like `chapter.<stage>.sqlite`. When omitted, the path is derived from the backup's `<site>/<book>` layout; if that is not possible, the command exits with a usage error (`2`)
+* `-y, --yes`: allow replacing an existing database. The current file is first preserved next to it as `chapter.<stage>.sqlite.pre-restore-<timestamp>.bak`; without `--yes`, an existing target is refused (exit code `2`)
+* `--json`: print a single-line JSON report with `command`, `ok`, `from`, `target`, `replaced_existing`, `pre_restore_backup`, `schema_version`, `chapters`, `bytes`, `sha256`
+
+**Examples**
+
+```bash
+# Restore into raw_data using the site/book path stored in the backup
+novel-cli storage restore --from ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite
+
+# Restore to an explicit database path, allowing replacement (the old file is backed up first)
+novel-cli storage restore --from ./backup.sqlite --to ./raw_data/qidian/1010868264/chapter.raw.sqlite -y
+
+# Scripted use
+novel-cli storage restore --from ./backup.sqlite -y --json
+```
+
+The `--to` filename must look like `chapter.<stage>.sqlite`, and the stage must match the original database (usually `raw` or `cleaner`). Writing to the wrong stage does not affect other files, but the application then reads and writes a different stage database, which looks like “my chapters disappeared”.
+
+##### 9.3 Full Workflow: Back Up → Verify → Restore
+
+1. Back up and keep the machine-readable report (its `sha256`, `schema_version`, and `chapters` fields are used in the next step):
+
+```bash
+mkdir -p ~/novel-backups
+novel-cli storage backup --out ~/novel-backups --json > ~/novel-backups/last-backup.json
+```
+
+2. Verify the copy before restoring: every digest must match the report, and SQLite's integrity check must return `ok`. `restore` repeats the integrity, schema-version, and required-column checks itself; this step just catches a truncated copy or disk damage earlier:
+
+```bash
+jq -r '.files[] | "\(.sha256)  \(.target)"' ~/novel-backups/last-backup.json | sha256sum -c -
+sqlite3 ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite 'PRAGMA integrity_check;'
+# expected output: ok
+```
+
+These commands need `jq`, `sha256sum` (Git Bash / Linux / macOS), and the `sqlite3` CLI; if `sqlite3` is unavailable, skip the integrity check — `restore` still enforces the same validation.
+
+3. Restore and check the result. If the target already exists, `-y` is required; the old database is first preserved as `chapter.<stage>.sqlite.pre-restore-<timestamp>.bak` in the same directory:
+
+```bash
+novel-cli storage restore \
+  --from ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite \
+  -y --json
+```
+
+In the JSON report, `replaced_existing` says whether an existing database was replaced, `pre_restore_backup` is where the old one was preserved (`null` when nothing was replaced), and `chapters` is the restored row count. To confirm a backup is usable without touching live data, omit `-y`: when the target exists the command exits with a usage error (`2`) and writes nothing.
 
 ---
 
@@ -856,12 +981,14 @@ Print a shell completion script for `novel-cli`. The completion is generated fro
 **Synopsis**
 
 ```bash
-novel-cli completion [-h] [--shell {bash,zsh,powershell}]
+novel-cli completion [-h] [--shell {bash,zsh,fish,powershell}]
 ```
 
 **Options**
 
-* `--shell {bash,zsh,powershell}`: shell to generate the script for; when omitted it is auto-detected: `$SHELL` pointing to bash/zsh is honored, otherwise Windows defaults to `powershell` and other platforms to `bash`.
+* `--shell {bash,zsh,fish,powershell}`: shell to generate the script for; when omitted it is auto-detected: if the basename of `$SHELL` is `bash`, `zsh` or `fish` that shell is used, otherwise Windows defaults to `powershell` and other platforms to `bash`.
+
+Generated scripts always use LF line endings (no CRLF even on Windows), so they can be redirected to a file and sourced as-is.
 
 **Examples**
 
@@ -875,6 +1002,16 @@ source <(novel-cli completion --shell zsh)
 
 # Zsh (persistent): drop it into a directory on $fpath, the file must be named _novel-cli
 novel-cli completion --shell zsh > "${fpath[1]}/_novel-cli"
+```
+
+```fish
+# Fish: persist into the autoloaded directory; every completion session reads it
+# afterwards (no need to edit config.fish)
+mkdir -p ~/.config/fish/completions
+novel-cli completion --shell fish > ~/.config/fish/completions/novel-cli.fish
+
+# Fish: current session only
+novel-cli completion --shell fish | source
 ```
 
 ```powershell
@@ -944,7 +1081,7 @@ novel-cli batch --file books.txt --download --interval 1.5 --verbose
 
 #### 13. update Subcommand
 
-Check the update manifest (`latest.json`) and optionally download this platform's asset. Checking and downloading are two separate steps: `--check` only checks, and the download must be triggered explicitly. The CLI only **downloads and verifies**; it never executes, unpacks or installs anything.
+Check the update manifest (`latest.json`) and optionally download this platform's CLI asset. Checking and downloading are two separate steps: `--check` only checks, and the download must be triggered explicitly. The CLI requests `shape="cli"` explicitly and only selects `novel-cli-<version>-<platform>.zip`; even if the manifest/API only offers desktop packages, it **never falls back** to downloading `NovelDownloader-setup-*.exe`. The CLI only **downloads and verifies**; it never executes, unpacks or installs anything.
 
 **Synopsis**
 
@@ -955,7 +1092,7 @@ novel-cli update [-h] [--check] [--json] [-y] [--no-mirror]
 **Options**
 
 * `--check`: check only; never ask or download. The exit code reports whether the *check* worked, not whether an update exists
-* `--json`: print one machine-readable JSON document on stdout and exit; without `--yes` it behaves like `--check` and leaves `download_path` as `null`
+* `--json`: print one machine-readable JSON document on stdout and exit; without `--yes` it behaves like `--check` and leaves `download_path` as `null`. The document always contains `asset_shape`: `cli` when a CLI asset was selected, `null` when there is no CLI asset or the check failed
 * `-y, --yes`: non-interactive download; downloads, verifies the SHA-256 digest and prints the file path, but does **not** install it. An asset without a digest is refused
 * `--no-mirror`: ignore `NOVEL_UPDATE_MIRROR` and download from the release URL directly
 
@@ -966,6 +1103,10 @@ novel-cli update [-h] [--check] [--json] [-y] [--no-mirror]
   `insecure-url` with `--json --yes`).
 * An asset without a SHA-256 digest is never downloaded (`missing-digest`); the
   digest is verified before the file path is printed.
+* Only `novel-cli-*.zip` is accepted. When the release has no matching CLI asset
+  for this platform, the CLI does not fall back to a desktop installer; with
+  `--json --yes` the `error` is `no-cli-asset` (the old `no-asset` value is no
+  longer used), and interactive `--yes` also exits with code `1`.
 * One asset is capped at `1 GiB`; if an HTTPS request is redirected to plain
   HTTP, the download is refused.
 * On failure: a non-resume transfer deletes `.part` before the next retry; a
@@ -978,7 +1119,7 @@ novel-cli update [-h] [--check] [--json] [-y] [--no-mirror]
 
 * `NOVEL_UPDATE_MIRROR`: comma-separated mirror prefixes, probed in order and used when one answers; when none answers the original release URL is used, and an unset variable means no mirror.
 
-The file always lands in `<app home>/updates/` (never the current directory). To install: on Windows double-click the downloaded `NovelDownloader-setup-<version>-x64.exe`; on other platforms extract the archive and replace the installed files manually. See [Updates and auto-update](./updates.en.md) for the desktop/Android automatic checks and the full verification rules.
+The file always lands in `<app home>/updates/` (never the current directory), named like `novel-cli-<version>-<platform>.zip`. To install: close the running CLI, extract that zip, and replace the installed CLI directory with its contents (on Windows standalone installs this is usually `%LOCALAPPDATA%\Programs\novel-downloader\novel-cli\`). The CLI never downloads or runs a desktop installer. See [Updates and auto-update](./updates.en.md) for the desktop/Android automatic checks and the full verification rules.
 
 **Examples**
 
@@ -1005,8 +1146,8 @@ novel-cli update --json
 | Code | Meaning | Typical cases |
 | --- | --- | --- |
 | `0` | Success | The command completed; no search results or no new chapters is still success |
-| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean`, unmatched/malformed/download-failed entries in `batch`, a failed `update` check (also no asset for the platform, missing digest, or a failed download with `--yes`) |
-| `2` | Usage error | Missing/conflicting arguments (including argparse errors), `--json` with `--first`, `--json` with `--clean`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, `batch` without an input file or with a negative `--interval`, `clean --site` given a traversal value such as `..` or a path separator |
+| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean`, a failed `storage backup` / `restore`, any failed `music health` platform, unmatched/malformed/download-failed entries in `batch`, a failed `update` check (also no asset for the platform, missing digest, or a failed download with `--yes`) |
+| `2` | Usage error | Missing/conflicting arguments (including argparse errors), an empty `--site`/`--start`/`--end` for `download` (a whitespace-only value counts as empty), `--json` with `--first`, `storage`'s `--json` with `--clean` (without `--dry-run`), `clean cache`/`clean book` `--json` without `--dry-run`, `storage --dry-run` without `--clean`, `storage restore` replacing an existing database without `--yes` or targeting a path outside `raw_data_dir`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, an unknown `music --platform`, `batch` without an input file or with a negative `--interval`, `clean --site` given a traversal value such as `..` or a path separator |
 
 The `update --check` exit code reports whether the **check** succeeded, not whether an update exists: finding one still returns `0`. `sources list --probe` never changes the exit code by itself — network unreachability only shows as `-` in the `Latency`/`HTTP` columns, and only a failed structural `--check` exits with `1`.
 
@@ -1022,14 +1163,22 @@ With `--json`:
 
 | Command | Option | stdout shape |
 | --- | --- | --- |
-| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; `failed` is the number of missing chapters (`0` means complete); `exported` is `{format: [paths...]}`, or `null` with `--no-export` |
+| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; printed as indented multi-line JSON (`indent=2`); `failed` is the number of missing chapters (`0` means complete); `exported` is `{format: [paths...]}`, or `null` with `--no-export` |
 | `search` | `--json` | Array of results with `site`, `book_id`, `book_url`, `cover_url`, `title`, `author`, `latest_chapter`, `update_date`, `word_count`, `priority`, plus the read-only derived fields `rank_score` (`0..1`) and `match_tier` (`0..4`: `4` exact / `3` prefix / `2` contains / `1` partial / `0` no match) |
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
 | `sources list` | `--json` | Array with `site_key`, `name`, `search`, `hosts`, `origin`; `status` is populated only with `--check` (otherwise `null`); with `--probe` each item also carries `latency_ms` and `http_status` (`null` when unreachable) |
-| `update` | `--json` | One object with exactly eight keys: `current`, `latest`, `available`, `asset_name`, `asset_size`, `sha256`, `download_path`, `error`; absent values are `null` (or an empty string for `latest`) |
+| `update` | `--json` | One object with exactly nine keys: `current`, `latest`, `available`, `asset_name`, `asset_shape`, `asset_size`, `sha256`, `download_path`, `error`; absent values are `null` (or an empty string for `latest`). `asset_shape` is `cli` when a CLI asset was selected; `error` may be `insecure-url`, `missing-digest`, or `no-cli-asset` |
 | `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}`; with `platform=all` (the default) each track carries `sources` and the response also includes a `platforms` summary |
+| `music platforms` | `--json` | `{platform key: display name}` object |
+| `music health` | `--json` | `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`; field names match `GET /api/v1/music/health` |
 | `follow list` | `--json` | Array with `site`, `book_id`, `title`, `last_chapter`, `updated_at` |
-| `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` |
+| `clean cache` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` is `clean cache`, `book_id` is `null`, `book_ids` is `[]`; each `items[]` entry has `path`, `kind`, `files`, `bytes` |
+| `clean book` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` is `clean book`; `book_id` is the ID when exactly one book is cleaned, otherwise `null` (multiple books or a whole-site clean); `items[]` as above |
+| `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` (dir and total fields are described above) |
+| `storage --clean` | `--dry-run --json` | Same dry-run shape as `clean cache`, with `command` set to `storage --clean`, `site`/`book_id` `null`, and `book_ids` `[]` |
+| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files"}`; each `files[]` entry has `source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters` |
+| `storage restore` | `--json` | `{"command", "ok", "from", "target", "replaced_existing", "pre_restore_backup", "schema_version", "chapters", "bytes", "sha256"}` |
+| `doctor` | `--json` | `{"summary": {"total", "failures", "optional_failures", "ok"}, "checks": [{"key", "name", "ok", "fatal", ...}]}` |
 
 ```bash
 # Typical script use: take the first book ID
@@ -1042,7 +1191,7 @@ novel-cli follow list --json | jq 'length'
 novel-cli storage --json | jq '.total.bytes'
 ```
 
-> `login --list` prints a plain-text list, not JSON. `sources check`, `config`, `clean`, and `batch` currently have no `--json`.
+> `login --list` prints a plain-text list, not JSON. `sources check`, `config`, `clean logs`, `clean state`, and `batch` currently have no `--json`.
 >
 > The `jq` examples above require [jq](https://jqlang.github.io/jq/); without it, read the raw JSON output directly.
 

@@ -35,7 +35,7 @@ DRM decryption and HLS downloads additionally need **external** conditions (your
 
 Every platform implements a common interface: `search` returns platform-neutral `Track` objects, `resolve` turns a `Track` into a downloadable direct link, and `lyric` returns original and translated lyrics when available. The registry stores only a display name and a constructor; platform implementations are imported when selected.
 
-Platforms are grouped as `国内` (China), `国际` (International) and `曲库` (Catalog), sorted by display name inside each group. Some platforms have a usage note (`platform_note`), printed by the CLI after a platform is selected and shown under the search box in the desktop app:
+Platforms are grouped as `国内` (China), `国际` (International) and `曲库` (Catalog), sorted by display name inside each group. The CLI `--platform` option accepts a registry key (`netease`), a display name (`网易云音乐` or `国内 · 网易云音乐`), or a common alias (`163`, `NetEase`, `网易云`, ...), all case-insensitively; an unknown platform is a usage error (`2`) that lists the available keys. Some platforms have a usage note (`platform_note`), printed by the CLI after a platform is selected and shown under the search box in the desktop app:
 
 | Platform | Note |
 | --- | --- |
@@ -138,8 +138,8 @@ For 400/429 export failures see [Troubleshooting - playlist export](./troublesho
 
 A health check performs one **bounded search** only; it does not resolve direct links or download anything. It distinguishes "the platform is down" from "this song is not found".
 
-* CLI: `novel-cli music health` checks every platform concurrently, or use `--platform KEY` for one. The probe keyword defaults to `test` and each platform returns at most one result. A successful search with zero results still counts as reachable (that is what an auth-required platform without credentials looks like). The command exits non-zero if any platform fails.
-* API: `GET /api/v1/music/health` returns `platform`, `ok`, `elapsed_ms` and `error` per platform. Omitting `platform` checks all; `timeout` defaults to 5 seconds (allowed 0-60). An unknown platform returns `400`.
+* CLI: `novel-cli music health` checks every platform concurrently, or use `--platform KEY` for one. The probe keyword defaults to `test` and each platform returns at most one result. A successful search with zero results still counts as reachable (that is what an auth-required platform without credentials looks like). The command exits non-zero if any platform fails. With `--json` it prints one line, `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`, whose field names match the REST endpoint (on failure the complete JSON is printed first, then the command exits `1`).
+* API: `GET /api/v1/music/health` returns `platform`, `ok`, `elapsed_ms` and `error` per platform. Omitting `platform` checks all; `timeout` defaults to 5 seconds (must be greater than 0 and at most 60). An unknown platform returns `400`.
 * A passing single-platform check only means "it can complete a search"; it does not mean member-only or DRM tracks are downloadable.
 
 ---

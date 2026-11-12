@@ -42,6 +42,9 @@ novel-cli sources check ./rules/_example-template.json
 # 安装到用户目录 ($NOVEL_RULES_DIR, 未设置时用用户配置目录); --force 覆盖同名文件
 novel-cli sources add ./my-site.json
 
+# 也可以直接从 HTTP(S) URL 安装, --name 指定文件名 (省略时取 URL 中的文件名)
+novel-cli sources add --url https://example.com/my-site.json --name my-site
+
 # 卸载用户书源 (内置书源受保护, 无法删除)
 novel-cli sources remove my-site
 
@@ -55,6 +58,8 @@ novel-cli search "斗破苍穹" --first
 ```
 
 `--json` 会关闭交互提示, 并把机器可读的结果输出到 stdout; 表格、日志等诊断信息一律走 stderr, 因此可以直接管道给 `jq`。`--json` 与 `--first` 不能同时使用。
+
+`sources add` 的参数: 位置参数 `path` (本地文件) 与 `--url URL` 二选一; `--name NAME` 为远程规则指定安装文件名 (不含 `.json`); `--force` 覆盖同名文件。
 
 校验失败的后果取决于入口: 自动加载 (搜索、下载、`sources list`) 时, 解析失败的文件 (JSON 语法错误、重复键、未知键、缺少必填键、正则非法等) 会在加载阶段被跳过并记录一条警告日志, 不影响其它书源; `sources check` 与 `sources add` 面对同样的错误则直接报错并以非零退出码结束, 便于在安装前发现问题。具体的校验规则见下一节。
 

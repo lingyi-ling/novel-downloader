@@ -306,7 +306,7 @@ python -c "import sys; from pathlib import Path; p = Path.cwd(); print('filesyst
    ping -n 4 <电脑IP>
    ```
 
-4. 用手机浏览器打开 `http://<电脑IP>:8081/docs`，能打开 Swagger 页面说明网络可达；若打不开，继续检查防火墙。
+4. 用手机浏览器打开 `http://<电脑IP>:8081/api/v1/health`。绑定非回环地址时 `/docs` 会自动关闭，因此改用健康检查端点：返回 `401`（`Invalid or missing API token...`）说明网络可达且鉴权生效；若连接超时或被拒绝，继续检查防火墙。
 
 5. 放行 Windows 防火墙端口（管理员 PowerShell）：
 
@@ -473,9 +473,9 @@ curl -x http://127.0.0.1:7890 -I https://www.google.com
 
 **机制**：
 
-* 客户端先判断安装形态：可执行文件位于 `%LOCALAPPDATA%\Programs\NovelDownloader` 视为**安装版**，其它已打包目录视为**便携版**；源码运行则是 `source`。
-* **安装版**下载 `NovelDownloader-setup-<version>-x64.exe`，退出后以静默参数启动 Inno Setup，原地覆盖安装目录。安装器会先删除 `_internal` 再写入新版本，并通过命名互斥量 `NovelDownloader-UpdateMutex` 关闭仍在运行的旧实例。
-* **便携版**下载 zip，退出后由 PowerShell 辅助脚本 `updates/_apply_portable_update.ps1` 等待进程结束，解压到 `%TEMP%` 再覆盖当前程序目录并重新启动；不会另装一份到 `%LOCALAPPDATA%`。
+* 客户端先判断安装形态：优先读取卸载注册表的 `InstallLocation` / `DisplayIcon`（`{AppId}_is1` 键），其次看可执行文件旁是否有 `unins000.exe`，最后才检查默认目录 `%LOCALAPPDATA%\Programs\NovelDownloader`。因此安装到自定义目录仍算**安装版**；其它已打包目录视为**便携版**；源码运行则是 `source`。
+* **安装版**下载 `NovelDownloader-setup-<version>-x64.exe`，退出后以静默参数启动 Inno Setup，原地覆盖安装目录。安装器会先删除 `_internal` 再写入新版本，并通过命名互斥量 `NovelDownloader-UpdateMutex` 关闭仍在运行的旧实例；静默安装结束后会直接启动新版本，无需手动打开。
+* **便携版**下载 zip，退出后由 PowerShell 辅助脚本 `updates/_apply_portable_update.ps1` 等待进程结束，解压到 `%TEMP%`，先删除当前程序目录中的 `_internal` 再覆盖并重新启动，因此已移除的插件不会残留；`app_home` 下的设置与下载不受影响。不会另装一份到 `%LOCALAPPDATA%`。
 * 便携版更新依赖 `powershell` 或 `pwsh`。两者都找不到时，更新会中止并提示手动解压。
 
 **排查**：
@@ -483,7 +483,7 @@ curl -x http://127.0.0.1:7890 -I https://www.google.com
 1. 更新包在 `%LOCALAPPDATA%\novel_downloader\updates\`。失败后 zip/安装包通常仍在这里，便携版可以直接解压覆盖 `NovelDownloader.exe` 所在目录，再手动启动。
 2. 清理规则：`.part` 未完成文件保留 1 天，完整安装包/zip 保留 7 天，过期自动删除。
 3. 提示找不到 PowerShell：手动解压 `updates\` 里的 zip，把所有文件覆盖到当前程序目录。
-4. 怀疑升级没生效或出现两份：检查是否同时存在安装版目录 `%LOCALAPPDATA%\Programs\NovelDownloader` 和一个便携目录，确认自己启动的是哪一份。侧栏底部显示的 `v...` 是当前运行版本。
+4. 怀疑升级没生效或出现两份：安装版目录由卸载注册表（`InstallLocation` / `DisplayIcon`）或 `unins000.exe` 确定，未必是默认的 `%LOCALAPPDATA%\Programs\NovelDownloader`；确认自己启动的是哪一份。侧栏底部显示的 `v...` 是当前运行版本。
 5. 日志在 `%LOCALAPPDATA%\novel_downloader\logs\novel-desktop.log`，可搜索 `Launched the update installer` 或 `Launched the portable update helper` 确认更新器是否真正启动。
 
 安装、升级、卸载时的用户数据行为见[安装](./installation.md)一节。
@@ -590,11 +590,15 @@ novel-cli music search "关键词" --platform tidal --limit 5
 
 **现象**：桌面端更新提示 `Refusing to download an update from an insecure source`；
 `novel-cli update --yes` 以退出码 `1` 结束；`novel-cli update --json --yes`
-输出里 `error` 为 `insecure-url`、`missing-digest` 或 `no-asset`；下载中断后
+输出里 `error` 为 `insecure-url`、`missing-digest` 或 `no-cli-asset`；下载中断后
 `updates\` 里留下 `.part` 文件。
 
 **机制**（桌面端与 CLI 共用 `apps/common/updater.py`）：
 
+* `novel-cli update` 显式请求 `shape="cli"`，只接受 `novel-cli-<version>-<platform>.zip`。
+  即使清单/API 只返回桌面安装包，也会丢弃该回退并停止，不会下载或运行
+  `NovelDownloader-setup-*.exe`。对应地，`--json` 的 `asset_shape` 在选中 CLI 资产时
+  为 `cli`，没有 CLI 资产或检查失败时为 `null`。
 * 发布清单提供的资产 URL 必须是 `https://`。CLI 在询问/下载之前就拒绝明文地址；
   桌面端同样拒绝。
 * 下载器本身只接受 `http://` / `https://`；如果 HTTPS 请求被重定向到明文 HTTP，
@@ -610,15 +614,50 @@ novel-cli music search "关键词" --platform tidal --limit 5
    是用户自己配置的前缀，但镜像若把 HTTPS 重定向到 HTTP，也会在下载阶段被拒绝。
 2. `missing-digest`：该 release 没有为你的平台资产提供 SHA-256，客户端不会下载
    无法校验的文件；到发布页手动下载并核对摘要。
-3. `no-asset`：当前平台没有匹配的资产（例如在不受支持的架构上运行）。
+3. `no-cli-asset`：当前平台没有匹配的 CLI 资产（`novel-cli-*.zip`，例如发布漏传或架构不受支持）。CLI 不会回退到桌面安装包；请改用 `pip install -U novel-downloader`，或到发布页手动下载对应 CLI zip。
 4. 反复校验失败：关闭应用后删除 `%LOCALAPPDATA%\novel_downloader\updates\`
    下对应的 `.part` 再重试；桌面端也会自动清理超过 1 天的 `.part`。
 5. 需要机器可读原因时用 `novel-cli update --json --yes`：它不会进入交互，
-   下载失败的原因在 `error` 字段里（只加 `--json` 等价于 `--check`，不会尝试下载）。
+   下载失败的原因在 `error` 字段里，`asset_shape` 标明实际选择的资产形态
+   （CLI 只会是 `cli` 或 `null`；只加 `--json` 等价于 `--check`，不会尝试下载）。
 
 ---
 
-## 14. 仍有问题？
+## 14. 清理或恢复前先确认会删什么
+
+`clean cache`、`clean book` 与 `storage --clean` 都支持 `--dry-run`: 只报告路径与占用,
+**不删除任何文件**, 并与真实删除共用同一套路径校验 (越界站点名、保护目录同样报错)。
+
+```bash
+novel-cli clean cache --site qidian --dry-run
+novel-cli clean book --site qidian 1010868264 --all --dry-run
+novel-cli storage --clean --dry-run
+```
+
+脚本消费时加 `--json` (必须与 `--dry-run` 同用), 输出单行
+`{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`。
+
+如果章节数据库已被误删, 可用备份恢复:
+
+```bash
+# 先备份所有章节数据库
+novel-cli storage backup --out ~/novel-backups
+
+# 从备份恢复; 覆盖已有数据库需要 -y
+novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<时间戳>.sqlite -y
+```
+
+`restore` 会先校验备份文件 (完整性、schema 版本、必需列) 再原子替换; 覆盖已有数据库时
+旧库会先保存为同目录的 `*.pre-restore-*.bak`。目标路径必须位于 `raw_data_dir` 内。
+
+备份只含 `raw_data` 下的章节数据库, 不含 Cookie/token、`settings.toml`、日志或媒体文件;
+恢复后仍需重新登录, 且备份是明文, 请按敏感数据保管。完整的
+[「备份 → 校验 (SHA-256 / `PRAGMA integrity_check`) → 恢复」流程](./cli-examples.md#9-storage)
+见 CLI 用法示例。
+
+---
+
+## 15. 仍有问题？
 
 带上下面的信息提交 Issue：
 

@@ -58,7 +58,7 @@
 
 | 入口 | 代码位置 | 启动方式 | 说明 |
 | --- | --- | --- | --- |
-| CLI | `apps/cli/main.py` | `novel-cli` | `argparse` 子命令：`download` / `search` / `follow` / `export` / `login` / `config` / `clean` / `storage` / `doctor` / `sources` / `music` |
+| CLI | `apps/cli/main.py` | `novel-cli` | `argparse` 子命令：`download` / `search` / `browse` / `follow` / `export` / `login` / `config` / `clean` / `storage` / `doctor` / `sources` / `music` / `completion` / `batch` / `update` |
 | REST API | `apps/api/main.py` | `novel-api` | FastAPI + uvicorn，默认 `127.0.0.1:8081`，路由前缀 `/api/v1` |
 | 桌面客户端 | `apps/desktop/main.py` | `novel-desktop` | pywebview 窗口承载单文件 HTML 前端（`web_assets.py`），`webview_app.ApiBridge` 暴露 JSON 方法；`apps/desktop/engine.py` 中的 `AsyncEngine` 持有后台 asyncio 事件循环 |
 | Android | `android/app/src/main/java/com/lingyi/noveldl/` | Gradle 构建 | 通过 HTTP 调用本地 API，不直接依赖 Python 代码 |
@@ -90,7 +90,7 @@
 | 任务模型 | `apps/core/models.py` | 任务状态与进度 | `DownloadTask`、`Status` |
 | 追更列表 | `apps/core/watchlist.py` | 记录关注的书籍与最新章节 | `WatchlistStore`、`WatchEntry` |
 | REST 路由 | `apps/api/routes.py` | `/api/v1/*` 端点 | `router`、`create_app()` |
-| 音乐 | `apps/music/providers/` | 平台注册表与惰性加载 | `PLATFORMS`、`create()` |
+| 音乐 | `apps/music/providers/` | 平台注册表与惰性加载 | `LIGHT_PLATFORMS`、`available_labels()`、`create()` |
 
 ---
 

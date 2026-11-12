@@ -25,6 +25,8 @@ After installation, the following executable commands are provided:
 * `novel-cli`: command-line entry point
 * `novel-api`: local REST API entry point (requires the `api` extra, see below)
 
+For Tab completion in bash / zsh / fish / PowerShell, generate a script with `novel-cli completion --shell <shell>` and load it; see [CLI Usage § completion](./cli-examples.md#11-completion-subcommand).
+
 (2) Install the latest development version (GitHub)
 
 ```bash
@@ -49,11 +51,11 @@ pip install .
 
 When you download `NovelDownloader-setup-<version>-x64.exe` from GitHub Releases:
 
-* **Per-user install**, by default into `%LOCALAPPDATA%\Programs\NovelDownloader`; no administrator rights are required (`PrivilegesRequired=lowest`). The updater recognizes this default path as an installer copy; a copy installed elsewhere is treated as portable.
-* **Upgrade** overwrites the install directory in place. Setup deletes the old `_internal` before writing the new build, so plugin directories removed from the product do not linger. The in-app updater launches the same installer with silent flags.
+* **Per-user install**, by default into `%LOCALAPPDATA%\Programs\NovelDownloader`; no administrator rights are required (`PrivilegesRequired=lowest`). The updater recognises an installer copy through the uninstall registry entry: it reads the `InstallLocation` / `DisplayIcon` values that Inno writes under the `{AppId}_is1` uninstall key, so an install into a custom directory is still updated as an installer copy. When that registry entry is missing it falls back to `unins000.exe` in the install directory, and only then to the default path. Any other frozen folder is treated as portable.
+* **Upgrade** overwrites the install directory in place. Setup deletes the old `_internal` before writing the new build, so plugin directories removed from the product do not linger. The in-app updater launches the same installer with silent flags, and after a silent update the installer starts the new build itself (the `[Run]` entry has no `skipifsilent`), so nothing needs to be opened manually.
 * **A running instance** is identified by the named mutex `NovelDownloader-UpdateMutex`; Setup closes the old process before replacing files.
 * **Uninstall** removes only the install directory and shortcuts. It does not delete configuration, download history, caches, or login state under `%LOCALAPPDATA%\novel_downloader`. To remove everything, delete that directory manually (it contains account credentials, so review it first).
-* **Portable (no-install) builds** can be extracted to any directory. Configuration, logs, caches, and login state still live in `%LOCALAPPDATA%\novel_downloader` (overridable with `NOVEL_HOME`) and are not written into the program folder.
+* **Portable (no-install) builds** can be extracted to any directory. Configuration, logs, caches, and login state still live in `%LOCALAPPDATA%\novel_downloader` (overridable with `NOVEL_HOME`) and are not written into the program folder. A portable update deletes `_internal` in the program folder before copying the new files, so removed plugins do not linger; settings and downloads under `app_home` are untouched (only when `NOVEL_HOME` explicitly points inside `_internal` is that subtree preserved).
 
 ---
 
@@ -185,7 +187,7 @@ The complete installation process is as follows.
 (1) Install the extension dependencies
 
 ```bash
-pip install novel-downloader[image-utils]
+pip install "novel-downloader[image-utils]"
 ```
 
 This installs:

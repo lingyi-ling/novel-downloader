@@ -110,7 +110,7 @@ pip install -U novel-downloader
 安装汇总的运行时可选依赖:
 
 ```bash
-pip install novel-downloader[all]
+pip install "novel-downloader[all]"
 ```
 
 按需安装可选组:
@@ -201,6 +201,7 @@ novel-desktop
 | 历史 | 浏览导出文件, 打开所在文件夹 |
 | 音乐 | 多平台搜索与下载, 平台健康检查 (依赖可选组 `music`) |
 | 追更 | 维护追更列表, 检查新章节, 新章节加入下载队列 |
+| 设置 | 修改输出目录、代理、自动检查/下载/安装更新、主题与语言, 保存到 `settings.toml` |
 
 搜索结果按 `60` 条一批渲染: 列表底部显示「显示更多 (Show more)」和
 `已显示/总数`, 点一次追加下一批, 大结果集不会一次建满页面。音乐页导出歌单
