@@ -66,6 +66,11 @@ class QimaoSearcher(BaseSearcher):
             if not book_id:
                 continue
 
+            # Search covers are absolute on the live API; a mirror may serve a
+            # protocol-relative or root-relative path, which the UI and cover
+            # downloader cannot use as-is.
+            cover_rel = str(item.get("image_link") or "")
+
             results.append(
                 SearchResult(
                     site=self.site_name,
@@ -73,7 +78,7 @@ class QimaoSearcher(BaseSearcher):
                     book_url=self._abs_url(
                         str(item.get("read_url") or f"{self.BASE_URL}/shuku/{book_id}/")
                     ),
-                    cover_url=str(item.get("image_link") or ""),
+                    cover_url=self._abs_url(cover_rel) if cover_rel else "",
                     title=str(item.get("title") or ""),
                     author=str(item.get("author") or ""),
                     latest_chapter=str(item.get("latest_chapter_title") or "-"),

@@ -7,10 +7,10 @@ novel_downloader.plugins.sites.n71ge.searcher
 
 import contextlib
 import logging
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -54,31 +54,40 @@ class N71geSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
+
         rows = doc.xpath("//tr[td/a]")
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
             title_a = row.xpath("./td[1]/a")
             href = self._first_str([a.get("href") for a in title_a])
             title = self._first_str([a.text_content() for a in title_a])
-            if not href:
+            if not href or not title:
+                continue
+            if href.lower().startswith(("javascript:", "#")):
                 continue
 
-            if limit is not None and idx >= limit:
+            # ``/341_341309/`` or ``/341_341309.html?from=list#top``.  Build the
+            # id from the URL *path*: keeping the raw href leaked the query
+            # string and fragment into ``book_id``.
+            path = urlsplit(href).path
+            book_id = path.rstrip("/").rsplit("/", 1)[-1]
+            if book_id.endswith(".html"):
+                book_id = book_id[: -len(".html")]
+            if not book_id:
+                continue
+
+            if limit is not None and len(results) >= limit:
                 break
 
-            # '/341_341309/' -> "341_341309"
-            book_id = href.strip("/")
-            book_url = self._abs_url(href)
-
+            book_url = self._abs_url(path)
             latest_chapter = self._first_str(row.xpath("./td[2]/a/text()"))
             author = self._first_str(row.xpath("./td[3]/text()"))
             word_count = self._first_str(row.xpath("./td[4]/text()"))
             update_date = self._first_str(row.xpath("./td[5]/text()"))
-
-            # Compute priority
-            prio = self.priority + idx
 
             results.append(
                 SearchResult(
@@ -91,7 +100,7 @@ class N71geSearcher(BaseSearcher):
                     latest_chapter=latest_chapter,
                     update_date=update_date,
                     word_count=word_count,
-                    priority=prio,
+                    priority=self.priority + len(results),
                 )
             )
         return results

@@ -52,6 +52,9 @@ class Quanben5Parser(BaseParser):
             tree.xpath('//p[@class="info"][contains(., "类别")]/span/text()')
         )
         tags = [category] if category else []
+        serial_status = self._first_str(
+            tree.xpath('//p[@class="info"][contains(., "状态")]/span/text()')
+        )
         summary = self._first_str(tree.xpath('//p[@class="description"]/text()'))
 
         chapters: list[ChapterInfoDict] = []
@@ -77,6 +80,7 @@ class Quanben5Parser(BaseParser):
             "author": author,
             "cover_url": cover_url,
             "update_time": "",
+            "serial_status": serial_status,
             "tags": tags,
             "summary": summary,
             "volumes": volumes,

@@ -7,9 +7,11 @@ novel_downloader.plugins.sites.tongrenquan.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -36,7 +38,9 @@ class TongrenquanParser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         # Metadata
         book_name = self._first_str(tree.xpath('//div[@class="infos"]/h1/text()'))
@@ -57,14 +61,16 @@ class TongrenquanParser(BaseParser):
         summary = "\n".join(p.strip() for p in paras if p.strip())
 
         # Chapters extraction
-        chapters: list[ChapterInfoDict] = [
-            {
-                "title": (a.text or "").strip(),
-                "url": (a.get("href") or "").strip(),
-                "chapterId": (a.get("href") or "").rsplit("/", 1)[-1].split(".", 1)[0],
-            }
-            for a in tree.xpath('//div[contains(@class,"book_list")]//ul//li/a')
-        ]
+        chapters: list[ChapterInfoDict] = []
+        for a in tree.xpath('//div[contains(@class,"book_list")]//ul//li/a'):
+            href = (a.get("href") or "").strip()
+            if not href or href.lower().startswith(("javascript:", "#")):
+                continue
+            chapter_id = chapter_id_from_href(href)
+            title = (a.text_content() or "").strip()
+            if not chapter_id or not title:
+                continue
+            chapters.append({"title": title, "url": href, "chapterId": chapter_id})
 
         if not chapters:
             return None
@@ -91,7 +97,9 @@ class TongrenquanParser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         raw_title = self._first_str(
             tree.xpath('//div[contains(@class,"read_chapterName")]//h1/text()')

@@ -7,9 +7,12 @@ novel_downloader.plugins.sites.shu111.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,6 +29,7 @@ class Shu111Parser(BaseParser):
     """
 
     site_name: str = "shu111"
+    BASE_URL: str = "http://www.shu111.com"
 
     def parse_book_info(
         self,
@@ -35,7 +39,9 @@ class Shu111Parser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         book_name = self._first_str(
             tree.xpath('//meta[@property="og:novel:book_name"]/@content')
@@ -86,14 +92,24 @@ class Shu111Parser(BaseParser):
         )
         tags = [book_type] if book_type else []
 
-        chapters: list[ChapterInfoDict] = [
-            {
-                "title": (a.text or "").strip(),
-                "url": (a.get("href") or "").strip(),
-                "chapterId": (a.get("href") or "").rsplit("/", 1)[-1].split(".", 1)[0],
-            }
-            for a in tree.xpath('//*[@id="list-chapterAll"]//dd/a')
-        ]
+        chapters: list[ChapterInfoDict] = []
+        for a in tree.xpath('//*[@id="list-chapterAll"]//dd/a'):
+            href = (a.get("href") or "").strip()
+            if not href or href.lower().startswith(("javascript:", "#")):
+                continue
+            chapter_id = chapter_id_from_href(href)
+            if not chapter_id:
+                continue
+            title = (a.text_content() or "").strip()
+            if not title:
+                continue
+            chapters.append(
+                {
+                    "title": title,
+                    "url": resolve_url(tree, href, fallback_base=self.BASE_URL),
+                    "chapterId": chapter_id,
+                }
+            )
 
         if not chapters:
             return None
@@ -122,7 +138,9 @@ class Shu111Parser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         title = self._first_str(
             tree.xpath('//h1[contains(@class,"readTitle")]/text()'),

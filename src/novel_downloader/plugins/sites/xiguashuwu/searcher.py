@@ -6,10 +6,10 @@ novel_downloader.plugins.sites.xiguashuwu.searcher
 """
 
 import logging
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -48,25 +48,47 @@ class XiguashuwuSearcher(BaseSearcher):
             self._log_fetch_failure(keyword, self.SEARCH_URL, exc)
             return ""
 
+    @staticmethod
+    def _url_to_id(url: str) -> str:
+        """Derive the book id from a ``/book/<id>/...`` link."""
+        value = url.strip()
+        if value.startswith("//"):
+            value = "https:" + value
+        parts = urlsplit(value)
+        if parts.scheme not in ("", "http", "https"):
+            return ""
+        path = parts.path or value
+        marker = "/book/"
+        if marker not in path:
+            return ""
+        return path.split(marker, 1)[1].split("/", 1)[0]
+
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath('//div[@class="SHsectionThree-middle"]/p')
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
             href = self._first_str(
                 row.xpath(".//a[starts-with(@href,'/book/')][1]/@href")
-            ) or self._first_str(row.xpath(".//a[1]/@href"))
+            )
+            if not href:
+                href = self._first_str(row.xpath(".//a[1]/@href"))
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
+            # '/book/184974/iszip/0/' -> "184974"
+            book_id = self._url_to_id(href)
+            if not book_id:
+                continue
+
+            if limit is not None and len(results) >= limit:
                 break
 
-            # '/book/184974/iszip/0/' -> "184974"
-            book_id = href.split("/book/")[-1].split("/")[0]
             book_url = self._abs_url(href)
 
             title = (
@@ -96,7 +118,7 @@ class XiguashuwuSearcher(BaseSearcher):
                     latest_chapter="-",
                     update_date="-",
                     word_count="-",
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
         return results

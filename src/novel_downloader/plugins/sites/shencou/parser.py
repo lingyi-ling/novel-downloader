@@ -10,6 +10,10 @@ from typing import Any
 from lxml import etree, html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,6 +30,7 @@ class ShencouParser(BaseParser):
     """
 
     site_name: str = "shencou"
+    BASE_URL = "https://www.shencou.com"
 
     def parse_book_info(
         self,
@@ -39,8 +44,10 @@ class ShencouParser(BaseParser):
         if len(raw_pages) < 2:
             return None
 
-        info_tree = html.fromstring(raw_pages[0])
-        catalog_tree = html.fromstring(raw_pages[1])
+        info_tree = parse_html_tree(raw_pages[0])
+        catalog_tree = parse_html_tree(raw_pages[1])
+        if info_tree is None or catalog_tree is None:
+            return None
 
         # --- Metadata ---
         raw_name = self._first_str(info_tree.xpath("//span//a/text()"))
@@ -54,6 +61,7 @@ class ShencouParser(BaseParser):
         cover_url = self._first_str(
             info_tree.xpath('//a[contains(@href,"/files/article/image")]/img/@src')
         )
+        cover_url = resolve_url(info_tree, cover_url, fallback_base=self.BASE_URL)
 
         # word count
         word_count = self._first_str(
@@ -145,7 +153,9 @@ class ShencouParser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
         title = self._first_str(tree.xpath("//h1/text()"))
 
         # strip book-name prefix if present

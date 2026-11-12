@@ -6,9 +6,11 @@ novel_downloader.plugins.sites.n69shuba.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -34,8 +36,10 @@ class N69shubaParser(BaseParser):
         if len(raw_pages) < 2:
             return None
 
-        info_tree = html.fromstring(raw_pages[0])
-        catalog_tree = html.fromstring(raw_pages[1])
+        info_tree = parse_html_tree(raw_pages[0])
+        catalog_tree = parse_html_tree(raw_pages[1])
+        if info_tree is None or catalog_tree is None:
+            return None
 
         # --- base info ---
         book_name = self._first_str(
@@ -70,9 +74,11 @@ class N69shubaParser(BaseParser):
         chapters: list[ChapterInfoDict] = []
         for a in catalog_tree.xpath('//div[@id="catalog"]//ul/li/a'):
             url = a.get("href", "").strip()
-            if not url:
+            if not url or url.lower().startswith(("javascript:", "#")):
                 continue
-            chap_id = url.strip("/").rsplit("/", 1)[-1]
+            chap_id = chapter_id_from_href(url)
+            if not chap_id:
+                continue
             title = self._first_str(a.xpath(".//text()"))
             chapters.append(
                 {
@@ -111,7 +117,9 @@ class N69shubaParser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         title = ""
         paragraphs: list[str] = []

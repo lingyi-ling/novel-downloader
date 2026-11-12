@@ -9,6 +9,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,14 +30,16 @@ class LinovelParser(BaseParser):
     """
 
     site_name: str = "linovel"
-    BASE_URL = "https://lnovel.org"
+    #: The fetcher talks to www.linovel.net; the old ``lnovel.org`` value turned
+    #: relative cover paths into URLs on an unrelated host.
+    BASE_URL = "https://www.linovel.net/"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -44,11 +50,12 @@ class LinovelParser(BaseParser):
             or tree.xpath('//h1[contains(@class,"book-title")]/text()')
         )
 
-        cover_url = self._first_str(
+        cover_rel = self._first_str(
             tree.xpath('//meta[@property="og:image"]/@content')
             or tree.xpath('//div[contains(@class,"book-cover")]//img/@src')
             or tree.xpath('//div[contains(@class,"book-cover")]//a/@href')
         )
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
 
         author = self._first_str(
             tree.xpath(
@@ -90,9 +97,14 @@ class LinovelParser(BaseParser):
                 sec.xpath('.//h2[contains(@class,"volume-title")]//text()')
             )
 
-            volume_cover = self._first_str(
+            volume_cover_rel = self._first_str(
                 sec.xpath('.//div[contains(@class,"volume-cover")]//img/@src')
                 or sec.xpath('.//div[contains(@class,"volume-cover")]//a/@href')
+            )
+            volume_cover = (
+                resolve_url(sec, volume_cover_rel, fallback_base=self.BASE_URL)
+                if volume_cover_rel
+                else ""
             )
 
             volume_intro = self._join_strs(
@@ -113,7 +125,7 @@ class LinovelParser(BaseParser):
                     continue
 
                 ch_title = self._first_str([a.text_content()])
-                ch_id = ch_url.rsplit("/", 1)[-1].split(".", 1)[0]
+                ch_id = chapter_id_from_href(ch_url)
 
                 chapters.append(
                     {
@@ -157,7 +169,7 @@ class LinovelParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])

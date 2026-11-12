@@ -13,9 +13,9 @@ from typing import Any
 
 from Crypto.Cipher import DES
 from Crypto.Util.Padding import unpad
-from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -56,7 +56,8 @@ class CiyuanjiParser(BaseParser):
 
         book_data = self._extract_book_data(data)
         raw_chapters = self._extract_chapter_list(data)
-        volumes = self._build_volumes(raw_chapters)
+        book_id = str(book_data.get("bookId") or "")
+        volumes = self._build_volumes(raw_chapters, book_id)
         tag_list = book_data.get("tagList") or []
         tags = [
             t["tagName"] for t in tag_list if isinstance(t, dict) and t.get("tagName")
@@ -116,11 +117,21 @@ class CiyuanjiParser(BaseParser):
             logger.warning("ciyuanji chapter %s: no encrypted content", chapter_id)
             return None
 
+        # A malformed/truncated ciphertext must not escape as a traceback into
+        # the download loop; treat it like any other unreadable chapter.
+        try:
+            content = self._decrypt_chapter(enc_content)
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "ciyuanji chapter %s: cannot decrypt content: %s", chapter_id, exc
+            )
+            return None
+
         # Build result
         return {
             "id": str(chapter_content.get("chapterId") or chapter_id),
             "title": chapter_content.get("chapterName") or "",
-            "content": self._decrypt_chapter(enc_content),
+            "content": content,
             "extra": {
                 "site": self.site_name,
                 "wordCount": chapter_content.get("wordCount"),
@@ -131,7 +142,9 @@ class CiyuanjiParser(BaseParser):
         }
 
     def _build_volumes(
-        self, chapter_list: list[dict[str, Any]]
+        self,
+        chapter_list: list[dict[str, Any]],
+        book_id: str = "",
     ) -> list[VolumeInfoDict]:
         """
         Build structured volumes + chapters from raw chapter list.
@@ -156,10 +169,11 @@ class CiyuanjiParser(BaseParser):
             if not isinstance(sort_num, (int, float)):
                 sort_num = 0
 
-            # Build individual chapter entry
+            # Chapter objects do not carry ``bookId``; it lives on the book.
+            chapter_book_id = str(ch.get("bookId") or book_id)
             chapter_info: ChapterInfoDict = {
                 "title": ch.get("chapterName") or "",
-                "url": f"/chapter/{ch.get('bookId')}_{ch.get('chapterId')}.html",
+                "url": f"/chapter/{chapter_book_id}_{ch.get('chapterId')}.html",
                 "chapterId": str(ch.get("chapterId") or ""),
                 "accessible": ch.get("isFee", "0") == "0"
                 or ch.get("isBuy", "0") == "1",
@@ -209,7 +223,9 @@ class CiyuanjiParser(BaseParser):
         """
         Extract SSR JSON from <script id="__NEXT_DATA__">.
         """
-        tree = html.fromstring(html_str)
+        tree = parse_html_tree(html_str)
+        if tree is None:
+            return {}
         script = tree.xpath('//script[@id="__NEXT_DATA__"]/text()')
         if not script:
             return {}

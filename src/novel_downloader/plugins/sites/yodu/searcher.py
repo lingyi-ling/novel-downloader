@@ -5,9 +5,10 @@ novel_downloader.plugins.sites.yodu.searcher
 
 """
 
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -32,33 +33,53 @@ class YoduSearcher(BaseSearcher):
             self._log_fetch_failure(keyword, self.SEARCH_URL, exc)
             return ""
 
+    @staticmethod
+    def _url_to_id(url: str) -> str:
+        """Derive the book id from a ``/book/<id>/...`` link."""
+        value = url.strip()
+        if value.startswith("//"):
+            value = "https:" + value
+        parts = urlsplit(value)
+        if parts.scheme not in ("", "http", "https"):
+            return ""
+        path = parts.path or value
+        marker = "/book/"
+        if marker not in path:
+            return ""
+        return path.split(marker, 1)[1].split("/", 1)[0]
+
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath('//ul[contains(@class,"ser-ret")]/li')
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
             href = self._first_str(
                 row.xpath('.//a[contains(@class,"g_thumb")]/@href')
             ) or self._first_str(row.xpath(".//h3//a/@href"))
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
+            # '/book/17551/?for-search' -> "17551"
+            book_id = self._url_to_id(href)
+            if not book_id:
+                continue
+
+            if limit is not None and len(results) >= limit:
                 break
 
-            # '/book/17551/?for-search' -> "17551"
-            path_after_book = href.split("/book/", 1)[-1] if "/book/" in href else ""
-            book_id = path_after_book.split("/", 1)[0] if path_after_book else ""
             book_url = self._abs_url(href)
 
-            cover_url = self._first_str(
+            cover_rel = self._first_str(
                 row.xpath('.//a[contains(@class,"g_thumb")]//img/@_src')
             ) or self._first_str(
                 row.xpath('.//a[contains(@class,"g_thumb")]//img/@src')
             )
+            cover_url = self._abs_url(cover_rel) if cover_rel else ""
 
             title = self._first_str(row.xpath(".//h3//a/@title")) or self._first_str(
                 row.xpath(".//h3//a//text()")
@@ -79,7 +100,7 @@ class YoduSearcher(BaseSearcher):
                     latest_chapter=latest_chapter,
                     update_date="-",
                     word_count="-",
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
         return results

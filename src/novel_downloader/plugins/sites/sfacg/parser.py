@@ -12,6 +12,12 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+    strip_page_marker,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -31,17 +37,20 @@ class SfacgParser(BaseParser):
     """
 
     site_name: str = "sfacg"
+    BASE_URL = "https://m.sfacg.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if len(raw_pages) < 2:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
-        info_tree = html.fromstring(raw_pages[0])
-        catalog_tree = html.fromstring(raw_pages[1])
+        info_tree = parse_html_tree(raw_pages[0])
+        catalog_tree = parse_html_tree(raw_pages[1])
+        if info_tree is None or catalog_tree is None:
+            return None
 
         # Book metadata
         book_name = self._first_str(
@@ -64,9 +73,10 @@ class SfacgParser(BaseParser):
             if len(book_info3_nodes) >= 2:
                 update_time = book_info3_nodes[-1].strip()
 
-        cover_url = "https:" + self._first_str(
+        cover_src = self._first_str(
             info_tree.xpath('//ul[@class="book_info"]//img/@src')
         )
+        cover_url = resolve_url(info_tree, cover_src, fallback_base=self.BASE_URL)
 
         summary = self._join_strs(
             info_tree.xpath(
@@ -84,15 +94,19 @@ class SfacgParser(BaseParser):
             if ul is not None:
                 for a in ul.xpath('.//ul[@class="mulu_list"]/a'):
                     url = self._first_str(a.xpath("./@href"))
-                    if not url:
+                    if not url or url.lower().startswith(("javascript:", "#")):
                         continue
-                    chapter_id = url.strip("/").rsplit("/", 1)[-1]
+                    chapter_id = chapter_id_from_href(url)
+                    if not chapter_id:
+                        continue
                     title_texts = a.xpath(".//li//text()")
-                    title = self._join_strs(title_texts)
+                    title = strip_page_marker(self._join_strs(title_texts))
 
                     chap: ChapterInfoDict = {
                         "title": title,
-                        "url": url,
+                        "url": resolve_url(
+                            catalog_tree, url, fallback_base=self.BASE_URL
+                        ),
                         "chapterId": chapter_id,
                     }
                     chapters.append(chap)
@@ -128,12 +142,18 @@ class SfacgParser(BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         # check if chapter is locked
         keywords = ["本章为VIP章节"]  # 本章为VIP章节，订阅后可立即阅读
         if any(kw in raw_pages[0] for kw in keywords):
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
         content = ""
         resources: list[MediaResource] = []
 
@@ -177,8 +197,10 @@ class SfacgParser(BaseParser):
         if not (content or resources):
             return None
 
-        title = self._first_str(
-            tree.xpath('//ul[@class="menu_top_list book_view_top"]/li[2]/text()')
+        title = strip_page_marker(
+            self._first_str(
+                tree.xpath('//ul[@class="menu_top_list book_view_top"]/li[2]/text()')
+            )
         )
 
         return {
@@ -215,8 +237,7 @@ class SfacgParser(BaseParser):
             if elem.tag == "img":
                 src = elem.get("src")
                 if src:
-                    if src.startswith("//"):
-                        src = "https:" + src
+                    src = resolve_url(elem, src, fallback_base=self.BASE_URL)
 
                     resources.append(
                         {

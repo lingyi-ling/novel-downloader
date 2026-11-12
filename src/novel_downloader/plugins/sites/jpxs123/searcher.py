@@ -6,6 +6,7 @@ novel_downloader.plugins.sites.jpxs123.searcher
 """
 
 import logging
+from urllib.parse import urlsplit
 
 from lxml import html
 
@@ -47,6 +48,8 @@ class Jpxs123Searcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         rows = doc.xpath('//div[@class="books m-cols"]/div[@class="bk"]')
         results: list[SearchResult] = []
@@ -59,7 +62,11 @@ class Jpxs123Searcher(BaseSearcher):
             if limit is not None and idx >= limit:
                 break
 
-            book_id = href.strip("/").split(".", 1)[0].replace("/", "-")
+            # Derive the id from the path only: absolute/protocol-relative
+            # hrefs and ``?from=`` / ``#...`` suffixes must not leak into it.
+            # '/cyjk/11624.html' -> "cyjk-11624" (fetcher maps '-' back to '/').
+            path = urlsplit(href).path
+            book_id = path.strip("/").split(".", 1)[0].replace("/", "-")
             book_url = self._abs_url(href)
 
             title = self._first_str(row.xpath(".//h3/a//text()"))

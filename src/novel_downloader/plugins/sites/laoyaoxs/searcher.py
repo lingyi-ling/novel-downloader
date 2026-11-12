@@ -36,6 +36,8 @@ class LaoyaoxsSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         rows = doc.xpath('//div[contains(@class,"result")]//li')
         results: list[SearchResult] = []

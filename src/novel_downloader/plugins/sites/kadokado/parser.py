@@ -29,36 +29,64 @@ class KadokadoParser(BaseParser):
     site_name: str = "kadokado"
     BASE_URL = "https://www.kadokado.com.tw"
 
+    @staticmethod
+    def _load_json(raw: str) -> Any:
+        """
+        Decode an API page, returning ``None`` for a blocked/error body.
+
+        KadoKado's JSON endpoints can answer with an HTML WAF/rate-limit page
+        instead of JSON; that must degrade to "no data" rather than raise.
+        """
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if len(raw_pages) < 2:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
-        info = json.loads(raw_pages[0])
-        catalog = json.loads(raw_pages[1])
+        info = self._load_json(raw_pages[0])
+        catalog = self._load_json(raw_pages[1])
+        if not isinstance(info, dict) or not isinstance(catalog, list):
+            return None
 
         book_name = info.get("displayName", "")
         author = info.get("ownerDisplayName", "")
         summary = info.get("logline", "") or info.get("oneLineIntro", "")
-        tags = info.get("tags", [])
+        raw_tags = info.get("tags") or []
+        tags = (
+            [t for t in raw_tags if isinstance(t, str)]
+            if isinstance(raw_tags, list)
+            else []
+        )
         cover_urls = info.get("coverUrls") or []
-        cover_url = cover_urls[0] if cover_urls else ""
+        cover_url = cover_urls[0] if isinstance(cover_urls, list) and cover_urls else ""
         word_count = str(info.get("wordCount", "")) if info.get("wordCount") else ""
         update_time = ""
 
         volumes: list[VolumeInfoDict] = []
 
         for idx, vol in enumerate(catalog, start=1):
+            if not isinstance(vol, dict):
+                continue
             vol_name = vol.get("collectionDisplayName") or f"未命名卷 {idx}"
             chapters_data = vol.get("chapters") or []
+            if not isinstance(chapters_data, list):
+                continue
             vol_chaps: list[ChapterInfoDict] = []
 
             for ch in chapters_data:
-                chap_id = str(ch.get("chapterId", ""))
-                title = ch.get("chapterDisplayName", "").strip()
+                if not isinstance(ch, dict):
+                    continue
+                chap_id = str(ch.get("chapterId") or "").strip()
+                if not chap_id:
+                    continue
+                title = str(ch.get("chapterDisplayName") or "").strip()
                 accessible = bool(ch.get("isFree") or ch.get("isPurchased"))
 
                 vol_chaps.append(
@@ -98,18 +126,21 @@ class KadokadoParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
-        info = json.loads(raw_pages[0])
-        content_resp = json.loads(raw_pages[1])
+        info = self._load_json(raw_pages[0])
+        content_resp = self._load_json(raw_pages[1])
+        if not isinstance(info, dict) or not isinstance(content_resp, dict):
+            return None
         raw_content = content_resp.get("content")
-        if not raw_content:
+        if not isinstance(raw_content, str) or not raw_content.strip():
             return None
 
         tree = html.fromstring(raw_content)
 
-        title = info.get("chapterDisplayName") or ""
+        raw_title = info.get("chapterDisplayName") or ""
+        title = raw_title if isinstance(raw_title, str) else str(raw_title)
 
         paragraphs: list[str] = []
         resources: list[MediaResource] = []
@@ -139,13 +170,18 @@ class KadokadoParser(BaseParser):
 
         # After content
         extra_imgs = content_resp.get("imageUrls") or []
+        if not isinstance(extra_imgs, list):
+            extra_imgs = []
         for url in extra_imgs:
             if isinstance(url, str) and url.strip():
+                url = url.strip()
+                if url.startswith("//"):
+                    url = "https:" + url
                 resources.append(
                     {
                         "type": "image",
                         "paragraph_index": curr_paragraph_idx,
-                        "url": url.strip(),
+                        "url": url,
                     }
                 )
 

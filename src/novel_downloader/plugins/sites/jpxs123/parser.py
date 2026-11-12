@@ -10,6 +10,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -33,7 +37,7 @@ class Jpxs123Parser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         # Parse the main info page
@@ -51,11 +55,7 @@ class Jpxs123Parser(BaseParser):
             tree.xpath('//div[@class="date"]/span[2]/text()'), replaces=[("时间：", "")]
         )
         cover_rel = self._first_str(tree.xpath('//div[@class="pic"]/img/@src'))
-        cover_url = (
-            f"{self.BASE_URL}{cover_rel}"
-            if cover_rel and not cover_rel.startswith("http")
-            else cover_rel
-        )
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
 
         # Summary from the <p> inside infos
         summary = self._join_strs(tree.xpath('//div[@class="infos"]/p//text()'))
@@ -66,7 +66,7 @@ class Jpxs123Parser(BaseParser):
             url = a.get("href", "").strip()
             title = a.text_content().strip()
             # General regex: /{category}/{bookId}/{chapterId}.html
-            cid = url.split("/")[-1].split(".")[0]
+            cid = chapter_id_from_href(url)
             chapters.append({"title": title, "url": url, "chapterId": cid})
 
         if not chapters:
@@ -100,7 +100,7 @@ class Jpxs123Parser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -134,4 +134,8 @@ class Jpxs123Parser(BaseParser):
     @classmethod
     def _fix_download_link(cls, link: str) -> str:
         true_link = link.replace("xs../", "/e/DownSys/")
+        if true_link.startswith(("http://", "https://")):
+            return true_link
+        if true_link.startswith("//"):
+            return "https:" + true_link
         return f"{cls.BASE_URL}{true_link}"

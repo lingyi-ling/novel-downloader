@@ -12,9 +12,12 @@ from typing import Any
 
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
-from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -34,6 +37,7 @@ class ShaoniandreamParser(BaseParser):
     """
 
     site_name: str = "shaoniandream"
+    BASE_URL = "https://www.shaoniandream.com"
 
     _RE_TAG_I = re.compile(r"<i[^>]*>.*?</i>", re.DOTALL)
 
@@ -44,11 +48,12 @@ class ShaoniandreamParser(BaseParser):
     ) -> BookInfoDict | None:
         if len(raw_pages) < 2:
             return None
-
-        if not raw_pages[0].strip():
+        if not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
-        info_tree = html.fromstring(raw_pages[0])
+        info_tree = parse_html_tree(raw_pages[0])
+        if info_tree is None:
+            return None
         try:
             catalog_data = json.loads(raw_pages[1])
         except (json.JSONDecodeError, TypeError):
@@ -78,7 +83,8 @@ class ShaoniandreamParser(BaseParser):
         )
         cover_url = self._first_str(
             info_tree.xpath('//div[@class="cover"]/img/@data-original')
-        )
+        ) or self._first_str(info_tree.xpath('//div[@class="cover"]/img/@src'))
+        cover_url = resolve_url(info_tree, cover_url, fallback_base=self.BASE_URL)
         update_time = self._first_str(
             info_tree.xpath('//div[@class="bookdetial-newchapter"]//span/text()'),
             replaces=[("● ", "")],
@@ -93,6 +99,10 @@ class ShaoniandreamParser(BaseParser):
         summary = self._join_strs(
             info_tree.xpath('//div[@class="bookdetial-jianjie"]//text()')
         )
+
+        if not book_name:
+            logger.warning("shaoniandream book_info: book name not found")
+            return None
 
         # --- parse volumes & chapters ---
         volumes: list[VolumeInfoDict] = []
@@ -226,7 +236,11 @@ class ShaoniandreamParser(BaseParser):
                 url = pic.get("url")
                 if not url:
                     continue
-                full_url = img_prefix + url
+                full_url = resolve_url(
+                    None,
+                    str(url),
+                    fallback_base=str(img_prefix) or self.BASE_URL,
+                )
                 resources.append(
                     {
                         "type": "image",

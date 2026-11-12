@@ -7,9 +7,12 @@ novel_downloader.plugins.sites.piaotia.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,18 +29,21 @@ class PiaotiaParser(BaseParser):
     """
 
     site_name: str = "piaotia"
+    BASE_URL = "https://www.piaotia.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if len(raw_pages) < 2:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
         # Parse trees
-        info_tree = html.fromstring(raw_pages[0])
-        catalog_tree = html.fromstring(raw_pages[1])
+        info_tree = parse_html_tree(raw_pages[0])
+        catalog_tree = parse_html_tree(raw_pages[1])
+        if info_tree is None or catalog_tree is None:
+            return None
 
         book_name = self._first_str(info_tree.xpath("//span[@style]//h1/text()"))
         author = self._first_str(
@@ -72,6 +78,7 @@ class PiaotiaParser(BaseParser):
         )
 
         cover_url = self._first_str(info_tree.xpath('//td[@width="80%"]//img/@src'))
+        cover_url = resolve_url(info_tree, cover_url, fallback_base=self.BASE_URL)
 
         # Summary
         summary_divs = info_tree.xpath('//td[@width="80%"]/div')
@@ -85,8 +92,12 @@ class PiaotiaParser(BaseParser):
         chapters: list[ChapterInfoDict] = []
         for a in catalog_tree.xpath('//div[@class="centent"]//ul/li/a'):
             title = (a.text or "").strip()
-            url = a.get("href", "").strip()
-            chapter_id = url.split(".")[0]
+            url = (a.get("href") or "").strip()
+            if not url or url.lower().startswith(("javascript:", "#")):
+                continue
+            chapter_id = chapter_id_from_href(url)
+            if not chapter_id:
+                continue
             chapters.append({"title": title, "url": url, "chapterId": chapter_id})
 
         if not chapters:
@@ -132,6 +143,10 @@ class PiaotiaParser(BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         # normalize broken HTML
         raw = (
             raw_pages[0]
@@ -149,7 +164,9 @@ class PiaotiaParser(BaseParser):
             )
         )
 
-        doc = html.fromstring(raw)
+        doc = parse_html_tree(raw)
+        if doc is None:
+            return None
 
         content_nodes = doc.xpath('//div[@id="content"]')
         if not content_nodes:

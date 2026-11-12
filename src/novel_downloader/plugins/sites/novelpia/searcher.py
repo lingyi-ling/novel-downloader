@@ -11,9 +11,8 @@ result list server-side.
 import logging
 import re
 
-from lxml import html
-
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -45,28 +44,41 @@ class NovelpiaSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
+
         # PC rows carry the "novelbox" class; the mobile duplicates do not.
         rows = doc.xpath('//div[contains(@class, "novelbox")]')
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
             onclick = self._first_str(
                 row.xpath('.//b[contains(@onclick, "/novel/")]/@onclick')
             )
             match = _BOOK_LINK_RE.search(onclick) if onclick else None
             if match is None:
+                href = self._first_str(
+                    row.xpath('.//b/a[contains(@href, "/novel/")]/@href')
+                )
+                match = _BOOK_LINK_RE.search(href) if href else None
+            if match is None:
                 continue
 
-            if limit is not None and idx >= limit:
+            title = self._join_strs(
+                row.xpath('.//b[contains(@onclick, "/novel/")]//text()')
+            ) or self._join_strs(
+                row.xpath('.//b/a[contains(@href, "/novel/")]//text()')
+            )
+            if not title:
+                continue
+
+            if limit is not None and len(results) >= limit:
                 break
 
             book_id = match.group(1)
             book_url = f"{self.BASE_URL}/novel/{book_id}"
 
-            title = self._join_strs(
-                row.xpath('.//b[contains(@onclick, "/novel/")]//text()')
-            )
             # first <font> after the title is the author, the second is
             # the synopsis
             author = self._first_str(row.xpath('.//td[@valign="top"]/font[1]/text()'))
@@ -85,7 +97,7 @@ class NovelpiaSearcher(BaseSearcher):
                     latest_chapter="-",
                     update_date="-",
                     word_count="-",
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
         return results

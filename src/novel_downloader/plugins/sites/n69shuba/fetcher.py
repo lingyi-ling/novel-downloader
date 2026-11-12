@@ -44,7 +44,9 @@ class N69shubaFetcher(BaseFetcher):
     ) -> list[str]:
         headers = {
             **self.headers,
-            "Referer": f"https://www.69shuba.com/book/{chapter_id}/",
+            # The chapter lives under /txt/<book_id>/<chapter_id>; its reading
+            # page is /book/<book_id>/, not /book/<chapter_id>/.
+            "Referer": f"https://www.69shuba.com/book/{book_id}/",
         }
         url = self.CHAPTER_URL.format(book_id=book_id, chapter_id=chapter_id)
         return [await self.fetch(url, headers=headers, **kwargs)]

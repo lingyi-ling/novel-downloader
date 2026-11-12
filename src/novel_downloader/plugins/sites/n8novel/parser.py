@@ -7,10 +7,14 @@ novel_downloader.plugins.sites.n8novel.parser
 
 import re
 from typing import Any
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -53,7 +57,9 @@ class N8novelParser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         # --- Basic metadata ---
         book_name = self._first_str(tree.xpath("//li[contains(@class,'h2')]/text()"))
@@ -63,8 +69,12 @@ class N8novelParser(BaseParser):
             replaces=[("作者: ", ""), ("作者：", "")],
         )
 
-        cover_url = self.BASE_URL + self._first_str(
-            tree.xpath("//div[contains(@class,'item-cover')]//img/@src")
+        cover_url = resolve_url(
+            tree,
+            self._first_str(
+                tree.xpath("//div[contains(@class,'item-cover')]//img/@src")
+            ),
+            fallback_base=self.BASE_URL,
         )
 
         update_time = self._first_str(
@@ -104,8 +114,10 @@ class N8novelParser(BaseParser):
                 href = a.get("href") or ""
                 if not href or not title:
                     continue
-                url = href if href.startswith("http") else self.BASE_URL + href
-                chapter_id = href.split("?")[-1]  # "/read/3355/?270015" -> "270015"
+                url = resolve_url(tree, href, fallback_base=self.BASE_URL)
+                chapter_id = self._chapter_id_from_href(href)
+                if not chapter_id:
+                    continue
                 chapters.append({"title": title, "url": url, "chapterId": chapter_id})
 
             volumes.append({"volume_name": vol_name, "chapters": chapters})
@@ -140,7 +152,11 @@ class N8novelParser(BaseParser):
         except Exception:
             title = ""
 
-        wrapper = html.fromstring(f"<div>{raw_pages[1]}</div>")
+        if not raw_pages[1] or not raw_pages[1].strip():
+            return None
+        wrapper = parse_html_tree(f"<div>{raw_pages[1]}</div>")
+        if wrapper is None:
+            return None
 
         paragraphs: list[str] = []
         resources: list[MediaResource] = []
@@ -237,6 +253,31 @@ class N8novelParser(BaseParser):
                 if mismatches > 2:
                     return False
         return True
+
+    @staticmethod
+    def _chapter_id_from_href(href: str) -> str:
+        """
+        Derive the chapter id from a chapter link.
+
+        Live catalogue links are ``/read/<book_id>/?<chapter_id>``: the id is
+        the bare query string.  Absolute links and fragments must not leak
+        into it, and a bare ``/read/<book_id>/`` link has no chapter id at all
+        (its last path segment is the book id, so falling back to it would
+        fetch the wrong page).
+        """
+        value = (href or "").strip()
+        if not value or value.lower().startswith(("javascript:", "#")):
+            return ""
+        if value.startswith("//"):
+            value = "https:" + value
+        parts = urlsplit(value)
+        if parts.scheme not in ("", "http", "https"):
+            return ""
+        query = parts.query.strip()
+        if query and "=" not in query:
+            return query
+        segments = [segment for segment in parts.path.split("/") if segment]
+        return chapter_id_from_href(value) if len(segments) > 2 else ""
 
     @classmethod
     def _build_id_title_map(cls, html_str: str) -> dict[str, str]:

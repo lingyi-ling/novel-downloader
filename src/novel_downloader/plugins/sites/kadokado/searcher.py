@@ -46,12 +46,14 @@ class KadokadoSearcher(BaseSearcher):
     ) -> list[SearchResult]:
         try:
             data = json.loads(html_str)
-        except json.JSONDecodeError:
+        except (TypeError, json.JSONDecodeError):
             logger.warning(f"{self.site_name}: invalid JSON in search response")
             return []
 
+        if not isinstance(data, dict):
+            return []
         rows = data.get("data")
-        if not rows:
+        if not isinstance(rows, list) or not rows:
             return []
 
         results: list[SearchResult] = []
@@ -59,6 +61,8 @@ class KadokadoSearcher(BaseSearcher):
         for idx, row in enumerate(rows):
             if limit is not None and idx >= limit:
                 break
+            if not isinstance(row, dict):
+                continue
 
             book_id = str(row.get("id") or "")
             if not book_id:
@@ -67,7 +71,10 @@ class KadokadoSearcher(BaseSearcher):
             title = (row.get("displayName") or "").strip()
             author = (row.get("ownerDisplayName") or "").strip()
             cover_urls = row.get("coverUrls") or []
-            cover_url = cover_urls[0] if cover_urls else ""
+            cover_rel = (
+                cover_urls[0] if isinstance(cover_urls, list) and cover_urls else ""
+            )
+            cover_url = self._abs_url(cover_rel) if cover_rel else ""
             word_count = str(row.get("wordCount") or "")
             book_url = f"{self.BASE_URL}/book/{book_id}"
 

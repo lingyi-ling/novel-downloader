@@ -10,6 +10,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,13 +30,14 @@ class I25zwParser(BaseParser):
     """
 
     site_name: str = "i25zw"
+    BASE_URL: str = "https://www.i25zw.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if len(raw_pages) < 2:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
         info_tree = html.fromstring(raw_pages[0])
@@ -41,7 +46,8 @@ class I25zwParser(BaseParser):
         # Metadata extraction
         book_name = self._first_str(info_tree.xpath("//h1[@class='f21h']/text()"))
         author = self._first_str(info_tree.xpath("//h1[@class='f21h']/em/a/text()"))
-        cover_url = self._first_str(info_tree.xpath("//div[@class='pic']/img/@src"))
+        cover_rel = self._first_str(info_tree.xpath("//div[@class='pic']/img/@src"))
+        cover_url = resolve_url(info_tree, cover_rel, fallback_base=self.BASE_URL)
 
         # Tags, status, word count, update time
         tag = self._first_str(
@@ -63,7 +69,10 @@ class I25zwParser(BaseParser):
         summary = full_intro.replace(f"关于{book_name}：", "", 1).strip()
 
         # Chapter list extraction
-        dl = catalog_tree.xpath("//div[@id='list']/dl")[0]
+        dls = catalog_tree.xpath("//div[@id='list']/dl")
+        if not dls:
+            return None
+        dl = dls[0]
         # Full-text section dd's
         dds = dl.xpath("./dd[preceding-sibling::dt[1][contains(., '正文')]]/a")
         if not dds:
@@ -75,7 +84,7 @@ class I25zwParser(BaseParser):
             url = a.get("href", "").strip()
             title = a.text_content().strip()
             # '/311006/252845677.html' -> '252845677'
-            chapter_id = url.split("/")[-1].split(".")[0]
+            chapter_id = chapter_id_from_href(url)
             chapters.append(
                 {
                     "title": title,
@@ -108,7 +117,7 @@ class I25zwParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])

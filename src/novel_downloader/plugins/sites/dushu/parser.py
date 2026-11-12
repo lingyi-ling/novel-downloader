@@ -6,9 +6,13 @@ novel_downloader.plugins.sites.dushu.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    dedupe_chapters,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -25,16 +29,20 @@ class DushuParser(BaseParser):
     """
 
     site_name: str = "dushu"
+    BASE_URL: str = "https://www.dushu.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         # --- Basic metadata ---
         book_name = self._first_str(tree.xpath("//div[@class='book-title']/h1/text()"))
@@ -43,7 +51,8 @@ class DushuParser(BaseParser):
                 "//div[@class='book-details']//table//tr[td[contains(., '作')]]/td[2]/text()"  # noqa: E501
             )
         )
-        cover_url = self._first_str(tree.xpath("//div[@class='book-pic']//img/@src"))
+        cover_rel = self._first_str(tree.xpath("//div[@class='book-pic']//img/@src"))
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
 
         summary = self._join_strs(
             tree.xpath("//div[contains(@class,'txtsummary')]//text()"),
@@ -66,18 +75,23 @@ class DushuParser(BaseParser):
 
             vol_chaps: list[ChapterInfoDict] = []
             for a in table[0].xpath(".//a"):
-                href = a.get("href") or ""
-                if not href:
+                href = (a.get("href") or "").strip()
+                if not href or href.lower().startswith(("javascript:", "#")):
                     continue
-                chap_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
+                chap_id = chapter_id_from_href(href)
+                if not chap_id:
+                    continue
                 title = (a.text_content() or "").strip()
                 vol_chaps.append(
                     {
                         "title": title,
-                        "url": href,
+                        "url": resolve_url(tree, href, fallback_base=self.BASE_URL)
+                        .split("#", 1)[0]
+                        .split("?", 1)[0],
                         "chapterId": chap_id,
                     }
                 )
+            vol_chaps = dedupe_chapters(vol_chaps)
 
             if vol_chaps:
                 volumes.append(
@@ -106,10 +120,13 @@ class DushuParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         title = self._first_str(
             tree.xpath(

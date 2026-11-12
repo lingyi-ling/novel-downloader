@@ -8,10 +8,10 @@ Search アルファポリス novels via the global search page
 """
 
 import logging
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -46,26 +46,30 @@ class AlphapolisSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath(
             '//div[contains(@class, "content-block") and contains(@class, "novels")]'
         )
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
+            if limit is not None and len(results) >= limit:
+                break
+
             href = self._first_str(
                 row.xpath('.//h2[contains(@class, "title")]/a[1]/@href')
             )
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
-                break
-
             # href format: /novel/182309940/328987318
             # book_id keeps the dash form ("182309940-328987318") expected
             # by the fetcher's BOOK_ID_REPLACEMENTS ("-" -> "/").
-            parts = href.strip("/").split("/")
+            parts = [p for p in urlsplit(href).path.strip("/").split("/") if p]
+            if not parts:
+                continue
             book_id = "-".join(parts[1:]) if len(parts) >= 3 else parts[-1]
             book_url = self._abs_url(href)
 
@@ -106,7 +110,7 @@ class AlphapolisSearcher(BaseSearcher):
                     latest_chapter=status or "-",
                     update_date=update_date or "-",
                     word_count=word_count or "-",
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
         return results

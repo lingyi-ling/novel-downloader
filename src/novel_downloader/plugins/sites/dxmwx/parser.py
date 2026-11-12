@@ -7,9 +7,13 @@ novel_downloader.plugins.sites.dxmwx.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    dedupe_chapters,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,6 +30,7 @@ class DxmwxParser(BaseParser):
     """
 
     site_name: str = "dxmwx"
+    BASE_URL: str = "https://www.dxmwx.org"
     ADS = {"大熊猫文学", "点这里听书"}
 
     def parse_book_info(
@@ -33,18 +38,24 @@ class DxmwxParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if len(raw_pages) < 2:
             return None
 
-        info_tree = html.fromstring(raw_pages[0])
-        catalog_tree = html.fromstring(raw_pages[1])
+        info_tree = parse_html_tree(raw_pages[0])
+        catalog_tree = parse_html_tree(raw_pages[1])
+        if info_tree is None or catalog_tree is None:
+            return None
 
         book_name = self._first_str(
             info_tree.xpath("//span[contains(@style,'font-size: 24px')]/text()")
         )
         author = self._first_str(
             info_tree.xpath(
-                "//div[contains(@style,'height: 28px') and contains(., '著')]//a/text()"
+                # The author row is the only 28px-high div with a link.  A
+                # single-CJK-char ``contains(., '著')`` is unreliable in
+                # libxml2 (``contains(., '作者')`` works), so match on style.
+                "//div[contains(@style,'height: 28px')]//a/text()"
             )
         )
         tags = [
@@ -52,9 +63,8 @@ class DxmwxParser(BaseParser):
             for t in info_tree.xpath("//span[@class='typebut']//a/text()")
             if t.strip()
         ]
-        cover_url = "https://www.dxmwx.org" + self._first_str(
-            info_tree.xpath("//img[@class='imgwidth']/@src")
-        )
+        cover_rel = self._first_str(info_tree.xpath("//img[@class='imgwidth']/@src"))
+        cover_url = resolve_url(info_tree, cover_rel, fallback_base=self.BASE_URL)
 
         update_time = self._join_strs(
             info_tree.xpath(
@@ -89,13 +99,25 @@ class DxmwxParser(BaseParser):
         for a in catalog_tree.xpath(
             "//div[contains(@style,'height:40px') and contains(@style,'border-bottom')]//a"  # noqa: E501
         ):
-            href = a.get("href") or ""
+            href = (a.get("href") or "").strip()
             title = (a.text_content() or "").strip()
-            if not href or not title:
+            if not href or not title or "/read/" not in href:
                 continue
-            # "/read/57215_50197663.html" -> "50197663"
-            chap_id = href.split("read/", 1)[-1].split(".html", 1)[0].split("_")[-1]
-            chapters.append({"title": title, "url": href, "chapterId": chap_id})
+            # "/read/57215_50197663.html" -> "50197663"; the fetcher rebuilds
+            # the URL as ``read/{book_id}_{chapter_id}.html``.
+            chap_id = chapter_id_from_href(href).rsplit("_", 1)[-1]
+            if not chap_id:
+                continue
+            chapters.append(
+                {
+                    "title": title,
+                    "url": resolve_url(catalog_tree, href, fallback_base=self.BASE_URL)
+                    .split("#", 1)[0]
+                    .split("?", 1)[0],
+                    "chapterId": chap_id,
+                }
+            )
+        chapters = dedupe_chapters(chapters)
 
         if not chapters:
             return None
@@ -119,10 +141,13 @@ class DxmwxParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         title = self._norm_space(
             self._first_str(tree.xpath("//h1[@id='ChapterTitle']/text()"))

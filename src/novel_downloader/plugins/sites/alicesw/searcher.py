@@ -6,10 +6,10 @@ novel_downloader.plugins.sites.alicesw.searcher
 
 import logging
 import re
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -22,7 +22,7 @@ _WORD_COUNT_RE = re.compile(r"字数[：:]\s*([^\s\u3000]+)")
 class AliceswSearcher(BaseSearcher):
     site_name = "alicesw"
     priority = 500
-    BASE_URL = "http://www.alicesw.com/"
+    BASE_URL = "https://www.alicesw.com/"
     SEARCH_URL = "https://www.alicesw.com/search.html"
 
     @property
@@ -42,19 +42,23 @@ class AliceswSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath("//div[contains(@class, 'list-group-item')]")
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
+            if limit is not None and len(results) >= limit:
+                break
+
             href = self._first_str(row.xpath(".//h5/a/@href"))
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
-                break
-
-            book_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
+            book_id = urlsplit(href).path.rsplit("/", 1)[-1].split(".", 1)[0]
+            if not book_id:
+                continue
             book_url = self._abs_url(href)
             title = self._join_strs(row.xpath(".//h5/a//text()"))
             author = self._first_str(
@@ -85,7 +89,7 @@ class AliceswSearcher(BaseSearcher):
                     latest_chapter="-",
                     update_date=update_date,
                     word_count=word_count,
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
         return results

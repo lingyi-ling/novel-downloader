@@ -66,6 +66,13 @@ class N23qbParser(BaseParser):
         word_count = self._first_str(
             info_tree.xpath('//span[contains(text(), "字")]/text()')
         )
+        # The detail page exposes the last-update date in the "newchapter"
+        # heading; the book-info parser used to drop it even though the
+        # searcher already reads the same node.
+        update_time = self._first_str(
+            info_tree.xpath('//div[@class="module-heading newchapter"]/time/text()'),
+            replaces=[("更新时间：", ""), ("更新时间:", "")],
+        )
 
         summary_node = info_tree.xpath(
             '//div[@class="novel-info-item novel-info-content"]/span'
@@ -124,7 +131,7 @@ class N23qbParser(BaseParser):
             "book_name": book_name,
             "author": author,
             "cover_url": cover_url,
-            "update_time": "",
+            "update_time": update_time,
             "word_count": word_count,
             "serial_status": serial_status,
             "summary": summary,
