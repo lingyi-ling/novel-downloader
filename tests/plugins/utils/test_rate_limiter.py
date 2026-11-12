@@ -226,6 +226,167 @@ async def test_cancelled_waiter_gives_its_slot_back(monkeypatch, frozen_clock):
 
 
 @pytest.mark.asyncio
+async def test_retry_after_pause_refills_the_bucket(monkeypatch, frozen_clock):
+    """A long backoff must not stack with the limiter and block twice.
+
+    ``BaseFetcher`` waits for a token *and* sleeps ``Retry-After`` on a 429.
+    The pause is real elapsed time, so the bucket is full again when the
+    retry fires: the limiter must not add a second delay on top.
+    """
+    rl = TokenBucketRateLimiter(rate=1.0, burst=1, jitter_strength=0)
+    await rl.wait()  # spend the burst token
+    frozen_clock.advance(30.0)  # the Retry-After sleep elapsed
+
+    slept: list[float] = []
+
+    async def fake_sleep(t):
+        slept.append(t)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await rl.wait()
+
+    assert slept == []
+
+
+# --------------------------------------------------------------------------- #
+# shared cooldown (429 / 503 handling)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_penalize_blocks_every_concurrent_caller():
+    """A cooldown is shared: new waiters cannot slip past it individually."""
+    rl = TokenBucketRateLimiter(rate=1000.0, burst=100, jitter_strength=0)
+    rl.penalize(0.15, jitter=False)
+
+    start = time.perf_counter()
+    await asyncio.gather(*(rl.wait() for _ in range(3)))
+    elapsed = time.perf_counter() - start
+
+    # A per-caller sleep would let the first waiter through immediately; the
+    # shared deadline makes all three finish after the same pause.
+    assert elapsed >= 0.12
+    assert elapsed < 2.0
+
+
+def test_penalize_is_capped(frozen_clock):
+    rl = TokenBucketRateLimiter(rate=1.0, burst=1, jitter_strength=0)
+
+    applied = rl.penalize(3600.0, jitter=False)
+
+    assert applied == pytest.approx(rate_limiter_module.MAX_COOLDOWN)
+    assert applied == pytest.approx(60.0)
+    assert rl.cooldown_remaining() == pytest.approx(60.0)
+
+
+def test_penalize_keeps_the_latest_deadline_not_the_sum(frozen_clock):
+    """Workers reporting the same 429 must not add their pauses together."""
+    rl = TokenBucketRateLimiter(rate=1.0, burst=1, jitter_strength=0)
+    rl.penalize(5.0, jitter=False)  # until t+5
+
+    frozen_clock.advance(1.0)
+    rl.penalize(2.0, jitter=False)  # t+1+2 = t+3 < t+5 -> unchanged
+    assert rl.cooldown_remaining() == pytest.approx(4.0)
+
+    frozen_clock.advance(1.0)
+    rl.penalize(10.0, jitter=False)  # t+2+10 = t+12 wins
+    assert rl.cooldown_remaining() == pytest.approx(10.0)
+
+
+def test_penalize_adds_upward_only_jitter(monkeypatch, frozen_clock):
+    rl = TokenBucketRateLimiter(rate=1.0, burst=1, jitter_strength=0)
+    # Force the upper end of the range: the server's minimum is never reduced.
+    monkeypatch.setattr(rate_limiter_module.random, "uniform", lambda a, b: b)
+
+    applied = rl.penalize(10.0)
+
+    assert applied == pytest.approx(11.0)  # 10 s + min(1 s, 10 %)
+    assert rl.cooldown_remaining() == pytest.approx(11.0)
+
+
+def test_penalize_ignores_non_positive_and_nan(frozen_clock):
+    rl = TokenBucketRateLimiter(rate=1.0, burst=1, jitter_strength=0)
+
+    assert rl.penalize(0) == 0.0
+    assert rl.penalize(-5) == 0.0
+    assert rl.penalize(float("nan")) == 0.0
+    assert rl.penalize("not-a-number") == 0.0  # type: ignore[arg-type]
+    assert rl.cooldown_remaining() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_cooldown_expiry_restores_normal_bucket_semantics(
+    monkeypatch, frozen_clock
+):
+    rl = TokenBucketRateLimiter(rate=2.0, burst=1, jitter_strength=0)
+    await rl.wait()  # spend the burst token
+    rl.penalize(5.0, jitter=False)
+
+    frozen_clock.advance(5.0)  # the shared pause elapsed
+
+    slept: list[float] = []
+
+    async def fake_sleep(t):
+        slept.append(t)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await rl.wait()  # bucket refilled during the pause -> instant
+    await rl.wait()  # next slot costs one rate interval
+
+    assert slept == [pytest.approx(0.5)]
+
+
+@pytest.mark.asyncio
+async def test_cooldown_does_not_consume_a_token(monkeypatch, frozen_clock):
+    """Waiting out a cooldown must not cost a request slot."""
+    rl = TokenBucketRateLimiter(rate=1.0, burst=1, jitter_strength=0)
+    await rl.wait()  # tokens == 0
+    rl.penalize(2.0, jitter=False)
+    frozen_clock.advance(2.0)  # refill to capacity == 1
+
+    slept: list[float] = []
+
+    async def fake_sleep(t):
+        slept.append(t)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await rl.wait()
+
+    assert slept == []
+    assert rl.tokens == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_waiter_already_sleeping_observes_a_new_cooldown(
+    monkeypatch, frozen_clock
+):
+    """A caller mid-sleep when a 429 arrives must not wake up and fire."""
+    rl = TokenBucketRateLimiter(rate=1.0, burst=10, jitter_strength=0)
+    for _ in range(10):
+        await rl.wait()  # spend the burst, tokens == 0
+
+    slept: list[float] = []
+
+    async def fake_sleep(t):
+        slept.append(t)
+        if len(slept) == 1:
+            # Announced while this waiter is sleeping its bucket interval.
+            rl.penalize(5.0, jitter=False)
+        frozen_clock.advance(t)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await rl.wait()
+
+    # 1 s bucket deficit, then the remaining 4 s of the cooldown.
+    assert slept == [pytest.approx(1.0), pytest.approx(4.0)]
+    # The slot was charged once (-1) and 5 s of refill accrued; a second
+    # reservation during the cooldown re-check would leave 3 tokens.
+    assert rl.tokens == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
 async def test_real_concurrency_serialises_callers_in_time():
     """Wall-clock check on the real event loop, tolerant of timer granularity.
 

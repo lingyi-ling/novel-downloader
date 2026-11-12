@@ -39,7 +39,16 @@ RETRYABLE_STATUS: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504}
 
 
 class HttpStatusError(ConnectionError):
-    """A non-2xx response that survived (or skipped) the retry budget."""
+    """A non-2xx response that survived (or skipped) the retry budget.
+
+    The fetcher already spent its budget on retryable statuses (5xx/429) and
+    refuses deterministic ones (4xx) outright, so no higher level may retry
+    this error: doing so would multiply the request count by the task-level
+    budget.  ``retryable`` states that explicitly, exactly like
+    :class:`TransportError`.
+    """
+
+    retryable: bool = False
 
     def __init__(self, url: str, status: int) -> None:
         super().__init__(f"Request to {url} failed with status {status}")
@@ -49,6 +58,11 @@ class HttpStatusError(ConnectionError):
 
 class TransportError(ConnectionError):
     """A transport failure after the fetcher's retry budget was spent."""
+
+    #: The fetcher already retried; another level would multiply the request
+    #: count for the same failure.  Also set for deterministic failures
+    #: (certificate/proxy-credential rejections) that were never retried.
+    retryable: bool = False
 
     def __init__(self, url: str, reason: BaseException) -> None:
         super().__init__(f"Request to {url} failed: {reason}")
@@ -82,8 +96,18 @@ def is_transient_error(exc: BaseException) -> bool:
     Whether ``exc`` is worth retrying at a higher level.
 
     :param exc: The exception a request raised.
-    :return: True for timeouts, connection problems and retryable statuses.
+    :return: True for raw timeouts and connection problems that have *not* been
+        through the fetcher yet.  Typed request failures
+        (:class:`TransportError`, :class:`HttpStatusError`) return False: the
+        fetcher's budget is the one that counts, so a higher-level loop must
+        not multiply the request count.  Their transience is still visible
+        from ``exc.status in RETRYABLE_STATUS`` for callers that report rather
+        than retry.
     """
-    if isinstance(exc, HttpStatusError):
-        return exc.status in RETRYABLE_STATUS
+    if isinstance(exc, (TransportError, HttpStatusError)):
+        # The fetcher already spent its budget (or refused a deterministic
+        # status/TLS/proxy failure); a higher-level retry must not multiply
+        # requests.  ``HttpStatusError`` covers both a deterministic 4xx and a
+        # 5xx/429 whose retries are already exhausted.
+        return False
     return isinstance(exc, (TimeoutError, ConnectionError))

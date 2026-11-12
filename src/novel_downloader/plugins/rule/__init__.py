@@ -13,6 +13,11 @@ small JSON document (see :mod:`~.model`) kept in one of:
 * ``$NOVEL_RULES_DIR/*.json``                     -- custom directory
 * ``<user-config>/rules/*.json``                  -- per-user sources
 
+Locations are scanned in that order and a later rule with the same
+``site_key`` overrides an earlier one (within a directory, the file name decides
+the same way).  :func:`install_rule` refuses a write that a later-scanned file
+would silently override.
+
 This module glues those rules into the existing plugin registry, so a
 rule-based source behaves exactly like a hand-written one: it shows up in
 ``search``, can be selected with ``--site`` and can be resolved from a URL.
@@ -138,8 +143,18 @@ def _load_payload(text: str, origin: str, filename: str) -> None:
         logger.warning("Duplicate builtin rule '%s'; keeping the first", key)
         return
 
-    if key in _rules:
-        logger.info("Rule source '%s' overridden by %s rule", key, origin)
+    previous = _meta.get(key)
+    if previous is not None:
+        # Name both files: "overridden by a user rule" is not actionable when a
+        # stale copy in another directory silently wins.
+        logger.info(
+            "Rule '%s' from %s (%s) overrides the rule from %s (%s)",
+            key,
+            origin,
+            filename,
+            previous.get("origin"),
+            previous.get("file"),
+        )
     _rules[key] = rule
     _meta[key] = {"origin": origin, "file": filename}
     # ``_host_map`` is rebuilt from the final ``_rules`` once every directory
@@ -244,8 +259,12 @@ def install_dir() -> Path:
     """
     Directory new user rule files are installed into.
 
-    ``$NOVEL_RULES_DIR`` when set, otherwise the per-user config directory,
-    which is also the last directory :func:`load_rules` scans.
+    ``$NOVEL_RULES_DIR`` when set, otherwise the per-user config directory.
+
+    Note that :func:`load_rules` scans ``$NOVEL_RULES_DIR`` *before* the
+    per-user config directory, so a rule already installed there can shadow a
+    newly installed one.  :func:`install_rule` refuses such a write instead of
+    reporting a silently ineffective installation.
     """
     env = os.environ.get("NOVEL_RULES_DIR")
     if env:
@@ -290,6 +309,78 @@ def _serialize_rule(data: Mapping[str, Any]) -> str:
     return text + "\n"
 
 
+def _ordered_user_dirs() -> list[Path]:
+    """User rule directories in scan order, with duplicate paths collapsed."""
+    ordered: list[Path] = []
+    seen: set[Path] = set()
+    for directory in _user_dirs():
+        try:
+            resolved = directory.resolve()
+        except OSError:  # pragma: no cover - pathological path
+            resolved = directory
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        ordered.append(resolved)
+    return ordered
+
+
+def _rule_file_site_key(path: Path) -> str | None:
+    """Best-effort ``site_key`` of a rule file, or None when it is unusable."""
+    try:
+        data = loads_rule_json(_read_rule_text(path), source=path.name)
+        return _normalize_key(parse_rule(data, source=path.name).site_key)
+    except (OSError, ValueError):
+        # RuleError subclasses ValueError; a broken file cannot shadow anything
+        # because the loader skips it too.
+        return None
+
+
+def _shadowing_rule_file(key: str, target: Path) -> Path | None:
+    """
+    Return the file that would win over ``target`` for ``key``, if any.
+
+    ``load_rules`` scans the user directories in :func:`_user_dirs` order and
+    the files inside one directory in sorted order; the last file parsed wins.
+    ``target`` always lives in a user directory, so builtins (scanned first)
+    can never shadow it.  Only files scanned *after* ``target`` are considered,
+    which is exactly the set that would silently replace the installed rule.
+
+    :param key: Normalized ``site_key`` of the rule being installed.
+    :param target: Path the rule would be written to.
+    :return: The shadowing file, or None when the rule would take effect.
+    """
+    directories = _ordered_user_dirs()
+    target = target.resolve()
+    target_dir = target.parent
+    try:
+        start = directories.index(target_dir)
+    except ValueError:
+        # The install directory is not scanned by the loader at all; the rule
+        # would not be loaded, but that is a different (configured) situation.
+        return None
+
+    for position in range(start, len(directories)):
+        directory = directories[position]
+        if not directory.is_dir():
+            continue
+        candidates = sorted(
+            path
+            for path in directory.glob("*.json")
+            if path != target and not _is_ignored(path.name)
+        )
+        if position == start:
+            # Model inserting the not-yet-written target into the scan order:
+            # only the files sorted after it are scanned later and can win.
+            combined = sorted([*candidates, target])
+            after = combined.index(target) + 1
+            candidates = combined[after:]
+        for path in candidates:
+            if key == _rule_file_site_key(path):
+                return path
+    return None
+
+
 def install_rule(
     data: Mapping[str, Any] | str | Path,
     name: str | None = None,
@@ -307,7 +398,9 @@ def install_rule(
     :param overwrite: Replace an existing file with the same target name.
     :param force: Deprecated alias for ``overwrite`` (kept for the CLI).
     :raises RuleError: when the input cannot be read/parsed, is structurally
-        invalid, or the target exists and ``overwrite`` is false.
+        invalid, the target exists and ``overwrite`` is false, or another rule
+        file with the same ``site_key`` is scanned after the target (and would
+        therefore silently take precedence).
     :return: The installed file's path.
     """
     if isinstance(data, Mapping):
@@ -347,6 +440,18 @@ def install_rule(
             t("{target} already exists (pass --force to overwrite)").format(
                 target=target
             )
+        )
+
+    # Installing is only meaningful if the new file actually wins at load time.
+    # Within a directory the last file name wins, and ``$NOVEL_RULES_DIR`` is
+    # scanned before the user config directory -- both used to let a stale rule
+    # silently override a fresh install.
+    key = _normalize_key(rule.site_key)
+    shadowing = _shadowing_rule_file(key, target)
+    if shadowing is not None:
+        raise RuleError(
+            f"rule '{key}' would be shadowed by {shadowing} "
+            "(loaded after the target); remove or rename that file first"
         )
 
     try:

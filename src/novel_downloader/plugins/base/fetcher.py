@@ -10,9 +10,10 @@ import abc
 import asyncio
 import hashlib
 import logging
-import time
+import random
 import types
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -20,7 +21,10 @@ from typing import Any, Literal, Self
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS, IMAGE_HEADERS
 from novel_downloader.infra.i18n import t
 from novel_downloader.infra.sessions import create_session
-from novel_downloader.infra.sessions.base import TooManyRedirectsError
+from novel_downloader.infra.sessions.base import (
+    NonRetryableConnectionError,
+    TooManyRedirectsError,
+)
 from novel_downloader.libs.filesystem import font_filename, image_filename, write_file
 from novel_downloader.libs.time_utils import async_jitter_sleep
 from novel_downloader.plugins.base.errors import (
@@ -36,6 +40,21 @@ logger = logging.getLogger(__name__)
 
 #: A server may ask us to wait an hour; downloads should not stall that long.
 _MAX_RETRY_AFTER = 30.0
+
+#: Upper bound for the locally computed exponential backoff.
+_MAX_BACKOFF = 60.0
+
+#: Extra wait added on top of a server-supplied ``Retry-After`` so concurrent
+#: workers that received the same header do not retry in lockstep.  The jitter
+#: is upward-only, so the server's minimum delay is still respected.
+_RETRY_AFTER_JITTER_MAX = 1.0
+_RETRY_AFTER_JITTER_FRACTION = 0.1
+
+#: Statuses whose ``Retry-After`` describes site-wide pressure and therefore
+#: pauses every worker sharing the rate limiter, not just this request.  A 5xx
+#: without the header may be one broken route rather than a rate limit, so it
+#: keeps the local exponential backoff only.
+_SHARED_COOLDOWN_STATUS: frozenset[int] = frozenset({429, 503})
 
 
 def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
@@ -61,7 +80,13 @@ def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
             return None
         if when is None:
             return None
-        seconds = when.timestamp() - time.time()
+        # HTTP-dates are GMT; a parser that returns a naive datetime (some
+        # malformed variants) must not be interpreted in the local timezone.
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+    if seconds != seconds:  # NaN
+        return None
     return max(0.0, min(seconds, _MAX_RETRY_AFTER))
 
 
@@ -200,6 +225,16 @@ class BaseFetcher(abc.ABC):
                     exc,
                 )
                 return None
+            except NonRetryableConnectionError as exc:
+                # Bad certificate / proxy credentials: media is best-effort,
+                # and every retry would fail the same way.
+                logger.warning(
+                    "Request failed (site=%s) %s: %s (not retrying)",
+                    self.site_name,
+                    url,
+                    exc,
+                )
+                return None
             except (TimeoutError, ConnectionError) as exc:
                 if attempt < self._retry_times:
                     logger.info(
@@ -222,10 +257,19 @@ class BaseFetcher(abc.ABC):
 
             if not resp.ok:
                 if resp.status in RETRYABLE_STATUS and attempt < self._retry_times:
-                    await self._retry_backoff(
-                        attempt, _retry_after_seconds(resp.headers)
-                    )
+                    delay = _retry_after_seconds(resp.headers)
+                    if resp.status in _SHARED_COOLDOWN_STATUS and delay is not None:
+                        covered = self._apply_shared_cooldown(delay)
+                        if covered > 0 and covered >= delay:
+                            # Covered by the next ``wait()``; no local sleep.
+                            continue
+                        if covered > 0:
+                            delay -= covered
+                    await self._retry_backoff(attempt, delay)
                     continue
+                # Out of retries (or a status we cannot retry): still pass a
+                # rate-limit header on to the peers sharing this limiter.
+                self._register_shared_cooldown(resp.status, resp.headers)
                 logger.warning(
                     "Request failed (site=%s) %s: HTTP %s",
                     self.site_name,
@@ -441,6 +485,18 @@ class BaseFetcher(abc.ABC):
                     exc,
                 )
                 raise RedirectLimitError(url, exc) from exc
+            except NonRetryableConnectionError as exc:
+                # Deterministic transport failure (untrusted certificate,
+                # rejected proxy credentials).  Treated like a spent budget:
+                # the typed TransportError tells the chapter loop not to
+                # retry, so the same request is not sent three more times.
+                logger.warning(
+                    "Request failed (site=%s) %s: %s (not retrying)",
+                    self.site_name,
+                    url,
+                    exc,
+                )
+                raise TransportError(url, exc) from exc
             except (TimeoutError, ConnectionError) as exc:
                 # Transport trouble is exactly what the retry budget is for;
                 # the previous version only retried HTTP statuses, so one
@@ -467,6 +523,9 @@ class BaseFetcher(abc.ABC):
                 raise HttpStatusError(url, resp.status)
 
             if attempt >= self._retry_times:
+                # This request gives up, but the header is still evidence for
+                # the peers that are about to hit the same rate limit.
+                self._register_shared_cooldown(resp.status, resp.headers)
                 raise HttpStatusError(url, resp.status)
 
             logger.info(
@@ -477,28 +536,111 @@ class BaseFetcher(abc.ABC):
                 url,
                 resp.status,
             )
-            await self._retry_backoff(attempt, _retry_after_seconds(resp.headers))
+            delay = _retry_after_seconds(resp.headers)
+            if resp.status in _SHARED_COOLDOWN_STATUS and delay is not None:
+                covered = self._apply_shared_cooldown(delay)
+                if covered > 0 and covered >= delay:
+                    # The limiter now holds every worker until the cooldown
+                    # expires, and the next ``wait()`` blocks for exactly that
+                    # long.  Sleeping here as well would wait twice for one
+                    # 429 and silently multiply the requested pause.
+                    continue
+                if covered > 0:
+                    delay -= covered
+            await self._retry_backoff(attempt, delay)
 
         raise AssertionError("unreachable: the retry loop always returns or raises")
+
+    def _register_shared_cooldown(
+        self,
+        status: int,
+        headers: Mapping[str, str],
+    ) -> float | None:
+        """
+        Register a shared cooldown from a rate-limit response, when applicable.
+
+        Subclasses that override :meth:`fetch` do not pass through the base
+        retry loop, so they call this to keep the same contract: a 429/503
+        carrying a parseable ``Retry-After`` pauses every worker sharing the
+        limiter, while other statuses and a limiter without ``penalize``
+        change nothing.
+
+        :param status: HTTP status of the response.
+        :param headers: Response headers.
+        :return: The parsed delay when a cooldown was registered; ``None``
+            otherwise.
+        """
+        if status not in _SHARED_COOLDOWN_STATUS:
+            return None
+        delay = _retry_after_seconds(headers)
+        if delay is None:
+            return None
+        if self._apply_shared_cooldown(delay) <= 0:
+            return None
+        return delay
+
+    def _apply_shared_cooldown(self, seconds: float) -> float:
+        """
+        Pause every worker sharing the limiter, when the limiter supports it.
+
+        ``penalize`` is optional (the limiter is duck-typed, and callers may
+        install their own), so its absence is normal and must not change the
+        retry path.
+
+        :param seconds: Server-requested delay.
+        :return: Seconds covered by the shared cooldown; ``0.0`` when the
+            limiter has no such capability.
+        """
+        penalize = getattr(self._rate_limiter, "penalize", None)
+        if penalize is None:
+            return 0.0
+        try:
+            covered = float(penalize(seconds))
+        except Exception:  # pragma: no cover - defensive: a foreign limiter
+            logger.debug(
+                "Rate limiter penalize() failed (site=%s)",
+                self.site_name,
+                exc_info=True,
+            )
+            return 0.0
+        if not covered > 0:  # NaN-safe
+            return 0.0
+        return min(covered, seconds)
 
     async def _retry_backoff(self, attempt: int, delay: float | None = None) -> None:
         """
         Sleep before the next attempt.
 
         A server-supplied ``Retry-After`` wins over the local jitter schedule;
-        otherwise the jittered exponential backoff is spread around
-        ``backoff_factor``.
+        otherwise the delay is an exponential backoff (``backoff_factor``,
+        then doubling per attempt) with jitter, capped at
+        :data:`_MAX_BACKOFF`.
+
+        The retry counter used to be accepted but ignored, so every retry
+        slept the same jittered ``backoff_factor`` however many failures had
+        already happened.
 
         :param attempt: Zero-based index of the attempt that just failed.
         :param delay: Delay requested by the server, if any.
         """
         if delay is not None:
-            await asyncio.sleep(delay)
+            # Wait at least as long as the server asked, plus upward-only
+            # jitter: a fleet of workers that all received the same
+            # ``Retry-After`` must not retry in lockstep and earn another 429.
+            jitter = random.uniform(
+                0.0,
+                min(_RETRY_AFTER_JITTER_MAX, delay * _RETRY_AFTER_JITTER_FRACTION),
+            )
+            await asyncio.sleep(min(delay + jitter, _MAX_RETRY_AFTER))
             return
+        base = min(
+            self._backoff_factor * (2 ** min(attempt, 16)),
+            _MAX_BACKOFF,
+        )
         await async_jitter_sleep(
-            self._backoff_factor,
+            base,
             mul_spread=1.1,
-            max_sleep=self._backoff_factor + 2,
+            max_sleep=min(base + 2.0, _MAX_BACKOFF),
         )
 
     async def _check_login_status(self) -> bool:

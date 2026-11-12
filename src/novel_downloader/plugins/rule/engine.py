@@ -52,6 +52,7 @@ import binascii
 import hashlib
 import html
 import json
+import logging
 import re
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -74,6 +75,7 @@ __all__ = [
     "json_to_str",
     "extract",
     "extract_multi",
+    "MAX_MULTI_ITEMS",
     "apply_steps",
     "preprocess",
     "body_fingerprint",
@@ -86,6 +88,14 @@ __all__ = [
     "http_url",
     "is_fetchable_url",
 ]
+
+logger = logging.getLogger(__name__)
+
+#: Safety cap for :func:`extract_multi`.  A rule whose multi-selector matches
+#: an unbounded node set (e.g. a malformed ``//a`` over a huge page) would
+#: otherwise produce an arbitrarily large list in memory and in the parsed
+#: result.  Normal rules match far fewer items.
+MAX_MULTI_ITEMS = 1000
 
 _NESTED_HTML_RE = re.compile(r"<!DOCTYPE.*?>", re.I | re.S)
 
@@ -643,26 +653,53 @@ def extract(root: Any, fld: Field, fmt: str = "html") -> str:
     return fld.apply_replace(fld.default).strip()
 
 
-def _extract_all(root: Any, fld: Field, fmt: str) -> list[str]:
+def _extract_all(
+    root: Any, fld: Field, fmt: str, *, limit: int | None = None
+) -> list[str]:
     out: list[str] = []
     for node in _nodes(root, fld, fmt):
         value = _extract_one(node, fld, fmt)
         if value:
             out.append(value)
+            if limit is not None and len(out) >= limit:
+                break
     return out
 
 
-def extract_multi(root: Any, fld: Field, fmt: str = "html") -> list[str]:
+def extract_multi(
+    root: Any,
+    fld: Field,
+    fmt: str = "html",
+    *,
+    max_items: int | None = MAX_MULTI_ITEMS,
+) -> list[str]:
     """Extract every non-empty match for ``fld`` from ``root``.
 
     As with :func:`extract`, if the main selector matches nothing the first
     fallback that yields values wins.
+
+    ``max_items`` caps the result (default :data:`MAX_MULTI_ITEMS`); when the
+    selector matches more, the first ``max_items`` values are kept and a
+    WARNING is logged.  Pass ``None`` to disable the cap.  Values themselves
+    are never modified, so rules that stay under the cap are unaffected.
     """
-    out = _extract_all(root, fld, fmt)
+    if max_items is not None and max_items < 1:
+        raise RuleError("extract_multi: max_items must be >= 1")
+    # Ask for one extra item so truncation can be *detected* without ever
+    # materialising the full (possibly enormous) match set.
+    probe = None if max_items is None else max_items + 1
+    out = _extract_all(root, fld, fmt, limit=probe)
+    if max_items is not None and len(out) > max_items:
+        logger.warning(
+            "extract_multi: selector %r matched more than %d items; truncating",
+            fld.selector,
+            max_items,
+        )
+        del out[max_items:]
     if out:
         return out
     for alt in fld.fallback:
-        out = extract_multi(root, alt, fmt)
+        out = extract_multi(root, alt, fmt, max_items=max_items)
         if out:
             return out
     return out

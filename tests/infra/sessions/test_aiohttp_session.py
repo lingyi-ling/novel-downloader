@@ -1,4 +1,6 @@
 import json
+import ssl
+from types import SimpleNamespace
 
 import aiohttp
 import aiohttp.web
@@ -6,6 +8,7 @@ import pytest
 import pytest_asyncio
 
 from novel_downloader.infra.sessions._aiohttp import AiohttpSession
+from novel_downloader.infra.sessions.base import NonRetryableConnectionError
 from novel_downloader.schemas import FetcherConfig
 
 
@@ -157,3 +160,57 @@ async def test_cookie_update_and_clear(cfg):
     assert s.get_cookie("b") is None
 
     await s.close()
+
+
+# ----------------------------
+# deterministic failure types
+# ----------------------------
+class _RaisingClient:
+    """Client double whose ``get`` raises a prepared backend exception."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    def get(self, url: str, **kwargs: object) -> object:
+        raise self.exc
+
+
+def _session_raising(cfg: FetcherConfig, exc: BaseException) -> AiohttpSession:
+    session = AiohttpSession(cfg, cookies=None)
+    session._session = _RaisingClient(exc)  # type: ignore[assignment]
+    return session
+
+
+@pytest.mark.asyncio
+async def test_certificate_error_is_non_retryable(cfg):
+    connection_key = SimpleNamespace(host="demo", port=443, is_ssl=True)
+    error = aiohttp.ClientConnectorCertificateError(
+        connection_key, ssl.SSLCertVerificationError(1, "certificate expired")
+    )
+    session = _session_raising(cfg, error)
+
+    with pytest.raises(NonRetryableConnectionError):
+        await session.get("https://demo/")
+
+
+@pytest.mark.asyncio
+async def test_proxy_407_is_non_retryable(cfg):
+    request_info = SimpleNamespace(real_url="https://demo/")
+    error = aiohttp.ClientHttpProxyError(request_info, (), status=407)
+    session = _session_raising(cfg, error)
+
+    with pytest.raises(NonRetryableConnectionError):
+        await session.get("https://demo/")
+
+
+@pytest.mark.asyncio
+async def test_proxy_5xx_stays_retryable(cfg):
+    """An upstream proxy failure can heal; only credential refusals cannot."""
+    request_info = SimpleNamespace(real_url="https://demo/")
+    error = aiohttp.ClientHttpProxyError(request_info, (), status=502)
+    session = _session_raising(cfg, error)
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await session.get("https://demo/")
+
+    assert not isinstance(excinfo.value, NonRetryableConnectionError)

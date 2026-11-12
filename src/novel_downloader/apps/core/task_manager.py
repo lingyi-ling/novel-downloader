@@ -125,15 +125,23 @@ def is_retryable_error(error: BaseException) -> bool:
         return False
     if isinstance(error, RetryableTaskError):
         return True
+    # An explicit ``retryable`` declaration must beat the generic transport
+    # families below. ``TransportError``, ``HttpStatusError`` and
+    # ``NonRetryableConnectionError`` subclass ``ConnectionError`` but set
+    # ``retryable = False``: the fetcher already spent its budget on them
+    # (including 5xx/429 statuses), or refused a deterministic
+    # certificate/proxy/4xx failure. Checking ``isinstance(ConnectionError)``
+    # first would multiply the fetcher's request count by this task-level
+    # budget for errors the lower layer deliberately stopped retrying.
+    declared = getattr(error, "retryable", None)
+    if isinstance(declared, bool):
+        return declared
     if isinstance(error, aiohttp.ClientResponseError):
         # 4xx means the request itself is refused (auth/paywall); only
         # server-side errors and rate limiting are worth another attempt.
         return error.status >= 500 or error.status == 429
     if isinstance(error, (aiohttp.ClientError, ConnectionError, TimeoutError, OSError)):
         return True
-    declared = getattr(error, "retryable", None)
-    if isinstance(declared, bool):
-        return declared
     return type(error).__name__ in _RETRYABLE_ERROR_NAMES
 
 

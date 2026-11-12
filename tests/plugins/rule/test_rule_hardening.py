@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import logging
 import time
 from typing import Any, cast
 
@@ -369,6 +370,39 @@ def test_extract_multi_matches_the_hand_written_path() -> None:
             "/book/7/3.html",
         ]
     )
+
+
+def test_extract_multi_truncates_above_the_default_cap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unbounded multi-selector must not materialise an unbounded list."""
+    count = engine.MAX_MULTI_ITEMS + 5
+    tree = parse_page(
+        "<div>" + "".join(f'<a class="c">v{i}</a>' for i in range(count)) + "</div>"
+    )
+    fld = Field(selector="a.c", attr="text", multi=True)
+
+    with caplog.at_level(
+        logging.WARNING, logger="novel_downloader.plugins.rule.engine"
+    ):
+        got = extract_multi(tree, fld)
+
+    assert len(got) == engine.MAX_MULTI_ITEMS
+    assert got[0] == "v0"
+    assert got[-1] == f"v{engine.MAX_MULTI_ITEMS - 1}"
+    assert any("truncating" in record.message for record in caplog.records)
+
+
+def test_extract_multi_cap_is_configurable_and_does_not_reorder() -> None:
+    tree = parse_page(
+        "<div>" + "".join(f'<a class="c">v{i}</a>' for i in range(5)) + "</div>"
+    )
+    fld = Field(selector="a.c", attr="text", multi=True)
+
+    assert extract_multi(tree, fld, max_items=2) == ["v0", "v1"]
+    assert extract_multi(tree, fld, max_items=None) == ["v0", "v1", "v2", "v3", "v4"]
+    with pytest.raises(RuleError, match="max_items must be >= 1"):
+        extract_multi(tree, fld, max_items=0)
 
 
 def test_extract_without_steps_raises_the_same_errors() -> None:

@@ -3,8 +3,10 @@ import json
 import aiohttp.web
 import pytest
 import pytest_asyncio
+from curl_cffi.requests.exceptions import CertificateVerifyError, ProxyError
 
 from novel_downloader.infra.sessions._curl_cffi import CurlCffiSession
+from novel_downloader.infra.sessions.base import NonRetryableConnectionError
 from novel_downloader.schemas import FetcherConfig
 
 
@@ -136,3 +138,53 @@ async def test_cookie_update_and_clear(cfg):
     assert s.get_cookie("b") is None
 
     await s.close()
+
+
+# ----------------------------
+# deterministic failure types
+# ----------------------------
+class _RaisingClient:
+    """AsyncSession double whose ``get`` raises a prepared exception."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    async def get(self, url: str, **kwargs: object) -> object:
+        raise self.exc
+
+
+def _session_raising(cfg: FetcherConfig, exc: BaseException) -> CurlCffiSession:
+    session = CurlCffiSession(cfg, cookies=None)
+    session._session = _RaisingClient(exc)  # type: ignore[assignment]
+    return session
+
+
+@pytest.mark.asyncio
+async def test_certificate_error_is_non_retryable(cfg):
+    error = CertificateVerifyError(
+        "SSL certificate problem: self signed certificate", code=60
+    )
+    session = _session_raising(cfg, error)
+
+    with pytest.raises(NonRetryableConnectionError):
+        await session.get("https://demo/")
+
+
+@pytest.mark.asyncio
+async def test_proxy_407_is_non_retryable(cfg):
+    error = ProxyError("CONNECT tunnel failed, response 407", code=56)
+    session = _session_raising(cfg, error)
+
+    with pytest.raises(NonRetryableConnectionError):
+        await session.get("https://demo/")
+
+
+@pytest.mark.asyncio
+async def test_proxy_connection_failure_stays_retryable(cfg):
+    error = ProxyError("Failed to connect to proxy", code=5)
+    session = _session_raising(cfg, error)
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await session.get("https://demo/")
+
+    assert not isinstance(excinfo.value, NonRetryableConnectionError)

@@ -12,6 +12,9 @@ from typing import Any, Unpack
 
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import (
+    CertificateVerifyError as CurlCertificateVerifyError,
+)
+from curl_cffi.requests.exceptions import (
     ChunkedEncodingError as CurlChunkedEncodingError,
 )
 from curl_cffi.requests.exceptions import (
@@ -43,9 +46,11 @@ from .base import (
     GetRequestKwargs,
     PostRequestKwargs,
     as_connection_error,
+    as_non_retryable_connection_error,
     as_timeout_error,
     as_too_many_redirects_error,
     close_backend_session,
+    is_proxy_authentication_error,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -127,9 +132,18 @@ class CurlCffiSession(BaseSession):
             raise as_timeout_error(exc) from exc
         except CurlTooManyRedirects as exc:
             raise as_too_many_redirects_error(exc) from exc
+        except CurlCertificateVerifyError as exc:
+            # Must precede ConnectionError: CertificateVerifyError is one, and
+            # the peer's certificate cannot become valid between attempts.
+            raise as_non_retryable_connection_error(exc) from exc
+        except CurlProxyError as exc:
+            # CONNECT tunnel failures carry the proxy status in the message
+            # ("... response 407"); only credential refusals are permanent.
+            if is_proxy_authentication_error(exc):
+                raise as_non_retryable_connection_error(exc) from exc
+            raise as_connection_error(exc) from exc
         except (
             CurlConnectionError,
-            CurlProxyError,
             CurlIncompleteRead,
             CurlHTTPError,
             CurlContentDecodingError,
@@ -171,9 +185,18 @@ class CurlCffiSession(BaseSession):
             raise as_timeout_error(exc) from exc
         except CurlTooManyRedirects as exc:
             raise as_too_many_redirects_error(exc) from exc
+        except CurlCertificateVerifyError as exc:
+            # Must precede ConnectionError: CertificateVerifyError is one, and
+            # the peer's certificate cannot become valid between attempts.
+            raise as_non_retryable_connection_error(exc) from exc
+        except CurlProxyError as exc:
+            # CONNECT tunnel failures carry the proxy status in the message
+            # ("... response 407"); only credential refusals are permanent.
+            if is_proxy_authentication_error(exc):
+                raise as_non_retryable_connection_error(exc) from exc
+            raise as_connection_error(exc) from exc
         except (
             CurlConnectionError,
-            CurlProxyError,
             CurlIncompleteRead,
             CurlHTTPError,
             CurlContentDecodingError,

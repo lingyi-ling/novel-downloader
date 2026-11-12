@@ -16,9 +16,12 @@ from .base import (
     GetRequestKwargs,
     PostRequestKwargs,
     as_connection_error,
+    as_non_retryable_connection_error,
     as_timeout_error,
     as_too_many_redirects_error,
     close_backend_session,
+    is_certificate_verification_error,
+    is_proxy_authentication_error,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -116,11 +119,18 @@ class AiohttpSession(BaseSession):
             raise as_timeout_error(exc) from exc
         except aiohttp.TooManyRedirects as exc:
             raise as_too_many_redirects_error(exc) from exc
-        except (
-            aiohttp.ClientConnectionError,
-            aiohttp.ClientPayloadError,
-            aiohttp.ClientHttpProxyError,
-        ) as exc:
+        except aiohttp.ClientHttpProxyError as exc:
+            # A proxy that refused our credentials will refuse them again; a
+            # proxy that answered 502/503 is a transient upstream failure.
+            if is_proxy_authentication_error(exc):
+                raise as_non_retryable_connection_error(exc) from exc
+            raise as_connection_error(exc) from exc
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
+            # ClientConnectorCertificateError is a ClientConnectionError and
+            # an ssl.SSLCertVerificationError; replaying the handshake cannot
+            # turn an untrusted certificate into a trusted one.
+            if is_certificate_verification_error(exc):
+                raise as_non_retryable_connection_error(exc) from exc
             raise as_connection_error(exc) from exc
 
     async def post(
@@ -155,11 +165,18 @@ class AiohttpSession(BaseSession):
             raise as_timeout_error(exc) from exc
         except aiohttp.TooManyRedirects as exc:
             raise as_too_many_redirects_error(exc) from exc
-        except (
-            aiohttp.ClientConnectionError,
-            aiohttp.ClientPayloadError,
-            aiohttp.ClientHttpProxyError,
-        ) as exc:
+        except aiohttp.ClientHttpProxyError as exc:
+            # A proxy that refused our credentials will refuse them again; a
+            # proxy that answered 502/503 is a transient upstream failure.
+            if is_proxy_authentication_error(exc):
+                raise as_non_retryable_connection_error(exc) from exc
+            raise as_connection_error(exc) from exc
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
+            # ClientConnectorCertificateError is a ClientConnectionError and
+            # an ssl.SSLCertVerificationError; replaying the handshake cannot
+            # turn an untrusted certificate into a trusted one.
+            if is_certificate_verification_error(exc):
+                raise as_non_retryable_connection_error(exc) from exc
             raise as_connection_error(exc) from exc
 
     def load_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:

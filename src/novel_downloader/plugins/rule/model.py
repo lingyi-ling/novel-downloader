@@ -89,6 +89,7 @@ global config object is untouched.
 
 from __future__ import annotations
 
+import codecs
 import json
 import re
 from dataclasses import dataclass, field, replace
@@ -113,7 +114,14 @@ __all__ = [
     "parse_rule",
     "loads_rule_json",
     "apply_limits",
+    "MAX_EXTRA_PAGES",
 ]
+
+#: Hard upper bound on the extra pagination pages the fetcher will fetch.
+#: ``pages.max_pages`` is a *page number*, so a value above this cannot be
+#: honoured; it was previously clamped silently at runtime (the walk simply
+#: stopped), which hid a misconfigured rule.  It is now rejected at load time.
+MAX_EXTRA_PAGES = 50
 
 
 class RuleError(ValueError):
@@ -230,6 +238,25 @@ def _as_int(value: Any, default: int, *, where: str) -> int:
         return int(value)
     except ValueError as e:
         raise RuleError(f"{where} must be an integer, got {value!r}") from e
+
+
+def _check_encoding(value: str, *, where: str = "encoding") -> str:
+    """
+    Reject an ``encoding`` name that Python cannot decode responses with.
+
+    ``codecs.lookup`` is the same registry :class:`BaseFetcher` ultimately uses;
+    validating it here turns a bad value (``"utf8-bom"``, a typo, ...) into a
+    readable load-time :class:`RuleError` instead of a per-request ``LookupError``
+    once the site is actually crawled.
+    """
+    try:
+        codecs.lookup(value)
+    except (LookupError, TypeError) as e:
+        raise RuleError(
+            f"{where} {value!r} is not a known text encoding "
+            "(use a Python codec name such as 'utf-8' or 'gb18030')"
+        ) from e
+    return value
 
 
 def _as_bool(value: Any, default: bool, *, where: str) -> bool:
@@ -1370,14 +1397,19 @@ class PagesRule:
             raise RuleError(t("pages rule requires a 'url'"))
         _reject_unknown(data, _PAGES_KEYS, where="pages")
         raw_max = data.get("max_pages")
+        max_pages = (
+            None if raw_max is None else _as_int(raw_max, 2, where="pages.max_pages")
+        )
+        if max_pages is not None and max_pages > MAX_EXTRA_PAGES:
+            raise RuleError(
+                f"pages.max_pages must be <= {MAX_EXTRA_PAGES}, got {max_pages} "
+                "(the fetcher refuses to walk more extra pages than that, so a "
+                "larger value would be silently truncated)"
+            )
         return cls(
             url=_check_url_template(data["url"], where="pages.url"),
             start=_as_int(data.get("start"), 2, where="pages.start"),
-            max_pages=(
-                None
-                if raw_max is None
-                else _as_int(raw_max, 2, where="pages.max_pages")
-            ),
+            max_pages=max_pages,
             stop_when=_check_regex(data.get("stop_when"), where="pages.stop_when"),
             loop_guard=_as_bool(data.get("loop_guard"), True, where="pages.loop_guard"),
         )
@@ -1586,7 +1618,7 @@ def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
         base_url=_check_url_template(
             _as_str(data.get("base_url")), where="base_url", allow_empty=True
         ),
-        encoding=_as_str(data.get("encoding"), "utf-8"),
+        encoding=_check_encoding(_as_str(data.get("encoding"), "utf-8")),
         format=_check_format(_as_str(data.get("format"), "html").lower()),
         hosts=[h.lower() for h in _as_str_list(data.get("hosts"), where="hosts")],
         headers=_as_headers(data.get("headers")),

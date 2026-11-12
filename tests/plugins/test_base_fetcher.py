@@ -8,17 +8,26 @@ what is retried, what is swallowed, and what is left on disk after a failure.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import novel_downloader.plugins.base.fetcher as fetcher_mod
+import novel_downloader.plugins.utils.rate_limiter as rate_limiter_module
 from novel_downloader.infra.http_defaults import IMAGE_HEADERS
+from novel_downloader.infra.sessions.base import NonRetryableConnectionError
 from novel_downloader.infra.sessions.response import BaseResponse
 from novel_downloader.libs.filesystem import font_filename, image_filename
-from novel_downloader.plugins.base.errors import HttpStatusError, TransportError
+from novel_downloader.plugins.base.errors import (
+    HttpStatusError,
+    TransportError,
+    is_transient_error,
+)
 from novel_downloader.plugins.base.fetcher import (
     BaseFetcher,
     GenericFetcher,
@@ -252,6 +261,422 @@ def test_retry_after_accepts_both_header_forms() -> None:
 
 def test_retry_after_is_capped() -> None:
     assert _retry_after_seconds({"Retry-After": "3600"}) == 30.0
+
+
+def test_retry_after_accepts_a_future_http_date() -> None:
+    """The date form is honoured, then bounded by the same ceiling."""
+    when = datetime.now(UTC) + timedelta(seconds=60)
+    header = format_datetime(when, usegmt=True)
+
+    assert _retry_after_seconds({"Retry-After": header}) == 30.0
+
+
+def test_retry_after_ignores_a_malformed_value() -> None:
+    assert _retry_after_seconds({"Retry-After": ""}) is None
+    assert _retry_after_seconds({"Retry-After": "nan"}) is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_retries_429_without_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """429 is transient even without a Retry-After header."""
+    handler = lambda url, kw: BaseResponse(content=b"", status=429)  # noqa: E731
+    fetcher, session = _make(monkeypatch, handler, retry_times=2)
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await fetcher.fetch("https://demo/1")
+
+    assert excinfo.value.status == 429
+    # The fetcher spent the whole budget above, so no higher level may retry.
+    assert excinfo.value.retryable is False
+    assert is_transient_error(excinfo.value) is False
+    assert len(session.calls) == 3  # retry_times + 1
+
+
+def test_typed_http_status_error_is_not_transient() -> None:
+    """5xx budget is spent inside the fetcher; 4xx is deterministic.
+
+    ``is_transient_error`` gates higher-level retries, so it must agree with
+    ``HttpStatusError.retryable`` even though ``RETRYABLE_STATUS`` still marks
+    5xx/429 as transient for reporting callers.
+    """
+    for status in (503, 429, 500, 404, 403):
+        error = HttpStatusError("https://demo/1", status)
+        assert error.retryable is False
+        assert is_transient_error(error) is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_data_honours_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Media retries use the same 429/Retry-After contract as page fetches."""
+    handler = _sequence_handler(
+        BaseResponse(content=b"", status=429, headers={"Retry-After": "4"}),
+        BaseResponse(content=b"image"),
+    )
+    fetcher, session = _make(monkeypatch, handler, retry_times=1)
+    delays: list[float | None] = []
+
+    async def _record(attempt: int, delay: float | None = None) -> None:
+        delays.append(delay)
+
+    fetcher._retry_backoff = _record  # type: ignore[method-assign]
+
+    assert await fetcher.fetch_data("https://demo/cover.jpg") == b"image"
+    assert delays == [4.0]
+    assert len(session.calls) == 2
+
+
+class _RecordingLimiter:
+    """Stand-in for a limiter that may or may not expose ``penalize``."""
+
+    def __init__(self, covered: float | None = None, *, with_penalize: bool = True):
+        self.waits = 0
+        self.penalties: list[float] = []
+        self._covered = covered
+        self._with_penalize = with_penalize
+
+    async def wait(self) -> None:
+        self.waits += 1
+
+    def penalize(self, seconds: float) -> float:
+        self.penalties.append(seconds)
+        if self._covered is None:
+            return seconds
+        return min(self._covered, seconds)
+
+
+def _attach_limiter(fetcher: BaseFetcher, limiter: Any) -> Any:
+    fetcher._rate_limiter = limiter  # type: ignore[assignment]
+    return limiter
+
+
+@pytest.mark.asyncio
+async def test_fetch_429_retry_after_pauses_all_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared cooldown replaces the local sleep: one pause, not two."""
+    handler = _sequence_handler(
+        BaseResponse(content=b"", status=429, headers={"Retry-After": "7"}),
+        BaseResponse(content=b"ok", status=200),
+    )
+    fetcher, _ = _make(monkeypatch, handler, retry_times=2)
+    limiter = _attach_limiter(fetcher, _RecordingLimiter())
+    delays: list[float | None] = []
+
+    async def _record(attempt: int, delay: float | None = None) -> None:
+        delays.append(delay)
+
+    fetcher._retry_backoff = _record  # type: ignore[method-assign]
+
+    assert await fetcher.fetch("https://demo/1") == "ok"
+    assert limiter.penalties == [7.0]
+    # The retry must wait through the limiter's cooldown, not sleep on top.
+    assert delays == []
+    assert limiter.waits == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_503_retry_after_pauses_all_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = _sequence_handler(
+        BaseResponse(content=b"", status=503, headers={"Retry-After": "3"}),
+        BaseResponse(content=b"ok", status=200),
+    )
+    fetcher, _ = _make(monkeypatch, handler, retry_times=1)
+    limiter = _attach_limiter(fetcher, _RecordingLimiter())
+
+    assert await fetcher.fetch("https://demo/1") == "ok"
+    assert limiter.penalties == [3.0]
+
+
+@pytest.mark.asyncio
+async def test_fetch_500_retry_after_does_not_pause_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 500 with Retry-After may be one broken route, not site throttling."""
+    handler = _sequence_handler(
+        BaseResponse(content=b"", status=500, headers={"Retry-After": "7"}),
+        BaseResponse(content=b"ok", status=200),
+    )
+    fetcher, _ = _make(monkeypatch, handler, retry_times=1)
+    limiter = _attach_limiter(fetcher, _RecordingLimiter())
+    delays: list[float | None] = []
+
+    async def _record(attempt: int, delay: float | None = None) -> None:
+        delays.append(delay)
+
+    fetcher._retry_backoff = _record  # type: ignore[method-assign]
+
+    assert await fetcher.fetch("https://demo/1") == "ok"
+    assert limiter.penalties == []
+    assert delays == [7.0]
+
+
+@pytest.mark.asyncio
+async def test_fetch_429_without_retry_after_does_not_pause_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an explicit header the server gave no shared deadline."""
+    handler = _sequence_handler(
+        BaseResponse(content=b"", status=429),
+        BaseResponse(content=b"ok", status=200),
+    )
+    fetcher, _ = _make(monkeypatch, handler, retry_times=1)
+    limiter = _attach_limiter(fetcher, _RecordingLimiter())
+
+    assert await fetcher.fetch("https://demo/1") == "ok"
+    assert limiter.penalties == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_falls_back_when_limiter_has_no_penalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backward compatibility: a foreign limiter only has to provide wait()."""
+
+    class _WaitOnly:
+        def __init__(self) -> None:
+            self.waits = 0
+
+        async def wait(self) -> None:
+            self.waits += 1
+
+    handler = _sequence_handler(
+        BaseResponse(content=b"", status=429, headers={"Retry-After": "7"}),
+        BaseResponse(content=b"ok", status=200),
+    )
+    fetcher, _ = _make(monkeypatch, handler, retry_times=1)
+    limiter = _attach_limiter(fetcher, _WaitOnly())
+    delays: list[float | None] = []
+
+    async def _record(attempt: int, delay: float | None = None) -> None:
+        delays.append(delay)
+
+    fetcher._retry_backoff = _record  # type: ignore[method-assign]
+
+    assert await fetcher.fetch("https://demo/1") == "ok"
+    assert limiter.waits == 2
+    assert delays == [7.0]  # the old local sleep still happens
+
+
+@pytest.mark.asyncio
+async def test_fetch_sleeps_only_the_part_the_cooldown_could_not_cover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a cooldown is capped shorter than Retry-After, sleep the remainder."""
+    handler = _sequence_handler(
+        BaseResponse(content=b"", status=429, headers={"Retry-After": "7"}),
+        BaseResponse(content=b"ok", status=200),
+    )
+    fetcher, _ = _make(monkeypatch, handler, retry_times=1)
+    limiter = _attach_limiter(fetcher, _RecordingLimiter(covered=2.0))
+    delays: list[float | None] = []
+
+    async def _record(attempt: int, delay: float | None = None) -> None:
+        delays.append(delay)
+
+    fetcher._retry_backoff = _record  # type: ignore[method-assign]
+
+    assert await fetcher.fetch("https://demo/1") == "ok"
+    assert limiter.penalties == [7.0]
+    assert delays == [5.0]
+
+
+@pytest.mark.asyncio
+async def test_fetch_data_429_retry_after_pauses_all_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = _sequence_handler(
+        BaseResponse(content=b"", status=429, headers={"Retry-After": "4"}),
+        BaseResponse(content=b"image"),
+    )
+    fetcher, _ = _make(monkeypatch, handler, retry_times=1)
+    limiter = _attach_limiter(fetcher, _RecordingLimiter())
+
+    assert await fetcher.fetch_data("https://demo/cover.jpg") == b"image"
+    assert limiter.penalties == [4.0]
+
+
+@pytest.mark.asyncio
+async def test_fetch_penalises_even_after_the_budget_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last 429 still tells the pool to slow down, though we give up."""
+    handler = lambda url, kw: BaseResponse(  # noqa: E731
+        content=b"", status=429, headers={"Retry-After": "7"}
+    )
+    fetcher, session = _make(monkeypatch, handler, retry_times=1)
+    limiter = _attach_limiter(fetcher, _RecordingLimiter())
+
+    with pytest.raises(HttpStatusError):
+        await fetcher.fetch("https://demo/1")
+
+    assert len(session.calls) == 2
+    assert limiter.penalties == [7.0, 7.0]
+
+
+@pytest.mark.asyncio
+async def test_fetch_data_penalises_even_after_the_budget_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = lambda url, kw: BaseResponse(  # noqa: E731
+        content=b"", status=503, headers={"Retry-After": "2"}
+    )
+    fetcher, _ = _make(monkeypatch, handler, retry_times=0)
+    limiter = _attach_limiter(fetcher, _RecordingLimiter())
+
+    assert await fetcher.fetch_data("https://demo/cover.jpg") is None
+    assert limiter.penalties == [2.0]
+
+
+class _Clock:
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.mark.asyncio
+async def test_retry_after_and_the_bucket_do_not_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: one 429 costs one Retry-After pause, not two.
+
+    With a real ``TokenBucketRateLimiter`` the fetcher registers a shared
+    cooldown and then ``wait()`` sleeps it out.  If the fetcher also slept the
+    header locally, the retry would be delayed by ~2 x Retry-After.
+    """
+    clock = _Clock()
+    monkeypatch.setattr(rate_limiter_module, "time", clock)
+
+    real_sleep = asyncio.sleep
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.advance(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    handler = _sequence_handler(
+        BaseResponse(content=b"", status=429, headers={"Retry-After": "5"}),
+        BaseResponse(content=b"ok", status=200),
+    )
+    fetcher, _ = _make(monkeypatch, handler, retry_times=1, max_rps=1000.0)
+    limiter = fetcher._rate_limiter
+    assert limiter is not None
+    penalties: list[float] = []
+    original_penalize = limiter.penalize
+
+    def _spy(seconds: float, **kwargs: Any) -> float:
+        penalties.append(seconds)
+        return original_penalize(seconds, **kwargs)
+
+    monkeypatch.setattr(limiter, "penalize", _spy)
+    backoffs: list[float | None] = []
+
+    async def _record(attempt: int, delay: float | None = None) -> None:
+        backoffs.append(delay)
+
+    fetcher._retry_backoff = _record  # type: ignore[method-assign]
+
+    assert await fetcher.fetch("https://demo/1") == "ok"
+
+    assert penalties == [5.0]
+    assert backoffs == []  # no local sleep on top of the cooldown
+    # Exactly one pause, and it is the cooldown's (5 s + <=0.5 s jitter).
+    assert len(slept) == 1
+    assert 5.0 <= slept[0] <= 5.6
+
+
+@pytest.mark.asyncio
+async def test_fetch_does_not_retry_a_non_retryable_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected certificate/proxy credential fails on the first attempt."""
+    handler = lambda url, kw: NonRetryableConnectionError("certificate expired")  # noqa: E731
+    fetcher, session = _make(monkeypatch, handler, retry_times=3)
+
+    with pytest.raises(TransportError) as excinfo:
+        await fetcher.fetch("https://demo/1")
+
+    assert len(session.calls) == 1
+    assert isinstance(excinfo.value.__cause__, NonRetryableConnectionError)
+    assert is_transient_error(excinfo.value) is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_data_does_not_retry_a_non_retryable_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = lambda url, kw: NonRetryableConnectionError("bad proxy credentials")  # noqa: E731
+    fetcher, session = _make(monkeypatch, handler, retry_times=3)
+
+    assert await fetcher.fetch_data("https://demo/cover.jpg") is None
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_backoff_doubles_with_each_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher, _ = _make(monkeypatch, backoff_factor=2.0)
+    bases: list[float] = []
+
+    async def _record(base: float, **kwargs: Any) -> None:
+        bases.append(base)
+
+    monkeypatch.setattr(fetcher_mod, "async_jitter_sleep", _record)
+
+    for attempt in range(3):
+        await fetcher._retry_backoff(attempt)
+
+    assert bases == [2.0, 4.0, 8.0]
+
+
+@pytest.mark.asyncio
+async def test_backoff_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetcher, _ = _make(monkeypatch, backoff_factor=2.0)
+    bases: list[float] = []
+
+    async def _record(base: float, **kwargs: Any) -> None:
+        bases.append(base)
+
+    monkeypatch.setattr(fetcher_mod, "async_jitter_sleep", _record)
+
+    await fetcher._retry_backoff(20)
+
+    assert bases == [60.0]
+
+
+@pytest.mark.asyncio
+async def test_retry_after_jitter_is_upward_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Workers must not retry in lockstep, but never before the server's time."""
+    fetcher, _ = _make(monkeypatch)
+    slept: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(fetcher_mod.asyncio, "sleep", _fake_sleep)
+
+    await fetcher._retry_backoff(0, 10.0)
+    await fetcher._retry_backoff(0, 0.0)
+
+    assert len(slept) == 2
+    assert 10.0 <= slept[0] <= 11.0
+    assert slept[1] == 0.0
 
 
 @pytest.mark.asyncio
