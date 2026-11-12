@@ -512,57 +512,65 @@ def test_post_task_finished_success_and_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     posted: list[tuple[str, dict[str, Any], float]] = []
+    monkeypatch.setattr(api_webhook, "_retry_sleep", lambda _seconds: None)
+    public_url = "https://93.184.216.34/hook"
 
     class _Response:
         def raise_for_status(self) -> None:
             return None
 
-    def ok_post(url: str, *, json: dict[str, Any], timeout: float) -> _Response:
+    def ok_post(
+        url: str, *, json: dict[str, Any], timeout: float, **_kwargs: Any
+    ) -> _Response:
         posted.append((url, json, timeout))
         return _Response()
 
     monkeypatch.setattr(api_webhook.requests, "post", ok_post)
-    assert post_task_finished("http://hook", {"event": "task_finished"}, timeout=2.5)
+    assert post_task_finished(public_url, {"event": "task_finished"}, timeout=2.5)
     assert posted[0][2] == 2.5
 
-    def broken_post(url: str, *, json: dict[str, Any], timeout: float) -> Any:
+    def broken_post(url: str, **_kwargs: Any) -> Any:
         raise api_webhook.requests.ConnectionError("unreachable")
 
     monkeypatch.setattr(api_webhook.requests, "post", broken_post)
-    assert post_task_finished("http://hook", {"event": "task_finished"}) is False
+    assert post_task_finished(public_url, {"event": "task_finished"}) is False
 
 
 def test_notifier_uses_requests_with_five_second_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sent: list[tuple[str, dict[str, Any], float]] = []
+    monkeypatch.setattr(api_webhook, "_retry_sleep", lambda _seconds: None)
+    public_url = "https://93.184.216.34/hook"
 
     class _Response:
         def raise_for_status(self) -> None:
             return None
 
-    def fake_post(url: str, *, json: dict[str, Any], timeout: float) -> _Response:
+    def fake_post(
+        url: str, *, json: dict[str, Any], timeout: float, **_kwargs: Any
+    ) -> _Response:
         sent.append((url, json, timeout))
         return _Response()
 
     monkeypatch.setattr(api_webhook.requests, "post", fake_post)
-    notifier = WebhookNotifier("http://hook")
+    notifier = WebhookNotifier(public_url)
     notifier.notify_task_finished({"task_id": "1"})
     notifier.wait(timeout=5)
 
     assert sent == [
         (
-            "http://hook",
+            public_url,
             {"event": "task_finished", "task": {"task_id": "1"}},
             5.0,
         )
     ]
 
-    def failing_post(url: str, *, json: dict[str, Any], timeout: float) -> Any:
+    def failing_post(url: str, **_kwargs: Any) -> Any:
         raise api_webhook.requests.Timeout("slow endpoint")
 
     monkeypatch.setattr(api_webhook.requests, "post", failing_post)
-    notifier = WebhookNotifier("http://hook")
+    notifier = WebhookNotifier(public_url)
     notifier.notify_task_finished({"task_id": "2"})
     notifier.wait(timeout=5)  # a failing endpoint must not raise
 

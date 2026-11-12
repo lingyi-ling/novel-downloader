@@ -400,6 +400,47 @@ async def test_max_keys_evicts_the_least_recently_active_key(
 
 
 @pytest.mark.asyncio
+async def test_recently_active_key_is_not_evicted(clock: FakeClock) -> None:
+    """Touching a key again moves it to the back of the eviction order."""
+    mw, _ = _limited(limit=5, window=60.0, max_keys=2)
+
+    await _run(mw, client=("10.0.0.1", 5000))  # t=1000
+    clock.advance(1)
+    await _run(mw, client=("10.0.0.2", 5000))  # t=1001
+    clock.advance(1)
+    await _run(mw, client=("10.0.0.1", 5000))  # t=1002: 10.0.0.1 is freshest
+    clock.advance(1)
+    await _run(mw, client=("10.0.0.3", 5000))  # t=1003: evicts 10.0.0.2
+
+    assert set(mw._hits) == {"10.0.0.1", "10.0.0.3"}
+
+
+def test_eviction_at_capacity_does_not_sort_every_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Admitting a new key at the cap must not sort (or rescan) the whole table.
+
+    A source-address flood reaches ``max_keys`` quickly; an O(n log n) eviction
+    per new key turns the hard memory bound into a CPU amplifier. The LRU
+    order is kept incrementally instead.
+    """
+    import builtins
+
+    mw, _ = _limited(limit=5, window=60.0, max_keys=1000)
+    for index in range(1000):
+        mw._register_hit(f"10.0.{index // 256}.{index % 256}", 1000.0)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("eviction must not sort the whole counter table")
+
+    monkeypatch.setattr(builtins, "sorted", forbidden)
+
+    assert mw._register_hit("203.0.113.9", 1000.0) is None
+    assert len(mw._hits) == 1000
+
+
+@pytest.mark.asyncio
 async def test_forwarded_for_header_cannot_evade_the_limit(
     clock: FakeClock,
 ) -> None:
@@ -654,6 +695,34 @@ def test_api_main_forwards_rate_limit_arguments(
     api_main_module.api_main(["--rate-limit", "0"])
     assert captured["rate_limit"] == 0
     assert captured["rate_limit_window"] == 60.0
+
+
+def test_api_main_does_not_trust_forwarded_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``X-Forwarded-For`` must never determine the rate-limit key.
+
+    Uvicorn enables ``ProxyHeadersMiddleware`` by default and trusts requests
+    arriving from ``127.0.0.1``; on the default local bind every client is such
+    a peer, so a client could otherwise choose its own counter bucket by
+    sending a fresh ``X-Forwarded-For`` on each request. The limiter reads the
+    TCP peer from the ASGI scope, so the server must not rewrite it.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_create_app(**kwargs: Any) -> Any:
+        return object()
+
+    def fake_run(*args: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(api_main_module, "create_app", fake_create_app)
+    monkeypatch.setattr(api_main_module.uvicorn, "run", fake_run)
+
+    api_main_module.api_main([])
+
+    assert captured["proxy_headers"] is False
 
 
 def test_api_main_hides_docs_on_a_public_bind(

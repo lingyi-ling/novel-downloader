@@ -77,6 +77,7 @@ import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -91,6 +92,7 @@ from .middleware import (
     DEFAULT_RATE_LIMIT,
     DEFAULT_RATE_LIMIT_MAX_KEYS,
     DEFAULT_RATE_LIMIT_WINDOW,
+    RATE_LIMIT_EXEMPT_PATHS,
     BodySizeLimitMiddleware,
     CacheControlMiddleware,
     DownloadsAuthMiddleware,
@@ -130,6 +132,94 @@ CORS_ALLOW_HEADERS: tuple[str, ...] = (
 #: Response headers browser clients may read through ``--cors``. ``Retry-After``
 #: is needed so a rate-limited browser client can back off correctly.
 CORS_EXPOSE_HEADERS: tuple[str, ...] = ("Retry-After",)
+
+#: Body schema of the shared ``{"detail": ...}`` error responses.
+_ERROR_DETAIL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"detail": {"type": "string"}},
+    "required": ["detail"],
+}
+
+#: Error responses every route can produce. Declared on the application so the
+#: generated document (and ``/docs``) describes the same contract for ``401``
+#: (a token is configured and the request carries no matching one) and ``429``
+#: (the per-IP rate limit, or too many queued music jobs) without repeating it
+#: on every route. FastAPI contributes the ``422`` validation response itself.
+SHARED_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    401: {
+        "description": (
+            "Authentication failed: the server has a token configured and the "
+            "request carried no matching 'Authorization: Bearer <token>' or "
+            "'X-API-Key: <token>' header."
+        ),
+        "content": {"application/json": {"schema": _ERROR_DETAIL_SCHEMA}},
+    },
+    429: {
+        "description": (
+            "Request rate limit exceeded, or too many music jobs are already "
+            "running; wait for the number of seconds in Retry-After."
+        ),
+        "headers": {
+            "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {"type": "integer", "minimum": 0},
+            }
+        },
+        "content": {"application/json": {"schema": _ERROR_DETAIL_SCHEMA}},
+    },
+}
+
+#: Security schemes matching :mod:`novel_downloader.apps.api.auth`. The token
+#: check is a router-level dependency, so FastAPI only contributes the two
+#: accepted header parameters; declaring the equivalent schemes keeps the
+#: document complete for tooling that renders an authentication prompt.
+AUTH_SECURITY_SCHEMES: dict[str, dict[str, Any]] = {
+    "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": (
+            "Send 'Authorization: Bearer <token>'. Required only when the "
+            "server was started with an API token."
+        ),
+    },
+    "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": (
+            "Send the token as 'X-API-Key: <token>'. Required only when the "
+            "server was started with an API token."
+        ),
+    },
+}
+
+
+def _install_openapi_metadata(application: FastAPI) -> None:
+    """
+    Add the authentication schemes to the generated OpenAPI document.
+
+    The schema is otherwise produced from the routes; this wrapper only
+    augments it, so it stays in sync with the router automatically.
+    """
+    original_openapi = application.openapi
+
+    def openapi() -> dict[str, Any]:
+        schema = original_openapi()
+        components = schema.setdefault("components", {})
+        security_schemes = components.setdefault("securitySchemes", {})
+        for name, definition in AUTH_SECURITY_SCHEMES.items():
+            security_schemes.setdefault(name, dict(definition))
+        schema.setdefault("security", [{"BearerAuth": []}, {"ApiKeyAuth": []}])
+        # ``SHARED_ERROR_RESPONSES`` applies to every route, but the rate
+        # limiter exempts a few paths (``/api/v1/health``); drop the 429 there
+        # so the document never promises an error that cannot occur.
+        for path in RATE_LIMIT_EXEMPT_PATHS:
+            for operation in schema.get("paths", {}).get(path, {}).values():
+                if isinstance(operation, dict):
+                    operation.get("responses", {}).pop("429", None)
+        return schema
+
+    application.openapi = openapi  # type: ignore[method-assign]
 
 
 def _resolve_output_dir(output_dir: str | Path | None) -> Path:
@@ -261,6 +351,7 @@ def create_app(
         ),
         version=__version__,
         openapi_tags=OPENAPI_TAGS,
+        responses=SHARED_ERROR_RESPONSES,
         lifespan=lifespan,
         docs_url="/docs" if expose_docs else None,
         redoc_url="/redoc" if expose_docs else None,
@@ -268,6 +359,8 @@ def create_app(
     )
     application.state.api_token = resolved_token or None
     application.state.api_timeouts = dict(timeouts or {})
+    #: Read by the catch-all 500 handler, which runs above the CORS layer.
+    application.state.cors_enabled = bool(cors)
     application.state.webhook_url = resolved_webhook or None
     application.state.webhook_notifier = (
         WebhookNotifier(resolved_webhook) if resolved_webhook else None
@@ -351,6 +444,7 @@ def create_app(
     )
 
     application.include_router(router)
+    _install_openapi_metadata(application)
     return application
 
 

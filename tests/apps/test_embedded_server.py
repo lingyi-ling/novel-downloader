@@ -22,7 +22,6 @@ import json
 import os
 import socket
 import threading
-import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -42,6 +41,13 @@ _port = 0
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
+
+
+def _unused_port() -> int:
+    """A loopback port the OS says is free right now (not a fixed test port)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
 
 
 def _call(
@@ -80,21 +86,48 @@ def _delete(path: str) -> tuple[int, Any]:
     return _call("DELETE", path)
 
 
-def _raw_exchange(port: int, raw: bytes, wait: float = 1.0) -> bytes:
-    """Send raw bytes on a fresh socket and collect the server's reply."""
-    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+def _raw_exchange(port: int, raw: bytes, wait: float = 5.0) -> bytes:
+    """Send raw bytes on a fresh socket and read exactly one HTTP response.
+
+    Reading only until the socket goes quiet made the assertion race the
+    server: on a busy machine the 1 s receive timeout could expire before the
+    first byte arrived, yielding ``b""``. Instead parse the header terminator
+    and ``Content-Length`` and stop as soon as the response is complete; the
+    timeout is now only a hang guard.
+    """
+    with socket.create_connection(("127.0.0.1", port), timeout=wait) as sock:
         sock.sendall(raw)
         sock.settimeout(wait)
-        chunks: list[bytes] = []
-        while True:
-            try:
-                chunk = sock.recv(4096)
-            except TimeoutError:
+        buffer = bytearray()
+        while b"\r\n\r\n" not in buffer:
+            chunk = sock.recv(4096)
+            if not chunk:
+                return bytes(buffer)
+            buffer.extend(chunk)
+        head, _, body = bytes(buffer).partition(b"\r\n\r\n")
+        length: int | None = None
+        for line in head.split(b"\r\n")[1:]:
+            name, _, value = line.partition(b":")
+            if name.strip().lower() == b"content-length":
+                try:
+                    length = int(value.strip())
+                except ValueError:
+                    length = None
                 break
+        if length is None:
+            # No declared length: the server must close to end the body.
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                body += chunk
+            return head + b"\r\n\r\n" + body
+        while len(body) < length:
+            chunk = sock.recv(4096)
             if not chunk:
                 break
-            chunks.append(chunk)
-    return b"".join(chunks)
+            body += chunk
+        return head + b"\r\n\r\n" + body
 
 
 def _downloads_dir(tmp_path: Path) -> Path:
@@ -198,10 +231,10 @@ def running_server(
     )
     monkeypatch.setenv("NOVEL_HOME", str(home))
 
-    port = eserver.start_server(str(home), 8765)
-    assert port == 8765
+    port = eserver.start_server(str(home), 0)
+    assert port > 0
     global _port
-    _port = 8765
+    _port = port
     yield SimpleNamespace(port=port, home=home, calls=calls)
     eserver.stop_server()
 
@@ -256,9 +289,15 @@ def test_search_defaults_mirror_api(running_server: SimpleNamespace) -> None:
 
 
 def test_search_empty_sites_list_searches_none(running_server: SimpleNamespace) -> None:
-    status, _ = _post("/api/v1/search", {"keyword": "x", "sites": []})
+    """``sites: []`` returns the empty envelope without starting a search.
+
+    Mirrors ``routes.search_books``: an explicit empty selection means
+    "search no site", so the engine is never invoked.
+    """
+    status, body = _post("/api/v1/search", {"keyword": "x", "sites": []})
     assert status == 200
-    assert running_server.calls["search"][-1]["sites"] == []
+    assert body == {"total": 0, "results": []}
+    assert running_server.calls["search"] == []
 
 
 def test_search_validation_422(running_server: SimpleNamespace) -> None:
@@ -296,6 +335,30 @@ def test_search_rejects_malformed_json(running_server: SimpleNamespace) -> None:
     data = _raw_exchange(_port, raw)
     assert data.startswith(b"HTTP/1.1 422")
     assert b"JSON decode error" in data
+
+
+def test_missing_body_is_422(running_server: SimpleNamespace) -> None:
+    """FastAPI's required-body rule: no body at all is a 422 ``missing``."""
+    status, body = _call("POST", "/api/v1/watchlist/check")
+    assert status == 422
+    assert body["detail"] == "Request validation failed: Field required"
+    assert body["errors"] == [
+        {"type": "missing", "loc": ["body"], "msg": "Field required"}
+    ]
+
+
+def test_null_body_is_422(running_server: SimpleNamespace) -> None:
+    """A JSON ``null`` body is "no body" to FastAPI, not an empty object."""
+    raw = (
+        b"POST /api/v1/watchlist/check HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 4\r\n"
+        b"\r\nnull"
+    )
+    data = _raw_exchange(_port, raw)
+    assert data.startswith(b"HTTP/1.1 422")
+    assert b'"loc": ["body"]' in data
 
 
 def test_search_timeout_returns_504(
@@ -410,7 +473,8 @@ def test_add_task_validation_and_default_title(
 
     status, body = _post("/api/v1/tasks", {"site": ""})
     assert status == 422
-    assert "String should have at least 1 character" in body["detail"]
+    # ``SiteKey`` has no min_length: the blank value is a validator error.
+    assert "site must not be empty or whitespace-only" in body["detail"]
 
     status, added = _post("/api/v1/tasks", {"site": "qidian", "book_id": "42"})
     assert status == 200
@@ -640,10 +704,12 @@ def test_watchlist_check_mirrors_api_semantics(
     assert first["changed"] is True
     assert first["previous_chapter"] == ""
     assert first["last_chapter"] == "Chapter 2"
-    assert first["task"] is None
+    # REST only attaches ``task`` when ``download=true`` and the book changed.
+    assert "task" not in first
     assert second["needs_download"] is False
     assert second["last_chapter"] == "Ch 1"
-    assert third["error"] == "TimeoutError: boom"
+    # Only the exception class reaches the client (the message is redacted).
+    assert third["error"] == "TimeoutError"
     assert third["found"] is False
     assert fourth["found"] is True
     assert [i["book_id"] for i in body["needs_download"]] == ["1", "4"]
@@ -874,6 +940,48 @@ def test_body_size_limit_413(running_server: SimpleNamespace) -> None:
     assert b"1048576" in data
 
 
+def test_body_limit_covers_every_state_changing_route() -> None:
+    """Mirrors the REST middleware: *any* write under ``/api/v1`` is capped."""
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        assert eserver._is_body_guarded(method, "/api/v1/anything")
+        assert eserver._is_body_guarded(method, "/api/v1/tasks/t1/cancel")
+    assert eserver._is_body_guarded("POST", "/api/v1")
+    for method in ("GET", "HEAD", "OPTIONS"):
+        assert not eserver._is_body_guarded(method, "/api/v1/search")
+    assert not eserver._is_body_guarded("POST", "/downloads/x")
+    # A trailing slash is normalised, exactly like the REST middleware.
+    assert eserver._is_body_guarded("POST", "/api/v1/search/")
+
+
+def test_oversized_delete_body_is_413(running_server: SimpleNamespace) -> None:
+    """DELETE bodies are capped too (``BODY_LIMIT_METHODS`` on both sides)."""
+    raw = (
+        b"DELETE /api/v1/watchlist/s/1 HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Length: 2097152\r\n"
+        b"\r\n"
+    )
+    data = _raw_exchange(_port, raw)
+    assert data.startswith(b"HTTP/1.1 413")
+    assert b"Request body too large" in data
+
+
+def test_compressed_body_is_415(running_server: SimpleNamespace) -> None:
+    """A compressed body is refused before it is read (compression bomb)."""
+    raw = (
+        b"POST /api/v1/search HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Encoding: gzip\r\n"
+        b"Content-Length: 10\r\n"
+        b"\r\n"
+        b"0123456789"
+    )
+    data = _raw_exchange(_port, raw)
+    assert data.startswith(b"HTTP/1.1 415")
+    assert b"Unsupported Content-Encoding" in data
+
+
 # ---------------------------------------------------------------------------
 # HTTP semantics: concurrency and lifecycle
 # ---------------------------------------------------------------------------
@@ -886,7 +994,10 @@ def test_busy_server_answers_503(
         eserver, "_request_slots", threading.BoundedSemaphore(1), raising=False
     )
 
+    entered = threading.Event()
+
     async def slow_search(keyword: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        entered.set()
         await asyncio.sleep(1.0)
         return []
 
@@ -900,7 +1011,9 @@ def test_busy_server_answers_503(
 
     worker = threading.Thread(target=hold_slot)
     worker.start()
-    time.sleep(0.3)
+    # Wait until the only slot is definitely held instead of guessing with a
+    # sleep: the slow handler signals from inside the request.
+    assert entered.wait(5), "slow search never started"
     try:
         status, body = _get("/api/v1/health")
         assert status == 503
@@ -967,14 +1080,14 @@ def test_start_server_bind_failure_no_silent_drift(
 
     monkeypatch.setattr(eserver, "_QuietThreadingHTTPServer", FailOnce, raising=False)
     monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    port = _unused_port()
     try:
         with pytest.raises(OSError):
-            eserver.start_server(str(tmp_path), 8791)
+            eserver.start_server(str(tmp_path), port)
         assert eserver._server is None
         # once the port frees up, a retry binds the requested port again
-        port = eserver.start_server(str(tmp_path), 8791)
-        assert port == 8791
-        status, _body = _get("/api/v1/health", port=8791)
+        assert eserver.start_server(str(tmp_path), port) == port
+        status, _body = _get("/api/v1/health", port=port)
         assert status == 200
     finally:
         eserver.stop_server()
@@ -986,7 +1099,7 @@ def test_stop_server_then_restart_reuses_engine_loop(
     from novel_downloader.apps.core import cred_broker
 
     monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
-    port = eserver.start_server(str(tmp_path), 8781)
+    port = eserver.start_server(str(tmp_path), 0)
     request = eserver._run(
         cred_broker.create_cred_request(task_id="t0", title="B", fields=[])
     )

@@ -372,6 +372,64 @@ async def test_lying_content_length_is_still_enforced() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unsupported_content_encoding_is_rejected_without_reading() -> None:
+    """
+    A compressed body is refused with ``415`` before any byte is read.
+
+    The API never decompresses requests, so a gzip body could not be parsed;
+    rejecting it up front also means a compression bomb (a tiny stream that
+    expands to gigabytes) can never be inflated by a future decoder.
+    """
+    app, store = _middleware(max_bytes=8)
+    reads: list[Message] = []
+
+    async def receive() -> Message:
+        reads.append({"type": "http.receive"})
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    await app(
+        _scope(
+            headers=[
+                (b"content-encoding", b"gzip"),
+                (b"content-length", b"2"),
+            ]
+        ),
+        receive,
+        _capture_send(store),
+    )
+
+    status, body = _response(store)
+    assert status == 415
+    assert json.loads(body) == {
+        "detail": (
+            "Unsupported Content-Encoding: send the request body "
+            "uncompressed (identity)"
+        )
+    }
+    assert reads == []
+    assert "body" not in store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", [b"identity", b"IDENTITY", b""])
+async def test_identity_content_encoding_is_accepted(encoding: bytes) -> None:
+    app, store = _middleware(max_bytes=8)
+    headers = [(b"content-length", b"4")]
+    if encoding:
+        headers.append((b"content-encoding", encoding))
+
+    await app(
+        _scope(headers=headers),
+        _receive_of([{"type": "http.request", "body": b"tiny", "more_body": False}]),
+        _capture_send(store),
+    )
+
+    status, _ = _response(store)
+    assert status == 200
+    assert store["body"] == b"tiny"
+
+
+@pytest.mark.asyncio
 async def test_unparseable_content_length_falls_back_to_streaming() -> None:
     app, store = _middleware(max_bytes=8)
 
@@ -551,6 +609,27 @@ async def test_oversized_body_is_rejected_on_every_write_route(
 
     assert response.status_code == 413
     assert response.json()["detail"].startswith("Request body too large")
+
+
+@pytest.mark.asyncio
+async def test_compressed_body_rejection_keeps_error_hardening(
+    limited_client: httpx.AsyncClient,
+) -> None:
+    """The 415 is still no-store and carries the usual security headers."""
+    response = await limited_client.post(
+        "/api/v1/search",
+        content=b"\x1f\x8b\x08\x00compressed",
+        headers={
+            "content-type": "application/json",
+            "content-encoding": "gzip",
+        },
+    )
+
+    assert response.status_code == 415
+    assert response.json()["detail"].startswith("Unsupported Content-Encoding")
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
 
 
 # ---------------------------------------------------------------------------

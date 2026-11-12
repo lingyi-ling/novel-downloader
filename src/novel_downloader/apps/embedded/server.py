@@ -24,13 +24,21 @@ Contract parity with the REST API
   paginates and carries ``total`` / ``offset`` / ``limit``, task dicts carry
   ``export_stage`` and a nullable ``error``, watchlist entries are exactly
   ``WatchEntry.to_dict()``, search responses have ``total`` / ``results``
-  only.
+  only, and a watchlist check only carries ``task`` when ``download=true``
+  and the book changed.
+* Request validation mirrors ``apps.api.schemas`` even though this module is
+  stdlib-only: field bounds (keyword/title/site/book_id/platform, search and
+  music paging, track text/URL/headers), stripping/deduplication and the
+  redaction rules are re-implemented to the same ``422`` contract.
 * Every error is ``{"detail": ...}`` with the REST status: ``404`` for
   unknown routes / tasks / login requests / watchlist entries, ``405`` plus
   ``Allow`` for wrong methods, ``409`` for consumed login requests, ``422``
   with an ``errors`` list for validation failures, ``413`` over the body
-  cap, ``503`` while the music extras are absent, ``504`` when an engine
+  cap, ``415`` for a compressed body, ``502`` when the download engine
+  fails, ``503`` while the music extras are absent, ``504`` when an engine
   call exceeds its budget, and a stack-trace-free ``500``.
+* Every state-changing request below ``/api/v1`` shares the REST body cap
+  (``413``) and refuses non-identity ``Content-Encoding`` (``415``).
 * ``HEAD`` is answered like ``GET`` (headers, no body) so probes work.
 
 Lifecycle
@@ -51,6 +59,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -61,7 +70,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse, urlsplit
 
 __all__ = ["start_server", "stop_server"]
 
@@ -95,21 +104,6 @@ _MAX_CONCURRENT_REQUESTS = 32
 #: ``DEFAULT_MAX_BODY_BYTES``.
 _MAX_BODY_BYTES = 1024 * 1024
 
-#: JSON endpoints whose request bodies are capped, mirroring the REST API's
-#: ``BODY_LIMIT_ENDPOINTS``.
-_BODY_LIMIT_ENDPOINTS = frozenset(
-    {
-        ("POST", "/api/v1/search"),
-        ("POST", "/api/v1/browse"),
-        ("POST", "/api/v1/watchlist"),
-        ("POST", "/api/v1/watchlist/check"),
-        ("POST", "/api/v1/music/search"),
-        ("POST", "/api/v1/music/download"),
-        ("POST", "/api/v1/music/export"),
-        ("POST", "/api/v1/music/jobs"),
-    }
-)
-
 #: Page size used when only one of ``offset`` / ``limit`` is supplied
 #: (mirrors ``routes.DEFAULT_PAGE_LIMIT``).
 _DEFAULT_PAGE_LIMIT = 50
@@ -128,6 +122,61 @@ _MAX_MUSIC_SEARCH_LIMIT = 100
 #: anything else is a ``422`` before a cache/table lookup or a log line.
 _MUSIC_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 _MUSIC_ID_RE = re.compile(_MUSIC_ID_PATTERN)
+
+# Field bounds mirrored from ``apps.api.schemas``.  The REST request models
+# reject values outside them with ``422``; the embedded engine must answer the
+# same way instead of forwarding a hostile/unbounded value to a provider or the
+# filesystem layer.
+_MAX_KEYWORD_LENGTH = 200
+_MAX_TITLE_LENGTH = 512
+_MAX_CATEGORY_ID_LENGTH = 128
+_MAX_SITE_KEY_LENGTH = 64
+_MAX_SEARCH_SITES = 100
+_MAX_PER_SITE_LIMIT = 100
+_MAX_SEARCH_LIMIT = 500
+_MAX_SEARCH_TIMEOUT = 120.0
+_MAX_MUSIC_OFFSET = 10_000
+_MAX_PLATFORM_LENGTH = 64
+_MAX_LEVEL_LENGTH = 64
+_MAX_OPTIONAL_PATH_LENGTH = 1024
+_MAX_MUSIC_TRACK_TEXT_LENGTH = 512
+_MAX_MUSIC_LYRIC_LENGTH = 100_000
+_MAX_MEDIA_URL_LENGTH = 2048
+_MAX_HEADER_COUNT = 32
+_MAX_HEADER_NAME_LENGTH = 64
+_MAX_HEADER_VALUE_LENGTH = 2048
+_MAX_TRACK_SOURCES = 32
+_MAX_LOGIN_FIELDS = 50
+_MAX_LOGIN_FIELD_NAME_LENGTH = 64
+_MAX_LOGIN_VALUE_LENGTH = 65_536
+
+#: C0 control characters plus DEL: legitimate names/ids/URLs never contain
+#: them, and they enable log/header injection (mirrors ``schemas``).
+_CONTROL_CHARS = re.compile(r"[\x00-\x1F\x7F]")
+
+#: Shape of a site key (mirrors ``schemas._SITE_KEY_CHARS``).
+_SITE_KEY_CHARS = re.compile(r"[A-Za-z0-9_.-]+")
+
+#: Header-name shape accepted for client-supplied per-track headers.
+_HEADER_NAME_CHARS = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+#: Methods whose request bodies the REST middleware caps (and whose compressed
+#: bodies it refuses), mirroring ``api.middleware.BODY_LIMIT_METHODS``.
+_BODY_LIMIT_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+#: Prefix under which every state-changing body is capped, mirroring
+#: ``api.middleware.BODY_LIMIT_PREFIX``.
+_BODY_LIMIT_PREFIX = "/api/v1"
+
+_MSG_BODY_TOO_LARGE = (
+    f"Request body too large: the limit for this endpoint is {_MAX_BODY_BYTES} bytes"
+)
+_MSG_UNSUPPORTED_ENCODING = (
+    "Unsupported Content-Encoding: send the request body uncompressed (identity)"
+)
+_MSG_MUSIC_PLATFORM_INIT_FAILED = (
+    "Could not initialise music platform {platform!r}: {error}"
+)
 
 #: ``Retry-After`` (seconds) on the music-job concurrency 429 (mirrors
 #: ``routes.MUSIC_JOBS_RETRY_AFTER_SECONDS``).
@@ -209,8 +258,146 @@ class _ApiError(Exception):
 
 
 def _err(name: str, msg: str, type_: str, source: str = "body") -> dict[str, Any]:
-    """One validation entry; ``name`` may be dotted (``sites.0``)."""
-    return {"type": type_, "loc": [source, *name.split(".")], "msg": msg}
+    """One validation entry; ``name`` may be dotted (``sites.0``).
+
+    All-digit segments become integers, matching Pydantic's list indices
+    (``["body", "sites", 0]``), while the detail renderer stringifies them.
+    """
+    location: list[Any] = [source]
+    for part in name.split("."):
+        location.append(int(part) if part.isdigit() else part)
+    return {"type": type_, "loc": location, "msg": msg}
+
+
+def _value_error(name: str, message: str, source: str = "body") -> dict[str, Any]:
+    """One ``AfterValidator``-style entry (Pydantic prefixes the message)."""
+    return _err(name, f"Value error, {message}", "value_error", source)
+
+
+def _has_surrogate(value: str) -> bool:
+    """Whether ``value`` holds an unpaired surrogate (mirrors ``schemas``)."""
+    return any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+
+
+def _clean_string(
+    raw: str,
+    name: str,
+    max_length: int,
+    *,
+    source: str = "body",
+    label: str | None = None,
+    allow_blank: bool = False,
+    allow_controls: bool = False,
+    strip: bool = True,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """
+    Strip and bound one short, single-line text value.
+
+    Mirrors ``schemas._clean_text``: blank values fail unless ``allow_blank``,
+    then the surrogate, length and control-character checks run in that order.
+    """
+    label = label or name
+    cleaned = raw.strip() if strip else raw
+    if not allow_blank and not cleaned.strip():
+        return None, _value_error(
+            name, f"{label} must not be empty or whitespace-only", source
+        )
+    if _has_surrogate(cleaned):
+        return None, _value_error(
+            name,
+            f"{label} must not contain unpaired surrogate characters",
+            source,
+        )
+    if len(cleaned) > max_length:
+        return None, _value_error(
+            name, f"{label} must be at most {max_length} characters long", source
+        )
+    if not allow_controls and _CONTROL_CHARS.search(cleaned):
+        return None, _value_error(
+            name, f"{label} must not contain control characters", source
+        )
+    return cleaned, None
+
+
+def _typed_string(
+    body: dict[str, Any], name: str
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Return an optional string field, or a ``string_type`` error."""
+    if name not in body or body[name] is None:
+        return None, None
+    value = body[name]
+    if not isinstance(value, str):
+        return None, _err(name, "Input should be a valid string", "string_type")
+    return value, None
+
+
+def _site_value(
+    raw: str, *, name: str = "site", source: str = "body"
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Validate one site key exactly like ``schemas.validate_site_key``."""
+    cleaned, error = _clean_string(
+        raw, name, _MAX_SITE_KEY_LENGTH, source=source, label="site"
+    )
+    if error is not None or cleaned is None:
+        return None, error
+    if _SITE_KEY_CHARS.fullmatch(cleaned) is None:
+        return None, _value_error(
+            name,
+            "site must contain only letters, digits, '_', '-' and '.'",
+            source,
+        )
+    return cleaned, None
+
+
+def _keyword_value(
+    raw: str, *, name: str = "keyword", source: str = "body"
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Validate one search keyword like ``schemas.validate_keyword``."""
+    return _clean_string(
+        raw,
+        name,
+        _MAX_KEYWORD_LENGTH,
+        source=source,
+        label="keyword",
+        strip=False,
+    )
+
+
+def _book_id_value(
+    raw: str, *, name: str = "book_id", source: str = "body"
+) -> tuple[str | None, dict[str, Any] | None]:
+    """
+    Validate a ``book_id`` like the REST API's ``BookId`` field type.
+
+    ``book_id`` becomes the cache directory ``raw_data/<site>/<book_id>``:
+    path separators, a drive-letter colon, other Windows-reserved characters,
+    control characters and unpaired surrogates would let a crafted request
+    place the chapter cache and media files outside that tree.
+    """
+    cleaned, error = _clean_string(raw, name, _MAX_BOOK_ID_LENGTH, source=source)
+    if error is not None or cleaned is None:
+        return None, error
+    if _BOOK_ID_INVALID_CHARS.search(cleaned):
+        return None, _value_error(
+            name,
+            "book_id must not contain path separators, ':' or other "
+            "Windows-reserved characters",
+            source,
+        )
+    if cleaned in {".", ".."} or cleaned.endswith("."):
+        return None, _value_error(
+            name, "book_id must be a usable directory name", source
+        )
+    return cleaned, None
+
+
+def _missing_body_error() -> _ApiError:
+    """The 422 FastAPI emits when a required JSON body is absent or ``null``."""
+    return _ApiError(
+        422,
+        "Request validation failed: Field required",
+        errors=[{"type": "missing", "loc": ["body"], "msg": "Field required"}],
+    )
 
 
 def _validation_error(entries: list[dict[str, Any]]) -> _ApiError:
@@ -252,13 +439,44 @@ def _required_str(
     return value, None
 
 
+def _required_text(
+    body: dict[str, Any], name: str
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Validate presence/type only; the field's own validator checks content.
+
+    ``SiteKey``/``Keyword`` carry no ``min_length``, so an empty string is
+    reported by ``validate_site_key``/``validate_keyword`` as a ``value_error``
+    rather than as Pydantic's ``string_too_short``.
+    """
+    if name not in body:
+        return None, _err(name, "Field required", "missing")
+    value = body[name]
+    if not isinstance(value, str):
+        return None, _err(name, "Input should be a valid string", "string_type")
+    return value, None
+
+
+def _site_field(body: dict[str, Any], entries: list[dict[str, Any]]) -> str | None:
+    """Validate the required ``site`` field like ``schemas.SiteKey``."""
+    raw, error = _required_text(body, "site")
+    if error is not None:
+        entries.append(error)
+        return None
+    assert raw is not None
+    site, error = _site_value(raw)
+    if error is not None:
+        entries.append(error)
+        return None
+    return site
+
+
 #: ``book_id`` becomes the cache directory ``raw_data/<site>/<book_id>``.
 #: Path separators, a drive-letter colon, other Windows-reserved characters
 #: and control characters would let a crafted request place the chapter cache
 #: and media files outside that tree, so such values are rejected. Mirrors
 #: ``apps.api.schemas.validate_book_id`` — keep the two in sync (this module
 #: is stdlib-only and cannot import the pydantic layer).
-_BOOK_ID_INVALID_CHARS = re.compile(r'[/\\<>:"|?*\x00-\x1F]')
+_BOOK_ID_INVALID_CHARS = re.compile(r'[/\\<>:"|?*\x00-\x1F\x7F]')
 
 #: Length ceiling, mirroring ``apps.api.schemas``.
 _MAX_BOOK_ID_LENGTH = 128
@@ -269,29 +487,7 @@ def _book_id_field(body: dict[str, Any]) -> tuple[str | None, dict[str, Any] | N
     book_id, error = _required_str(body, "book_id")
     if error is not None or book_id is None:
         return book_id, error
-    cleaned = book_id.strip()
-    if not cleaned:
-        return None, _err(
-            "book_id", "book_id must not be empty or whitespace-only", "value_error"
-        )
-    if len(cleaned) > _MAX_BOOK_ID_LENGTH:
-        return None, _err(
-            "book_id",
-            f"book_id must be at most {_MAX_BOOK_ID_LENGTH} characters long",
-            "value_error",
-        )
-    if _BOOK_ID_INVALID_CHARS.search(cleaned):
-        return None, _err(
-            "book_id",
-            "book_id must not contain path separators, ':' or other "
-            "Windows-reserved characters",
-            "value_error",
-        )
-    if cleaned in {".", ".."} or cleaned.endswith("."):
-        return None, _err(
-            "book_id", "book_id must be a usable directory name", "value_error"
-        )
-    return cleaned, None
+    return _book_id_value(book_id)
 
 
 def _int_field(
@@ -335,6 +531,9 @@ def _float_field(
     default: float,
     gt: float,
     entries: list[dict[str, Any]],
+    le: float | None = None,
+    *,
+    finite: bool = False,
 ) -> float:
     if name not in body or body[name] is None:
         return default
@@ -343,9 +542,23 @@ def _float_field(
         entries.append(_err(name, "Input should be a valid number", "float_type"))
         return default
     result = float(value)
+    # ``json`` loads bare NaN/Infinity, which Pydantic rejects when
+    # ``allow_inf_nan=False`` (REST's timeout fields all set it).
+    if finite and not math.isfinite(result):
+        entries.append(_err(name, "Input should be a finite number", "finite_number"))
+        return default
     if result <= gt:
         entries.append(
             _err(name, f"Input should be greater than {gt:g}", "greater_than")
+        )
+        return default
+    if le is not None and result > le:
+        entries.append(
+            _err(
+                name,
+                f"Input should be less than or equal to {le:g}",
+                "less_than_equal",
+            )
         )
         return default
     return result
@@ -650,40 +863,79 @@ def _handle_sites(
     }
 
 
+def _sites_field(
+    body: dict[str, Any], entries: list[dict[str, Any]]
+) -> list[str] | None:
+    """
+    Validate ``sites`` like ``SearchRequest.sites`` (``list[SiteKey]``).
+
+    Items are stripped and bounded, invalid entries keep their list index in
+    ``loc``, and duplicates are dropped case-insensitively (the registry is
+    case-insensitive), keeping the first spelling — exactly like the REST
+    model's ``_dedupe_sites`` validator.
+    """
+    raw = body.get("sites")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        entries.append(_err("sites", "Input should be a valid list", "list_type"))
+        return None
+    if len(raw) > _MAX_SEARCH_SITES:
+        entries.append(
+            _err(
+                "sites",
+                f"List should have at most {_MAX_SEARCH_SITES} items after "
+                f"validation, not {len(raw)}",
+                "too_long",
+            )
+        )
+        return None
+    selected: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        if not isinstance(item, str):
+            entries.append(
+                _err(f"sites.{index}", "Input should be a valid string", "string_type")
+            )
+            continue
+        site, error = _site_value(item)
+        if error is not None:
+            error["loc"] = ["body", "sites", index]
+            entries.append(error)
+            continue
+        assert site is not None
+        key = site.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(site)
+    return selected
+
+
 def _handle_search(
     body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
     from novel_downloader.plugins.search import search
 
-    keyword, keyword_err = _required_str(body, "keyword")
     entries: list[dict[str, Any]] = []
-
-    sites_raw = body.get("sites")
-    sites: list[str] | None = None
-    if sites_raw is not None:
-        if not isinstance(sites_raw, list):
-            entries.append(_err("sites", "Input should be a valid list", "list_type"))
-        else:
-            sites = []
-            for index, item in enumerate(sites_raw):
-                if isinstance(item, str):
-                    sites.append(item)
-                else:
-                    entries.append(
-                        _err(
-                            f"sites.{index}",
-                            "Input should be a valid string",
-                            "string_type",
-                        )
-                    )
-
-    per_site_limit = _int_field(body, "per_site_limit", 5, 1, entries)
-    timeout = _float_field(body, "timeout", 5.0, 0.0, entries)
-    sort = _literal_field(body, "sort", "quality", _SEARCH_SORT_KEYS, entries)
-    order = _literal_field(body, "order", None, ("asc", "desc"), entries)
-    limit = _int_field(body, "limit", None, 1, entries)
+    keyword, keyword_err = _required_text(body, "keyword")
     if keyword_err is not None:
         entries.append(keyword_err)
+    elif keyword is not None:
+        keyword, keyword_err = _keyword_value(keyword)
+        if keyword_err is not None:
+            entries.append(keyword_err)
+
+    sites = _sites_field(body, entries)
+    per_site_limit = _int_field(
+        body, "per_site_limit", 5, 1, entries, le=_MAX_PER_SITE_LIMIT
+    )
+    timeout = _float_field(
+        body, "timeout", 5.0, 0.0, entries, le=_MAX_SEARCH_TIMEOUT, finite=True
+    )
+    sort = _literal_field(body, "sort", "quality", _SEARCH_SORT_KEYS, entries)
+    order = _literal_field(body, "order", None, ("asc", "desc"), entries)
+    limit = _int_field(body, "limit", None, 1, entries, le=_MAX_SEARCH_LIMIT)
     if entries:
         raise _validation_error(entries)
     # ``group`` mirrors ``SearchRequest.group`` (validated last, like the
@@ -695,6 +947,11 @@ def _handle_search(
     assert keyword is not None
     assert per_site_limit is not None
     assert sort is not None
+
+    if sites is not None and not sites:
+        # An explicit empty selection means "search no site": the REST handler
+        # returns the same empty envelope without starting a search.
+        return {"total": 0, "results": []}
 
     results = _run(
         search(
@@ -745,11 +1002,15 @@ def _handle_browse_categories(
     _body: dict[str, Any], _params: dict[str, str], query: dict[str, list[str]]
 ) -> dict[str, Any]:
     values = query.get("site") or []
-    site = values[0] if values else ""
-    if not site:
+    raw_site = values[0] if values else ""
+    if not raw_site:
         raise _validation_error(
             [_err("site", "Field required", "missing", source="query")]
         )
+    site, site_err = _site_value(raw_site, source="query")
+    if site_err is not None:
+        raise _validation_error([site_err])
+    assert site is not None
     searcher_cls = _browse_searcher(site, "categories")
     groups = _run(
         _with_browse_searcher(searcher_cls, lambda s: s.categories()),
@@ -763,26 +1024,26 @@ def _handle_browse(
     body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
-    site, site_err = _required_str(body, "site")
-    if site_err is not None:
-        entries.append(site_err)
+    site = _site_field(body, entries)
 
-    category_id = body.get("category_id")
-    if category_id is not None and not isinstance(category_id, str):
-        entries.append(
-            _err("category_id", "Input should be a valid string", "string_type")
+    category_id: str | None = None
+    raw_category, category_err = _typed_string(body, "category_id")
+    if category_err is not None:
+        entries.append(category_err)
+    elif raw_category is not None:
+        category_id, category_err = _clean_string(
+            raw_category,
+            "category_id",
+            _MAX_CATEGORY_ID_LENGTH,
+            allow_blank=True,
         )
+        if category_err is not None:
+            entries.append(category_err)
+        elif not category_id:
+            category_id = None
 
     gender = _literal_field(body, "gender", "male", _BROWSE_GENDERS, entries)
-    limit = _int_field(body, "limit", 20, 1, entries)
-    if limit is not None and limit > 100:
-        entries.append(
-            _err(
-                "limit",
-                "Input should be less than or equal to 100",
-                "less_than_equal",
-            )
-        )
+    limit = _int_field(body, "limit", 20, 1, entries, le=100)
     if entries:
         raise _validation_error(entries)
     assert site is not None and gender is not None and limit is not None
@@ -834,26 +1095,37 @@ def _handle_task_get(
     return _task_dict(task)
 
 
+def _title_field(body: dict[str, Any], entries: list[dict[str, Any]]) -> str | None:
+    """Validate an optional display title like ``schemas.Title``."""
+    raw, error = _typed_string(body, "title")
+    if error is not None:
+        entries.append(error)
+        return None
+    if raw is None:
+        return None
+    cleaned, error = _clean_string(raw, "title", _MAX_TITLE_LENGTH, allow_blank=True)
+    if error is not None:
+        entries.append(error)
+        return None
+    return cleaned or None
+
+
 def _handle_tasks_post(
     body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
     from novel_downloader.apps.core.task_manager import manager
 
-    site, site_err = _required_str(body, "site")
-    book_id, book_id_err = _book_id_field(body)
-    title = body.get("title")
     entries: list[dict[str, Any]] = []
-    if site_err is not None:
-        entries.append(site_err)
+    title = _title_field(body, entries)
+    site = _site_field(body, entries)
+    book_id, book_id_err = _book_id_field(body)
     if book_id_err is not None:
         entries.append(book_id_err)
-    if title is not None and not isinstance(title, str):
-        entries.append(_err("title", "Input should be a valid string", "string_type"))
     if entries:
         raise _validation_error(entries)
     assert site is not None and book_id is not None
 
-    resolved_title = (title or "").strip() or f"{site} (id = {book_id})"
+    resolved_title = title or f"{site} (id = {book_id})"
     task = _run(manager.add_task(title=resolved_title, site=site, book_id=book_id))
     return _task_dict(task)
 
@@ -878,30 +1150,97 @@ def _handle_login_requests(
     return {"total": len(requests), "requests": requests}
 
 
+def _login_values(
+    body: dict[str, Any],
+) -> tuple[dict[str, str] | None, list[dict[str, Any]]]:
+    """
+    Validate ``values`` like ``LoginSubmitRequest.values``.
+
+    The values are merged into cookies/headers later, so CR/LF (header
+    injection) and NUL are rejected.  The value itself is never echoed in an
+    error message: it may be a password.
+    """
+    entries: list[dict[str, Any]] = []
+    raw = body.get("values", {})
+    if not isinstance(raw, dict):
+        entries.append(
+            _err("values", "Input should be a valid dictionary", "dict_type")
+        )
+        return None, entries
+    if len(raw) > _MAX_LOGIN_FIELDS:
+        entries.append(
+            _value_error(
+                "values", f"values must contain at most {_MAX_LOGIN_FIELDS} fields"
+            )
+        )
+        return None, entries
+    values: dict[str, str] = {}
+    for name, value in raw.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name) > _MAX_LOGIN_FIELD_NAME_LENGTH
+        ):
+            entries.append(
+                _value_error("values", "values contains an invalid field name")
+            )
+            continue
+        if _CONTROL_CHARS.search(name):
+            entries.append(
+                _value_error("values", "values contains an invalid field name")
+            )
+            continue
+        if not isinstance(value, str):
+            entries.append(
+                {
+                    "type": "string_type",
+                    "loc": ["body", "values", name],
+                    "msg": "Input should be a valid string",
+                }
+            )
+            continue
+        if _has_surrogate(value):
+            entries.append(
+                _value_error(
+                    "values",
+                    "values must not contain unpaired surrogate characters",
+                )
+            )
+            continue
+        if len(value) > _MAX_LOGIN_VALUE_LENGTH:
+            entries.append(
+                _value_error(
+                    "values",
+                    f"values must be at most {_MAX_LOGIN_VALUE_LENGTH} characters long",
+                )
+            )
+            continue
+        if any(char in value for char in "\r\n\x00"):
+            entries.append(
+                _value_error("values", "values must not contain newlines or NUL")
+            )
+            continue
+        values[name] = value
+    return values, entries
+
+
 def _handle_login_submit(
     body: dict[str, Any], params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
     from novel_downloader.apps.core import cred_broker
 
     req_id = params.get("req_id", "")
-    values = body.get("values")
-    if values is None:
-        values = {}
-    if not isinstance(values, dict):
-        raise _validation_error(
-            [_err("values", "Input should be a valid dictionary", "dict_type")]
-        )
+    values, entries = _login_values(body)
+    if entries:
+        raise _validation_error(entries)
+    assert values is not None
 
     exists, done = _run(cred_broker.get_req_state(req_id))
     if not exists:
         raise _ApiError(404, _MSG_LOGIN_REQUEST_NOT_FOUND.format(req_id=req_id))
     if done:
         raise _ApiError(409, _MSG_LOGIN_REQUEST_ALREADY_COMPLETED.format(req_id=req_id))
-    _run(
-        cred_broker.complete_request(
-            req_id, {str(key): str(value) for key, value in values.items()}
-        )
-    )
+    _run(cred_broker.complete_request(req_id, values))
     return {"ok": True}
 
 
@@ -937,16 +1276,12 @@ def _handle_watchlist_get(
 def _handle_watchlist_post(
     body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
-    site, site_err = _required_str(body, "site")
-    book_id, book_id_err = _book_id_field(body)
-    title = body.get("title")
     entries: list[dict[str, Any]] = []
-    if site_err is not None:
-        entries.append(site_err)
+    site = _site_field(body, entries)
+    book_id, book_id_err = _book_id_field(body)
     if book_id_err is not None:
         entries.append(book_id_err)
-    if title is not None and not isinstance(title, str):
-        entries.append(_err("title", "Input should be a valid string", "string_type"))
+    title = _title_field(body, entries)
     if entries:
         raise _validation_error(entries)
     assert site is not None and book_id is not None
@@ -958,13 +1293,41 @@ def _handle_watchlist_post(
 def _handle_watchlist_delete(
     _body: dict[str, Any], params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
-    site = params.get("site", "")
-    book_id = params.get("book_id", "")
+    # Path parameters are validated exactly like the REST route's
+    # ``site: SiteKey`` / ``book_id: BookId`` (a malformed value is a 422
+    # before the store lookup, not a misleading 404).
+    entries: list[dict[str, Any]] = []
+    site, site_err = _site_value(params.get("site", ""), source="path")
+    if site_err is not None:
+        entries.append(site_err)
+    book_id, book_id_err = _book_id_value(params.get("book_id", ""), source="path")
+    if book_id_err is not None:
+        entries.append(book_id_err)
+    if entries:
+        raise _validation_error(entries)
+    assert site is not None and book_id is not None
+
     if not _watchlist_store().remove(site, book_id):
         raise _ApiError(
             404, _MSG_BOOK_NOT_IN_WATCHLIST.format(site=site, book_id=book_id)
         )
     return {"ok": True}
+
+
+def _sanitized_check_error(error: Any) -> str | None:
+    """
+    Reduce a per-book check error to its exception class name.
+
+    The shared core formats failures as ``"<Class>: <message>"``; the REST
+    handler exposes only ``type(exc).__name__`` because the message may embed
+    provider URLs, tokens or internal paths.
+    """
+    if error is None:
+        return None
+    text = str(error).strip()
+    if not text:
+        return None
+    return text.partition(":")[0].strip() or None
 
 
 def _handle_watchlist_check(
@@ -993,8 +1356,9 @@ def _handle_watchlist_check(
             "found": bool(result.found),
             "changed": changed,
             "needs_download": changed,
-            "error": result.error,
-            "task": None,
+            # Only the exception class reaches the client; the full reason may
+            # quote tokens or internal paths (same anti-leak rule as REST).
+            "error": _sanitized_check_error(result.error),
         }
         if changed and download:
             item["task"] = {
@@ -1087,6 +1451,26 @@ def _require_music_platform(components: Any, platform: str) -> None:
         )
 
 
+def _create_music_provider(components: Any, platform: str) -> Any:
+    """
+    Instantiate a provider, mirroring ``routes._create_provider``.
+
+    Unknown platforms are ``400``; a construction failure is a sanitized
+    ``500`` (only the exception class reaches the client).
+    """
+    _require_music_platform(components, platform)
+    try:
+        return components.create(platform)
+    except Exception as exc:  # noqa: BLE001 - provider construction
+        logger.warning("Music platform %r failed to initialise: %s", platform, exc)
+        raise _ApiError(
+            500,
+            _MSG_MUSIC_PLATFORM_INIT_FAILED.format(
+                platform=platform, error=type(exc).__name__
+            ),
+        ) from exc
+
+
 def _is_all_platforms(platform: Any) -> bool:
     """``platform`` 是否表示「全部平台」（``all`` 或空）。"""
     from novel_downloader.apps.music.aggregate import is_all_platforms
@@ -1123,25 +1507,58 @@ def _platform_field(body: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
     """
     Validate ``platform`` the way the REST model does.
 
-    ``MusicSearchRequest.platform`` (and the download/export bodies) are
-    ``str = Field(default="all", min_length=1)``: an absent key uses the
-    default, while an explicit ``null``, a non-string or an empty string is a
-    ``422``. The value is *not* stripped -- REST does not strip either, so
-    ``" netease "`` is an unknown platform on both transports instead of
-    being silently accepted by only one.
+    ``MusicSearchRequest.platform`` (and the download/export bodies) is a
+    ``Platform``: an absent key uses ``"all"``, while an explicit ``null``, a
+    non-string, an empty string, an over-long value or one containing control
+    characters is a ``422``. The value is *not* stripped -- REST does not strip
+    either, so ``" netease "`` is an unknown platform on both transports
+    instead of being silently accepted by only one.  A whitespace-only value
+    is still accepted and means "all", exactly like ``is_all_platforms``.
     """
     if "platform" not in body:
         return "all", None
     value = body["platform"]
     if not isinstance(value, str):
         return "all", _err("platform", "Input should be a valid string", "string_type")
-    if len(value) < 1:
-        return "all", _err(
-            "platform",
-            "String should have at least 1 character",
-            "string_too_short",
-        )
+    if not value:
+        return "all", _value_error("platform", "platform must not be empty")
+    _, error = _clean_string(
+        value,
+        "platform",
+        _MAX_PLATFORM_LENGTH,
+        label="platform",
+        allow_blank=True,
+        strip=False,
+    )
+    if error is not None:
+        return "all", error
     return value, None
+
+
+def _optional_text_field(
+    body: dict[str, Any],
+    name: str,
+    max_length: int,
+    entries: list[dict[str, Any]],
+) -> str | None:
+    """
+    Validate an optional path/level field like ``schemas.OptionalPath``.
+
+    Absent/null means "use the default"; a non-string is a ``string_type``
+    error (the old code ``str()``-coerced it, accepting payloads REST rejects)
+    and a blank value collapses to ``None``.
+    """
+    raw, error = _typed_string(body, name)
+    if error is not None:
+        entries.append(error)
+        return None
+    if raw is None:
+        return None
+    cleaned, error = _clean_string(raw, name, max_length, allow_blank=True)
+    if error is not None:
+        entries.append(error)
+        return None
+    return cleaned or None
 
 
 def _health_timeout(
@@ -1169,16 +1586,11 @@ def _health_timeout(
             )
         )
         return 5.0
-    if value != value:
-        # NaN compares false against every bound; pydantic reports the ``le``
-        # violation, so mirror that rather than passing NaN into the probe.
+    if not math.isfinite(value):
+        # REST's ``Query(..., allow_inf_nan=False)`` reports NaN/±inf as a
+        # non-finite number; don't pass those into the probe.
         entries.append(
-            _err(
-                "timeout",
-                "Input should be less than or equal to 60",
-                "less_than_equal",
-                "query",
-            )
+            _err("timeout", "Input should be a finite number", "finite_number", "query")
         )
     elif value <= 0:
         entries.append(
@@ -1196,14 +1608,374 @@ def _health_timeout(
     return value
 
 
-def _music_track(components: Any, data: Any) -> Any:
-    """Build the provider track, ignoring fields this server does not know."""
+#: Free-form single-line text fields of ``MusicTrack`` (``TrackText``).
+_MUSIC_TRACK_TEXT_FIELDS = ("provider", "id", "name", "artists", "album", "ext")
+
+
+def _lax_int(value: Any) -> int | None:
+    """Coerce like Pydantic's lax ``int`` mode (``"3"``/``3.0`` → 3)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _lax_bool(value: Any) -> bool | None:
+    """Coerce like Pydantic's lax ``bool`` mode."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, float) and value in (0.0, 1.0):
+        return value == 1.0
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered in _BOOL_TRUTHY:
+            return True
+        if lowered in _BOOL_FALSY:
+            return False
+    return None
+
+
+def _media_url_error(
+    value: Any, name: str, index: int, entries: list[dict[str, Any]]
+) -> str | None:
+    """Validate ``cover_url``/``download_url`` like ``schemas.TrackUrl``."""
+    if not isinstance(value, str):
+        entries.append(
+            _err(
+                f"tracks.{index}.{name}",
+                "Input should be a valid string",
+                "string_type",
+            )
+        )
+        return None
+    url = value.strip()
+    if not url:
+        return ""
+    loc = f"tracks.{index}.{name}"
+    if _has_surrogate(url):
+        entries.append(
+            _value_error(loc, "URL must not contain unpaired surrogate characters")
+        )
+        return None
+    if len(url) > _MAX_MEDIA_URL_LENGTH:
+        entries.append(
+            _value_error(
+                loc, f"URL must be at most {_MAX_MEDIA_URL_LENGTH} characters long"
+            )
+        )
+        return None
+    if _CONTROL_CHARS.search(url):
+        entries.append(_value_error(loc, "URL must not contain control characters"))
+        return None
+    scheme = urlsplit(url).scheme.lower()
+    if scheme and scheme not in {"http", "https"}:
+        entries.append(_value_error(loc, "URL scheme must be http or https"))
+        return None
+    return url
+
+
+def _music_track_fields(
+    data: dict[str, Any], index: int, entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """
+    Validate one submitted track like ``schemas.MusicTrack``.
+
+    Returns the cleaned field map (only the keys the caller sent); invalid
+    values append an entry to ``entries`` and are left out.  Unknown keys are
+    ignored, matching Pydantic's default model config.
+    """
+    cleaned: dict[str, Any] = {}
+    base = f"tracks.{index}"
+
+    for name in _MUSIC_TRACK_TEXT_FIELDS:
+        if name not in data:
+            continue
+        value = data[name]
+        if not isinstance(value, str):
+            entries.append(
+                _err(f"{base}.{name}", "Input should be a valid string", "string_type")
+            )
+            continue
+        text, error = _clean_string(
+            value,
+            f"{base}.{name}",
+            _MAX_MUSIC_TRACK_TEXT_LENGTH,
+            label="value",
+            allow_blank=True,
+        )
+        if error is not None:
+            entries.append(error)
+        else:
+            assert text is not None
+            cleaned[name] = text
+
+    for name in ("duration_s", "track_no"):
+        if name not in data:
+            continue
+        number = _lax_int(data[name])
+        if number is None:
+            entries.append(
+                _err(f"{base}.{name}", "Input should be a valid integer", "int_type")
+            )
+        else:
+            cleaned[name] = number
+
+    if "vip" in data:
+        flag = _lax_bool(data["vip"])
+        if flag is None:
+            entries.append(
+                _err(
+                    f"{base}.vip",
+                    "Input should be a valid boolean, unable to interpret input",
+                    "bool_type",
+                )
+            )
+        else:
+            cleaned["vip"] = flag
+
+    for name in ("cover_url", "download_url"):
+        if name not in data:
+            continue
+        url = _media_url_error(data[name], name, index, entries)
+        if url is not None:
+            cleaned[name] = url
+
+    if "path" in data:
+        value = data["path"]
+        if not isinstance(value, str):
+            entries.append(
+                _err(f"{base}.path", "Input should be a valid string", "string_type")
+            )
+        else:
+            text, error = _clean_string(
+                value,
+                f"{base}.path",
+                _MAX_OPTIONAL_PATH_LENGTH,
+                label="path",
+                allow_blank=True,
+            )
+            if error is not None:
+                entries.append(error)
+            else:
+                cleaned["path"] = text
+
+    if "lyric" in data:
+        value = data["lyric"]
+        if not isinstance(value, str):
+            entries.append(
+                _err(f"{base}.lyric", "Input should be a valid string", "string_type")
+            )
+        else:
+            text, error = _clean_string(
+                value,
+                f"{base}.lyric",
+                _MAX_MUSIC_LYRIC_LENGTH,
+                label="lyric",
+                allow_blank=True,
+                allow_controls=True,
+            )
+            if error is not None:
+                entries.append(error)
+            else:
+                cleaned["lyric"] = text
+
+    if "http_headers" in data:
+        headers = data["http_headers"]
+        if not isinstance(headers, dict):
+            entries.append(
+                _err(
+                    f"{base}.http_headers",
+                    "Input should be a valid dictionary",
+                    "dict_type",
+                )
+            )
+        elif len(headers) > _MAX_HEADER_COUNT:
+            entries.append(
+                _value_error(
+                    f"{base}.http_headers",
+                    f"http_headers must contain at most {_MAX_HEADER_COUNT} entries",
+                )
+            )
+        else:
+            parsed_headers: dict[str, str] = {}
+            for header_name, header_value in headers.items():
+                if (
+                    not isinstance(header_name, str)
+                    or not header_name
+                    or len(header_name) > _MAX_HEADER_NAME_LENGTH
+                    or _HEADER_NAME_CHARS.fullmatch(header_name) is None
+                ):
+                    entries.append(
+                        _value_error(
+                            f"{base}.http_headers",
+                            "http_headers contains an invalid header name",
+                        )
+                    )
+                    continue
+                if not isinstance(header_value, str):
+                    entries.append(
+                        _err(
+                            f"{base}.http_headers",
+                            "Input should be a valid string",
+                            "string_type",
+                        )
+                    )
+                    continue
+                if _has_surrogate(header_value):
+                    entries.append(
+                        _value_error(
+                            f"{base}.http_headers",
+                            "http_headers values must not contain unpaired "
+                            "surrogate characters",
+                        )
+                    )
+                    continue
+                if len(header_value) > _MAX_HEADER_VALUE_LENGTH:
+                    entries.append(
+                        _value_error(
+                            f"{base}.http_headers",
+                            "http_headers values must be at most "
+                            f"{_MAX_HEADER_VALUE_LENGTH} characters long",
+                        )
+                    )
+                    continue
+                if "\r" in header_value or "\n" in header_value:
+                    entries.append(
+                        _value_error(
+                            f"{base}.http_headers",
+                            "http_headers values must not contain newlines",
+                        )
+                    )
+                    continue
+                parsed_headers[header_name] = header_value
+            cleaned["http_headers"] = parsed_headers
+
+    if "sources" in data:
+        sources = data["sources"]
+        if not isinstance(sources, list):
+            entries.append(
+                _err(f"{base}.sources", "Input should be a valid list", "list_type")
+            )
+        elif len(sources) > _MAX_TRACK_SOURCES:
+            entries.append(
+                _value_error(
+                    f"{base}.sources",
+                    f"sources must contain at most {_MAX_TRACK_SOURCES} entries",
+                )
+            )
+        else:
+            parsed_sources: list[str] = []
+            for source in sources:
+                if not isinstance(source, str):
+                    entries.append(
+                        _err(
+                            f"{base}.sources",
+                            "Input should be a valid string",
+                            "string_type",
+                        )
+                    )
+                    continue
+                text, error = _clean_string(
+                    source,
+                    f"{base}.sources",
+                    _MAX_MUSIC_TRACK_TEXT_LENGTH,
+                    label="sources",
+                    allow_blank=True,
+                )
+                if error is not None:
+                    entries.append(error)
+                else:
+                    assert text is not None
+                    parsed_sources.append(text)
+            cleaned["sources"] = parsed_sources
+
+    if "extra" in data:
+        if not isinstance(data["extra"], dict):
+            entries.append(
+                _err(f"{base}.extra", "Input should be a valid dictionary", "dict_type")
+            )
+        else:
+            cleaned["extra"] = data["extra"]
+
+    return cleaned
+
+
+def _music_track(
+    components: Any,
+    data: Any,
+    index: int = 0,
+    entries: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Build the provider track from validated fields the dataclass knows."""
     if not isinstance(data, dict):
+        if entries is not None:
+            entries.append(
+                _err(
+                    f"tracks.{index}", "Input should be a valid dictionary", "dict_type"
+                )
+            )
+            return None
         raise _validation_error(
             [_err("tracks", "Input should be a valid dictionary", "dict_type")]
         )
+    bucket: list[dict[str, Any]] = [] if entries is None else entries
+    cleaned = _music_track_fields(data, index, bucket)
+    if entries is None and bucket:
+        raise _validation_error(bucket)
     allowed = {field.name for field in dataclasses.fields(components.track_cls)}
-    return components.track_cls(**{k: v for k, v in data.items() if k in allowed})
+    return components.track_cls(**{k: v for k, v in cleaned.items() if k in allowed})
+
+
+def _music_tracks_field(
+    body: dict[str, Any], components: Any, entries: list[dict[str, Any]]
+) -> list[Any]:
+    """Validate ``tracks`` (``1..MAX_MUSIC_TRACKS`` items) for download/export."""
+    raw_tracks = body.get("tracks")
+    if not isinstance(raw_tracks, list):
+        entries.append(_err("tracks", "Input should be a valid list", "list_type"))
+        return []
+    if not raw_tracks:
+        entries.append(
+            _err(
+                "tracks",
+                "List should have at least 1 item after validation, not 0",
+                "too_short",
+            )
+        )
+        return []
+    if len(raw_tracks) > _MAX_MUSIC_TRACKS:
+        entries.append(
+            _err(
+                "tracks",
+                f"List should have at most {_MAX_MUSIC_TRACKS} items",
+                "too_long",
+            )
+        )
+        return []
+    tracks: list[Any] = []
+    for index, item in enumerate(raw_tracks):
+        if not isinstance(item, dict):
+            entries.append(
+                _err(
+                    f"tracks.{index}",
+                    "Input should be a valid dictionary or object to extract "
+                    "fields from",
+                    "model_attributes_type",
+                )
+            )
+            continue
+        tracks.append(_music_track(components, item, index, entries))
+    return tracks
 
 
 def _music_track_payload(track: Any) -> dict[str, Any]:
@@ -1269,13 +2041,17 @@ def _handle_music_search(
     components = _music_components()
     entries: list[dict[str, Any]] = []
     platform, platform_err = _platform_field(body)
-    keyword, keyword_err = _required_str(body, "keyword")
     if platform_err is not None:
         entries.append(platform_err)
+    keyword, keyword_err = _required_text(body, "keyword")
     if keyword_err is not None:
         entries.append(keyword_err)
+    elif keyword is not None:
+        keyword, keyword_err = _keyword_value(keyword)
+        if keyword_err is not None:
+            entries.append(keyword_err)
     limit = _int_field(body, "limit", 20, 1, entries, le=_MAX_MUSIC_SEARCH_LIMIT)
-    offset = _int_field(body, "offset", 0, 0, entries)
+    offset = _int_field(body, "offset", 0, 0, entries, le=_MAX_MUSIC_OFFSET)
     if entries:
         raise _validation_error(entries)
     assert keyword is not None
@@ -1304,8 +2080,7 @@ def _handle_music_search(
             "supports_offset": False,
         }
 
-    _require_music_platform(components, platform)
-    provider = components.create(platform)
+    provider = _create_music_provider(components, platform)
     tracks, total = provider.search(keyword, limit=limit, offset=offset)
     payload = [_music_track_payload(track) for track in tracks]
     return {
@@ -1353,28 +2128,7 @@ def _music_download_args(
     platform, platform_err = _platform_field(body)
     if platform_err is not None:
         entries.append(platform_err)
-    raw_tracks = body.get("tracks")
-    tracks: list[Any] = []
-    if not isinstance(raw_tracks, list):
-        entries.append(_err("tracks", "Input should be a valid list", "list_type"))
-    elif not raw_tracks:
-        entries.append(
-            _err(
-                "tracks",
-                "List should have at least 1 item after validation, not 0",
-                "too_short",
-            )
-        )
-    elif len(raw_tracks) > _MAX_MUSIC_TRACKS:
-        entries.append(
-            _err(
-                "tracks",
-                f"List should have at most {_MAX_MUSIC_TRACKS} items",
-                "too_long",
-            )
-        )
-    else:
-        tracks = [_music_track(components, item) for item in raw_tracks]
+    tracks = _music_tracks_field(body, components, entries)
     # Blank means "no search id" on both transports; a malformed one is a 422
     # before the cache lookup (and before any log line quoting the value).
     search_id = body.get("search_id")
@@ -1384,6 +2138,13 @@ def _music_download_args(
         id_error = _music_id_error(search_id, source="body", name="search_id")
         if id_error is not None:
             entries.append(id_error)
+    # ``level`` / ``out_dir`` are ``OptionalLevel`` / ``OptionalPath``: a
+    # non-string (or a hostile value) is a 422 here, before the filesystem
+    # policy runs, exactly like the REST request model.
+    level = _optional_text_field(body, "level", _MAX_LEVEL_LENGTH, entries)
+    raw_out_dir = _optional_text_field(
+        body, "out_dir", _MAX_OPTIONAL_PATH_LENGTH, entries
+    )
     if entries:
         raise _validation_error(entries)
     if not _is_all_platforms(platform):
@@ -1394,17 +2155,13 @@ def _music_download_args(
     if search_id is not None:
         tracks = CACHE.resolve(search_id, tracks)
 
-    raw_out_dir = str(body.get("out_dir") or "").strip()
     out_dir = str(_resolve_music_out_dir(components, raw_out_dir))
-    if not raw_out_dir:
+    if raw_out_dir is None:
         # Preserve the historical behaviour: the default music directory is
         # created eagerly, while a caller-supplied directory is left to the
         # engine (which only creates it when a track is actually written).
         Path(out_dir).mkdir(parents=True, exist_ok=True)
-    level = body.get("level")
-    options = components.download_options(
-        out_dir=out_dir, level=str(level) if level else "exhigh"
-    )
+    options = components.download_options(out_dir=out_dir, level=level or "exhigh")
     return platform, tracks, options
 
 
@@ -1478,30 +2235,10 @@ def _handle_music_export(
     platform, platform_err = _platform_field(body)
     if platform_err is not None:
         entries.append(platform_err)
-    raw_tracks = body.get("tracks")
-    tracks: list[Any] = []
-    if not isinstance(raw_tracks, list):
-        entries.append(_err("tracks", "Input should be a valid list", "list_type"))
-    elif not raw_tracks:
-        # ``MusicExportRequest.tracks`` is ``min_length=1``: an empty list is
-        # a 422 on the REST side, not a successful export of zero tracks.
-        entries.append(
-            _err(
-                "tracks",
-                "List should have at least 1 item after validation, not 0",
-                "too_short",
-            )
-        )
-    elif len(raw_tracks) > _MAX_MUSIC_TRACKS:
-        entries.append(
-            _err(
-                "tracks",
-                f"List should have at most {_MAX_MUSIC_TRACKS} items",
-                "too_long",
-            )
-        )
-    else:
-        tracks = [_music_track(components, item) for item in raw_tracks]
+    tracks = _music_tracks_field(body, components, entries)
+    raw_out_path = _optional_text_field(
+        body, "out_path", _MAX_OPTIONAL_PATH_LENGTH, entries
+    )
     if entries:
         raise _validation_error(entries)
     if not _is_all_platforms(platform):
@@ -1514,8 +2251,7 @@ def _handle_music_export(
     keep = playlist_keep_flags(getattr(track, "path", "") for track in tracks)
     usable = [track for track, keep_it in zip(tracks, keep, strict=True) if keep_it]
     skipped = len(tracks) - len(usable)
-    out_path = str(body.get("out_path") or "").strip()
-    target = _resolve_music_export_target(components, out_path)
+    target = _resolve_music_export_target(components, raw_out_path)
     try:
         written_path = components.export_m3u(usable, target)
     except OSError as exc:
@@ -1545,11 +2281,13 @@ def _music_create_provider(components: Any, platform: str) -> Any:
     """``create_provider`` for ``download_mixed``.
 
     ``platform="all"`` lets every track use its own provider (aggregate
-    search); an explicit key overrides it, as single-platform UIs do.
+    search); an explicit key overrides it, as single-platform UIs do.  The
+    explicit provider is built eagerly so an unknown/broken platform is a
+    400/500 before the job starts (mirrors ``routes._music_download_callable``).
     """
     if _is_all_platforms(platform):
         return components.create
-    provider = components.create(platform)
+    provider = _create_music_provider(components, platform)
     return lambda _key: provider
 
 
@@ -1568,9 +2306,19 @@ def _handle_music_download(
         with lock:
             results.append((index, _music_result_item(result)))
 
-    ok, skip, fail, _failed_pairs, _failed_tracks = components.download_mixed(
-        create_provider, tracks, options, on_result=on_result
-    )
+    try:
+        ok, skip, fail, _failed_pairs, _failed_tracks = components.download_mixed(
+            create_provider, tracks, options, on_result=on_result
+        )
+    except _ApiError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - download engine errors
+        # Same anti-leak rule as REST: the client sees the exception class,
+        # the operator sees the message in the log.
+        logger.warning("Embedded music download failed: %s", exc)
+        raise _ApiError(
+            502, _MSG_MUSIC_DOWNLOAD_FAILED.format(error=type(exc).__name__)
+        ) from exc
     ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
     return {"ok": int(ok), "skip": int(skip), "fail": int(fail), "results": ordered}
 
@@ -1624,52 +2372,56 @@ def _music_job_worker(
     options: Any,
     timeout: float,
 ) -> None:
-    """Run one job on a plain thread; the engine is synchronous anyway."""
+    """Run one job on a plain thread; the engine is synchronous anyway.
+
+    A watchdog timer enforces ``timeout`` even when the engine produces no
+    callbacks at all (mirroring REST's ``asyncio.wait_for``); a job that
+    exceeds it is marked ``failed`` and the worker thread is left to finish on
+    its own.  Terminal transitions are idempotent: the first one wins, so a
+    late callback or exception cannot overwrite a recorded result.
+    """
     _music_job_update(job_id, status="running")
-    started = time.monotonic()
     results: list[tuple[int, dict[str, Any]]] = []
     lock = threading.Lock()
-    expired = False
+
+    def _finish(status: str, reason: str | None) -> None:
+        with lock:
+            ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
+        with _MUSIC_JOBS_LOCK:
+            job = _MUSIC_JOBS.get(job_id)
+            if job is None or job["status"] in _TERMINAL_MUSIC_STATUSES:
+                return
+            job.update(
+                status=status,
+                results=ordered,
+                error=reason,
+                finished_at=time.time(),
+            )
 
     def on_result(index: int, _track: Any, result: Any) -> None:
-        nonlocal expired
         with lock:
             results.append((index, _music_result_item(result)))
             done = len(results)
-        if time.monotonic() - started > timeout and not expired:
-            expired = True
-            _music_job_update(
-                job_id,
-                status="failed",
-                error=_MSG_TIMED_OUT.format(label="Music download", timeout=timeout),
-                finished_at=time.time(),
-            )
         _music_job_progress(job_id, done)
 
+    timer = threading.Timer(
+        timeout,
+        _finish,
+        args=("failed", _MSG_TIMED_OUT.format(label="Music download", timeout=timeout)),
+    )
+    timer.daemon = True
+    timer.start()
     try:
         components.download_mixed(create_provider, tracks, options, on_result=on_result)
     except Exception as exc:  # noqa: BLE001 - reported in the job record
         # Only the exception class reaches the client: the message may carry
         # internal paths or credentials.  The full reason stays in the log.
         logger.warning("Embedded music job %s failed: %s", job_id, exc)
-        if not expired:
-            _music_job_update(
-                job_id,
-                status="failed",
-                error=_MSG_MUSIC_DOWNLOAD_FAILED.format(error=type(exc).__name__),
-                finished_at=time.time(),
-            )
+        _finish("failed", _MSG_MUSIC_DOWNLOAD_FAILED.format(error=type(exc).__name__))
         return
-    if expired:
-        return
-    ordered = [item for _, item in sorted(results, key=lambda pair: pair[0])]
-    _music_job_update(
-        job_id,
-        status="done",
-        results=ordered,
-        error=None,
-        finished_at=time.time(),
-    )
+    finally:
+        timer.cancel()
+    _finish("done", None)
 
 
 def _handle_music_jobs_post(
@@ -1764,6 +2516,12 @@ ROUTES: dict[tuple[str, str], Handler] = {
 }
 
 
+#: POST handlers whose REST counterpart declares **no** request-body model.
+#: FastAPI only rejects a missing body when the route actually expects one, so
+#: ``POST /tasks/{id}/cancel`` must keep working without a JSON payload.
+_BODYLESS_POST_HANDLERS = frozenset({_handle_task_cancel})
+
+
 # ---------------------------------------------------------------------------
 # routing
 # ---------------------------------------------------------------------------
@@ -1776,6 +2534,10 @@ def _pattern_matches(pattern: str, path: str) -> bool:
         return False
     for want, got in zip(pattern_parts, path_parts, strict=True):
         if want.startswith("{") and want.endswith("}"):
+            # Starlette's path converters never match an empty segment, so
+            # ``/api/v1/tasks/`` is a 404, not a lookup of ``task_id=""``.
+            if not got:
+                return False
             continue
         if want != got:
             return False
@@ -1797,6 +2559,19 @@ def _match_route(method: str, path: str) -> tuple[Handler | None, dict[str, str]
     return None, {}
 
 
+def _is_body_guarded(method: str, path: str) -> bool:
+    """Whether the REST body-size/encoding guard applies to this request.
+
+    Mirrors ``api.middleware.LimitBodySize._applies``: every state-changing
+    request below ``/api/v1`` is covered, so a new POST route cannot silently
+    opt out of the cap.
+    """
+    if method not in _BODY_LIMIT_METHODS:
+        return False
+    cleaned = path.rstrip("/") or "/"
+    return cleaned == _BODY_LIMIT_PREFIX or cleaned.startswith(_BODY_LIMIT_PREFIX + "/")
+
+
 def _allowed_methods(path: str) -> list[str]:
     """Methods the REST API would allow on ``path`` (for 405 responses)."""
     if path == "/downloads" or path.startswith("/downloads/"):
@@ -1805,6 +2580,8 @@ def _allowed_methods(path: str) -> list[str]:
     for route_method, pattern in ROUTES:
         if route_method not in allowed and _pattern_matches(pattern, path):
             allowed.append(route_method)
+    # Starlette answers HEAD like GET but lists only "GET" in ``Allow`` for a
+    # 405; the parity test pins that exact header, so don't add HEAD here.
     return allowed
 
 
@@ -1857,8 +2634,26 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         return length if length >= 0 else None
 
-    def _drain_body(self) -> None:
+    def _check_body_encoding(self) -> None:
+        """Refuse compressed request bodies exactly like the REST middleware.
+
+        The JSON endpoints parse raw UTF-8; a compressed body could only be a
+        compression bomb, so it is rejected before anything is read.
+        """
+        encodings = [
+            part.strip().lower()
+            for value in self.headers.get_all("Content-Encoding") or []
+            for part in value.split(",")
+        ]
+        if any(encoding not in ("", "identity") for encoding in encodings):
+            self.close_connection = True
+            raise _ApiError(415, _MSG_UNSUPPORTED_ENCODING)
+
+    def _drain_body(self, path: str) -> None:
         """Consume an unread request body so keep-alive stays in sync."""
+        guarded = _is_body_guarded(self.command, path)
+        if guarded:
+            self._check_body_encoding()
         if self.headers.get("Transfer-Encoding"):
             self.close_connection = True
             return
@@ -1869,6 +2664,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if remaining > _MAX_BODY_BYTES:
             self.close_connection = True
+            if guarded:
+                raise _ApiError(413, _MSG_BODY_TOO_LARGE)
             return
         while remaining > 0:
             chunk = self.rfile.read(min(65536, remaining))
@@ -1879,6 +2676,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _read_body(self, path: str) -> dict[str, Any]:
         """Read and decode the JSON request body (validation errors → 422)."""
+        guarded = _is_body_guarded(self.command, path)
+        if guarded:
+            self._check_body_encoding()
         if self.headers.get("Transfer-Encoding"):
             self.close_connection = True
             raise _ApiError(501, "Chunked request bodies are not supported")
@@ -1887,19 +2687,14 @@ class _Handler(BaseHTTPRequestHandler):
             if self.headers.get("Content-Length") is not None:
                 self.close_connection = True
                 raise _ApiError(400, "Invalid Content-Length header")
-            return {}
+            # Every POST route takes a required Pydantic body, so a missing
+            # body is FastAPI's ``missing`` error, not an empty dictionary.
+            raise _missing_body_error()
         if length == 0:
-            return {}
-        if (
-            self.command,
-            path.rstrip("/") or "/",
-        ) in _BODY_LIMIT_ENDPOINTS and length > _MAX_BODY_BYTES:
+            raise _missing_body_error()
+        if guarded and length > _MAX_BODY_BYTES:
             self.close_connection = True
-            raise _ApiError(
-                413,
-                "Request body too large: the limit for this endpoint is "
-                f"{_MAX_BODY_BYTES} bytes",
-            )
+            raise _ApiError(413, _MSG_BODY_TOO_LARGE)
         data = self.rfile.read(length)
         if len(data) < length:
             self.close_connection = True
@@ -1910,6 +2705,9 @@ class _Handler(BaseHTTPRequestHandler):
             raise _validation_error(
                 [_err("body", "JSON decode error", "json_invalid")]
             ) from None
+        if loaded is None:
+            # ``null`` is still "no body" to FastAPI's required-body rule.
+            raise _missing_body_error()
         if not isinstance(loaded, dict):
             raise _validation_error(
                 [
@@ -1983,10 +2781,10 @@ class _Handler(BaseHTTPRequestHandler):
 
         handler, params = _match_route(method, path)
         if handler is not None:
-            if method == "POST":
+            if method == "POST" and handler not in _BODYLESS_POST_HANDLERS:
                 body = self._read_body(path)
             else:
-                self._drain_body()
+                self._drain_body(path)
                 body = {}
             self._send_json(
                 handler(body, params, query),
@@ -1998,7 +2796,7 @@ class _Handler(BaseHTTPRequestHandler):
         # 404 / 405 (+ Allow).  The body, if any, is drained so the
         # keep-alive connection stays usable.
         allowed = _allowed_methods(path)
-        self._drain_body()
+        self._drain_body(path)
         if not allowed:
             self._send_json({"detail": "Not Found"}, 404)
             return
@@ -2111,8 +2909,11 @@ def start_server(home_dir: str, port: int = 8081) -> int:
         name="noveldl-embedded-http",
         daemon=True,
     ).start()
-    logger.info("embedded engine listening on %s:%s", _HOST, port)
-    return port
+    bound_port = int(server.server_address[1])
+    logger.info("embedded engine listening on %s:%s", _HOST, bound_port)
+    # Return the socket's actual port, not the requested one: ``port=0`` asks
+    # the OS for a free loopback port so parallel test runs cannot collide.
+    return bound_port
 
 
 def stop_server() -> None:

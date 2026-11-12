@@ -55,7 +55,7 @@ import ipaddress
 import logging
 import math
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlsplit
@@ -85,6 +85,13 @@ BODY_LIMIT_PREFIX = "/api/v1"
 #: need a ceiling. ``GET``/``HEAD``/``OPTIONS`` bodies are never parsed by a
 #: route and are left alone.
 BODY_LIMIT_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+#: Content encodings accepted for guarded bodies. The API parses raw JSON and
+#: nothing in the stack decompresses requests, so a compressed body could not
+#: work anyway. Rejecting it *before* reading means a compression bomb (a tiny
+#: gzip stream expanding to gigabytes) is refused instead of being handed to any
+#: future decompressor or buffered on the way.
+SUPPORTED_CONTENT_ENCODINGS: frozenset[str] = frozenset({"", "identity"})
 
 # ---------------------------------------------------------------------------
 # Rate limiting
@@ -287,6 +294,9 @@ class BodySizeLimitMiddleware:
     chunk by chunk and the request is aborted as soon as the running total
     crosses the limit (so chunked uploads without ``Content-Length`` are
     covered too). Accepted bodies are replayed to the application unchanged.
+    A body declaring a content encoding other than ``identity`` is refused with
+    ``415`` before anything is read: the API parses raw JSON, so a compressed
+    payload could only be a compression bomb.
 
     :param app: The wrapped ASGI application.
     :param max_bytes: Maximum accepted body size in bytes.
@@ -336,6 +346,26 @@ class BodySizeLimitMiddleware:
         path = str(scope.get("path", ""))
         if not self._applies(method, path):
             await self.app(scope, receive, send)
+            return
+
+        encodings = [
+            part.strip().lower()
+            for value in Headers(scope=scope).getlist("content-encoding")
+            for part in value.split(",")
+        ]
+        if any(encoding not in SUPPORTED_CONTENT_ENCODINGS for encoding in encodings):
+            # Unsupported compressed body: reject without reading it, so a
+            # compression bomb never reaches a decoder. The value is not echoed.
+            response = JSONResponse(
+                status_code=415,
+                content={
+                    "detail": (
+                        "Unsupported Content-Encoding: send the request body "
+                        "uncompressed (identity)"
+                    )
+                },
+            )
+            await response(scope, receive, send)
             return
 
         declared = _content_length(scope)
@@ -471,7 +501,11 @@ class RateLimitMiddleware:
       short-lived client IPs. Because that periodic sweep can lag a burst of
       distinct source addresses, :attr:`max_keys` imposes a hard ceiling:
       when a new key would exceed it, stale entries are swept immediately and
-      then the least recently active keys are evicted.
+      then the least recently active keys are evicted. Recency is maintained
+      incrementally in an ``OrderedDict`` (every admitted hit moves its key to
+      the end), so admitting a new key at the cap is O(1) amortised instead of
+      sorting the whole table — the cap must not become a CPU amplifier under
+      an address flood.
 
     :param app: The wrapped ASGI application.
     :param limit: Requests admitted per client IP per window; ``<= 0`` disables.
@@ -498,7 +532,10 @@ class RateLimitMiddleware:
             RATE_LIMIT_EXEMPT_PATHS if exempt_paths is None else exempt_paths
         )
         self.max_keys = int(max_keys)
-        self._hits: dict[str, deque[float]] = {}
+        #: ``key -> timestamps`` with recency order: the first item is the least
+        #: recently *admitted* request's key. Every admitted hit moves its key
+        #: to the end, so eviction never has to scan or sort the table.
+        self._hits: OrderedDict[str, deque[float]] = OrderedDict()
         self._last_cleanup = 0.0
 
     @staticmethod
@@ -530,6 +567,10 @@ class RateLimitMiddleware:
         if self.limit > 0 and len(timestamps) >= self.limit:
             return max(math.ceil(timestamps[0] + self.window - now), 1)
         timestamps.append(now)
+        # Admitted activity refreshes the key's position in the LRU order; a
+        # rejected request deliberately does not, so a hammering client stays
+        # close to eviction and cannot displace well-behaved keys.
+        self._hits.move_to_end(key)
         self._maybe_cleanup(now)
         return None
 
@@ -538,42 +579,38 @@ class RateLimitMiddleware:
         Keep the counter dict under :attr:`max_keys` before adding a new key.
 
         Stale entries are swept first (ignoring the periodic-cleanup interval,
-        because the cap is a hard bound). If the dict is still full, the least
-        recently active keys are evicted: they are the closest to expiring and
-        losing their budget only makes an abusive client *more* likely to be
-        limited.
+        because the cap is a hard bound). Because the dict is ordered by last
+        admitted activity, expired entries form a prefix: popping it costs
+        O(expired), not O(tracked). If the dict is still full, the least
+        recently active keys are evicted the same way — they are the closest to
+        expiring and losing their budget only makes an abusive client *more*
+        likely to be limited.
         """
         if self.max_keys <= 0 or len(self._hits) < self.max_keys:
             return
         cutoff = now - self.window
-        stale = [
-            key
-            for key, timestamps in self._hits.items()
-            if not timestamps or timestamps[-1] <= cutoff
-        ]
-        for key in stale:
-            del self._hits[key]
+        while self._hits:
+            timestamps = next(iter(self._hits.values()))
+            if timestamps and timestamps[-1] > cutoff:
+                break
+            self._hits.popitem(last=False)
         if len(self._hits) < self.max_keys:
             return
-        # Evict just enough keys to make room for the new one. ``timestamps``
-        # is never empty for a live key, so ``[-1]`` is safe.
+        # Evict just enough keys to make room for the new one.
         excess = len(self._hits) - self.max_keys + 1
-        oldest = sorted(self._hits, key=lambda key: self._hits[key][-1])[:excess]
-        for key in oldest:
-            del self._hits[key]
+        for _ in range(excess):
+            self._hits.popitem(last=False)
 
     def _maybe_cleanup(self, now: float) -> None:
         """Drop per-IP state that has fully slid out of the window."""
         if now - self._last_cleanup < self.window:
             return
         cutoff = now - self.window
-        stale = {
-            key
-            for key, timestamps in self._hits.items()
-            if not timestamps or timestamps[-1] <= cutoff
-        }
-        for key in stale:
-            del self._hits[key]
+        while self._hits:
+            timestamps = next(iter(self._hits.values()))
+            if timestamps and timestamps[-1] > cutoff:
+                break
+            self._hits.popitem(last=False)
         self._last_cleanup = now
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -846,12 +883,29 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def _on_unhandled_error(_request: Request, _exc: Exception) -> JSONResponse:
+    async def _on_unhandled_error(request: Request, _exc: Exception) -> JSONResponse:
         # Never include ``str(exc)`` or a traceback: it may reveal filesystem
         # paths, tokens or provider internals to the client.
+        #
+        # This response is produced by Starlette's outermost error layer, *above*
+        # the Cache-Control/SecurityHeaders/CORS middleware, so it would
+        # otherwise be the only response class without ``no-store``, the
+        # ``nosniff``/``no-referrer`` headers, and (in ``--cors`` mode) the
+        # origin header a browser needs to read it. Stamp them here as well.
+        headers: dict[str, str] = {
+            "Cache-Control": CACHE_CONTROL_NO_STORE,
+            **dict(SECURITY_HEADERS),
+        }
+        if getattr(request.app.state, "cors_enabled", False) and request.headers.get(
+            "origin"
+        ):
+            # Mirror CORSMiddleware: a wildcard origin is only meaningful (and
+            # only emitted) when the request actually carries an Origin.
+            headers["Access-Control-Allow-Origin"] = "*"
         return JSONResponse(
             status_code=500,
             content={"detail": "Internal server error"},
+            headers=headers,
         )
 
 
