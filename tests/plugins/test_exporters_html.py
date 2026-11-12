@@ -458,6 +458,141 @@ def test_xp_html_chapter_image_protocol_relative_url(scenario: Scenario) -> None
     assert IMG_TAG.format(fname="img_0.png", alt="image") in chapter_obj.content
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/uploads/pic.png",
+        "./images/pic.png",
+        "../images/pic.png",
+    ],
+)
+def test_xp_html_chapter_image_relative_url(scenario: Scenario, url: str) -> None:
+    # The downloader hashes a root-relative or dotted-relative reference
+    # verbatim when it names the cached file, so the exporter must look it up
+    # with the same form.
+    scenario.write_media(image_filename(url), PNG_BYTES)
+
+    chapter_obj, builder = _render(
+        scenario,
+        {
+            "id": "1",
+            "title": None,
+            "content": "行",
+            "extra": {
+                "resources": [{"type": "image", "paragraph_index": 0, "url": url}]
+            },
+        },
+    )
+
+    assert IMG_TAG.format(fname="img_0.png", alt="image") in chapter_obj.content
+    assert [img.filename for img in builder.images] == ["img_0.png"]
+
+
+def test_xp_html_chapter_image_relative_url_without_cache_is_omitted(
+    scenario: Scenario,
+) -> None:
+    # No cache entry: the reference must disappear instead of becoming a
+    # dangling <img>.
+    chapter_obj, builder = _render(
+        scenario,
+        {
+            "id": "1",
+            "title": None,
+            "content": "行",
+            "extra": {
+                "resources": [
+                    {"type": "image", "paragraph_index": 0, "url": "/uploads/gone.png"},
+                    {"type": "image", "paragraph_index": 0, "url": "../gone.png"},
+                ]
+            },
+        },
+    )
+
+    assert "<img" not in chapter_obj.content
+    assert builder.images == []
+
+
+def test_xp_html_chapter_image_scheme_case_and_query(scenario: Scenario) -> None:
+    # The downloader hashes the reference exactly as stored (query included,
+    # scheme case preserved) and only lower-cases the suffix.
+    url = "HTTPS://CDN.example.com/PIC.PNG?w=100"
+    scenario.write_media(image_filename(url), PNG_BYTES)
+
+    chapter_obj, builder = _render(
+        scenario,
+        {
+            "id": "1",
+            "title": None,
+            "content": "行",
+            "extra": {
+                "resources": [{"type": "image", "paragraph_index": 0, "url": url}]
+            },
+        },
+    )
+
+    assert IMG_TAG.format(fname="img_0.png", alt="image") in chapter_obj.content
+    assert [img.filename for img in builder.images] == ["img_0.png"]
+
+
+def test_xp_html_chapter_image_malformed_url_is_swallowed(
+    scenario: Scenario,
+) -> None:
+    # ``urlsplit`` rejects the unterminated IPv6 host on every Python version;
+    # one broken reference must not abort the chapter or drop its siblings.
+    chapter_obj, builder = _render(
+        scenario,
+        {
+            "id": "1",
+            "title": None,
+            "content": "行",
+            "extra": {
+                "resources": [
+                    {
+                        "type": "image",
+                        "paragraph_index": 0,
+                        "url": "https://[bad/x.png",
+                    },
+                    {
+                        "type": "image",
+                        "paragraph_index": 0,
+                        "base64": _b64(PNG_BYTES),
+                    },
+                ]
+            },
+        },
+    )
+
+    assert chapter_obj.content.splitlines() == [
+        IMG_TAG.format(fname="img_0.png", alt="image"),
+        "<p>行</p>",
+    ]
+    assert [img.filename for img in builder.images] == ["img_0.png"]
+
+
+def test_xp_html_chapter_image_unsupported_scheme_skipped_even_if_cached(
+    scenario: Scenario,
+) -> None:
+    # A scheme the downloader can never fetch is not a media reference, even
+    # if a file mysteriously exists under its hash.
+    url = "ftp://example.com/pic.png"
+    scenario.write_media(image_filename(url), PNG_BYTES)
+
+    chapter_obj, builder = _render(
+        scenario,
+        {
+            "id": "1",
+            "title": None,
+            "content": "行",
+            "extra": {
+                "resources": [{"type": "image", "paragraph_index": 0, "url": url}]
+            },
+        },
+    )
+
+    assert "<img" not in chapter_obj.content
+    assert builder.images == []
+
+
 def test_xp_html_chapter_image_from_base64(scenario: Scenario) -> None:
     chapter_obj, builder = _render(
         scenario,
@@ -1175,3 +1310,117 @@ def test_html_export_interrupted_write_keeps_previous_files(
     assert (folder / "index.html").read_bytes() == index_before
     assert (folder / "chapters" / "c1.html").read_bytes() == chapter_before
     assert not list(folder.rglob(".*.tmp"))
+
+
+# ---------------------------------------------------------------------------
+# Filename safety: case-insensitive collisions and traversal
+# ---------------------------------------------------------------------------
+
+
+def test_export_book_html_case_insensitive_cid_collision_keeps_both(
+    scenario: Scenario,
+) -> None:
+    # "A" and "a" are distinct chapter ids, but their output files differ only
+    # by case. On Windows/macOS (case-insensitive) the second write used to
+    # overwrite the first, silently losing a chapter while the index still
+    # linked to both names.
+    scenario.write_book_info(
+        make_book_info(
+            volumes=[
+                make_volume(
+                    "卷",
+                    [
+                        make_chapter_info("A", "大写章"),
+                        make_chapter_info("a", "小写章"),
+                    ],
+                )
+            ]
+        )
+    )
+    scenario.write_chapters(
+        [
+            make_chapter("A", "大写内容", title="大写章"),
+            make_chapter("a", "小写内容", title="小写章"),
+        ]
+    )
+
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+    chap_dir = folder / "chapters"
+    files = sorted(p.name for p in chap_dir.iterdir())
+
+    assert len(files) == 2
+    # No two names may map to the same file on a case-insensitive filesystem.
+    assert len({name.casefold() for name in files}) == 2
+
+    bodies = "\n".join((chap_dir / name).read_text("utf-8") for name in files)
+    assert "大写内容" in bodies
+    assert "小写内容" in bodies
+
+    index = (folder / "index.html").read_text("utf-8")
+    links = re.findall(r'href="chapters/([^"]+)"', index)
+    assert sorted(links) == files
+
+
+def test_export_book_html_cid_cannot_escape_chapters_dir(scenario: Scenario) -> None:
+    cid = "../../../evil"
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info(cid, "越界")])])
+    )
+    scenario.write_chapters([make_chapter(cid, "越界内容", title="越界")])
+
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+    chap_dir = folder / "chapters"
+
+    files = list(chap_dir.iterdir())
+    assert len(files) == 1
+    assert files[0].is_file()
+    assert "/" not in files[0].name and "\\" not in files[0].name
+    assert files[0].resolve().parent == chap_dir.resolve()
+
+
+def test_export_book_html_missing_book_name_still_exports(scenario: Scenario) -> None:
+    # Metadata without "book_name" must fall back to a placeholder folder
+    # instead of raising KeyError and producing no export at all.
+    scenario.write_book_info(
+        {
+            "author": "作者",
+            "volumes": [make_volume("卷", [make_chapter_info("1", "章")])],
+        }
+    )
+    scenario.write_chapters([make_chapter("1", "内容", title="章")])
+
+    result = scenario.export("html", ExporterConfig(append_timestamp=False))
+
+    assert len(result["html"]) == 1
+    folder = result["html"][0]
+    assert folder.is_dir()
+    assert (folder / "index.html").is_file()
+    assert (folder / "chapters" / "c1.html").is_file()
+
+
+def test_export_book_html_metadata_is_escaped(scenario: Scenario) -> None:
+    # Book title, author, summary, tags and volume names all come from the
+    # site and are interpolated into index.html; none may inject markup.
+    scenario.write_book_info(
+        make_book_info(
+            name="书<script>alert(1)</script>",
+            author='<img src=x onerror="alert(1)">',
+            summary="<b>简介</b>",
+            tags=["<i>tag</i>"],
+            volumes=[
+                make_volume("<script>卷</script>", [make_chapter_info("1", "章")])
+            ],
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容")])
+
+    folder = scenario.export("html", ExporterConfig(append_timestamp=False))["html"][0]
+    index = (folder / "index.html").read_text("utf-8")
+
+    assert "<script>alert(1)</script>" not in index
+    assert "<script>卷</script>" not in index
+    assert '<img src=x onerror="alert(1)">' not in index
+    assert "<b>简介</b>" not in index
+    assert "<i>tag</i>" not in index
+    assert "&lt;script&gt;" in index
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in index

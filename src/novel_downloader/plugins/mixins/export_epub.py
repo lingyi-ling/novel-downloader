@@ -7,18 +7,23 @@ novel_downloader.plugins.mixins.export_epub
 import base64
 import hashlib
 import logging
+import re
+from dataclasses import replace
 from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlsplit
 
 from novel_downloader.infra.persistence.chapter_storage import ChapterStorage
 from novel_downloader.libs.epub_builder import EpubBuilder, EpubChapter, EpubVolume
+from novel_downloader.libs.epub_builder.constants import IMAGE_MEDIA_TYPES
 from novel_downloader.libs.filesystem import (
     font_filename,
     format_filename,
     image_filename,
     sanitize_filename,
 )
+from novel_downloader.libs.media.image import detect_image_format
 from novel_downloader.schemas import (
     BookConfig,
     ChapterDict,
@@ -38,6 +43,134 @@ _MAX_PATH_LEN = 240
 # component short so extracting the EPUB on Windows cannot exceed the limit,
 # whatever directory the reading app unpacks to.
 _MAX_CHAPTER_NAME_LEN = 72
+
+#: Characters that are illegal in XML 1.0 (and cannot even be expressed as
+#: character references). Metadata is escaped for markup, but a title made
+#: only of these would still end up empty in ``<dc:title>``, which strict
+#: EPUB validators reject.
+_ILLEGAL_XML_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+#: Upper bound for a single embedded image. The media cache can contain
+#: multi-hundred-megabyte scans; embedding one makes the whole export
+#: unusable (memory and archive size) for very little benefit, so oversized
+#: files are skipped instead of being written into every chapter.
+_MAX_IMAGE_BYTES = 16 * 1024 * 1024
+
+_UTF8_BOM = b"\xef\xbb\xbf"
+
+
+def _clean_metadata_text(text: str) -> str:
+    """Strip characters that cannot appear in the generated XML."""
+    return _ILLEGAL_XML_CHARS.sub("", text or "").strip()
+
+
+def _detect_embeddable_image(data: bytes) -> str | None:
+    """
+    Return the image format of ``data`` when it is safe to embed, else ``None``.
+
+    Failed downloads leave empty files, truncated bodies or HTML error pages
+    behind under an image name, and ``detect_image_format`` reports formats
+    (BMP/TIFF/ICO) the EPUB manifest has no media type for. Both must be
+    dropped: the builder would otherwise fall back to the file suffix and
+    publish, say, an HTML page as ``image/png``.
+    """
+    head = data[:64].removeprefix(_UTF8_BOM)
+    fmt = detect_image_format(head)
+    if fmt is None or fmt not in IMAGE_MEDIA_TYPES:
+        return None
+    return fmt
+
+
+def _probe_image(path: Path) -> bool:
+    """Whether ``path`` is a readable image the EPUB builder can embed."""
+    try:
+        if not path.is_file():
+            return False
+        size = path.stat().st_size
+        if size == 0 or size > _MAX_IMAGE_BYTES:
+            logger.warning(
+                "Skipping image %s (%d bytes): empty or over the %d-byte limit",
+                path,
+                size,
+                _MAX_IMAGE_BYTES,
+            )
+            return False
+        with path.open("rb") as fh:
+            head = fh.read(64)
+    except OSError as exc:
+        logger.debug("Cannot read image %s: %s", path, exc)
+        return False
+
+    if _detect_embeddable_image(head) is None:
+        logger.debug("Skipping unrecognised image data: %s", path)
+        return False
+    return True
+
+
+def _usable_image_path(path: Path | None) -> Path | None:
+    """Return ``path`` when it can be embedded, otherwise ``None``."""
+    if path is None or not _probe_image(path):
+        return None
+    return path
+
+
+def _image_cache_url(url: str | None) -> str | None:
+    """
+    Return the form of *url* the downloader hashes into the media cache.
+
+    ``BaseFetcher._fetch_one_image`` upgrades a protocol-relative reference
+    (``//host/x``) to ``https://host/x`` before computing the cache filename;
+    every other reference is hashed verbatim. A lookup that skips the upgrade
+    reports a downloaded illustration as missing.
+    """
+    if not url:
+        return None
+    return "https:" + url if url.startswith("//") else url
+
+
+def _cached_image_path(media_dir: Path, url: object) -> Path | None:
+    """
+    Locate the cached file for an image resource URL, or return ``None``.
+
+    The downloader saves each image under a hash of the reference as stored:
+    protocol-relative URLs are upgraded to ``https:`` first
+    (:meth:`BaseFetcher._fetch_one_image`), while root-relative
+    (``/uploads/x.png``) and dotted-relative (``./x.png``, ``../x.png``)
+    references are hashed untouched. The lookup must use exactly the same rule,
+    otherwise the file is on disk but never embedded.
+
+    Values that cannot name downloaded media are refused: an empty value, a
+    non-HTTP scheme (``ftp:``, ``data:``, a Windows drive letter), a malformed
+    URL, or a reference whose cache file does not exist. Callers then omit the
+    image instead of emitting a dangling ``<img>``.
+    """
+    if not isinstance(url, str):
+        return None
+
+    candidate = url.strip()
+    if not candidate:
+        return None
+
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        # ``urlsplit`` rejects e.g. an unterminated IPv6 host.
+        return None
+
+    scheme = parsed.scheme.lower()
+    if scheme:
+        if scheme not in ("http", "https") or not parsed.netloc:
+            return None
+    elif not parsed.path:
+        return None
+
+    try:
+        filename = image_filename(_image_cache_url(candidate) or "")
+    except ValueError:
+        return None
+
+    path = media_dir / filename
+    return path if path.is_file() else None
 
 
 def _fit_name(name: str, parent: Path, limit: int = _MAX_PATH_LEN) -> str:
@@ -64,6 +197,34 @@ def _fit_name(name: str, parent: Path, limit: int = _MAX_PATH_LEN) -> str:
     tail = f"~{digest}" + (f".{ext}" if ext else "")
     keep = max(budget - len(tail), 1)
     return f"{stem[:keep]}{tail}"
+
+
+def _unique_chapter_filename(filename: str, used: set[str]) -> str:
+    """
+    Return ``filename`` unless it was already used in this export.
+
+    Different chapter ids can sanitize down to the same filename (``a/b`` and
+    ``a_b`` both become ``ca_b``), so the later chapter gets a numeric suffix
+    (``_2``, ``_3``, ...). Comparison is case-insensitive (``used`` holds
+    case-folded keys): ``cA.xhtml`` and ``ca.xhtml`` are distinct ZIP entries
+    but the same file when the archive is extracted on Windows or macOS.
+    """
+    key = filename.casefold()
+    if key not in used:
+        used.add(key)
+        return filename
+
+    stem, dot, ext = filename.rpartition(".")
+    if not dot:
+        stem, ext = filename, ""
+    index = 2
+    while True:
+        candidate = f"{stem}_{index}.{ext}" if ext else f"{stem}_{index}"
+        key = candidate.casefold()
+        if key not in used:
+            used.add(key)
+            return candidate
+        index += 1
 
 
 def _count_unique_cids(vols: list[VolumeInfoDict]) -> int:
@@ -186,12 +347,22 @@ class ExportEpubMixin:
             return []
 
         # --- Prepare header (book metadata) ---
-        name = book_info["book_name"]
+        # Hand-written metadata may omit "book_name"; fall back to the id so
+        # the EPUB still gets a non-empty dc:title.
+        book_name = _clean_metadata_text(book_info.get("book_name") or "")
+        name = book_name or _clean_metadata_text(book_id)
         author = book_info.get("author") or ""
         book_summary = book_info.get("summary", "")
 
         # --- Generate intro + cover ---
-        cover_path = self._resolve_image_path(media_dir, book_info.get("cover_url"))
+        # Downloads cache the book cover as ``cover.<ext>``; resolving it
+        # without ``name="cover"`` silently dropped the cover of every split
+        # volume.
+        cover_path = _usable_image_path(
+            self._resolve_image_path(
+                media_dir, book_info.get("cover_url"), name="cover"
+            )
+        )
 
         # --- Compile columes ---
         outputs: list[Path] = []
@@ -200,7 +371,11 @@ class ExportEpubMixin:
             for v_idx, vol in enumerate(vols, start=1):
                 vol_title = vol.get("volume_name") or f"卷 {v_idx}"
 
-                vol_cover = self._resolve_image_path(media_dir, vol.get("volume_cover"))
+                vol_cover = _usable_image_path(
+                    self._resolve_image_path(
+                        media_dir, _image_cache_url(vol.get("volume_cover"))
+                    )
+                )
                 vol_cover = vol_cover or cover_path
 
                 builder = EpubBuilder(
@@ -226,6 +401,7 @@ class ExportEpubMixin:
 
                 # Append each chapter
                 seen_cids: set[str] = set()
+                used_chapter_files: set[str] = set()
                 skipped = 0
                 for ch_info in vol.get("chapters", []):
                     cid = ch_info.get("chapterId")
@@ -241,7 +417,14 @@ class ExportEpubMixin:
                                 cid=cid,
                                 chap_title=ch_title,
                             )
-                            builder.add_chapter(chapter_obj)
+                            builder.add_chapter(
+                                replace(
+                                    chapter_obj,
+                                    filename=_unique_chapter_filename(
+                                        chapter_obj.filename, used_chapter_files
+                                    ),
+                                )
+                            )
                         else:
                             skipped += 1
                         continue
@@ -254,7 +437,14 @@ class ExportEpubMixin:
                         media_dir=media_dir,
                         include_picture=cfg.include_picture,
                     )
-                    builder.add_chapter(chapter_obj)
+                    builder.add_chapter(
+                        replace(
+                            chapter_obj,
+                            filename=_unique_chapter_filename(
+                                chapter_obj.filename, used_chapter_files
+                            ),
+                        )
+                    )
 
                 _check_export_consistency(
                     fmt="EPUB",
@@ -333,12 +523,17 @@ class ExportEpubMixin:
             return []
 
         # --- Prepare header (book metadata) ---
-        name = book_info["book_name"]
+        # Hand-written metadata may omit "book_name"; fall back to the id so
+        # the EPUB still gets a non-empty dc:title.
+        book_name = _clean_metadata_text(book_info.get("book_name") or "")
+        name = book_name or _clean_metadata_text(book_id)
         author = book_info.get("author") or ""
 
         # --- Generate intro + cover ---
-        cover_path = self._resolve_image_path(
-            media_dir, book_info.get("cover_url"), name="cover"
+        cover_path = _usable_image_path(
+            self._resolve_image_path(
+                media_dir, book_info.get("cover_url"), name="cover"
+            )
         )
 
         # --- Initialize EPUB ---
@@ -355,12 +550,20 @@ class ExportEpubMixin:
 
         # --- Compile columes ---
         seen_cids: set[str] = set()
+        # Chapter filenames are unique book-wide: the archive is extracted as
+        # one tree, and case-insensitive filesystems would otherwise collapse
+        # ``cA.xhtml`` and ``ca.xhtml`` onto a single chapter.
+        used_chapter_files: set[str] = set()
         skipped = 0
         with ChapterStorage(raw_base, filename=f"chapter.{stage}.sqlite") as storage:
             for v_idx, vol in enumerate(vols, start=1):
                 vol_title = vol.get("volume_name") or f"卷 {v_idx}"
 
-                vol_cover = self._resolve_image_path(media_dir, vol.get("volume_cover"))
+                vol_cover = _usable_image_path(
+                    self._resolve_image_path(
+                        media_dir, _image_cache_url(vol.get("volume_cover"))
+                    )
+                )
 
                 curr_vol = EpubVolume(
                     id=f"vol_{v_idx}",
@@ -395,6 +598,12 @@ class ExportEpubMixin:
                                 cid=cid,
                                 chap_title=ch_title,
                             )
+                            chapter_obj = replace(
+                                chapter_obj,
+                                filename=_unique_chapter_filename(
+                                    chapter_obj.filename, used_chapter_files
+                                ),
+                            )
                             curr_vol.chapters.append(chapter_obj)
                         else:
                             skipped += 1
@@ -407,6 +616,12 @@ class ExportEpubMixin:
                         chap=ch,
                         media_dir=media_dir,
                         include_picture=cfg.include_picture,
+                    )
+                    chapter_obj = replace(
+                        chapter_obj,
+                        filename=_unique_chapter_filename(
+                            chapter_obj.filename, used_chapter_files
+                        ),
                     )
 
                     curr_vol.chapters.append(chapter_obj)
@@ -471,7 +686,11 @@ class ExportEpubMixin:
         if chap is None:
             return None
 
-        chap_title = (chap.get("title") or f"chapter_{chapter_id}").strip()
+        # The chapter title becomes the EPUB's dc:title; strip characters that
+        # would leave it empty in the generated XML.
+        chap_title = _clean_metadata_text(chap.get("title") or "") or (
+            f"chapter_{chapter_id}"
+        )
 
         builder = EpubBuilder(
             title=chap_title,
@@ -552,17 +771,30 @@ class ExportEpubMixin:
             fname: str | None = None
             try:
                 if url := res.get("url"):
-                    local = media_dir / image_filename(url)
-                    if local and local.is_file():
+                    local = _cached_image_path(media_dir, url)
+                    if local is not None and _probe_image(local):
                         fname = book.add_image(local)
 
-                elif b64 := res.get("base64"):
-                    mime = res.get("mime", "image/png")
-                    raw = base64.b64decode(b64)
-                    fname = book.add_image_bytes(raw, mime_type=mime)
+                # A resource may carry an inline copy as well; use it when the
+                # download is missing or unusable instead of dropping the
+                # illustration.
+                if not fname and (b64 := res.get("base64")):
+                    # Reject absurd payloads before decoding so a corrupt or
+                    # hostile resource cannot balloon memory usage.
+                    if len(b64) > (_MAX_IMAGE_BYTES * 4 // 3) + 4:
+                        logger.warning("Skipping oversized inline image resource")
+                    else:
+                        raw = base64.b64decode(b64)
+                        fmt = _detect_embeddable_image(raw)
+                        if fmt is not None and len(raw) <= _MAX_IMAGE_BYTES:
+                            fname = book.add_image_bytes(
+                                raw, mime_type=IMAGE_MEDIA_TYPES[fmt]
+                            )
 
                 if fname:
-                    alt = escape(res.get("alt") or "image")
+                    # Parser-provided alts are not guaranteed to be strings;
+                    # a non-string used to raise and silently drop the image.
+                    alt = escape(str(res.get("alt") or "image"))
                     tag = f'<img src="../Images/{fname}" alt="{alt}"/>'
                     html_parts.append(self._IMAGE_WRAPPER.format(img=tag))
 
@@ -588,13 +820,21 @@ class ExportEpubMixin:
                     logger.debug("EPUB font add failed: %s", e)
 
             elif typ == "image" and include_picture:
-                idx = r.get("paragraph_index", max_i)
-                if idx == 0:
+                # Hand-written metadata bypasses type checking, so a null or
+                # string index must not abort the whole chapter.
+                raw_idx = r.get("paragraph_index", max_i)
+                try:
+                    idx = int(raw_idx)
+                except (TypeError, ValueError):
+                    idx = max_i
+
+                # Index 0 means "before the text"; negative indexes would
+                # otherwise never match a line and silently disappear.
+                if idx <= 0 or max_i == 0:
                     _append_image(r)
                     continue
 
-                idx = min(idx, max_i)
-                images_by_index.setdefault(idx, []).append(r)
+                images_by_index.setdefault(min(idx, max_i), []).append(r)
 
         for i, ln in enumerate(lines, start=1):
             if ln := ln.strip():

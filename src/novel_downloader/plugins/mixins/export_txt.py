@@ -8,6 +8,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -36,6 +37,21 @@ _MAX_PATH_LEN = 240
 #: whole path at 260 UTF-16 units.  A 400-character CJK title is 1,200 bytes,
 #: so a character-only budget still produces ``ENAMETOOLONG`` on Linux.
 _MAX_COMPONENT_BYTES = 200
+
+#: Characters that cannot be carried by a UTF-8 text file: stray C0 controls
+#: (other than tab/newline), lone surrogates left behind by a lossy decode and
+#: the two Unicode non-characters. ``str.encode("utf-8")`` raises on the
+#: surrogates, so a single bad chapter would otherwise abort the whole export.
+_ILLEGAL_TEXT_CHARS = re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]"
+)
+
+
+def _clean_export_text(text: str) -> str:
+    """Make ``text`` writable as UTF-8 with deterministic LF newlines."""
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return _ILLEGAL_TEXT_CHARS.sub("", text)
 
 
 def _truncate_utf8(text: str, limit_bytes: int) -> str:
@@ -110,6 +126,7 @@ def _atomic_write_text(path: Path, text: str) -> Path:
     raised (with the destination path in the message) and the old file is
     left untouched -- fail, never corrupt.
     """
+    text = _clean_export_text(text)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -265,7 +282,8 @@ class ExportTxtMixin:
             return []
 
         # --- Prepare header (book metadata) ---
-        name = book_info["book_name"]
+        # Hand-written metadata may omit the key entirely.
+        name = book_info.get("book_name") or ""
         author = book_info.get("author") or ""
         header_txt = self._xp_txt_header(book_info, name, author)
 

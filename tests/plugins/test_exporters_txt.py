@@ -625,3 +625,97 @@ def test_fit_name_respects_the_posix_byte_limit() -> None:
     assert len(fitted.encode("utf-8")) <= 200
     assert fitted.endswith(".txt")
     assert fitted != "长" * 400 + ".txt"
+
+
+# ---------------------------------------------------------------------------
+# Encoding: unencodable input must not abort the whole export
+# ---------------------------------------------------------------------------
+
+
+def test_txt_atomic_write_drops_unencodable_characters(tmp_path: Path) -> None:
+    """A lone surrogate (undecodable source bytes) must not fail the export.
+
+    ``str.encode("utf-8")`` raises ``UnicodeEncodeError`` on lone surrogates;
+    without cleaning, one bad chapter discarded the entire book. NUL and a
+    stray CR are likewise not valid in a plain-text export.
+    """
+    from novel_downloader.plugins.mixins.export_txt import _atomic_write_text
+
+    target = tmp_path / "a.txt"
+    _atomic_write_text(target, "a\ud800b\x00c\rd\r\ne\U0001f600")
+
+    raw = target.read_bytes()
+    assert raw == "abc\nd\ne\U0001f600".encode()
+    # UTF-8 without a BOM, so naive readers do not see a stray \ufeff.
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
+# Degenerate metadata / paths
+# ---------------------------------------------------------------------------
+
+
+def test_export_book_txt_missing_book_name_still_exports(scenario: Scenario) -> None:
+    # Hand-written metadata may omit "book_name" entirely. The export must
+    # fall back to a generated name instead of raising KeyError.
+    scenario.write_book_info(
+        {
+            "author": "作者",
+            "volumes": [make_volume("卷", [make_chapter_info("1", "章")])],
+        }
+    )
+    scenario.write_chapters([make_chapter("1", "内容", title="章")])
+
+    result = scenario.export("txt", ExporterConfig(append_timestamp=False))
+
+    assert len(result["txt"]) == 1
+    assert result["txt"][0].is_file()
+
+
+def test_export_book_txt_name_cannot_escape_output_dir(scenario: Scenario) -> None:
+    scenario.write_book_info(
+        make_book_info(
+            name="../../escape",
+            volumes=[make_volume("卷", [make_chapter_info("1", "章")])],
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容")])
+
+    path = scenario.export(
+        "txt", ExporterConfig(filename_template="{title}", append_timestamp=False)
+    )["txt"][0]
+
+    assert path.resolve().parent == scenario.output_dir.resolve()
+    assert "/" not in path.name and "\\" not in path.name
+
+
+@pytest.mark.skipif(os.name != "nt", reason="device names are Windows-only")
+def test_export_book_txt_reserved_device_name_is_prefixed(scenario: Scenario) -> None:
+    scenario.write_book_info(
+        make_book_info(
+            name="CON",
+            author="",
+            volumes=[make_volume("卷", [make_chapter_info("1", "章")])],
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容")])
+
+    path = scenario.export(
+        "txt", ExporterConfig(filename_template="{title}", append_timestamp=False)
+    )["txt"][0]
+
+    assert path.name == "_CON.txt"
+    assert path.is_file()
+
+
+def test_export_book_txt_very_long_chapter_is_complete(scenario: Scenario) -> None:
+    content = "长" * 400_000
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "超长章")])])
+    )
+    scenario.write_chapters([make_chapter("1", content, title="超长章")])
+
+    path = scenario.export("txt", ExporterConfig(append_timestamp=False))["txt"][0]
+
+    assert content in path.read_text("utf-8")
