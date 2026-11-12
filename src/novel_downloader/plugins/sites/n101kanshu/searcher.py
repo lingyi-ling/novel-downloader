@@ -9,6 +9,7 @@ import logging
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import chapter_id_from_href
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -35,20 +36,22 @@ class N101kanshuSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         rows = doc.xpath("//ul[@id='article_list_content']/li")
         results: list[SearchResult] = []
-        count = 0
 
-        for row in rows:
+        for idx, row in enumerate(rows):
             book_url = self._first_str(row.xpath(".//a[@class='imgbox']/@href"))
             if not book_url:
                 continue
 
-            if limit is not None and count > limit:
+            if limit is not None and idx >= limit:
                 break
 
-            book_id = book_url.rstrip("/").rsplit("/", 1)[-1].split(".", 1)[0]
+            book_url = self._abs_url(book_url)
+            book_id = chapter_id_from_href(book_url)
             cover_url = self._first_str(
                 row.xpath(".//img/@data-src")
             ) or self._first_str(row.xpath(".//img/@src"))
@@ -62,7 +65,6 @@ class N101kanshuSearcher(BaseSearcher):
             latest_chapter = self._first_str(
                 row.xpath(".//div[@class='zxzj']//a/text()")
             )
-            count += 1
 
             results.append(
                 SearchResult(
@@ -75,7 +77,7 @@ class N101kanshuSearcher(BaseSearcher):
                     latest_chapter=latest_chapter,
                     update_date="-",
                     word_count="-",
-                    priority=self.priority + count,
+                    priority=self.priority + idx,
                 )
             )
         return results

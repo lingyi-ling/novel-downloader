@@ -54,6 +54,8 @@ class WestnovelSearcher(BaseSearcher):
             return []
         query = self._query.lower()
 
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         rows = doc.xpath('//ul[@class="chapter-grid"]//li/a[@href]')
         results: list[SearchResult] = []

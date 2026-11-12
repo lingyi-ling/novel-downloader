@@ -8,6 +8,7 @@ novel_downloader.plugins.sites.esjzone.searcher
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import chapter_id_from_href
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -32,6 +33,8 @@ class EsjzoneSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         cards = doc.xpath('//div[contains(@class,"card-body")]')
         results: list[SearchResult] = []
@@ -47,8 +50,8 @@ class EsjzoneSearcher(BaseSearcher):
                 break
 
             # href format: /detail/<book_id>.html
-            book_id = href.split("/")[-1].split(".")[0]
             book_url = self._abs_url(href)
+            book_id = chapter_id_from_href(book_url)
 
             title = self._first_str(
                 card.xpath(".//h5[contains(@class,'card-title')]/a[1]//text()")
@@ -72,7 +75,7 @@ class EsjzoneSearcher(BaseSearcher):
                 './preceding-sibling::a[contains(@class,"card-img-tiles")]'
                 '//div[contains(@class,"lazyload")]/@data-src'
             )
-            cover_url = cover_data[0].strip() if cover_data else ""
+            cover_url = self._abs_url(cover_data[0].strip()) if cover_data else ""
 
             # The list card shows the work's size next to a file icon.
             word_count = (

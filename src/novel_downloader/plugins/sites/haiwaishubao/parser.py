@@ -9,6 +9,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -25,13 +29,14 @@ class HaiwaishubaoParser(BaseParser):
     """
 
     site_name: str = "haiwaishubao"
+    BASE_URL: str = "https://www.haiwaishubao.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -45,10 +50,11 @@ class HaiwaishubaoParser(BaseParser):
             tree.xpath('//meta[@property="og:novel:author"]/@content')
             or tree.xpath('//p[@class="author"]//a/text()')
         )
-        cover_url = self._first_str(
+        cover_rel = self._first_str(
             tree.xpath('//meta[@property="og:image"]/@content')
             or tree.xpath('//div[@class="BGsectionOne-top-left"]/img/@src')
         )
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
         update_time = self._first_str(
             tree.xpath('//meta[@property="og:novel:update_time"]/@content')
             or tree.xpath('//p[@class="time"]/span/text()')
@@ -70,13 +76,15 @@ class HaiwaishubaoParser(BaseParser):
         # Chapter volumes & listings
         chapters: list[ChapterInfoDict] = []
         for catalog_html in raw_pages[1:]:
+            if not catalog_html.strip():
+                continue
             cat_tree = html.fromstring(catalog_html)
             for a in cat_tree.xpath('//ol[contains(@class,"BCsectionTwo-top")]//a'):
                 href = (a.get("href") or "").strip()
                 if not href:
                     continue
                 title = self._first_str(a.xpath(".//text()"))
-                chapter_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
+                chapter_id = chapter_id_from_href(href)
                 chapters.append(
                     ChapterInfoDict(
                         title=title,
@@ -110,7 +118,7 @@ class HaiwaishubaoParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         title: str = ""

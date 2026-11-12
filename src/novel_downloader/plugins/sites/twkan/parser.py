@@ -6,9 +6,12 @@ novel_downloader.plugins.sites.twkan.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -25,6 +28,7 @@ class TwkanParser(BaseParser):
     """
 
     site_name: str = "twkan"
+    BASE_URL = "https://twkan.com"
     ADS = {
         r"twkan\.com",
         "台灣小說網",
@@ -35,11 +39,14 @@ class TwkanParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if len(raw_pages) < 2:
             return None
 
-        info_tree = html.fromstring(raw_pages[0])
-        catalog_tree = html.fromstring(raw_pages[1])
+        info_tree = parse_html_tree(raw_pages[0])
+        catalog_tree = parse_html_tree(raw_pages[1])
+        if info_tree is None or catalog_tree is None:
+            return None
 
         # --- base info ---
         book_name = self._first_str(
@@ -50,8 +57,10 @@ class TwkanParser(BaseParser):
                 '//div[@class="booknav2"]/p[contains(text(),"作者")]/a/text()'
             )
         )
-        cover_url = self._first_str(
-            info_tree.xpath('//div[@class="bookimg2"]/img/@src')
+        cover_url = resolve_url(
+            info_tree,
+            self._first_str(info_tree.xpath('//div[@class="bookimg2"]/img/@src')),
+            fallback_base=self.BASE_URL,
         )
 
         # "123.45万字 | 连载"
@@ -74,9 +83,11 @@ class TwkanParser(BaseParser):
         chapters: list[ChapterInfoDict] = []
         for a in catalog_tree.xpath("//ul/li/a"):
             url = a.get("href", "").strip()
-            if not url:
+            if not url or url.lower().startswith(("javascript:", "#")):
                 continue
-            chap_id = url.strip("/").rsplit("/", 1)[-1]
+            chap_id = chapter_id_from_href(url)
+            if not chap_id:
+                continue
             title = self._first_str(a.xpath(".//text()"))
             chapters.append(
                 {
@@ -109,10 +120,13 @@ class TwkanParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         title = self._first_str(
             tree.xpath('//div[contains(@class,"txtnav")]//h1/text()')

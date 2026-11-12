@@ -9,6 +9,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -31,10 +35,13 @@ class TianyabooksParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         book_name = (
             self._first_str(tree.xpath('//div[@class="catalog"]/h1/text()'))
@@ -92,9 +99,12 @@ class TianyabooksParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
         title_xpaths = [
             '//div[@class="article"]/h2/text()',
             '//div[@id="main"]/h1/text()',
@@ -120,6 +130,17 @@ class TianyabooksParser(BaseParser):
             paragraphs = [s.strip() for s in tree.xpath(xp) if s.strip()]
             if paragraphs:
                 break
+
+        if not paragraphs:
+            # Older pages separate paragraphs with ``<br>`` instead of ``<p>``.
+            for xp in (
+                '//div[@class="article"]//text()',
+                '//div[@id="main"]//text()',
+                '//div[@id="neirong"]//text()',
+            ):
+                paragraphs = [text for line in tree.xpath(xp) if (text := line.strip())]
+                if paragraphs:
+                    break
 
         if not paragraphs:
             return None
@@ -166,10 +187,10 @@ class TianyabooksParser(BaseParser):
             elif tag == "dd" or "list" in cls:
                 for a in elem.xpath(".//a"):
                     href = a.get("href", "").strip()
-                    if not href:
+                    if not href or href.lower().startswith(("javascript:", "#")):
                         continue
                     title = a.text_content().strip()
-                    chap_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
+                    chap_id = chapter_id_from_href(href)
                     vol_chaps.append(
                         {"title": title, "url": href, "chapterId": chap_id}
                     )

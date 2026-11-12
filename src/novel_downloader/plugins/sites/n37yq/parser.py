@@ -10,6 +10,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -27,13 +31,14 @@ class N37yqParser(BaseParser):
     """
 
     site_name: str = "n37yq"
+    BASE_URL: str = "https://www.37yq.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if len(raw_pages) < 2:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
         info_tree = html.fromstring(raw_pages[0])
@@ -46,10 +51,11 @@ class N37yqParser(BaseParser):
         author = self._first_str(
             info_tree.xpath("//meta[@property='og:novel:author']/@content")
         )
-        cover_url = self._first_str(
+        cover_rel = self._first_str(
             info_tree.xpath("//meta[@property='og:image']/@content")
             or info_tree.xpath("//div[contains(@class,'book-cover')]//img/@src")
         )
+        cover_url = resolve_url(info_tree, cover_rel, fallback_base=self.BASE_URL)
         serial_status = self._first_str(
             info_tree.xpath("//meta[@property='og:novel:status']/@content")
             or info_tree.xpath(
@@ -123,7 +129,7 @@ class N37yqParser(BaseParser):
                     url = (a.get("href") or "").strip()
                     if not url:
                         continue
-                    chapter_id = url.rsplit("/", 1)[-1].split(".", 1)[0]
+                    chapter_id = chapter_id_from_href(url)
                     current_chapters.append(
                         {"title": title, "url": url, "chapterId": chapter_id}
                     )
@@ -153,7 +159,7 @@ class N37yqParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -177,11 +183,10 @@ class N37yqParser(BaseParser):
 
             elif tag == "div" and "divimage" in (node.get("class") or ""):
                 for src in node.xpath(".//img/@src"):
-                    src = src.strip()
-                    if not src:
+                    src_rel = src.strip()
+                    if not src_rel:
                         continue
-                    if src.startswith("//"):
-                        src = "https:" + src
+                    src = resolve_url(node, src_rel, fallback_base=self.BASE_URL)
 
                     resources.append(
                         {
@@ -192,10 +197,9 @@ class N37yqParser(BaseParser):
                     )
 
             elif tag == "img":
-                src = (node.get("src") or "").strip()
-                if src:
-                    if src.startswith("//"):
-                        src = "https:" + src
+                src_rel = (node.get("src") or "").strip()
+                if src_rel:
+                    src = resolve_url(node, src_rel, fallback_base=self.BASE_URL)
 
                     resources.append(
                         {

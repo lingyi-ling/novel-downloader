@@ -10,6 +10,7 @@ import logging
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import chapter_id_from_href
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 class N37yqSearcher(BaseSearcher):
     site_name = "n37yq"
     priority = 10
+    BASE_URL = "https://www.37yq.com"
     SEARCH_URL = "https://www.37yq.com/so.html"
 
     async def _fetch_html(self, keyword: str) -> str:
@@ -38,6 +40,8 @@ class N37yqSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         rows = doc.xpath(
             "//div[contains(@class,'search-tab')]//div[contains(@class,'search-result-list')]"
@@ -56,11 +60,13 @@ class N37yqSearcher(BaseSearcher):
                 break
 
             # 'https://www.37yq.com/lightnovel/3860.html' -> "3860"
-            book_id = book_url.rsplit("/", 1)[-1].split(".")[0]
+            book_url = self._abs_url(book_url)
+            book_id = chapter_id_from_href(book_url)
 
-            cover_url = self._first_str(
+            cover_rel = self._first_str(
                 row.xpath(".//div[contains(@class,'imgbox')]//img/@src")
             )
+            cover_url = self._abs_url(cover_rel) if cover_rel else ""
             title = self._first_str(row.xpath(".//h2[contains(@class,'tit')]/a/text()"))
             author = self._first_str(
                 row.xpath(".//div[contains(@class,'bookinfo')]//a[1]/text()")

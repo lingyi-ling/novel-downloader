@@ -10,6 +10,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,6 +30,7 @@ class TtkanParser(BaseParser):
     """
 
     site_name: str = "ttkan"
+    BASE_URL: str = "https://www.ttkan.co"
 
     SITE_AD_SETS: list[set[str]] = [
         {"W", "w", "ω", "ш", "щ"},  # w/ш variants
@@ -47,7 +52,7 @@ class TtkanParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -63,9 +68,10 @@ class TtkanParser(BaseParser):
             )
         )
 
-        cover_url = self._first_str(
+        cover_rel = self._first_str(
             tree.xpath('//div[contains(@class,"novel_info")]//amp-img/@src')
         )
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
 
         serial_status = self._first_str(
             tree.xpath(
@@ -83,7 +89,7 @@ class TtkanParser(BaseParser):
             url = a.get("href", "").strip()
             title = a.text_content().strip()
             # '/novel/pagea/wushenzhuzai-anmoshi_6094.html' -> '6094'
-            chap_id = url.rstrip(".html").split("_")[-1]
+            chap_id = chapter_id_from_href(url).rsplit("_", 1)[-1]
             chapters.append(
                 {
                     "chapterId": chap_id,
@@ -119,7 +125,7 @@ class TtkanParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
         tree = html.fromstring(raw_pages[0])
 

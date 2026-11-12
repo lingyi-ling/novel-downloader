@@ -5,10 +5,15 @@ novel_downloader.plugins.sites.uaa.parser
 """
 
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -25,14 +30,22 @@ class UaaParser(BaseParser):
     """
 
     site_name: str = "uaa"
-    BASE_URL = "https://www.uaa.com"
+    BASE_URL: str = "https://www.uaa.com"
+
+    @staticmethod
+    def _id_from_href(href: str) -> str:
+        """Read the ``?id=`` query parameter, falling back to the path tail."""
+        values = parse_qs(urlsplit(href).query).get("id") or []
+        if values and values[0].strip():
+            return values[0].strip()
+        return chapter_id_from_href(href)
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -42,7 +55,8 @@ class UaaParser(BaseParser):
         author = self._first_str(
             tree.xpath('//div[@class="item"][contains(text(),"作者")]/a/text()')
         )
-        cover_url = self._first_str(tree.xpath('//img[@class="cover"]/@src'))
+        cover_rel = self._first_str(tree.xpath('//img[@class="cover"]/@src'))
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
         serial_status = self._first_str(
             tree.xpath('//span[contains(@class,"update_state")]/text()'),
             [("状态：", "")],
@@ -110,7 +124,7 @@ class UaaParser(BaseParser):
                     if not href:
                         continue
                     title = a[0].text_content().strip()
-                    chapter_id = href.split("id=")[-1]
+                    chapter_id = self._id_from_href(href)
                     vol_chaps.append(
                         {
                             "title": title,
@@ -130,7 +144,7 @@ class UaaParser(BaseParser):
                 if not href:
                     continue
                 title = a[0].text_content().strip()
-                chapter_id = href.split("id=")[-1]
+                chapter_id = self._id_from_href(href)
                 vol_chaps.append(
                     {
                         "title": title,
@@ -163,7 +177,7 @@ class UaaParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
         tree = html.fromstring(raw_pages[0])
 

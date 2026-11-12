@@ -7,9 +7,11 @@ novel_downloader.plugins.sites.zhenhunxiaoshuo.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -32,10 +34,13 @@ class ZhenhunxiaoshuoParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         book_name = self._first_str(
             tree.xpath("//h1[contains(@class,'focusbox-title')]/text()")
@@ -50,10 +55,12 @@ class ZhenhunxiaoshuoParser(BaseParser):
         chapters: list[ChapterInfoDict] = [
             {
                 "title": (a.text or "").strip(),
-                "url": (a.get("href") or "").strip(),
-                "chapterId": (a.get("href") or "").rsplit("/", 1)[-1].split(".", 1)[0],
+                "url": href,
+                "chapterId": chapter_id_from_href(href),
             }
             for a in tree.xpath("//div[contains(@class,'excerpts')]//article//a[@href]")
+            if (href := (a.get("href") or "").strip())
+            and not href.lower().startswith(("javascript:", "#"))
         ]
 
         if not chapters:
@@ -77,10 +84,13 @@ class ZhenhunxiaoshuoParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         title = self._first_str(
             tree.xpath(
@@ -89,9 +99,9 @@ class ZhenhunxiaoshuoParser(BaseParser):
         )
 
         paragraphs = [
-            stripped
+            text
             for p in tree.xpath("//article[contains(@class,'article-content')]//p")
-            if (stripped := (p.text or "").strip())
+            if (text := self._norm_space("".join(p.itertext())))
         ]
 
         if not paragraphs:
