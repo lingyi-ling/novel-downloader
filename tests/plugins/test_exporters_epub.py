@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import posixpath
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
@@ -15,6 +16,7 @@ import pytest
 
 from novel_downloader.libs.epub_builder import EpubBuilder, EpubChapter
 from novel_downloader.libs.filesystem import image_filename
+from novel_downloader.plugins.mixins import export_epub as export_epub_module
 from novel_downloader.schemas import ExporterConfig
 from tests.plugins.exporters_helpers import (
     PNG_BYTES,
@@ -272,6 +274,152 @@ def test_export_book_epub_includes_url_image(scenario: Scenario) -> None:
 
     path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
     assert "OEBPS/Images/img_0.png" in _open_names(path)
+
+
+def test_export_book_epub_includes_protocol_relative_image(
+    scenario: Scenario,
+) -> None:
+    # The downloader upgrades ``//host/x`` to ``https://host/x`` before hashing
+    # the cache filename; the exporter must use the same form or the download
+    # is invisible to it.
+    url = "//cdn.example.com/pic/1.png"
+    scenario.write_media(image_filename("https://cdn.example.com/pic/1.png"), PNG_BYTES)
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "图章")])])
+    )
+    resource = {"type": "image", "paragraph_index": 0, "url": url, "alt": "图"}
+    scenario.write_chapters(
+        [make_chapter("1", "正文", title="图章", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert "OEBPS/Images/img_0.png" in names
+    assert '<img src="../Images/img_0.png"' in chapter
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/uploads/pic.png",
+        "./images/pic.png",
+        "../images/pic.png",
+    ],
+)
+def test_export_book_epub_includes_relative_image(scenario: Scenario, url: str) -> None:
+    scenario.write_media(image_filename(url), PNG_BYTES)
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "图章")])])
+    )
+    resource = {"type": "image", "paragraph_index": 0, "url": url}
+    scenario.write_chapters(
+        [make_chapter("1", "正文", title="图章", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert "OEBPS/Images/img_0.png" in names
+    assert '<img src="../Images/img_0.png"' in chapter
+
+
+def test_export_book_epub_missing_relative_image_leaves_no_reference(
+    scenario: Scenario,
+) -> None:
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "图章")])])
+    )
+    resources = [
+        {"type": "image", "paragraph_index": 0, "url": "/uploads/gone.png"},
+        {"type": "image", "paragraph_index": 0, "url": "../gone.png"},
+        {"type": "image", "paragraph_index": 0, "url": "//cdn.example.com/gone.png"},
+    ]
+    scenario.write_chapters(
+        [make_chapter("1", "正文", title="图章", extra={"resources": resources})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert not [n for n in names if n.startswith("OEBPS/Images/")]
+    assert "<img" not in chapter
+    assert "正文" in chapter
+
+
+def test_export_book_epub_invalid_image_references_are_omitted(
+    scenario: Scenario,
+) -> None:
+    # A reference with an unterminated IPv6 host cannot be parsed, and an
+    # unsupported scheme can never have been downloaded. Both must be dropped
+    # without breaking the rest of the chapter.
+    scenario.write_media(image_filename("ftp://example.com/pic.png"), PNG_BYTES)
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "图章")])])
+    )
+    resources = [
+        {"type": "image", "paragraph_index": 0, "url": "https://[bad/x.png"},
+        {"type": "image", "paragraph_index": 0, "url": "ftp://example.com/pic.png"},
+        {
+            "type": "image",
+            "paragraph_index": 0,
+            "base64": base64.b64encode(PNG_BYTES).decode("ascii"),
+            "mime": "image/png",
+        },
+    ]
+    scenario.write_chapters(
+        [make_chapter("1", "正文", title="图章", extra={"resources": resources})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    # Only the inline payload is embedded; the rejected URLs leave no mark.
+    assert [n for n in names if n.startswith("OEBPS/Images/")] == [
+        "OEBPS/Images/img_0.png"
+    ]
+    assert chapter.count("<img") == 1
+    assert "正文" in chapter
+
+
+def test_export_book_epub_protocol_relative_volume_cover(
+    scenario: Scenario,
+) -> None:
+    # Volume covers are cached without an explicit name, so a protocol-relative
+    # one is hashed in its upgraded form by the downloader.
+    url = "//cdn.example.com/v1.png"
+    scenario.write_media(image_filename("https://cdn.example.com/v1.png"), PNG_BYTES)
+    scenario.write_book_info(
+        make_book_info(
+            volumes=[
+                make_volume(
+                    "第一卷",
+                    [make_chapter_info("1", "章")],
+                    volume_cover=url,
+                )
+            ]
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容")])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        _assert_image_links_resolve(zf)
+
+    assert [n for n in names if n.startswith("OEBPS/Images/")]
 
 
 def test_export_book_epub_cover(scenario: Scenario) -> None:
@@ -714,3 +862,820 @@ def test_epub_export_temp_file_failure_raises_with_destination(
     assert "temporary file" in str(excinfo.value)
     assert out.read_bytes() == b"EXISTING"
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
+# Filename safety: case-insensitive collisions and traversal
+# ---------------------------------------------------------------------------
+
+DC_NS = "http://purl.org/dc/elements/1.1/"
+OPF_NS = "http://www.idpf.org/2007/opf"
+CONTAINER_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
+
+
+def _opf_title(zf: zipfile.ZipFile) -> str:
+    opf = ET.fromstring(zf.read("OEBPS/content.opf"))
+    node = opf.find(f".//{{{DC_NS}}}title")
+    assert node is not None
+    return node.text or ""
+
+
+def test_export_book_epub_case_insensitive_cid_collision_keeps_both(
+    scenario: Scenario,
+) -> None:
+    # "A" and "a" produce archive entries that differ only by case. The ZIP
+    # itself is case-sensitive, but extracting it on Windows/macOS overwrites
+    # one chapter with the other, so the export must keep the names distinct.
+    scenario.write_book_info(
+        make_book_info(
+            volumes=[
+                make_volume(
+                    "卷",
+                    [
+                        make_chapter_info("A", "大写章"),
+                        make_chapter_info("a", "小写章"),
+                    ],
+                )
+            ]
+        )
+    )
+    scenario.write_chapters(
+        [
+            make_chapter("A", "大写内容", title="大写章"),
+            make_chapter("a", "小写内容", title="小写章"),
+        ]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        chapters = [n for n in zf.namelist() if n.startswith("OEBPS/Text/c")]
+        assert len(chapters) == 2
+        assert len({name.casefold() for name in chapters}) == 2
+        bodies = "\n".join(zf.read(name).decode("utf-8") for name in chapters)
+        assert "大写内容" in bodies
+        assert "小写内容" in bodies
+
+
+def test_export_book_epub_cid_cannot_escape_text_dir(scenario: Scenario) -> None:
+    cid = "../../../evil"
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info(cid, "越界")])])
+    )
+    scenario.write_chapters([make_chapter(cid, "越界内容", title="越界")])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        chapters = [n for n in zf.namelist() if n.startswith("OEBPS/Text/c")]
+
+    assert len(chapters) == 1
+    parts = Path(chapters[0]).parts
+    assert ".." not in parts
+    assert len(parts) == 3
+
+
+# ---------------------------------------------------------------------------
+# Metadata validity (empty / illegal titles, missing book_name)
+# ---------------------------------------------------------------------------
+
+
+def test_export_book_epub_empty_book_name_gets_valid_title(
+    scenario: Scenario,
+) -> None:
+    scenario.write_book_info(
+        make_book_info(
+            name="",
+            author="",
+            volumes=[make_volume("卷", [make_chapter_info("1", "章")])],
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容")])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        title = _opf_title(zf)
+        nav_title = ET.fromstring(zf.read("OEBPS/nav.xhtml")).find(
+            f"{{{XHTML_NS}}}head/{{{XHTML_NS}}}title"
+        )
+
+    # An empty <dc:title> fails strict EPUB validation; fall back to the
+    # book id instead.
+    assert title.strip() == scenario.book_id
+    assert nav_title is not None
+    assert (nav_title.text or "").strip()
+
+
+def test_export_book_epub_title_with_illegal_xml_chars_is_valid(
+    scenario: Scenario,
+) -> None:
+    scenario.write_book_info(
+        make_book_info(
+            name="A\x00B\x01<&>",
+            volumes=[make_volume("卷", [make_chapter_info("1", "章")])],
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容")])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        # Must still be well-formed XML, with the illegal bytes dropped and
+        # markup escaped exactly once.
+        assert _opf_title(zf) == "AB<&>"
+
+
+def test_export_book_epub_missing_book_name_still_exports(scenario: Scenario) -> None:
+    scenario.write_book_info(
+        {
+            "author": "作者",
+            "volumes": [make_volume("卷", [make_chapter_info("1", "章")])],
+        }
+    )
+    scenario.write_chapters([make_chapter("1", "内容", title="章")])
+
+    result = scenario.export("epub", ExporterConfig(append_timestamp=False))
+
+    assert len(result["epub"]) == 1
+    with zipfile.ZipFile(result["epub"][0]) as zf:
+        assert _opf_title(zf).strip()
+
+
+def test_export_chapter_epub_illegal_title_yields_valid_metadata(
+    scenario: Scenario,
+) -> None:
+    scenario.write_book_info(make_book_info())
+    scenario.write_chapters([make_chapter("1", "内容", title="\x01")])
+
+    result = scenario.export_chapter(
+        "1", "epub", ExporterConfig(append_timestamp=False)
+    )
+    path = result["epub"]
+    assert path is not None
+    with zipfile.ZipFile(path) as zf:
+        assert _opf_title(zf).strip()
+
+
+# ---------------------------------------------------------------------------
+# Archive structure: manifest, spine, nav and NCX all resolve
+# ---------------------------------------------------------------------------
+
+
+def test_export_book_epub_manifest_spine_and_nav_are_consistent(
+    scenario: Scenario,
+) -> None:
+    scenario.write_media("cover.png", PNG_BYTES)
+    scenario.write_book_info(
+        make_book_info(
+            name="结构 <书>",
+            cover_url="https://example.com/cover.png",
+            volumes=[
+                make_volume("空卷", []),
+                make_volume(
+                    "卷/一",
+                    [
+                        make_chapter_info("1", "章一"),
+                        make_chapter_info("2", "缺失章"),
+                        make_chapter_info("a/b", "斜杠章"),
+                    ],
+                ),
+            ],
+        )
+    )
+    scenario.write_chapters(
+        [
+            make_chapter("1", "内容一", title="章一"),
+            make_chapter("a/b", "内容二", title="斜杠章"),
+        ]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        assert names[0] == "mimetype"
+        assert zf.getinfo("mimetype").compress_type == zipfile.ZIP_STORED
+        assert len(names) == len(set(names))
+
+        container = ET.fromstring(zf.read("META-INF/container.xml"))
+        rootfile = container.find(f".//{{{CONTAINER_NS}}}rootfile")
+        assert rootfile is not None
+        assert rootfile.get("full-path") in names
+
+        opf = ET.fromstring(zf.read("OEBPS/content.opf"))
+        manifest = {
+            item.get("id"): item.get("href")
+            for item in opf.findall(f".//{{{OPF_NS}}}item")
+        }
+        spine = [item.get("idref") for item in opf.findall(f".//{{{OPF_NS}}}itemref")]
+        assert spine
+        assert set(spine) <= set(manifest)
+        for href in manifest.values():
+            assert f"OEBPS/{href}" in names
+
+        text_entries = {n for n in names if n.startswith("OEBPS/Text/")}
+        assert text_entries == {
+            f"OEBPS/{href}"
+            for href in manifest.values()
+            if href and href.startswith("Text/")
+        }
+
+        nav = ET.fromstring(zf.read("OEBPS/nav.xhtml"))
+        nav_hrefs = [a.get("href") for a in nav.iter(f"{{{XHTML_NS}}}a")]
+        assert nav_hrefs
+        for href in nav_hrefs:
+            assert f"OEBPS/{href}" in names
+
+        ncx = ET.fromstring(zf.read("OEBPS/toc.ncx"))
+        ncx_srcs = [c.get("src") for c in ncx.iter(f"{{{NCX_NS}}}content")]
+        assert ncx_srcs
+        for src in ncx_srcs:
+            assert f"OEBPS/{src}" in names
+
+
+def test_export_book_epub_very_long_chapter_is_complete(scenario: Scenario) -> None:
+    content = "长" * 400_000
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "超长章")])])
+    )
+    scenario.write_chapters([make_chapter("1", content, title="超长章")])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+
+    assert content in chapter
+
+
+# ---------------------------------------------------------------------------
+# Image pipeline: covers, media types, dedupe and failure fallbacks
+# ---------------------------------------------------------------------------
+
+# Minimal payloads that the magic-byte sniffer recognises.
+WEBP_BYTES = b"RIFF" + (12).to_bytes(4, "little") + b"WEBPVP8 " + b"\x00" * 4
+SVG_BYTES = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect/></svg>'
+)
+# Enough bytes for the sniffer, but not an image (e.g. a cached 404 page).
+NOT_IMAGE_BYTES = b"<html>404 not found, no image here</html>"
+
+_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+}
+
+
+def _manifest_items(
+    zf: zipfile.ZipFile,
+) -> dict[str, tuple[str, str, str]]:
+    root = ET.fromstring(zf.read("OEBPS/content.opf"))
+    return {
+        item.get("id") or "": (
+            item.get("href") or "",
+            item.get("media-type") or "",
+            item.get("properties") or "",
+        )
+        for item in root.findall(f".//{{{OPF_NS}}}item")
+    }
+
+
+def _image_sources(zf: zipfile.ZipFile) -> list[tuple[str, str]]:
+    """Every ``<img src>`` in the archive, paired with its owning document."""
+    out: list[tuple[str, str]] = []
+    for name in zf.namelist():
+        if not name.endswith(".xhtml"):
+            continue
+        root = ET.fromstring(zf.read(name))
+        for img in root.iter(f"{{{XHTML_NS}}}img"):
+            src = img.get("src")
+            if src:
+                out.append((name, src))
+    return out
+
+
+def _assert_image_links_resolve(zf: zipfile.ZipFile) -> None:
+    """Every image reference must resolve to a manifest-registered entry."""
+    names = set(zf.namelist())
+    manifest = _manifest_items(zf)
+    by_href = {
+        href: (media_type, props)
+        for href, media_type, props in manifest.values()
+        if href.startswith("Images/")
+    }
+
+    for doc, src in _image_sources(zf):
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(doc), src))
+        assert resolved in names, f"{doc} references missing {src}"
+        assert ".." not in Path(resolved).parts
+        href = resolved.removeprefix("OEBPS/")
+        assert href in by_href, f"{href} is absent from the manifest"
+        media_type, _ = by_href[href]
+        assert media_type == _IMAGE_MEDIA_TYPES[Path(href).suffix.lower()]
+
+    cover_images = [
+        href for href, _, props in manifest.values() if "cover-image" in props
+    ]
+    assert len(cover_images) <= 1
+
+
+def test_export_volume_epub_reuses_cached_book_cover(scenario: Scenario) -> None:
+    # Downloads cache the book cover as ``cover.<ext>`` (name="cover"); the
+    # split export must look it up the same way as the single-file export.
+    scenario.write_media("cover.png", PNG_BYTES)
+    scenario.write_book_info(
+        make_book_info(
+            cover_url="https://example.com/cover.png",
+            volumes=[
+                make_volume("第一卷", [make_chapter_info("1", "章一")]),
+                make_volume("第二卷", [make_chapter_info("2", "章二")]),
+            ],
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容一"), make_chapter("2", "内容二")])
+
+    paths = scenario.export(
+        "epub", ExporterConfig(append_timestamp=False, split_mode="volume")
+    )["epub"]
+    assert len(paths) == 2
+
+    for path in paths:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+            manifest = _manifest_items(zf)
+            _assert_image_links_resolve(zf)
+        assert "OEBPS/Images/cover.png" in names
+        assert any("cover-image" in props for _, _, props in manifest.values())
+
+
+def test_export_book_epub_damaged_cover_is_omitted(scenario: Scenario) -> None:
+    # A cached error page under ``cover.png`` must not become the cover.
+    scenario.write_media("cover.png", NOT_IMAGE_BYTES)
+    scenario.write_book_info(
+        make_book_info(
+            cover_url="https://example.com/cover.png",
+            volumes=[make_volume("卷", [make_chapter_info("1", "章")])],
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容")])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        manifest = _manifest_items(zf)
+        # Still a well-formed package, just without a cover.
+        assert ET.fromstring(zf.read("OEBPS/content.opf")) is not None
+
+    assert not [n for n in names if n.startswith("OEBPS/Images/")]
+    assert "OEBPS/Text/cover.xhtml" not in names
+    assert not any("cover-image" in props for _, _, props in manifest.values())
+
+
+@pytest.mark.parametrize(
+    "cover_url",
+    ["", "data:image/png;base64,AAAA", "/rel/c.png", "https://example.com/missing.png"],
+)
+def test_export_book_epub_unresolvable_cover_is_omitted(
+    scenario: Scenario, cover_url: str
+) -> None:
+    scenario.write_book_info(
+        make_book_info(
+            cover_url=cover_url,
+            volumes=[make_volume("卷", [make_chapter_info("1", "章")])],
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容")])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        manifest = _manifest_items(zf)
+        _assert_image_links_resolve(zf)
+
+    assert "OEBPS/Text/c1.xhtml" in names
+    assert not any("cover-image" in props for _, _, props in manifest.values())
+
+
+def test_export_book_epub_cover_extension_follows_bytes(scenario: Scenario) -> None:
+    # The download cache is named after the URL suffix, but the bytes win:
+    # a JPEG-named PNG must be published as PNG and referenced as such.
+    scenario.write_media("cover.jpg", PNG_BYTES)
+    scenario.write_book_info(
+        make_book_info(
+            cover_url="https://example.com/cover.jpg",
+            volumes=[make_volume("卷", [make_chapter_info("1", "章")])],
+        )
+    )
+    scenario.write_chapters([make_chapter("1", "内容")])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        manifest = _manifest_items(zf)
+        cover = zf.read("OEBPS/Text/cover.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert "OEBPS/Images/cover.png" in names
+    assert "OEBPS/Images/cover.jpg" not in names
+    cover_items = [
+        (href, media_type)
+        for href, media_type, props in manifest.values()
+        if "cover-image" in props
+    ]
+    assert cover_items == [("Images/cover.png", "image/png")]
+    assert "../Images/cover.png" in cover
+
+
+def test_export_book_epub_corrupt_chapter_image_is_skipped(
+    scenario: Scenario,
+) -> None:
+    resource = {
+        "type": "image",
+        "paragraph_index": 0,
+        "base64": base64.b64encode(NOT_IMAGE_BYTES).decode("ascii"),
+        "mime": "image/png",
+        "alt": "坏图",
+    }
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert not [n for n in names if n.startswith("OEBPS/Images/")]
+    assert "<img" not in chapter
+    assert "正文" in chapter
+
+
+def test_export_book_epub_zero_byte_image_is_skipped(scenario: Scenario) -> None:
+    url = "https://example.com/empty.png"
+    scenario.write_media(image_filename(url), b"")
+    resource = {"type": "image", "paragraph_index": 0, "url": url}
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+
+    assert not [n for n in names if n.startswith("OEBPS/Images/")]
+    assert "<img" not in chapter
+
+
+@pytest.mark.parametrize("kind", ["url", "base64"])
+def test_export_book_epub_oversized_image_is_skipped(
+    scenario: Scenario, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setattr(export_epub_module, "_MAX_IMAGE_BYTES", 64, raising=False)
+    oversized = PNG_BYTES + b"\x00" * 128
+
+    if kind == "url":
+        url = "https://example.com/huge.png"
+        scenario.write_media(image_filename(url), oversized)
+        resource = {"type": "image", "paragraph_index": 0, "url": url}
+    else:
+        resource = {
+            "type": "image",
+            "paragraph_index": 0,
+            "base64": base64.b64encode(oversized).decode("ascii"),
+            "mime": "image/png",
+        }
+
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+
+    assert not [n for n in names if n.startswith("OEBPS/Images/")]
+    assert "<img" not in chapter
+
+
+@pytest.mark.parametrize("index", [None, "2", -5, 10**9])
+def test_export_book_epub_invalid_paragraph_index_is_tolerated(
+    scenario: Scenario, index: object
+) -> None:
+    # Hand-written / parser-produced metadata is not type-checked at runtime:
+    # a null or string index used to abort the whole chapter with TypeError.
+    resource = {
+        "type": "image",
+        "paragraph_index": index,
+        "base64": base64.b64encode(PNG_BYTES).decode("ascii"),
+        "mime": "image/png",
+    }
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "第一行\n第二行", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+
+    assert "OEBPS/Images/img_0.png" in names
+    assert chapter.count("<img") == 1
+    assert "第一行" in chapter and "第二行" in chapter
+
+
+def test_export_book_epub_non_string_alt_does_not_drop_image(
+    scenario: Scenario,
+) -> None:
+    resource = {
+        "type": "image",
+        "paragraph_index": 0,
+        "base64": base64.b64encode(PNG_BYTES).decode("ascii"),
+        "mime": "image/png",
+        "alt": 5,
+    }
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+
+    assert 'alt="5"' in chapter
+    assert '<img src="../Images/img_0.png"' in chapter
+
+
+def test_export_book_epub_image_extension_follows_bytes(scenario: Scenario) -> None:
+    # URL says .jpg, cached bytes are PNG: extension, media-type and <img src>
+    # must all agree with the real payload.
+    url = "https://example.com/photo.jpg"
+    scenario.write_media(image_filename(url), PNG_BYTES)
+    resource = {"type": "image", "paragraph_index": 0, "url": url, "alt": "图"}
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        manifest = _manifest_items(zf)
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert "OEBPS/Images/img_0.png" in names
+    assert "OEBPS/Images/img_0.jpg" not in names
+    assert manifest["img_0"][:2] == ("Images/img_0.png", "image/png")
+    assert '<img src="../Images/img_0.png"' in chapter
+
+
+def test_export_book_epub_svg_and_webp_images(scenario: Scenario) -> None:
+    resources = [
+        {
+            "type": "image",
+            "paragraph_index": 0,
+            "base64": base64.b64encode(SVG_BYTES).decode("ascii"),
+            "mime": "image/svg+xml",
+            "alt": "svg",
+        },
+        {
+            "type": "image",
+            "paragraph_index": 0,
+            "base64": base64.b64encode(WEBP_BYTES).decode("ascii"),
+            "mime": "image/webp",
+            "alt": "webp",
+        },
+    ]
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters([make_chapter("1", "正文", extra={"resources": resources})])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        manifest = _manifest_items(zf)
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert "OEBPS/Images/img_0.svg" in names
+    assert manifest["img_0"][:2] == ("Images/img_0.svg", "image/svg+xml")
+    assert "OEBPS/Images/img_1.webp" in names
+    assert manifest["img_1"][:2] == ("Images/img_1.webp", "image/webp")
+    assert '<img src="../Images/img_0.svg"' in chapter
+    assert '<img src="../Images/img_1.webp"' in chapter
+
+
+def test_export_book_epub_identical_image_bytes_are_stored_once(
+    scenario: Scenario,
+) -> None:
+    url_a = "https://example.com/a.png"
+    url_b = "https://example.com/b.png"
+    scenario.write_media(image_filename(url_a), PNG_BYTES)
+    scenario.write_media(image_filename(url_b), PNG_BYTES)
+    resources = [
+        {"type": "image", "paragraph_index": 0, "url": url_a},
+        {"type": "image", "paragraph_index": 0, "url": url_b},
+    ]
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters([make_chapter("1", "正文", extra={"resources": resources})])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        images = [n for n in zf.namelist() if n.startswith("OEBPS/Images/")]
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+
+    assert images == ["OEBPS/Images/img_0.png"]
+    assert chapter.count('<img src="../Images/img_0.png"') == 2
+
+
+def test_export_book_epub_image_url_cannot_escape_images_dir(
+    scenario: Scenario,
+) -> None:
+    url = "../../../outside/escape.png"
+    scenario.write_media(image_filename(url), PNG_BYTES)
+    resource = {"type": "image", "paragraph_index": 0, "url": url}
+    scenario.write_book_info(
+        make_book_info(
+            cover_url="https://example.com/../../cover.png",
+            volumes=[make_volume("卷", [make_chapter_info("1", "章")])],
+        )
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        _assert_image_links_resolve(zf)
+
+    for name in names:
+        assert ".." not in Path(name).parts
+    assert [n for n in names if n.startswith("OEBPS/Images/")]
+
+
+def test_export_book_epub_missing_image_file_leaves_no_reference(
+    scenario: Scenario,
+) -> None:
+    resource = {
+        "type": "image",
+        "paragraph_index": 0,
+        "url": "https://example.com/never-downloaded.png",
+        "alt": "缺失",
+    }
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert not [n for n in names if n.startswith("OEBPS/Images/")]
+    assert "<img" not in chapter
+    assert "正文" in chapter
+
+
+def test_export_book_epub_utf8_bom_svg_image(scenario: Scenario) -> None:
+    # A UTF-8 BOM hides the XML declaration from the magic-byte sniffer; the
+    # resource must still be published as SVG rather than being dropped.
+    bom_svg = b"\xef\xbb\xbf" + SVG_BYTES
+    resource = {
+        "type": "image",
+        "paragraph_index": 0,
+        "base64": base64.b64encode(bom_svg).decode("ascii"),
+        "mime": "image/svg+xml",
+    }
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        manifest = _manifest_items(zf)
+        _assert_image_links_resolve(zf)
+
+    assert "OEBPS/Images/img_0.svg" in names
+    assert manifest["img_0"][:2] == ("Images/img_0.svg", "image/svg+xml")
+
+
+def test_export_book_epub_chapter_image_reuses_cover_bytes(
+    scenario: Scenario,
+) -> None:
+    # The cover is registered first; an identical illustration must reuse the
+    # existing asset instead of being stored twice (and its <img> must point
+    # at the cover entry, which is already in the manifest).
+    scenario.write_media("cover.png", PNG_BYTES)
+    resource = {
+        "type": "image",
+        "paragraph_index": 0,
+        "base64": base64.b64encode(PNG_BYTES).decode("ascii"),
+        "mime": "image/png",
+    }
+    scenario.write_book_info(
+        make_book_info(
+            cover_url="https://example.com/cover.png",
+            volumes=[make_volume("卷", [make_chapter_info("1", "章")])],
+        )
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        images = [n for n in zf.namelist() if n.startswith("OEBPS/Images/")]
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert images == ["OEBPS/Images/cover.png"]
+    assert '<img src="../Images/cover.png"' in chapter
+
+
+def test_export_chapter_epub_includes_image(scenario: Scenario) -> None:
+    resource = {
+        "type": "image",
+        "paragraph_index": 0,
+        "base64": base64.b64encode(PNG_BYTES).decode("ascii"),
+        "mime": "image/png",
+    }
+    scenario.write_book_info(make_book_info())
+    scenario.write_chapters(
+        [make_chapter("1", "单章正文", extra={"resources": [resource]})]
+    )
+
+    result = scenario.export_chapter(
+        "1", "epub", ExporterConfig(append_timestamp=False)
+    )
+    path = result["epub"]
+    assert path is not None
+
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert "OEBPS/Images/img_0.png" in names
+    assert '<img src="../Images/img_0.png"' in chapter
+    assert "单章正文" in chapter
+
+
+def test_export_book_epub_inline_image_is_fallback_for_missing_download(
+    scenario: Scenario,
+) -> None:
+    # Some parsers attach both the remote URL and an inline copy. When the
+    # download is absent the inline payload must be used instead of dropping
+    # the illustration.
+    resource = {
+        "type": "image",
+        "paragraph_index": 0,
+        "url": "https://example.com/not-cached.png",
+        "base64": base64.b64encode(PNG_BYTES).decode("ascii"),
+        "mime": "image/png",
+    }
+    scenario.write_book_info(
+        make_book_info(volumes=[make_volume("卷", [make_chapter_info("1", "章")])])
+    )
+    scenario.write_chapters(
+        [make_chapter("1", "正文", extra={"resources": [resource]})]
+    )
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        chapter = zf.read("OEBPS/Text/c1.xhtml").decode("utf-8")
+        _assert_image_links_resolve(zf)
+
+    assert "OEBPS/Images/img_0.png" in names
+    assert '<img src="../Images/img_0.png"' in chapter

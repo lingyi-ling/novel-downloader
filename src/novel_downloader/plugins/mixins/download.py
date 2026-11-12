@@ -934,11 +934,30 @@ class DownloadMixin:
         :param book_info: Metadata dictionary containing cover URLs.
         """
         img_dir = self._raw_data_dir / book_id / "media"
-        img_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            img_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # Metadata images are decorative: a read-only or full disk must
+            # not abort the chapter download that is about to start.
+            logger.warning(
+                "Cannot create media directory (site=%s, book=%s): %s",
+                self._site,
+                book_id,
+                exc,
+            )
+            return
 
         # --- cover image ---
         if cover_url := book_info.get("cover_url"):
-            await self.fetcher.fetch_image(cover_url, img_dir, name="cover")
+            try:
+                await self.fetcher.fetch_image(cover_url, img_dir, name="cover")
+            except Exception as exc:  # noqa: BLE001 - media is best-effort
+                logger.warning(
+                    "Cover image failed (site=%s, book=%s): %s",
+                    self._site,
+                    book_id,
+                    exc,
+                )
 
         # --- volume covers ---
         vol_covers = [
@@ -947,7 +966,15 @@ class DownloadMixin:
             if (cover := v.get("volume_cover"))
         ]
         if vol_covers:
-            await self.fetcher.fetch_images(img_dir, vol_covers)
+            try:
+                await self.fetcher.fetch_images(img_dir, vol_covers)
+            except Exception as exc:  # noqa: BLE001 - media is best-effort
+                logger.warning(
+                    "Volume cover images failed (site=%s, book=%s): %s",
+                    self._site,
+                    book_id,
+                    exc,
+                )
 
     @staticmethod
     def _dl_chapter_meta(vols: list[VolumeInfoDict]) -> dict[str, tuple[str, str]]:

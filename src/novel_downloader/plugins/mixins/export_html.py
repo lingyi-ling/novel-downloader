@@ -11,6 +11,7 @@ from dataclasses import replace
 from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlsplit
 
 from novel_downloader.infra.persistence.chapter_storage import ChapterStorage
 from novel_downloader.libs.filesystem import (
@@ -134,6 +135,65 @@ def _check_export_consistency(
     )
 
 
+def _image_cache_url(url: str | None) -> str | None:
+    """
+    Return the form of *url* the downloader hashes into the media cache.
+
+    ``BaseFetcher._fetch_one_image`` upgrades a protocol-relative reference
+    (``//host/x``) to ``https://host/x`` before computing the cache filename;
+    every other reference is hashed verbatim. A lookup that skips the upgrade
+    reports a downloaded illustration as missing.
+    """
+    if not url:
+        return None
+    return "https:" + url if url.startswith("//") else url
+
+
+def _cached_image_path(media_dir: Path, url: object) -> Path | None:
+    """
+    Locate the cached file for an image resource URL, or return ``None``.
+
+    The downloader saves each image under a hash of the reference as stored:
+    protocol-relative URLs are upgraded to ``https:`` first
+    (:meth:`BaseFetcher._fetch_one_image`), while root-relative
+    (``/uploads/x.png``) and dotted-relative (``./x.png``, ``../x.png``)
+    references are hashed untouched. The lookup must use exactly the same rule,
+    otherwise the file is on disk but never embedded.
+
+    Values that cannot name downloaded media are refused: an empty value, a
+    non-HTTP scheme (``ftp:``, ``data:``, a Windows drive letter), a malformed
+    URL, or a reference whose cache file does not exist. Callers then omit the
+    image instead of emitting a dangling ``<img>``.
+    """
+    if not isinstance(url, str):
+        return None
+
+    candidate = url.strip()
+    if not candidate:
+        return None
+
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        # ``urlsplit`` rejects e.g. an unterminated IPv6 host.
+        return None
+
+    scheme = parsed.scheme.lower()
+    if scheme:
+        if scheme not in ("http", "https") or not parsed.netloc:
+            return None
+    elif not parsed.path:
+        return None
+
+    try:
+        filename = image_filename(_image_cache_url(candidate) or "")
+    except ValueError:
+        return None
+
+    path = media_dir / filename
+    return path if path.is_file() else None
+
+
 def _unique_chapter_filename(filename: str, used: set[str]) -> str:
     """
     Return ``filename`` unless it was already used in this export.
@@ -142,9 +202,15 @@ def _unique_chapter_filename(filename: str, used: set[str]) -> str:
     ``a_b`` both become ``ca_b``); appending a numeric suffix (``_2``,
     ``_3``, ...) then keeps the later chapter from silently overwriting
     the earlier one and keeps the index pointing at both files.
+
+    Comparison is case-insensitive (``used`` holds case-folded keys) because
+    ``cA.html`` and ``ca.html`` are two distinct ids but the same file on
+    Windows and macOS: writing both would lose one chapter there while the
+    index still linked to it.
     """
-    if filename not in used:
-        used.add(filename)
+    key = filename.casefold()
+    if key not in used:
+        used.add(key)
         return filename
 
     stem, dot, ext = filename.rpartition(".")
@@ -153,8 +219,9 @@ def _unique_chapter_filename(filename: str, used: set[str]) -> str:
     index = 2
     while True:
         candidate = f"{stem}_{index}.{ext}" if ext else f"{stem}_{index}"
-        if candidate not in used:
-            used.add(candidate)
+        key = candidate.casefold()
+        if key not in used:
+            used.add(key)
             return candidate
         index += 1
 
@@ -231,7 +298,8 @@ class ExportHtmlMixin:
             return []
 
         # --- Prepare header (book metadata) ---
-        name = book_info["book_name"]
+        # Hand-written metadata may omit the key entirely.
+        name = book_info.get("book_name") or ""
         author = book_info.get("author") or ""
         cover_path = self._resolve_image_path(
             media_dir, book_info.get("cover_url"), name="cover"
@@ -463,12 +531,9 @@ class ExportHtmlMixin:
             fname: str | None = None
             try:
                 if url := res.get("url"):
-                    if url.startswith("//"):
-                        url = "https:" + url
-                    if url.startswith(("http://", "https://")):
-                        local = media_dir / image_filename(url)
-                        if local and local.is_file():
-                            fname = builder.add_image(local)
+                    local = _cached_image_path(media_dir, url)
+                    if local is not None:
+                        fname = builder.add_image(local)
 
                 elif b64 := res.get("base64"):
                     mime = res.get("mime", "image/png")
