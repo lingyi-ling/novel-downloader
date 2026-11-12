@@ -46,7 +46,7 @@ from novel_downloader.apps.core.cred_broker import (
     list_requests,
     request_to_dict,
 )
-from novel_downloader.apps.core.models import CredRequest, DownloadTask
+from novel_downloader.apps.core.models import CredRequest, DownloadTask, Status
 from novel_downloader.apps.core.task_manager import TaskManager, manager
 from novel_downloader.apps.core.watchlist import WatchEntry, WatchlistStore
 from novel_downloader.plugins import search as search_module
@@ -69,16 +69,23 @@ from .constants import (
     MSG_UNKNOWN_MUSIC_PLATFORM,
 )
 from .schemas import (
+    MAX_PER_SITE_LIMIT,
+    MAX_SEARCH_SITES,
+    MAX_SEARCH_TIMEOUT,
     MUSIC_ID_PATTERN,
+    BookId,
     BrowseRequest,
+    Keyword,
     LoginSubmitRequest,
     MusicDownloadRequest,
     MusicExportRequest,
     MusicSearchRequest,
     SearchRequest,
+    SiteKey,
     TaskCreateRequest,
     WatchlistAddRequest,
     WatchlistCheckRequest,
+    validate_site_key,
 )
 
 #: Logger for sanitized failures whose full reason stays server-side.
@@ -247,7 +254,7 @@ def _gender_code(gender: str) -> str:
 
 
 @router.get("/browse/categories", tags=["browse"])
-async def browse_categories(site: str, request: Request) -> dict[str, Any]:
+async def browse_categories(site: SiteKey, request: Request) -> dict[str, Any]:
     """Return a site's browse categories, grouped by audience."""
     searcher_cls = _browse_searcher(site, "categories")
     timeout = _blocking_timeout(request, "browse")
@@ -396,12 +403,40 @@ async def _search_event_stream(
     yield _sse_frame("done", {"total": total})
 
 
+def _parse_sites_query(raw: str) -> list[str]:
+    """
+    Parse the comma-separated ``sites`` query parameter.
+
+    Each entry is validated exactly like a JSON ``sites`` list item (shape,
+    length, control characters), duplicates are dropped case-insensitively and
+    the total count is bounded. An empty value stays an empty list, which the
+    stream treats as "search no site".
+
+    :raises ValueError: when an entry or the total count is invalid.
+    """
+    parts = [part for part in (piece.strip() for piece in raw.split(",")) if part]
+    if len(parts) > MAX_SEARCH_SITES:
+        raise ValueError(f"at most {MAX_SEARCH_SITES} sites may be selected")
+    selected: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        site = validate_site_key(part)
+        key = site.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(site)
+    return selected
+
+
 @router.get("/search/stream", tags=["search"])
 async def stream_search(
-    keyword: Annotated[str, Query(min_length=1)],
-    sites: Annotated[str | None, Query()] = None,
-    per_site_limit: Annotated[int, Query(ge=1)] = 5,
-    timeout: Annotated[float, Query(gt=0)] = 5.0,
+    keyword: Annotated[Keyword, Query()],
+    sites: Annotated[str | None, Query(max_length=4096)] = None,
+    per_site_limit: Annotated[int, Query(ge=1, le=MAX_PER_SITE_LIMIT)] = 5,
+    timeout: Annotated[
+        float, Query(gt=0, le=MAX_SEARCH_TIMEOUT, allow_inf_nan=False)
+    ] = 5.0,
 ) -> StreamingResponse:
     """
     Stream search results as Server-Sent Events.
@@ -414,7 +449,13 @@ async def stream_search(
     """
     selected: list[str] | None = None
     if sites is not None:
-        selected = [part.strip() for part in sites.split(",") if part.strip()]
+        try:
+            selected = _parse_sites_query(sites)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Request validation failed: sites: {exc}",
+            ) from exc
 
     return StreamingResponse(
         _search_event_stream(keyword, selected, per_site_limit, timeout),
@@ -454,34 +495,74 @@ def _page_bounds(
     return start, start + applied, applied
 
 
+def _task_order_key(indexed_task: tuple[int, DownloadTask]) -> tuple[float, int, str]:
+    """
+    Total order for the combined task sequence.
+
+    ``created_at`` descending (newest first) is the primary key. The queue
+    group is a secondary key so tasks created in the same clock tick keep the
+    documented ``pending → running → completed`` layout instead of depending on
+    randomly generated ids. ``task_id`` is the final key, making the order
+    total (no two tasks compare equal), so pagination cannot repeat or skip an
+    item while the underlying queue is unchanged.
+    """
+    group_rank, task = indexed_task
+    return (-float(task.created_at or 0.0), group_rank, task.task_id)
+
+
+def _select_tasks(
+    snapshot: dict[str, list[DownloadTask]],
+    *,
+    status_filter: Status | None,
+    site_filter: str | None,
+) -> list[tuple[int, DownloadTask]]:
+    """
+    Flatten, filter and sort the three queue groups.
+
+    Filtering happens before the single sort, so ``total`` and every page are
+    computed over the same reduced sequence. Site matching is case-insensitive
+    because clients may echo a key with different casing; the registry itself
+    is case-insensitive too.
+    """
+    wanted_site = site_filter.casefold() if site_filter is not None else None
+    selected: list[tuple[int, DownloadTask]] = []
+    for group_rank, name in enumerate(_TASK_GROUPS):
+        for task in snapshot[name]:
+            if status_filter is not None and task.status != status_filter:
+                continue
+            if wanted_site is not None and task.site.casefold() != wanted_site:
+                continue
+            selected.append((group_rank, task))
+    selected.sort(key=_task_order_key)
+    return selected
+
+
 def _paginate_tasks(
     snapshot: dict[str, list[DownloadTask]],
     offset: int | None,
     limit: int | None,
+    *,
+    status_filter: Status | None = None,
+    site_filter: str | None = None,
 ) -> tuple[dict[str, list[DownloadTask]], int, int, int]:
     """
-    Paginate the concatenation of ``pending``, ``running`` and ``completed``.
+    Filter, order and paginate the three queue groups.
 
-    The three lists keep their individual ordering; a page simply spans that
-    combined sequence. Grouping is restored afterwards, so the response shape
+    The combined sequence is sorted once per request (no re-sorting while the
+    page is sliced); grouping is restored afterwards so the response shape
     never changes.
 
     :return: ``(groups, total, start, applied_limit)``.
     """
-    total = sum(len(snapshot[name]) for name in _TASK_GROUPS)
+    selected = _select_tasks(
+        snapshot, status_filter=status_filter, site_filter=site_filter
+    )
+    total = len(selected)
     start, stop, applied = _page_bounds(total, offset, limit)
 
     groups: dict[str, list[DownloadTask]] = {name: [] for name in _TASK_GROUPS}
-    cursor = 0
-    for name in _TASK_GROUPS:
-        items = snapshot[name]
-        end = cursor + len(items)
-        low = max(start, cursor)
-        high = min(stop, end)
-        if low < high:
-            groups[name] = items[low - cursor : high - cursor]
-        cursor = end
-
+    for group_rank, task in selected[start:stop]:
+        groups[_TASK_GROUPS[group_rank]].append(task)
     return groups, total, start, applied
 
 
@@ -496,19 +577,35 @@ def _tasks_snapshot(mgr: TaskManager) -> dict[str, list[dict[str, Any]]]:
 @router.get("/tasks", tags=["tasks"])
 async def list_tasks(
     mgr: Annotated[TaskManager, Depends(get_manager)],
+    status_filter: Annotated[Status | None, Query(alias="status")] = None,
+    site: Annotated[SiteKey | None, Query()] = None,
     offset: Annotated[int | None, Query(ge=0)] = None,
     limit: Annotated[int | None, Query(ge=1, le=MAX_PAGE_LIMIT)] = None,
 ) -> dict[str, Any]:
     """
     Return pending, running and recently completed tasks.
 
-    ``offset`` / ``limit`` paginate the combined sequence
-    ``pending + running + completed``. With neither parameter the full
-    snapshot is returned, exactly as before pagination existed (the response
-    still carries ``total``, ``offset`` and ``limit`` alongside the three
-    lists). Supplying one parameter defaults the other to ``0`` / ``50``.
+    ``status`` keeps only tasks in that lifecycle state (the same values as the
+    per-task ``status`` field); an unknown value is a ``422``. ``site`` keeps
+    only tasks for one site key, matched case-insensitively.
+
+    The filtered sequence is ordered by ``created_at`` descending, then queue
+    group, then ``task_id``, and sorted only once per request. ``offset`` /
+    ``limit`` paginate that sequence and are applied after filtering, so
+    ``total`` always describes the filtered collection.
+
+    With neither pagination parameter the full (filtered) snapshot is returned,
+    exactly as before pagination existed (the response still carries ``total``,
+    ``offset`` and ``limit`` alongside the three lists). Supplying one parameter
+    defaults the other to ``0`` / ``50``.
     """
-    groups, total, start, applied = _paginate_tasks(mgr.snapshot(), offset, limit)
+    groups, total, start, applied = _paginate_tasks(
+        mgr.snapshot(),
+        offset,
+        limit,
+        status_filter=status_filter,
+        site_filter=site,
+    )
     payload: dict[str, Any] = {
         name: [task_to_dict(task) for task in groups[name]] for name in _TASK_GROUPS
     }
@@ -867,8 +964,8 @@ async def add_watchlist(
 
 @router.delete("/watchlist/{site}/{book_id}", tags=["watchlist"])
 async def remove_watchlist(
-    site: str,
-    book_id: str,
+    site: SiteKey,
+    book_id: BookId,
     store: Annotated[WatchlistStore, Depends(get_watchlist_store)],
 ) -> dict[str, bool]:
     """Stop following a book."""
@@ -1303,7 +1400,9 @@ async def music_export(body: MusicExportRequest) -> dict[str, Any]:
 @router.get("/music/health", tags=["music"])
 async def music_health(
     platform: Annotated[str | None, Query()] = None,
-    timeout: Annotated[float, Query(gt=0, le=60)] = DEFAULT_MUSIC_HEALTH_TIMEOUT,
+    timeout: Annotated[
+        float, Query(gt=0, le=60, allow_inf_nan=False)
+    ] = DEFAULT_MUSIC_HEALTH_TIMEOUT,
 ) -> list[dict[str, Any]]:
     """
     Probe one or all music platforms by performing a bounded search.

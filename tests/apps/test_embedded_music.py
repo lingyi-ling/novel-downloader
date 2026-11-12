@@ -888,13 +888,23 @@ def test_platform_value_is_not_stripped(music: SimpleNamespace) -> None:
 
 
 def test_health_rejects_invalid_timeout(music: SimpleNamespace) -> None:
-    """REST's ``Query(gt=0, le=60)`` is a 422, not a silent clamp."""
-    for raw in ("0", "-1", "61", "abc", "nan", "inf", "-inf"):
+    """REST's ``Query(gt=0, le=60, allow_inf_nan=False)`` is a 422."""
+    expected = {
+        "0": "greater_than",
+        "-1": "greater_than",
+        "61": "less_than_equal",
+        "abc": "float_parsing",
+        "nan": "finite_number",
+        "inf": "finite_number",
+        "-inf": "finite_number",
+    }
+    for raw, error_type in expected.items():
         with pytest.raises(eserver._ApiError) as err:
             eserver._handle_music_health({}, {}, {"timeout": [raw]})
         assert err.value.status == 422, raw
         assert err.value.errors
         assert err.value.errors[0]["loc"] == ["query", "timeout"]
+        assert err.value.errors[0]["type"] == error_type
 
 
 def test_health_passes_a_valid_timeout_through(

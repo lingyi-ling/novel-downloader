@@ -492,17 +492,19 @@ async def test_webhook_failure_log_omits_url_secret(
         )
 
     monkeypatch.setattr(api_webhook.requests, "post", failing_post)
+    monkeypatch.setattr(api_webhook, "_retry_sleep", lambda _seconds: None)
+    public_url = "https://93.184.216.34/push?token=super-secret-value"
 
     with caplog.at_level(logging.WARNING, logger="novel_downloader.apps.api.webhook"):
         delivered = api_webhook.post_task_finished(
-            _WEBHOOK_SECRET_URL, {"event": "task_finished", "task": {}}
+            public_url, {"event": "task_finished", "task": {}}
         )
 
     assert delivered is False
     assert "super-secret-value" not in caplog.text
     assert "?token=" not in caplog.text
     # The target stays identifiable for debugging: origin + path are kept.
-    assert "hooks.example/push" in caplog.text
+    assert "93.184.216.34/push" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -953,6 +955,60 @@ async def test_unhandled_exception_returns_generic_500(
     assert "leak" not in response.text
     assert "secret-token-abc" not in response.text
     assert "Traceback" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_unhandled_exception_response_is_hardened(
+    make_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The catch-all ``500`` is produced by Starlette's outermost error layer, so
+    it bypasses the Cache-Control/SecurityHeaders/CORS middleware stack. It must
+    still be no-store and carry the API's security headers; otherwise a broken
+    route would be the one response class an intermediary is allowed to cache
+    and a browser is allowed to sniff.
+    """
+
+    async def exploding_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api_routes, "search", exploding_search)
+
+    app = make_app()
+    async with _client(app, raise_app_exceptions=False) as client:
+        response = await client.post("/api/v1/search", json={"keyword": "x"})
+
+    assert response.status_code == 500
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    # CORS was not enabled for this app, so no wildcard may be added.
+    assert "access-control-allow-origin" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_unhandled_exception_keeps_cors_headers(
+    make_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A browser client must be able to read the sanitised ``500`` in --cors mode."""
+
+    async def exploding_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api_routes, "search", exploding_search)
+
+    app = make_app(cors=True)
+    async with _client(app, raise_app_exceptions=False) as client:
+        response = await client.post(
+            "/api/v1/search",
+            json={"keyword": "x"},
+            headers={"Origin": "http://example.test"},
+        )
+
+    assert response.status_code == 500
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.asyncio

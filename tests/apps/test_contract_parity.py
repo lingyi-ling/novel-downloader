@@ -61,8 +61,9 @@ from novel_downloader.apps.core.models import DownloadTask, Status
 from novel_downloader.apps.core.task_manager import manager
 from novel_downloader.apps.embedded import server as eserver
 
-#: Dedicated loopback port for this module (8765 is test_embedded_server's).
-EMBEDDED_PORT = 8767
+#: Loopback port 0: the OS picks a free port, so a parallel pytest run (or a
+#: lingering listener from a crashed one) cannot steal a fixed test port.
+EMBEDDED_PORT = 0
 
 #: REST routes deliberately absent from the embedded ``ROUTES`` table.  The
 #: Android client polls; the stdlib server has no Server-Sent Events support.

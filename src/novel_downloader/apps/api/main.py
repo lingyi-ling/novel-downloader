@@ -163,6 +163,13 @@ def api_main(argv: Sequence[str] | None = None) -> None:
         host=args.host,
         port=args.port,
         limit_concurrency=DEFAULT_MAX_CONNECTIONS,
+        # Uvicorn trusts ``X-Forwarded-For`` by default for peers listed in
+        # ``forwarded_allow_ips`` (``127.0.0.1`` unless configured) and rewrites
+        # ``scope["client"]`` from it. On the default local bind every client is
+        # such a peer, which would let a client choose a fresh rate-limit bucket
+        # per request. The limiter keys on the TCP peer and deliberately ignores
+        # forwarded headers, so keep the ASGI scope untouched.
+        proxy_headers=False,
     )
 
 

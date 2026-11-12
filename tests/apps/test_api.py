@@ -29,7 +29,7 @@ from novel_downloader.apps.api import create_app
 from novel_downloader.apps.api import routes as api_routes
 from novel_downloader.apps.api.routes import get_manager
 from novel_downloader.apps.common import history_files
-from novel_downloader.apps.core.models import DownloadTask
+from novel_downloader.apps.core.models import DownloadTask, Status
 
 
 class FakeManager:
@@ -567,9 +567,19 @@ async def test_tasks_validation_requires_site_and_book_id(
 
 
 def _seed_tasks(manager: FakeManager, count: int) -> list[DownloadTask]:
-    """Put ``count`` distinguishable tasks into the fake manager."""
+    """Put ``count`` distinguishable tasks into the fake manager.
+
+    ``created_at`` is assigned explicitly: ``time.time()`` may return the same
+    value for tasks built in a tight loop, which would make any order assertion
+    depend on the generated ``task_id`` instead of the intended sequence.
+    """
     tasks = [
-        DownloadTask(title=f"t{index}", site="demo", book_id=str(index))
+        DownloadTask(
+            title=f"t{index}",
+            site="demo",
+            book_id=str(index),
+            created_at=float(index),
+        )
         for index in range(count)
     ]
     manager.pending = tasks
@@ -592,8 +602,9 @@ async def test_tasks_without_params_returns_full_snapshot(
     assert payload["total"] == 60
     assert payload["offset"] == 0
     assert payload["limit"] == 60
+    # Newest first (``_seed_tasks`` numbers tasks in creation order).
     assert [item["task_id"] for item in payload["pending"]] == [
-        task.task_id for task in tasks
+        task.task_id for task in reversed(tasks)
     ]
     assert payload["running"] == []
     assert payload["completed"] == []
@@ -605,7 +616,12 @@ async def test_tasks_pagination_spans_all_groups(
     fake_manager: FakeManager,
 ) -> None:
     tasks = [
-        DownloadTask(title=f"t{index}", site="demo", book_id=str(index))
+        DownloadTask(
+            title=f"t{index}",
+            site="demo",
+            book_id=str(index),
+            created_at=float(index),
+        )
         for index in range(6)
     ]
     fake_manager.pending = tasks[0:2]
@@ -619,9 +635,14 @@ async def test_tasks_pagination_spans_all_groups(
     assert payload["total"] == 6
     assert payload["offset"] == 1
     assert payload["limit"] == 3
-    assert [item["task_id"] for item in payload["pending"]] == [tasks[1].task_id]
+    # Combined order is created_at descending: t5, t4, t3, t2, t1, t0; the
+    # requested page is t4, t3, t2, regrouped by queue.
+    assert payload["pending"] == []
     assert [item["task_id"] for item in payload["running"]] == [tasks[2].task_id]
-    assert [item["task_id"] for item in payload["completed"]] == [tasks[3].task_id]
+    assert [item["task_id"] for item in payload["completed"]] == [
+        tasks[4].task_id,
+        tasks[3].task_id,
+    ]
 
 
 @pytest.mark.asyncio
@@ -639,7 +660,8 @@ async def test_tasks_pagination_offset_only_uses_default_limit(
     assert payload["offset"] == 10
     assert payload["limit"] == 50
     assert len(payload["pending"]) == 50
-    assert payload["pending"][0]["title"] == "t10"
+    # Newest-first order, so the 11th item is t49.
+    assert payload["pending"][0]["title"] == "t49"
 
 
 @pytest.mark.asyncio
@@ -655,7 +677,7 @@ async def test_tasks_pagination_limit_only_starts_at_zero(
     payload = response.json()
     assert payload["offset"] == 0
     assert payload["limit"] == 2
-    assert [item["title"] for item in payload["pending"]] == ["t0", "t1"]
+    assert [item["title"] for item in payload["pending"]] == ["t4", "t3"]
 
 
 @pytest.mark.asyncio
@@ -705,6 +727,190 @@ async def test_tasks_pagination_accepts_max_limit(
 
     assert response.status_code == 200
     assert response.json()["limit"] == 200
+
+
+# ---------------------------------------------------------------------------
+# Tasks: filters and ordering
+# ---------------------------------------------------------------------------
+
+
+def _make_task(
+    title: str,
+    *,
+    site: str = "demo",
+    created_at: float,
+    status: Status = Status.QUEUED,
+) -> DownloadTask:
+    """Build a task whose ordering inputs are explicit."""
+    return DownloadTask(
+        title=title,
+        site=site,
+        book_id=title,
+        created_at=created_at,
+        status=status,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tasks_filter_by_status(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    queued = _make_task("queued", created_at=4.0, status=Status.QUEUED)
+    running = _make_task("running", created_at=3.0, status=Status.RUNNING)
+    failed = _make_task("failed", created_at=2.0, status=Status.FAILED)
+    done = _make_task("done", created_at=1.0, status=Status.COMPLETED)
+    fake_manager.pending = [queued]
+    fake_manager.running = [running]
+    fake_manager.completed = [done, failed]
+
+    response = await client.get("/api/v1/tasks", params={"status": "failed"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["pending"] == []
+    assert payload["running"] == []
+    assert [item["task_id"] for item in payload["completed"]] == [failed.task_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["bogus", "done", "PENDING", ""])
+async def test_tasks_reject_unknown_status(
+    client: httpx.AsyncClient,
+    value: str,
+) -> None:
+    response = await client.get("/api/v1/tasks", params={"status": value})
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_tasks_filter_by_site_is_case_insensitive(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    demo = _make_task("demo", site="demo_site", created_at=2.0)
+    other = _make_task("other", site="qidian", created_at=1.0)
+    fake_manager.pending = [demo, other]
+
+    response = await client.get("/api/v1/tasks", params={"site": "DEMO_SITE"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert [item["task_id"] for item in payload["pending"]] == [demo.task_id]
+
+
+@pytest.mark.asyncio
+async def test_tasks_reject_malformed_site(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get("/api/v1/tasks", params={"site": "bad site"})
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_tasks_filters_combine_and_paginate(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    demo_failed = [
+        _make_task(
+            f"df{index}", site="demo", created_at=float(index), status=Status.FAILED
+        )
+        for index in range(3)
+    ]
+    demo_done = [
+        _make_task(
+            f"dd{index}",
+            site="demo",
+            created_at=10.0 + index,
+            status=Status.COMPLETED,
+        )
+        for index in range(2)
+    ]
+    qidian_failed = [
+        _make_task(
+            f"qf{index}", site="qidian", created_at=20.0 + index, status=Status.FAILED
+        )
+        for index in range(2)
+    ]
+    fake_manager.completed = [*demo_failed, *demo_done, *qidian_failed]
+
+    response = await client.get(
+        "/api/v1/tasks",
+        params={"site": "demo", "status": "failed", "limit": 2},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert (payload["total"], payload["offset"], payload["limit"]) == (3, 0, 2)
+    # Newest first, then task_id: only the demo failures survive the filter.
+    assert [item["task_id"] for item in payload["completed"]] == [
+        demo_failed[2].task_id,
+        demo_failed[1].task_id,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tasks_ordering_and_pagination_are_stable(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    newest = _make_task("newest", created_at=30.0)
+    middle = _make_task("middle", created_at=20.0, status=Status.RUNNING)
+    tie_a = _make_task("tie-a", created_at=10.0, status=Status.COMPLETED)
+    tie_a.task_id = "00000000000000000000000000000001"
+    tie_b = _make_task("tie-b", created_at=10.0, status=Status.COMPLETED)
+    tie_b.task_id = "00000000000000000000000000000002"
+    fake_manager.pending = [newest]
+    fake_manager.running = [middle]
+    fake_manager.completed = [tie_b, tie_a]
+
+    full = (await client.get("/api/v1/tasks")).json()
+    expected = [newest.task_id, middle.task_id, tie_a.task_id, tie_b.task_id]
+    flattened = [
+        item["task_id"]
+        for group in ("pending", "running", "completed")
+        for item in full[group]
+    ]
+    assert flattened == expected
+
+    first_page = (
+        await client.get("/api/v1/tasks", params={"offset": 0, "limit": 2})
+    ).json()
+    second_page = (
+        await client.get("/api/v1/tasks", params={"offset": 2, "limit": 2})
+    ).json()
+    paged = [
+        item["task_id"]
+        for page in (first_page, second_page)
+        for group in ("pending", "running", "completed")
+        for item in page[group]
+    ]
+    assert paged == expected
+
+
+@pytest.mark.asyncio
+async def test_tasks_filter_with_no_matches_keeps_stable_shape(
+    client: httpx.AsyncClient,
+    fake_manager: FakeManager,
+) -> None:
+    _seed_tasks(fake_manager, 2)
+
+    response = await client.get("/api/v1/tasks", params={"status": "failed"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "pending": [],
+        "running": [],
+        "completed": [],
+        "total": 0,
+        "offset": 0,
+        "limit": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
