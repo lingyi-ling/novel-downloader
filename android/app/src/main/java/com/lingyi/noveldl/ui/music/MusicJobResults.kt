@@ -25,6 +25,33 @@ object MusicJobResults {
     fun trackKey(track: MusicTrack): String = "${track.provider}\u0000${track.id}"
 
     /**
+     * Whether [value] has the [trackKey] shape (`provider\u0000id`, both parts
+     * non-blank, exactly one separator). Used to reject selection entries
+     * saved by older builds, which stored the bare id and would otherwise
+     * match whichever provider happens to use that id.
+     */
+    fun isTrackKey(value: String): Boolean {
+        val separator = value.indexOf('\u0000')
+        if (separator <= 0 || separator >= value.lastIndex) return false
+        return value.indexOf('\u0000', separator + 1) == -1
+    }
+
+    /**
+     * Well-formed [trackKey] entries of a saved selection; older bare ids are
+     * dropped instead of being reinterpreted as keys.
+     */
+    fun sanitizeSelection(saved: Iterable<String>?): Set<String> =
+        saved?.filterTo(LinkedHashSet()) { isTrackKey(it) }.orEmpty()
+
+    /**
+     * Rows of [tracks] whose [trackKey] is in [selected], preserving the list
+     * order. Selection sets are keyed by [trackKey], so the same numeric id
+     * from two providers selects two independent rows.
+     */
+    fun selectedTracks(tracks: List<MusicTrack>, selected: Set<String>): List<MusicTrack> =
+        if (selected.isEmpty()) emptyList() else tracks.filter { trackKey(it) in selected }
+
+    /**
      * Records [searchId] for every track of [page], keeping the ids of pages
      * loaded earlier. A blank id (single-platform response without a cache) or
      * an empty page leaves [current] untouched.

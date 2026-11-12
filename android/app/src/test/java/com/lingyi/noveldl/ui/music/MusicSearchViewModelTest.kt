@@ -146,7 +146,7 @@ class MusicSearchViewModelTest {
         val first = track("1")
         val second = track("2")
         fake.respond(0, page(listOf(first, second), total = 2, searchId = "s1"))
-        model.setSelected(second.id, true)
+        model.setSelected(second, true)
 
         // Re-reading the state is what a rebuilt screen does; nothing may be
         // requested again for it.
@@ -154,7 +154,7 @@ class MusicSearchViewModelTest {
         assertEquals("jay", restored.keyword)
         assertEquals(MUSIC_ALL_PLATFORMS, restored.platform)
         assertEquals(listOf("1", "2"), restored.tracks.map { it.id })
-        assertEquals(setOf("2"), restored.selected)
+        assertEquals(setOf(MusicJobResults.trackKey(second)), restored.selectedKeys)
         assertEquals(2, restored.totalHits)
         assertEquals(ids(first to "s1", second to "s1"), restored.searchIdsByTrack)
         assertFalse(restored.searching)
@@ -169,13 +169,71 @@ class MusicSearchViewModelTest {
         model.search()
         fake.respond(0, page(tracks(1..3)))
 
-        model.setSelected("1", true)
-        model.setSelected("1", true)
-        model.setSelected("3", true)
-        assertEquals(setOf("1", "3"), model.state.value.selected)
+        val first = track("1")
+        val third = track("3")
+        model.setSelected(first, true)
+        model.setSelected(first, true)
+        model.setSelected(third, true)
+        assertEquals(
+            setOf(MusicJobResults.trackKey(first), MusicJobResults.trackKey(third)),
+            model.state.value.selectedKeys,
+        )
 
-        model.setSelected("1", false)
-        assertEquals(setOf("3"), model.state.value.selected)
+        model.setSelected(first, false)
+        assertEquals(setOf(MusicJobResults.trackKey(third)), model.state.value.selectedKeys)
+    }
+
+    @Test
+    fun sameNumericIdOnTwoProvidersIsSelectedIndependently() = runBlocking {
+        val fake = FakeSearch()
+        val model = newModel(fake)
+        model.onKeywordChange("x")
+        model.search()
+        val netease = track("1", provider = "netease")
+        val qq = track("1", provider = "qq")
+        fake.respond(0, page(listOf(netease, qq), total = 2, searchId = "s1"))
+
+        model.setSelected(netease, true)
+
+        // The bare id would have checked (and later downloaded) both rows.
+        assertEquals(setOf(MusicJobResults.trackKey(netease)), model.state.value.selectedKeys)
+        assertEquals(
+            listOf(netease),
+            MusicJobResults.selectedTracks(model.state.value.tracks, model.state.value.selectedKeys),
+        )
+
+        model.setSelected(qq, true)
+        assertEquals(2, model.state.value.selectedKeys.size)
+        model.setSelected(netease, false)
+        assertEquals(setOf(MusicJobResults.trackKey(qq)), model.state.value.selectedKeys)
+        assertEquals(
+            listOf(qq),
+            MusicJobResults.selectedTracks(model.state.value.tracks, model.state.value.selectedKeys),
+        )
+    }
+
+    @Test
+    fun selectAllCountsEachProviderRowSeparatelyAndClearsTheSameWay() = runBlocking {
+        val fake = FakeSearch()
+        val model = newModel(fake)
+        model.onKeywordChange("x")
+        model.search()
+        val netease = track("1", provider = "netease")
+        val qq = track("1", provider = "qq")
+        val third = track("2", provider = "netease")
+        fake.respond(0, page(listOf(netease, qq, third), total = 3, searchId = "s1"))
+
+        model.setAllSelected(true)
+
+        val selected = model.state.value.selectedKeys
+        assertEquals(3, selected.size)
+        assertEquals(
+            listOf(netease, qq, third),
+            MusicJobResults.selectedTracks(model.state.value.tracks, selected),
+        )
+
+        model.setAllSelected(false)
+        assertTrue(model.state.value.selectedKeys.isEmpty())
     }
 
     @Test
@@ -191,18 +249,23 @@ class MusicSearchViewModelTest {
         assertEquals("qq", restarted.state.value.platform)
         assertEquals("", restarted.state.value.keyword)
         assertTrue(restarted.state.value.tracks.isEmpty())
-        assertTrue(restarted.state.value.selected.isEmpty())
+        assertTrue(restarted.state.value.selectedKeys.isEmpty())
     }
 
     // ---------- process death (SavedStateHandle) ----------
 
     @Test
     fun savedStateRestoresKeywordPlatformAndSelection() {
+        val netease = track("7", provider = "netease")
+        val qq = track("9", provider = "qq")
         val saved = SavedStateHandle(
             mapOf(
                 MusicSearchViewModel.SAVED_KEYWORD to "jay",
                 MusicSearchViewModel.SAVED_PLATFORM to "qq",
-                MusicSearchViewModel.SAVED_SELECTED to arrayListOf("7", "9"),
+                MusicSearchViewModel.SAVED_SELECTED to arrayListOf(
+                    MusicJobResults.trackKey(netease),
+                    MusicJobResults.trackKey(qq),
+                ),
             ),
         )
 
@@ -213,10 +276,35 @@ class MusicSearchViewModelTest {
         val state = restored.state.value
         assertEquals("jay", state.keyword)
         assertEquals("qq", state.platform)
-        assertEquals(setOf("7", "9"), state.selected)
+        assertEquals(
+            setOf(MusicJobResults.trackKey(netease), MusicJobResults.trackKey(qq)),
+            state.selectedKeys,
+        )
         // Pages are not restored: their search_ids are server-side and expire.
         assertTrue(state.tracks.isEmpty())
         assertTrue(state.searchIdsByTrack.isEmpty())
+    }
+
+    @Test
+    fun bareIdsFromOlderSavedStatesAreDroppedInsteadOfMatchingAnyProvider() {
+        val saved = SavedStateHandle(
+            mapOf(
+                MusicSearchViewModel.SAVED_SELECTED to arrayListOf(
+                    "7",
+                    "9",
+                    // Malformed keys are dropped too: no provider, no id.
+                    "\u0000",
+                    "netease\u0000",
+                    "\u00007",
+                    "netease\u00007\u0000qq",
+                    "netease\u00007",
+                ),
+            ),
+        )
+
+        val restored = newModel(FakeSearch(), savedState = saved)
+
+        assertEquals(setOf("netease\u00007"), restored.state.value.selectedKeys)
     }
 
     @Test
@@ -226,14 +314,16 @@ class MusicSearchViewModelTest {
 
         model.onKeywordChange("jay")
         model.selectPlatform("netease")
-        model.setSelected("3", true)
-        model.setSelected("5", true)
-        model.setSelected("3", false)
+        val third = track("3")
+        val fifth = track("5")
+        model.setSelected(third, true)
+        model.setSelected(fifth, true)
+        model.setSelected(third, false)
 
         assertEquals("jay", saved.get<String>(MusicSearchViewModel.SAVED_KEYWORD))
         assertEquals("netease", saved.get<String>(MusicSearchViewModel.SAVED_PLATFORM))
         assertEquals(
-            listOf("5"),
+            listOf(MusicJobResults.trackKey(fifth)),
             saved.get<ArrayList<String>>(MusicSearchViewModel.SAVED_SELECTED),
         )
         // A new search drops the selection from both the state and the handle.
@@ -307,15 +397,15 @@ class MusicSearchViewModelTest {
         model.onKeywordChange("jay")
         model.search()
         fake.respond(0, page(tracks(1..3), total = 3, searchId = "old"))
-        model.setSelected("1", true)
-        model.setSelected("2", true)
+        model.setSelected(track("1"), true)
+        model.setSelected(track("2"), true)
 
         model.search()
 
         val reset = model.state.value
         assertTrue(reset.searching)
         assertTrue(reset.tracks.isEmpty())
-        assertTrue(reset.selected.isEmpty())
+        assertTrue(reset.selectedKeys.isEmpty())
         assertTrue(reset.searchIdsByTrack.isEmpty())
         assertEquals(0, reset.totalHits)
         assertFalse(reset.endReached)
@@ -323,7 +413,7 @@ class MusicSearchViewModelTest {
 
         fake.respond(1, page(listOf(track("9")), total = 1, searchId = "new"))
         assertEquals(listOf("9"), model.state.value.tracks.map { it.id })
-        assertTrue(model.state.value.selected.isEmpty())
+        assertTrue(model.state.value.selectedKeys.isEmpty())
         assertEquals(ids(track("9") to "new"), model.state.value.searchIdsByTrack)
     }
 
@@ -335,7 +425,7 @@ class MusicSearchViewModelTest {
         model.onKeywordChange("jay")
         model.search()
         fake.respond(0, page(tracks(1..2)))
-        model.setSelected("1", true)
+        model.setSelected(track("1"), true)
 
         model.selectPlatform("qq")
 
@@ -343,7 +433,7 @@ class MusicSearchViewModelTest {
         assertEquals("qq", state.platform)
         assertEquals("qq", persisted)
         assertTrue(state.tracks.isEmpty())
-        assertTrue(state.selected.isEmpty())
+        assertTrue(state.selectedKeys.isEmpty())
         assertTrue(state.searchIdsByTrack.isEmpty())
         assertFalse(state.searching)
         // Selecting the same platform again is a no-op, not a reset.
@@ -429,6 +519,52 @@ class MusicSearchViewModelTest {
         assertTrue(model.state.value.endReached)
         model.loadMore()
         assertEquals(1, fake.requests.size)
+    }
+
+    @Test
+    fun aProviderWithoutOffsetSupportEndsPagingAfterTheFirstPage() = runBlocking {
+        val fake = FakeSearch()
+        val model = newModel(fake)
+        model.onKeywordChange("jay")
+        model.search()
+        // A musicdl-backed platform (or an aggregate search) can only serve
+        // the first page, even though it returned a full one with a large
+        // total.
+        fake.respond(
+            0,
+            page(tracks(0..19), total = 100, searchId = "p1").copy(supports_offset = false),
+        )
+
+        val state = model.state.value
+        assertEquals(false, state.supportsOffset)
+        assertTrue(state.endReached)
+
+        // The footer is hidden by endReached; even a direct call must not
+        // request an offset the provider would ignore.
+        model.loadMore()
+        assertEquals(1, fake.requests.size)
+
+        // A new search starts from a clean paging state.
+        model.search()
+        assertNull(model.state.value.supportsOffset)
+        assertFalse(model.state.value.endReached)
+    }
+
+    @Test
+    fun aServerWithoutTheOffsetFlagKeepsTheLegacyPagingRule() = runBlocking {
+        val fake = FakeSearch()
+        val model = newModel(fake)
+        model.onKeywordChange("jay")
+        model.search()
+        // No `supports_offset` in the payload: older server, old behaviour.
+        fake.respond(0, page(tracks(0..19), total = 60, searchId = "p1"))
+
+        val state = model.state.value
+        assertNull(state.supportsOffset)
+        assertFalse(state.endReached)
+
+        model.loadMore()
+        assertEquals(20, fake.requests[1].offset)
     }
 
     @Test
@@ -520,7 +656,7 @@ class MusicSearchViewModelTest {
         assertEquals(MUSIC_ALL_PLATFORMS, model.state.value.platform)
         assertEquals(MUSIC_ALL_PLATFORMS, persisted)
         assertTrue(model.state.value.tracks.isEmpty())
-        assertTrue(model.state.value.selected.isEmpty())
+        assertTrue(model.state.value.selectedKeys.isEmpty())
     }
 
     // ---------- path backfill ----------

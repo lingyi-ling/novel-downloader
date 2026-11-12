@@ -5,6 +5,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
@@ -16,7 +19,10 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.InterruptedIOException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLHandshakeException
 
 /**
  * Transport level tests for [Api] backed by MockWebServer: request shape,
@@ -36,6 +42,7 @@ class ApiClientTest {
     @After
     fun stopServer() {
         server.shutdown()
+        Api.maxResponseBytes = MAX_JSON_RESPONSE_BYTES
         resetService()
     }
 
@@ -243,7 +250,7 @@ class ApiClientTest {
 
         assertTrue(result.isFailure)
         val failure = result.exceptionOrNull() as ApiFailure
-        assertEquals(ApiErrorCode.NETWORK, failure.code)
+        assertEquals(ApiErrorCode.TIMEOUT, failure.code)
         assertTrue("missing detail: ${failure.detail}", failure.detail.isNotBlank())
     }
 
@@ -427,5 +434,251 @@ class ApiClientTest {
 
         assertTrue(result.isFailure)
         assertEquals("""bad "quoted" value""", result.exceptionOrNull()?.message ?: "")
+    }
+
+    // ------------------------------------------------------------------
+    // Timeouts: a single read deadline can be reset forever by a server that
+    // trickles bytes, so every call also has an overall deadline. The
+    // classification distinguishes a timeout from a dead peer so the UI can
+    // tell the user to retry rather than reconfigure the address.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun callTimeoutIsReportedAsATimeout() = runBlocking {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        Api.configure(
+            baseUrl(),
+            null,
+            connectTimeoutMillis = 1_000,
+            readTimeoutMillis = 30_000,
+            writeTimeoutMillis = 1_000,
+            callTimeoutMillis = 300,
+        )
+
+        val result = Api.call { Api.service().health() }
+
+        assertTrue(result.isFailure)
+        assertEquals(
+            ApiErrorCode.TIMEOUT,
+            (result.exceptionOrNull() as ApiFailure).code,
+        )
+    }
+
+    @Test
+    fun transportFailuresAreClassifiedByCause() {
+        val base = "http://10.0.2.2:8081/"
+
+        assertEquals(
+            ApiErrorCode.TIMEOUT,
+            Api.transportFailure(base, java.net.SocketTimeoutException("read timed out")).code,
+        )
+        assertEquals(
+            ApiErrorCode.TIMEOUT,
+            Api.transportFailure(base, InterruptedIOException("timeout")).code,
+        )
+        assertEquals(
+            ApiErrorCode.DNS,
+            Api.transportFailure(base, UnknownHostException("my-pc")).code,
+        )
+        assertEquals(
+            ApiErrorCode.TLS,
+            Api.transportFailure(base, SSLHandshakeException("bad certificate")).code,
+        )
+        assertEquals(
+            ApiErrorCode.NETWORK,
+            Api.transportFailure(base, java.net.ConnectException("Connection refused")).code,
+        )
+    }
+
+    @Test
+    fun engineFailuresKeepTheReadinessCodeWhateverTheSocketCause() {
+        val failure = Api.transportFailure(
+            EmbeddedEngine.BASE_URL,
+            java.net.SocketTimeoutException("connect timed out"),
+        )
+
+        assertEquals(ApiErrorCode.ENGINE_UNREACHABLE, failure.code)
+    }
+
+    // ------------------------------------------------------------------
+    // Response size limits: an accidental/hostile endpoint must not make the
+    // app buffer an unbounded document, and an error body is only scanned far
+    // enough to find a `detail` field.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun oversizedSuccessBodyIsRejectedAsABadResponse() = runBlocking {
+        Api.maxResponseBytes = 32
+        server.enqueue(
+            json("""{"status":"ok","version":"this body is longer than thirty-two bytes"}"""),
+        )
+        Api.configure(baseUrl(), null)
+
+        val result = Api.call { Api.service().health() }
+
+        assertTrue(result.isFailure)
+        val failure = result.exceptionOrNull() as ApiFailure
+        assertEquals(ApiErrorCode.BAD_RESPONSE, failure.code)
+        assertTrue("unexpected detail: ${failure.detail}", failure.detail.contains("larger than"))
+    }
+
+    @Test
+    fun chunkedOversizedBodyIsAlsoRefused() = runBlocking {
+        // No Content-Length: only the streaming guard can catch this one.
+        Api.maxResponseBytes = 32
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setChunkedBody(
+                    """{"status":"ok","version":"a lot more than thirty-two bytes"}""",
+                    8,
+                ),
+        )
+        Api.configure(baseUrl(), null)
+
+        val result = Api.call { Api.service().health() }
+
+        assertTrue(result.isFailure)
+        assertEquals(
+            ApiErrorCode.BAD_RESPONSE,
+            (result.exceptionOrNull() as ApiFailure).code,
+        )
+    }
+
+    @Test
+    fun errorBodyIsOnlyScannedUpToTheCap() = runBlocking {
+        // The `detail` sits beyond the scan cap, so it must not be read (and
+        // the fallback status text is used instead).
+        val padding = "x".repeat(MAX_ERROR_BODY_BYTES.toInt() + 512)
+        server.enqueue(json("""{"padding":"$padding","detail":"late detail"}""", 500))
+        Api.configure(baseUrl(), null)
+
+        val result = Api.call { Api.service().health() }
+
+        assertTrue(result.isFailure)
+        assertEquals("HTTP 500", result.exceptionOrNull()?.message ?: "")
+    }
+
+    // ------------------------------------------------------------------
+    // Credential scoping and redirects. Redirects are followed (self-hosted
+    // setups use them), but the API key must never leave its origin and an
+    // HTTPS server must not be downgraded to plain HTTP.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun apiKeyIsNotForwardedToACrossOriginRedirect() = runBlocking {
+        val other = MockWebServer()
+        other.start()
+        try {
+            other.enqueue(json("""{"status":"ok","version":"1"}"""))
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(302)
+                    .setHeader("Location", other.url("/api/v1/health").toString()),
+            )
+            Api.configure(baseUrl(), "secret")
+
+            val result = Api.call { Api.service().health() }
+
+            assertTrue(result.isSuccess)
+            assertEquals("/api/v1/health", server.takeRequest().path)
+            val redirected = other.takeRequest()
+            assertEquals("/api/v1/health", redirected.path)
+            assertNull(
+                "the API key must not follow a cross-origin redirect",
+                redirected.getHeader("X-API-Key"),
+            )
+        } finally {
+            other.shutdown()
+        }
+    }
+
+    @Test
+    fun apiKeySurvivesASameOriginRedirect() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(302).setHeader("Location", "/api/v1/health"),
+        )
+        server.enqueue(json("""{"status":"ok","version":"1"}"""))
+        Api.configure(baseUrl(), "secret")
+
+        val result = Api.call { Api.service().health() }
+
+        assertTrue(result.isSuccess)
+        assertEquals("secret", server.takeRequest().getHeader("X-API-Key"))
+        assertEquals("secret", server.takeRequest().getHeader("X-API-Key"))
+    }
+
+    @Test
+    fun anHttpsOriginRefusesToBeRedirectedToPlainHttp() {
+        // The policy only compares the configured scheme with the outgoing
+        // request; pointing it at a loopback HTTP server makes the downgrade
+        // observable without running a TLS server.
+        val policy = ApiOriginPolicy(
+            ApiOrigin.of("https://secure.example/".toHttpUrl()),
+            "secret",
+        )
+        val client = OkHttpClient.Builder()
+            .addNetworkInterceptor(policy.interceptor())
+            .build()
+
+        val failure = runCatching {
+            client.newCall(Request.Builder().url(server.url("/api/v1/health")).build()).execute()
+        }.exceptionOrNull()
+
+        assertNotNull("the cleartext request must be refused", failure)
+        assertTrue(
+            "expected InsecureRedirectException, was $failure",
+            failure is InsecureRedirectException,
+        )
+    }
+
+    @Test
+    fun insecureRedirectIsMappedToItsOwnCode() = runBlocking {
+        // OkHttp's async path delivers interceptor I/O failures unchanged, so
+        // Api.call must map the specific exception before the generic one.
+        val result = Api.call { throw InsecureRedirectException("cleartext blocked") }
+
+        assertEquals(
+            ApiErrorCode.INSECURE_REDIRECT,
+            (result.exceptionOrNull() as ApiFailure).code,
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // Retry policy: OkHttp's internal retry is disabled so a POST is never
+    // silently replayed; GET/HEAD get exactly one explicit retry, and
+    // cancellation is never retried.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun getIsRetriedOnceAfterAConnectionDrop() = runBlocking {
+        server.enqueue(
+            MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST),
+        )
+        server.enqueue(json("""{"status":"ok","version":"1"}"""))
+        Api.configure(baseUrl(), null)
+
+        val result = Api.call { Api.service().health() }
+
+        assertTrue("a safe request should survive one dropped connection", result.isSuccess)
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun postIsNotRetriedAfterAConnectionDrop() = runBlocking {
+        server.enqueue(
+            MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST),
+        )
+        server.enqueue(json("""{"total":0,"results":[]}"""))
+        Api.configure(baseUrl(), null)
+
+        val result = Api.call {
+            Api.service().search(SearchRequest(keyword = "x", sites = emptyList()))
+        }
+
+        assertTrue(result.isFailure)
+        // A queued task / submitted login must not be duplicated by a replay.
+        assertEquals(1, server.requestCount)
     }
 }

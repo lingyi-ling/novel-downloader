@@ -1,5 +1,6 @@
 package com.lingyi.noveldl.data
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.net.URLDecoder
 
 /**
@@ -81,18 +82,39 @@ fun downloadFileName(name: String, downloadUrl: String, fallbackExt: String): St
 }
 
 /**
- * Request headers attached to a DownloadManager download.
+ * Request headers attached to a download.
  *
  * Authentication is optional: the local API runs without a token unless one was
  * configured, so a null/blank key yields no headers and the download still
  * works. A configured key is trimmed (matching [Api.configure]) and sent as
  * `X-API-Key`, the header alias accepted by the server alongside
  * `Authorization: Bearer`.
+ *
+ * When both [url] and [baseUrl] are supplied the key is attached only if the
+ * download lives on the configured API origin. DownloadManager cannot strip
+ * headers when it follows a redirect, so a server-supplied absolute URL to a
+ * different host (a CDN, or a hostile payload) must not receive the key at
+ * all. Callers that already scope the key at the HTTP-client level may omit
+ * both parameters.
  */
-fun downloadRequestHeaders(apiKey: String?): Map<String, String> =
-    apiKey?.trim()?.takeIf { it.isNotEmpty() }
-        ?.let { mapOf(DOWNLOAD_API_KEY_HEADER to it) }
-        ?: emptyMap()
+fun downloadRequestHeaders(
+    apiKey: String?,
+    url: String? = null,
+    baseUrl: String? = null,
+): Map<String, String> {
+    val key = apiKey?.trim()?.takeIf { it.isNotEmpty() } ?: return emptyMap()
+    if (url != null && baseUrl != null && !sameOrigin(url, baseUrl)) return emptyMap()
+    return mapOf(DOWNLOAD_API_KEY_HEADER to key)
+}
+
+/** Whether [a] and [b] share scheme, host and port (http(s) URLs only). */
+internal fun sameOrigin(a: String, b: String): Boolean {
+    val first = a.trim().toHttpUrlOrNull() ?: return false
+    val second = b.trim().toHttpUrlOrNull() ?: return false
+    return first.scheme == second.scheme &&
+        first.host == second.host &&
+        first.port == second.port
+}
 
 /**
  * Percent-encodes [raw] as a single URL path segment.

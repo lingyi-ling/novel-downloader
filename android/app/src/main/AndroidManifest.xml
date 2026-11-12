@@ -2,15 +2,24 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Runtime permission on Android 13+; used for task completion notifications. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Lets the system installer run the APK downloaded by the in-app updater.
          The user still confirms the install in the system dialog. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- Cleartext stays allowed app-wide because a static network-security
+         config cannot enumerate arbitrary LAN addresses: the embedded engine
+         listens on http://127.0.0.1 and self-hosted servers are commonly
+         reached over plain HTTP on a LAN. The narrower rules live in the
+         request path instead (data/NetworkHttp.kt): the API key is only sent
+         to the configured origin, an HTTPS server cannot be redirected to
+         plain HTTP, and update downloads are separately pinned to HTTPS by
+         UpdateChecker (UpdateFailure.INSECURE_URL). -->
     <application
         android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"

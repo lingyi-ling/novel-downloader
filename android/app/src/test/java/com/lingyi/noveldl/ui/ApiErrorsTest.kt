@@ -36,12 +36,32 @@ class ApiErrorsTest {
             apiErrorRes(ApiErrorCode.NETWORK),
         )
         assertEquals(
+            R.string.api_error_timeout,
+            apiErrorRes(ApiErrorCode.TIMEOUT),
+        )
+        assertEquals(
+            R.string.api_error_dns,
+            apiErrorRes(ApiErrorCode.DNS),
+        )
+        assertEquals(
+            R.string.api_error_tls,
+            apiErrorRes(ApiErrorCode.TLS),
+        )
+        assertEquals(
             R.string.api_error_bad_response,
             apiErrorRes(ApiErrorCode.BAD_RESPONSE),
         )
         assertEquals(
             R.string.api_error_unknown,
             apiErrorRes(ApiErrorCode.UNKNOWN),
+        )
+    }
+
+    @Test
+    fun insecureRedirectHasItsOwnSentence() {
+        assertEquals(
+            R.string.api_error_insecure_redirect,
+            apiErrorRes(ApiErrorCode.INSECURE_REDIRECT),
         )
     }
 
@@ -54,7 +74,7 @@ class ApiErrorsTest {
     @Test
     fun everyCodeIsEitherLocalizedOrDetailOnly() {
         // Pin the enum size: adding a code must come with a decision here.
-        assertEquals(6, ApiErrorCode.entries.size)
+        assertEquals(10, ApiErrorCode.entries.size)
         ApiErrorCode.entries.forEach { code ->
             val mapped = apiErrorRes(code) != null
             assertTrue(

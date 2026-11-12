@@ -20,8 +20,30 @@ enum class ApiErrorCode {
      */
     ENGINE_UNREACHABLE,
 
-    /** The request could not be delivered (DNS, refused, timeout, TLS...). */
+    /**
+     * The request could not be delivered for a reason without a more specific
+     * code below (connection refused, no route, socket reset...).
+     */
     NETWORK,
+
+    /**
+     * The connection was established, or the request sent, but no complete
+     * response arrived in time (connect/read/call timeout).
+     */
+    TIMEOUT,
+
+    /** The host name could not be resolved (offline, captive DNS, typo). */
+    DNS,
+
+    /** The TLS handshake failed (expired/wrong certificate, protocol mismatch). */
+    TLS,
+
+    /**
+     * An HTTPS server redirected the request to plain HTTP. The transport is
+     * refused instead of silently downgrading (and sending credentials
+     * unencrypted).
+     */
+    INSECURE_REDIRECT,
 
     /** A 2xx response whose body could not be decoded as the expected JSON. */
     BAD_RESPONSE,

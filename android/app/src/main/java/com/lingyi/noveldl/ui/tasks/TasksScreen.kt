@@ -97,6 +97,9 @@ fun TasksScreen(onMessage: (String) -> Unit) {
     var retryingIds by remember { mutableStateOf(setOf<String>()) }
     // Credential submission currently in flight; the dialog's button waits.
     var submittingLogin by remember { mutableStateOf(false) }
+    // Notifications are off: explain the first skipped alert once instead of
+    // letting the task finish silently.
+    var notificationHintShown by rememberSaveable { mutableStateOf(false) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(refreshKey) {
@@ -116,7 +119,15 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                     knownStatuses.clear()
                     knownStatuses.putAll(taskStatusSnapshot(tasks))
                     detectTerminalTaskEvents(previous, tasks).forEach { event ->
-                        TaskNotifier.notify(context, event)
+                        val posted = TaskNotifier.notify(context, event)
+                        // Silently dropping the alert would look like a lost
+                        // task; tell the user once per screen why nothing
+                        // popped up (POST_NOTIFICATIONS denied, or the channel
+                        // blocked in system settings).
+                        if (!posted && !notificationHintShown) {
+                            notificationHintShown = true
+                            onMessage(context.getString(R.string.tasks_notification_off_hint))
+                        }
                     }
                     snapshot = response
                     error = null

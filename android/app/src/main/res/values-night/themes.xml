@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Night override of values/themes.xml. The window background is dark here,
+     so the status bar must use light icons: keeping windowLightStatusBar=true
+     would draw dark icons on the dark navy background (unreadable). -->
+<resources>
+    <style name="Theme.NovelDownloader" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:statusBarColor">@color/window_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

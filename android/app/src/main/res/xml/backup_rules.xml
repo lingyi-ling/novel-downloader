@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and below (fullBackupContent). The DataStore file holds the
+     server URL, the API key and a SAF download-directory grant. The key is a
+     credential and the grant is device-bound, so neither belongs in a cloud
+     backup; the app simply starts with defaults on a restored device. -->
+<full-backup-content>
+    <exclude
+        domain="file"
+        path="datastore/novel_dl_settings.preferences_pb" />
+</full-backup-content>

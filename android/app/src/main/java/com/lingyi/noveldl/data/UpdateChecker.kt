@@ -15,6 +15,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -45,6 +46,7 @@ enum class UpdateFailure {
     CHECKSUM_MISMATCH,
     INSECURE_URL,
     DOWNLOAD_FAILED,
+    INSUFFICIENT_SPACE,
     INSTALL_FAILED,
 }
 
@@ -63,6 +65,7 @@ internal fun UpdateFailure.message(): String = when (this) {
     UpdateFailure.CHECKSUM_MISMATCH -> "checksum mismatch"
     UpdateFailure.INSECURE_URL -> "insecure asset url"
     UpdateFailure.DOWNLOAD_FAILED -> "download failed"
+    UpdateFailure.INSUFFICIENT_SPACE -> "insufficient storage"
     UpdateFailure.INSTALL_FAILED -> "install failed"
 }
 
@@ -93,9 +96,16 @@ object VersionCompare {
     /**
      * Numeric segments of [value], stopping at the first segment without a
      * digit. Unparsable input yields `[0]`, so it never ranks as an update.
+     *
+     * Build metadata (`1.4.0+41`) is dropped as well: otherwise the digits of
+     * the build number would be read as a fourth version segment and
+     * `1.4.0+41` would rank above `1.4.1`.
      */
     fun parse(value: String): List<Int> {
-        val head = value.trim().substringBefore('-').trimStart('v', 'V')
+        val head = value.trim()
+            .substringBefore('-')
+            .substringBefore('+')
+            .trimStart('v', 'V')
         val parts = mutableListOf<Int>()
         for (chunk in head.split('.')) {
             val number = chunk.filter { it in '0'..'9' }.toIntOrNull()
@@ -264,6 +274,77 @@ internal fun installPrecheck(file: File, expectedSha256: String?): UpdateFailure
     if (Checksums.normalizeDigest(expectedSha256) == null) return UpdateFailure.NO_CHECKSUM
     if (!Checksums.verify(file, expectedSha256)) return UpdateFailure.CHECKSUM_MISMATCH
     return null
+}
+
+/**
+ * Largest APK we are willing to write when the release publishes no size.
+ * The real APK is ~60 MB; the cap only exists so a hostile or misconfigured
+ * endpoint cannot fill the device while the download runs.
+ */
+internal const val MAX_APK_BYTES: Long = 512L * 1024L * 1024L
+
+/**
+ * Space check performed before the first byte is written. A release that
+ * would not fit in the cache ([expectedSize] known) is refused immediately
+ * instead of failing halfway through with a raw `ENOSPC`.
+ *
+ * A [File.usableSpace] of 0 is treated as "unknown" (some filesystems and the
+ * JVM test sandbox do not report it) rather than "full", so this can never
+ * block an update on its own.
+ */
+internal fun storageFailure(directory: File, expectedSize: Long?): UpdateFailure? {
+    val needed = expectedSize ?: return null
+    if (needed <= 0L) return null
+    val free = runCatching { directory.usableSpace }.getOrDefault(0L)
+    return if (free in 1 until needed) UpdateFailure.INSUFFICIENT_SPACE else null
+}
+
+/**
+ * Streams [input] into [target], refusing to write more than [expectedSize]
+ * (or [maxBytes] when the publisher did not state a size), then verifies the
+ * SHA-256 of the written file.
+ *
+ * The partial file is deleted on every failure — a truncated, oversized or
+ * tampered download must never be left behind where a retry or the installer
+ * could pick it up. Throws [UpdateException] with
+ * [UpdateFailure.DOWNLOAD_FAILED] / [UpdateFailure.CHECKSUM_MISMATCH].
+ */
+internal fun writeVerifiedDownload(
+    input: InputStream,
+    target: File,
+    expectedSha256: String,
+    expectedSize: Long? = null,
+    maxBytes: Long = MAX_APK_BYTES,
+): File {
+    val limit = when {
+        expectedSize != null && expectedSize > 0L -> minOf(expectedSize, maxBytes)
+        else -> maxBytes
+    }
+    try {
+        var written = 0L
+        target.outputStream().use { output ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                written += read
+                if (written > limit) {
+                    throw UpdateException(
+                        UpdateFailure.DOWNLOAD_FAILED,
+                        "response larger than $limit bytes",
+                    )
+                }
+                output.write(buffer, 0, read)
+            }
+        }
+        if (!Checksums.verify(target, expectedSha256)) {
+            throw UpdateException(UpdateFailure.CHECKSUM_MISMATCH, "checksum mismatch")
+        }
+    } catch (e: Throwable) {
+        target.delete()
+        throw e
+    }
+    return target
 }
 
 /** 24h throttle rule for the automatic startup check. */
@@ -529,28 +610,59 @@ object UpdateChecker {
         "Accept" to "application/json",
     )
 
-    private fun client(connectTimeoutMs: Long, readTimeoutMs: Long): OkHttpClient =
-        OkHttpClient.Builder()
+    /**
+     * Client used for every updater request. Redirects are limited to the same
+     * scheme: the pre-flight only validates the *initial* URL, so an https
+     * asset that 302s to plain http must fail instead of silently downgrading
+     * the transport after the check. HTTPS→HTTPS redirects (GitHub → CDN) are
+     * still followed.
+     *
+     * [callTimeoutMs] defaults to 0 ("no overall deadline"): a metadata check
+     * passes its short deadline, while an APK download must be allowed to run
+     * as long as it makes progress. Connect/read timeouts still bound a dead
+     * peer in every case.
+     *
+     * Exposed to unit tests so the policy is asserted without a TLS server.
+     */
+    internal fun updaterHttpClient(
+        connectTimeoutMs: Long,
+        readTimeoutMs: Long,
+        callTimeoutMs: Long = 0L,
+    ): OkHttpClient {
+        val builder = updaterBaseClient.newBuilder()
             .connectTimeout(connectTimeoutMs, TimeUnit.MILLISECONDS)
             .readTimeout(readTimeoutMs, TimeUnit.MILLISECONDS)
-            .build()
+            .followSslRedirects(false)
+        if (callTimeoutMs > 0L) {
+            builder.callTimeout(callTimeoutMs, TimeUnit.MILLISECONDS)
+        }
+        return builder.build()
+    }
 
-    /** GET [url], returning the body or `null` for any failure. */
-    private fun fetchBody(
+    /** Shares the connection pool/dispatcher between checks and downloads. */
+    private val updaterBaseClient: OkHttpClient = OkHttpClient.Builder()
+        .followSslRedirects(false)
+        .build()
+
+    /** GET [url], returning the bounded body or `null` for any failure. */
+    private suspend fun fetchBody(
         http: OkHttpClient,
         url: String,
         headers: Map<String, String>,
+        maxBytes: Long = MAX_METADATA_RESPONSE_BYTES,
     ): String? = try {
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", USER_AGENT)
             .apply { headers.forEach { (name, value) -> header(name, value) } }
             .build()
-        http.newCall(request).execute().use { response ->
+        // Cancellable: leaving the screen mid-check must not pin an OkHttp
+        // dispatcher thread until the read timeout.
+        http.executeCancellable(request).use { response ->
             if (!response.isSuccessful) {
                 null
             } else {
-                response.body?.string()?.takeIf { it.isNotEmpty() }
+                response.readBoundedText(maxBytes).takeIf { it.isNotEmpty() }
             }
         }
     } catch (e: CancellationException) {
@@ -574,7 +686,7 @@ object UpdateChecker {
         preferredAbis: List<String> = emptyList(),
         client: OkHttpClient? = null,
     ): UpdateInfo? = withContext(Dispatchers.IO) {
-        val http = client ?: client(timeoutMs, timeoutMs)
+        val http = client ?: updaterHttpClient(timeoutMs, timeoutMs, callTimeoutMs = timeoutMs)
 
         // 1. The manifest: one small request that also carries the checksums.
         // A multi-APK release publishes `android-<abi>` keys, so the device
@@ -610,6 +722,12 @@ object UpdateChecker {
             ?: throw UpdateException(UpdateFailure.NO_CHECKSUM, "missing checksum")
 
         val directory = prepareUpdatesDir(File(context.cacheDir, UPDATES_DIR))
+        // Refuse before opening the connection when the APK cannot possibly
+        // fit: a mid-transfer ENOSPC would otherwise leave the user with a
+        // generic failure after minutes of downloading.
+        storageFailure(directory, info.assetSize)?.let { reason ->
+            throw UpdateException(reason, reason.message())
+        }
         // Leftovers from an interrupted run were removed by prepareUpdatesDir:
         // they were never verified and must not be reused on a retry.
         val target = downloadTarget(directory, info.assetName)
@@ -620,7 +738,9 @@ object UpdateChecker {
                 .header("User-Agent", USER_AGENT)
                 .build()
             // No call timeout: a large APK on a slow link must still finish.
-            client(30_000, 60_000).newCall(request).execute().use { response ->
+            // The call is cancellable, so leaving the updater stops it.
+            val http = updaterHttpClient(30_000, 60_000)
+            http.executeCancellable(request).use { response ->
                 if (!response.isSuccessful) {
                     throw UpdateException(
                         UpdateFailure.DOWNLOAD_FAILED,
@@ -629,13 +749,24 @@ object UpdateChecker {
                 }
                 val body = response.body
                     ?: throw UpdateException(UpdateFailure.DOWNLOAD_FAILED, "empty response")
-                body.byteStream().use { input ->
-                    target.outputStream().use { output -> input.copyTo(output) }
+                // A stated size that disagrees with the announced Content-Length
+                // means the release document and the asset diverged; fail now
+                // rather than writing a wrong file and rejecting it later.
+                val announced = body.contentLength()
+                if (info.assetSize != null && info.assetSize > 0L &&
+                    announced > 0L && announced != info.assetSize
+                ) {
+                    throw UpdateException(
+                        UpdateFailure.DOWNLOAD_FAILED,
+                        "size mismatch: expected ${info.assetSize}, got $announced",
+                    )
                 }
-            }
-            if (!Checksums.verify(target, expected)) {
-                target.delete()
-                throw UpdateException(UpdateFailure.CHECKSUM_MISMATCH, "checksum mismatch")
+                writeVerifiedDownload(
+                    input = body.byteStream(),
+                    target = target,
+                    expectedSha256 = expected,
+                    expectedSize = info.assetSize,
+                )
             }
         } catch (e: CancellationException) {
             target.delete()

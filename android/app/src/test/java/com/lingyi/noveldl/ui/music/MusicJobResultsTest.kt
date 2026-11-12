@@ -3,8 +3,10 @@ package com.lingyi.noveldl.ui.music
 import com.lingyi.noveldl.data.MusicJobResult
 import com.lingyi.noveldl.data.MusicTrack
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -140,6 +142,47 @@ class MusicJobResultsTest {
                 mapOf(MusicJobResults.trackKey(track("1")) to "/old.mp3"),
             ),
         )
+    }
+
+    // ---------- selection keys ----------
+
+    @Test
+    fun isTrackKeyAcceptsOnlyProviderSeparatorId() {
+        assertTrue(MusicJobResults.isTrackKey("netease\u00001"))
+        assertTrue(MusicJobResults.isTrackKey("qq\u0000abc-def"))
+
+        // Bare ids are what older builds saved; they must not be reinterpreted.
+        assertFalse(MusicJobResults.isTrackKey("1"))
+        assertFalse(MusicJobResults.isTrackKey(""))
+        assertFalse(MusicJobResults.isTrackKey("\u0000"))
+        assertFalse(MusicJobResults.isTrackKey("\u00001"))
+        assertFalse(MusicJobResults.isTrackKey("netease\u0000"))
+        assertFalse(MusicJobResults.isTrackKey("netease\u00001\u0000qq"))
+    }
+
+    @Test
+    fun sanitizeSelectionDropsBareIdsAndKeepsValidKeys() {
+        val kept = MusicJobResults.sanitizeSelection(
+            listOf("7", "netease\u00007", "", "qq\u00009", "netease\u00007"),
+        )
+
+        assertEquals(setOf("netease\u00007", "qq\u00009"), kept)
+        assertTrue(MusicJobResults.sanitizeSelection(null).isEmpty())
+    }
+
+    @Test
+    fun selectedTracksKeepsOrderAndTreatsProvidersAsDistinct() {
+        val netease = track("1", provider = "netease")
+        val qq = track("1", provider = "qq")
+        val tracks = listOf(netease, qq, track("2", provider = "netease"))
+
+        val chosen = MusicJobResults.selectedTracks(
+            tracks,
+            setOf(MusicJobResults.trackKey(qq), MusicJobResults.trackKey(track("2"))),
+        )
+
+        assertEquals(listOf(qq, track("2")), chosen)
+        assertTrue(MusicJobResults.selectedTracks(tracks, emptySet()).isEmpty())
     }
 
     // ---------- completion counts / DownloadManager handoff ----------

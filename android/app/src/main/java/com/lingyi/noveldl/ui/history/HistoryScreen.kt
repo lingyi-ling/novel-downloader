@@ -205,7 +205,7 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
             Spacer(Modifier.height(8.dp))
             if (files.isEmpty() && !loading && error == null) {
                 Text(
-                    stringResource(R.string.state_empty),
+                    stringResource(R.string.state_no_items),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -4,13 +4,18 @@ import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFact
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import retrofit2.HttpException
 import retrofit2.Retrofit
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLException
 
 /**
  * Holds the Retrofit service and classifies failures into [ApiErrorCode]s.
@@ -21,8 +26,27 @@ import java.util.concurrent.TimeUnit
 object Api {
     const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8081/"
 
-    /** Error bodies longer than this are not scanned for a `detail` field. */
-    private const val MAX_ERROR_BODY_CHARS = 100_000
+    /**
+     * Default overall deadline for one API call. `readTimeout` only bounds a
+     * single socket read, so a server that trickles one byte per read could
+     * otherwise keep a request alive indefinitely.
+     */
+    const val DEFAULT_CALL_TIMEOUT_MILLIS: Long = 120_000
+
+    /**
+     * Shared factory for every client produced by [configure]. `newBuilder()`
+     * keeps the dispatcher and connection pool, so re-configuring the app
+     * (settings save, standalone toggle, process start) does not strand a
+     * thread pool per previous configuration.
+     */
+    private val baseClient: OkHttpClient = OkHttpClient.Builder()
+        // OkHttp's own retry can replay a request that was written but got no
+        // response. For a non-idempotent POST (adding a task, submitting a
+        // login, exporting) a blind replay can duplicate the operation, so it
+        // is disabled here and re-added for GET/HEAD only by
+        // [idempotentRetryInterceptor].
+        .retryOnConnectionFailure(false)
+        .build()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -32,6 +56,14 @@ object Api {
 
     @Volatile
     private var service: ApiService? = null
+
+    /**
+     * Response-size ceiling enforced before the converter buffers a body.
+     * Exposed to unit tests so the guard can be exercised without allocating a
+     * multi-megabyte payload.
+     */
+    @Volatile
+    internal var maxResponseBytes: Long = MAX_JSON_RESPONSE_BYTES
 
     @Volatile
     var baseUrl: String = DEFAULT_BASE_URL
@@ -53,8 +85,10 @@ object Api {
      * blank fallback) was used as-is — `false` means the input was malformed
      * and the default is now active.
      *
-     * The timeout parameters keep the defaults used in the app and exist so the
-     * transport behaviour can be exercised from unit tests.
+     * Timeouts: connect 10 s, read/write 60 s (a search can legitimately take
+     * a while; polling requests are short) and one overall call deadline of
+     * [callTimeoutMillis]. They are parameters so the transport behaviour can
+     * be exercised from unit tests.
      */
     @JvmOverloads
     fun configure(
@@ -63,23 +97,27 @@ object Api {
         connectTimeoutMillis: Long = 10_000,
         readTimeoutMillis: Long = 60_000,
         writeTimeoutMillis: Long = 60_000,
+        callTimeoutMillis: Long = DEFAULT_CALL_TIMEOUT_MILLIS,
     ): Boolean {
         val trimmed = baseUrl.trim()
         val candidate = if (trimmed.endsWith("/")) trimmed else "$trimmed/"
-        val usable = trimmed.isNotEmpty() && candidate.toHttpUrlOrNull() != null
+        val parsed = candidate.toHttpUrlOrNull()
+        val usable = trimmed.isNotEmpty() && parsed != null
         val normalized = if (usable) candidate else DEFAULT_BASE_URL
         this.baseUrl = normalized
         val key = apiKey?.trim().orEmpty()
         this.apiKey = key
-        val client = OkHttpClient.Builder()
+        val origin = ApiOrigin.of(normalized.toHttpUrl())
+        val client = baseClient.newBuilder()
             .connectTimeout(connectTimeoutMillis, TimeUnit.MILLISECONDS)
             .readTimeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
             .writeTimeout(writeTimeoutMillis, TimeUnit.MILLISECONDS)
-            .addInterceptor { chain ->
-                val builder = chain.request().newBuilder()
-                if (key.isNotEmpty()) builder.header("X-API-Key", key)
-                chain.proceed(builder.build())
-            }
+            .callTimeout(callTimeoutMillis, TimeUnit.MILLISECONDS)
+            .addInterceptor(idempotentRetryInterceptor())
+            .addInterceptor(responseSizeGuard())
+            // Network (not application) interceptor: redirects must be seen so
+            // the key is not forwarded to another origin.
+            .addNetworkInterceptor(ApiOriginPolicy(origin, key).interceptor())
             .build()
         service = Retrofit.Builder()
             .baseUrl(normalized)
@@ -121,6 +159,14 @@ object Api {
         // decoder's own text as the detail, the UI supplies the sentence.
         val raw = e.message?.take(160)?.ifBlank { "not JSON" } ?: "not JSON"
         Result.failure(ApiFailure(ApiErrorCode.BAD_RESPONSE, raw, e))
+    } catch (e: ResponseTooLargeException) {
+        Result.failure(
+            ApiFailure(ApiErrorCode.BAD_RESPONSE, e.message ?: "response too large", e),
+        )
+    } catch (e: InsecureRedirectException) {
+        Result.failure(
+            ApiFailure(ApiErrorCode.INSECURE_REDIRECT, e.message ?: "insecure redirect", e),
+        )
     } catch (e: IOException) {
         Result.failure(transportFailure(baseUrl, e))
     } catch (e: Exception) {
@@ -137,29 +183,71 @@ object Api {
      * Classifies a transport failure. A loopback request can only fail because
      * the embedded engine has not bound its port yet (or died), which is a
      * different situation from a wrong/unreachable remote address.
+     *
+     * Outside the loopback case the socket exception is mapped to the most
+     * specific [ApiErrorCode]: [ApiErrorCode.TIMEOUT] for any interruptible
+     * timeout (connect/read/call), [ApiErrorCode.DNS] for an unresolvable
+     * host, [ApiErrorCode.TLS] for a failed handshake, and
+     * [ApiErrorCode.NETWORK] for everything else.
      */
-    internal fun transportFailure(baseUrl: String, error: IOException): ApiFailure =
+    internal fun transportFailure(baseUrl: String, error: IOException): ApiFailure {
+        val detail = error.message ?: error.javaClass.simpleName
         if (baseUrl == EmbeddedEngine.BASE_URL) {
-            ApiFailure(
-                ApiErrorCode.ENGINE_UNREACHABLE,
-                // Kept as a diagnostic detail; the UI shows its own sentence.
-                error.message ?: error.javaClass.simpleName,
-                error,
-            )
-        } else {
-            ApiFailure(
-                ApiErrorCode.NETWORK,
-                error.message ?: error.javaClass.simpleName,
-                error,
-            )
+            return ApiFailure(ApiErrorCode.ENGINE_UNREACHABLE, detail, error)
         }
+        val code = when (error) {
+            // SocketTimeoutException (connect/read) and OkHttp's call timeout
+            // both extend InterruptedIOException.
+            is InterruptedIOException -> ApiErrorCode.TIMEOUT
+            is UnknownHostException -> ApiErrorCode.DNS
+            is SSLException -> ApiErrorCode.TLS
+            else -> ApiErrorCode.NETWORK
+        }
+        return ApiFailure(code, detail, error)
+    }
+
+    private fun idempotentRetryInterceptor(): Interceptor = Interceptor { chain ->
+        val request = chain.request()
+        val replayable = request.method == "GET" || request.method == "HEAD"
+        try {
+            chain.proceed(request)
+        } catch (e: IOException) {
+            // One retry for safe methods only. Timeouts and TLS failures are
+            // not retried: the connection already had its chance and a second
+            // wait would only delay the user's error message.
+            val mayRetry = replayable && !chain.call().isCanceled() &&
+                e !is NonRetryableTransportFailure &&
+                e !is InterruptedIOException && e !is SSLException &&
+                e !is java.net.ProtocolException
+            if (!mayRetry) throw e
+            chain.proceed(request)
+        }
+    }
+
+    /**
+     * Refuses oversized success bodies before the JSON converter buffers them.
+     *
+     * A declared `Content-Length` is checked up front; the returned body is
+     * also wrapped in [BoundedResponseBody] so a chunked response (which has
+     * no length) fails once it crosses the same limit.
+     */
+    private fun responseSizeGuard(): Interceptor = Interceptor { chain ->
+        val response = chain.proceed(chain.request())
+        val limit = maxResponseBytes
+        val body = response.body ?: return@Interceptor response
+        if (body.contentLength() > limit) {
+            response.close()
+            throw ResponseTooLargeException("response body larger than $limit bytes")
+        }
+        response.newBuilder()
+            .body(BoundedResponseBody(body, limit))
+            .build()
+    }
 
     private fun readableError(e: HttpException): String {
-        val body = try {
-            e.response()?.errorBody()?.string().orEmpty().take(MAX_ERROR_BODY_CHARS)
-        } catch (_: Exception) {
-            ""
-        }
+        // Bounded: the message is rendered as one line, but an error endpoint
+        // (or a proxy) can otherwise make us buffer the whole body.
+        val body = e.response()?.errorBody().readAtMost(MAX_ERROR_BODY_BYTES)
         val detail = Regex("\"detail\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
             .find(body)
             ?.groupValues

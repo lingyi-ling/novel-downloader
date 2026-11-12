@@ -2,17 +2,22 @@ package com.lingyi.noveldl.ui.settings
 
 import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -22,6 +27,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -33,8 +39,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lingyi.noveldl.R
+import com.lingyi.noveldl.notifications.TaskNotifier
 import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiSettings
@@ -58,6 +69,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
     val context = LocalContext.current
@@ -75,6 +87,11 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
     var sitesSummary by remember { mutableStateOf<SitesSummary?>(null) }
     var sitesLoading by remember { mutableStateOf(false) }
     var sitesError by remember { mutableStateOf<String?>(null) }
+    // Re-read on every resume: the user may grant or revoke the permission
+    // from system settings while this screen is in the back stack.
+    var notificationsAllowed by remember {
+        mutableStateOf(TaskNotifier.canPostNotifications(context))
+    }
 
     fun save() {
         scope.launch {
@@ -139,6 +156,17 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
 
     LaunchedEffect(Unit) { loadSites() }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                notificationsAllowed = TaskNotifier.canPostNotifications(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     val treePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
@@ -174,6 +202,60 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
         }
     }
 
+    /** Applies the standalone-engine toggle; also used by the row's semantics. */
+    fun setStandalone(enabled: Boolean) {
+        scope.launch {
+            // The persisted remote URL/API key for the "off" direction, read
+            // fresh so a just-saved edit is used.
+            val latest = store.settings.first()
+            store.saveStandalone(enabled)
+            if (enabled) EmbeddedEngine.ensureStarted(context)
+            // The toggle must take effect immediately: without reconfiguring,
+            // the app would keep talking to the previous base URL until the
+            // process restarts.
+            val usable = Api.configure(
+                standaloneTargetUrl(enabled, latest),
+                latest.apiKey,
+            )
+            if (enabled && !usable) {
+                // The engine URL is always valid; unreachable in practice,
+                // kept as a guard.
+                onMessage(
+                    context.getString(
+                        R.string.settings_url_invalid,
+                        Api.baseUrl,
+                    ),
+                )
+            } else {
+                onMessage(
+                    context.getString(
+                        if (enabled) {
+                            R.string.settings_standalone_on
+                        } else {
+                            R.string.settings_standalone_off
+                        },
+                    ),
+                )
+            }
+        }
+    }
+
+    /** Opens the system screen that controls this app's notification toggle. */
+    fun openNotificationSettings() {
+        val direct = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val opened = runCatching { context.startActivity(direct) }.isSuccess
+        if (opened) return
+        // Not every OEM exposes the per-app notification page; app details is
+        // always present and links to the same toggle.
+        val fallback = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${context.packageName}"),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(fallback) }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -202,7 +284,13 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Wraps instead of overflowing when a locale or large font scale makes
+        // both labels wider than a narrow portrait screen.
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             Button(onClick = { save() }) {
                 Text(stringResource(R.string.action_save))
             }
@@ -227,8 +315,19 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
 
         Spacer(Modifier.height(12.dp))
         // ----- Standalone engine -----
+        // The whole row is the switch target: it clears the 48 dp touch size
+        // and merges title/hint/switch into one talkback node with a Switch
+        // role, instead of an unlabeled switch floating next to plain text.
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .toggleable(
+                    value = settings.standalone,
+                    role = Role.Switch,
+                    onValueChange = ::setStandalone,
+                )
+                .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {
@@ -244,42 +343,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             }
             Switch(
                 checked = settings.standalone,
-                onCheckedChange = { enabled ->
-                    scope.launch {
-                        // The persisted remote URL/API key for the "off"
-                        // direction, read fresh so a just-saved edit is used.
-                        val latest = store.settings.first()
-                        store.saveStandalone(enabled)
-                        if (enabled) EmbeddedEngine.ensureStarted(context)
-                        // The toggle must take effect immediately: without
-                        // reconfiguring, the app would keep talking to the
-                        // previous base URL until the process restarts.
-                        val usable = Api.configure(
-                            standaloneTargetUrl(enabled, latest),
-                            latest.apiKey,
-                        )
-                        if (enabled && !usable) {
-                            // The engine URL is always valid; unreachable in
-                            // practice, kept as a guard.
-                            onMessage(
-                                context.getString(
-                                    R.string.settings_url_invalid,
-                                    Api.baseUrl,
-                                ),
-                            )
-                        } else {
-                            onMessage(
-                                context.getString(
-                                    if (enabled) {
-                                        R.string.settings_standalone_on
-                                    } else {
-                                        R.string.settings_standalone_off
-                                    },
-                                ),
-                            )
-                        }
-                    }
-                },
+                onCheckedChange = null,
             )
         }
         if (settings.standalone && EmbeddedEngine.lastError != null) {
@@ -368,7 +432,11 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             Button(onClick = { treePicker.launch(null) }) {
                 Text(stringResource(R.string.settings_download_pick_directory))
             }
@@ -385,6 +453,37 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        // ----- Notifications -----
+        Text(
+            stringResource(R.string.settings_section_notifications),
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            stringResource(
+                if (notificationsAllowed) {
+                    R.string.settings_notifications_enabled
+                } else {
+                    R.string.settings_notifications_disabled
+                },
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (notificationsAllowed) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.error
+            },
+        )
+        if (!notificationsAllowed) {
+            TextButton(onClick = { openNotificationSettings() }) {
+                Text(stringResource(R.string.settings_notifications_open))
+            }
+        }
 
         Spacer(Modifier.height(16.dp))
         HorizontalDivider()
@@ -415,7 +514,17 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
         )
         Spacer(Modifier.height(8.dp))
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .toggleable(
+                    value = settings.autoCheckUpdates,
+                    role = Role.Switch,
+                    onValueChange = { enabled ->
+                        scope.launch { store.saveAutoCheckUpdates(enabled) }
+                    },
+                )
+                .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -425,9 +534,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             )
             Switch(
                 checked = settings.autoCheckUpdates,
-                onCheckedChange = { enabled ->
-                    scope.launch { store.saveAutoCheckUpdates(enabled) }
-                },
+                onCheckedChange = null,
             )
         }
         Spacer(Modifier.height(8.dp))
@@ -509,6 +616,8 @@ internal fun updateFailureText(failed: UpdatePhase.Failed): String = when (faile
     UpdateFailure.NO_CHECKSUM -> stringResource(R.string.update_failed_no_checksum)
     UpdateFailure.CHECKSUM_MISMATCH -> stringResource(R.string.update_failed_checksum)
     UpdateFailure.INSECURE_URL -> stringResource(R.string.update_failed_insecure)
+    UpdateFailure.INSUFFICIENT_SPACE ->
+        stringResource(R.string.update_failed_insufficient_space)
     UpdateFailure.INSTALL_FAILED -> stringResource(R.string.update_failed_install)
     UpdateFailure.DOWNLOAD_FAILED -> stringResource(
         R.string.update_failed_download,

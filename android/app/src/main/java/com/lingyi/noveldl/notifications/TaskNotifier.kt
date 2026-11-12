@@ -1,6 +1,7 @@
 package com.lingyi.noveldl.notifications
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -30,7 +31,7 @@ object TaskNotifier {
 
     /** Creates the channel; safe to call repeatedly. */
     fun ensureChannel(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        // minSdk is 26, so NotificationChannel is always available.
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         val channel = NotificationChannel(
             CHANNEL_ID,
@@ -56,6 +57,10 @@ object TaskNotifier {
     }
 
     /** Posts the notification for [event]; returns false when it was skipped. */
+    // canPostNotifications() is checked right below (POST_NOTIFICATIONS on
+    // 13+ plus the app-level toggle), which lint cannot follow into a helper;
+    // the try/catch additionally covers a revoke racing the check.
+    @SuppressLint("MissingPermission")
     fun notify(context: Context, event: TaskTerminalEvent): Boolean {
         if (!canPostNotifications(context)) return false
         ensureChannel(context)
@@ -92,7 +97,11 @@ object TaskNotifier {
             .build()
 
         val notificationId = "task:${event.task.task_id}".hashCode()
-        NotificationManagerCompat.from(appContext).notify(notificationId, notification)
-        return true
+        return try {
+            NotificationManagerCompat.from(appContext).notify(notificationId, notification)
+            true
+        } catch (_: SecurityException) {
+            false
+        }
     }
 }

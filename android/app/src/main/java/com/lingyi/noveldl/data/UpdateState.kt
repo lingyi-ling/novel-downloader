@@ -1,5 +1,6 @@
 package com.lingyi.noveldl.data
 
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -157,12 +158,21 @@ object UpdateCenter {
     fun install(context: Context) {
         val ready = _phase.value as? UpdatePhase.Ready ?: return
         installPrecheck(ready.file, ready.info.sha256)?.let { reason ->
+            // The file no longer matches the published digest (evicted from
+            // the cache, replaced or truncated). Drop it so the next attempt
+            // re-downloads instead of retrying the same bad bytes.
+            ready.file.delete()
             _phase.value = UpdatePhase.Failed(ready.info, reason)
             return
         }
         if (!canInstall(context)) {
             awaitingInstallPermission = true
-            requestInstallPermission(context)
+            if (!requestInstallPermission(context)) {
+                // No settings activity to send the user to: report instead of
+                // waiting forever for a grant that can never arrive.
+                awaitingInstallPermission = false
+                _phase.value = UpdatePhase.Failed(ready.info, UpdateFailure.INSTALL_FAILED)
+            }
             return
         }
         awaitingInstallPermission = false
@@ -176,13 +186,14 @@ object UpdateCenter {
         install(context)
     }
 
-    private fun requestInstallPermission(context: Context) {
+    /** Sends the user to the per-app "install unknown apps" switch. */
+    private fun requestInstallPermission(context: Context): Boolean = runCatching {
         val intent = Intent(
             Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
             Uri.parse("package:${context.packageName}"),
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        runCatching { context.startActivity(intent) }
-    }
+        context.startActivity(intent)
+    }.isSuccess
 
     private fun launchInstaller(context: Context, ready: UpdatePhase.Ready) {
         // getUriForFile itself throws when the file falls outside the paths
@@ -196,6 +207,9 @@ object UpdateCenter {
             )
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, APK_MIME)
+                // Some OEM installers only read the URI grant from the clip
+                // data even though it is also set as the intent data.
+                clipData = ClipData.newRawUri(null, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }

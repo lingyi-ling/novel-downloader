@@ -41,12 +41,17 @@ object MusicPaging {
      * Whether another page should be requested after [pageReceived] tracks
      * came back for a list that grew from [previousLoaded] to [loaded] items
      * against a reported [total]. Stops when:
+     * - the provider advertises `supports_offset = false` (musicdl platforms
+     *   and every aggregate search): non-zero offsets always return the first
+     *   page or an empty one, so "load more" must not be offered at all;
      * - the page came back empty or shorter than [pageSize] (end of results);
      * - the loaded count reached the reported total (`offset >= total`);
      * - the page added nothing new — a server that ignores `offset` would
      *   repeat the first page forever, and platforms without pagination
-     *   support (e.g. the musicdl backend returns an empty page for any
-     *   non-zero offset) surface as empty or non-growing pages.
+     *   support surface as empty or non-growing pages.
+     *
+     * [supportsOffset] is `null` for servers that predate the capability flag;
+     * the legacy heuristics above still apply then.
      */
     fun hasMore(
         loaded: Int,
@@ -54,7 +59,9 @@ object MusicPaging {
         pageReceived: Int,
         previousLoaded: Int,
         pageSize: Int = MUSIC_PAGE_SIZE,
+        supportsOffset: Boolean? = null,
     ): Boolean {
+        if (supportsOffset == false) return false
         if (pageReceived <= 0) return false
         if (pageReceived < pageSize) return false
         if (total > 0 && loaded >= total) return false

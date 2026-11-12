@@ -2,22 +2,30 @@ package com.lingyi.noveldl.data
 
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.Call
 import okhttp3.EventListener
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -71,6 +79,16 @@ class UpdateCheckerTest {
         assertTrue(VersionCompare.isNewer("1.4.1-rc1", "1.4.0"))
         // A release candidate of the running version is not an upgrade.
         assertFalse(VersionCompare.isNewer("1.4.0-rc2", "1.4.0"))
+    }
+
+    @Test
+    fun buildMetadataIsNotAVersionSegment() {
+        // `versionName` may carry `+<versionCode>`; reading its digits as a
+        // fourth segment would rank 1.4.0+41 above 1.4.1.
+        assertEquals(listOf(1, 4, 0), VersionCompare.parse("1.4.0+41"))
+        assertFalse(VersionCompare.isNewer("1.4.0+41", "1.4.1"))
+        assertTrue(VersionCompare.isNewer("1.4.1+7", "1.4.0"))
+        assertFalse(VersionCompare.isNewer("1.4.0+99", "1.4.0"))
     }
 
     @Test
@@ -786,6 +804,91 @@ class UpdateCheckerTest {
     }
 
     @Test
+    fun storageIsCheckedBeforeTheDownloadStarts() {
+        val directory = folder.newFolder(UpdateChecker.UPDATES_DIR)
+
+        // Unknown or nonsensical sizes cannot block an update.
+        assertNull(storageFailure(directory, null))
+        assertNull(storageFailure(directory, 0L))
+        assertNull(storageFailure(directory, -1L))
+        assertNull(storageFailure(directory, 1L))
+        // No cache could hold this: refuse instead of downloading most of it
+        // and then dying with ENOSPC.
+        assertEquals(
+            UpdateFailure.INSUFFICIENT_SPACE,
+            storageFailure(directory, Long.MAX_VALUE),
+        )
+        // A missing directory is not "no space" either; mkdirs() runs first.
+        assertNull(storageFailure(File(folder.root, "absent"), null))
+    }
+
+    @Test
+    fun verifiedDownloadWritesTheExactBytes() {
+        val target = File(folder.root, "update.apk")
+
+        val result = writeVerifiedDownload(
+            input = "hello".byteInputStream(),
+            target = target,
+            expectedSha256 = helloDigest,
+            expectedSize = 5L,
+        )
+
+        assertEquals(target, result)
+        assertEquals("hello", target.readText())
+    }
+
+    @Test
+    fun tamperedDownloadIsDeletedInsteadOfLeftForTheInstaller() {
+        val target = File(folder.root, "tampered.apk")
+
+        val error = assertThrows(UpdateException::class.java) {
+            writeVerifiedDownload("hello!".byteInputStream(), target, helloDigest)
+        }
+
+        assertEquals(UpdateFailure.CHECKSUM_MISMATCH, error.reason)
+        assertFalse(target.exists())
+    }
+
+    @Test
+    fun oversizedResponseIsAbortedAndDeleted() {
+        val target = File(folder.root, "huge.apk")
+
+        // The publisher said 16 bytes; the body is 64. Streaming must stop at
+        // the announced size instead of filling the cache with unverified data.
+        val error = assertThrows(UpdateException::class.java) {
+            writeVerifiedDownload(
+                input = ByteArray(64) { 1 }.inputStream(),
+                target = target,
+                expectedSha256 = helloDigest,
+                expectedSize = 16L,
+            )
+        }
+
+        assertEquals(UpdateFailure.DOWNLOAD_FAILED, error.reason)
+        assertFalse(target.exists())
+    }
+
+    @Test
+    fun downloadWithoutAStatedSizeStillHasAHardCap() {
+        val target = File(folder.root, "unbounded.apk")
+
+        // No size in the release document: the fallback cap is what stops a
+        // hostile endpoint from writing without limit.
+        val error = assertThrows(UpdateException::class.java) {
+            writeVerifiedDownload(
+                input = ByteArray(64) { 1 }.inputStream(),
+                target = target,
+                expectedSha256 = helloDigest,
+                expectedSize = null,
+                maxBytes = 8L,
+            )
+        }
+
+        assertEquals(UpdateFailure.DOWNLOAD_FAILED, error.reason)
+        assertFalse(target.exists())
+    }
+
+    @Test
     fun repeatedDownloadOfTheSameNameOverwritesInsteadOfFailing() {
         val directory = File(folder.root, UpdateChecker.UPDATES_DIR).apply { mkdirs() }
         val name = "novel-downloader-1.4.1-android.apk"
@@ -1039,6 +1142,31 @@ class UpdateCheckerTest {
     }
 
     @Test
+    fun theUpdateClientDoesNotFollowCrossSchemeRedirects() {
+        val server = MockWebServer()
+        server.start()
+        try {
+            // The pre-flight validates the initial https URL only; a redirect
+            // that switches scheme must be returned as-is (and therefore fail
+            // the download) instead of being followed to plain http.
+            server.enqueue(
+                MockResponse().setResponseCode(302)
+                    .setHeader("Location", "https://127.0.0.1:${server.port}/moved.apk"),
+            )
+
+            val response = UpdateChecker.updaterHttpClient(2_000, 2_000)
+                .newCall(Request.Builder().url(server.url("/start.apk")).build())
+                .execute()
+
+            response.use { assertEquals(302, it.code) }
+            // Exactly one request: the redirect target was never contacted.
+            assertEquals(1, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun failedChecksReturnNullInsteadOfThrowing() = runBlocking {
         val server = MockWebServer()
         server.start()
@@ -1053,6 +1181,37 @@ class UpdateCheckerTest {
                 ),
             )
             assertEquals(2, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun checkStopsPromptlyWhenItsCoroutineIsCancelled() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            // The server accepts the request and never answers; without call
+            // cancellation the check would sit here until the read timeout.
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+            val job = launch(Dispatchers.IO) {
+                UpdateChecker.check(
+                    "1.4.0",
+                    timeoutMs = 30_000,
+                    apiUrl = server.url("/latest").toString(),
+                    manifestUrl = server.url("/latest.json").toString(),
+                )
+            }
+            assertNotNull("request should reach the server", server.takeRequest(5, TimeUnit.SECONDS))
+            val startedAt = System.nanoTime()
+            job.cancelAndJoin()
+            val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+
+            assertTrue("job must end cancelled", job.isCancelled)
+            assertTrue(
+                "cancellation waited ${elapsedMs}ms for the socket timeout",
+                elapsedMs < 5_000,
+            )
         } finally {
             server.shutdown()
         }

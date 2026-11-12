@@ -1,18 +1,23 @@
 package com.lingyi.noveldl.ui.music
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Cancel
 import androidx.compose.material.icons.outlined.CheckCircle
@@ -45,6 +50,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -65,7 +71,8 @@ private const val MUSIC_HEALTH_TIMEOUT_SECONDS = 5
 private const val MUSIC_HEALTH_DEBOUNCE_MS = 1_000L
 
 /** Success tint for the health badge; Material3 has no semantic "ok" color. */
-private val HealthOkColor: Color = Color(0xFF388E3C)
+private val HealthOkLight: Color = Color(0xFF2E7D32)
+private val HealthOkDark: Color = Color(0xFF81C784)
 
 /**
  * Music search + download screen.
@@ -77,6 +84,7 @@ private val HealthOkColor: Color = Color(0xFF388E3C)
  * remembers where the last one was written. Nothing is remembered locally
  * except transient UI state (menu, health badge).
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MusicScreen(
     jobModel: MusicJobViewModel,
@@ -99,7 +107,9 @@ fun MusicScreen(
     }
 
     fun downloadSelected() {
-        val chosen = search.tracks.filter { search.selected.contains(it.id) }
+        // Checked rows are keyed by provider + id: two platforms reusing the
+        // same numeric song id stay independent.
+        val chosen = MusicJobResults.selectedTracks(search.tracks, search.selectedKeys)
         if (chosen.isEmpty()) {
             onMessage(context.getString(R.string.music_no_selection))
             return
@@ -284,7 +294,16 @@ fun MusicScreen(
         healthChecking = false
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+    // Header and result rows share one LazyColumn. With a fixed header in a
+    // Column and a weighted list, a landscape phone (or a large font scale)
+    // could spend the whole height on the controls and leave the results
+    // clipped and unreachable.
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        item(key = "music-header") {
+            Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box {
                 Button(onClick = { menuExpanded = true }) {
@@ -329,7 +348,11 @@ fun MusicScreen(
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             Button(onClick = searchModel::search, enabled = !search.searching) {
                 Text(stringResource(R.string.music_search_button))
             }
@@ -436,29 +459,72 @@ fun MusicScreen(
         }
         if (search.tracks.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
-            Text(
-                if (search.totalHits > 0) {
-                    stringResource(R.string.music_search_progress, search.tracks.size, search.totalHits)
-                } else {
-                    stringResource(R.string.music_tracks, search.tracks.size)
-                },
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(search.tracks) { track ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(
-                            checked = search.selected.contains(track.id),
-                            onCheckedChange = { checked ->
-                                searchModel.setSelected(track.id, checked)
-                            },
+            // "Select all" works on the currently loaded rows only; a later
+            // page starts unchecked. Identity is provider + id, so duplicate
+            // numeric ids across platforms are distinct entries.
+            val allSelected = search.tracks.all {
+                MusicJobResults.trackKey(it) in search.selectedKeys
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .toggleable(
+                        value = allSelected,
+                        role = Role.Checkbox,
+                        onValueChange = searchModel::setAllSelected,
+                    )
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(
+                    checked = allSelected,
+                    onCheckedChange = null,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    stringResource(R.string.music_select_all),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    if (search.totalHits > 0) {
+                        stringResource(
+                            R.string.music_search_progress,
+                            search.tracks.size,
+                            search.totalHits,
                         )
+                    } else {
+                        stringResource(R.string.music_tracks, search.tracks.size)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+            }
+        }
+        items(search.tracks) { track ->
+            val checked = MusicJobResults.trackKey(track) in search.selectedKeys
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    // The whole card selects the track: a 24 dp checkbox alone
+                    // is a small target, and merging the title/artist text into
+                    // the toggle node lets TalkBack read "song name, checkbox".
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .toggleable(
+                            value = checked,
+                            role = Role.Checkbox,
+                            onValueChange = { searchModel.setSelected(track, it) },
+                        )
+                        .padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(
+                        checked = checked,
+                        onCheckedChange = null,
+                    )
                         Column(Modifier.weight(1f)) {
                             Text(track.name, style = MaterialTheme.typography.titleSmall)
                             Text(
@@ -489,8 +555,14 @@ fun MusicScreen(
             }
             // "Load more" footer: once it scrolls into view the next page is
             // fetched automatically; it disappears entirely when the end of
-            // the result list was reached.
-            if (search.tracks.isNotEmpty() && !search.endReached) {
+            // the result list was reached or the provider cannot page at all
+            // (`supports_offset = false`: musicdl platforms, aggregate
+            // searches). Requesting another page there would only return the
+            // first page again or an empty one.
+            if (search.tracks.isNotEmpty() &&
+                !search.endReached &&
+                search.supportsOffset != false
+            ) {
                 item(key = "music-load-more") {
                     MusicLoadMoreFooter(
                         loadingMore = search.loadingMore,
@@ -501,7 +573,6 @@ fun MusicScreen(
             }
         }
     }
-}
 
 /**
  * Auto-trigger + status row for paged music search: fires [onLoadMore] once
@@ -568,12 +639,22 @@ private fun PlatformHealthBadge(
         }
         result != null && result.ok -> {
             val okText = stringResource(R.string.music_health_ok, result.elapsed_ms)
+            // #2E7D32 on white is ~5:1, but the same green on the dark navy
+            // surface drops to ~2:1; the lighter tone keeps the badge legible.
+            val okTint = if (isSystemInDarkTheme()) HealthOkDark else HealthOkLight
             HealthTooltip(tooltip = okText) {
-                Icon(
-                    Icons.Outlined.CheckCircle,
-                    contentDescription = okText,
-                    tint = HealthOkColor,
-                )
+                // 48 dp touch target around the 24 dp icon: the tooltip is
+                // opened with a long press, so the hit area must be tappable.
+                Box(
+                    modifier = Modifier.size(48.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Outlined.CheckCircle,
+                        contentDescription = okText,
+                        tint = okTint,
+                    )
+                }
             }
         }
         result != null -> {
@@ -582,11 +663,16 @@ private fun PlatformHealthBadge(
                 result.error.ifBlank { "-" },
             )
             HealthTooltip(tooltip = failedText) {
-                Icon(
-                    Icons.Outlined.Cancel,
-                    contentDescription = failedText,
-                    tint = MaterialTheme.colorScheme.error,
-                )
+                Box(
+                    modifier = Modifier.size(48.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Outlined.Cancel,
+                        contentDescription = failedText,
+                        tint = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
     }

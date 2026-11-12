@@ -18,14 +18,17 @@
     <string name="action_copy">Copy</string>
     <string name="action_add_to_queue">Add to download queue</string>
     <string name="state_loading">Loading…</string>
-    <string name="state_empty">Nothing here yet</string>
+    <string name="state_no_items">Nothing here yet</string>
     <string name="state_error">Error: %1$s</string>
-    <string name="state_ready">Ready</string>
     <string name="section_count">%1$s (%2$d)</string>
 
     <string name="api_error_not_configured">The API is not configured. Enter an API address in Settings first.</string>
     <string name="api_error_engine_unreachable">The built-in engine is not ready yet (starting or failed to start). Try again shortly; if it keeps failing, check the standalone engine status in Settings.</string>
     <string name="api_error_network">Network error: %1$s</string>
+    <string name="api_error_timeout">Request timed out: %1$s</string>
+    <string name="api_error_dns">Cannot resolve the server address (no network or wrong address): %1$s</string>
+    <string name="api_error_tls">Secure connection failed (certificate or TLS configuration): %1$s</string>
+    <string name="api_error_insecure_redirect">Blocked an insecure redirect (HTTPS was downgraded to plain HTTP)</string>
     <string name="api_error_bad_response">Invalid response format: %1$s</string>
     <string name="api_error_unknown">Request failed: %1$s</string>
 
@@ -120,6 +123,7 @@
     <string name="music_search_progress">Loaded %1$d / %2$d songs</string>
     <string name="music_loading_more">Loading more…</string>
     <string name="music_download_selected">Download selected</string>
+    <string name="music_select_all">Select all</string>
     <string name="music_job_progress">Downloading %1$d/%2$d</string>
     <string name="music_job_done">Done: %1$d succeeded, %2$d skipped, %3$d failed</string>
     <string name="music_job_failed">Job failed: %1$s</string>
@@ -188,6 +192,11 @@
     <string name="settings_download_dir_unavailable">The custom download directory is unavailable — pick it again in Settings</string>
     <string name="settings_download_dir_create_failed">Could not create a file in the custom download directory</string>
     <string name="settings_download_hint">Once a SAF directory is chosen, exported files are saved into its NovelDL subfolder; otherwise they go to the system Downloads directory.</string>
+    <string name="settings_section_notifications">Notifications</string>
+    <string name="settings_notifications_enabled">Task completion and failure alerts are shown</string>
+    <string name="settings_notifications_disabled">Notifications are off, so you will not be alerted when a task completes or fails. Enable them in system settings.</string>
+    <string name="settings_notifications_open">Open notification settings</string>
+    <string name="tasks_notification_off_hint">Notification permission is off, so finished tasks will not raise an alert</string>
     <string name="settings_standalone_title">Standalone engine (no PC needed)</string>
     <string name="settings_standalone_hint">Runs the full download engine on this device; ignores novel-api on your computer while on</string>
     <string name="settings_standalone_on">Standalone engine on — starting locally…</string>
@@ -211,6 +220,7 @@
     <string name="update_failed_checksum">Checksum verification failed; the file was deleted, please retry</string>
     <string name="update_failed_insecure">The download URL is not HTTPS, so the update was cancelled</string>
     <string name="update_failed_download">Download failed: %1$s</string>
+    <string name="update_failed_insufficient_space">Not enough free storage to download the update; free some space and retry</string>
     <string name="update_failed_install">Could not start the system installer</string>
     <string name="settings_section_update">Updates</string>
     <string name="settings_current_version">Current version: v%1$s</string>
