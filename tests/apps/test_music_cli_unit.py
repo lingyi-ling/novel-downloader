@@ -25,6 +25,10 @@ import pytest
 
 from novel_downloader.apps.cli.commands import music
 from novel_downloader.apps.cli.commands.music import MusicCmd
+from novel_downloader.apps.music.downloader import export_m3u as real_export_m3u
+
+#: UTF-8 byte-order mark the ``.m3u`` writer prepends to non-ASCII playlists.
+BOM = b"\xef\xbb\xbf"
 
 
 class FakeLoginExpired(Exception):
@@ -66,6 +70,7 @@ class FakeEngine:
         download_error: BaseException | None = None,
         export_result: str | None = None,
         export_error: BaseException | None = None,
+        export_writer: Any = None,
         health_results: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.provider = provider or FakeProvider([])
@@ -78,6 +83,8 @@ class FakeEngine:
         self.download_error = download_error
         self.export_result = export_result or ""
         self.export_error = export_error
+        # Optional drop-in for the real exporter, used by the encoding tests.
+        self.export_writer = export_writer
         self.health_results = health_results or {}
         self.created: list[str] = []
         self.download_calls: list[dict[str, Any]] = []
@@ -133,6 +140,15 @@ class FakeEngine:
         if self.export_error is not None:
             raise self.export_error
         self.export_calls.append((list(tracks), out_path))
+        if self.export_writer is not None:
+            return str(self.export_writer(tracks, out_path))
+        # The real exporter writes the playlist to the path it is given; the
+        # command hands it a sibling temp file and renames atomically.
+        with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("#EXTM3U\n")
+            for track in tracks:
+                fh.write(f"#EXTINF:185,{track.artists} - {track.name}\n")
+                fh.write(f"{track.path}\n")
         return self.export_result or out_path
 
     def health_check(self, key: str, keyword: str) -> dict[str, Any]:
@@ -157,11 +173,17 @@ def _run(
     args.func(args)
 
 
-def _track(index: int, *, path: str = "") -> SimpleNamespace:
+def _track(
+    index: int,
+    *,
+    path: str = "",
+    name: str | None = None,
+    artists: str = "Artist",
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=f"id{index}",
-        name=f"Song {index}",
-        artists="Artist",
+        name=name or f"Song {index}",
+        artists=artists,
         album="Album",
         duration_s=185,
         vip=index % 2 == 0,
@@ -274,6 +296,15 @@ def test_pick_tracks_unknown_value_exits_with_usage_error() -> None:
         music._pick_tracks(tracks, "9")
 
     assert excinfo.value.code == 2
+
+
+def test_normalize_platform_keeps_unknown_input_for_the_error_message() -> None:
+    engine = FakeEngine(labels=[("netease", "NetEase")])
+
+    assert music._normalize_platform(engine, " NETease ") == "netease"
+    assert music._normalize_platform(engine, "ALL") == "all"
+    assert music._normalize_platform(engine, "") == "all"
+    assert music._normalize_platform(engine, " BoGus ") == "BoGus"
 
 
 def test_is_logged_in_never_raises() -> None:
@@ -621,10 +652,20 @@ def test_export_m3u_writes_ready_tracks_to_default_path(
 
     _run(["music", "export-m3u", "-k", "hello"], monkeypatch, engine)
 
-    ready, out_path = engine.export_calls[0]
+    ready, temp_path = engine.export_calls[0]
     import os
 
-    assert out_path == os.path.join(str(tmp_path), "hello.m3u8")
+    playlist = os.path.join(str(tmp_path), "hello.m3u8")
+    # The exporter writes a sibling temp file; the command renames it into
+    # place only after the write completed.
+    assert os.path.dirname(temp_path) == str(tmp_path)
+    assert temp_path != playlist
+    # The temp file keeps the target extension so the exporter picks the
+    # right encoding (``.m3u8`` without BOM).
+    assert os.path.splitext(temp_path)[1] == ".m3u8"
+    assert os.path.isfile(playlist)
+    with open(playlist, encoding="utf-8") as fh:
+        assert fh.read().startswith("#EXTM3U\n")
     assert [track.id for track in ready] == ["id1"]
     captured = capsys.readouterr()
     assert "Exported 1 track(s)" in captured.out + captured.err
@@ -641,7 +682,30 @@ def test_export_m3u_out_flag_overrides_default(monkeypatch, tmp_path) -> None:
         engine,
     )
 
-    assert engine.export_calls[0][1] == str(target)
+    temp_path = engine.export_calls[0][1]
+    assert os.path.dirname(temp_path) == str(tmp_path)
+    assert temp_path != str(target)
+    assert os.path.splitext(temp_path)[1] == ".m3u8"
+    assert target.is_file()
+    assert target.read_text(encoding="utf-8").startswith("#EXTM3U\n")
+
+
+def test_export_m3u_platform_is_case_insensitive_and_aliased(
+    monkeypatch, tmp_path
+) -> None:
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1, path="a.mp3")]),
+        labels=[("netease", "国内 · 网易云音乐")],
+        settings={"out_dir": str(tmp_path)},
+    )
+
+    _run(
+        ["music", "export-m3u", "-k", "hello", "--platform", "WANGYIYUN"],
+        monkeypatch,
+        engine,
+    )
+
+    assert engine.created == ["netease"]
 
 
 def test_export_m3u_without_local_paths_fails(monkeypatch, capsys) -> None:
@@ -655,15 +719,71 @@ def test_export_m3u_without_local_paths_fails(monkeypatch, capsys) -> None:
     assert engine.export_calls == []
 
 
-def test_export_m3u_write_failure_exits(monkeypatch, capsys) -> None:
+def test_export_m3u_write_failure_exits(monkeypatch, capsys, tmp_path) -> None:
     provider = FakeProvider([_track(1, path="a.mp3")])
-    engine = FakeEngine(provider=provider, export_error=OSError("disk full"))
+    engine = FakeEngine(
+        provider=provider,
+        settings={"out_dir": str(tmp_path)},
+        export_error=OSError("disk full"),
+    )
 
     with pytest.raises(SystemExit) as excinfo:
         _run(["music", "export-m3u", "-k", "hello"], monkeypatch, engine)
 
     assert excinfo.value.code == 1
     assert "Could not write playlist" in capsys.readouterr().err
+    # No half-written target and no leftover temp file.
+    assert not (tmp_path / "hello.m3u8").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_export_m3u_directory_target_is_an_error(monkeypatch, capsys, tmp_path) -> None:
+    provider = FakeProvider([_track(1, path="a.mp3")])
+    engine = FakeEngine(provider=provider, settings={"out_dir": str(tmp_path)})
+    target = tmp_path / "playlist-dir"
+    target.mkdir()
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            ["music", "export-m3u", "-k", "hello", "--out", str(target)],
+            monkeypatch,
+            engine,
+        )
+
+    assert excinfo.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "Could not write playlist" in stderr
+    assert "Is a directory" in stderr
+    # The exporter is never asked to open a directory.
+    assert engine.export_calls == []
+
+
+def test_export_m3u_failure_keeps_existing_playlist(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    """A failed write must not truncate the previous good playlist."""
+    target = tmp_path / "custom.m3u8"
+    target.write_text("#EXTM3U\nold\n", encoding="utf-8")
+
+    class PartialWriter(FakeEngine):
+        def export_m3u(self, tracks: list[Any], out_path: str) -> str:
+            with open(out_path, "w", encoding="utf-8") as fh:
+                fh.write("#EXTMU")  # simulate a write that dies halfway
+            raise OSError("disk full")
+
+    engine = PartialWriter(provider=FakeProvider([_track(1, path="a.mp3")]))
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            ["music", "export-m3u", "-k", "hello", "--out", str(target)],
+            monkeypatch,
+            engine,
+        )
+
+    assert excinfo.value.code == 1
+    assert target.read_text(encoding="utf-8") == "#EXTM3U\nold\n"
+    # The failed attempt leaves nothing behind next to the old playlist.
+    assert [entry.name for entry in tmp_path.iterdir()] == ["custom.m3u8"]
 
 
 # --------------------------------------------------------------------------- #
@@ -716,6 +836,103 @@ def test_health_without_platforms_warns(monkeypatch, capsys) -> None:
 
     assert "No music platforms" in capsys.readouterr().err
     assert engine.health_calls == []
+
+
+def test_health_json_without_platforms_still_emits_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run(["music", "health", "--json"], monkeypatch, FakeEngine(labels=[]))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"keyword": "test", "platforms": [], "failed": 0}
+
+
+@pytest.mark.parametrize("platform", ["Netease", "163", "网易云音乐"])
+def test_health_platform_is_case_insensitive_and_aliased(
+    platform: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = FakeEngine(labels=[("netease", "国内 · 网易云音乐"), ("qq", "QQ音乐")])
+
+    _run(["music", "health", "--platform", platform], monkeypatch, engine)
+
+    assert engine.health_calls == [("netease", "test")]
+
+
+def test_health_all_keyword_checks_every_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = FakeEngine(labels=[("netease", "NetEase"), ("qq", "QQ")])
+
+    _run(["music", "health", "--platform", "ALL"], monkeypatch, engine)
+
+    assert engine.health_calls == [("netease", "test"), ("qq", "test")]
+
+
+def test_health_json_matches_documented_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = FakeEngine(
+        labels=[("netease", "NetEase"), ("qq", "QQ")],
+        health_results={
+            "netease": {"ok": True, "elapsed_ms": 12, "error": ""},
+            "qq": {"ok": False, "elapsed_ms": 34, "error": "timeout"},
+        },
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["music", "health", "--json"], monkeypatch, engine)
+
+    assert excinfo.value.code == 1
+    stdout = capsys.readouterr().out
+    # Single machine-readable document; the human table stays off stdout.
+    assert stdout.count("\n") == 1
+    assert "Music platform health" not in stdout
+    payload = json.loads(stdout)
+    assert payload["keyword"] == "test"
+    assert payload["failed"] == 1
+    assert payload["platforms"] == [
+        {"platform": "netease", "ok": True, "elapsed_ms": 12, "error": ""},
+        {"platform": "qq", "ok": False, "elapsed_ms": 34, "error": "timeout"},
+    ]
+
+
+def test_health_json_success_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = FakeEngine(labels=[("netease", "NetEase")])
+
+    _run(
+        ["music", "health", "--platform", "Netease", "--keyword", "probe", "--json"],
+        monkeypatch,
+        engine,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failed"] == 0
+    assert payload["platforms"][0]["platform"] == "netease"
+
+
+def test_health_check_exception_is_reported_not_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class RaisingEngine(FakeEngine):
+        def health_check(self, key: str, keyword: str) -> dict[str, Any]:
+            raise RuntimeError("probe exploded")
+
+    engine = RaisingEngine(labels=[("netease", "NetEase"), ("qq", "QQ")])
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["music", "health", "--json"], monkeypatch, engine)
+
+    assert excinfo.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["ok"] for item in payload["platforms"]] == [False, False]
+    assert "probe exploded" in payload["platforms"][0]["error"]
 
 
 # --------------------------------------------------------------------------- #
@@ -921,10 +1138,93 @@ def test_export_m3u_resolves_fresh_search_result_to_downloaded_file(
 
     _run(["music", "export-m3u", "-k", "hello"], monkeypatch, engine)
 
-    ready, out_path = engine.export_calls[0]
+    ready, temp_path = engine.export_calls[0]
+    playlist = os.path.join(str(tmp_path), "hello.m3u8")
     assert [track.path for track in ready] == [str(audio)]
-    assert out_path == os.path.join(str(tmp_path), "hello.m3u8")
+    assert os.path.dirname(temp_path) == str(tmp_path)
+    assert os.path.isfile(playlist)
     assert "Exported 1 track(s)" in capsys.readouterr().err
+
+
+def test_export_m3u_non_ascii_dot_m3u_gets_a_utf8_bom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """``--out x.m3u`` must keep the BOM the engine emits for non-ASCII text.
+
+    The command writes through a sibling temp file; if that file had a
+    generic ``.tmp`` suffix the exporter would see an unknown format and
+    write plain UTF-8, leaving Windows players to guess the code page.
+    """
+    target = tmp_path / "custom.m3u"
+    track = _track(1, path=str(tmp_path / "a.mp3"), name="晴天", artists="周杰伦")
+    engine = FakeEngine(
+        provider=FakeProvider([track]),
+        export_writer=real_export_m3u,
+    )
+
+    _run(
+        ["music", "export-m3u", "-k", "hello", "--out", str(target)],
+        monkeypatch,
+        engine,
+    )
+
+    temp_path = engine.export_calls[0][1]
+    assert os.path.splitext(temp_path)[1] == ".m3u"
+    raw = target.read_bytes()
+    assert raw.startswith(BOM + b"#EXTM3U\n")
+    text = raw.decode("utf-8-sig")
+    assert "#EXTINF:185,周杰伦 - 晴天" in text
+    # Only the final playlist remains.
+    assert [entry.name for entry in tmp_path.iterdir()] == ["custom.m3u"]
+
+
+def test_export_m3u_non_ascii_dot_m3u8_has_no_bom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    target = tmp_path / "custom.m3u8"
+    track = _track(1, path=str(tmp_path / "a.mp3"), name="晴天", artists="周杰伦")
+    engine = FakeEngine(
+        provider=FakeProvider([track]),
+        export_writer=real_export_m3u,
+    )
+
+    _run(
+        ["music", "export-m3u", "-k", "hello", "--out", str(target)],
+        monkeypatch,
+        engine,
+    )
+
+    temp_path = engine.export_calls[0][1]
+    assert os.path.splitext(temp_path)[1] == ".m3u8"
+    raw = target.read_bytes()
+    # ``.m3u8`` declares UTF-8: a BOM must not precede the header.
+    assert raw.startswith(b"#EXTM3U\n")
+    assert not raw.startswith(BOM)
+    assert "周杰伦 - 晴天" in raw.decode("utf-8")
+
+
+def test_export_m3u_ascii_dot_m3u_has_no_bom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    target = tmp_path / "custom.m3u"
+    track = _track(1, path=str(tmp_path / "a.mp3"))
+    engine = FakeEngine(
+        provider=FakeProvider([track]),
+        export_writer=real_export_m3u,
+    )
+
+    _run(
+        ["music", "export-m3u", "-k", "hello", "--out", str(target)],
+        monkeypatch,
+        engine,
+    )
+
+    raw = target.read_bytes()
+    assert raw.startswith(b"#EXTM3U\n")
+    assert not raw.startswith(BOM)
 
 
 def test_download_expands_tilde_in_out_dir(

@@ -213,6 +213,99 @@ def test_search_json_empty_result_is_still_valid_json(
     assert payload["total"] == 0
 
 
+def test_search_json_is_a_single_line_document(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scripts can scan one line and ``json.loads`` it without pretty parsing."""
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1)]), labels=[("netease", "NetEase")]
+    )
+
+    _run(
+        ["music", "search", "hello", "--platform", "netease", "--json"],
+        monkeypatch,
+        engine,
+    )
+
+    stdout = capsys.readouterr().out
+    assert stdout.count("\n") == 1
+    assert stdout.endswith("\n")
+    assert "\n" not in stdout.strip()
+    assert json.loads(stdout)["tracks"][0]["id"] == "id1"
+
+
+def test_search_json_keeps_warnings_on_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Platform notes are warnings: stdout stays a pure JSON document."""
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1)]),
+        labels=[("soda", "Soda")],
+        note="login required",
+    )
+
+    _run(
+        ["music", "search", "hello", "--platform", "soda", "--json"],
+        monkeypatch,
+        engine,
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["platform"] == "soda"
+    assert "login required" in captured.err
+    assert "login required" not in captured.out
+
+
+@pytest.mark.parametrize(
+    "platform",
+    ["Netease", "NETEASE", "163", "网易云音乐", "国内 · 网易云音乐", " netease "],
+)
+def test_search_platform_names_are_case_insensitive_and_aliased(
+    platform: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1)]),
+        labels=[("netease", "国内 · 网易云音乐")],
+    )
+
+    _run(
+        ["music", "search", "hello", "--platform", platform, "--json"],
+        monkeypatch,
+        engine,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    # The canonical key is echoed, and the provider was created with it.
+    assert payload["platform"] == "netease"
+    assert engine.created == ["netease"]
+
+
+def test_search_platform_all_is_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = FakeEngine(provider=FakeProvider([]))
+    calls: list[tuple[str, int]] = []
+
+    def fake_search_all(keyword: str, limit: int, *, show_status: bool):
+        calls.append((keyword, limit))
+        return [], 0, []
+
+    monkeypatch.setattr(music, "_search_all", fake_search_all)
+
+    _run(
+        ["music", "search", "hello", "--platform", "ALL", "--json"], monkeypatch, engine
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["platform"] == "all"
+    assert calls == [("hello", 20)]
+
+
 # ---------------------------------------------------------------------------
 # platforms
 # ---------------------------------------------------------------------------

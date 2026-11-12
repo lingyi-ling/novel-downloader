@@ -44,6 +44,75 @@ def _track(
     )
 
 
+class _ManualTimer:
+    """Stand-in for ``threading.Timer`` used by :class:`_ControlledClock`."""
+
+    def __init__(self, callback: Any) -> None:
+        self._callback = callback
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def run(self) -> None:
+        if not self.cancelled:
+            self._callback()
+
+
+class _ControlledClock:
+    """Deterministic replacement for :data:`aggregate._clock`.
+
+    The real clock makes a 50 ms search budget a scheduling race: on a loaded
+    machine even an instant provider can be slow enough to be reported as a
+    timeout. Here ``wait`` never sleeps -- a test-supplied hook decides when
+    the "budget" is considered elapsed -- and ``schedule`` records the
+    early-exit grace callback so the test fires it explicitly.
+    """
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._timers: list[_ManualTimer] = []
+        self.scheduled_delays: list[float] = []
+        self.wait_calls: list[float] = []
+        self._on_wait: Any = None
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def wait(self, event: threading.Event, timeout: float) -> bool:
+        self.wait_calls.append(timeout)
+        if self._on_wait is None:
+            return event.wait(timeout)
+        return bool(self._on_wait(event))
+
+    def schedule(self, delay: float, callback: Any) -> _ManualTimer:
+        timer = _ManualTimer(callback)
+        with self._cv:
+            self._timers.append(timer)
+            self.scheduled_delays.append(delay)
+            self._cv.notify_all()
+        return timer
+
+    def fire_scheduled(self) -> int:
+        """Run every recorded grace callback; returns how many ran."""
+        with self._cv:
+            timers, self._timers = self._timers, []
+        for timer in timers:
+            timer.run()
+        return len(timers)
+
+    def wait_for_schedule(self, deadline: float = 5.0) -> bool:
+        """Block until a grace callback is scheduled (or ``deadline``)."""
+        end = time.monotonic() + deadline
+        with self._cv:
+            while not self._timers:
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cv.wait(remaining)
+            return True
+
+
 # ---------------------------------------------------------------------------
 # merge_tracks
 # ---------------------------------------------------------------------------
@@ -178,15 +247,22 @@ def test_search_all_reports_timeouts(
     monkeypatch: pytest.MonkeyPatch, clean_breaker: Any
 ) -> None:
     monkeypatch.setattr(aggregate, "available", lambda: [("slow", "慢")])
+    # The provider cannot finish until the search returned: whether it is
+    # reported as a timeout no longer depends on how quickly it would have
+    # answered, only on the (explicitly elapsed) budget.
+    gate = threading.Event()
 
     class Slow:
         def search(self, keyword: str, limit: int = 30, offset: int = 0):
-            time.sleep(0.5)
+            gate.wait(timeout=10)
             return [_track(keyword, "A", "slow")], 1
 
     monkeypatch.setattr(aggregate, "create", lambda key: Slow())
 
-    result = aggregate.search_all("晴天", timeout=0.05)
+    try:
+        result = aggregate.search_all("晴天", timeout=0.05)
+    finally:
+        gate.set()
 
     assert result.tracks == []
     assert result.platforms[0].ok is False
@@ -422,21 +498,34 @@ def test_search_all_reports_partial_results(
     monkeypatch.setattr(
         aggregate, "available", lambda: [("fast", "快"), ("slow", "慢")]
     )
+    # Not the subject of this test: keep a slow worker from being cut off by
+    # the early-exit grace under heavy load.
+    monkeypatch.setattr(aggregate, "EARLY_EXIT_GRACE", 60.0)
 
     class Fast:
         def search(self, keyword: str, limit: int = 30, offset: int = 0):
             return [_track(keyword, "A", "fast")], 1
 
+    fast_visible = threading.Event()
+
     class Slow:
         def search(self, keyword: str, limit: int = 30, offset: int = 0):
-            time.sleep(0.15)
+            # Return only after the fast row has been delivered: the first
+            # snapshot must be the real partial state, not a race.
+            fast_visible.wait(timeout=5)
             return [_track(keyword, "B", "slow")], 1
 
     providers = {"fast": Fast(), "slow": Slow()}
     monkeypatch.setattr(aggregate, "create", lambda key, **kw: providers[key])
 
     snapshots: list[aggregate.AggregateResult] = []
-    result = aggregate.search_all("晴天", on_update=snapshots.append)
+
+    def on_update(partial: aggregate.AggregateResult) -> None:
+        snapshots.append(partial)
+        if any(item.platform == "fast" for item in partial.platforms):
+            fast_visible.set()
+
+    result = aggregate.search_all("晴天", on_update=on_update)
 
     assert result.tracks
     assert snapshots
@@ -596,10 +685,13 @@ def test_search_all_returns_early_after_a_usable_batch(
     monkeypatch: pytest.MonkeyPatch, clean_breaker: Any
 ) -> None:
     """A slow tail must not hold the whole search past the first usable batch."""
+    clock = _ControlledClock()
+    monkeypatch.setattr(aggregate, "_clock", clock)
     monkeypatch.setattr(aggregate, "EARLY_EXIT_GRACE", 0.1)
     monkeypatch.setattr(
         aggregate, "available", lambda: [("fast", "快"), ("slow", "慢")]
     )
+    gate = threading.Event()
 
     class Fast:
         def search(self, keyword: str, limit: int = 30, offset: int = 0):
@@ -607,17 +699,30 @@ def test_search_all_returns_early_after_a_usable_batch(
 
     class Slow:
         def search(self, keyword: str, limit: int = 30, offset: int = 0):
-            time.sleep(1.5)
+            gate.wait(timeout=10)
             return [_track(keyword, "B", "slow")], 1
 
     providers = {"fast": Fast(), "slow": Slow()}
     monkeypatch.setattr(aggregate, "create", lambda key, **kw: providers[key])
 
-    started = time.monotonic()
-    result = aggregate.search_all("晴天", timeout=5.0)
-    elapsed = time.monotonic() - started
+    def on_wait(event: threading.Event) -> bool:
+        # The first hit schedules the grace callback; fire it explicitly
+        # instead of waiting on the wall clock.
+        assert clock.wait_for_schedule(5.0)
+        clock.fire_scheduled()
+        return event.is_set()
 
-    assert elapsed < 1.0
+    clock._on_wait = on_wait
+
+    try:
+        result = aggregate.search_all("晴天", timeout=5.0)
+    finally:
+        gate.set()
+
+    # The real budget was never consumed: the wait ended because the grace
+    # callback fired.
+    assert clock.wait_calls == [5.0]
+    assert clock.scheduled_delays == [0.1]
     assert [item.platform for item in result.platforms] == ["fast"]
     # The omitted platform was not judged: it may simply have been mid-request.
     assert aggregate._breaker_open("slow") is False
@@ -636,6 +741,8 @@ def test_search_all_records_a_budget_timeout_in_the_breaker(
     monkeypatch.setattr(
         aggregate, "available", lambda: [("good", "好"), ("slow", "慢")]
     )
+    gate = threading.Event()
+    good_seen = threading.Event()
     calls: list[str] = []
 
     class Good:
@@ -644,7 +751,7 @@ def test_search_all_records_a_budget_timeout_in_the_breaker(
 
     class Slow:
         def search(self, keyword: str, limit: int = 30, offset: int = 0):
-            time.sleep(0.5)
+            gate.wait(timeout=10)
             return [_track(keyword, "B", "slow")], 1
 
     providers = {"good": Good(), "slow": Slow()}
@@ -655,7 +762,26 @@ def test_search_all_records_a_budget_timeout_in_the_breaker(
 
     monkeypatch.setattr(aggregate, "create", create)
 
-    first = aggregate.search_all("晴天", timeout=0.05)
+    clock = _ControlledClock()
+
+    def on_wait(event: threading.Event) -> bool:
+        # The "good" row has been delivered; the gated platform never can,
+        # so this is a genuine budget expiry rather than a scheduling race.
+        assert good_seen.wait(5.0)
+        return event.is_set()
+
+    clock._on_wait = on_wait
+    monkeypatch.setattr(aggregate, "_clock", clock)
+
+    def on_update(partial: aggregate.AggregateResult) -> None:
+        if any(item.platform == "good" for item in partial.platforms):
+            good_seen.set()
+
+    try:
+        first = aggregate.search_all("晴天", timeout=0.05, on_update=on_update)
+    finally:
+        gate.set()
+
     outcomes = {item.platform: item for item in first.platforms}
     assert outcomes["good"].ok is True
     assert outcomes["slow"].ok is False
@@ -667,7 +793,8 @@ def test_search_all_records_a_budget_timeout_in_the_breaker(
     assert aggregate._load_stats()["slow"]["last_ms"] == 100  # clamped 0.1s budget
 
     calls.clear()
-    second = aggregate.search_all("晴天", timeout=0.05)
+    good_seen.clear()
+    second = aggregate.search_all("晴天", timeout=0.05, on_update=on_update)
     assert calls == ["good"]  # the timed-out platform is skipped
     assert [item.platform for item in second.platforms] == ["good"]
 
@@ -702,6 +829,9 @@ def test_search_all_starts_every_platform_with_a_small_worker_pool(
     monkeypatch.setattr(
         aggregate, "available", lambda: [("a", "A"), ("b", "B"), ("c", "C")]
     )
+    # Every platform must be delivered; do not let the grace timer win a
+    # scheduling race on a loaded machine.
+    monkeypatch.setattr(aggregate, "EARLY_EXIT_GRACE", 60.0)
     calls: list[str] = []
 
     class Provider:
@@ -726,6 +856,7 @@ def test_search_all_total_counts_songs_before_limit(
 ) -> None:
     """``AggregateResult.total`` documents the pre-limit match count."""
     monkeypatch.setattr(aggregate, "available", lambda: [("a", "A")])
+    monkeypatch.setattr(aggregate, "EARLY_EXIT_GRACE", 60.0)
 
     class Provider:
         def search(self, keyword: str, limit: int = 30, offset: int = 0):
@@ -760,13 +891,14 @@ def test_save_stats_is_safe_under_concurrent_writes(
         {"a": {"ok": True, "last_ms": 1, "failed_until": 0.0}},
     )
 
-    # Write the JSON in two halves with a delay so two writers would overlap.
+    # Write the JSON in two halves with a flush between them. The save path
+    # holds its lock across the whole write, so writers are serialised; this
+    # exercises that without a sleep-based overlap window.
     def slow_dump(obj: Any, fh: Any, **kwargs: Any) -> None:
         text = json.dumps(obj, **kwargs)
         cut = max(1, len(text) // 2)
         fh.write(text[:cut])
         fh.flush()
-        time.sleep(0.05)
         fh.write(text[cut:])
 
     monkeypatch.setattr(aggregate.json, "dump", slow_dump)
@@ -787,6 +919,8 @@ def test_save_stats_is_safe_under_concurrent_writes(
     assert errors == []
     payload = json.loads((tmp_path / "search_stats.json").read_text(encoding="utf-8"))
     assert payload["platforms"]["a"]["ok"] is True
+    # Atomic replace: no half-written temp file may survive.
+    assert list(tmp_path.glob("search_stats.json.*.tmp")) == []
 
 
 def test_search_all_serializes_progressive_updates(
@@ -810,6 +944,8 @@ def test_search_all_serializes_progressive_updates(
     monkeypatch.setattr(
         aggregate, "available", lambda: [("a", "A"), ("b", "B"), ("c", "C"), ("d", "D")]
     )
+    # All four callbacks must be delivered, so keep the grace timer out of it.
+    monkeypatch.setattr(aggregate, "EARLY_EXIT_GRACE", 60.0)
     monkeypatch.setattr(aggregate, "create", lambda key, **kw: Provider(key))
 
     guard = threading.Lock()
@@ -822,7 +958,6 @@ def test_search_all_serializes_progressive_updates(
             active["now"] += 1
             active["max"] = max(active["max"], active["now"])
         sizes.append(len(partial.platforms))
-        time.sleep(0.03)
         with guard:
             active["now"] -= 1
             if len(sizes) >= 4:
