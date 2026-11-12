@@ -46,7 +46,14 @@ class SearchCmd(Command):
             metavar="SITE",
             help=t("Restrict search to specific site key(s). Default: all sites."),
         )
-        parser.add_argument("keyword", help=t("Search keyword"))
+        # ``nargs="+"`` accepts an unquoted "title author" query, which is the
+        # form the multi-word ranking feature expects; the parts are joined
+        # with single spaces in ``run``.
+        parser.add_argument(
+            "keyword",
+            nargs="+",
+            help=t("Search keyword"),
+        )
         parser.add_argument(
             "--config", type=str, help=t("Path to the configuration file")
         )
@@ -110,8 +117,20 @@ class SearchCmd(Command):
 
     @classmethod
     def run(cls, args: Namespace) -> None:
+        # Shell users may type the keyword unquoted ("斗破苍穹 天蚕土豆"), so
+        # the parser produces one item per word; the ranking layer expects a
+        # single normalized string. A blank query is a usage error, not a
+        # request to search every site for nothing.
+        raw_keyword = args.keyword
+        if isinstance(raw_keyword, (list, tuple)):
+            keyword = " ".join(str(part) for part in raw_keyword)
+        else:
+            keyword = str(raw_keyword or "")
+        keyword = keyword.strip()
+        if not keyword:
+            fail(t("No keyword entered."), EXIT_USAGE)
+
         sites: Sequence[str] | None = args.site or None
-        keyword: str = args.keyword
         formats: list[str] | None = args.format
         as_json: bool = bool(args.as_json)
         interactive = not as_json
@@ -143,15 +162,17 @@ class SearchCmd(Command):
             # ``search()`` is the aggregate (non-streaming) call, so its
             # ``completed``/``failed`` events arrive in one burst when every
             # site has finished; the browser-assistance events arrive earlier,
-            # while the searchers are prepared.  Either way each event is a
-            # per-site status line on stderr, keeping stdout machine readable.
+            # while the searchers are prepared.  Human mode prints one line per
+            # event on stderr; JSON mode suppresses the per-site lines and
+            # keeps only the closing tally on stderr, so stdout stays pure.
             events: list[SearchEvent] = []
 
             def _on_event(event: SearchEvent) -> None:
                 """Record one per-site search event and echo it on stderr."""
                 events.append(event)
                 if as_json:
-                    # Keep stdout parseable: no per-site lines in JSON mode.
+                    # JSON consumers get one summary line on stderr; per-site
+                    # chatter is suppressed, and stdout stays pure JSON.
                     return
                 if event.kind == "completed":
                     count = 0 if event.result_count is None else event.result_count
@@ -205,9 +226,20 @@ class SearchCmd(Command):
                     group=group_results_flag,
                 )
                 _print_search_summary()
+                if not results and not _every_site_failed():
+                    # An empty array is a valid document, but it does not say
+                    # why it is empty. Echo the (possibly multi-word) keyword
+                    # on stderr so "no such book" is distinguishable from an
+                    # outage, mirroring the human-readable path below.
+                    ui.warn(
+                        t("No results found for '{keyword}'.").format(keyword=keyword)
+                    )
                 # The document is emitted first so a machine consumer still
                 # gets its (empty) payload; the non-zero exit reports the outage.
-                ui.emit(json.dumps(list(results), ensure_ascii=False, indent=2))
+                # Compact separators keep stdout on exactly one line.
+                ui.emit(
+                    json.dumps(list(results), ensure_ascii=False, separators=(",", ":"))
+                )
                 if _every_site_failed():
                     raise SystemExit(EXIT_FAILURE)
                 return

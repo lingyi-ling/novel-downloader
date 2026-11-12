@@ -39,8 +39,11 @@ batch run (and it is owned by a concurrent change).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import difflib
+import os
 import re
+import tempfile
 import time
 import unicodedata
 from argparse import ArgumentParser, Namespace
@@ -276,14 +279,19 @@ class BatchCmd(Command):
         # the documented "switch site and retry" workflow. "all" means the
         # previous run searched every site, i.e. there is no site to reuse.
         site: str | None = args.site
-        if site is None and from_not_found:
+        if site is not None:
+            # Validate even an empty/blank explicit value: silently falling
+            # back to "search every site" would hide a prompting/script bug.
+            site = require_safe_site(site)
+        elif from_not_found:
             hint = parsed.site_hint
             site = hint if hint and hint != "all" else None
+            if site is not None:
+                # The key can come from a not-found file header, i.e. from a
+                # file the user may have edited by hand; it is joined onto the
+                # raw-data root, so refuse escaping values like ``--site`` does.
+                site = require_safe_site(site)
         if site:
-            # The key can come from a not-found file header, i.e. from a file
-            # the user may have edited by hand; it is joined onto the raw-data
-            # root, so refuse escaping values like ``--site`` does.
-            require_safe_site(site)
             ui.info(t("Using site: {site}").format(site=site))
 
         _report_input_problems(parsed)
@@ -620,22 +628,36 @@ async def _match_entries(
     """
     outcomes: list[MatchOutcome] = []
     total = len(entries)
+    # A hand-maintained list often repeats a line (copy/paste, merge). The
+    # result for an identical normalized title/author pair is the same, so a
+    # duplicate must not cost a second search (or a second rate-limit hit).
+    # The original entries -- and therefore progress lines and counts -- are
+    # kept: only the network round trip is skipped.
+    seen: dict[tuple[str, str | None], MatchOutcome] = {}
     for index, entry in enumerate(entries, 1):
-        if interval > 0 and index > 1:
-            await asyncio.sleep(interval)
-        try:
-            results = await _search_one(entry, site)
-        except Exception as err:
-            # A site may be down or a rule may be broken; that must not abort
-            # the rest of the batch. The entry is reported as not found.
-            ui.warn(
-                t("Search failed for '{title}': {err}").format(
-                    title=entry.title, err=err
+        key = (
+            normalize_text(entry.title),
+            normalize_text(entry.author) if entry.author else None,
+        )
+        outcome = seen.get(key)
+        if outcome is None:
+            if interval > 0 and index > 1:
+                await asyncio.sleep(interval)
+            try:
+                results = await _search_one(entry, site)
+            except Exception as err:
+                # A site may be down or a rule may be broken; that must not
+                # abort the rest of the batch. The entry is reported as not
+                # found.
+                ui.warn(
+                    t("Search failed for '{title}': {err}").format(
+                        title=entry.title, err=err
+                    )
                 )
-            )
-            results = []
+                results = []
 
-        outcome = select_match(entry, results, strict=strict)
+            outcome = select_match(entry, results, strict=strict)
+            seen[key] = outcome
         outcomes.append(outcome)
         _report_outcome(index, total, entry, outcome)
         if verbose:
@@ -852,8 +874,26 @@ def _write_not_found(
         lines.append(f"# malformed line {item.line_no}: {item.text}")
     lines.append(_END_MARKER)
 
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write("\n".join(lines) + "\n")
+    # Write to a sibling temporary file and move it into place, so an
+    # interrupted run never truncates a previous report halfway: the old file
+    # stays readable and the next ``--from-not-found`` retry sees either the
+    # complete old report or the complete new one.
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(lines) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
 
 
 def _format_entry(entry: BatchEntry) -> str:
@@ -917,7 +957,15 @@ def _download_matches(
                 site=site, index=index, total=total
             )
         )
-        report = _download_site(adapter, site, book_ids)
+        try:
+            report = _download_site(adapter, site, book_ids)
+        except Exception as err:
+            # ``_download_site`` isolates per-book errors itself; this guard
+            # covers everything before that (client/config construction) so a
+            # broken site cannot abort the sites after it.
+            ui.error(t("Site error ({site}): {err}").format(site=site, err=err))
+            site_failures += 1
+            continue
         site_failures += report.site_failures
         incomplete_books += report.incomplete_books
     return DownloadReport(
@@ -944,8 +992,19 @@ def _download_site(
     :param book_ids: Book identifiers to download, in input order.
     :return: Per-site report (hard failure count and incomplete book count).
     """
-    client = registrar.get_client(site, adapter.get_client_config(site))
-    books = [BookConfig(book_id=book_id) for book_id in book_ids]
+    try:
+        client = registrar.get_client(site, adapter.get_client_config(site))
+        books = [BookConfig(book_id=book_id) for book_id in book_ids]
+    except ValueError as err:
+        # Same message as the in-download ValueError path below; the client
+        # could not even be built, so this site contributes nothing.
+        ui.warn(
+            t("'{site}' is currently not supported: {err}").format(site=site, err=err)
+        )
+        return DownloadReport(site_failures=1)
+    except Exception as err:
+        ui.error(t("Site error ({site}): {err}").format(site=site, err=err))
+        return DownloadReport(site_failures=1)
     login_ui = CLILoginUI()
     download_ui = CLIDownloadUI()
     login_failed = False
@@ -1009,6 +1068,18 @@ def _download_site(
     if not download_ui.completed_books:
         ui.error(t("No books were downloaded from {site}.").format(site=site))
         return DownloadReport(site_failures=1)
+
+    # A download that returned without calling ``ui.on_complete`` (the client
+    # found nothing to do, e.g. an empty chapter plan) is not a success. With
+    # other books completed the old loop skipped it silently and reported the
+    # site as fine; count it as a hard failure instead.
+    for book in books:
+        if book in download_ui.completed_books or book in failed_books:
+            continue
+        failed_books.add(book)
+        ui.error(
+            t("No chapters downloaded for book {book_id}.").format(book_id=book.book_id)
+        )
 
     process_ui = CLIProcessUI()
     export_ui = CLIExportUI()

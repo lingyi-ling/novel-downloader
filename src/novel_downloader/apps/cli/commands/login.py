@@ -10,6 +10,7 @@ searched without pasting cookies by hand.
 
 from __future__ import annotations
 
+import math
 from argparse import ArgumentParser, Namespace
 
 from novel_downloader.apps.cli import ui
@@ -63,7 +64,16 @@ class LoginCmd(Command):
             # unsupported language.
             raise SystemExit(EXIT_USAGE)
 
-        if run_login(site, timeout=float(args.timeout)):
+        timeout = float(args.timeout)
+        if not math.isfinite(timeout) or timeout <= 0:
+            # ``inf`` would otherwise make the login deadline unreachable.
+            ui.error(
+                f"{t('Invalid input.')} "
+                "(--timeout must be a finite number greater than zero)"
+            )
+            raise SystemExit(EXIT_USAGE)
+
+        if run_login(site, timeout=timeout):
             ui.success(
                 t("Session cookies saved to {path}").format(path=site_cache_dir(site))
             )

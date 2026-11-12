@@ -55,20 +55,30 @@ three states in :meth:`ProgressUI.start` and reports it through
 from __future__ import annotations
 
 import logging
+import os
+import re
 import sys
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from typing import IO, Any, cast
 
 from rich.console import Console
 from rich.markup import escape
 from rich.progress import Progress, TaskID
 from rich.prompt import Confirm, Prompt
+from rich.segment import Segment
 from rich.status import Status
 
 from novel_downloader.infra.i18n import t
+from novel_downloader.infra.logger import (
+    FILE_LOG_FORMAT,
+    RedactingFilter,
+    RedactingFormatter,
+    install_root_redaction,
+)
 from novel_downloader.infra.paths import PACKAGE_NAME
 
 #: A live bar owns the screen and redraws it in place.
@@ -85,9 +95,114 @@ _TEXT_STEP_PERCENT = 10
 _MUTE_LOGGERS: set[str] = {
     "fontTools.ttLib.tables._p_o_s_t",
 }
+
+#: Any CSI sequence: colour and text attributes (bold/underline) both use it.
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+class _SafeStream:
+    """
+    A text-stream proxy that cannot fail on an unencodable character.
+
+    Legacy Windows consoles and streams opened with a narrow code page
+    (cp936, cp1252, ...) raise ``UnicodeEncodeError`` for emoji or even CJK.
+    Diagnostics and progress must never kill a download that already
+    succeeded, so only the offending characters are retried as backslash
+    escapes (``\\U0001f3b5``) while the rest of the message stays readable.
+
+    The target is resolved on every call: Rich resolves ``sys.stderr``
+    dynamically, and pytest capture fixtures swap the stream after this
+    module is imported.
+    """
+
+    def __init__(self, resolve: Callable[[], IO[str]]) -> None:
+        self._resolve = resolve
+
+    def write(self, text: str) -> int:
+        stream = self._resolve()
+        try:
+            return stream.write(text)
+        except UnicodeEncodeError:
+            encoding = getattr(stream, "encoding", None) or "ascii"
+            safe = text.encode(encoding, "backslashreplace").decode(encoding, "replace")
+            if safe == text:  # pragma: no cover - a raising write changed text
+                raise
+            try:
+                return stream.write(safe)
+            except (OSError, ValueError, UnicodeError):
+                return len(text)
+
+    def flush(self) -> None:
+        with suppress(OSError, ValueError):
+            self._resolve().flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._resolve(), name)
+
+
+class _CLIConsole(Console):
+    """Console that strips escape sequences when its stream is not a TTY."""
+
+    def _render_buffer(self, buffer: Iterable[Segment]) -> str:
+        rendered = super()._render_buffer(buffer)
+        if self.is_terminal:
+            return rendered
+        # A console built while the stream was a terminal keeps its cached
+        # colour system. Once the stream is redirected (``tee``, CI, an
+        # embedder swapping ``sys.stderr``) that cache would leak ANSI into
+        # the new sink, so drop it here.
+        return _ANSI_ESCAPE_RE.sub("", rendered)
+
+
+def _build_console(
+    *, file: IO[str] | None = None, width: int | None = None
+) -> _CLIConsole:
+    """
+    Build the diagnostics console with an explicit colour policy.
+
+    Rich honours ``NO_COLOR`` and treats a non-empty ``FORCE_COLOR`` as
+    "pretend to be a terminal", but two gaps matter to the CLI:
+
+    * ``FORCE_COLOR=0`` (and an empty value) means *disable* colour per
+      https://force-color.org/, whereas Rich's ``is_terminal`` treats any
+      non-empty value -- including ``"0"`` -- as "force a terminal". That
+      would put ANSI escapes into a redirected log.
+    * Rich's ``no_color=True`` only strips colour; bold/underline attributes
+      still emit CSI sequences. ``color_system=None`` is what guarantees a
+      plain stream for ``NO_COLOR`` users.
+
+    :param file: Stream to write to; defaults to the current ``sys.stderr``.
+    :param width: Fixed console width; defaults to Rich's terminal detection.
+    :return: A console whose writes cannot raise ``UnicodeEncodeError``.
+    """
+    force_color = os.environ.get("FORCE_COLOR")
+    no_color = bool(os.environ.get("NO_COLOR"))
+    force_terminal: bool | None = None
+    if force_color is not None:
+        if force_color in ("", "0"):
+            no_color = True
+            force_terminal = False
+        else:
+            force_terminal = True
+
+    stream = cast(IO[str], _SafeStream(lambda: sys.stderr if file is None else file))
+    if no_color:
+        return _CLIConsole(
+            file=stream,
+            width=width,
+            stderr=True,
+            no_color=True,
+            color_system=None,
+            force_terminal=force_terminal,
+        )
+    return _CLIConsole(
+        file=stream, width=width, stderr=True, force_terminal=force_terminal
+    )
+
+
 # Diagnostics (tables, spinners, warnings) go to stderr so that data printed on
 # stdout -- e.g. ``search --json`` -- stays machine readable.
-_CONSOLE = Console(stderr=True)
+_CONSOLE = _build_console()
 
 
 def _stream_is_tty(stream: object) -> bool:
@@ -412,18 +527,30 @@ def emit(text: str) -> None:
     with a traceback after an otherwise successful search. Fall back to the
     byte buffer with an explicit UTF-8 encoding; the text path is kept for
     streams that can encode the payload (terminals, test capture objects).
+    A lone surrogate is not valid UTF-8 either, so the byte path escapes
+    only what UTF-8 cannot represent instead of raising a second time.
     """
     try:
         print(text)
     except UnicodeEncodeError:
-        buffer = getattr(sys.stdout, "buffer", None)
-        if buffer is None:
-            raise
-        # Flush the text layer first so the byte write cannot overtake it.
-        with suppress(OSError, ValueError):
-            sys.stdout.flush()
-        buffer.write((text + "\n").encode("utf-8"))
-        buffer.flush()
+        stream = sys.stdout
+        buffer = getattr(stream, "buffer", None)
+        if buffer is not None:
+            # Flush the text layer first so the byte write cannot overtake it.
+            with suppress(OSError, ValueError):
+                stream.flush()
+            payload = (text + "\n").encode("utf-8", "backslashreplace")
+            buffer.write(payload)
+            buffer.flush()
+            return
+        # No byte buffer to escape through (an embedder replaced sys.stdout
+        # with a strict legacy-code-page writer). Keep a successful command
+        # alive by escaping only what that code page cannot represent.
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        safe = text.encode(encoding, "backslashreplace").decode(encoding, "replace")
+        with suppress(OSError, ValueError, UnicodeError):
+            stream.write(safe + "\n")
+            stream.flush()
 
 
 def info(message: str) -> None:
@@ -779,6 +906,16 @@ def setup_logging(
     backup_count: int = 7,
     when: str = "midnight",
 ) -> logging.Logger:
+    """
+    Configure the package logger for a CLI command.
+
+    The file handler and the Rich console handler both format records through
+    :class:`~novel_downloader.infra.logger.RedactingFormatter`; the console
+    additionally filters the record itself because Rich renders tracebacks
+    without the formatter.  Third-party loggers are covered separately at the
+    root logger.  Calling this function again replaces (and closes) the
+    previous handlers instead of stacking new ones.
+    """
     # Tame noisy third-party loggers
     for name in _MUTE_LOGGERS:
         ml = logging.getLogger(name)
@@ -789,9 +926,12 @@ def setup_logging(
     logger.setLevel(logging.DEBUG)
     logger.propagate = False  # otherwise may affected by PaddleOCR
 
-    # Clear existing handlers to avoid duplicate logs
-    if logger.hasHandlers():
-        logger.handlers.clear()
+    # Replace handlers from a previous call. Closing them first releases the
+    # file descriptor (and the Windows file lock) instead of leaking it.
+    for handler in logger.handlers[:]:
+        with suppress(Exception):
+            handler.close()
+    logger.handlers.clear()
 
     # File handler (rotates daily)
     if file:
@@ -812,8 +952,8 @@ def setup_logging(
             delay=True,
         )
 
-        file_formatter = logging.Formatter(
-            fmt="%(asctime)s [%(levelname)s] %(name)s.%(funcName)s: %(message)s",
+        file_formatter = RedactingFormatter(
+            fmt=FILE_LOG_FORMAT,
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         fh.setFormatter(file_formatter)
@@ -836,7 +976,13 @@ def setup_logging(
             show_path=False,
             log_time_format="%H:%M:%S",
         )
-        ch.setFormatter(logging.Formatter("%(message)s"))
+        ch.setFormatter(RedactingFormatter("%(message)s"))
+        # Rich renders ``record.exc_info`` without going through the formatter,
+        # so the record itself has to be sanitized before Rich sees it.
+        ch.addFilter(RedactingFilter())
         ch.setLevel(console_level)
         logger.addHandler(ch)
+
+    # Third-party libraries log through the root logger, not the package one.
+    install_root_redaction()
     return logger

@@ -12,6 +12,7 @@ unsupported instead of failing with an ``AttributeError``.
 from __future__ import annotations
 
 import json
+import sys
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,23 @@ from .base import EXIT_FAILURE, EXIT_USAGE, Command, expand_path, fail
 
 #: ``--gender`` spellings mapped onto the site's numeric audience code.
 _GENDERS = {"male": "1", "female": "2", "1": "1", "2": "2"}
+
+
+def _stdin_is_tty() -> bool:
+    """
+    Whether stdin can answer a selection prompt.
+
+    A redirected/closed stdin (pipe, CI job, service) either blocks forever or
+    hits EOF immediately, so the command must not enter interactive selection
+    on it. Streams missing ``isatty`` (or raising from it) count as non-TTY.
+    """
+    isatty = getattr(sys.stdin, "isatty", None)
+    if isatty is None:
+        return False
+    try:
+        return bool(isatty())
+    except (OSError, ValueError):
+        return False
 
 
 class BrowseCmd(Command):
@@ -160,6 +178,18 @@ class BrowseCmd(Command):
             ui.warn(t("No entries returned by '{site}'.").format(site=site))
             return
 
+        # Selecting an entry needs a real prompt. Piped/CI stdin cannot answer
+        # it (EOF cancels silently, an idle pipe hangs), so refuse up front --
+        # ``--first`` and ``--json`` are the documented non-interactive paths.
+        if not args.first and not _stdin_is_tty():
+            fail(
+                t(
+                    "Interactive selection requires a terminal; "
+                    "pass the required arguments explicitly."
+                ),
+                EXIT_USAGE,
+            )
+
         ui.info(
             t("Found {count} entr(y/ies) on '{site}'.").format(
                 count=len(results), site=site
@@ -209,12 +239,19 @@ def _print_categories(site: str, groups: Any, *, as_json: bool) -> None:
     if as_json:
         ui.emit(json.dumps(groups, ensure_ascii=False, indent=2))
         return
-    groups = groups or {}
-    if not groups:
+    # Provider output is remote data: a plugin returning a list (or entries
+    # that are not mappings) must degrade to a warning, not an
+    # ``AttributeError`` traceback out of the command.
+    if not isinstance(groups, dict) or not groups:
         ui.warn(t("No browse categories returned by '{site}'.").format(site=site))
         return
     for audience, entries in groups.items():
         label = {"male": t("Male"), "female": t("Female")}.get(audience, audience)
-        ui.info(t("{name} ({count})").format(name=label, count=len(entries)))
-        for entry in entries:
-            ui.emit(f"  {entry['id']}\t{entry['name']}")
+        rows = (
+            [entry for entry in entries if isinstance(entry, dict)]
+            if isinstance(entries, (list, tuple))
+            else []
+        )
+        ui.info(t("{name} ({count})").format(name=label, count=len(rows)))
+        for entry in rows:
+            ui.emit(f"  {entry.get('id', '')}\t{entry.get('name', '')}")

@@ -74,6 +74,24 @@ class _RanklessSearcher:
         self.session = session
 
 
+class _BrokenCategoriesSearcher(_StubSearcher):
+    """Hands the CLI a categories payload of an unexpected shape."""
+
+    async def categories(self) -> Any:  # type: ignore[override]
+        _StubSearcher.calls.append(("categories",))
+        # A provider bug (list instead of the documented mapping) must be a
+        # warning, not an ``AttributeError`` traceback out of the command.
+        return [{"id": "1", "name": "西方奇幻"}]
+
+
+class _InterruptingSearcher(_StubSearcher):
+    """Simulates Ctrl+C while the fetch is in flight."""
+
+    async def rank(self, limit: int = 10) -> list[SearchResult]:
+        _StubSearcher.calls.append(("rank", limit))
+        raise KeyboardInterrupt
+
+
 def _parser() -> ArgumentParser:
     parser = ArgumentParser(prog="novel-cli", add_help=False)
     sub = parser.add_subparsers(dest="command")
@@ -240,6 +258,66 @@ def test_browse_first_delegates_to_download_and_propagates_its_exit_code(
     assert seen["args"].site == "fanqienovel"
     assert seen["args"].book_ids == [_ROWS[0]["book_id"]]
     assert seen["args"].no_export is False
+
+
+def test_browse_categories_payload_of_the_wrong_shape_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Malformed provider output must not leak an ``AttributeError``."""
+    _env(monkeypatch, tmp_path, cls=_BrokenCategoriesSearcher)
+    warnings: list[str] = []
+    monkeypatch.setattr(browse.ui, "warn", warnings.append)
+
+    args = _parser().parse_args(["browse", "fanqienovel", "--categories"])
+    args.func(args)  # must return normally
+
+    assert any("No browse categories" in message for message in warnings)
+
+
+def test_browse_interactive_selection_requires_a_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Piped/CI stdin cannot answer the selection prompt; fail as usage."""
+    _env(monkeypatch, tmp_path)
+    errors: list[str] = []
+    monkeypatch.setattr(browse.ui, "error", errors.append)
+    monkeypatch.setattr(browse, "_stdin_is_tty", lambda: False)
+
+    args = _parser().parse_args(["browse", "fanqienovel"])
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    assert excinfo.value.code == 2
+    assert any("requires a terminal" in message for message in errors)
+
+
+def test_browse_first_skips_the_terminal_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``--first`` is the documented non-interactive path."""
+    from novel_downloader.apps.cli.commands.download import DownloadCmd
+
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(browse, "_stdin_is_tty", lambda: False)
+    monkeypatch.setattr(DownloadCmd, "run", classmethod(lambda _cls, _args: None))
+
+    args = _parser().parse_args(["browse", "fanqienovel", "--first"])
+    args.func(args)  # must not raise SystemExit
+
+
+def test_browse_propagates_ctrl_c(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ctrl+C is handled by ``cli_main`` (Aborted., exit 1), not swallowed."""
+    _env(monkeypatch, tmp_path, cls=_InterruptingSearcher)
+
+    args = _parser().parse_args(["browse", "fanqienovel", "--json"])
+    with pytest.raises(KeyboardInterrupt):
+        args.func(args)
 
 
 def test_browse_namespace_exposes_every_option() -> None:

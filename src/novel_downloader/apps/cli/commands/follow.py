@@ -32,6 +32,7 @@ worker task outlives the CLI process).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 from argparse import ArgumentParser, Namespace, _SubParsersAction
@@ -54,6 +55,7 @@ from .base import (
     EXIT_USAGE,
     Command,
     fail,
+    is_safe_path_component,
     localize_help,
     require_safe_book_id,
     require_safe_site,
@@ -79,9 +81,13 @@ def _make_store() -> WatchlistStore:
     return WatchlistStore()
 
 
-def _reject_unreadable_watchlist(store: WatchlistStore) -> None:
+def _reject_unreadable_watchlist(
+    store: WatchlistStore,
+    *,
+    allow_unusable: bool = False,
+) -> int:
     """
-    Refuse to mutate a watchlist file that cannot be decoded.
+    Validate the watchlist file before it is read, mutated or rewritten.
 
     :class:`WatchlistStore` deliberately treats a corrupt file as an empty
     list so read-only commands (and the desktop) keep working. For ``add`` and
@@ -90,34 +96,59 @@ def _reject_unreadable_watchlist(store: WatchlistStore) -> None:
     whatever the old file held. A mutation therefore checks the raw document
     first and stops with the parse error instead.
 
+    Entries that cannot be used (no ``site``/``book_id``, or values that would
+    escape the data directory) are just as destructive: ``_read`` drops them,
+    and the next rewrite would silently persist that loss. Mutating commands
+    therefore refuse them; ``follow check`` passes ``allow_unusable=True`` so
+    the valid entries are still checked while the unusable ones are reported.
+
     An empty file is accepted: it has no entries to lose, so writing a fresh
     document is the desired recovery.
 
-    :param store: Store whose backing file is about to be modified.
+    :param store: Store whose backing file is about to be read or modified.
+    :param allow_unusable: Return the unusable count instead of exiting.
+    :return: Number of unusable entries (``0`` unless ``allow_unusable``).
     """
     path = store.path
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return
+        return 0
     except OSError as exc:
         fail(t("Could not read {path}: {err}").format(path=path, err=exc))
 
     if not text.strip():
-        return
+        return 0
 
     try:
         document = json.loads(text)
     except ValueError as exc:
         fail(t("Could not read {path}: {err}").format(path=path, err=exc))
 
-    usable = isinstance(document, list) or (
-        isinstance(document, dict) and isinstance(document.get("books"), list)
-    )
-    if not usable:
+    if isinstance(document, dict):
+        raw_entries = document.get("books")
+    elif isinstance(document, list):
+        raw_entries = document
+    else:
+        raw_entries = None
+    if not isinstance(raw_entries, list):
         fail(
             t("Could not read {path}: {err}").format(path=path, err=t("Invalid input."))
         )
+
+    unusable = 0
+    for raw in raw_entries:
+        entry = WatchEntry.from_dict(raw)
+        if entry is None or not (
+            is_safe_path_component(entry.site) and is_safe_path_component(entry.book_id)
+        ):
+            unusable += 1
+
+    if unusable and not allow_unusable:
+        fail(
+            t("Could not read {path}: {err}").format(path=path, err=t("Invalid input."))
+        )
+    return unusable
 
 
 def _finite_timeout(value: float, option: str) -> float:
@@ -135,6 +166,13 @@ def _finite_timeout(value: float, option: str) -> float:
     if not math.isfinite(value):
         fail(f"{t('Invalid input.')} ({option}={value!r})", EXIT_USAGE)
     return max(0.1, value)
+
+
+def _error_text(error: BaseException) -> str:
+    """Describe a manager failure for the ``--wait`` report."""
+    # Some network/queue errors stringify to an empty string; the type name
+    # keeps the report useful in that case.
+    return f"{type(error).__name__}: {error}"
 
 
 @dataclass
@@ -210,14 +248,43 @@ async def _download_entries(
     outcomes: list[_WaitOutcome] = []
     try:
         for entry in entries:
-            task = await manager.add_task(
-                title=entry.title or entry.book_id,
-                site=entry.site,
-                book_id=entry.book_id,
-            )
-            state = await _wait_for_task(manager, task.task_id, wait_timeout)
+            # A manager that refuses or fails one book (a broken queue entry,
+            # a closed manager) must not cost the remaining books their
+            # download. Record it as that book's failure and move on.
+            try:
+                task = await manager.add_task(
+                    title=entry.title or entry.book_id,
+                    site=entry.site,
+                    book_id=entry.book_id,
+                )
+            except Exception as exc:
+                outcomes.append(
+                    _WaitOutcome(
+                        entry=entry,
+                        status=Status.FAILED,
+                        error=_error_text(exc),
+                    )
+                )
+                continue
+
+            try:
+                state = await _wait_for_task(manager, task.task_id, wait_timeout)
+            except Exception as exc:
+                outcomes.append(
+                    _WaitOutcome(
+                        entry=entry,
+                        task_id=task.task_id,
+                        status=Status.FAILED,
+                        error=_error_text(exc),
+                    )
+                )
+                continue
+
             if state is None:
-                await manager.cancel_task(task.task_id)
+                # Best-effort: ``manager.close()`` in the ``finally`` block
+                # below still stops the worker if this cancel fails.
+                with contextlib.suppress(Exception):
+                    await manager.cancel_task(task.task_id)
                 outcomes.append(_WaitOutcome(entry=entry, task_id=task.task_id))
             else:
                 outcomes.append(
@@ -490,8 +557,21 @@ class FollowCheckCmd(Command):
         )
 
         store = _make_store()
+        # Unusable entries (a hand edit that dropped book_id, a path-escaping
+        # value) would be silently discarded by the store and by the next
+        # rewrite. Keep checking the valid entries, but report the damage and
+        # exit non-zero instead of claiming a clean sweep.
+        invalid = _reject_unreadable_watchlist(store, allow_unusable=True)
+        if invalid:
+            ui.warn(
+                t("Could not read {path}: {err}").format(
+                    path=store.path, err=t("Invalid input.")
+                )
+            )
         entries = store.entries()
         if not entries:
+            if invalid:
+                raise SystemExit(EXIT_FAILURE)
             ui.info(t("No followed books to check."))
             return
 
@@ -521,6 +601,12 @@ class FollowCheckCmd(Command):
             if not outcome.found:
                 if show_all:
                     ui.info(t("No result found for {book}.").format(book=label))
+                elif entry.last_chapter:
+                    # This book was found by an earlier check, so a missing
+                    # match now usually means the site is down, renamed or no
+                    # longer indexes it. Surface that instead of a silent
+                    # clean sweep (the exit code still reflects real errors).
+                    ui.warn(t("No result found for {book}.").format(book=label))
                 continue
 
             if not outcome.changed:
@@ -576,5 +662,5 @@ class FollowCheckCmd(Command):
             # list of followed books.
             ui.error(t("{count} check(s) failed.").format(count=failed))
 
-        if failed or not downloads_ok:
+        if failed or invalid or not downloads_ok:
             raise SystemExit(EXIT_FAILURE)

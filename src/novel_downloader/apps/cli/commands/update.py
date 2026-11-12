@@ -20,6 +20,8 @@ download is an explicit second step.  Three flags control which half runs:
     One machine-readable document on stdout; nothing is printed to stdout
     that is not part of it. The document is never interactive: without
     ``--yes`` it behaves like ``--check`` and leaves ``download_path`` null.
+    ``asset_name``/``asset_shape`` name the selected CLI archive (both are
+    null when the release has none), and every older key is still present.
 
 ``--yes``
     Non-interactive download. It downloads, verifies the SHA-256 digest and
@@ -36,9 +38,14 @@ an update channel never needs it, and the desktop client applies the same rule.
 Nothing is executed, unpacked or installed by this command -- not even a
 downloaded ``.exe`` -- so there is no launch step to harden.
 
+This command only updates a CLI install, so the release check asks for the
+``cli`` package shape explicitly.  A desktop installer or portable bundle is
+never downloaded as a substitute: when the release has no matching CLI archive
+the command reports that and exits instead of installing the wrong program.
+
 Exit codes: ``0`` when the check succeeded (with or without an update), when
 the user declined the download, or after a successful download; ``1`` when the
-check failed, no asset matches the platform (with ``--yes``), the digest is
+check failed, no CLI asset matches the platform (with ``--yes``), the digest is
 missing (with ``--yes``) or the download failed.
 """
 
@@ -47,6 +54,7 @@ from __future__ import annotations
 import json
 import os
 from argparse import ArgumentParser, Namespace
+from dataclasses import replace
 from pathlib import Path
 
 from novel_downloader import __version__
@@ -66,12 +74,24 @@ from .base import EXIT_FAILURE, Command
 from .storage import format_size
 
 __all__ = [
+    "CLI_ASSET_PREFIX",
+    "CLI_SHAPE",
     "INSECURE_URL_ERROR",
     "MIRROR_ENV_VAR",
+    "NO_CLI_ASSET_ERROR",
     "UPDATES_DIRNAME",
     "UpdateCmd",
     "updates_dir",
 ]
+
+#: Package shape this command updates: ``novel-cli-<version>-<os>-<arch>.zip``.
+CLI_SHAPE = "cli"
+
+#: Prefix every CLI release archive starts with (see ``updater``).
+CLI_ASSET_PREFIX = "novel-cli-"
+
+#: JSON ``error`` value reported when the release has no CLI archive.
+NO_CLI_ASSET_ERROR = "no-cli-asset"
 
 #: Directory (below :func:`app_home`) the asset is written to.
 UPDATES_DIRNAME = "updates"
@@ -131,6 +151,7 @@ def _payload(
         "latest": info.latest if info is not None else "",
         "available": bool(info is not None and info.available),
         "asset_name": asset.name if asset is not None else None,
+        "asset_shape": CLI_SHAPE if asset is not None else None,
         "asset_size": asset.size if asset is not None else None,
         "sha256": asset.sha256 if asset is not None else None,
         "download_path": str(download_path) if download_path is not None else None,
@@ -143,20 +164,62 @@ def _emit_json(payload: dict[str, object]) -> None:
     ui.emit(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _is_cli_asset(asset: ReleaseAsset) -> bool:
+    """Whether *asset* is a CLI archive rather than a desktop package."""
+    name = asset.name.strip().lower()
+    return name.startswith(CLI_ASSET_PREFIX) and name.endswith(".zip")
+
+
+def _cli_asset(info: UpdateInfo, platform_tag: str) -> ReleaseAsset | None:
+    """The CLI archive for *platform_tag*, or ``None`` when the release has none.
+
+    ``check_for_update`` receives ``shape="cli"`` but its selector falls back to
+    the other shapes when a manifest has no CLI entry, and the GitHub API
+    selector never returns CLI bundles at all.  This guard therefore re-checks
+    the result: a desktop installer selected by that fallback is discarded, and
+    the API path is searched for the matching CLI archive.  Returning ``None``
+    (instead of the fallback) is what stops ``novel-cli update`` from
+    downloading and *installing* the desktop client.
+    """
+    if info.asset is not None and _is_cli_asset(info.asset):
+        return info.asset
+    suffix = f"-{platform_tag.strip().lower()}.zip"
+    for asset in info.assets:
+        name = asset.name.strip().lower()
+        if _is_cli_asset(asset) and (not platform_tag or name.endswith(suffix)):
+            return asset
+    return None
+
+
 def _check(current: str) -> tuple[UpdateInfo | None, str | None]:
     """Run the release check, returning ``(info, error)``.
 
-    The shared helper already collapses every failure into an ``UpdateCheck``
-    with ``info is None``; the ``error`` string is only used for the message.
+    The check asks for the CLI shape, then keeps only a CLI archive on the
+    returned :class:`UpdateInfo` (its ``asset`` is ``None`` when there is
+    none).  The shared helper already collapses every failure into an
+    ``UpdateCheck`` with ``info is None``; the ``error`` string is only used
+    for the message.
     """
+    platform_tag = detect_platform()
     result = check_for_update(
         current,
-        platform_tag=detect_platform(),
+        platform_tag=platform_tag,
+        shape=CLI_SHAPE,
         timeout=CHECK_TIMEOUT,
     )
     if result.info is None:
         return None, result.error or "unreachable"
-    return result.info, None
+    info = result.info
+    chosen = _cli_asset(info, platform_tag)
+    if chosen is not info.asset:
+        info = replace(info, asset=chosen)
+    return info, None
+
+
+def _no_cli_asset_message() -> str:
+    return t("No CLI release asset matches this platform ({platform}).").format(
+        platform=detect_platform()
+    )
 
 
 def _print_summary(info: UpdateInfo, *, current: str) -> None:
@@ -167,11 +230,8 @@ def _print_summary(info: UpdateInfo, *, current: str) -> None:
         ui.info(t("Release notes: {url}").format(url=info.notes_url))
     asset = info.asset
     if asset is None:
-        ui.warn(
-            t("No release asset matches this platform ({platform}).").format(
-                platform=detect_platform()
-            )
-        )
+        if info.available:
+            ui.warn(_no_cli_asset_message())
         return
     size = format_size(asset.size) if asset.size is not None else t("unknown size")
     ui.info(t("Download asset: {name} ({size})").format(name=asset.name, size=size))
@@ -278,16 +338,12 @@ class UpdateCmd(Command):
         asset = info.asset
         if asset is None:
             if as_json:
-                _emit_json(_payload(info, current=current, error="no-asset"))
+                _emit_json(_payload(info, current=current, error=NO_CLI_ASSET_ERROR))
                 raise SystemExit(EXIT_FAILURE)
-            # ``_print_summary`` already said no asset matches this platform.
+            # ``_print_summary`` already said no CLI asset matches this platform.
             if not assume_yes:
                 return
-            ui.error(
-                t("No release asset matches this platform ({platform}).").format(
-                    platform=detect_platform()
-                )
-            )
+            ui.error(_no_cli_asset_message())
             raise SystemExit(EXIT_FAILURE)
 
         if not _is_secure_url(asset.url):

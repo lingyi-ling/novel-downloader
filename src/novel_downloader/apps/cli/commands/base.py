@@ -5,13 +5,16 @@ novel_downloader.apps.cli.commands.base
 
 """
 
+import json
 import os
 from abc import ABC, abstractmethod
 from argparse import ArgumentParser, Namespace, _SubParsersAction
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
 from novel_downloader.infra.i18n import t
+from novel_downloader.libs.filesystem import KIND_ROWS, RemovalItem
 from novel_downloader.schemas import BookConfig
 
 __all__ = [
@@ -19,11 +22,15 @@ __all__ = [
     "EXIT_SUCCESS",
     "EXIT_USAGE",
     "Command",
+    "emit_removal_preview",
     "expand_config_paths",
     "expand_path",
     "fail",
+    "format_size",
+    "is_safe_path_component",
     "localize_help",
     "parse_book_args",
+    "removal_preview_payload",
     "require_safe_book_id",
     "require_safe_site",
 ]
@@ -53,6 +60,103 @@ def fail(message: str, code: int = EXIT_FAILURE) -> NoReturn:
 
     ui.error(message)
     raise SystemExit(code)
+
+
+def format_size(count: int) -> str:
+    """Format a byte count with a binary unit suffix."""
+    if count < 1024:
+        return f"{count} B"
+    value = float(count)
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        value /= 1024.0
+        if value < 1024.0:
+            return f"{value:.1f} {unit}"
+    return f"{value:.1f} PiB"
+
+
+def removal_preview_payload(
+    *,
+    command: str,
+    items: Sequence[RemovalItem],
+    site: str | None = None,
+    book_ids: Sequence[str] = (),
+) -> dict[str, object]:
+    """
+    Build the stable, machine-readable shape of a dry-run report.
+
+    ``items`` carries one entry per path the cleanup would touch, ``paths`` is
+    the same list flattened to strings for simple consumers, and ``files`` /
+    ``bytes`` are the totals.  ``book_id`` is set only when exactly one book was
+    requested; ``book_ids`` is always a list so the field never changes type.
+    """
+    ids = [str(book_id) for book_id in book_ids]
+    total_files = sum(item.files for item in items)
+    total_bytes = sum(item.bytes for item in items)
+    return {
+        "dry_run": True,
+        "command": command,
+        "site": site,
+        "book_id": ids[0] if len(ids) == 1 else None,
+        "book_ids": ids,
+        "items": [item.to_dict() for item in items],
+        "paths": [str(item.path) for item in items],
+        "files": total_files,
+        "bytes": total_bytes,
+    }
+
+
+def emit_removal_preview(
+    *,
+    command: str,
+    items: Sequence[RemovalItem],
+    site: str | None = None,
+    book_ids: Sequence[str] = (),
+    as_json: bool = False,
+) -> dict[str, object]:
+    """
+    Print a dry-run report: one JSON line, or a path list plus totals.
+
+    JSON goes through :func:`novel_downloader.apps.cli.ui.emit` with compact
+    separators so the whole report is exactly one line.  The human form names
+    every path and ends with the total file count and byte size.
+    """
+    payload = removal_preview_payload(
+        command=command, items=items, site=site, book_ids=book_ids
+    )
+    total_files = sum(item.files for item in items)
+    total_bytes = sum(item.bytes for item in items)
+    if as_json:
+        from novel_downloader.apps.cli import ui
+
+        ui.emit(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        return payload
+
+    from novel_downloader.apps.cli import ui
+
+    ui.info(t("Dry-run mode: nothing will be removed."))
+    for item in items:
+        if item.kind == KIND_ROWS:
+            ui.info(
+                t("  - {path} (chapter rows; database file stays)").format(
+                    path=item.path
+                )
+            )
+        else:
+            ui.info(
+                t("  - {path} ({files} file(s), {size})").format(
+                    path=item.path,
+                    files=item.files,
+                    size=format_size(item.bytes),
+                )
+            )
+    ui.info(
+        t("Total: {files} file(s), {size} ({bytes} bytes)").format(
+            files=total_files,
+            size=format_size(total_bytes),
+            bytes=total_bytes,
+        )
+    )
+    return payload
 
 
 def expand_path(value: str) -> Path:
@@ -146,12 +250,16 @@ def _is_path_component(value: str) -> bool:
     segment would step outside the directory the user selected. Real keys are
     plain identifiers (``b520``, ``8_8187``), so an escaping value is a bad
     argument rather than a runtime condition.
+
+    Windows also strips trailing spaces/dots from a path component, which
+    turns ``".. "`` or ``"..."`` into a parent reference.  Such names cannot
+    be created through the normal API either, so they are rejected here.
     """
     text = str(value)
     path = Path(text)
     return not (
-        not text.strip()
-        or text in {".", ".."}
+        not text.strip(" .")
+        or text != text.rstrip(" .")
         or "/" in text
         or "\\" in text
         or ":" in text
@@ -159,6 +267,20 @@ def _is_path_component(value: str) -> bool:
         or path.name != text
         or any(ord(char) < 32 for char in text)
     )
+
+
+def is_safe_path_component(value: str) -> bool:
+    """
+    Return whether ``value`` is usable as a single directory/file name.
+
+    Non-raising counterpart of :func:`require_safe_site` /
+    :func:`require_safe_book_id`, for callers that must reject one bad value
+    (a hand-edited watchlist entry, say) without aborting the whole command.
+
+    :param value: Raw site key or book ID.
+    :return: ``True`` when joining it onto a base directory cannot escape.
+    """
+    return _is_path_component(value)
 
 
 def require_safe_site(site: str) -> str:

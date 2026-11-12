@@ -15,8 +15,10 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 import types
 import urllib.error
+from email.utils import formatdate
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,7 @@ from novel_downloader.apps.login.sites import (
     normalize_site,
     supported_sites,
 )
+from novel_downloader.infra.sessions.cookie_io import load_cookie_items
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -360,6 +363,143 @@ def test_cookie_pairs_rejects_malformed_items() -> None:
     assert login._cookie_pairs(42) == {}
 
 
+def test_collect_cookie_items_keeps_morsel_attributes() -> None:
+    """SimpleCookie backends (WebView2/CEF) expose scope and flags."""
+    jar: SimpleCookie[str] = SimpleCookie()
+    jar["sessionid"] = "secret"
+    jar["sessionid"]["domain"] = ".fanqienovel.com"
+    jar["sessionid"]["path"] = "/"
+    jar["sessionid"]["secure"] = True
+    jar["sessionid"]["httponly"] = True
+    jar["sessionid"]["samesite"] = "None"
+
+    items = login._collect_cookie_items(
+        types.SimpleNamespace(get_cookies=lambda: [jar])
+    )
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["name"] == "sessionid"
+    assert item["value"] == "secret"
+    assert item["domain"] == ".fanqienovel.com"
+    assert item["path"] == "/"
+    assert item["secure"] is True
+    assert item["http_only"] is True
+    assert item["same_site"] == "None"
+
+
+def test_collect_cookie_items_accepts_dict_backends_and_sanitizes_values() -> None:
+    window = _FakeWindow(
+        cookies=[
+            {
+                "name": "sessionid",
+                "value": "secret\r\nX-Injected: 1",
+                "domain": ".fanqienovel.com",
+                "path": "/",
+                "httpOnly": True,
+                "sameSite": "Lax",
+                "expires": formatdate(time.time() + 3600, usegmt=True),
+            },
+            {"name": "bad name", "value": "x"},
+        ]
+    )
+
+    items = login._collect_cookie_items(window)
+
+    assert [item["name"] for item in items] == ["sessionid"]
+    assert "\r" not in items[0]["value"]
+    assert "\n" not in items[0]["value"]
+    assert items[0]["http_only"] is True
+    assert items[0]["same_site"] == "Lax"
+    assert items[0]["expires"] == pytest.approx(time.time() + 3600, abs=5)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Thu, 01 Jan 1970 00:00:00 GMT",
+        "Mon, 01 Jan 1601 00:00:00 GMT",
+        "Fri, 31 Dec 9999 23:59:59 GMT",
+        -1,
+        0,
+        float("nan"),
+        float("inf"),
+        10**400,
+        "not a date",
+        None,
+    ],
+)
+def test_coerce_expiry_rejects_session_sentinels_and_unusable_values(
+    raw: Any,
+) -> None:
+    assert login._coerce_expiry(raw, now=time.time()) is None
+
+
+def test_coerce_expiry_accepts_a_real_future_deadline() -> None:
+    now = time.time()
+    deadline = now + 24 * 60 * 60
+    assert login._coerce_expiry(deadline, now=now) == pytest.approx(deadline)
+    assert login._coerce_expiry(
+        formatdate(deadline, usegmt=True), now=now
+    ) == pytest.approx(deadline, abs=1)
+
+
+def test_dedupe_cookie_items_keeps_same_name_on_different_domains() -> None:
+    items = [
+        {"name": "sid", "value": "one", "domain": ".fanqienovel.com", "path": "/"},
+        {"name": "sid", "value": "two", "domain": ".other.example", "path": "/"},
+        {"name": "sid", "value": "three", "domain": ".fanqienovel.com", "path": "/"},
+    ]
+
+    deduped = login._dedupe_cookie_items(items)
+
+    assert len(deduped) == 2
+    assert {(item["domain"], item["value"]) for item in deduped} == {
+        (".fanqienovel.com", "three"),
+        (".other.example", "two"),
+    }
+
+
+def test_filter_cookie_items_drops_cookies_for_other_sites() -> None:
+    config = get_site_config("fanqienovel")
+    assert config is not None
+    items = [
+        {"name": "sessionid", "value": "ok", "domain": ".fanqienovel.com"},
+        {"name": "passport", "value": "ok", "domain": "passport.fanqienovel.com"},
+        {"name": "tracking", "value": "leak", "domain": ".unrelated.example"},
+        {"name": "domainless", "value": "backend-scoped"},
+    ]
+
+    kept = login._filter_cookie_items(
+        config,
+        items,
+        current_url="https://passport.fanqienovel.com/login",
+    )
+
+    assert {item["name"] for item in kept} == {
+        "sessionid",
+        "passport",
+        "domainless",
+    }
+
+
+def test_filter_cookie_items_honours_the_site_allow_list() -> None:
+    config = SiteLoginConfig(
+        site="example",
+        start_url="https://example.com/",
+        cookie_names=("sid",),
+    )
+    kept = login._filter_cookie_items(
+        config,
+        [
+            {"name": "sid", "value": "keep", "domain": ".example.com"},
+            {"name": "noise", "value": "drop", "domain": ".example.com"},
+        ],
+    )
+
+    assert kept == [{"name": "sid", "value": "keep", "domain": ".example.com"}]
+
+
 # ---------------------------------------------------------------------------
 # Cookie persistence
 # ---------------------------------------------------------------------------
@@ -373,9 +513,10 @@ def test_save_cookies_writes_atomically_and_leaves_no_temp_files(
     path = login.save_cookies("fanqienovel", {"sessionid": "abc", "t": "1"})
 
     assert path == tmp_path / "fanqienovel" / login.COOKIE_FILENAME
-    assert json.loads(path.read_text(encoding="utf-8")) == [
-        {"name": "sessionid", "value": "abc"},
-        {"name": "t", "value": "1"},
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert [(entry["name"], entry["value"]) for entry in saved] == [
+        ("sessionid", "abc"),
+        ("t", "1"),
     ]
     leftovers = [
         child.name
@@ -395,9 +536,8 @@ def test_save_cookies_drops_invalid_entries(
         {"good": "value\x01", "bad name": "x", "": "empty"},
     )
 
-    assert json.loads(path.read_text(encoding="utf-8")) == [
-        {"name": "good", "value": "value"}
-    ]
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert [(entry["name"], entry["value"]) for entry in saved] == [("good", "value")]
 
 
 def test_save_cookies_rejects_cache_dir_traversal(
@@ -409,6 +549,123 @@ def test_save_cookies_rejects_cache_dir_traversal(
     with pytest.raises(ValueError):
         login.save_cookies("../escape", {"a": "1"})
     assert not (tmp_path.parent / "escape").exists()
+
+
+def test_save_cookie_items_writes_the_versioned_format(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_CACHE_DIR", str(tmp_path))
+    expires = time.time() + 3600
+
+    path = login.save_cookie_items(
+        "fanqienovel",
+        [
+            {
+                "name": "sessionid",
+                "value": "secret",
+                "domain": ".fanqienovel.com",
+                "path": "/",
+                "secure": True,
+                "http_only": True,
+                "same_site": "None",
+                "expires": expires,
+            }
+        ],
+    )
+
+    stored = load_cookie_items(path)
+    assert stored is not None
+    assert stored == [
+        {
+            "name": "sessionid",
+            "value": "secret",
+            "version": 1,
+            "domain": ".fanqienovel.com",
+            "path": "/",
+            "secure": True,
+            "http_only": True,
+            "same_site": "None",
+            "expires": pytest.approx(expires),
+            "max_age": None,
+            "domain_specified": True,
+            "domain_initial_dot": True,
+            "path_specified": True,
+            "rest": {},
+        }
+    ]
+
+
+def test_save_cookie_items_refuses_to_clobber_with_an_empty_jar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_CACHE_DIR", str(tmp_path))
+    path = login.save_cookies("fanqienovel", {"sessionid": "keep"})
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        login.save_cookies("fanqienovel", {"bad name": "x"})
+
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_save_cookies_reports_a_read_only_destination(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The site directory exists as a file: creating the cookie file must
+    # fail with an OSError rather than silently writing somewhere else.
+    monkeypatch.setenv("NOVEL_CACHE_DIR", str(tmp_path))
+    (tmp_path / "fanqienovel").write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(OSError):
+        login.save_cookies("fanqienovel", {"sessionid": "secret"})
+
+
+def test_repeated_login_replaces_the_previous_cookie_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(login, "_LOGIN_PROBES", {})
+
+    first = _FakeWindow(
+        cookies=[
+            {"name": "sessionid", "value": "old"},
+            {"name": "stale", "value": "gone"},
+        ]
+    )
+    _install_webview(monkeypatch, _FakeWebview(first))
+    assert login.run_login("fanqienovel", timeout=30.0) is True
+
+    second = _FakeWindow(cookies=[{"name": "sessionid", "value": "new"}])
+    _install_webview(monkeypatch, _FakeWebview(second))
+    assert login.run_login("fanqienovel", timeout=30.0) is True
+
+    saved = json.loads(
+        (tmp_path / "fanqienovel" / login.COOKIE_FILENAME).read_text(encoding="utf-8")
+    )
+    assert [(entry["name"], entry["value"]) for entry in saved] == [
+        ("sessionid", "new")
+    ]
+
+
+def test_login_does_not_persist_cookies_for_other_sites(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(login, "_LOGIN_PROBES", {})
+    window = _FakeWindow(
+        cookies=[
+            {"name": "sessionid", "value": "ok", "domain": ".fanqienovel.com"},
+            {"name": "leak", "value": "other", "domain": ".unrelated.example"},
+        ]
+    )
+    _install_webview(monkeypatch, _FakeWebview(window))
+
+    assert login.run_login("fanqienovel", timeout=30.0) is True
+
+    saved = json.loads(
+        (tmp_path / "fanqienovel" / login.COOKIE_FILENAME).read_text(encoding="utf-8")
+    )
+    assert [entry["name"] for entry in saved] == ["sessionid"]
 
 
 # ---------------------------------------------------------------------------
@@ -583,8 +840,9 @@ def test_run_login_result_saves_cookies_and_destroys_window(
     assert outcome.status is login.LoginStatus.SUCCESS
     assert outcome.site == "fanqienovel"
     assert outcome.path == tmp_path / "fanqienovel" / login.COOKIE_FILENAME
-    assert json.loads(outcome.path.read_text(encoding="utf-8")) == [
-        {"name": "sessionid", "value": "secret"}
+    saved = json.loads(outcome.path.read_text(encoding="utf-8"))
+    assert [(entry["name"], entry["value"]) for entry in saved] == [
+        ("sessionid", "secret")
     ]
     assert fake.started is True
     assert fake.create_kwargs["url"] == "https://fanqienovel.com/"
@@ -742,10 +1000,10 @@ def test_run_login_result_save_failure_is_reported(
     window = _FakeWindow(cookies=[{"name": "sessionid", "value": "secret"}])
     _install_webview(monkeypatch, _FakeWebview(window))
 
-    def fail_save(site: str, cookies: Any) -> Path:
+    def fail_save(site: str, items: Any) -> Path:
         raise OSError("disk full")
 
-    monkeypatch.setattr(login, "save_cookies", fail_save)
+    monkeypatch.setattr(login, "save_cookie_items", fail_save)
     messages: list[str] = []
 
     outcome = login.run_login_result(
@@ -755,6 +1013,59 @@ def test_run_login_result_save_failure_is_reported(
     assert outcome.status is login.LoginStatus.SAVE_ERROR
     assert "disk full" in (outcome.error or "")
     assert any("disk full" in message for message in messages)
+    assert window.destroyed is True
+
+
+def test_run_login_result_save_error_does_not_leak_cookie_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(login, "_LOGIN_PROBES", {})
+    window = _FakeWindow(cookies=[{"name": "sessionid", "value": "topsecret"}])
+    _install_webview(monkeypatch, _FakeWebview(window))
+
+    def fail_save(site: str, items: Any) -> Path:
+        raise OSError("could not persist sessionid=topsecret")
+
+    monkeypatch.setattr(login, "save_cookie_items", fail_save)
+    messages: list[str] = []
+
+    outcome = login.run_login_result(
+        "fanqienovel", timeout=30.0, notify=messages.append
+    )
+
+    assert outcome.status is login.LoginStatus.SAVE_ERROR
+    assert "topsecret" not in (outcome.error or "")
+    assert all("topsecret" not in message for message in messages)
+
+
+def test_with_detail_redacts_secrets_and_terminal_controls() -> None:
+    text = login._with_detail(
+        "Login failed.", RuntimeError("sessionid=topsecret\x1b[31m boom")
+    )
+
+    assert text.startswith("Login failed. (")
+    assert "topsecret" not in text
+    assert "\x1b" not in text
+    assert "boom" in text
+
+
+def test_run_login_result_interrupt_still_destroys_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _FakeWindow()
+
+    class _InterruptingWebview:
+        def create_window(self, **kwargs: Any) -> _FakeWindow:
+            return window
+
+        def start(self, func: Any = None, *args: Any, **kwargs: Any) -> None:
+            raise KeyboardInterrupt
+
+    _install_webview(monkeypatch, _InterruptingWebview())  # type: ignore[arg-type]
+
+    with pytest.raises(KeyboardInterrupt):
+        login.run_login_result("fanqienovel", notify=lambda _msg: None)
+
     assert window.destroyed is True
 
 
@@ -893,6 +1204,56 @@ def test_login_main_rejects_non_positive_timeout(
 
     monkeypatch.setattr(login, "run_login_result", must_not_run)
     assert login.login_main(["fanqienovel", "--timeout", "0"]) == 2
+    assert "greater than zero" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan"])
+def test_login_main_rejects_non_finite_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    def must_not_run(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("login must not start")
+
+    monkeypatch.setattr(login, "run_login_result", must_not_run)
+    assert login.login_main(["fanqienovel", f"--timeout={value}"]) == 2
+    assert "greater than zero" in capsys.readouterr().err
+
+
+def test_run_login_result_treats_infinite_timeout_as_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _FakeWindow()
+    _install_webview(monkeypatch, _FakeWebview(window))
+
+    outcome = login.run_login_result(
+        "fanqienovel", timeout=float("inf"), notify=lambda _msg: None
+    )
+
+    assert outcome.status is login.LoginStatus.TIMEOUT
+    assert window.destroyed is True
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan"), 0.0, -1.0])
+def test_cli_login_command_rejects_an_unusable_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: float,
+) -> None:
+    from argparse import Namespace
+
+    import novel_downloader.apps.login as login_package
+    from novel_downloader.apps.cli.commands.login import LoginCmd
+
+    def must_not_run(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("login must not start")
+
+    monkeypatch.setattr(login_package, "run_login", must_not_run)
+    with pytest.raises(SystemExit) as excinfo:
+        LoginCmd.run(Namespace(site="fanqienovel", timeout=value, list=False))
+
+    assert excinfo.value.code == 2
     assert "greater than zero" in capsys.readouterr().err
 
 

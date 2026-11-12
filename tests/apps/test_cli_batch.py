@@ -1095,6 +1095,7 @@ def _install_fake_client(
     fail_process: frozenset[str] = frozenset(),
     fail_export: frozenset[str] = frozenset(),
     empty_export: frozenset[str] = frozenset(),
+    silent: frozenset[str] = frozenset(),
     incomplete: dict[str, int] | None = None,
     skipped: dict[str, int] | None = None,
 ) -> list[tuple[str, str]]:
@@ -1106,6 +1107,8 @@ def _install_fake_client(
     ``{fmt: []}`` (the shape ``CommonClient`` uses for a failed export)
     instead of raising. ``skipped`` maps a book id to cached chapters that
     were not refetched; those are part of ``succeeded`` and never a failure.
+    ``silent`` books return a summary without calling ``ui.on_complete``,
+    which is what a client does when the chapter plan ends up empty.
     """
     events: list[tuple[str, str]] = []
     chapters_missing = incomplete or {}
@@ -1122,7 +1125,7 @@ def _install_fake_client(
             events.append(("download", book.book_id))
             if book.book_id in fail_download:
                 raise RuntimeError(f"download boom {book.book_id}")
-            if ui is not None:
+            if ui is not None and book.book_id not in silent:
                 await ui.on_complete(book)
             return {
                 "failed": chapters_missing.get(book.book_id, 0),
@@ -1683,3 +1686,175 @@ def test_batch_is_offered_by_shell_completion(
     out = capsys.readouterr().out
     assert "batch" in out
     assert "--from-not-found" in out
+
+
+# ---------------------------------------------------------------------------
+# Adversarial review: duplicates, per-site isolation and atomic writes
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_entries_are_searched_once(
+    tmp_path: Path,
+    offline: Path,
+    messages: _Messages,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A book listed twice costs one search, not two."""
+    source = _write(
+        tmp_path / "books.txt",
+        "斗破苍穹 天蚕土豆\n斗破苍穹 天蚕土豆\n",
+    )
+    calls = _install_search(monkeypatch, {"斗破苍穹": [_result()]})
+
+    BatchCmd.run(
+        _parse_args(
+            "--file",
+            str(source),
+            "--site",
+            "b520",
+            "--not-found",
+            str(tmp_path / "nf"),
+        )
+    )  # both lines matched: no SystemExit
+
+    assert calls == [("斗破苍穹", "b520")]
+    assert sum("matched b520" in line for line in messages.success) == 2
+
+
+def test_an_unexpected_site_failure_does_not_abort_the_remaining_sites(
+    messages: _Messages,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One site whose client cannot be built must not cost the other sites."""
+    events = _install_fake_client(monkeypatch)
+    healthy = batch.registrar.get_client
+
+    def _get_client(site: str, cfg: Any) -> Any:
+        if site == "broken":
+            raise RuntimeError("no client for broken")
+        return healthy(site, cfg)
+
+    monkeypatch.setattr(batch.registrar, "get_client", _get_client)
+
+    outcomes = [
+        batch.MatchOutcome(
+            result=_result(site="broken", book_id="1"),
+            candidates=1,
+            author_mismatch=False,
+        ),
+        batch.MatchOutcome(
+            result=_result(site="good", book_id="2"),
+            candidates=1,
+            author_mismatch=False,
+        ),
+    ]
+
+    report = batch._download_matches(_FakeAdapter(), outcomes)
+
+    assert report.ok is False
+    assert report.site_failures == 1
+    assert [bid for kind, bid in events if kind == "download"] == ["2"]
+    assert any("no client for broken" in line for line in messages.error)
+
+
+def test_a_raising_download_site_does_not_abort_the_remaining_sites(
+    messages: _Messages,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_download_matches`` guards each site even if ``_download_site`` raises."""
+    seen: list[str] = []
+
+    def _download_site(_adapter: Any, site: str, _ids: Any) -> batch.DownloadReport:
+        seen.append(site)
+        if site == "broken":
+            raise RuntimeError("site boom")
+        return batch.DownloadReport()
+
+    monkeypatch.setattr(batch, "_download_site", _download_site)
+
+    outcomes = [
+        batch.MatchOutcome(
+            result=_result(site="broken", book_id="1"),
+            candidates=1,
+            author_mismatch=False,
+        ),
+        batch.MatchOutcome(
+            result=_result(site="good", book_id="2"),
+            candidates=1,
+            author_mismatch=False,
+        ),
+    ]
+
+    report = batch._download_matches(_FakeAdapter(), outcomes)
+
+    assert seen == ["broken", "good"]
+    assert report.ok is False
+    assert report.site_failures == 1
+    assert any("site boom" in line for line in messages.error)
+
+
+def test_a_book_that_reports_no_completion_is_counted_as_a_failure(
+    messages: _Messages,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that returns without ``on_complete`` must not look successful.
+
+    ``CommonClient.download_book`` returns early (without calling
+    ``ui.on_complete``) when the requested chapter range selects nothing. The
+    book is then absent from ``completed_books``; silently skipping it would
+    make a partial run exit 0.
+    """
+    events = _install_fake_client(monkeypatch, silent=frozenset({"2"}))
+
+    report = batch._download_site(_FakeAdapter(), "s1", ["1", "2"])
+
+    assert report.ok is False
+    assert report.site_failures == 1
+    assert [bid for kind, bid in events if kind == "export"] == ["1"]
+    assert any("No chapters downloaded for book 2" in line for line in messages.error)
+
+
+def test_empty_explicit_site_is_a_usage_error(
+    tmp_path: Path,
+    offline: Path,
+    messages: _Messages,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--site ""`` must not silently mean "search every site"."""
+    source = _write(tmp_path / "books.txt", "斗破苍穹 天蚕土豆\n")
+    calls = _install_search(monkeypatch, {"斗破苍穹": [_result()]})
+
+    with pytest.raises(SystemExit) as excinfo:
+        BatchCmd.run(_parse_args("--file", str(source), "--site", ""))
+
+    assert excinfo.value.code == 2
+    assert calls == []
+    assert any("Unsupported site" in line for line in messages.error)
+
+
+def test_not_found_write_is_atomic_and_keeps_the_old_file_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash while replacing the file must leave the previous report intact."""
+    target = tmp_path / "nf.txt"
+    target.write_text("previous report\n", encoding="utf-8")
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(batch.os, "replace", _boom)
+
+    with pytest.raises(OSError):
+        batch._write_not_found(
+            target,
+            entries=[BatchEntry(line_no=1, title="未找到书", author="作者")],
+            malformed=[],
+            site="all",
+            matched=0,
+            total=1,
+        )
+
+    assert target.read_text(encoding="utf-8") == "previous report\n"
+    # The temporary file used for the atomic write was cleaned up.
+    assert [path.name for path in tmp_path.iterdir()] == ["nf.txt"]
