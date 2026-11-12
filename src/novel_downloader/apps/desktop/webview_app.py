@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import errno
+import importlib.util
 import json
 import logging
 import os
@@ -32,11 +34,11 @@ import tempfile
 import threading
 import time
 import webbrowser
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from novel_downloader.apps.common.updater import (
@@ -92,6 +94,9 @@ _UPDATE_CHECK_INTERVAL = 24 * 3600.0
 _UPDATE_TIMEOUT = DEFAULT_TIMEOUT
 #: Directory under :func:`app_home` holding downloaded update files.
 _UPDATES_DIRNAME = "updates"
+#: PyInstaller's onedir payload directory (pinned by
+#: ``packaging/novel_desktop.spec`` and cleaned by ``noveldl_installer.iss``).
+_PAYLOAD_DIRNAME = "_internal"
 #: Timeout for an asset transfer, in seconds.  Downloads are much larger than
 #: the release document, so they get their own (generous) budget.
 _UPDATE_DOWNLOAD_TIMEOUT = 300.0
@@ -99,12 +104,15 @@ _UPDATE_DOWNLOAD_TIMEOUT = 300.0
 #: holding it lets the installer's Restart Manager identify this process.
 _UPDATE_MUTEX_NAME = "NovelDownloader-UpdateMutex"
 #: Arguments for the Inno Setup installer: no wizard, no message boxes, and a
-#: Restart-Manager request to close (then restart) a running instance.
+#: Restart-Manager request to close a running instance.  There is deliberately
+#: no ``/RESTARTAPPLICATIONS``: Setup only restarts programs that called
+#: ``RegisterApplicationRestart`` (this one does not), and the installer's
+#: ``[Run]`` entry already starts the new build after a silent install.
+#: Asking for both would launch a second instance.
 _INSTALLER_ARGS = (
     "/SILENT",
     "/SUPPRESSMSGBOXES",
     "/CLOSEAPPLICATIONS",
-    "/RESTARTAPPLICATIONS",
 )
 #: Delay before closing the window after the installer starts.  Only long
 #: enough for the ``install_update`` reply to cross the JS bridge; the process
@@ -124,19 +132,69 @@ _PORTABLE_UPDATE_SCRIPT = r"""param(
     [Parameter(Mandatory=$true)][int]$ProcessId,
     [Parameter(Mandatory=$true)][string]$Zip,
     [Parameter(Mandatory=$true)][string]$AppDir,
-    [Parameter(Mandatory=$true)][string]$Exe
+    [Parameter(Mandatory=$true)][string]$Exe,
+    [string[]]$Keep = @()
 )
 $ErrorActionPreference = 'Stop'
+
+function Test-PathWithin([string]$Path, [string]$Root) {
+    if ([string]::IsNullOrWhiteSpace($Root)) { return $false }
+    $p = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $r = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    if ($p.Equals($r, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $p.StartsWith($r + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-Protected([string]$Path) {
+    foreach ($k in @($Keep)) {
+        if ([string]::IsNullOrWhiteSpace($k)) { continue }
+        # Keep the user-data tree itself and any payload subtree that contains
+        # it: user settings/downloads must never be removed by an update.
+        if ((Test-PathWithin $Path $k) -or (Test-PathWithin $k $Path)) { return $true }
+    }
+    return $false
+}
+
 # Wait for the running instance to release its executable and DLLs.
 for ($i = 0; $i -lt 240; $i++) {
     if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { break }
     Start-Sleep -Milliseconds 500
 }
+
+$AppDir = [System.IO.Path]::GetFullPath($AppDir)
+# A misdetected install shape must never turn an update into "clean a drive".
+if ($AppDir -eq [System.IO.Path]::GetPathRoot($AppDir)) {
+    throw "Refusing to update a drive root: $AppDir"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $AppDir $Exe))) {
+    throw "The installed executable is missing: $AppDir\$Exe"
+}
+
 $temp = Join-Path $env:TEMP ('noveldl-update-' + [guid]::NewGuid().ToString('N'))
 Expand-Archive -LiteralPath $Zip -DestinationPath $temp -Force
 $items = @(Get-ChildItem -LiteralPath $temp)
+if ($items.Count -eq 0) { throw "The update archive is empty" }
 $source = $temp
 if ($items.Count -eq 1 -and $items[0].PSIsContainer) { $source = $items[0].FullName }
+
+# PyInstaller puts every module/resource below _internal.  Overwriting files
+# alone leaves removed plugins behind (the registry enumerates them from
+# disk), so the old payload directory is cleared first.  User data lives in
+# app_home(), never in _internal; the $Keep guard only matters when NOVEL_HOME
+# points inside the payload, and then the protected subtree is preserved.
+$payload = Join-Path $AppDir '_internal'
+for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    try {
+        if ((Test-Path -LiteralPath $payload) -and -not (Test-Protected $payload)) {
+            Remove-Item -LiteralPath $payload -Recurse -Force
+        }
+        break
+    } catch {
+        if ($attempt -eq 9) { throw }
+        Start-Sleep -Seconds 1
+    }
+}
+
 # A slow antivirus scan can keep a file locked for a moment; retry briefly.
 for ($attempt = 0; $attempt -lt 10; $attempt++) {
     try {
@@ -287,6 +345,209 @@ def _music_funcs() -> dict[str, Any] | None:
     return _MUSIC_FUNCS or None
 
 
+#: Heavy music platforms that need an account and/or an optional dependency.
+#: The provider registry only lists a platform whose dependency imports, so
+#: without this table TIDAL/Apple/SoundCloud/YouTube simply disappeared and
+#: their failures stayed unexplained. ``credentials`` rows are also what the
+#: settings page's "Music accounts" card writes through ``providers.creds``.
+_MUSIC_HEAVY_GUIDANCE: dict[str, dict[str, Any]] = {
+    "tidal": {
+        "label": "TIDAL",
+        "dependency": "aigpy",
+        "tools": ("N_m3u8DL-RE",),
+        "credentials": True,
+        "credential_required": True,
+    },
+    "apple": {
+        "label": "Apple Music",
+        "dependency": "pywidevine",
+        "tools": ("ffmpeg",),
+        "credentials": True,
+        "credential_required": False,
+    },
+    "soundcloud": {
+        "label": "SoundCloud",
+        "dependency": "pywidevine",
+        "tools": ("N_m3u8DL-RE",),
+        "credentials": True,
+        "credential_required": False,
+    },
+    "youtube": {
+        "label": "YouTube",
+        "dependency": "ytmusicapi",
+        "tools": (),
+        "credentials": False,
+        "credential_required": False,
+    },
+}
+
+#: Platforms whose account token can be stored from the settings page.
+_MUSIC_CREDENTIAL_KEYS = frozenset(
+    key for key, meta in _MUSIC_HEAVY_GUIDANCE.items() if meta.get("credentials")
+)
+
+
+def _music_dependency_available(name: str) -> bool:
+    """Whether an optional Python dependency can be imported."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _music_tool_available(name: str) -> bool:
+    """Whether an external executable is on ``PATH``."""
+    return shutil.which(name) is not None
+
+
+def _music_credential_configured(key: str) -> bool:
+    """Whether a platform has a non-empty credential object (never its value)."""
+    try:
+        from novel_downloader.apps.music.providers import creds
+
+        data = creds.get(key)  # type: ignore[no-untyped-call]
+    except Exception:  # noqa: BLE001 - optional extras / unreadable file
+        logger.debug("Could not read the music credentials for %s", key, exc_info=True)
+        return False
+    return isinstance(data, dict) and bool(data)
+
+
+def _music_credential_hint(key: str) -> str:
+    """Describe the JSON shape expected by one platform's credential blob."""
+    if key == "tidal":
+        return t(
+            "Paste the TIDAL token JSON (access_token, refresh_token, "
+            "client_id, client_secret)."
+        )
+    if key == "apple":
+        return t('Paste a cookie JSON with "media-user-token".')
+    if key == "soundcloud":
+        return t('Paste a token JSON with "oauth_token" and "client_id".')
+    return ""
+
+
+def _music_credential_rows() -> list[dict[str, Any]]:
+    """Platform credential rows for the settings card (values never included)."""
+    rows: list[dict[str, Any]] = []
+    for key, meta in _MUSIC_HEAVY_GUIDANCE.items():
+        if not meta.get("credentials"):
+            continue
+        rows.append(
+            {
+                "key": key,
+                "label": str(meta["label"]),
+                "configured": _music_credential_configured(key),
+                "required": bool(meta.get("credential_required")),
+                "hint": _music_credential_hint(key),
+            }
+        )
+    return rows
+
+
+def _music_platform_status() -> list[dict[str, Any]]:
+    """Guidance rows for the heavy platforms, including unavailable ones.
+
+    The provider registry hides a platform when an optional package is
+    missing. The music page needs the opposite: a row that names the package
+    or external tool and points at the account settings, so a missing token is
+    never rendered as an empty result list.
+    """
+    funcs = _music_funcs()
+    registered: set[str] = set()
+    if funcs is not None:
+        try:
+            registered = {str(key) for key, _label in funcs["available_labels"]()}
+        except Exception:  # noqa: BLE001 - guidance must not break the page
+            logger.debug("Could not list the registered music platforms", exc_info=True)
+
+    rows: list[dict[str, Any]] = []
+    for key, meta in _MUSIC_HEAVY_GUIDANCE.items():
+        dependency = str(meta["dependency"])
+        dependency_ok = _music_dependency_available(dependency)
+        missing_tools = [
+            str(tool)
+            for tool in meta.get("tools", ())
+            if not _music_tool_available(str(tool))
+        ]
+        configured = (
+            _music_credential_configured(key) if meta.get("credentials") else False
+        )
+        reasons: list[str] = []
+        state = "ready"
+        if not dependency_ok:
+            state = "missing_dependency"
+            reasons.append(
+                t("Missing optional dependency: {name}").replace("{name}", dependency)
+            )
+            reasons.append(
+                t(
+                    "Install the music extras with: "
+                    'pip install "novel-downloader[music]"'
+                )
+            )
+        elif funcs is not None and key not in registered:
+            state = "unavailable"
+            reasons.append(t("This platform is unavailable in this build."))
+        if missing_tools:
+            if state == "ready":
+                state = "missing_tool"
+            tools_text = ", ".join(missing_tools)
+            reasons.append(
+                t("Missing external tool: {name}").replace("{name}", tools_text)
+            )
+            reasons.append(
+                t("Install {name} and add it to your PATH.").replace(
+                    "{name}", tools_text
+                )
+            )
+        if meta.get("credentials") and not configured:
+            if key == "tidal":
+                if state == "ready":
+                    state = "needs_credentials"
+                reasons.append(
+                    t(
+                        "TIDAL needs an account token before it can search; paste "
+                        "the token JSON under Settings → Music accounts."
+                    )
+                )
+            elif key == "apple":
+                if state == "ready":
+                    state = "limited"
+                reasons.append(
+                    t(
+                        "Apple Music downloads need a media-user-token cookie; add "
+                        "it under Settings → Music accounts. Previews work without it."
+                    )
+                )
+            elif key == "soundcloud":
+                if state == "ready":
+                    state = "limited"
+                reasons.append(
+                    t(
+                        "SoundCloud downloads need an oauth_token cookie; add it "
+                        "under Settings → Music accounts. Search works without it."
+                    )
+                )
+        if funcs is None and state == "ready":
+            state = "unavailable"
+            reasons.append(t("Music extras are not installed"))
+        rows.append(
+            {
+                "key": key,
+                "label": str(meta["label"]),
+                "state": state,
+                "available": state
+                in {"ready", "limited", "needs_credentials", "missing_tool"},
+                "needs_credentials": bool(meta.get("credentials")) and not configured,
+                "can_configure": bool(meta.get("credentials")),
+                "configured": configured,
+                "reason": " ".join(part for part in reasons if part),
+                "hint": _music_credential_hint(key) if meta.get("credentials") else "",
+            }
+        )
+    return rows
+
+
 def _music_options_type(**kwargs: Any) -> Any:
     """Construct :class:`DownloadOptions` from the (untyped) music extras."""
     from novel_downloader.apps.music.downloader import DownloadOptions
@@ -359,6 +620,7 @@ def _i18n_catalog() -> dict[str, str]:
     """
     return {
         # navigation / chrome
+        "Skip to content": t("Skip to content"),
         "Search": t("Search"),
         "Download": t("Download"),
         "History": t("History"),
@@ -425,6 +687,23 @@ def _i18n_catalog() -> dict[str, str]:
         "Saved; leave blank to keep": t("Saved; leave blank to keep"),
         "Optional": t("Optional"),
         "Clear saved password": t("Clear saved password"),
+        "Music accounts": t("Music accounts"),
+        "Paste account tokens for TIDAL, Apple Music and SoundCloud. They are "
+        "stored on this device and never shown again.": t(
+            "Paste account tokens for TIDAL, Apple Music and SoundCloud. They are "
+            "stored on this device and never shown again."
+        ),
+        "Platform": t("Platform"),
+        "Paste the token JSON": t("Paste the token JSON"),
+        "Save credentials": t("Save credentials"),
+        "Clear credentials": t("Clear credentials"),
+        "Configured": t("Configured"),
+        "Not configured": t("Not configured"),
+        "Platform credentials saved": t("Platform credentials saved"),
+        "Platform credentials cleared": t("Platform credentials cleared"),
+        "Could not save the credentials": t("Could not save the credentials"),
+        "Could not clear the credentials": t("Could not clear the credentials"),
+        "Enter the token JSON before saving": t("Enter the token JSON before saving"),
         "Updates": t("Updates"),
         "Check for updates automatically": t("Check for updates automatically"),
         "Download updates in the background": t("Download updates in the background"),
@@ -462,6 +741,11 @@ def _i18n_catalog() -> dict[str, str]:
         ),
         "Use a proxy scheme such as http:// or socks5://": t(
             "Use a proxy scheme such as http:// or socks5://"
+        ),
+        "Put the proxy username and password in the fields below, "
+        "not in the address": t(
+            "Put the proxy username and password in the fields below, "
+            "not in the address"
         ),
         "Include a host and port, e.g. http://127.0.0.1:7890": t(
             "Include a host and port, e.g. http://127.0.0.1:7890"
@@ -541,6 +825,11 @@ def _i18n_catalog() -> dict[str, str]:
         # search page
         "Searching…": t("Searching…"),
         "{n} results in {s}s": t("{n} results in {s}s"),
+        "{n} sources": t("{n} sources"),
+        "{n} results": t("{n} results"),
+        "{n} sources failed": t("{n} sources failed"),
+        "{s}s": t("{s}s"),
+        "Search cancelled": t("Search cancelled"),
         "Search failed": t("Search failed"),
         "No results": t("No results"),
         "Try another keyword or clear the site filter": t(
@@ -583,6 +872,8 @@ def _i18n_catalog() -> dict[str, str]:
         ),
         # music page
         "All platforms": t("All platforms"),
+        "Some platforms need extra setup": t("Some platforms need extra setup"),
+        "Go to settings": t("Go to settings"),
         "Searches every platform at once and merges the results": t(
             "Searches every platform at once and merges the results"
         ),
@@ -780,11 +1071,35 @@ class _UpdateCache:
 
 @dataclass(frozen=True)
 class _DownloadedUpdate:
-    """A downloaded asset whose checksum was verified by us."""
+    """A downloaded asset whose checksum was verified by us.
+
+    ``version`` is the release the file was fetched for.  It stays optional so
+    records restored from older builds (and tests that only care about the
+    file) remain valid; a record without a version is never treated as stale.
+    """
 
     path: Path
     sha256: str
     name: str
+    version: str | None = None
+
+
+def _idle_download_state() -> dict[str, Any]:
+    """The "nothing in flight" download payload, carrying every public key."""
+    return {
+        "active": False,
+        "ok": False,
+        "received": 0,
+        "total": 0,
+        "error": None,
+        "path": None,
+        "version": None,
+    }
+
+
+def _normalise_version(value: str | None) -> str:
+    """Compare versions without the cosmetic ``v`` prefix or whitespace."""
+    return str(value or "").strip().lstrip("vV").strip()
 
 
 #: Handle of the process-lifetime update mutex (Windows only).  Kept at module
@@ -842,6 +1157,37 @@ def _updates_dir() -> Path:
     path = Path(app_home()) / _UPDATES_DIRNAME
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _portable_keep_paths(app_dir: Path) -> tuple[str, ...]:
+    """
+    User-data paths the portable helper must not delete.
+
+    Updates clear ``<app_dir>/_internal`` (the PyInstaller payload).  User
+    settings and downloads normally live in :func:`app_home` outside the
+    program folder and are never touched.  The only overlap is an explicit
+    ``NOVEL_HOME`` pointing inside the payload; that subtree is handed to the
+    helper so it is preserved instead of being removed with the old build.
+
+    :param app_dir: directory containing the running executable.
+    :return: absolute user-data paths inside ``_internal``, possibly empty.
+    """
+    try:
+        payload = (app_dir / _PAYLOAD_DIRNAME).resolve()
+    except OSError:
+        return ()
+    try:
+        from novel_downloader.infra.paths import app_home
+
+        home = Path(app_home()).resolve()
+    except (OSError, RuntimeError):
+        return ()
+    try:
+        if home == payload or home.is_relative_to(payload):
+            return (str(home),)
+    except ValueError:
+        return ()
+    return ()
 
 
 def _prune_updates(updates_dir: Path) -> None:
@@ -946,11 +1292,190 @@ def _load_prefs() -> dict[str, Any]:
         return {}
 
 
-#: Serialises read-merge-write cycles.  The update check stamps
-#: ``last_update_check`` from a worker thread while the page writes the theme,
-#: so without this the two writes could drop one another or expose a
-#: truncated file to the other reader.
-_PREFS_LOCK = threading.Lock()
+#: How long a read-modify-write may wait for another process's lock before
+#: the caller reports a structured failure.  Bridge saves run on the UI
+#: thread, so a wedged peer must never freeze the window indefinitely.
+_LOCK_TIMEOUT = 2.0
+#: Polling interval while a peer holds the file lock.
+_LOCK_POLL_INTERVAL = 0.05
+
+#: ``errno`` values a contended lock reports (POSIX ``flock`` and Windows
+#: ``msvcrt.locking`` disagree on the code, so all of them are accepted).
+_LOCK_CONTENTION_ERRNOS = frozenset(
+    code
+    for code in (
+        getattr(errno, "EACCES", None),
+        getattr(errno, "EAGAIN", None),
+        getattr(errno, "EDEADLK", None),
+        getattr(errno, "EWOULDBLOCK", None),
+    )
+    if code is not None
+)
+
+#: In-process locks, one per target file.  ``flock``/``msvcrt`` protect the
+#: data file across processes; this keeps threads of one process serialised
+#: as well (Windows byte-range locks are per process) and is the fallback
+#: when the platform cannot lock files at all.
+_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+class _LockTimeoutError(TimeoutError):
+    """A settings/prefs lock could not be acquired before the deadline."""
+
+
+def _lock_path(target: Path) -> Path:
+    """Return the sidecar lock file: ``<target>.lock`` in the same folder."""
+    return target.with_name(target.name + ".lock")
+
+
+def _thread_lock_for(target: Path) -> threading.RLock:
+    """Return the process-local lock shared by every caller for ``target``."""
+    key = os.path.normcase(os.path.abspath(os.fspath(target)))
+    with _THREAD_LOCKS_GUARD:
+        lock = _THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _THREAD_LOCKS[key] = lock
+        return lock
+
+
+def _open_lock_file(path: Path) -> int:
+    """
+    Open (creating) the sidecar lock file without following a symlink.
+
+    A symlink planted where the lock file belongs is removed (the link
+    itself, not its target) and replaced with a regular file; ``O_NOFOLLOW``
+    closes the check/open race on POSIX.  The file is private to the user
+    (0600) on POSIX even when a pre-existing file had looser bits.
+    """
+    if path.is_symlink():
+        with contextlib.suppress(OSError):
+            path.unlink()
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags, 0o600)
+    if os.name != "posix" and path.is_symlink():
+        # Windows has no ``O_NOFOLLOW``: re-check after opening so a link
+        # swapped in between the pre-check and the open is never used.
+        os.close(fd)
+        raise OSError(errno.ELOOP, "lock path is a symlink")
+    if os.name == "posix":
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            with contextlib.suppress(OSError):
+                fchmod(fd, 0o600)
+    return fd
+
+
+def _lock_fd(fd: int) -> None:
+    """Take an exclusive non-blocking lock on ``fd``'s first byte."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    # The POSIX-only members are absent from the Windows type stubs mypy uses;
+    # this branch never runs there, so the ignores are safe.
+    fcntl.flock(  # type: ignore[attr-defined]
+        fd,
+        fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+    )
+
+
+def _unlock_fd(fd: int) -> None:
+    """Release :func:`_lock_fd` (best effort; closing ``fd`` also drops it)."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[attr-defined]
+
+
+def _acquire_file_lock(fd: int, deadline: float) -> None:
+    """
+    Retry :func:`_lock_fd` until ``deadline``.
+
+    :raises _LockTimeoutError: when another process still holds the lock.
+    :raises OSError: when the platform cannot lock files (the caller then
+        degrades to the in-process lock).
+    """
+    while True:
+        try:
+            _lock_fd(fd)
+            return
+        except OSError as exc:
+            if exc.errno not in _LOCK_CONTENTION_ERRNOS:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _LockTimeoutError(t("already in use")) from exc
+            time.sleep(min(_LOCK_POLL_INTERVAL, remaining))
+
+
+@contextlib.contextmanager
+def _cross_process_lock(
+    target: Path, *, timeout: float | None = None
+) -> Iterator[None]:
+    """
+    Serialise a read-modify-write on ``target`` across threads and processes.
+
+    The lock is an advisory exclusive lock on ``<target>.lock`` in the same
+    directory as ``target``.  When file locking is unavailable (unsupported
+    filesystem, unusable lock path), the in-process lock is used alone and a
+    debug message records the degradation.  Waiting is bounded by ``timeout``
+    so a bridge call can never block the UI thread forever.
+
+    :raises _LockTimeoutError: when the lock is still held at the deadline.
+    """
+    budget = _LOCK_TIMEOUT if timeout is None else timeout
+    deadline = time.monotonic() + max(0.0, budget)
+    thread_lock = _thread_lock_for(target)
+    if not thread_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise _LockTimeoutError(t("already in use"))
+
+    fd: int | None = None
+    try:
+        lock_path = _lock_path(target)
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = _open_lock_file(lock_path)
+        except OSError as exc:
+            logger.debug(
+                "Cross-process lock unavailable for %s (%s); using the in-process lock",
+                target,
+                exc,
+            )
+        if fd is not None:
+            try:
+                _acquire_file_lock(fd, deadline)
+            except _LockTimeoutError:
+                raise
+            except OSError as exc:
+                logger.debug(
+                    "Cross-process lock unavailable for %s (%s); "
+                    "using the in-process lock",
+                    target,
+                    exc,
+                )
+        yield
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                _unlock_fd(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        thread_lock.release()
+
 
 #: Boolean switches the front end is allowed to write through ``save_prefs``.
 _PREF_BOOL_KEYS: tuple[str, ...] = (
@@ -988,9 +1513,43 @@ def _write_text_atomic(path: Path, text: str) -> None:
             temp.unlink(missing_ok=True)
 
 
+def _prefs_file_is_corrupt(path: Path) -> bool:
+    """Whether ``path`` exists but does not hold a JSON object."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        # Unreadable is an I/O problem; a backup copy would not help.
+        return False
+    except ValueError:
+        # Undecodable bytes count as corruption worth preserving.
+        return True
+    if not text.strip():
+        return False
+    try:
+        return not isinstance(json.loads(text), dict)
+    except ValueError:
+        return True
+
+
+def _preserve_corrupt_prefs(path: Path) -> bool:
+    """Keep the bytes of an unreadable preference file next to it."""
+    backup = path.with_name(path.name + ".broken")
+    try:
+        os.replace(path, backup)
+    except OSError:
+        logger.warning("Could not preserve the corrupt prefs file %s", path)
+        return False
+    logger.warning("Moved an unreadable prefs file to %s", backup)
+    return True
+
+
 def _save_prefs(values: dict[str, Any]) -> bool:
     """
     Merge ``values`` into the preference file (best effort).
+
+    A file that cannot be parsed is moved aside as ``<name>.broken`` before
+    the merged content is written, so a crash or a hand edit never destroys
+    data silently.
 
     :return: ``True`` when the file was written.  Callers that show feedback
         (the settings page) must not tell the user their change was saved
@@ -998,10 +1557,17 @@ def _save_prefs(values: dict[str, Any]) -> bool:
     """
     path = _prefs_path()
     try:
-        with _PREFS_LOCK:
+        with _cross_process_lock(path):
             stored = _load_prefs()
+            if _prefs_file_is_corrupt(path):
+                _preserve_corrupt_prefs(path)
             stored.update(values)
             _write_text_atomic(path, json.dumps(stored, ensure_ascii=False, indent=2))
+    except _LockTimeoutError:
+        # Another instance held the lock for the whole budget.  The file is
+        # left untouched, so the caller can report a retryable failure.
+        logger.warning("Timed out waiting for the desktop prefs lock: %s", path)
+        return False
     except (OSError, TypeError, ValueError):
         # ``TypeError``/``ValueError`` guard against unserialisable stored
         # content; preferences are best effort and never fatal.
@@ -1062,12 +1628,21 @@ def _expand_output_dir(raw: str) -> Path:
     is what stops the settings page from saving an unexpanded ``~/books``
     that the downloader would later resolve differently.
     """
-    path = Path(os.path.expandvars(str(raw).strip())).expanduser()
-    if not path.is_absolute():
-        path = Path.cwd() / path
+    text = str(raw).strip()
+    try:
+        path = Path(os.path.expandvars(text)).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+    except (OSError, ValueError, RuntimeError):
+        # An unresolvable ``~``/variable leaves us with the literal input; the
+        # probe below turns that into a structured error instead of a crash.
+        return Path(text or ".")
     try:
         return path.resolve()
-    except OSError:  # pragma: no cover - broken symlink loops, etc.
+    except (OSError, ValueError, RuntimeError):
+        # ``resolve`` stats the path, so a NUL byte or a symlink loop raises
+        # here.  Returning the anchored path keeps every caller total;
+        # :func:`_probe_directory` reports the real problem when saving.
         return path
 
 
@@ -1083,13 +1658,18 @@ def _directory_status(path: Path) -> dict[str, Any]:
     state = "ready"
     error: str | None = None
     try:
+        # ``Path.exists`` swallows the ValueError a NUL byte raises and would
+        # report "missing", which invites the page to create an impossible
+        # path.  Surface it as the unusable configuration it is.
+        if "\x00" in str(path):
+            raise ValueError("embedded null byte in path")
         if not path.exists():
             state = "missing"
         elif not path.is_dir():
             state = "not_a_dir"
         elif not os.access(path, os.W_OK):
             state = "not_writable"
-    except OSError as exc:  # pragma: no cover - exotic filesystem failures
+    except (OSError, ValueError) as exc:
         state = "error"
         error = format_error(exc)
     return {"path": str(path), "state": state, "error": error}
@@ -1106,9 +1686,14 @@ def _probe_directory(path: Path) -> str | None:
             return t("That path is a file, not a folder")
         path.mkdir(parents=True, exist_ok=True)
         handle, temp_name = tempfile.mkstemp(prefix=".noveldl-write-", dir=str(path))
-        os.close(handle)
-        Path(temp_name).unlink(missing_ok=True)
-    except OSError as exc:
+        try:
+            os.close(handle)
+        finally:
+            # The directory accepted a file, which is all we needed to prove:
+            # a lock on the temp file must not turn into "not writable".
+            with contextlib.suppress(OSError):
+                Path(temp_name).unlink(missing_ok=True)
+    except (OSError, ValueError) as exc:
         return format_error(exc)
     return None
 
@@ -1221,6 +1806,12 @@ def _patch_toml_text(text: str, section: str, values: Mapping[str, Any]) -> str:
             for index in range(start + 1, end):
                 if _TOML_KEY_RE.match(lines[index]):
                     insert_at = index + 1
+            if insert_at > 0 and not lines[insert_at - 1].endswith(("\n", "\r")):
+                # A hand-edited file can end at ``[general]`` without a
+                # newline; inserting there would glue the key to the header.
+                lines.insert(insert_at, "\n")
+                insert_at += 1
+                end += 1
             lines.insert(insert_at, f"{key} = {_toml_value(value)}\n")
             end += 1
     return "".join(lines)
@@ -1235,7 +1826,20 @@ def _update_config_section(section: str, values: Mapping[str, Any]) -> None:
     """
     if not values:
         return
+    # Read-modify-write must not interleave with another bridge save (in this
+    # or another process), or the later write would silently drop the first
+    # one's keys.
     path = _settings_config_path()
+    with _cross_process_lock(path):
+        _apply_config_section(section, values, path)
+
+
+def _apply_config_section(
+    section: str, values: Mapping[str, Any], path: Path | None = None
+) -> None:
+    """Implementation of :func:`_update_config_section` (lock held)."""
+    if path is None:
+        path = _settings_config_path()
     if path.suffix.lower() == ".json":
         data: dict[str, Any] = {}
         if path.is_file():
@@ -1273,9 +1877,49 @@ def _update_config_section(section: str, values: Mapping[str, Any]) -> None:
     _write_text_atomic(path, updated)
 
 
+def _split_proxy_credentials(value: Any) -> tuple[str, str, str]:
+    """
+    Split ``scheme://user:pass@host:port`` into an address and the secrets.
+
+    ``general.proxy`` is an address; credentials belong in ``proxy_user`` /
+    ``proxy_pass`` because that is what the HTTP stack reads.  Older files may
+    still carry them inline, and stripping the userinfo here is what stops
+    :meth:`ApiBridge.get_settings` from echoing a password back into the page.
+
+    :return: ``(address, username, password)``; the last two are ``""`` when
+        the value has no userinfo.
+    """
+    raw = str(value or "").strip()
+    if not raw or "@" not in raw:
+        return raw, "", ""
+    candidate = raw if "://" in raw else "http://" + raw
+    try:
+        parts = urlsplit(candidate)
+    except ValueError:
+        # A URL the parser rejects (unclosed IPv6 bracket, ...) can still
+        # carry ``user:pass@``; drop that textually so a malformed value
+        # never echoes a secret to the page.
+        head, separator, _rest = raw.partition("://")
+        _userinfo, _at, hostpart = raw.rpartition("@")
+        if not hostpart:
+            return raw, "", ""
+        return (head + separator if separator else "") + hostpart, "", ""
+    if "@" not in parts.netloc:
+        return raw, "", ""
+    hostport = parts.netloc.rsplit("@", 1)[1]
+    address = urlunsplit(
+        (parts.scheme, hostport, parts.path, parts.query, parts.fragment)
+    )
+    return address, parts.username or "", parts.password or ""
+
+
 def _normalize_proxy(value: Any) -> tuple[str, str | None]:
     """
     Validate a proxy address and add ``http://`` when the scheme is omitted.
+
+    Credentials embedded in the URL are rejected: they would be stored and
+    echoed as part of ``general.proxy``, and the downloader only sends
+    ``proxy_user``/``proxy_pass`` to the HTTP stack.
 
     :return: ``(normalised_address, error)``; ``error`` is ``None`` on success
         and empty input means "no proxy".
@@ -1293,10 +1937,20 @@ def _normalize_proxy(value: Any) -> tuple[str, str | None]:
         return raw, t("The proxy port must be a number between 1 and 65535")
     if parts.scheme.lower() not in _PROXY_SCHEMES:
         return raw, t("Use a proxy scheme such as http:// or socks5://")
+    if parts.username is not None or parts.password is not None:
+        return raw, t(
+            "Put the proxy username and password in the fields below, "
+            "not in the address"
+        )
     if not parts.hostname:
         return raw, t("Include a host and port, e.g. http://127.0.0.1:7890")
     if port is None:
         return raw, t("Include a port, e.g. http://127.0.0.1:7890")
+    if port < 1:
+        # ``urlsplit`` already rejects negative/non-numeric/out-of-range
+        # values; zero is the one it still lets through, and no proxy listens
+        # there (the HTTP stack would treat it as "default port").
+        return raw, t("The proxy port must be a number between 1 and 65535")
     return candidate, None
 
 
@@ -1354,14 +2008,7 @@ class ApiBridge:
         # Byte-level transfer progress, polled by the update bar.  The auto
         # download runs in the background, so without this the page can only
         # show "Downloading…" for however long a 60 MB asset takes.
-        self._update_download_state: dict[str, Any] = {
-            "active": False,
-            "ok": False,
-            "received": 0,
-            "total": 0,
-            "error": None,
-            "path": None,
-        }
+        self._update_download_state: dict[str, Any] = _idle_download_state()
         self._exit_callback: Callable[[], None] | None = None
         # follow-list check: the sweep blocks one bridge thread for a while,
         # so progress and per-book outcomes are published here for the page to
@@ -1519,14 +2166,20 @@ class ApiBridge:
 
         The proxy *password* is deliberately absent: the page only learns
         whether one is stored, and a new one is written only when the user
-        types it.  ``output_dir.state`` mirrors the boot payload so both
-        screens agree on whether the folder is usable.
+        types it.  A legacy ``user:pass@host`` value in ``general.proxy`` is
+        also split: the address is returned without the userinfo and the
+        username/password are reported through the fields that own them, so
+        the page never round-trips a secret.  ``output_dir.state`` mirrors the
+        boot payload so both screens agree on whether the folder is usable.
         """
         try:
             from novel_downloader.infra.i18n import SUPPORTED_LANGUAGES
 
             prefs = _load_prefs()
             data_dir = self.get_data_dir()
+            proxy, inline_user, inline_password = _split_proxy_credentials(
+                _configured_value("proxy")
+            )
             return {
                 "version": self._version(),
                 "config_path": str(_settings_config_path()),
@@ -1534,9 +2187,11 @@ class ApiBridge:
                     **_directory_status(Path(data_dir)),
                     "configured": _configured_output_dir(),
                 },
-                "proxy": _configured_value("proxy"),
-                "proxy_user": _configured_value("proxy_user"),
-                "proxy_has_password": bool(_configured_value("proxy_pass")),
+                "proxy": proxy,
+                "proxy_user": _configured_value("proxy_user") or inline_user,
+                "proxy_has_password": bool(
+                    _configured_value("proxy_pass") or inline_password
+                ),
                 "auto_check_updates": _prefs_flag(prefs, "auto_check_updates", True),
                 "auto_download_updates": _prefs_flag(
                     prefs, "auto_download_updates", True
@@ -1650,27 +2305,18 @@ class ApiBridge:
                 else:
                     errors["language"] = t("Unknown language")
 
+        output_target: Path | None = None
         if "output_dir" in values:
             raw_path = str(values.get("output_dir") or "").strip()
             if not raw_path:
                 errors["output_dir"] = t("Enter a folder path")
             else:
-                try:
-                    target = _expand_output_dir(raw_path)
-                except (OSError, ValueError) as exc:
-                    errors["output_dir"] = format_error(exc)
-                else:
-                    current = _expand_output_dir(_configured_output_dir())
-                    if target != current:
-                        problem = _probe_directory(target)
-                        if problem is None:
-                            config_updates["output_dir"] = str(target)
-                        elif problem == t("That path is a file, not a folder"):
-                            errors["output_dir"] = problem
-                        else:
-                            errors["output_dir"] = t(
-                                "The output folder could not be created: {error}"
-                            ).format(error=problem)
+                # ``_expand_output_dir`` is total; the write probe is deferred
+                # until every field validated, so a rejected proxy cannot
+                # leave a freshly created (but never configured) folder.
+                target = _expand_output_dir(raw_path)
+                if target != _expand_output_dir(_configured_output_dir()):
+                    output_target = target
 
         proxy_touched = any(
             key in values
@@ -1682,9 +2328,16 @@ class ApiBridge:
             )
         )
         if proxy_touched:
-            current_proxy = _configured_value("proxy")
-            current_user = _configured_value("proxy_user")
-            current_pass = _configured_value("proxy_pass")
+            stored_proxy = _configured_value("proxy")
+            stored_user = _configured_value("proxy_user")
+            stored_pass = _configured_value("proxy_pass")
+            current_proxy, inline_user, inline_password = _split_proxy_credentials(
+                stored_proxy
+            )
+            # Inline credentials count as the effective values; otherwise an
+            # untouched save would look like "the user removed them".
+            current_user = stored_user or inline_user
+            current_pass = stored_pass or inline_password
             raw_proxy = values.get("proxy") if "proxy" in values else current_proxy
             proxy, proxy_error = _normalize_proxy(raw_proxy)
             if proxy_error is not None:
@@ -1700,12 +2353,20 @@ class ApiBridge:
                     password = str(values["proxy_password"])
                 elif _coerce_bool(values.get("clear_proxy_password")) is True:
                     password = ""
-                if proxy != current_proxy:
+                if inline_user or inline_password:
+                    # Migrate the inline secret into the keys the HTTP stack
+                    # reads; leaving it in the URL leaks it to the page and
+                    # drops it when the address changes.
                     config_updates["proxy"] = proxy
-                if user != current_user:
                     config_updates["proxy_user"] = user
-                if password != current_pass:
                     config_updates["proxy_pass"] = password
+                else:
+                    if proxy != current_proxy:
+                        config_updates["proxy"] = proxy
+                    if user != current_user:
+                        config_updates["proxy_user"] = user
+                    if password != current_pass:
+                        config_updates["proxy_pass"] = password
 
         if errors:
             return {
@@ -1715,6 +2376,25 @@ class ApiBridge:
                 "message": t("Some settings were not saved"),
                 "settings": self.get_settings(),
             }
+
+        if output_target is not None:
+            problem = _probe_directory(output_target)
+            if problem is not None:
+                errors["output_dir"] = (
+                    problem
+                    if problem == t("That path is a file, not a folder")
+                    else t("The output folder could not be created: {error}").format(
+                        error=problem
+                    )
+                )
+                return {
+                    "ok": False,
+                    "errors": errors,
+                    "saved": [],
+                    "message": t("Some settings were not saved"),
+                    "settings": self.get_settings(),
+                }
+            config_updates["output_dir"] = str(output_target)
 
         if config_updates:
             try:
@@ -2105,15 +2785,70 @@ class ApiBridge:
             logger.debug("Update install failed", exc_info=True)
             return {"ok": False, "error": format_error(exc)}
 
+    def _announced_version(self) -> str:
+        """The latest release the current cache advertises, or ``""``."""
+        with self._update_guard:
+            cache = self._update_cache
+        info = cache.info if cache is not None else None
+        if info is None or not info.available:
+            return ""
+        return _normalise_version(info.latest)
+
+    def _version_conflict(self, record: _DownloadedUpdate) -> str:
+        """The announced version when ``record`` is for an older release.
+
+        :return: The newer version, or ``""`` when the record is usable (or
+            predates version tracking, where nothing can be compared).
+        """
+        latest = self._announced_version()
+        have = _normalise_version(record.version)
+        if latest and have and latest != have:
+            return latest
+        return ""
+
+    def _forget_download(
+        self, record: _DownloadedUpdate, *, remove: bool = False
+    ) -> None:
+        """Drop a verified record (optionally deleting its file).
+
+        Only the exact record is cleared: a newer download that landed in the
+        meantime must never be discarded by a stale caller.
+        """
+        with self._download_guard:
+            if self._downloaded is record:
+                self._downloaded = None
+                self._update_download_state = _idle_download_state()
+        if remove:
+            with contextlib.suppress(OSError):
+                record.path.unlink(missing_ok=True)
+
+    def _ready_record(self) -> _DownloadedUpdate | None:
+        """The usable verified download, forgetting vanished/stale ones."""
+        with self._download_guard:
+            record = self._downloaded
+        if record is None:
+            return None
+        try:
+            present = record.path.is_file()
+        except OSError:
+            present = False
+        if not present:
+            # A pruned installer must flip the bar back to "download" instead
+            # of dead-ending on an install that can only fail.
+            self._forget_download(record)
+            return None
+        if self._version_conflict(record):
+            self._forget_download(record, remove=True)
+            return None
+        return record
+
     def _has_downloaded_update(self) -> bool:
         """Whether a verified installer is waiting to be launched."""
-        with self._download_guard:
-            return self._downloaded is not None
+        return self._ready_record() is not None
 
     def _downloaded_update_size(self) -> int:
         """Size of the verified update already on disk (0 when none)."""
-        with self._download_guard:
-            record = self._downloaded
+        record = self._ready_record()
         if record is None:
             return 0
         try:
@@ -2121,13 +2856,16 @@ class ApiBridge:
         except OSError:
             # The file vanished between the claim and the stat: report 0 and
             # let the install step surface the real error.
+            self._forget_download(record)
             return 0
 
     def _install_on_exit(self) -> None:
         """Run a verified installer when the app is closing.
 
         This is the zero-click path: the update was downloaded in the
-        background, and quitting the app is the only step left.
+        background, and quitting the app is the only step left.  Only the
+        release the current check advertises is launched — an older package
+        left over from a previous check stays on disk for cleanup instead.
         """
         try:
             if sys.platform != "win32":
@@ -2136,22 +2874,42 @@ class ApiBridge:
                 return
             with self._download_guard:
                 record = self._downloaded
-                if record is None:
+            if record is None:
+                return
+            if self._version_conflict(record):
+                return
+            target = record.path
+            suffix = target.suffix.lower()
+            updates_dir = _updates_dir()
+            if suffix not in {".exe", ".zip"} or not _inside_dir(target, updates_dir):
+                return
+            if not target.is_file():
+                self._forget_download(record)
+                return
+            if not verify_sha256(target, record.sha256):
+                self._forget_download(record, remove=True)
+                return
+            if suffix == ".exe" and detect_install_shape() == "portable":
+                # Never run the Inno installer on a portable copy: it would
+                # create a second installation rather than update this one.
+                return
+            with self._download_guard:
+                if self._downloaded is not record:
                     return
                 self._downloaded = None
-            target = record.path
-            if target.suffix.lower() != ".exe" or not _inside_dir(
-                target, _updates_dir()
-            ):
+            if suffix == ".zip":
+                # A portable bundle needs the PowerShell replace-after-exit
+                # helper; ``_launch_portable_update`` gives the claim back if
+                # it cannot run, so a later cleanup can still see the file.
+                self._launch_portable_update(record, updates_dir)
+                return
+            try:
+                subprocess.Popen(  # noqa: S603
+                    [str(target), *_INSTALLER_ARGS], close_fds=True, shell=False
+                )
+            except OSError:
                 self._release_claim(record)
-                return
-            if not target.is_file() or not verify_sha256(target, record.sha256):
-                with contextlib.suppress(OSError):
-                    target.unlink(missing_ok=True)
-                return
-            subprocess.Popen(  # noqa: S603
-                [str(target), *_INSTALLER_ARGS], close_fds=True, shell=False
-            )
+                raise
             logger.info("Launched the update installer on exit")
         except Exception:  # noqa: BLE001 - shutdown must never fail
             logger.debug("Install on exit failed", exc_info=True)
@@ -2185,7 +2943,12 @@ class ApiBridge:
         checked_at: float,
         error: str | None,
     ) -> None:
-        """Store one interpreted check for :meth:`update_state` to serve."""
+        """Store one interpreted check for :meth:`update_state` to serve.
+
+        A ready package for an older release is discarded here, at the same
+        moment the newer release becomes known, so the bar can never offer an
+        installer the feed no longer announces.
+        """
         with self._update_guard:
             self._update_cache = _UpdateCache(
                 info=info,
@@ -2194,6 +2957,27 @@ class ApiBridge:
                 current=current,
                 platform=platform,
             )
+        latest = ""
+        if info is not None and info.available:
+            latest = _normalise_version(info.latest)
+        if not latest:
+            return
+        stale: _DownloadedUpdate | None = None
+        with self._download_guard:
+            record = self._downloaded
+            have = _normalise_version(record.version) if record is not None else ""
+            if record is not None and have and have != latest:
+                stale = record
+                self._downloaded = None
+                # Reset the progress view too: a "ready" bar for v9.0.0 must
+                # not stay green while v9.1.0 is the announced release.  A
+                # transfer that is still running keeps its live progress; its
+                # finished record is filtered out by ``_ready_record``.
+                if not self._download_active:
+                    self._update_download_state = _idle_download_state()
+        if stale is not None:
+            with contextlib.suppress(OSError):
+                stale.path.unlink(missing_ok=True)
 
     def _empty_update_payload(self, error: str | None) -> dict[str, Any]:
         """The all-empty :meth:`update_state` payload for a failed read."""
@@ -2343,22 +3127,35 @@ class ApiBridge:
         else:
             logger.debug("Background update download failed: %s", result.get("error"))
 
-    def _download_update(self) -> dict[str, Any]:
-        """Implementation of :meth:`download_update` (may raise)."""
-        with self._download_guard:
-            busy = self._download_active
-            if not busy:
-                self._download_active = True
-        if busy:
-            # Not inside the lock: ``_download_error`` updates the shared state
-            # under the same non-reentrant lock.
-            return self._download_error(t("An update download is already running"))
+    def _download_update(self, *, claimed: bool = False) -> dict[str, Any]:
+        """Implementation of :meth:`download_update` (may raise).
+
+        :param claimed: The caller already owns ``_download_active`` (the
+            async entry point reserves it before spawning this worker).  A
+            plain call claims it here and is rejected while another transfer
+            is running.
+        """
+        if not claimed:
+            with self._download_guard:
+                busy = self._download_active
+                if not busy:
+                    self._download_active = True
+            if busy:
+                # Do not touch the shared progress dict: the worker that owns
+                # the slot is still updating it, and a rejected second call
+                # must not flip the bar to "failed" mid-transfer.
+                return {
+                    "ok": False,
+                    "path": None,
+                    "error": t("An update download is already running"),
+                }
         try:
             with self._update_guard:
                 cache = self._update_cache
             info = cache.info if cache is not None else None
             if info is None or not info.available:
                 return self._download_error(t("No update is available to download"))
+            version = _normalise_version(info.latest)
             asset = info.asset
             if asset is None:
                 return self._download_error(
@@ -2388,6 +3185,7 @@ class ApiBridge:
                     "total": int(asset.size or 0),
                     "error": None,
                     "path": None,
+                    "version": version or None,
                 }
 
             def on_progress(received: int, total: int) -> None:
@@ -2436,7 +3234,10 @@ class ApiBridge:
 
             with self._download_guard:
                 self._downloaded = _DownloadedUpdate(
-                    path=final, sha256=digest, name=final.name
+                    path=final,
+                    sha256=digest,
+                    name=final.name,
+                    version=version or None,
                 )
                 self._update_download_state = {
                     "active": False,
@@ -2445,6 +3246,7 @@ class ApiBridge:
                     "total": int(final.stat().st_size),
                     "error": None,
                     "path": str(final),
+                    "version": version or None,
                 }
             return {
                 "ok": True,
@@ -2468,6 +3270,7 @@ class ApiBridge:
                 "total": int(state.get("total") or 0),
                 "error": message,
                 "path": None,
+                "version": state.get("version"),
             }
         return {"ok": False, "path": None, "error": message}
 
@@ -2496,14 +3299,22 @@ class ApiBridge:
 
         The page polls :meth:`update_download_state` for bytes/percent, so the
         update bar stays responsive while a 60 MB asset is in flight.  A second
-        call while a transfer is running reports ``started: False``.
+        call while a transfer is running reports ``started: False`` and
+        ``active: True`` — without touching the running progress state.
         """
+        version = self._announced_version()
         with self._download_guard:
             if self._download_active:
+                # Deliberately leave the progress dict alone: a double click
+                # must not erase the bytes the running worker already reported.
                 return {
                     "started": False,
+                    "active": True,
                     "error": t("An update download is already running"),
                 }
+            # Reserve the slot before spawning the worker.  It stays held
+            # until the worker releases it in ``_download_update``'s finally
+            # block, so a synchronous call cannot slip in between.
             self._download_active = True
             self._update_download_state = {
                 "active": True,
@@ -2512,36 +3323,57 @@ class ApiBridge:
                 "total": 0,
                 "error": None,
                 "path": None,
+                "version": version or None,
             }
-        # ``_download_update`` claims the same flag; release it here first so
-        # the worker does not see its own reservation as a concurrent call.
-        with self._download_guard:
-            self._download_active = False
 
         def worker() -> None:
             try:
-                self._download_update()
+                self._download_update(claimed=True)
             except Exception:  # noqa: BLE001 - surfaced through the state
                 logger.debug("Update download raised", exc_info=True)
                 self._download_error(t("Update download failed"))
 
-        threading.Thread(
-            target=worker, name="novel-desktop-update-dl", daemon=True
-        ).start()
-        return {"started": True, "error": None}
+        try:
+            threading.Thread(
+                target=worker, name="novel-desktop-update-dl", daemon=True
+            ).start()
+        except Exception:  # noqa: BLE001 - never leave the slot reserved
+            self._download_error(t("Update download failed"))
+            return {
+                "started": False,
+                "active": False,
+                "error": t("Update download failed"),
+            }
+        return {"started": True, "active": True, "error": None}
 
     def _install_update(self) -> dict[str, Any]:
         """Implementation of :meth:`install_update` (may raise)."""
+        with self._download_guard:
+            record = self._downloaded
+        if record is None:
+            return {"ok": False, "error": t("No update has been downloaded yet")}
+        announced = self._version_conflict(record)
+        if announced:
+            # The feed moved on after this file was fetched: never launch the
+            # stale installer.  The record stays so a later pass can clean it.
+            return {
+                "ok": False,
+                "error": t(
+                    "The downloaded update is for v{have}, but v{want} is now "
+                    "available; please download it again"
+                )
+                .replace("{have}", _normalise_version(record.version))
+                .replace("{want}", announced),
+            }
         # Claim the verified record atomically.  The page disables its buttons
         # while installing, but any script in the window can call the bridge
         # twice; without the claim both calls would reach ``Popen`` and start
         # two installers.  Every failure that leaves the file usable gives the
         # claim back (see :meth:`_release_claim`).
         with self._download_guard:
-            record = self._downloaded
+            if self._downloaded is not record:
+                return {"ok": False, "error": t("No update has been downloaded yet")}
             self._downloaded = None
-        if record is None:
-            return {"ok": False, "error": t("No update has been downloaded yet")}
         try:
             return self._launch_update(record)
         except Exception:  # noqa: BLE001 - re-raised; the claim is returned first
@@ -2567,6 +3399,17 @@ class ApiBridge:
                 "ok": False,
                 "error": t(
                     "This update is not an installer; please extract it manually"
+                ),
+            }
+        if suffix == ".exe" and detect_install_shape() == "portable":
+            # Running the Inno installer on a portable copy would create a
+            # second installation instead of updating this folder.
+            self._release_claim(record)
+            return {
+                "ok": False,
+                "error": t(
+                    "This update is an installer, which a portable copy cannot "
+                    "use; download the portable package instead"
                 ),
             }
         updates_dir = _updates_dir()
@@ -2604,13 +3447,17 @@ class ApiBridge:
         try:
             # Fixed argument vector: no shell, no user-supplied text.  A list
             # argument keeps an installer path containing spaces intact
-            # (``list2cmdline`` quotes it).
+            # (``list2cmdline`` quotes it).  Setup closes this instance via
+            # /CLOSEAPPLICATIONS and relaunches the new build from its [Run]
+            # entry, so the process is never waited on here.
             process = subprocess.Popen(  # noqa: S603
                 [str(target), *_INSTALLER_ARGS],
                 close_fds=True,
                 shell=False,
             )
         except OSError as exc:
+            # Nothing was started: hand the download back so the user can
+            # retry without fetching the package again.
             logger.debug("Could not start the installer: %s", exc)
             self._release_claim(record)
             return {"ok": False, "error": format_error(exc)}
@@ -2682,6 +3529,11 @@ class ApiBridge:
             "-Exe",
             exe.name,
         ]
+        keep = _portable_keep_paths(app_dir)
+        if keep:
+            # Only paths inside _internal are ever at risk; the helper skips a
+            # payload subtree containing user data rather than deleting it.
+            command.extend(["-Keep", *keep])
         try:
             process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
                 command, close_fds=True, shell=False
@@ -2875,7 +3727,10 @@ class ApiBridge:
         The page polls :meth:`search_progress` while the sites answer, so the
         first rows appear as soon as the fastest site replies instead of
         waiting for the slowest one. The final poll carries the fully ranked
-        (and optionally merged) list.
+        (and optionally merged) list. Every poll also reports how many sites
+        completed or failed, the current row count and the elapsed time, which
+        is what the page's progress line renders. :meth:`cancel_search` can
+        stop the run early; late chunks are then discarded.
 
         :param keyword: The search term.
         :param sites_csv: Optional comma-separated site filter.
@@ -2892,35 +3747,116 @@ class ApiBridge:
         state: dict[str, Any] = {
             "results": [],
             "done": False,
+            "cancelled": False,
             "error": "",
             "sites_done": 0,
+            "sites_completed": 0,
+            "sites_failed": 0,
+            "result_count": 0,
             "elapsed": 0.0,
             "started": time.perf_counter(),
+            # The concurrent future lets cancel_search stop the coroutine
+            # (and with it the per-site tasks / HTTP session) instead of only
+            # hiding the rows from the page.
+            "future": None,
         }
         with self._lock:
-            # Abandoned searches (page closed mid-run) must not pile up.
+            # Abandoned searches (page closed mid-run) must not pile up. A
+            # replaced search is cancelled too, not left running in the
+            # background for the whole per-site timeout.
             while len(self._searches) >= 8:
-                self._searches.pop(next(iter(self._searches)), None)
+                old_key = next(iter(self._searches))
+                old_state = self._searches.pop(old_key)
+                old_future = old_state.get("future")
+                if old_future is not None:
+                    old_future.cancel()
             self._searches[search_id] = state
 
         async def run() -> None:
             from novel_downloader.plugins.search import search, search_stream
 
             rows: list[dict[str, Any]] = []
+            stream: Any = None
+            #: Sites already counted as finished, so a duplicate event cannot
+            #: make "3/5 sources" jump past the real number of sites.
+            settled: set[str] = set()
+            #: Whether any per-site event arrived. A cache hit replays chunks
+            #: without events, so only then may chunks stand in for sites.
+            events_seen = False
+
+            def on_event(event: Any) -> None:
+                nonlocal events_seen
+                kind = str(getattr(event, "kind", "") or "")
+                if kind not in {"completed", "failed"}:
+                    return
+                site = str(getattr(event, "site", "") or "")
+                with self._lock:
+                    if bool(state["cancelled"]):
+                        # Cancellation closes the stream; the cleanup failures
+                        # it reports are not the user's search failing.
+                        return
+                    if site and site in settled:
+                        return
+                    events_seen = True
+                    if site:
+                        settled.add(site)
+                    if kind == "completed":
+                        state["sites_completed"] = int(state["sites_completed"]) + 1
+                    else:
+                        state["sites_failed"] = int(state["sites_failed"]) + 1
+                    state["sites_done"] = int(state["sites_completed"]) + int(
+                        state["sites_failed"]
+                    )
+
             try:
-                async for chunk in search_stream(
+                with self._lock:
+                    if bool(state["cancelled"]):
+                        return
+                chunks = 0
+                stream = search_stream(
                     text,
                     sites=sites,
                     per_site_limit=per_site_limit,
                     timeout=SEARCH_SITE_TIMEOUT,
-                ):
-                    base = len(rows)
-                    rows.extend(
-                        _result_dict(item, base + i) for i, item in enumerate(chunk)
-                    )
-                    with self._lock:
-                        state["results"] = list(rows)
-                        state["sites_done"] = int(state["sites_done"]) + 1
+                    on_event=on_event,
+                )
+                try:
+                    async for chunk in stream:
+                        with self._lock:
+                            if bool(state["cancelled"]):
+                                break
+                        base = len(rows)
+                        rows.extend(
+                            _result_dict(item, base + i) for i, item in enumerate(chunk)
+                        )
+                        chunks += 1
+                        with self._lock:
+                            state["results"] = list(rows)
+                            state["result_count"] = len(rows)
+                            # A cache hit replays chunks without per-site
+                            # events; each chunk still means one finished
+                            # site, so keep the progress counters honest.
+                            if (
+                                not events_seen
+                                and int(state["sites_completed"]) < chunks
+                            ):
+                                delta = chunks - int(state["sites_completed"])
+                                state["sites_completed"] = chunks
+                                state["sites_done"] = int(state["sites_done"]) + delta
+                finally:
+                    # Stopping the stream is what closes its aiohttp session
+                    # and cancels the site tasks; no process is killed.
+                    try:
+                        await stream.aclose()
+                    except Exception:  # noqa: BLE001 - best effort cleanup
+                        logger.debug(
+                            "Closing a progressive search stream failed",
+                            exc_info=True,
+                        )
+
+                with self._lock:
+                    if bool(state["cancelled"]):
+                        return
                 if rows:
                     # The stream left its merged snapshot in the search cache,
                     # so this ranks/groups it without touching the network.
@@ -2931,26 +3867,83 @@ class ApiBridge:
                         timeout=SEARCH_SITE_TIMEOUT,
                         group=bool(group),
                     )
+                    with self._lock:
+                        if bool(state["cancelled"]):
+                            return
                     rows = [_result_dict(item, i) for i, item in enumerate(final)]
                 with self._lock:
                     state["results"] = rows
+                    state["result_count"] = len(rows)
             except Exception as exc:  # noqa: BLE001 - reported to the page
-                logger.exception("Progressive search failed")
                 with self._lock:
-                    state["error"] = format_error(exc)
+                    cancelled = bool(state["cancelled"])
+                    if not cancelled:
+                        state["error"] = format_error(exc)
+                if cancelled:
+                    logger.debug("Progressive search cancelled")
+                else:
+                    logger.exception("Progressive search failed")
             finally:
                 with self._lock:
                     state["done"] = True
                     state["elapsed"] = time.perf_counter() - float(state["started"])
+                    state["result_count"] = len(state["results"])
+
+        def finalize(_future: Any) -> None:
+            """Mark the snapshot final even when cancellation beats the task.
+
+            Cancelling a coroutine before the loop picked it up means its own
+            ``finally`` never runs; without this the page would poll a stale
+            ``done=False`` entry forever.
+            """
+            with self._lock:
+                state["done"] = True
+                state["elapsed"] = time.perf_counter() - float(state["started"])
+                state["result_count"] = len(state["results"])
 
         try:
-            self._engine.submit(run())
+            future = self._engine.submit(run())
         except Exception as exc:  # noqa: BLE001 - engine refused the coroutine
             logger.exception("Progressive search could not start")
             with self._lock:
                 state["error"] = format_error(exc)
                 state["done"] = True
+        else:
+            future.add_done_callback(finalize)
+            with self._lock:
+                state["future"] = future
+                cancelled = bool(state["cancelled"])
+            if cancelled:
+                future.cancel()
         return {"search_id": search_id, "results": [], "done": False, "elapsed": 0.0}
+
+    def cancel_search(self, search_id: str) -> dict[str, Any]:
+        """
+        Stop a progressive search and its per-site work.
+
+        The search entry stays in ``_searches`` until the page polls the final
+        ``done`` snapshot, so a cancelled search still reports the rows that
+        had arrived. A new search id (or a finished one) is a harmless no-op.
+
+        :return: ``{"ok": True, "search_id": ..., "cancelled": bool}``.
+        """
+        key = str(search_id or "")
+        with self._lock:
+            state = self._searches.get(key)
+            if state is None:
+                return {"ok": True, "search_id": key, "cancelled": False}
+            if bool(state["done"]):
+                return {"ok": True, "search_id": key, "cancelled": False}
+            state["cancelled"] = True
+            future = state.get("future")
+        if future is not None:
+            try:
+                # Cancels the asyncio task on the engine loop, which unwinds
+                # the stream (closing its HTTP session and site tasks).
+                future.cancel()
+            except Exception:  # noqa: BLE001 - already finished
+                logger.debug("Could not cancel search %s", key, exc_info=True)
+        return {"ok": True, "search_id": key, "cancelled": True}
 
     def search_progress(self, search_id: str) -> dict[str, Any]:
         """
@@ -2958,7 +3951,8 @@ class ApiBridge:
 
         ``done`` marks the final poll, which carries the ranked list; the
         entry is dropped afterwards so a page that stops polling cannot leak
-        state.
+        state. ``cancelled`` tells the page that the partial rows are final
+        because the user stopped the run.
         """
         key = str(search_id or "")
         with self._lock:
@@ -2967,16 +3961,30 @@ class ApiBridge:
                 return {
                     "results": [],
                     "done": True,
+                    "cancelled": False,
                     "error": "",
                     "sites_done": 0,
+                    "sites_completed": 0,
+                    "sites_failed": 0,
+                    "result_count": 0,
                     "elapsed": 0.0,
                 }
             payload = {
                 "results": list(state["results"]),
                 "done": bool(state["done"]),
+                "cancelled": bool(state["cancelled"]),
                 "error": str(state["error"]),
                 "sites_done": int(state["sites_done"]),
-                "elapsed": float(state["elapsed"]),
+                "sites_completed": int(state["sites_completed"]),
+                "sites_failed": int(state["sites_failed"]),
+                "result_count": int(state["result_count"]),
+                # Live polls report the wall time so far; the final poll has
+                # the value frozen by the coroutine's cleanup.
+                "elapsed": (
+                    float(state["elapsed"])
+                    if bool(state["done"])
+                    else max(0.0, time.perf_counter() - float(state["started"]))
+                ),
             }
             if payload["done"]:
                 self._searches.pop(key, None)
@@ -3337,6 +4345,96 @@ class ApiBridge:
             {"key": key, "label": label, "note": funcs["platform_note"](key)}
             for key, label in funcs["available_labels"]()
         ]
+
+    def get_music_platform_status(self) -> dict[str, Any]:
+        """Guidance rows for heavy platforms, including unavailable ones.
+
+        :return: ``{"ok": True, "platforms": [...]}`` or ``{"ok": False,
+            "error": "..."}``; every row names the missing dependency/tool or
+            the account the platform still needs.
+        """
+        try:
+            return {"ok": True, "platforms": _music_platform_status()}
+        except Exception as exc:  # noqa: BLE001 - the page needs an answer
+            logger.exception("Could not build the music platform status")
+            return {"ok": False, "error": format_error(exc)}
+
+    def get_music_credentials(self) -> dict[str, Any]:
+        """Credential rows for the settings card (stored values never included)."""
+        try:
+            return {"ok": True, "platforms": _music_credential_rows()}
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            logger.exception("Could not read the music credentials")
+            return {"ok": False, "error": format_error(exc)}
+
+    def save_music_credentials(self, platform: str, value: str) -> dict[str, Any]:
+        """Store a platform credential JSON blob; blank leaves it unchanged.
+
+        The raw value is never logged or echoed back. Clearing is explicit
+        (:meth:`clear_music_credentials`) so an accidental blank field cannot
+        destroy a working token.
+        """
+        key = str(platform or "").strip()
+        if key not in _MUSIC_CREDENTIAL_KEYS:
+            return {
+                "ok": False,
+                "error": t("Unknown music platform: {platform}").replace(
+                    "{platform}", key
+                ),
+            }
+        text = str(value or "").strip()
+        if not text:
+            return {
+                "ok": True,
+                "changed": False,
+                "configured": _music_credential_configured(key),
+            }
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return {"ok": False, "error": t("Platform credentials must be valid JSON.")}
+        if not isinstance(parsed, dict) or not parsed:
+            return {
+                "ok": False,
+                "error": t("Platform credentials must be a non-empty JSON object."),
+            }
+        try:
+            from novel_downloader.apps.music.providers import creds
+
+            creds.set(key, parsed)  # type: ignore[no-untyped-call]
+        except Exception as exc:  # noqa: BLE001 - reported to the page
+            logger.exception("Could not save the music credentials for %s", key)
+            return {
+                "ok": False,
+                "error": t("Could not save the platform credentials: {error}").replace(
+                    "{error}", format_error(exc)
+                ),
+            }
+        return {"ok": True, "changed": True, "configured": True}
+
+    def clear_music_credentials(self, platform: str) -> dict[str, Any]:
+        """Remove a stored platform credential."""
+        key = str(platform or "").strip()
+        if key not in _MUSIC_CREDENTIAL_KEYS:
+            return {
+                "ok": False,
+                "error": t("Unknown music platform: {platform}").replace(
+                    "{platform}", key
+                ),
+            }
+        try:
+            from novel_downloader.apps.music.providers import creds
+
+            creds.clear(key)  # type: ignore[no-untyped-call]
+        except Exception as exc:  # noqa: BLE001 - reported to the page
+            logger.exception("Could not clear the music credentials for %s", key)
+            return {
+                "ok": False,
+                "error": t("Could not clear the platform credentials: {error}").replace(
+                    "{error}", format_error(exc)
+                ),
+            }
+        return {"ok": True, "configured": False}
 
     def music_note(self, platform: str) -> str:
         """Usage hint for one platform, or for the aggregate search (may be empty)."""

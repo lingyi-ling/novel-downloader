@@ -21,9 +21,12 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from contextlib import suppress
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
+
+from novel_downloader.infra.logger import RedactingFormatter, install_root_redaction
 
 __all__ = ["desktop_main"]
 
@@ -33,6 +36,10 @@ logger = logging.getLogger(__name__)
 _LOG_NAME = "novel-desktop.log"
 _LOG_MAX_BYTES = 1_000_000
 _LOG_BACKUPS = 3
+#: Keeps the original file format while routing records through the redactor.
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+#: Marks the handler this module owns, so repeated setup never duplicates it.
+_LOG_HANDLER_ATTR = "_novel_downloader_desktop_file"
 #: Exclusive lock preventing two instances from sharing one queue.
 _LOCK_NAME = "desktop.lock"
 
@@ -74,24 +81,39 @@ def _setup_file_logging(home: Path) -> None:
     Attach a rotating file log (best effort).
 
     The console stays untouched; the file captures INFO and above from every
-    logger so a support request only needs one attachment.
+    logger so a support request only needs one attachment.  Records are
+    formatted through
+    :class:`~novel_downloader.infra.logger.RedactingFormatter`, and any other
+    handler already on the root logger receives the redacting filter, so a
+    library that configured logging first cannot leak credentials either.
+    Repeated calls replace the handler this function owns.
     """
     try:
         logs_dir = home / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
+        root = logging.getLogger()
+        # Repeated setup (tests, embedders, a retried start) must not stack
+        # handlers on the root logger.
+        for existing in root.handlers[:]:
+            if getattr(existing, _LOG_HANDLER_ATTR, False):
+                root.removeHandler(existing)
+                with suppress(Exception):
+                    existing.close()
+
         handler = RotatingFileHandler(
             logs_dir / _LOG_NAME,
             maxBytes=_LOG_MAX_BYTES,
             backupCount=_LOG_BACKUPS,
             encoding="utf-8",
         )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-        )
-        root = logging.getLogger()
+        handler.setFormatter(RedactingFormatter(_LOG_FORMAT))
+        setattr(handler, _LOG_HANDLER_ATTR, True)
         root.addHandler(handler)
         root.setLevel(logging.INFO)
-    except OSError:
+        # Third-party handlers already on root (e.g. a library's basicConfig)
+        # are filtered too; no extra console handler is added for the GUI.
+        install_root_redaction(fallback=False)
+    except (OSError, ValueError, TypeError):
         logger.debug("Could not attach the file log", exc_info=True)
 
 

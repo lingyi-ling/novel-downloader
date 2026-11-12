@@ -668,13 +668,27 @@ def test_install_update_launches_the_installer_then_exits(
             "/SILENT",
             "/SUPPRESSMSGBOXES",
             "/CLOSEAPPLICATIONS",
-            "/RESTARTAPPLICATIONS",
         ]
     ]
     assert exited.wait(5.0), "the window must be closed after the launch"
     # The record is consumed: a second click cannot start the installer twice.
     assert bridge._downloaded is None
     assert bridge.install_update()["ok"] is False
+
+
+def test_installer_args_leave_the_relaunch_to_setup() -> None:
+    """Setup's [Run] entry starts the new build after a silent install.
+
+    ``/RESTARTAPPLICATIONS`` would only work for an app that called
+    ``RegisterApplicationRestart`` (this one does not), and once it did it
+    would race the [Run] entry and open a second instance.
+    """
+    assert wa._INSTALLER_ARGS == (
+        "/SILENT",
+        "/SUPPRESSMSGBOXES",
+        "/CLOSEAPPLICATIONS",
+    )
+    assert not any("RESTART" in arg.upper() for arg in wa._INSTALLER_ARGS)
 
 
 def test_install_update_does_not_exit_when_the_launch_fails(
@@ -700,6 +714,7 @@ def test_install_update_does_not_exit_when_the_launch_fails(
     assert "locked" in result["error"]
     assert not exited.wait(0.3), "a failed launch must not close the app"
     assert bridge._downloaded is not None, "the download stays retryable"
+    assert path.exists(), "a failed launch must keep the package for a retry"
 
 
 # ---------------------------------------------------------------------------
@@ -1398,6 +1413,26 @@ def test_install_on_exit_launches_a_verified_installer(
     assert bridge._downloaded is None
 
 
+def test_install_on_exit_keeps_the_package_when_the_launch_fails(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shutdown-time launch failure must stay retryable on the next quit."""
+    _use_windows(monkeypatch)
+
+    def broken_popen(_cmd: list[str], **_kwargs: Any) -> Any:
+        raise OSError("installer is locked")
+
+    monkeypatch.setattr("subprocess.Popen", broken_popen)
+    path = _write_updates_file(home, "setup.exe", _PAYLOAD)
+    bridge = wa.ApiBridge()
+    bridge._downloaded = wa._DownloadedUpdate(path=path, sha256=_SHA, name=path.name)
+
+    bridge._install_on_exit()  # shutdown never raises
+
+    assert bridge._downloaded is not None
+    assert path.exists()
+
+
 def test_install_on_exit_honours_the_preference(
     prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1456,6 +1491,64 @@ def test_install_update_launches_the_portable_helper(
     assert "-ProcessId" in argv
 
 
+def test_portable_helper_clears_the_old_payload_before_copying() -> None:
+    """Removed plugins survive a plain overwrite, so _internal is cleared."""
+    script = wa._PORTABLE_UPDATE_SCRIPT
+    assert "_internal" in script
+    removal = script.index("Remove-Item -LiteralPath $payload -Recurse -Force")
+    copy = script.index("Copy-Item -Path (Join-Path $source '*')")
+    assert removal < copy
+    # The user-data guard must be consulted before deleting the payload.
+    assert "Test-Protected $payload" in script
+
+
+def test_portable_keep_paths_only_cover_data_inside_the_payload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Data in app_home is untouched by design; only a payload overlap is passed."""
+    app_dir = tmp_path / "portable"
+    outside = tmp_path / "home"
+    monkeypatch.setenv("NOVEL_HOME", str(outside))
+    assert wa._portable_keep_paths(app_dir) == ()
+
+    inside = app_dir / wa._PAYLOAD_DIRNAME / "data"
+    monkeypatch.setenv("NOVEL_HOME", str(inside))
+    assert wa._portable_keep_paths(app_dir) == (str(inside.resolve()),)
+
+    # The program directory itself is not the payload: clearing _internal never
+    # touches settings or downloads stored beside the executable.
+    monkeypatch.setenv("NOVEL_HOME", str(app_dir))
+    assert wa._portable_keep_paths(app_dir) == ()
+
+
+def test_portable_update_passes_user_data_inside_the_payload(
+    prefs: dict[str, Any], home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NOVEL_HOME inside _internal is handed to the helper as protected."""
+    calls = _recording_popen(monkeypatch)
+    _use_windows(monkeypatch)
+    monkeypatch.setattr(wa, "detect_install_shape", lambda: "portable")
+    monkeypatch.setattr(wa.shutil, "which", lambda name: "powershell.exe")
+    monkeypatch.setattr(wa.ApiBridge, "_schedule_exit", lambda self: None)
+    app_dir = tmp_path / "portable"
+    exe = app_dir / "NovelDownloader.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    monkeypatch.setattr(wa.sys, "executable", str(exe))
+    data = app_dir / wa._PAYLOAD_DIRNAME / "data"
+    data.mkdir(parents=True)
+    monkeypatch.setenv("NOVEL_HOME", str(data))
+    path = _write_updates_file(home, "NovelDownloader-9.0.0-windows-x64.zip", _PAYLOAD)
+    bridge = wa.ApiBridge()
+    record = wa._DownloadedUpdate(path=path, sha256=_SHA, name=path.name)
+
+    result = bridge._launch_portable_update(record, wa._updates_dir())
+
+    assert result["ok"] is True
+    argv = calls[0]
+    assert argv[argv.index("-Keep") + 1] == str(data)
+
+
 def test_prune_updates_removes_old_artefacts(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1476,3 +1569,239 @@ def test_prune_updates_removes_old_artefacts(
     assert not old.exists()
     assert not stale_part.exists()
     assert fresh.exists()
+
+
+# ---------------------------------------------------------------------------
+# stale downloads: a newer release must never install an older package
+# ---------------------------------------------------------------------------
+
+
+def _ready(
+    home: Path,
+    name: str = "NovelDownloader-setup-9.0.0-x64.exe",
+    *,
+    version: str | None = "9.0.0",
+    content: bytes = _PAYLOAD,
+) -> wa._DownloadedUpdate:
+    """A verified-looking record for ``content`` in ``home/updates``."""
+    path = _write_updates_file(home, name, content)
+    return wa._DownloadedUpdate(
+        path=path,
+        sha256=hashlib.sha256(content).hexdigest(),
+        name=path.name,
+        version=version,
+    )
+
+
+def test_a_newer_check_invalidates_a_ready_download(
+    prefs: dict[str, Any], home: Path
+) -> None:
+    """The bar must not offer v9.0.0 once the feed advertises v9.1.0."""
+    prefs["auto_check_updates"] = False
+    bridge = _bridge_with(_info(latest="9.0.0"))
+    bridge._downloaded = _ready(home)
+    assert bridge.update_state()["downloaded"] is True
+
+    bridge._remember_check(
+        _info(latest="9.1.0"),
+        current="1.0.0",
+        platform="windows-x64",
+        checked_at=time.time(),
+        error=None,
+    )
+
+    state = bridge.update_state()
+    assert state["available"] is True
+    assert state["latest"] == "9.1.0"
+    assert state["downloaded"] is False, "the old package is not the announced one"
+
+
+def test_install_update_refuses_a_download_for_an_older_version(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Clicking install after a newer check must not launch the stale installer."""
+    _use_windows(monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    bridge = _bridge_with(_info(latest="9.1.0"))
+    bridge._downloaded = _ready(home, version="9.0.0")
+
+    result = bridge.install_update()
+
+    assert result["ok"] is False
+    assert "9.1.0" in result["error"]
+    assert not calls
+    assert bridge._downloaded is not None, "the file stays for a later cleanup"
+
+
+def test_install_update_accepts_the_announced_version(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_windows(monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    bridge = _bridge_with(_info(latest="9.0.0"))
+    record = _ready(home, version="9.0.0")
+    bridge._downloaded = record
+
+    result = bridge.install_update()
+
+    assert result["ok"] is True
+    assert calls and calls[0][0] == str(record.path)
+    assert bridge._downloaded is None
+
+
+def test_install_on_exit_skips_a_download_for_an_older_version(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_windows(monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    bridge = _bridge_with(_info(latest="9.1.0"))
+    bridge._downloaded = _ready(home, version="9.0.0")
+
+    bridge._install_on_exit()
+
+    assert calls == []
+    assert bridge._downloaded is not None
+
+
+def test_install_on_exit_handles_a_portable_bundle(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quitting with a verified zip on a portable copy uses the helper too."""
+    _use_windows(monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    monkeypatch.setattr(wa, "detect_install_shape", lambda: "portable")
+    monkeypatch.setattr(wa.shutil, "which", lambda name: "powershell.exe")
+    bridge = _bridge_with(_info(latest="9.0.0"))
+    bridge._downloaded = _ready(
+        home, "NovelDownloader-9.0.0-windows-x64.zip", version="9.0.0"
+    )
+
+    bridge._install_on_exit()
+
+    assert calls and calls[0][0] == "powershell.exe"
+    assert bridge._downloaded is None
+
+
+def test_portable_copy_refuses_an_installer_exe(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Running the Inno installer on a portable copy would create a second app."""
+    _use_windows(monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    monkeypatch.setattr(wa, "detect_install_shape", lambda: "portable")
+    bridge = _bridge_with(_info(latest="9.0.0"))
+    bridge._downloaded = _ready(home, version="9.0.0")
+
+    result = bridge.install_update()
+
+    assert result["ok"] is False
+    assert "portable" in result["error"].lower()
+    assert not calls
+    assert bridge._downloaded is not None
+
+
+def test_a_ready_file_that_disappeared_is_forgotten(
+    prefs: dict[str, Any], home: Path
+) -> None:
+    """A pruned installer must flip the bar back to "download", not dead-end."""
+    prefs["auto_check_updates"] = False
+    bridge = _bridge_with(_info())
+    record = _ready(home)
+    bridge._downloaded = record
+    assert bridge.update_state()["downloaded"] is True
+
+    record.path.unlink()
+
+    state = bridge.update_state()
+    assert state["downloaded"] is False
+    assert state["downloaded_size"] == 0
+    assert bridge._downloaded is None
+
+
+# ---------------------------------------------------------------------------
+# concurrent downloads: one worker, and a busy call never clobbers progress
+# ---------------------------------------------------------------------------
+
+
+def test_a_busy_async_download_does_not_reset_the_running_state(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    def slow_download(
+        _url: str,
+        dest: Path,
+        expected_sha256: str | None = None,
+        mirror: Any = None,
+        *,
+        root: Path,
+        timeout: float,
+        progress: Any = None,
+        **extra: Any,
+    ) -> Path:
+        calls.append(1)
+        if progress is not None:
+            progress(10, len(_PAYLOAD))
+        started.set()
+        assert release.wait(5.0)
+        target = Path(root) / Path(dest).name
+        target.write_bytes(_PAYLOAD)
+        return target
+
+    monkeypatch.setattr(wa, "download_asset", slow_download)
+    bridge = _bridge_with(_info())
+
+    first = bridge.download_update_async()
+    try:
+        assert first["started"] is True
+        assert started.wait(5.0)
+        second = bridge.download_update_async()
+        assert second["started"] is False
+        assert second.get("active") is True
+        state = bridge.update_download_state()
+        assert state["active"] is True
+        assert state["version"] == "9.0.0"
+    finally:
+        release.set()
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if bridge.update_download_state()["ok"]:
+            break
+        time.sleep(0.05)
+
+    assert calls == [1], "a second click must not start a second transfer"
+    assert bridge.update_download_state()["ok"] is True
+    assert bridge._downloaded is not None
+    assert bridge._downloaded.version == "9.0.0"
+
+
+def test_update_download_state_is_reset_when_a_newer_version_appears(
+    prefs: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_download(_url: str, dest: Path, **_kwargs: Any) -> Path:
+        target = Path(_kwargs["root"]) / Path(dest).name
+        target.write_bytes(_PAYLOAD)
+        return target
+
+    monkeypatch.setattr(wa, "download_asset", fake_download)
+    bridge = _bridge_with(_info(latest="9.0.0"))
+    assert bridge.download_update()["ok"] is True
+    state = bridge.update_download_state()
+    assert state["ok"] is True
+    assert state["version"] == "9.0.0"
+
+    bridge._remember_check(
+        _info(latest="9.1.0"),
+        current="1.0.0",
+        platform="windows-x64",
+        checked_at=time.time(),
+        error=None,
+    )
+
+    reset = bridge.update_download_state()
+    assert reset["active"] is False
+    assert reset["ok"] is False
+    assert reset["error"] is None
