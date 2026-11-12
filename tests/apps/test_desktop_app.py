@@ -19,6 +19,8 @@ No network access and no windowed interaction happen here.
 
 from __future__ import annotations
 
+import ast
+import json
 import os
 import re
 import sys
@@ -676,9 +678,9 @@ def test_app_html_is_self_contained() -> None:
     assert not re.search(r"<link[^>]+stylesheet", APP_HTML)
 
 
-def test_app_html_declares_five_navigation_items() -> None:
+def test_app_html_declares_six_navigation_items() -> None:
     keys = re.findall(r'class="nav-item[^"]*" data-page="([a-z]+)"', APP_HTML)
-    assert keys == ["search", "download", "history", "music", "follow"]
+    assert keys == ["search", "download", "history", "music", "follow", "settings"]
 
 
 def test_i18n_catalog_covers_every_html_key() -> None:
@@ -1142,6 +1144,59 @@ def test_bridge_check_updates_summary(monkeypatch: pytest.MonkeyPatch) -> None:
     assert summary == {"checked": 3, "updated": 1, "failed": 1}
 
 
+def test_bridge_check_updates_publishes_per_book_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Progress polling needs the books that changed or failed, not just counts."""
+    from novel_downloader.apps.core import watchlist as wl
+    from novel_downloader.apps.core.watchlist import CheckResult
+
+    monkeypatch.setattr(wl, "default_watchlist_path", lambda: tmp_path / "watch.json")
+
+    async def fake_check_all(_store: Any, **_kwargs: Any) -> list[Any]:
+        return [
+            CheckResult(
+                entry=WatchEntry(site="a", book_id="1", title="Alpha"),
+                latest="Chapter 9",
+                changed=True,
+            ),
+            CheckResult(entry=WatchEntry(site="b", book_id="2", title="Beta")),
+            CheckResult(
+                entry=WatchEntry(site="c", book_id="3", title="Gamma"),
+                error="TimeoutError: boom",
+            ),
+        ]
+
+    monkeypatch.setattr(wl, "check_all", fake_check_all)
+    bridge = ApiBridge()
+    try:
+        summary = bridge.check_updates()
+        state = bridge.get_follow_check_state()
+    finally:
+        bridge.shutdown()
+    assert summary == {"checked": 3, "updated": 1, "failed": 1}
+    assert state["running"] is False
+    assert (state["total"], state["done"]) == (3, 3)
+    assert state["updates"] == [
+        {"site": "a", "book_id": "1", "title": "Alpha", "latest": "Chapter 9"}
+    ]
+    assert state["failures"] == [
+        {"site": "c", "book_id": "3", "title": "Gamma", "error": "TimeoutError: boom"}
+    ]
+
+
+def test_bridge_check_updates_refuses_a_parallel_sweep() -> None:
+    """A second sweep would interleave the progress counters."""
+    bridge = ApiBridge()
+    try:
+        bridge._follow_check["running"] = True  # noqa: SLF001 - state injection
+        result = bridge.check_updates()
+    finally:
+        bridge.shutdown()
+    assert result["checked"] == 0
+    assert result["error"] == "A check is already running"
+
+
 def test_bridge_music_download_guards_concurrency() -> None:
     bridge = ApiBridge()
     bridge._music_active = True  # noqa: SLF001 - direct state injection
@@ -1211,6 +1266,82 @@ def test_bridge_music_export_without_local_paths_reports_error(
     assert result["ok"] is False
     assert result["error"]
     assert result["skipped"] == 1
+
+
+def _fake_music_export(
+    monkeypatch: pytest.MonkeyPatch, exporter: Any | None = None
+) -> Any:
+    """Install a fake ``music`` extra set and return the bridge."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    @dataclass
+    class _FakeTrack:
+        name: str = ""
+        path: str = ""
+
+    def default_export(tracks: list[Any], path: Path) -> str:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#EXTM3U\n", encoding="utf-8")
+        return str(path)
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "Track": _FakeTrack,
+            "export_m3u": exporter or default_export,
+        },
+    )
+    return wa.ApiBridge()
+
+
+def test_bridge_music_export_requires_permission_to_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing playlist is reported, not silently replaced."""
+    bridge = _fake_music_export(monkeypatch)
+    target = tmp_path / "list.m3u8"
+    target.write_text("old\n", encoding="utf-8")
+
+    refused = bridge.music_export("netease", [{"path": "C:/a.mp3"}], str(target))
+    assert refused["ok"] is False
+    assert refused["needs_overwrite"] is True
+    assert refused["path"] == str(target)
+    assert str(target) in refused["error"]
+    assert target.read_text("utf-8") == "old\n"
+
+    accepted = bridge.music_export("netease", [{"path": "C:/a.mp3"}], str(target), True)
+    assert accepted["ok"] is True
+    assert accepted["path"] == str(target)
+    assert target.read_text("utf-8") == "#EXTM3U\n"
+
+
+def test_bridge_music_export_treats_non_playlist_path_as_directory() -> None:
+    """A typo such as ``songs.txt`` must not become the playlist file name."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    resolved = wa._playlist_target(str(Path("C:/exports/songs.txt")))
+    assert resolved.parent == Path("C:/exports/songs.txt")
+    assert resolved.suffix == ".m3u8"
+    # Supported suffixes are honoured verbatim, case-insensitively.
+    assert wa._playlist_target("C:/exports/list.M3U") == Path("C:/exports/list.M3U")
+
+
+def test_bridge_music_export_failure_names_the_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write error must tell the user which path failed."""
+
+    def broken_export(tracks: list[Any], path: Path) -> str:
+        raise OSError("disk full")
+
+    bridge = _fake_music_export(monkeypatch, broken_export)
+    target = tmp_path / "list.m3u8"
+    result = bridge.music_export("netease", [{"path": "C:/a.mp3"}], str(target))
+    assert result["ok"] is False
+    assert result["path"] == str(target)
+    assert str(target) in result["error"]
+    assert "disk full" in result["error"]
 
 
 def _wait_for_music_idle(bridge: Any, timeout: float = 10.0) -> dict[str, Any]:
@@ -2387,6 +2518,67 @@ def test_app_html_search_streams_results_while_sites_answer() -> None:
     assert "if (st.done) break;" in APP_HTML
 
 
+def _js_block(start_needle: str, end_needle: str) -> str:
+    """Return the JS source between two markers (a whole function body)."""
+    start = APP_HTML.index(start_needle)
+    return APP_HTML[start : APP_HTML.index(end_needle, start)]
+
+
+def test_app_html_renders_large_result_sets_in_chunks() -> None:
+    """Aggregate searches can return hundreds of rows: only one batch is built."""
+    assert "const RESULT_CHUNK = 60;" in APP_HTML
+    renderer = _js_block(
+        "function renderResults(results, kw)", "function appendResultChunk()"
+    )
+    assert "results.slice(0, renderedResultCount)" in renderer
+    assert "moreResultsHtml(results.length, renderedResultCount)" in renderer
+    # Appended cards keep the global index into lastResults.
+    append = _js_block(
+        "function appendResultChunk()", '$("#results").addEventListener("keydown"'
+    )
+    assert "lastResults.slice(start, end)" in append
+    assert "start + i" in append
+    assert "renderedResultCount = end;" in append
+    # The delegated click handler must claim the button before card handling.
+    assert 'if (e.target.closest("#results-more")) {' in APP_HTML
+
+
+def test_app_html_result_chunks_keep_selection_and_scroll() -> None:
+    """data-sel stays the lastResults index and re-renders keep the scroll box."""
+    renderer = _js_block(
+        "function renderResults(results, kw)", "function appendResultChunk()"
+    )
+    assert 'const scroller = box.closest(".scroll") || box;' in renderer
+    assert "const scrollTop = scroller.scrollTop;" in renderer
+    assert "scroller.scrollTop = scrollTop;" in renderer
+    # A streaming re-render never collapses rows the user already expanded.
+    assert "Math.max(RESULT_CHUNK, renderedResultCount)" in renderer
+    assert 'data-sel="${i}"' in APP_HTML
+
+
+def test_app_html_search_supersedes_stale_polls() -> None:
+    """A new query stops the old loop; duplicate Enter/click stays a no-op."""
+    searcher = _js_block("async function doSearch()", "function resultCardHtml")
+    assert "const token = ++searchSeq;" in searcher
+    assert "if (searching && kw === activeSearchKeyword) return;" in searcher
+    # The loop checks the token after every await so it cannot paint stale rows.
+    assert searcher.count("if (token !== searchSeq) return;") >= 3
+    # Only the current owner releases the controls.
+    assert "if (token === searchSeq) endSearchUi();" in searcher
+    assert "function cancelActiveSearch()" in APP_HTML
+    assert "cancelActiveSearch();" in _js_block(
+        '$("#btn-rank").onclick', "let catGroups"
+    )
+
+
+def test_app_html_playlist_export_confirms_overwrite() -> None:
+    """The bridge is asked first; stale targets need an explicit second click."""
+    assert '"music_export", $("#m-platform").value, ready, "", overwrite' in APP_HTML
+    assert "r.needs_overwrite" in APP_HTML
+    assert 't("Click to overwrite")' in APP_HTML
+    assert "exportPlaylist(true)" in APP_HTML
+
+
 def test_app_html_surfaces_rejected_task_errors() -> None:
     """``{"ok": false, "error": ...}`` answers are toasted, not swallowed."""
     assert 'else if (r && r.error) toast(r.error, "err");' in APP_HTML
@@ -2420,6 +2612,42 @@ def test_app_html_draws_a_task_in_one_bucket_only() -> None:
     assert '["done", t("Finished"), done]' in renderer
     # The empty state must look at the de-duplicated buckets, not the raw ones.
     assert "if (liveCount === 0 && groups[2][2].length === 0)" in renderer
+
+
+def test_app_html_task_card_shows_chapter_count_and_percent() -> None:
+    """Per-task progress is drawn as ``done/total · pct%``, not only a bar."""
+    card = _js_handler("function taskCard(k)")
+    assert "const chapterText = total > 0 ? `${done}/${total} · ${pct}%`" in card
+    # The indeterminate bar is only for a task whose chapter list is unknown.
+    assert "const indet = active && total <= 0;" in card
+    assert 'meta.push(`<span class="mono">${chapterText}</span>`)' in card
+
+
+def test_app_html_failed_task_keeps_its_error_actionable() -> None:
+    """A failed row offers the whole message and the export folder."""
+    card = _js_handler("function taskCard(k)")
+    assert 'class="task-error" title="${esc(k.error)}"' in card
+    assert 'data-copy-error="${esc(k.task_id)}"' in card
+    assert "data-open-dir" in card
+    assert 't("Copy error")' in card
+    handler = _js_handler('$("#tasks-body").addEventListener("click"')
+    assert 'await copyText(taskErrors.get(ce.dataset.copyError) || "")' in handler
+    assert 'await call("open_downloads_dir")' in handler
+    # The reporting helper and its "open failed" message are reused, not
+    # duplicated with a silent api() call.
+    assert 't("Could not open the download folder: {error}")' in handler
+
+
+def test_app_html_follow_check_reports_progress_and_empty_outcome() -> None:
+    """The sweep shows live progress and says when nothing was new."""
+    assert 'id="f-status"' in APP_HTML
+    assert 'api("get_follow_check_state")' in APP_HTML
+    assert 't("Checking for updates…")' in APP_HTML
+    assert 't("Checking {done}/{total}…")' in APP_HTML
+    assert 't("Checked {n} books · No new chapters")' in APP_HTML
+    handler = _js_handler('$("#btn-f-check").onclick')
+    assert "startFollowProgress();" in handler
+    assert "await renderFollowReport(r);" in handler
 
 
 def test_app_html_cancel_and_retry_report_rejected_requests() -> None:
@@ -2905,3 +3133,855 @@ def test_result_buttons_read_the_dataset_keys_they_set() -> None:
     assert "fol.dataset.follow" in APP_HTML
     assert "fol.dataset.bid" in APP_HTML
     assert "dataset.site" not in APP_HTML
+
+
+# ---------------------------------------------------------------------------
+# Front end <-> bridge contract parity
+# ---------------------------------------------------------------------------
+
+#: Every ``api("x")`` / ``call("x")`` target found in the single-file front end.
+_JS_BRIDGE_CALLS = sorted(
+    set(re.findall(r'(?:api|call)\("([A-Za-z_][A-Za-z0-9_]*)"', APP_HTML))
+)
+
+
+def test_every_front_end_call_targets_a_public_bridge_method() -> None:
+    """A renamed/removed bridge method must fail here, not in a click handler."""
+    assert _JS_BRIDGE_CALLS, "the front end declares no bridge calls"
+    missing = sorted(
+        name
+        for name in _JS_BRIDGE_CALLS
+        if not callable(getattr(ApiBridge, name, None))
+    )
+    assert not missing, f"front end calls unknown bridge methods: {missing}"
+
+
+def _bridge_literal_keys(methods: Iterable[str]) -> set[str]:
+    """String keys of every dict literal inside the named ApiBridge methods."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    tree = ast.parse(Path(wa.__file__).read_text(encoding="utf-8"))
+    bridge = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ApiBridge"
+    )
+    functions = {
+        node.name: node
+        for node in bridge.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    keys: set[str] = set()
+    for name in methods:
+        function = functions[name]
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Dict):
+                continue
+            keys.update(
+                key.value
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            )
+    return keys
+
+
+#: ``method -> (helper methods building its payload, keys the front end reads)``.
+#: The helpers matter because several replies are assembled in a private
+#: ``_*_payload`` function (``update_state`` and friends).
+_PAYLOAD_CONTRACT: dict[str, tuple[tuple[str, ...], set[str]]] = {
+    "get_initial_state": (
+        ("get_initial_state",),
+        {
+            "version",
+            "theme",
+            "theme_stored",
+            "data_dir",
+            "output_dir",
+            "is_frozen",
+            "shortcut_exists",
+            "auto_check_updates",
+            "auto_download_updates",
+            "auto_install_on_exit",
+            "language",
+            "languages",
+            "i18n",
+        },
+    ),
+    "get_settings": (
+        ("get_settings",),
+        {
+            "version",
+            "config_path",
+            "output_dir",
+            "proxy",
+            "proxy_user",
+            "proxy_has_password",
+            "auto_check_updates",
+            "auto_download_updates",
+            "auto_install_on_exit",
+            "theme",
+            "language",
+            "languages",
+            "shortcut_supported",
+            "shortcut_exists",
+            "data_dir",
+        },
+    ),
+    "save_settings": (
+        ("save_settings", "_save_settings"),
+        {"ok", "errors", "saved", "message", "settings"},
+    ),
+    "save_prefs": (("save_prefs",), {"ok", "error", "ignored"}),
+    "create_shortcut": (("create_shortcut",), {"ok", "message"}),
+    "check_update": (("check_update",), {"available", "current", "latest", "url"}),
+    "check_update_async": (
+        ("check_update_async", "_update_payload", "_empty_update_payload"),
+        {
+            "available",
+            "latest",
+            "notes_url",
+            "url",
+            "asset_name",
+            "asset_size",
+            "downloaded",
+            "downloaded_size",
+            "pending",
+            "error",
+            "started",
+            "reason",
+        },
+    ),
+    "update_state": (
+        ("update_state", "_update_payload", "_empty_update_payload"),
+        {
+            "current",
+            "available",
+            "latest",
+            "notes_url",
+            "url",
+            "asset_name",
+            "asset_size",
+            "downloaded",
+            "downloaded_size",
+            "platform",
+            "checked_at",
+            "error",
+            "pending",
+            "auto_check",
+            "auto_install",
+        },
+    ),
+    "update_download_state": (
+        (
+            "update_download_state",
+            "download_update_async",
+            "_download_update",
+            "_download_error",
+            "__init__",
+        ),
+        {"active", "ok", "received", "total", "error"},
+    ),
+    "download_update_async": (("download_update_async",), {"started", "error"}),
+    "download_update": (
+        ("download_update", "_download_update", "_download_error"),
+        {"ok", "path", "error"},
+    ),
+    "install_update": (
+        ("install_update", "_install_update", "_launch_update"),
+        {"ok", "error"},
+    ),
+    "search_async": (("search_async",), {"search_id", "results", "done"}),
+    "search_progress": (
+        ("search_progress",),
+        {"results", "done", "error", "sites_done", "elapsed"},
+    ),
+    "add_task": (("add_task",), {"ok", "task_id", "error"}),
+    "add_watch": (("add_watch",), {"ok", "message", "created"}),
+    "rank_list": (("rank_list",), {"results", "error"}),
+    "category_list": (("category_list",), {"groups", "error"}),
+    "category_books": (("category_books",), {"results", "error"}),
+    "get_tasks": (("get_tasks",), {"running", "queued", "completed"}),
+    "cancel_task": (("cancel_task",), {"ok"}),
+    "retry_task": (("retry_task",), {"ok"}),
+    "open_downloads_dir": (("open_downloads_dir",), {"ok", "path", "error"}),
+    "open_music_dir": (("open_music_dir",), {"ok", "path", "error"}),
+    "get_history": (
+        ("get_history",),
+        {"name", "ext", "path", "size", "size_text", "mtime", "mtime_text"},
+    ),
+    "get_music_settings": (
+        ("get_music_settings",),
+        {
+            "level",
+            "embed_tags",
+            "embed_cover",
+            "save_lyric",
+            "split_folder",
+            "skip_existing",
+        },
+    ),
+    "music_search_async": (
+        ("music_search_async",),
+        {"search_id", "done", "tracks", "platforms", "result_id", "error"},
+    ),
+    "music_search_progress": (
+        ("music_search_progress",),
+        {"tracks", "platforms", "done", "error", "result_id"},
+    ),
+    "music_download": (("music_download",), {"ok", "error"}),
+    "music_export": (("music_export",), {"ok", "path", "skipped", "error"}),
+    "get_music_status": (
+        ("get_music_status",),
+        {
+            "active",
+            "done",
+            "total",
+            "fraction",
+            "summary",
+            "failed",
+            "paths",
+            "failed_items",
+        },
+    ),
+    "get_watchlist": (
+        ("get_watchlist",),
+        {"site", "book_id", "title", "last_chapter", "updated_at", "updated_text"},
+    ),
+    "check_updates": (("check_updates",), {"checked", "updated", "failed", "error"}),
+    "remove_watch": (("remove_watch",), {"ok"}),
+    "music_health_start": (("music_health_start",), {"ok", "error"}),
+    "get_music_health": (
+        ("get_music_health",),
+        {"done", "ok", "error", "label", "elapsed_text"},
+    ),
+}
+
+
+def test_bridge_payloads_expose_the_keys_the_front_end_reads() -> None:
+    """Payload construction and page reads stay in step (the ``dataset.site`` class)."""
+    failures: list[str] = []
+    for method, (sources, required) in _PAYLOAD_CONTRACT.items():
+        available = _bridge_literal_keys(sources)
+        missing = sorted(required - available)
+        if missing:
+            failures.append(f"{method}: missing {missing}")
+    assert not failures, "; ".join(failures)
+
+
+def _kebab_case(name: str) -> str:
+    """``openUrl`` -> ``open-url`` (the attribute spelling of a dataset key)."""
+    return re.sub(r"([A-Z])", lambda match: "-" + match.group(1).lower(), name)
+
+
+def test_every_dataset_read_has_a_matching_data_attribute() -> None:
+    """``dataset.foo`` is only valid when some element carries ``data-foo``."""
+    attributes = {
+        match.group(1) for match in re.finditer(r"data-([A-Za-z0-9-]+)\s*=", APP_HTML)
+    }
+    reads = {
+        match.group(1) for match in re.finditer(r"\bdataset\.([A-Za-z0-9_]+)", APP_HTML)
+    }
+    assert reads, "the front end must read dataset values"
+    missing = sorted(name for name in reads if _kebab_case(name) not in attributes)
+    assert not missing, f"dataset reads without a data-* attribute: {missing}"
+
+
+def test_app_html_category_failures_are_not_rendered_as_empty_lists() -> None:
+    """``category_*`` answers an ``error`` key alongside empty rows."""
+    guard = "if (data && data.error) throw new Error(data.error);"
+    # The rankings handler already did this; the two category handlers now do
+    # too instead of painting an empty chip list / "No results".
+    assert guard in _js_handler('$("#btn-cats").onclick')
+    assert guard in _js_handler('$("#cat-chips").addEventListener("click"')
+    # Both handlers run inside a try/catch that prints the message.
+    assert '$("#cat-hint").textContent = String(e && e.message || e);' in APP_HTML
+
+
+def test_app_html_follow_check_reports_a_failed_run() -> None:
+    """``check_updates`` errors must not read as "Checked 0 books"."""
+    handler = _js_handler('$("#btn-f-check").onclick')
+    assert "if (r && r.error) {" in handler
+    assert 'toast(r.error, "err", 7000);' in handler
+    assert handler.index("if (r && r.error)") < handler.index('toast(t("Checked')
+
+
+def test_app_html_music_health_refusal_is_reported() -> None:
+    """A refused health check (missing extras) used to leave an empty panel."""
+    handler = _js_handler('$("#btn-m-health").onclick')
+    assert 'if (r && r.error) toast(r.error, "warn", 6000);' in handler
+
+
+# ---------------------------------------------------------------------------
+# Bridge methods not covered above: history, folders, music health
+# ---------------------------------------------------------------------------
+
+
+def test_data_dir_is_the_history_scan_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The history sub-line must name the folder the files were read from."""
+    import novel_downloader.apps.desktop.webview_app as wa
+    import novel_downloader.infra.config as config_pkg
+
+    target = tmp_path / "books"
+    monkeypatch.setattr(
+        config_pkg,
+        "get_config_value",
+        lambda keys, default: (
+            str(target) if keys == ["general", "output_dir"] else default
+        ),
+    )
+    monkeypatch.setattr(wa, "_load_prefs", lambda: {})
+    bridge = wa.ApiBridge()
+    expected = str(target.resolve())
+    assert bridge.get_data_dir() == expected
+    # The bootstrap payload's ``data_dir`` uses the same meaning.
+    assert bridge.get_initial_state()["data_dir"] == expected
+
+
+def test_bridge_get_history_formats_each_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``get_history`` hands the page name/size/time text, newest first."""
+    import novel_downloader.apps.desktop.webview_app as wa
+    from novel_downloader.apps.common import history_files
+
+    older = history_files.FileItem(
+        path=tmp_path / "older.txt",
+        name="older.txt",
+        ext="txt",
+        size=1024,
+        mtime=1_700_000_000.0,
+    )
+    newer = history_files.FileItem(
+        path=tmp_path / "newer.epub",
+        name="newer.epub",
+        ext="epub",
+        size=2048,
+        mtime=1_700_000_100.0,
+    )
+    monkeypatch.setattr(history_files, "_scan_files", lambda: [older, newer])
+
+    rows = wa.ApiBridge().get_history()
+
+    assert [row["name"] for row in rows] == ["newer.epub", "older.txt"]
+    assert rows[0]["size_text"] == "2.0 KB"
+    assert rows[1]["size_text"] == "1.0 KB"
+    assert rows[0]["mtime_text"] == wa._format_time(newer.mtime)
+    assert rows[0]["path"] == str(newer.path)
+
+
+def test_bridge_open_downloads_dir_creates_and_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The folder is created on demand and reported as ``{ok, path, error}``."""
+    import novel_downloader.apps.desktop.webview_app as wa
+    import novel_downloader.infra.config as config_pkg
+
+    target = tmp_path / "exports"
+    monkeypatch.setattr(
+        config_pkg, "get_config_value", lambda keys, default: str(target)
+    )
+    opened: list[str] = []
+    monkeypatch.setattr(
+        wa.ApiBridge,
+        "open_path",
+        lambda _self, path: opened.append(path) or True,
+    )
+
+    result = wa.ApiBridge().open_downloads_dir()
+
+    assert target.is_dir()
+    assert result == {"ok": True, "path": str(target.resolve()), "error": None}
+    assert opened == [str(target.resolve())]
+
+
+def test_bridge_open_downloads_dir_reports_a_shell_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed open answers ``ok: False`` with a message, never ``None``."""
+    import novel_downloader.apps.desktop.webview_app as wa
+    import novel_downloader.infra.config as config_pkg
+
+    target = tmp_path / "exports"
+    monkeypatch.setattr(
+        config_pkg, "get_config_value", lambda keys, default: str(target)
+    )
+    monkeypatch.setattr(wa.ApiBridge, "open_path", lambda _self, _path: False)
+
+    result = wa.ApiBridge().open_downloads_dir()
+
+    assert result["ok"] is False
+    assert result["path"] == str(target.resolve())
+    assert result["error"] == t("The system file manager could not open it")
+
+
+def test_bridge_music_platforms_and_health_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Platforms carry their note; health rows carry done/ok/latency text."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    def fake_health(key: str, timeout: float) -> dict[str, Any]:
+        assert timeout == wa.HEALTH_CHECK_TIMEOUT
+        if key == "qq":
+            return {"ok": False, "elapsed_ms": 34, "error": "timeout"}
+        return {"ok": True, "elapsed_ms": 12, "error": ""}
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "available_labels": lambda: [("netease", "NetEase"), ("qq", "QQ")],
+            "platform_note": lambda key: f"note-{key}",
+            "health_check": fake_health,
+        },
+    )
+
+    bridge = wa.ApiBridge()
+    assert bridge.get_music_platforms() == [
+        {"key": "netease", "label": "NetEase", "note": "note-netease"},
+        {"key": "qq", "label": "QQ", "note": "note-qq"},
+    ]
+    assert bridge.music_health_start() == {"ok": True}
+
+    deadline = time.monotonic() + 5.0
+    rows = bridge.get_music_health()
+    while time.monotonic() < deadline and not all(row["done"] for row in rows):
+        time.sleep(0.01)
+        rows = bridge.get_music_health()
+
+    assert [row["key"] for row in rows] == ["netease", "qq"]
+    assert rows[0]["ok"] is True and rows[0]["elapsed_text"] == "12ms"
+    assert rows[1]["ok"] is False and rows[1]["elapsed_text"] == "34ms"
+    assert rows[1]["error"] == "timeout"
+
+
+def test_bridge_music_health_start_requires_the_extras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refusing without the extras now carries the reason the page toasts."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(wa, "_music_funcs", lambda: None)
+    assert wa.ApiBridge().music_health_start() == {
+        "ok": False,
+        "error": t("Music extras are not installed"),
+    }
+
+
+def test_bridge_create_shortcut_requires_the_packaged_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unpackaged run answers ``{ok: false, message}`` instead of raising."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    result = wa.ApiBridge().create_shortcut()
+    assert result["ok"] is False
+    assert result["message"] == t("Shortcuts require the packaged app")
+
+
+# ---------------------------------------------------------------------------
+# Settings page: preference contract, config writing and first-run recovery
+# ---------------------------------------------------------------------------
+
+
+def _isolate_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[Path, Path]:
+    """Point the preference and config files at ``tmp_path``."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs = tmp_path / "profile" / "desktop_prefs.json"
+    config = tmp_path / "home" / "settings.toml"
+    monkeypatch.setattr(wa, "_prefs_path", lambda: prefs)
+    monkeypatch.setattr(wa, "_settings_config_path", lambda: config)
+    return prefs, config
+
+
+def _config_reader(monkeypatch: pytest.MonkeyPatch, config: Path) -> None:
+    """Make ``get_config_value`` read the isolated TOML file (or a default)."""
+    import novel_downloader.infra.config as config_mod
+
+    def read(keys: list[str], default: Any) -> Any:
+        if len(keys) == 2 and config.is_file():
+            import tomllib
+
+            try:
+                data = tomllib.loads(config.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return default
+            node = data.get(keys[0])
+            if isinstance(node, dict) and keys[1] in node:
+                return node[keys[1]]
+        return default
+
+    monkeypatch.setattr(config_mod, "get_config_value", read, raising=True)
+
+
+def test_save_prefs_round_trips_every_initial_state_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``save_prefs`` writes exactly the switches ``get_initial_state`` publishes."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    bridge = wa.ApiBridge()
+    switches = {
+        "theme": "dark",
+        "auto_check_updates": False,
+        "auto_download_updates": False,
+        "auto_install_on_exit": False,
+    }
+
+    result = bridge.save_prefs(switches)
+
+    assert result["ok"] is True
+    assert result["ignored"] == []
+    state = bridge.get_initial_state()
+    assert state["theme"] == "dark"
+    assert state["theme_stored"] is True
+    for key in (
+        "auto_check_updates",
+        "auto_download_updates",
+        "auto_install_on_exit",
+    ):
+        assert state[key] is False
+    stored = json.loads(prefs.read_text(encoding="utf-8"))
+    assert stored == switches
+
+
+def test_save_prefs_ignores_unknown_and_internal_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A page bug must not be able to inject arbitrary preference keys."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    result = wa.ApiBridge().save_prefs(
+        {"theme": "dark", "evil": "payload", "last_update_check": "0"}
+    )
+
+    assert result["ok"] is True
+    assert result["ignored"] == ["evil", "last_update_check"]
+    assert json.loads(prefs.read_text(encoding="utf-8")) == {"theme": "dark"}
+
+
+def test_save_prefs_rejects_an_unknown_theme(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    result = wa.ApiBridge().save_prefs({"theme": "purple"})
+
+    assert result["ok"] is False
+    assert result["errors"] == {"theme": t("Unknown theme")}
+    assert not prefs.exists(), "a rejected value must not reach the file"
+
+
+def test_save_prefs_reports_a_read_only_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The theme must not silently revert when the profile is unwritable."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    blocker = tmp_path / "profile-file"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(wa, "_prefs_path", lambda: blocker / "prefs.json")
+
+    result = wa.ApiBridge().save_prefs({"theme": "dark"})
+
+    assert result["ok"] is False
+    assert result["error"] == t("Could not save the settings")
+
+
+def test_save_prefs_is_atomic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A failed replace leaves no truncated file and reports failure."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+
+    def boom(_src: Any, _dst: Any) -> None:
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(wa.os, "replace", boom)
+
+    assert wa._save_prefs({"theme": "dark"}) is False
+    assert not prefs.exists()
+
+
+def test_patch_toml_text_preserves_comments_and_section_bounds() -> None:
+    """Only the touched key lines change; neighbouring comments survive."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    source = (
+        "# top of the file\n"
+        "[general]\n"
+        'raw_data_dir = "./raw_data"  # keep me\n'
+        'output_dir = "./downloads"  # books land here\n'
+        "\n"
+        "[general.output]\n"
+        'formats = ["txt"]\n'
+    )
+    updated = wa._patch_toml_text(
+        source, "general", {"output_dir": "D:/books", "proxy": ""}
+    )
+
+    import tomllib
+
+    data = tomllib.loads(updated)
+    assert data["general"]["output_dir"] == "D:/books"
+    assert data["general"]["proxy"] == ""
+    assert data["general"]["raw_data_dir"] == "./raw_data"
+    assert "# keep me" in updated
+    assert "# books land here" in updated
+    # The new key belongs to [general], not to [general.output].
+    assert updated.index('proxy = ""') < updated.index("[general.output]")
+
+
+def test_update_config_section_round_trips_toml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A missing config is seeded from the sample and patched without losing it."""
+    import tomllib
+
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    _prefs, config = _isolate_settings(monkeypatch, tmp_path)
+    target = tmp_path / "books"
+
+    wa._update_config_section(
+        "general", {"output_dir": str(target), "proxy": "http://127.0.0.1:7890"}
+    )
+
+    text = config.read_text(encoding="utf-8")
+    assert "# 全局通用设置" in text, "the shipped sample's comments are kept"
+    data = tomllib.loads(text)
+    assert data["general"]["output_dir"] == str(target)
+    assert data["general"]["proxy"] == "http://127.0.0.1:7890"
+    assert data["general"]["output"]["formats"], "later sections are untouched"
+
+
+def test_update_config_section_round_trips_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    _prefs, config = _isolate_settings(monkeypatch, tmp_path)
+    config = config.with_suffix(".json")
+    monkeypatch.setattr(wa, "_settings_config_path", lambda: config)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        json.dumps({"general": {"output_dir": "./old"}, "other": 1}),
+        encoding="utf-8",
+    )
+
+    wa._update_config_section("general", {"output_dir": "D:/new"})
+
+    data = json.loads(config.read_text(encoding="utf-8"))
+    assert data["general"]["output_dir"] == "D:/new"
+    assert data["other"] == 1
+
+
+def test_save_settings_creates_a_missing_output_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Saving a new folder creates it and proves a write before storing it."""
+    import tomllib
+
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    _prefs, config = _isolate_settings(monkeypatch, tmp_path)
+    _config_reader(monkeypatch, config)
+    target = tmp_path / "new" / "books"
+
+    result = wa.ApiBridge().save_settings({"output_dir": str(target)})
+
+    assert result["ok"] is True, result["errors"]
+    assert target.is_dir(), "a missing output folder is created on save"
+    data = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert data["general"]["output_dir"] == str(target.resolve())
+    assert result["settings"]["output_dir"]["state"] == "ready"
+
+
+def test_save_settings_rejects_a_file_as_the_output_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    _prefs, config = _isolate_settings(monkeypatch, tmp_path)
+    _config_reader(monkeypatch, config)
+    blocker = tmp_path / "book.txt"
+    blocker.write_text("x", encoding="utf-8")
+
+    result = wa.ApiBridge().save_settings({"output_dir": str(blocker)})
+
+    assert result["ok"] is False
+    assert result["errors"]["output_dir"] == t("That path is a file, not a folder")
+    assert not config.exists(), "a failed validation writes nothing"
+
+
+def test_save_settings_surfaces_a_config_write_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    _prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+
+    def boom(_section: str, _values: Any) -> None:
+        raise OSError("disk is full")
+
+    monkeypatch.setattr(wa, "_update_config_section", boom)
+    result = wa.ApiBridge().save_settings({"output_dir": str(tmp_path / "books")})
+
+    assert result["ok"] is False
+    assert "disk is full" in result["errors"]["output_dir"]
+    assert result["message"] == t("Some settings were not saved")
+
+
+def test_save_settings_validates_and_normalises_the_proxy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import tomllib
+
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    _prefs, config = _isolate_settings(monkeypatch, tmp_path)
+    _config_reader(monkeypatch, config)
+    bridge = wa.ApiBridge()
+
+    for bad, hint in (
+        ("127.0.0.1", "port"),
+        ("ftp://127.0.0.1:21", "scheme"),
+        ("http://host:notaport", "port"),
+    ):
+        rejected = bridge.save_settings({"proxy": bad})
+        assert rejected["ok"] is False, bad
+        assert hint in rejected["errors"]["proxy"].lower(), bad
+    assert not config.exists(), "invalid input must not create a config file"
+
+    accepted = bridge.save_settings({"proxy": "127.0.0.1:7890"})
+    assert accepted["ok"] is True, accepted["errors"]
+    data = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert data["general"]["proxy"] == "http://127.0.0.1:7890"
+
+
+def test_get_settings_never_returns_the_proxy_password(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The page only learns that a password is stored, never its value."""
+    import novel_downloader.apps.desktop.webview_app as wa
+    import novel_downloader.infra.config as config_mod
+
+    _isolate_settings(monkeypatch, tmp_path)
+    values = {
+        "proxy": "http://127.0.0.1:7890",
+        "proxy_user": "alice",
+        "proxy_pass": "s3cret",
+    }
+    monkeypatch.setattr(
+        config_mod,
+        "get_config_value",
+        lambda keys, default: values.get(keys[-1], default),
+        raising=True,
+    )
+
+    payload = wa.ApiBridge().get_settings()
+
+    assert payload["proxy_has_password"] is True
+    assert payload["proxy_user"] == "alice"
+    assert "s3cret" not in json.dumps(payload)
+
+
+def test_save_settings_switches_language_and_returns_the_catalog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A language change applies at once and publishes the new catalogue."""
+    import novel_downloader.apps.desktop.webview_app as wa
+    import novel_downloader.infra.i18n as i18n
+
+    _isolate_settings(monkeypatch, tmp_path)
+    active = {"code": "zh_CN"}
+    calls: list[str] = []
+
+    def fake_set(lang: str) -> str:
+        calls.append(lang)
+        active["code"] = lang
+        return lang
+
+    monkeypatch.setattr(i18n, "get_language", lambda: active["code"])
+    monkeypatch.setattr(i18n, "set_language", fake_set)
+
+    result = wa.ApiBridge().save_settings({"language": "en"})
+
+    assert result["ok"] is True, result["errors"]
+    assert calls == ["en_US"]
+    assert result["i18n"], "the page needs the new catalogue to re-render"
+    assert result["settings"]["language"] == "en_US"
+
+
+def test_save_settings_rejects_an_unknown_language(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    _isolate_settings(monkeypatch, tmp_path)
+    result = wa.ApiBridge().save_settings({"language": "fr"})
+
+    assert result["ok"] is False
+    assert result["errors"]["language"] == t("Unknown language")
+    # An empty select (catalogue failed to load) means "unchanged", not invalid.
+    assert wa.ApiBridge().save_settings({"language": ""})["ok"] is True
+
+
+def test_initial_state_reports_an_output_path_that_is_a_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The first-run warning needs a vocabulary for "this is not a folder"."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    blocker = tmp_path / "book.txt"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(wa, "_load_prefs", lambda: {})
+    monkeypatch.setattr(wa.ApiBridge, "get_data_dir", lambda _self: str(blocker))
+
+    state = wa.ApiBridge().get_initial_state()
+
+    assert state["output_dir"]["state"] == "not_a_dir"
+    assert state["output_dir"]["path"] == str(blocker)
+
+
+def test_settings_page_wires_every_switch_to_the_bridge() -> None:
+    """The save handler must send all three update switches and the theme."""
+    start = APP_HTML.index('$("#btn-set-save").onclick')
+    section_rule = (
+        "/* ================================================================ updates */"
+    )
+    end = APP_HTML.index(section_rule, start)
+    handler = APP_HTML[start:end]
+    for key in (
+        "output_dir",
+        "proxy",
+        "proxy_user",
+        "auto_check_updates",
+        "auto_download_updates",
+        "auto_install_on_exit",
+        "theme",
+        "language",
+    ):
+        assert key in handler, f"{key} is not sent by the settings page"
+    assert "save_settings" in handler
+    assert 'id="page-settings"' in APP_HTML
+    assert 'id="btn-set-save"' in APP_HTML
+    assert 'id="set-out-status"' in APP_HTML
+
+
+def test_boot_warns_about_an_unusable_output_folder() -> None:
+    """A blocked folder is a first-run dead end, not a silent download failure."""
+    boot = _js_handler("function boot()")
+    assert "state.output_dir" in boot
+    assert "not_writable" in boot
+    assert "The output folder isn't writable" in boot
+    assert 'showPage("settings")' in boot

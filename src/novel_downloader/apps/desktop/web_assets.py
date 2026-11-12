@@ -342,6 +342,34 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 .row-card.task.st-failed::before { background: var(--red); }
 .row-card.task.st-cancelled::before { background: var(--gray); }
 
+/* A failed task's message is evidence: wrap it instead of clipping it to one
+   ellipsised line, and let it use the full width of the row. */
+.task-error {
+  white-space: pre-wrap; overflow-wrap: anywhere; color: var(--red);
+  margin-top: 6px; line-height: 1.45;
+}
+/* Long action sets (exports + copy error + folder + retry) must not push the
+   card wider than the list on a narrow window. */
+@media (max-width: 820px) {
+  .row-card.task { flex-wrap: wrap; }
+  .row-card.task .row-actions { width: 100%; flex-wrap: wrap; }
+}
+
+/* Follow page: progress and result of the "check updates" sweep. */
+.follow-status {
+  margin: 0 2px 10px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--card); font-size: 12.5px; color: var(--text-2);
+}
+.follow-status[hidden] { display: none; }
+.follow-status.err { border-color: var(--red); background: var(--red-bg); }
+.follow-status .fs-list {
+  margin: 6px 0 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.follow-status .fs-list li { overflow-wrap: anywhere; }
+.follow-status .fs-list li.bad { color: var(--red); }
+
 /* ============================================================ search page */
 .search-zone { margin: 2px 0 0; width: 100%; }
 .search-row { display: flex; gap: 8px; }
@@ -477,6 +505,38 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 .set-row:last-of-type { border-bottom: none; }
 .set-row .lbl { flex: 1; min-width: 0; }
 .set-row select.picker { height: 30px; font-size: 12px; }
+
+/* ============================================================ settings page */
+.settings-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px; align-items: start;
+}
+@media (max-width: 1120px) { .settings-grid { grid-template-columns: minmax(0, 1fr); } }
+.settings-card { padding: 16px 18px; }
+/* Five cards in a two-column grid: the last one spans both columns instead of
+   leaving an empty quarter of the page. */
+.settings-card.wide { grid-column: 1 / -1; }
+@media (max-width: 1120px) { .settings-card.wide { grid-column: auto; } }
+.settings-title { font-size: 13px; font-weight: 650; color: var(--text); margin-bottom: 3px; }
+.settings-help { font-size: 11.5px; color: var(--text-3); margin-bottom: 10px; }
+.settings-note { font-size: 11.5px; color: var(--text-3); margin-top: 7px; overflow-wrap: anywhere; }
+.settings-note.ok { color: var(--green); }
+.settings-note.warn { color: var(--yellow); }
+.settings-note.err { color: var(--red); }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.settings-value {
+  color: var(--text-2); font-size: 12px; text-align: right;
+  overflow-wrap: anywhere; max-width: 62%; line-height: 1.45;
+}
+.settings-card .set-row:first-of-type { margin-top: 4px; }
+.settings-errors {
+  border: 1px solid var(--red); background: var(--red-bg); color: var(--red);
+  border-radius: var(--radius-md); padding: 10px 12px; margin-bottom: 12px;
+  font-size: 12.5px;
+}
+.settings-errors ul { margin: 5px 0 0 18px; }
+.settings-errors li { overflow-wrap: anywhere; }
+.field.bad { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-bg); }
 .track-row {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 12px; border-bottom: 1px solid var(--border);
@@ -564,7 +624,9 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 
 /* ============================================================ toasts */
-#toasts { position: fixed; top: 14px; right: 16px; z-index: 100; display: flex; flex-direction: column; gap: 8px; }
+/* Bottom-right: a toast must never cover the topbar's primary action (Save /
+   Refresh / Check updates), which is where the user is looking after a click. */
+#toasts { position: fixed; bottom: 18px; right: 16px; z-index: 100; display: flex; flex-direction: column-reverse; gap: 8px; }
 .toast {
   display: flex; align-items: stretch; gap: 10px;
   width: min(380px, calc(100vw - 32px));
@@ -573,7 +635,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
   font-size: 12.5px; animation: toastIn .18s var(--ease);
 }
 .toast.leaving { opacity: 0; transition: opacity .18s ease; }
-@keyframes toastIn { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes toastIn { from { opacity: 0; transform: translateY(6px); } }
 .toast .bar { width: 2px; border-radius: 2px; align-self: stretch; flex: none; margin-right: 2px; }
 .toast.ok .bar { background: var(--green); } .toast.err .bar { background: var(--red); }
 .toast.info .bar { background: var(--blue); } .toast.warn .bar { background: var(--yellow); }
@@ -612,6 +674,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 <symbol id="i-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 8L9 4l-3 8H2"/></symbol>
 <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
 <symbol id="i-desktop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
 </defs></svg>
 
 <div class="app">
@@ -626,6 +689,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
       <button class="nav-item" data-page="history"><svg class="icon"><use href="#i-hist"/></svg><span data-i18n="History">History</span><kbd>3</kbd></button>
       <button class="nav-item" data-page="music"><svg class="icon"><use href="#i-music"/></svg><span data-i18n="Music">Music</span><kbd>4</kbd></button>
       <button class="nav-item" data-page="follow"><svg class="icon"><use href="#i-heart"/></svg><span data-i18n="Follow">Follow</span><kbd>5</kbd></button>
+      <button class="nav-item" data-page="settings"><svg class="icon"><use href="#i-gear"/></svg><span data-i18n="Settings">Settings</span><kbd>6</kbd></button>
     </nav>
     <div class="side-foot">
       <div class="update-bar" id="update-bar" hidden>
@@ -643,7 +707,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
       <div class="foot-row">
         <button class="icon-btn" id="shortcut-btn" data-i18n-title="Create desktop shortcut" title="Create desktop shortcut"><svg class="icon"><use href="#i-desktop"/></svg></button>
         <button class="icon-btn" id="theme-btn" data-i18n-title="Theme" title="Theme"><svg class="icon"><use href="#i-moon"/></svg></button>
-        <div class="foot-meta"><span data-i18n="Ctrl+1-5 switch pages">Ctrl+1-5 switch pages</span><br>Ctrl+F / Ctrl+D</div>
+        <div class="foot-meta"><span data-i18n="Ctrl+1-6 switch pages">Ctrl+1-6 switch pages</span><br>Ctrl+F / Ctrl+D</div>
       </div>
     </div>
   </aside>
@@ -787,7 +851,83 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
         <button class="btn btn-ghost" id="btn-f-add"><svg class="icon"><use href="#i-plus"/></svg><span data-i18n="Add book">Add book</span></button>
         <button class="btn btn-primary" id="btn-f-check"><span class="spin" id="f-spin"></span><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Check updates">Check updates</span></button>
       </div>
+      <div class="follow-status" id="f-status" role="status" aria-live="polite" hidden></div>
       <div class="scroll" id="follow-body"></div>
+    </section>
+
+    <!-- ============================================= SETTINGS -->
+    <section class="page" id="page-settings">
+      <div class="topbar">
+        <div><h1 data-i18n="Settings">Settings</h1><div class="sub" data-i18n="Storage, network, updates and appearance">Storage, network, updates and appearance</div></div>
+        <div class="spacer"></div>
+        <button class="btn btn-primary" id="btn-set-save"><svg class="icon"><use href="#i-check"/></svg><span data-i18n="Save changes">Save changes</span></button>
+      </div>
+      <div class="scroll">
+        <div class="settings-errors" id="set-errors" role="alert" hidden></div>
+        <div class="settings-grid">
+          <div class="card settings-card">
+            <div class="settings-title" data-i18n="Storage">Storage</div>
+            <div class="settings-help" data-i18n="Where downloaded books are saved">Where downloaded books are saved</div>
+            <div class="field" id="set-out-field">
+              <svg class="icon"><use href="#i-folder"/></svg>
+              <input id="set-out" data-i18n-ph="Output folder path" placeholder="Output folder path" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="settings-note" id="set-out-status"></div>
+            <div class="settings-actions">
+              <button class="btn btn-ghost btn-sm" id="btn-set-open"><svg class="icon"><use href="#i-folder"/></svg><span data-i18n="Open folder">Open folder</span></button>
+            </div>
+          </div>
+
+          <div class="card settings-card">
+            <div class="settings-title" data-i18n="Network">Network</div>
+            <div class="field">
+              <svg class="icon"><use href="#i-pulse"/></svg>
+              <input id="set-proxy" data-i18n-ph="Proxy address, e.g. http://127.0.0.1:7890 (blank = direct)" placeholder="Proxy address, e.g. http://127.0.0.1:7890 (blank = direct)" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="field" style="margin-top:8px">
+              <input id="set-proxy-user" data-i18n-ph="Proxy username" placeholder="Proxy username" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="field" style="margin-top:8px">
+              <input id="set-proxy-pass" type="password" data-i18n-ph="Proxy password" placeholder="Proxy password" autocomplete="new-password">
+            </div>
+            <label class="set-row" id="set-clear-row" hidden>
+              <span class="lbl" data-i18n="Clear saved password">Clear saved password</span>
+              <input type="checkbox" class="cb" id="set-clear-pass">
+            </label>
+          </div>
+
+          <div class="card settings-card">
+            <div class="settings-title" data-i18n="Updates">Updates</div>
+            <label class="set-row"><span class="lbl" data-i18n="Check for updates automatically">Check for updates automatically</span><input type="checkbox" class="switch" id="set-auto-check"></label>
+            <label class="set-row"><span class="lbl" data-i18n="Download updates in the background">Download updates in the background</span><input type="checkbox" class="switch" id="set-auto-download"></label>
+            <label class="set-row"><span class="lbl" data-i18n="Install the downloaded update when quitting">Install the downloaded update when quitting</span><input type="checkbox" class="switch" id="set-auto-install"></label>
+            <div class="settings-actions">
+              <button class="btn btn-ghost btn-sm" id="btn-set-check"><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Check now">Check now</span></button>
+            </div>
+          </div>
+
+          <div class="card settings-card">
+            <div class="settings-title" data-i18n="Appearance">Appearance</div>
+            <label class="set-row"><span class="lbl" data-i18n="Theme">Theme</span>
+              <select class="picker" id="set-theme">
+                <option value="light" data-i18n="Light">Light</option>
+                <option value="dark" data-i18n="Dark">Dark</option>
+              </select></label>
+            <label class="set-row"><span class="lbl" data-i18n="Language">Language</span>
+              <select class="picker" id="set-language"></select></label>
+          </div>
+
+          <div class="card settings-card wide">
+            <div class="settings-title" data-i18n="Application">Application</div>
+            <div class="set-row"><span class="lbl" data-i18n="Version">Version</span><span class="settings-value mono" id="set-version"></span></div>
+            <div class="set-row"><span class="lbl" data-i18n="Config file">Config file</span><span class="settings-value mono" id="set-config" title=""></span></div>
+            <div class="set-row"><span class="lbl" data-i18n="Keyboard shortcuts">Keyboard shortcuts</span><span class="settings-value"><span data-i18n="Ctrl+1-6 switch pages">Ctrl+1-6 switch pages</span><br><span data-i18n="Ctrl+F search, Ctrl+D download selected">Ctrl+F search, Ctrl+D download selected</span></span></div>
+            <div class="settings-actions">
+              <button class="btn btn-ghost btn-sm" id="btn-set-shortcut"><svg class="icon"><use href="#i-desktop"/></svg><span data-i18n="Create desktop shortcut">Create desktop shortcut</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
 
   </main>
@@ -840,6 +980,33 @@ async function openPath(path) {
   return true;
 }
 
+/* Copying is used by the playlist path and by failed-task errors. The async
+   clipboard API answers a rejected promise when permission is denied, so the
+   legacy command is kept as a fallback: a copy button must not look dead. */
+async function copyText(text) {
+  const value = String(text ?? "");
+  if (!value) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {}
+  try {
+    const area = document.createElement("textarea");
+    area.value = value;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch {}
+    area.remove();
+    return copied;
+  } catch { return false; }
+}
+
 function toast(msg, kind = "info", ms = 3800, onclick = null) {
   const box = document.createElement("div");
   box.className = "toast " + kind;
@@ -881,7 +1048,7 @@ function highlight(text, kw) {
 
 /* ================================================================ router */
 let currentPage = "search";
-const loaders = { search: null, download: refreshTasks, history: refreshHistory, music: initMusic, follow: refreshFollow };
+const loaders = { search: null, download: refreshTasks, history: refreshHistory, music: initMusic, follow: refreshFollow, settings: initSettings };
 function showPage(name) {
   currentPage = name;
   document.querySelectorAll(".nav-item").forEach(b => b.classList.toggle("active", b.dataset.page === name));
@@ -893,19 +1060,202 @@ function showPage(name) {
 $("#nav").addEventListener("click", e => { const b = e.target.closest(".nav-item"); if (b) showPage(b.dataset.page); });
 
 /* ================================================================ theme */
-function setTheme(raw) {
+function applyTheme(raw) {
   const mode = raw === "dark" ? "dark" : "light";
   document.documentElement.dataset.theme = mode;
   $("#theme-btn").innerHTML = `<svg class="icon"><use href="#i-${mode === "dark" ? "sun" : "moon"}"/></svg>`;
   store.set("theme", mode);
-  api("save_prefs", { theme: mode }).catch(() => {});
+  const select = $("#set-theme");
+  if (select) select.value = mode;
 }
-$("#theme-btn").onclick = () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+function setTheme(raw, persist = true) {
+  applyTheme(raw);
+  if (!persist) return;
+  // The preference file can live in a read-only profile directory: report the
+  // failure instead of letting the choice silently revert on the next launch.
+  api("save_prefs", { theme: docTheme() }).then(r => {
+    if (r && r.ok === false) toast(t("Could not save the settings"), "warn", 7000);
+  }).catch(() => {});
+}
+function docTheme() { return document.documentElement.dataset.theme === "dark" ? "dark" : "light"; }
+$("#theme-btn").onclick = () => setTheme(docTheme() === "dark" ? "light" : "dark");
 
 /* ================================================================ shortcuts */
 $("#shortcut-btn").onclick = async () => {
   const r = await call("create_shortcut");
   if (r && r.message) toast(r.message, r.ok ? "ok" : "warn");
+};
+
+/* ================================================================ settings */
+/* One explicit "Save changes" keeps the validation honest: the bridge checks
+   the folder by creating it and probes a write, so a typo or a read-only
+   target is reported here rather than surfacing as a failed download later. */
+const SETTING_ERROR_LABELS = {
+  output_dir: "Output folder",
+  proxy: "Proxy",
+  proxy_user: "Proxy username",
+  proxy_password: "Proxy password",
+  theme: "Theme",
+  language: "Language",
+  prefs: "Settings",
+  settings: "Settings",
+  auto_check_updates: "Updates",
+  auto_download_updates: "Updates",
+  auto_install_on_exit: "Updates",
+};
+/* Rebuilt only when the language list changes; a module variable keeps the
+   static dataset-attribute guard test applicable to the rest of the page. */
+let languageCodes = "";
+
+function renderOutStatus(info) {
+  const node = $("#set-out-status");
+  if (!node || !info) return;
+  const text = {
+    ready: t("Folder exists and is writable"),
+    missing: t("Folder does not exist yet; it will be created when you save"),
+    not_a_dir: t("Not a folder"),
+    not_writable: t("Folder is not writable"),
+    error: info.error || t("Unknown error"),
+  }[info.state] || "";
+  node.textContent = info.path ? `${text}` : text;
+  node.className = "settings-note " + (
+    info.state === "ready" ? "ok" :
+    info.state === "not_a_dir" || info.state === "not_writable" || info.state === "error" ? "err" : "warn"
+  );
+  node.title = info.path || "";
+}
+
+function renderSettings(s) {
+  if (!s) return;
+  $("#set-out").value = s.data_dir || (s.output_dir && s.output_dir.path) || "";
+  renderOutStatus(s.output_dir);
+  $("#set-proxy").value = s.proxy || "";
+  $("#set-proxy-user").value = s.proxy_user || "";
+  const pass = $("#set-proxy-pass");
+  pass.value = "";
+  pass.placeholder = s.proxy_has_password
+    ? t("Saved; leave blank to keep")
+    : t("Proxy password");
+  $("#set-clear-row").hidden = !s.proxy_has_password;
+  $("#set-clear-pass").checked = false;
+  $("#set-auto-check").checked = !!s.auto_check_updates;
+  $("#set-auto-download").checked = !!s.auto_download_updates;
+  $("#set-auto-install").checked = !!s.auto_install_on_exit;
+  $("#set-theme").value = s.theme === "dark" ? "dark" : "light";
+  const langs = s.languages || {};
+  const select = $("#set-language");
+  const codes = Object.keys(langs);
+  if (languageCodes !== codes.join(",")) {
+    select.innerHTML = codes.map(code =>
+      `<option value="${esc(code)}">${esc(langs[code])}</option>`
+    ).join("");
+    languageCodes = codes.join(",");
+  }
+  if (s.language) select.value = s.language;
+  $("#set-version").textContent = s.version ? "v" + s.version : "";
+  const cfg = $("#set-config");
+  cfg.textContent = s.config_path || "";
+  cfg.title = s.config_path || "";
+  const shortcut = $("#btn-set-shortcut");
+  shortcut.hidden = !s.shortcut_supported;
+  shortcut.disabled = !!s.shortcut_exists;
+  if (s.shortcut_exists) shortcut.querySelector("span").textContent = t("Shortcut already exists");
+  else shortcut.querySelector("span").textContent = t("Create desktop shortcut");
+}
+
+function showSettingsErrors(errors) {
+  const box = $("#set-errors");
+  const entries = Object.entries(errors || {});
+  if (!entries.length) {
+    box.hidden = true;
+    box.innerHTML = "";
+    $("#set-out-field").classList.remove("bad");
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = `<div>${esc(t("Some settings were not saved"))}</div><ul>${
+    entries.map(([key, message]) =>
+      `<li><b>${esc(t(SETTING_ERROR_LABELS[key] || key))}</b>: ${esc(message)}</li>`
+    ).join("")
+  }</ul>`;
+  $("#set-out-field").classList.toggle("bad", !!errors.output_dir);
+}
+
+async function initSettings() {
+  const s = await call("get_settings");
+  if (!s) return;
+  if (s.error) toast(s.error, "err", 8000);
+  renderSettings(s);
+}
+
+$("#btn-set-open").onclick = async () => {
+  const r = await call("open_downloads_dir");
+  if (r && !r.ok) {
+    toast(
+      t("Could not open the download folder: {error}").replace(
+        "{error}", r.error || t("Unknown error")
+      ),
+      "err", 7000
+    );
+  }
+};
+
+$("#btn-set-check").onclick = () => {
+  const bridge = (window.pywebview && window.pywebview.api) || {};
+  if (typeof bridge.check_update_async === "function") {
+    // ``force`` skips the 24 h throttle and the auto-check switch, which is
+    // exactly what an explicit "Check now" means.
+    api("check_update_async", true).then(r => {
+      if (r && r.started === false && r.reason === "pending") toast(t("Checking for updates…"), "info");
+      applyUpdateState(r);
+      pollUpdateState();
+    }).catch(() => {});
+    return;
+  }
+  call("check_update");
+};
+
+$("#btn-set-shortcut").onclick = async () => {
+  const r = await call("create_shortcut");
+  if (r && r.message) toast(r.message, r.ok ? "ok" : "warn");
+  initSettings();
+};
+
+$("#btn-set-save").onclick = async () => {
+  const button = $("#btn-set-save");
+  const values = {
+    output_dir: $("#set-out").value.trim(),
+    proxy: $("#set-proxy").value.trim(),
+    proxy_user: $("#set-proxy-user").value.trim(),
+    auto_check_updates: $("#set-auto-check").checked,
+    auto_download_updates: $("#set-auto-download").checked,
+    auto_install_on_exit: $("#set-auto-install").checked,
+    theme: $("#set-theme").value,
+    language: $("#set-language").value,
+  };
+  const password = $("#set-proxy-pass").value;
+  if (password) values.proxy_password = password;
+  if ($("#set-clear-pass").checked) values.clear_proxy_password = true;
+
+  button.disabled = true;
+  const r = await call("save_settings", values);
+  button.disabled = false;
+  if (!r) return;
+  if (r.i18n) {
+    Object.assign(I18N, r.i18n);
+    applyI18n();
+  }
+  showSettingsErrors(r.errors);
+  if (r.settings) renderSettings(r.settings);
+  applyTheme(r.settings ? r.settings.theme : values.theme);
+  if (r.ok) {
+    toast(t("Settings saved"), "ok");
+    // Refresh the language-dependent rows that are already in the DOM.
+    refreshTasks().catch(() => {});
+    refreshFollow().catch(() => {});
+  } else {
+    toast(r.message || t("Some settings were not saved"), "err", 8000);
+  }
 };
 
 /* ================================================================ updates */
@@ -1113,6 +1463,17 @@ let searching = false;
 let lastResults = [];
 let lastKeyword = "";
 let selIndex = -1;
+/* Monotonic token for the running search poll. A new query (or a rank /
+   category request that replaces the list) bumps it; the old loop notices on
+   its next wake-up and returns without touching the new results. */
+let searchSeq = 0;
+let activeSearchKeyword = "";
+/* Aggregate searches can return hundreds of rows. Only one screenful is
+   built up front; "Show more" appends the next batch. ``data-sel`` always
+   holds the index into ``lastResults``, so selection stays global. */
+const RESULT_CHUNK = 60;
+let renderedResultCount = 0;
+let renderedKeyword = "";
 /* Below 1180px the details panel is a bottom sheet instead of a third column
    (see the media query); these helpers keep its open/closed state, focus and
    the backdrop in sync without changing the wide layout. */
@@ -1193,24 +1554,50 @@ function renderDetail(r, kw) {
     <button class="btn btn-ghost btn-sm" style="margin-top:7px;width:100%" data-open-url="${esc(r.book_url || "")}"><svg class="icon"><use href="#i-ext"/></svg>${esc(t("Open in browser"))}</button>`;
 }
 
+function endSearchUi() {
+  searching = false;
+  activeSearchKeyword = "";
+  $("#search-spin").classList.remove("on");
+  $("#btn-search").disabled = false;
+}
+function cancelActiveSearch() {
+  // Only bump the token: the owner of the old loop checks it and drops out.
+  searchSeq++;
+  activeSearchKeyword = "";
+  if (searching) endSearchUi();
+}
+function resetResultList() {
+  renderedResultCount = 0;
+  renderedKeyword = "";
+}
 async function doSearch() {
   const kw = $("#q").value.trim();
-  if (!kw || searching) return;
+  if (!kw) return;
+  // A repeated Enter / button press while the same query is in flight is a
+  // no-op. A *different* query supersedes it: bumping the token stops the old
+  // poll instead of letting it paint stale rows over the new ones.
+  if (searching && kw === activeSearchKeyword) return;
+  const token = ++searchSeq;
   searching = true;
+  activeSearchKeyword = kw;
   $("#search-spin").classList.add("on");
   $("#btn-search").disabled = true;
   $("#search-hint").textContent = t("Searching…");
   $("#results").innerHTML = "";
+  resetResultList();
   const started = performance.now();
   let rendered = -1;
   try {
     const job = await api("search_async", kw, $("#q-sites").value.trim(), $("#q-group").checked);
+    if (token !== searchSeq) return;
     if (!job || !job.search_id) throw new Error(t("Search failed"));
     for (;;) {
       // Poll while the sites answer: the fastest ones land in ~0.2s instead
       // of the page waiting for the slowest (bounded by the bridge budget).
       await new Promise(resolve => setTimeout(resolve, 250));
+      if (token !== searchSeq) return;
       const st = await api("search_progress", job.search_id);
+      if (token !== searchSeq) return;
       if (!st) break;
       // Bridge failures come back inside the payload, not as exceptions.
       if (st.error) throw new Error(st.error);
@@ -1226,40 +1613,89 @@ async function doSearch() {
       if (st.done) break;
     }
   } catch (e) {
+    // A superseded search must not overwrite the new query's state.
+    if (token !== searchSeq) return;
     $("#results").innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("Search failed"))}</div><div class="s">${esc(String(e && e.message || e))}</div></div>`;
     $("#search-hint").textContent = "";
   } finally {
-    searching = false;
-    $("#search-spin").classList.remove("on");
-    $("#btn-search").disabled = false;
+    // Only the current owner may release the controls; a stale loop leaving
+    // them disabled would lock the search box for the rest of the session.
+    if (token === searchSeq) endSearchUi();
   }
+}
+function resultCardHtml(r, i, kw) {
+  const sub = [r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join('<span style="opacity:.4"> · </span>');
+  return `<div class="card hover result-card" data-sel="${i}" tabindex="0" role="group" aria-label="${esc(r.title)}">
+    <div class="rc">
+      ${coverBox(r)}
+      <div class="rc-main">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="row-title" style="white-space:normal">${highlight(r.title, kw)}</span>
+          ${r.best ? `<span class="best-chip">${esc(t("Best match"))}</span>` : ""}
+        </div>
+        <div class="row-sub">${sub}</div>
+        ${r.latest_chapter ? `<div class="row-meta">${esc(r.latest_chapter)}</div>` : ""}
+      </div>
+      <div class="rc-side">
+        ${sourceCaps(r)}
+        <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
+      </div>
+    </div>
+  </div>`;
+}
+function moreResultsHtml(total, shown) {
+  if (shown >= total) return "";
+  return `<div class="results-more" style="padding:2px 0 10px;text-align:center">
+    <button type="button" class="btn btn-ghost btn-sm" id="results-more" data-more="1">${esc(t("Show more"))}<span class="hint" style="margin-left:6px">${shown}/${total}</span></button>
+  </div>`;
 }
 function renderResults(results, kw) {
   const box = $("#results");
   if (!results.length) {
+    renderedResultCount = 0;
+    renderedKeyword = kw;
     box.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("No results"))}</div><div class="s">${esc(t("Try another keyword or clear the site filter"))}</div><button class="btn btn-ghost btn-sm" id="search-in-music" style="margin-top:12px"><svg class="icon"><use href="#i-music"/></svg>${esc(t("Search in Music"))}</button></div>`;
     return;
   }
-  box.innerHTML = results.map((r, i) => {
-    const sub = [r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join('<span style="opacity:.4"> · </span>');
-    return `<div class="card hover result-card" data-sel="${i}" tabindex="0" role="group" aria-label="${esc(r.title)}">
-      <div class="rc">
-        ${coverBox(r)}
-        <div class="rc-main">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <span class="row-title" style="white-space:normal">${highlight(r.title, kw)}</span>
-            ${r.best ? `<span class="best-chip">${esc(t("Best match"))}</span>` : ""}
-          </div>
-          <div class="row-sub">${sub}</div>
-          ${r.latest_chapter ? `<div class="row-meta">${esc(r.latest_chapter)}</div>` : ""}
-        </div>
-        <div class="rc-side">
-          ${sourceCaps(r)}
-          <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
-        </div>
-      </div>
-    </div>`;
-  }).join("");
+  // Streaming appends rows on every poll: keep the user's expanded depth and
+  // the surrounding scroll box's offset instead of collapsing back to the
+  // first screen (``#results`` itself is not the scroller).
+  const scroller = box.closest(".scroll") || box;
+  const scrollTop = scroller.scrollTop;
+  renderedKeyword = kw;
+  renderedResultCount = Math.min(results.length, Math.max(RESULT_CHUNK, renderedResultCount));
+  box.innerHTML = results.slice(0, renderedResultCount)
+    .map((r, i) => resultCardHtml(r, i, kw)).join("") +
+    moreResultsHtml(results.length, renderedResultCount);
+  scroller.scrollTop = scrollTop;
+}
+function appendResultChunk() {
+  const btn = $("#results-more");
+  if (!btn || !lastResults.length) return;
+  const wrap = btn.closest(".results-more") || btn;
+  const start = renderedResultCount;
+  const end = Math.min(lastResults.length, start + RESULT_CHUNK);
+  if (end <= start) return;
+  // Insert before the *wrapper*, not before the button: the wrapper's markup
+  // is replaced below to refresh the counter, which would discard cards that
+  // were still inside it.
+  wrap.insertAdjacentHTML(
+    "beforebegin",
+    lastResults.slice(start, end).map((r, i) => resultCardHtml(r, start + i, renderedKeyword)).join("")
+  );
+  renderedResultCount = end;
+  const more = moreResultsHtml(lastResults.length, end);
+  if (more) {
+    wrap.outerHTML = more;
+  } else {
+    wrap.remove();
+  }
+  // The button disappears with the final batch; keep keyboard focus on the
+  // first newly revealed row rather than dropping it onto <body>.
+  if (end >= lastResults.length) {
+    const cards = document.querySelectorAll("#results .result-card");
+    if (cards[start]) cards[start].focus({ preventScroll: true });
+  }
 }
 /**
  * Cover thumbnail with a typographic fallback.
@@ -1295,6 +1731,10 @@ $("#results").addEventListener("keydown", e => {
   selectResult(+card.dataset.sel);
 });
 $("#results").addEventListener("click", async e => {
+  if (e.target.closest("#results-more")) {
+    appendResultChunk();
+    return;
+  }
   if (e.target.closest("#search-in-music")) {
     const kw = $("#q").value.trim();
     $("#m-q").value = kw;
@@ -1339,6 +1779,9 @@ $("#detail").addEventListener("click", async e => {
 });
 $("#btn-rank").onclick = async () => {
   const btn = $("#btn-rank");
+  // A rank list replaces the search rows: stop any poll still in flight so it
+  // cannot append stale results after this render.
+  cancelActiveSearch();
   btn.disabled = true;
   $("#search-hint").textContent = t("Searching…");
   try {
@@ -1347,6 +1790,9 @@ $("#btn-rank").onclick = async () => {
     const results = (data && data.results) || [];
     lastResults = results; lastKeyword = ""; selIndex = -1;
     hideDetail();
+    // A fresh list starts back at the first chunk, even if the previous one
+    // had been expanded much further.
+    resetResultList();
     renderResults(results, "");
     $("#search-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", "0.0");
   } catch (e) {
@@ -1372,6 +1818,10 @@ $("#btn-cats").onclick = async () => {
   $("#cat-hint").textContent = t("Searching…");
   try {
     const data = await call("category_list");
+    // Payload failures (not bridge rejections) come back as ``{groups, error}``:
+    // rendering them as an empty group list made a dead site look like a site
+    // without categories, so surface the message instead.
+    if (data && data.error) throw new Error(data.error);
     catGroups = (data && data.groups) || {};
     $("#cat-hint").textContent = "";
     renderCatChips();
@@ -1390,13 +1840,20 @@ $("#cat-female").onclick = () => switchCat("female");
 $("#cat-chips").addEventListener("click", async e => {
   const chip = e.target.closest("[data-cat]");
   if (!chip) return;
+  cancelActiveSearch();
   $("#cat-hint").textContent = t("Searching…");
   const started = performance.now();
   try {
     const data = await call("category_books", chip.dataset.cat, chip.dataset.gender, 20);
+    // An error payload also carries ``results: []``; without this check the
+    // page rendered "No results" for a failed category request.
+    if (data && data.error) throw new Error(data.error);
     const results = (data && data.results) || [];
     lastResults = results; lastKeyword = ""; selIndex = -1;
     hideDetail();
+    // A fresh list starts back at the first chunk, even if the previous one
+    // had been expanded much further.
+    resetResultList();
     renderResults(results, "");
     const secs = ((performance.now() - started) / 1000).toFixed(1);
     $("#cat-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", secs);
@@ -1414,11 +1871,20 @@ $("#q-group").addEventListener("change", () => store.set("merge_same_book", $("#
 /* ================================================================ download */
 let taskTimer = null;
 const knownStatus = new Map();
+/* Failed-task error text is kept beside the snapshot instead of in a data-*
+   attribute: the card only needs the task id, and long messages stay intact
+   (a DOM attribute would be re-parsed and truncated on copy). */
+const taskErrors = new Map();
 function renderTasks(snap) {
   // While a cancelled run is being cleaned up the manager can report the same
   // task in two buckets for one poll. The terminal record is the truth: drop
   // the duplicate instead of drawing the same book twice under two headings.
   const done = snap.completed || [];
+  for (const k of done) {
+    if (!k || !k.task_id) continue;
+    if (k.error) taskErrors.set(k.task_id, k.error);
+    else taskErrors.delete(k.task_id);
+  }
   const settled = new Set(done.map(k => k.task_id));
   const seen = new Set();
   const take = list => (list || []).filter(k => {
@@ -1447,24 +1913,43 @@ function renderTasks(snap) {
   `).join("");
 }
 function taskCard(k) {
+  const total = Number(k.chapters_total || 0);
+  const done = Number(k.chapters_done || 0);
   const pct = Math.round((k.progress || 0) * 100);
   const active = ["running", "processing", "exporting"].includes(k.status);
-  const indet = active && !(k.chapters_total > 0);
-  const stage = k.export_stage ? ` · ${esc(t("Exporting {fmt}").replace("{fmt}", k.export_stage.toUpperCase()))}` : "";
-  const speed = k.eta && active ? ` · ${esc(fmtEta(k.eta))}` : "";
-  const err = k.error ? `<div class="row-sub" style="color:var(--red)">${esc(k.error)}</div>` : "";
+  // The contract reports ``chapters_total`` as soon as the chapter list is
+  // known; only before that does the bar have to slide indeterminately.
+  const indet = active && total <= 0;
+  const stage = k.export_stage ? esc(t("Exporting {fmt}").replace("{fmt}", k.export_stage.toUpperCase())) : "";
+  const speed = k.eta && active ? esc(fmtEta(k.eta)) : "";
+  // "12/120 · 10%": the percentage makes per-task progress unambiguous even
+  // when the bar is thin; the raw pair answers "how much is left".
+  const chapterText = total > 0 ? `${done}/${total} · ${pct}%` : (done > 0 ? `${done}` : "");
+  const meta = [`<span class="site-tag">${esc(k.site)}</span>`];
+  if (chapterText) meta.push(`<span class="mono">${chapterText}</span>`);
+  if (stage) meta.push(`<span>${stage}</span>`);
+  if (speed) meta.push(`<span>${speed}</span>`);
+  const err = k.error ? `<div class="task-error" title="${esc(k.error)}">${esc(k.error)}</div>` : "";
   const retry = k.retry_count > 0 ? ` <span class="hint">(↻${k.retry_count})</span>` : "";
   const exports = (k.exports || []).map(p =>
     `<button class="btn btn-ghost btn-sm" data-open-file="${esc(p)}"><svg class="icon"><use href="#i-folder"/></svg>${esc(p.split(/[\\/]/).pop())}</button>`).join("");
+  // A failed row keeps its evidence actionable: the message can be copied
+  // whole and the export directory opened without hunting the History page.
+  const copyErr = k.error
+    ? `<button class="btn btn-ghost btn-sm" data-copy-error="${esc(k.task_id)}">${esc(t("Copy error"))}</button>`
+    : "";
+  const openDir = k.status === "failed" || k.status === "cancelled"
+    ? `<button class="btn btn-ghost btn-sm" data-open-dir title="${esc(t("Open folder"))}" aria-label="${esc(t("Open folder"))}"><svg class="icon"><use href="#i-folder"/></svg>${esc(t("Open folder"))}</button>`
+    : "";
   const created = k.created_at ? `<span>${esc(fmtTime(k.created_at))}</span>` : "";
   return `<div class="card hover row-card task st-${esc(k.status)}">
     <div class="row-main">
       <div style="display:flex;align-items:center;gap:9px"><span class="row-title">${esc(k.title)}</span>${pill(k.status)}${retry}</div>
-      <div class="row-sub"><span class="site-tag">${esc(k.site)}</span> <span class="mono">${k.chapters_done || 0}/${k.chapters_total || 0}${stage}${speed}</span></div>
+      <div class="row-sub">${meta.join(" ")}</div>
       ${active || indet ? `<div class="progress ${indet ? "indeterminate" : ""}"><i style="width:${pct}%"></i></div>` : ""}
       ${err}
     </div>
-    <div class="row-actions">${exports}
+    <div class="row-actions">${exports}${copyErr}${openDir}
       ${k.status === "queued" || active ? `<button class="btn btn-danger btn-sm" data-cancel="${esc(k.task_id)}">${esc(t("Cancel"))}</button>` : ""}
       ${k.retryable ? `<button class="btn btn-ghost btn-sm" data-retry="${esc(k.task_id)}"><svg class="icon"><use href="#i-refresh"/></svg>${esc(t("Retry"))}</button>` : ""}
       ${created ? `<span class="hint mono">${created}</span>` : ""}
@@ -1492,6 +1977,8 @@ $("#tasks-body").addEventListener("click", async e => {
   const c = e.target.closest("[data-cancel]");
   const r = e.target.closest("[data-retry]");
   const f = e.target.closest("[data-open-file]");
+  const ce = e.target.closest("[data-copy-error]");
+  const od = e.target.closest("[data-open-dir]");
   // Both mutations answer ``{ok: false}`` instead of throwing: the task may
   // have finished between two 1.2 s polls, or a retry may find no site/book id.
   // Saying so is the only way the click stops looking dead.
@@ -1503,6 +1990,14 @@ $("#tasks-body").addEventListener("click", async e => {
     const res = await call("retry_task", r.dataset.retry);
     if (res && res.ok === false) toast(t("Could not retry this task"), "err");
     refreshTasks();
+  } else if (ce) {
+    const ok = await copyText(taskErrors.get(ce.dataset.copyError) || "");
+    toast(ok ? t("Copied") : t("Could not copy the error"), ok ? "ok" : "warn", 3000);
+  } else if (od) {
+    const res = await call("open_downloads_dir");
+    if (res && res.ok === false) {
+      toast(t("Could not open the download folder: {error}").replace("{error}", res.error || t("Unknown error")), "err", 7000);
+    }
   } else if (f) { openPath(f.dataset.openFile); }
 });
 $("#btn-refresh-tasks").onclick = refreshTasks;
@@ -1879,7 +2374,7 @@ function showExportNote(r) {
   input.title = r.path || "";
   $("#m-export-note").hidden = false;
 }
-$("#btn-m-export").onclick = async () => {
+async function exportPlaylist(overwrite = false) {
   if (!music.tracks.length) {
     toast(t("Search songs first; there is nothing to export"), "warn", 5000);
     return;
@@ -1892,17 +2387,23 @@ $("#btn-m-export").onclick = async () => {
   const btn = $("#btn-m-export");
   btn.disabled = true;
   try {
-    const r = await call("music_export", $("#m-platform").value, ready);
+    const r = await call("music_export", $("#m-platform").value, ready, "", overwrite);
     if (r && r.ok) {
       showExportNote(r);
       toast(t("Playlist saved to {path}").replace("{path}", r.path), "ok", 9000, () => openPath(r.path));
+    } else if (r && r.needs_overwrite && r.path) {
+      // The backend refuses to replace a file without consent; the click on
+      // the toast is that consent (and the message names the exact path).
+      toast(t("The playlist already exists: {path}") + " · " + t("Click to overwrite"),
+        "warn", 12000, () => exportPlaylist(true));
     } else if (r && r.error) {
-      toast(r.error, "err", 7000);
+      toast(r.error, "err", 9000);
     }
   } finally {
     btn.disabled = false;
   }
-};
+}
+$("#btn-m-export").onclick = () => exportPlaylist(false);
 $("#m-export-copy").onclick = async () => {
   const input = $("#m-export-path");
   const path = input.value;
@@ -1972,7 +2473,12 @@ function pollMusic() {
 $("#btn-m-health").onclick = async () => {
   const btn = $("#btn-m-health");
   btn.disabled = true;
-  try { await call("music_health_start"); } finally { btn.disabled = false; }
+  try {
+    const r = await call("music_health_start");
+    // Without the extras the bridge refuses; the empty panel looked like a
+    // finished check with no platforms.
+    if (r && r.error) toast(r.error, "warn", 6000);
+  } finally { btn.disabled = false; }
   renderHealth();
 };
 function renderHealth() {
@@ -2041,17 +2547,93 @@ $("#btn-f-add").onclick = () => openModal([
   if (r) toast(r.message || (r.ok ? t("Added to follow list") : t("Already followed")), r.ok ? "ok" : "info");
   refreshFollow();
 });
+/* The sweep runs on the bridge and can take minutes; the page polls the
+   bridge's progress state while awaiting it and then paints one final report
+   (summary + the books that changed or failed). */
+let followPoll = null;
+function followStatus(html, isError) {
+  const box = $("#f-status");
+  if (!html) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.className = "follow-status" + (isError ? " err" : "");
+  box.innerHTML = html;
+}
+function followProgressText(st) {
+  const total = Number(st.total || 0);
+  const done = Number(st.done || 0);
+  if (total <= 0) return t("Checking for updates…");
+  return t("Checking {done}/{total}…").replace("{done}", done).replace("{total}", total);
+}
+function startFollowProgress() {
+  followStatus(`<div>${esc(t("Checking for updates…"))}</div>`, false);
+  if (followPoll) clearInterval(followPoll);
+  followPoll = setInterval(async () => {
+    let st = null;
+    try { st = await api("get_follow_check_state"); } catch { st = null; }
+    if (st && st.running) followStatus(`<div>${esc(followProgressText(st))}</div>`, false);
+  }, 450);
+}
+function stopFollowProgress() {
+  if (followPoll) { clearInterval(followPoll); followPoll = null; }
+}
+function followLine(label, text, bad) {
+  return `<li class="${bad ? "bad" : ""}">${esc(label)}${text ? ": " + esc(text) : ""}</li>`;
+}
+async function renderFollowReport(r) {
+  let st = null;
+  try { st = await api("get_follow_check_state"); } catch { st = null; }
+  const failures = (st && st.failures) || [];
+  const updates = (st && st.updates) || [];
+  const lines = [];
+  for (const f of failures) {
+    const title = f.title || `${f.site}/${f.book_id}`;
+    lines.push(followLine(title, f.error || "", true));
+  }
+  for (const u of updates) {
+    if (!u.latest) continue;
+    const title = u.title || `${u.site}/${u.book_id}`;
+    lines.push(followLine(title, u.latest, false));
+  }
+  let head;
+  if (failures.length) {
+    head = t("Checked {n} books, {u} updated, {f} failed")
+      .replace("{n}", r.checked).replace("{u}", r.updated).replace("{f}", r.failed);
+  } else if (!r.updated) {
+    head = t("Checked {n} books · No new chapters").replace("{n}", r.checked);
+  } else {
+    head = t("Checked {n} books · {u} updated").replace("{n}", r.checked).replace("{u}", r.updated);
+  }
+  followStatus(`<div>${esc(head)}</div>${lines.length ? `<ul class="fs-list">${lines.join("")}</ul>` : ""}`, failures.length > 0);
+}
 $("#btn-f-check").onclick = async () => {
   $("#f-spin").classList.add("on");
   $("#btn-f-check").disabled = true;
+  startFollowProgress();
+  let reported = false;
   try {
     const r = await call("check_updates");
-    if (r) {
-      toast(t("Checked {n} books, {u} updated, {f} failed").replace("{n}", r.checked).replace("{u}", r.updated).replace("{f}", r.failed),
-        r.failed ? "warn" : r.updated ? "ok" : "info", 6000);
+    // ``check_updates`` answers zeros plus ``error`` when the whole run
+    // failed; the old code still toasted "Checked 0 books…" as if successful.
+    if (r && r.error) {
+      toast(r.error, "err", 7000);
+      followStatus(`<div>${esc(r.error)}</div>`, true);
+      reported = true;
+    } else if (r) {
+      // "0 updated, 0 failed" is not a useful success message: say plainly
+      // that nothing new was found.
+      if (!r.updated && !r.failed) {
+        toast(t("Checked {n} books · No new chapters").replace("{n}", r.checked), "info", 6000);
+      } else {
+        toast(t("Checked {n} books, {u} updated, {f} failed").replace("{n}", r.checked).replace("{u}", r.updated).replace("{f}", r.failed),
+          r.failed ? "warn" : "ok", 6000);
+      }
+      await renderFollowReport(r);
+      reported = true;
     }
     refreshFollow();
   } finally {
+    stopFollowProgress();
+    if (!reported) followStatus("", false);
     $("#f-spin").classList.remove("on");
     $("#btn-f-check").disabled = false;
   }
@@ -2102,8 +2684,8 @@ document.addEventListener("keydown", e => {
   if (e.isComposing) return;
   if (typingTarget(e.target) || typingTarget(document.activeElement)) return;
   if (e.ctrlKey && !e.shiftKey && !e.altKey) {
-    const pages = ["search", "download", "history", "music", "follow"];
-    if (e.key >= "1" && e.key <= "5") { e.preventDefault(); showPage(pages[+e.key - 1]); }
+    const pages = ["search", "download", "history", "music", "follow", "settings"];
+    if (e.key >= "1" && e.key <= "6") { e.preventDefault(); showPage(pages[+e.key - 1]); }
     else if (e.key.toLowerCase() === "f") { e.preventDefault(); showPage("search"); }
     else if (e.key.toLowerCase() === "d") {
       e.preventDefault();
@@ -2119,9 +2701,20 @@ function boot() {
     Object.assign(I18N, state.i18n || {});
     applyI18n();
     $("#ver").textContent = "v" + (state.version || "");
-    setTheme(state.theme || store.get("theme", "light"));
+    // A saved preference wins; without one, keep the per-window choice from
+    // localStorage instead of resetting the user to "light" on every launch.
+    applyTheme(state.theme_stored ? state.theme : store.get("theme", "light"));
     if (state.is_frozen && !state.shortcut_exists) {
       setTimeout(() => toast(t("Click here to create a desktop shortcut"), "info", 6000), 1200);
+    }
+    // A read-only or deleted output folder is a first-run dead end: warn now,
+    // with a click-through to the page that can repair it.
+    const storage = state.output_dir || {};
+    if (storage.state === "not_writable" || storage.state === "not_a_dir" || storage.state === "error") {
+      setTimeout(() => toast(
+        t("The output folder isn't writable. Open Settings to choose another folder."),
+        "warn", 10000, () => showPage("settings")
+      ), 1800);
     }
     // Update checks start after the page is ready and never block it: the
     // bar appears on its own once the background check reports a release.
