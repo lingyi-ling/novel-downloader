@@ -117,6 +117,20 @@ input, select, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--radius-sm); }
 [hidden] { display: none !important; }
 
+/* First tab stop in the document: jump past the six navigation buttons.
+   Off-screen until focused so mouse users never see it. */
+.skip-link {
+  position: fixed; top: 8px; left: 8px; z-index: 130;
+  padding: 8px 13px; border-radius: var(--radius-md);
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--border-strong); box-shadow: var(--shadow-2);
+  font-weight: 600; font-size: 13px; text-decoration: none;
+  transform: translateY(-200%);
+  transition: transform .12s var(--ease);
+}
+.skip-link:focus, .skip-link:focus-visible { transform: translateY(0); }
+#main-content:focus { outline: none; }
+
 /* ============================================================ shell */
 .app { display: grid; grid-template-columns: 236px 1fr; height: 100vh; background: var(--bg); }
 
@@ -136,6 +150,9 @@ input, select, textarea { font: inherit; color: inherit; }
 .logo-sub { font-size: 10.5px; color: var(--text-3); margin-top: 1px; letter-spacing: .02em; }
 
 .nav { display: flex; flex-direction: column; gap: 2px; }
+/* The tablist wrapper exists for ARIA role support only: keeping it inside
+   <nav> preserves the navigation landmark while the buttons stay tabs. */
+.nav-tabs { display: flex; flex-direction: column; gap: 2px; }
 .nav-item {
   position: relative; display: flex; align-items: center; gap: 10px;
   min-height: 36px; padding: 7px 10px; border-radius: var(--radius-md);
@@ -497,6 +514,15 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 /* ============================================================ music */
 .music-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
 @media (max-width: 1080px) { .music-grid { grid-template-columns: minmax(0, 1fr); } }
+.music-status {
+  margin: 0 0 12px; padding: 11px 13px; border: 1px solid var(--border);
+  border-radius: var(--radius-lg); background: var(--card-2);
+}
+.music-status-title { font-size: 12px; font-weight: 650; color: var(--text-2); margin-bottom: 4px; }
+.music-status-row { display: flex; align-items: flex-start; gap: 9px; padding: 5px 0; font-size: 12.5px; }
+.music-status-main { flex: 1; min-width: 0; }
+.music-status-reason { color: var(--text-3); overflow-wrap: anywhere; }
+.music-status-row .btn { flex: none; }
 .set-row {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 0; font-size: 12.5px; color: var(--text-2);
@@ -585,6 +611,12 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 .search-note { margin: 6px 2px 0; font-size: 12px; color: var(--text-3); min-height: 15px; }
 .search-note.warn { color: var(--yellow); }
 
+/* Progressive search summary: sources answered, failures and elapsed time.
+   It freezes after the run instead of disappearing, so "N sources / Xs"
+   stays readable once the results are in. */
+.search-progress { margin: 8px 2px 0; font-size: 12px; color: var(--text-3); min-height: 15px; }
+.search-progress.final { color: var(--text-2); }
+
 /* Download failures: the reason stays on screen, with a one-click retry. */
 .fail-note {
   display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap;
@@ -653,6 +685,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 </style>
 </head>
 <body>
+<a class="skip-link" href="#main-content" data-i18n="Skip to content">Skip to content</a>
 <svg width="0" height="0" style="position:absolute"><defs>
 <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
 <symbol id="i-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></symbol>
@@ -684,12 +717,14 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
       <div><div class="logo-name">书音</div><div class="logo-sub" id="ver"></div></div>
     </div>
     <nav class="nav" id="nav">
-      <button class="nav-item active" data-page="search"><svg class="icon"><use href="#i-search"/></svg><span data-i18n="Search">Search</span><kbd>1</kbd></button>
-      <button class="nav-item" data-page="download"><svg class="icon"><use href="#i-down"/></svg><span data-i18n="Download">Download</span><kbd>2</kbd><span class="count-chip live" id="badge-live" hidden></span></button>
-      <button class="nav-item" data-page="history"><svg class="icon"><use href="#i-hist"/></svg><span data-i18n="History">History</span><kbd>3</kbd></button>
-      <button class="nav-item" data-page="music"><svg class="icon"><use href="#i-music"/></svg><span data-i18n="Music">Music</span><kbd>4</kbd></button>
-      <button class="nav-item" data-page="follow"><svg class="icon"><use href="#i-heart"/></svg><span data-i18n="Follow">Follow</span><kbd>5</kbd></button>
-      <button class="nav-item" data-page="settings"><svg class="icon"><use href="#i-gear"/></svg><span data-i18n="Settings">Settings</span><kbd>6</kbd></button>
+      <div class="nav-tabs" id="nav-tabs" role="tablist" aria-orientation="vertical">
+      <button id="tab-search" class="nav-item active" data-page="search" role="tab" aria-selected="true" aria-controls="page-search"><svg class="icon"><use href="#i-search"/></svg><span data-i18n="Search">Search</span><kbd aria-hidden="true">1</kbd></button>
+      <button id="tab-download" class="nav-item" data-page="download" role="tab" aria-selected="false" aria-controls="page-download"><svg class="icon"><use href="#i-down"/></svg><span data-i18n="Download">Download</span><kbd aria-hidden="true">2</kbd><span class="count-chip live" id="badge-live" hidden></span></button>
+      <button id="tab-history" class="nav-item" data-page="history" role="tab" aria-selected="false" aria-controls="page-history"><svg class="icon"><use href="#i-hist"/></svg><span data-i18n="History">History</span><kbd aria-hidden="true">3</kbd></button>
+      <button id="tab-music" class="nav-item" data-page="music" role="tab" aria-selected="false" aria-controls="page-music"><svg class="icon"><use href="#i-music"/></svg><span data-i18n="Music">Music</span><kbd aria-hidden="true">4</kbd></button>
+      <button id="tab-follow" class="nav-item" data-page="follow" role="tab" aria-selected="false" aria-controls="page-follow"><svg class="icon"><use href="#i-heart"/></svg><span data-i18n="Follow">Follow</span><kbd aria-hidden="true">5</kbd></button>
+      <button id="tab-settings" class="nav-item" data-page="settings" role="tab" aria-selected="false" aria-controls="page-settings"><svg class="icon"><use href="#i-gear"/></svg><span data-i18n="Settings">Settings</span><kbd aria-hidden="true">6</kbd></button>
+      </div>
     </nav>
     <div class="side-foot">
       <div class="update-bar" id="update-bar" hidden>
@@ -712,20 +747,22 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
     </div>
   </aside>
 
-  <main class="main">
+  <main class="main" id="main-content" tabindex="-1">
 
     <!-- ============================================= SEARCH -->
-    <section class="page active" id="page-search">
+    <section class="page active" id="page-search" role="tabpanel" aria-labelledby="tab-search">
       <div class="topbar"><div><h1 data-i18n="Search">Search</h1><div class="sub" data-i18n="Search novels across all sites, ranked by quality">Search novels across all sites, ranked by quality</div></div></div>
       <div class="scroll">
         <div class="search-zone">
           <div class="search-row">
             <div class="field field-lg">
               <svg class="icon"><use href="#i-search"/></svg>
-              <input id="q" data-i18n-ph="Enter book title or author…" placeholder="Enter book title or author…" autocomplete="off">
+              <input id="q" data-i18n-ph="Enter book title or author…" placeholder="Enter book title or author…" autocomplete="off" aria-keyshortcuts="Escape">
             </div>
             <button class="btn btn-primary btn-lg" id="btn-search"><span class="spin" id="search-spin"></span><svg class="icon"><use href="#i-search"/></svg><span data-i18n="Search">Search</span></button>
+            <button class="btn btn-ghost btn-lg" id="btn-search-cancel" hidden><svg class="icon"><use href="#i-x"/></svg><span data-i18n="Cancel">Cancel</span></button>
           </div>
+          <div class="search-progress" id="search-progress" role="status" aria-live="polite" hidden><span id="search-progress-text"></span></div>
           <div class="filters">
             <div class="field"><svg class="icon"><use href="#i-pulse"/></svg><input id="q-sites" data-i18n-ph="Site filter, comma separated (blank = all)" placeholder="Site filter, comma separated (blank = all)"></div>
             <label class="merge-toggle" for="q-group"><input type="checkbox" class="cb" id="q-group" checked><span data-i18n="Merge same book">Merge same book</span></label>
@@ -736,8 +773,8 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
         </div>
         <div class="card" id="cat-panel" hidden style="margin-top:16px;padding:14px 16px">
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
-            <button class="btn btn-sm btn-primary" id="cat-male" data-i18n="Male">Male</button>
-            <button class="btn btn-sm btn-ghost" id="cat-female" data-i18n="Female">Female</button>
+            <button class="btn btn-sm btn-primary" id="cat-male" data-i18n="Male" aria-pressed="true">Male</button>
+            <button class="btn btn-sm btn-ghost" id="cat-female" data-i18n="Female" aria-pressed="false">Female</button>
             <span class="hint" id="cat-hint"></span>
           </div>
           <div id="cat-chips" class="filters" style="gap:8px;flex-wrap:wrap"></div>
@@ -756,7 +793,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
     </section>
 
     <!-- ============================================= DOWNLOAD -->
-    <section class="page" id="page-download">
+    <section class="page" id="page-download" role="tabpanel" aria-labelledby="tab-download">
       <div class="topbar">
         <div><h1 data-i18n="Download">Download</h1><div class="sub" data-i18n="Live queue and progress">Live queue and progress</div></div>
         <div class="spacer"></div>
@@ -766,7 +803,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
     </section>
 
     <!-- ============================================= HISTORY -->
-    <section class="page" id="page-history">
+    <section class="page" id="page-history" role="tabpanel" aria-labelledby="tab-history">
       <div class="topbar">
         <div><h1 data-i18n="History">History</h1><div class="sub" id="hist-sub"></div></div>
         <div class="spacer"></div>
@@ -777,7 +814,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
     </section>
 
     <!-- ============================================= MUSIC -->
-    <section class="page" id="page-music">
+    <section class="page" id="page-music" role="tabpanel" aria-labelledby="tab-music">
       <div class="topbar">
         <div><h1 data-i18n="Music">Music</h1><div class="sub" data-i18n="Search and download across 25 music platforms">Search and download across 25 music platforms</div></div>
         <div class="spacer"></div>
@@ -786,13 +823,14 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
       <div class="scroll">
         <div class="music-grid">
           <div>
+            <div class="music-status" id="m-availability" hidden></div>
             <div class="search-row">
-              <select class="picker" id="m-platform" style="height:48px;border-radius:13px;max-width:230px"></select>
-              <div class="field field-lg"><svg class="icon"><use href="#i-music"/></svg><input id="m-q" data-i18n-ph="Song / artist / album…" placeholder="Song / artist / album…" autocomplete="off"></div>
+              <select class="picker" id="m-platform" data-i18n-title="Platform" style="height:48px;border-radius:13px;max-width:230px"></select>
+              <div class="field field-lg"><svg class="icon"><use href="#i-music"/></svg><input id="m-q" data-i18n-ph="Song / artist / album…" placeholder="Song / artist / album…" autocomplete="off" aria-keyshortcuts="Escape"></div>
               <button class="btn btn-primary" id="btn-m-search" style="height:48px"><span class="spin" id="m-spin"></span><span data-i18n="Search">Search</span></button>
             </div>
             <div class="hint" id="m-note" style="margin-top:9px"></div>
-            <div class="search-note" id="m-search-note"></div>
+            <div class="search-note" id="m-search-note" role="status" aria-live="polite"></div>
             <div class="section-head"><span data-i18n="Results">Results</span><span class="count-chip" id="m-count">0</span>
               <div class="spacer" style="flex:1"></div>
               <button class="btn btn-sm btn-ghost" id="btn-m-export"><svg class="icon"><use href="#i-down"/></svg><span data-i18n="Export playlist (.m3u8)">Export playlist (.m3u8)</span></button>
@@ -800,12 +838,12 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
               <button class="btn btn-sm btn-danger" id="btn-m-stop" hidden><svg class="icon"><use href="#i-stop"/></svg><span data-i18n="Stop">Stop</span></button>
               <button class="btn btn-sm btn-primary" id="btn-m-dl"><svg class="icon"><use href="#i-down"/></svg><span id="m-dl-label" data-i18n="Download selected">Download selected</span></button>
             </div>
-            <div class="progress" id="m-progress" style="margin:0 2px 12px" hidden><i></i></div>
+            <div class="progress" id="m-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="margin:0 2px 12px" hidden><i></i></div>
             <div class="export-note" id="m-export-note" hidden>
               <svg class="icon"><use href="#i-check"/></svg>
               <div class="export-note-main">
                 <div class="export-note-title" id="m-export-title"></div>
-                <input class="export-note-path" id="m-export-path" readonly>
+                <input class="export-note-path" id="m-export-path" aria-labelledby="m-export-title" readonly>
               </div>
               <button class="btn btn-ghost btn-sm" id="m-export-copy" data-i18n="Copy">Copy</button>
               <button class="btn btn-ghost btn-sm" id="m-export-open"><svg class="icon"><use href="#i-folder"/></svg><span data-i18n="Open">Open</span></button>
@@ -817,15 +855,15 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
               </div>
               <div class="fail-actions">
                 <button class="btn btn-primary btn-sm" id="btn-m-retry"><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Retry failed">Retry failed</span></button>
-                <button class="btn btn-ghost btn-sm" id="m-fail-close" title="Close" aria-label="Close" data-i18n-title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+                <button class="btn btn-ghost btn-sm" id="m-fail-close" title="Close" data-i18n-title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
               </div>
             </div>
-            <div id="m-tracks"></div>
+            <div id="m-tracks" role="group" aria-label="" data-i18n-aria="Results"></div>
           </div>
           <div class="card side-card">
             <div class="row-title" style="margin-bottom:8px" data-i18n="Quality & tags">Quality &amp; tags</div>
-            <div class="set-row"><span class="lbl" data-i18n="Quality">Quality</span>
-              <select class="picker" id="m-level" style="height:32px">
+            <div class="set-row"><span class="lbl" id="m-level-lbl" data-i18n="Quality">Quality</span>
+              <select class="picker" id="m-level" aria-labelledby="m-level-lbl" style="height:32px">
                 <option value="hires">Hi-Res</option><option value="lossless">Lossless</option>
                 <option value="exhigh">ExHigh</option><option value="higher">Higher</option>
                 <option value="standard">Standard</option>
@@ -844,7 +882,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
     </section>
 
     <!-- ============================================= FOLLOW -->
-    <section class="page" id="page-follow">
+    <section class="page" id="page-follow" role="tabpanel" aria-labelledby="tab-follow">
       <div class="topbar">
         <div><h1 data-i18n="Follow">Follow</h1><div class="sub" data-i18n="Track new chapters of books you care about">Track new chapters of books you care about</div></div>
         <div class="spacer"></div>
@@ -856,7 +894,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
     </section>
 
     <!-- ============================================= SETTINGS -->
-    <section class="page" id="page-settings">
+    <section class="page" id="page-settings" role="tabpanel" aria-labelledby="tab-settings">
       <div class="topbar">
         <div><h1 data-i18n="Settings">Settings</h1><div class="sub" data-i18n="Storage, network, updates and appearance">Storage, network, updates and appearance</div></div>
         <div class="spacer"></div>
@@ -896,6 +934,21 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             </label>
           </div>
 
+          <div class="card settings-card wide">
+            <div class="settings-title" data-i18n="Music accounts">Music accounts</div>
+            <div class="settings-help" data-i18n="Paste account tokens for TIDAL, Apple Music and SoundCloud. They are stored on this device and never shown again.">Paste account tokens for TIDAL, Apple Music and SoundCloud. They are stored on this device and never shown again.</div>
+            <div class="set-row"><span class="lbl" id="set-music-cred-platform-lbl" data-i18n="Platform">Platform</span>
+              <select class="picker" id="set-music-cred-platform" aria-labelledby="set-music-cred-platform-lbl" style="height:32px"></select></div>
+            <div class="field" style="margin-top:8px">
+              <input id="set-music-cred-value" type="password" data-i18n-ph="Paste the token JSON" placeholder="Paste the token JSON" spellcheck="false" autocomplete="new-password">
+            </div>
+            <div class="settings-note" id="set-music-cred-status"></div>
+            <div class="settings-actions">
+              <button class="btn btn-primary btn-sm" id="btn-music-cred-save"><svg class="icon"><use href="#i-check"/></svg><span data-i18n="Save credentials">Save credentials</span></button>
+              <button class="btn btn-ghost btn-sm" id="btn-music-cred-clear"><svg class="icon"><use href="#i-trash"/></svg><span data-i18n="Clear credentials">Clear credentials</span></button>
+            </div>
+          </div>
+
           <div class="card settings-card">
             <div class="settings-title" data-i18n="Updates">Updates</div>
             <label class="set-row"><span class="lbl" data-i18n="Check for updates automatically">Check for updates automatically</span><input type="checkbox" class="switch" id="set-auto-check"></label>
@@ -932,8 +985,8 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 
   </main>
 </div>
-<div id="detail-backdrop"></div>
-<div id="toasts"></div>
+<div id="detail-backdrop" aria-hidden="true"></div>
+<div id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
 <script>
 "use strict";
 /* ================================================================ i18n */
@@ -941,8 +994,24 @@ const I18N = Object.create(null);
 function t(key) { return I18N[key] || key; }
 function applyI18n(root) {
   document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
-  document.querySelectorAll("[data-i18n-ph]").forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
-  document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = t(el.dataset.i18nTitle); });
+  document.querySelectorAll("[data-i18n-ph]").forEach(el => {
+    const text = t(el.dataset.i18nPh);
+    el.placeholder = text;
+    // A placeholder is not an accessible name on its own; mirror it when the
+    // field has no other label (every one of these is a bare input/select).
+    if (!el.hasAttribute("aria-label") && !el.hasAttribute("aria-labelledby")) {
+      el.setAttribute("aria-label", text);
+    }
+  });
+  document.querySelectorAll("[data-i18n-title]").forEach(el => {
+    const text = t(el.dataset.i18nTitle);
+    el.title = text;
+    if (!el.hasAttribute("aria-labelledby") && !el.closest("label")) el.setAttribute("aria-label", text);
+  });
+  // aria-label-only strings (icon-only containers) use the same catalogue.
+  document.querySelectorAll("[data-i18n-aria]").forEach(el => {
+    el.setAttribute("aria-label", t(el.dataset.i18nAria));
+  });
 }
 
 /* ================================================================ helpers */
@@ -952,6 +1021,51 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
+
+/* ================================================================ focus */
+/* One trap for everything that behaves like a dialog: the add-book modal and
+   the narrow-window details drawer. Keyboard focus must never escape behind
+   an overlay, or the backdrop stops being modal for keyboard users. */
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+function focusables(root) {
+  // getClientRects() drops display:none / visibility:hidden controls, while
+  // offsetParent would also drop anything inside a position:fixed dialog.
+  return [...root.querySelectorAll(FOCUSABLE)].filter(el => el.getClientRects().length > 0);
+}
+function trapTab(root, e) {
+  if (e.key !== "Tab") return;
+  const items = focusables(root);
+  if (!items.length) { e.preventDefault(); return; }
+  const first = items[0], last = items[items.length - 1];
+  const inside = root.contains(document.activeElement);
+  if (e.shiftKey && (!inside || document.activeElement === first)) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && (!inside || document.activeElement === last)) {
+    e.preventDefault(); first.focus();
+  }
+}
+/* Polling redraws a list every second. Without this the button the user is on
+   is removed and focus falls back to <body>, so the next Tab starts from the
+   top of the page. The snapshot records which stable data-* key had focus and
+   puts focus back on the matching control after the redraw. */
+function captureFocus(root, attrs) {
+  const el = document.activeElement;
+  if (!el || !root.contains(el)) return null;
+  const node = el.closest(attrs.map(a => "[" + a + "]").join(","));
+  if (!node) return null;
+  const attr = attrs.find(a => node.hasAttribute(a));
+  return attr ? { attr, value: node.getAttribute(attr) } : null;
+}
+function restoreFocus(root, snap) {
+  if (!snap) return;
+  const nodes = root.querySelectorAll("[" + snap.attr + "]");
+  for (const node of nodes) {
+    if (node.getAttribute(snap.attr) === snap.value) {
+      node.focus({ preventScroll: true });
+      return;
+    }
+  }
+}
 function api(method, ...args) {
   const fn = window.pywebview && window.pywebview.api && window.pywebview.api[method];
   if (!fn) return Promise.reject(new Error("bridge not ready"));
@@ -1010,7 +1124,11 @@ async function copyText(text) {
 function toast(msg, kind = "info", ms = 3800, onclick = null) {
   const box = document.createElement("div");
   box.className = "toast " + kind;
-  box.innerHTML = `<span class="bar"></span><span class="msg">${esc(msg)}</span><button class="x">✕</button>`;
+  // Toasts appear in the #toasts live region. They never call focus(): the
+  // page's focus must stay where the user left it. The dismiss control is
+  // pulled out of the tab order because the toast removes itself on a timer
+  // and would otherwise vanish underneath a keyboard user's focus.
+  box.innerHTML = `<span class="bar"></span><span class="msg">${esc(msg)}</span><button type="button" class="x" tabindex="-1" aria-label="${esc(t("Close"))}">✕</button>`;
   box.querySelector(".x").onclick = () => dismiss();
   if (onclick) {
     box.style.cursor = "pointer";
@@ -1049,15 +1167,46 @@ function highlight(text, kw) {
 /* ================================================================ router */
 let currentPage = "search";
 const loaders = { search: null, download: refreshTasks, history: refreshHistory, music: initMusic, follow: refreshFollow, settings: initSettings };
-function showPage(name) {
+/* The six nav buttons are an ARIA tablist: aria-selected follows the active
+   page so screen readers and the focus ring never disagree. */
+function syncNav() {
+  document.querySelectorAll(".nav-item").forEach(b => {
+    const on = b.dataset.page === currentPage;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+  });
+}
+/* ``focusField: false`` keeps focus on the nav button itself when a page is
+   switched with the arrow keys; otherwise ArrowDown would hand focus to the
+   search input and the user could not keep browsing the tabs. */
+function showPage(name, opts) {
   currentPage = name;
-  document.querySelectorAll(".nav-item").forEach(b => b.classList.toggle("active", b.dataset.page === name));
+  syncNav();
   document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.id === "page-" + name));
+  const focusField = !(opts && opts.focusField === false);
   const focusMap = { search: "#q", music: "#m-q" };
-  if (focusMap[name]) setTimeout(() => $(focusMap[name]) && $(focusMap[name]).focus(), 60);
+  if (focusField && focusMap[name]) setTimeout(() => $(focusMap[name]) && $(focusMap[name]).focus(), 60);
   if (loaders[name]) loaders[name]();
 }
 $("#nav").addEventListener("click", e => { const b = e.target.closest(".nav-item"); if (b) showPage(b.dataset.page); });
+/* Arrow keys move through the tabs and switch pages in step; Home/End jump to
+   the ends. The click handler above is what Enter/Space activate. */
+$("#nav-tabs").addEventListener("keydown", e => {
+  const items = [...document.querySelectorAll(".nav-item")];
+  const current = e.target.closest(".nav-item");
+  const index = current ? items.indexOf(current) : -1;
+  if (index < 0) return;
+  let next = index;
+  if (e.key === "ArrowDown" || e.key === "ArrowRight") next = (index + 1) % items.length;
+  else if (e.key === "ArrowUp" || e.key === "ArrowLeft") next = (index - 1 + items.length) % items.length;
+  else if (e.key === "Home") next = 0;
+  else if (e.key === "End") next = items.length - 1;
+  else return;
+  e.preventDefault();
+  const item = items[next];
+  showPage(item.dataset.page, { focusField: false });
+  item.focus({ preventScroll: true });
+});
 
 /* ================================================================ theme */
 function applyTheme(raw) {
@@ -1106,6 +1255,10 @@ const SETTING_ERROR_LABELS = {
 /* Rebuilt only when the language list changes; a module variable keeps the
    static dataset-attribute guard test applicable to the rest of the page. */
 let languageCodes = "";
+/* Set by the music page's "Go to settings" button so initSettings can select
+   the right platform even though the loader runs asynchronously. */
+let pendingMusicCredential = "";
+const musicCreds = { platforms: [] };
 
 function renderOutStatus(info) {
   const node = $("#set-out-status");
@@ -1163,6 +1316,70 @@ function renderSettings(s) {
   else shortcut.querySelector("span").textContent = t("Create desktop shortcut");
 }
 
+/* Music account credentials: the bridge only reports whether a platform is
+   configured and the JSON shape it expects. Values are never sent back, so the
+   field always starts blank and blank means "leave the saved token alone". */
+function currentMusicCredential() {
+  const key = $("#set-music-cred-platform").value;
+  return musicCreds.platforms.find(p => p.key === key) || null;
+}
+
+function renderMusicCredentialStatus() {
+  const row = currentMusicCredential();
+  const status = $("#set-music-cred-status");
+  const input = $("#set-music-cred-value");
+  const clear = $("#btn-music-cred-clear");
+  if (!row) {
+    if (status) { status.textContent = ""; status.className = "settings-note"; }
+    if (clear) clear.disabled = true;
+    return;
+  }
+  if (input) {
+    input.value = "";
+    input.placeholder = row.configured
+      ? t("Saved; leave blank to keep")
+      : t("Paste the token JSON");
+  }
+  if (status) {
+    status.textContent = (row.configured ? t("Configured") : t("Not configured")) +
+      (row.hint ? " · " + row.hint : "");
+    status.className = "settings-note " + (row.configured ? "ok" : "warn");
+  }
+  if (clear) clear.disabled = !row.configured;
+}
+
+async function loadMusicCredentialSettings(preferredKey) {
+  const r = await call("get_music_credentials");
+  if (!r || r.ok === false) {
+    const status = $("#set-music-cred-status");
+    if (status && r && r.error) {
+      status.textContent = r.error;
+      status.className = "settings-note err";
+    }
+    return;
+  }
+  musicCreds.platforms = r.platforms || [];
+  const sel = $("#set-music-cred-platform");
+  if (!sel) return;
+  const wanted = preferredKey || sel.value;
+  sel.innerHTML = musicCreds.platforms.map(p =>
+    `<option value="${esc(p.key)}">${esc(p.label)}</option>`
+  ).join("");
+  if (wanted && musicCreds.platforms.some(p => p.key === wanted)) sel.value = wanted;
+  renderMusicCredentialStatus();
+}
+
+/* Called from the music availability panel; switches pages and focuses the
+   token field for the platform the user picked. */
+function openMusicCredential(key) {
+  pendingMusicCredential = key || "";
+  showPage("settings");
+  loadMusicCredentialSettings(key).then(() => {
+    const input = $("#set-music-cred-value");
+    if (input) { input.focus(); if (input.select) input.select(); }
+  }).catch(() => {});
+}
+
 function showSettingsErrors(errors) {
   const box = $("#set-errors");
   const entries = Object.entries(errors || {});
@@ -1183,9 +1400,13 @@ function showSettingsErrors(errors) {
 
 async function initSettings() {
   const s = await call("get_settings");
-  if (!s) return;
-  if (s.error) toast(s.error, "err", 8000);
-  renderSettings(s);
+  const preferred = pendingMusicCredential;
+  pendingMusicCredential = "";
+  if (s) {
+    if (s.error) toast(s.error, "err", 8000);
+    renderSettings(s);
+  }
+  await loadMusicCredentialSettings(preferred);
 }
 
 $("#btn-set-open").onclick = async () => {
@@ -1256,6 +1477,45 @@ $("#btn-set-save").onclick = async () => {
   } else {
     toast(r.message || t("Some settings were not saved"), "err", 8000);
   }
+};
+
+$("#set-music-cred-platform").addEventListener("change", renderMusicCredentialStatus);
+
+$("#btn-music-cred-save").onclick = async () => {
+  const row = currentMusicCredential();
+  if (!row) return;
+  const input = $("#set-music-cred-value");
+  const value = input.value.trim();
+  if (!value) {
+    toast(t("Enter the token JSON before saving"), "warn");
+    input.focus();
+    return;
+  }
+  const r = await call("save_music_credentials", row.key, value);
+  if (!r || r.ok === false) {
+    toast((r && r.error) || t("Could not save the credentials"), "err", 8000);
+    return;
+  }
+  input.value = "";
+  toast(t("Platform credentials saved"), "ok");
+  await loadMusicCredentialSettings(row.key);
+  await refreshMusicAvailability();
+  await updateMusicNote();
+};
+
+$("#btn-music-cred-clear").onclick = async () => {
+  const row = currentMusicCredential();
+  if (!row) return;
+  const r = await call("clear_music_credentials", row.key);
+  if (!r || r.ok === false) {
+    toast((r && r.error) || t("Could not clear the credentials"), "err", 8000);
+    return;
+  }
+  $("#set-music-cred-value").value = "";
+  toast(t("Platform credentials cleared"), "ok");
+  await loadMusicCredentialSettings(row.key);
+  await refreshMusicAvailability();
+  await updateMusicNote();
 };
 
 /* ================================================================ updates */
@@ -1468,6 +1728,9 @@ let selIndex = -1;
    its next wake-up and returns without touching the new results. */
 let searchSeq = 0;
 let activeSearchKeyword = "";
+/* Bridge id of the search currently polled, so cancel can stop its backend
+   work instead of only abandoning the poll loop. */
+let activeSearchId = "";
 /* Aggregate searches can return hundreds of rows. Only one screenful is
    built up front; "Show more" appends the next batch. ``data-sel`` always
    holds the index into ``lastResults``, so selection stays global. */
@@ -1480,10 +1743,28 @@ let renderedKeyword = "";
 const narrowDetail = window.matchMedia("(max-width: 1180px)");
 let detailReturnFocus = null;
 function detailIsOpen() { const box = $("#detail"); return !!box && box.classList.contains("open"); }
+/* In the narrow layout the drawer covers the page behind a backdrop, so it is
+   a modal dialog for keyboard and screen-reader users; in the wide layout the
+   very same node is a permanent column and must stay a plain complementary
+   aside. These two helpers flip the semantics with the layout. */
+function setDetailDialog(open) {
+  const box = $("#detail");
+  if (!box) return;
+  if (open && narrowDetail.matches) {
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-labelledby", "detail-title");
+  } else {
+    box.removeAttribute("role");
+    box.removeAttribute("aria-modal");
+    box.removeAttribute("aria-labelledby");
+  }
+}
 function hideDetail() {
   const box = $("#detail");
   box.hidden = true;
   box.classList.remove("open");
+  setDetailDialog(false);
   $("#detail-backdrop").classList.remove("show");
 }
 function openDetail() {
@@ -1498,6 +1779,7 @@ function openDetail() {
       : ($("#results .result-card.sel") || $("#q"));
   }
   box.classList.add("open");
+  setDetailDialog(true);
   $("#detail-backdrop").classList.add("show");
   const close = box.querySelector("[data-detail-close]");
   if (close) close.focus({ preventScroll: true });
@@ -1505,6 +1787,7 @@ function openDetail() {
 function closeDetail() {
   const box = $("#detail");
   box.classList.remove("open");
+  setDetailDialog(false);
   $("#detail-backdrop").classList.remove("show");
   // Put focus back on the card that opened the drawer (or the search field).
   const target = (detailReturnFocus && document.contains(detailReturnFocus))
@@ -1513,14 +1796,27 @@ function closeDetail() {
   detailReturnFocus = null;
   if (target && typeof target.focus === "function") target.focus({ preventScroll: true });
 }
+$("#detail").addEventListener("keydown", e => {
+  if (narrowDetail.matches && detailIsOpen()) trapTab($("#detail"), e);
+});
 narrowDetail.addEventListener("change", e => {
-  if (!e.matches) { $("#detail").classList.remove("open"); $("#detail-backdrop").classList.remove("show"); }
+  if (!e.matches) {
+    $("#detail").classList.remove("open");
+    setDetailDialog(false);
+    $("#detail-backdrop").classList.remove("show");
+  }
 });
 $("#detail-backdrop").addEventListener("click", closeDetail);
 function selectResult(i) {
   if (i < 0 || i >= lastResults.length) return;
   selIndex = i;
-  document.querySelectorAll("#results .result-card").forEach((el, k) => el.classList.toggle("sel", k === i));
+  document.querySelectorAll("#results .result-card").forEach((el, k) => {
+    el.classList.toggle("sel", k === i);
+    // aria-current is the "this is the selected row" signal screen readers
+    // announce; classList alone is invisible to them.
+    if (k === i) el.setAttribute("aria-current", "true");
+    else el.removeAttribute("aria-current");
+  });
   renderDetail(lastResults[i], lastKeyword);
   if (narrowDetail.matches) openDetail();
 }
@@ -1541,7 +1837,7 @@ function renderDetail(r, kw) {
     <div class="detail-head">
       ${img}
       <div style="min-width:0">
-        <div class="row-title" style="white-space:normal">${highlight(r.title, kw || "")}</div>
+        <div class="row-title" id="detail-title" style="white-space:normal">${highlight(r.title, kw || "")}</div>
         <div class="row-sub" style="white-space:normal">${meta}</div>
         ${r.latest_chapter ? `<div class="row-meta">${esc(r.latest_chapter)}</div>` : ""}
         <div class="detail-meta"><span class="k">${esc(t("Source"))}</span><span class="v">${esc(r.site)}</span></div>
@@ -1557,14 +1853,56 @@ function renderDetail(r, kw) {
 function endSearchUi() {
   searching = false;
   activeSearchKeyword = "";
+  activeSearchId = "";
   $("#search-spin").classList.remove("on");
   $("#btn-search").disabled = false;
+  $("#btn-search-cancel").hidden = true;
+  // The result list has settled: stop announcing it as busy.
+  const results = $("#results");
+  if (results) results.removeAttribute("aria-busy");
 }
 function cancelActiveSearch() {
-  // Only bump the token: the owner of the old loop checks it and drops out.
+  const id = activeSearchId;
+  // Bump the token first: the owner of the old loop checks it and drops out.
   searchSeq++;
   activeSearchKeyword = "";
+  activeSearchId = "";
   if (searching) endSearchUi();
+  // Do not leave the bridge ranking / fetching sites nobody will read.
+  if (id) api("cancel_search", id).catch(() => {});
+}
+function searchProgressLine(st, secs) {
+  const done = Number(st && st.sites_done) || 0;
+  const failed = Number(st && st.sites_failed) || 0;
+  const count = Array.isArray(st && st.results)
+    ? st.results.length
+    : (Number(st && st.result_count) || 0);
+  const parts = [
+    t("{n} sources").replace("{n}", done),
+    t("{n} results").replace("{n}", count),
+  ];
+  if (failed > 0) parts.push(t("{n} sources failed").replace("{n}", failed));
+  parts.push(t("{s}s").replace("{s}", secs));
+  return parts.join(" · ");
+}
+function showSearchProgress(text, done) {
+  const box = $("#search-progress");
+  if (!box) return;
+  box.hidden = !text;
+  box.classList.toggle("final", !!done);
+  const label = $("#search-progress-text");
+  if (label) label.textContent = text || "";
+}
+function cancelCurrentSearch() {
+  if (!searching) return;
+  // Freeze the last counters the user saw; the late chunks are still dropped
+  // by the token, and the backend is told to stop its site tasks.
+  const progress = $("#search-progress-text");
+  const frozen = progress ? progress.textContent : "";
+  cancelActiveSearch();
+  const label = t("Search cancelled");
+  showSearchProgress(frozen ? frozen + " · " + label : label, true);
+  $("#search-hint").textContent = label;
 }
 function resetResultList() {
   renderedResultCount = 0;
@@ -1577,20 +1915,32 @@ async function doSearch() {
   // no-op. A *different* query supersedes it: bumping the token stops the old
   // poll instead of letting it paint stale rows over the new ones.
   if (searching && kw === activeSearchKeyword) return;
+  const previousId = activeSearchId;
   const token = ++searchSeq;
   searching = true;
   activeSearchKeyword = kw;
+  activeSearchId = "";
+  if (previousId) api("cancel_search", previousId).catch(() => {});
   $("#search-spin").classList.add("on");
   $("#btn-search").disabled = true;
+  $("#btn-search-cancel").hidden = false;
   $("#search-hint").textContent = t("Searching…");
+  showSearchProgress(t("Searching…"), false);
   $("#results").innerHTML = "";
+  $("#results").setAttribute("aria-busy", "true");
   resetResultList();
   const started = performance.now();
   let rendered = -1;
   try {
     const job = await api("search_async", kw, $("#q-sites").value.trim(), $("#q-group").checked);
-    if (token !== searchSeq) return;
+    if (token !== searchSeq) {
+      // The user cancelled (or searched again) while the bridge was starting:
+      // stop the orphaned backend search instead of letting it run to timeout.
+      if (job && job.search_id) api("cancel_search", job.search_id).catch(() => {});
+      return;
+    }
     if (!job || !job.search_id) throw new Error(t("Search failed"));
+    activeSearchId = job.search_id;
     for (;;) {
       // Poll while the sites answer: the fastest ones land in ~0.2s instead
       // of the page waiting for the slowest (bounded by the bridge budget).
@@ -1601,6 +1951,7 @@ async function doSearch() {
       if (!st) break;
       // Bridge failures come back inside the payload, not as exceptions.
       if (st.error) throw new Error(st.error);
+      if (st.cancelled) break;
       const results = st.results || [];
       if (results.length !== rendered) {
         rendered = results.length;
@@ -1608,8 +1959,12 @@ async function doSearch() {
         hideDetail();
         renderResults(results, kw);
       }
-      const secs = ((performance.now() - started) / 1000).toFixed(1);
+      if (token !== searchSeq) return;
+      const secs = Number(st.elapsed) > 0
+        ? Number(st.elapsed).toFixed(1)
+        : ((performance.now() - started) / 1000).toFixed(1);
       $("#search-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", secs);
+      showSearchProgress(searchProgressLine(st, secs), st.done);
       if (st.done) break;
     }
   } catch (e) {
@@ -1617,6 +1972,7 @@ async function doSearch() {
     if (token !== searchSeq) return;
     $("#results").innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("Search failed"))}</div><div class="s">${esc(String(e && e.message || e))}</div></div>`;
     $("#search-hint").textContent = "";
+    showSearchProgress("", false);
   } finally {
     // Only the current owner may release the controls; a stale loop leaving
     // them disabled would lock the search box for the rest of the session.
@@ -1726,7 +2082,11 @@ function sourceCaps(r) {
 }
 $("#results").addEventListener("keydown", e => {
   const card = e.target.closest("[data-sel]");
-  if (!card || (e.key !== "Enter" && e.key !== " ")) return;
+  // Only the card itself is the "open details" target. If focus is on the
+  // nested Download button, Enter/Space must reach that button instead of
+  // being swallowed here (which also cancelled the button's own click).
+  if (!card || e.target !== card) return;
+  if (e.key !== "Enter" && e.key !== " ") return;
   e.preventDefault();
   selectResult(+card.dataset.sel);
 });
@@ -1782,6 +2142,7 @@ $("#btn-rank").onclick = async () => {
   // A rank list replaces the search rows: stop any poll still in flight so it
   // cannot append stale results after this render.
   cancelActiveSearch();
+  showSearchProgress("", false);
   btn.disabled = true;
   $("#search-hint").textContent = t("Searching…");
   try {
@@ -1833,6 +2194,8 @@ function switchCat(gender) {
   catGender = gender;
   $("#cat-male").className = "btn btn-sm " + (gender === "male" ? "btn-primary" : "btn-ghost");
   $("#cat-female").className = "btn btn-sm " + (gender === "female" ? "btn-primary" : "btn-ghost");
+  $("#cat-male").setAttribute("aria-pressed", gender === "male" ? "true" : "false");
+  $("#cat-female").setAttribute("aria-pressed", gender === "female" ? "true" : "false");
   renderCatChips();
 }
 $("#cat-male").onclick = () => switchCat("male");
@@ -1841,6 +2204,7 @@ $("#cat-chips").addEventListener("click", async e => {
   const chip = e.target.closest("[data-cat]");
   if (!chip) return;
   cancelActiveSearch();
+  showSearchProgress("", false);
   $("#cat-hint").textContent = t("Searching…");
   const started = performance.now();
   try {
@@ -1862,7 +2226,22 @@ $("#cat-chips").addEventListener("click", async e => {
   }
 });
 $("#btn-search").onclick = doSearch;
+$("#btn-search-cancel").onclick = cancelCurrentSearch;
 $("#q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.isComposing) doSearch(); });
+/* Escape inside the search box is deliberately two-step and self-contained:
+   a running search is cancelled first (the keyboard twin of the Cancel
+   button); otherwise the typed query is cleared in place, leaving the results
+   alone. The document-level shortcut handler never sees Escape while an input
+   has focus, so this is the single definition of that behaviour. */
+$("#q").addEventListener("keydown", e => {
+  if (e.key !== "Escape" || e.isComposing) return;
+  e.preventDefault();
+  if (searching) { cancelCurrentSearch(); return; }
+  if ($("#q").value) {
+    $("#q").value = "";
+    $("#search-hint").textContent = "";
+  }
+});
 // "Merge same book" defaults to on: without it one title lists once per site.
 // An explicit earlier choice (stored as JSON true/false) still wins.
 $("#q-group").checked = store.get("merge_same_book", true) !== false;
@@ -1903,6 +2282,7 @@ function renderTasks(snap) {
   badge.textContent = liveCount;
   if (currentPage !== "download") return;
   const body = $("#tasks-body");
+  const focusSnapshot = captureFocus(body, ["data-cancel", "data-retry", "data-open-file", "data-copy-error", "data-open-dir"]);
   if (liveCount === 0 && groups[2][2].length === 0) {
     body.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-down"/></svg><div class="t">${esc(t("Nothing in the queue"))}</div><div class="s">${esc(t("Search for a book and press Download"))}</div></div>`;
     return;
@@ -1911,6 +2291,7 @@ function renderTasks(snap) {
     <div class="section-head">${esc(label)}<span class="count-chip ${key === "live" ? "live" : ""}">${tasks.length}</span></div>
     ${tasks.map(taskCard).join("") || `<div class="hint" style="padding:2px 2px 8px">${esc(t("No tasks yet"))}</div>`}
   `).join("");
+  restoreFocus(body, focusSnapshot);
 }
 function taskCard(k) {
   const total = Number(k.chapters_total || 0);
@@ -1946,7 +2327,7 @@ function taskCard(k) {
     <div class="row-main">
       <div style="display:flex;align-items:center;gap:9px"><span class="row-title">${esc(k.title)}</span>${pill(k.status)}${retry}</div>
       <div class="row-sub">${meta.join(" ")}</div>
-      ${active || indet ? `<div class="progress ${indet ? "indeterminate" : ""}"><i style="width:${pct}%"></i></div>` : ""}
+      ${active || indet ? `<div class="progress ${indet ? "indeterminate" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100"${total > 0 ? ` aria-valuenow="${pct}"` : ""}><i style="width:${pct}%"></i></div>` : ""}
       ${err}
     </div>
     <div class="row-actions">${exports}${copyErr}${openDir}
@@ -2059,12 +2440,13 @@ $("#btn-open-dl").onclick = async () => {
 };
 
 /* ================================================================ music */
-const music = { tracks: [], selected: new Set(), downloading: false, note: "", batch: [], searchId: "", labels: {}, userTouched: false, failedItems: [] };
+const music = { tracks: [], selected: new Set(), downloading: false, note: "", batch: [], searchId: "", labels: {}, statuses: [], userTouched: false, failedItems: [] };
 let musicInited = false;
 let musicSearchToken = 0;
 async function initMusic() {
-  if (musicInited) { renderHealth(); return; }
+  if (musicInited) { renderHealth(); refreshMusicAvailability(); return; }
   musicInited = true;
+  await refreshMusicAvailability();
   try {
     const st = await call("get_music_settings");
     $("#m-level").value = st.level || "exhigh";
@@ -2097,9 +2479,52 @@ function saveMusicSettings() {
     save_lyric: $("#m-lyric").checked, split_folder: $("#m-split").checked, skip_existing: $("#m-skip").checked,
   }).catch(() => {});
 }
+/* The provider registry hides a platform whose dependency is missing. This
+   panel restores the missing explanation: the reason and a shortcut to the
+   account field, before the user searches and gets an empty result. */
+async function refreshMusicAvailability() {
+  const box = $("#m-availability");
+  if (!box) return;
+  const r = await call("get_music_platform_status");
+  if (!r || r.ok === false) {
+    music.statuses = [];
+    if (r && r.error) {
+      box.hidden = false;
+      box.innerHTML = `<div class="music-status-row"><span class="health-dot bad"></span><div class="music-status-main"><div class="music-status-reason">${esc(r.error)}</div></div></div>`;
+    }
+    return;
+  }
+  music.statuses = r.platforms || [];
+  const rows = music.statuses.filter(p => p.state && p.state !== "ready");
+  if (!rows.length) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML = `<div class="music-status-title">${esc(t("Some platforms need extra setup"))}</div>` +
+    rows.map(p => {
+      const dot = p.state === "limited" || p.state === "missing_tool" ? "wait" : "bad";
+      const action = p.can_configure
+        ? `<button class="btn btn-ghost btn-sm" data-music-cred="${esc(p.key)}">${esc(t("Go to settings"))}</button>`
+        : "";
+      return `<div class="music-status-row" data-music-status="${esc(p.key)}">
+        <span class="health-dot ${dot}"></span>
+        <div class="music-status-main"><div><strong>${esc(p.label)}</strong></div><div class="music-status-reason">${esc(p.reason || "")}</div></div>
+        ${action}
+      </div>`;
+    }).join("");
+}
+
+$("#m-availability").addEventListener("click", e => {
+  const btn = e.target.closest("[data-music-cred]");
+  if (btn) openMusicCredential(btn.dataset.musicCred);
+});
+
 async function updateMusicNote() {
-  try { const note = await call("music_note", $("#m-platform").value); $("#m-note").textContent = note || ""; }
-  catch { $("#m-note").textContent = ""; }
+  let note = "";
+  try { note = await call("music_note", $("#m-platform").value) || ""; } catch { note = ""; }
+  const row = (music.statuses || []).find(p => p.key === $("#m-platform").value);
+  if (row && row.state !== "ready" && row.reason) {
+    note = note ? note + " " + row.reason : row.reason;
+  }
+  $("#m-note").textContent = note;
 }
 async function doMusicSearch() {
   const kw = $("#m-q").value.trim();
@@ -2225,13 +2650,17 @@ function sourceChips(tr) {
 }
 function renderTracks() {
   const box = $("#m-tracks");
+  // Streaming searches redraw this list while the user may be tabbing the
+  // checkboxes. Match by track identity (not row index) so focus follows the
+  // same song even when partial snapshots merge and reorder the list.
+  const focusKey = captureFocus(box, ["data-key"]);
   if (!music.tracks.length) {
     box.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-music"/></svg><div class="t">${esc(t("Search a song to begin"))}</div></div>`;
     return;
   }
   box.innerHTML = music.tracks.map((tr, i) => `
     <div class="card row-card track-row" style="padding:9px 14px">
-      <input type="checkbox" class="cb" data-i="${i}" ${music.selected.has(i) ? "checked" : ""}>
+      <input type="checkbox" class="cb" data-i="${i}" data-key="${esc(musicTrackKey(tr))}" aria-label="${esc(tr.name)}" ${music.selected.has(i) ? "checked" : ""}>
       <span class="idx mono">${i + 1}</span>
       <div class="row-main">
         <div style="display:flex;align-items:center;gap:8px"><span class="row-title">${esc(tr.name)}</span>${tr.vip ? `<span class="vip-tag">VIP</span>` : ""}</div>
@@ -2241,6 +2670,7 @@ function renderTracks() {
       ${tr.ext ? `<span class="hint mono">${esc(tr.ext.toUpperCase())}</span>` : ""}
       <span class="hint mono">${esc(fmtDur(tr.duration_s))}</span>
     </div>`).join("");
+  restoreFocus(box, focusKey);
 }
 $("#m-tracks").addEventListener("change", e => {
   const cb = e.target.closest(".cb");
@@ -2259,6 +2689,13 @@ $("#btn-m-selall").onclick = () => {
 };
 $("#btn-m-search").onclick = doMusicSearch;
 $("#m-q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.isComposing) doMusicSearch(); });
+/* Same Escape contract as the book search box: clear the field in place. The
+   music search has no cancel endpoint, so Escape never cancels a run. */
+$("#m-q").addEventListener("keydown", e => {
+  if (e.key !== "Escape" || e.isComposing || !$("#m-q").value) return;
+  e.preventDefault();
+  $("#m-q").value = "";
+});
 
 $("#btn-m-dl").onclick = async () => {
   if (music.downloading || !music.selected.size) return;
@@ -2451,6 +2888,7 @@ function pollMusic() {
           $("#m-dl-label").textContent = t("Download selected");
           $("#m-progress").classList.remove("indeterminate");
           $("#m-progress").querySelector("i").style.width = "0%";
+          $("#m-progress").setAttribute("aria-valuenow", "0");
           setTimeout(() => { $("#m-progress").hidden = true; }, 600);
           // Which rows failed (and why) is page content, not a toast.
           showMusicFailures(st && Array.isArray(st.failed_items) ? st.failed_items : []);
@@ -2465,6 +2903,7 @@ function pollMusic() {
       bar.hidden = false;
       bar.classList.remove("indeterminate");
       bar.querySelector("i").style.width = Math.round((st.fraction || 0) * 100) + "%";
+      bar.setAttribute("aria-valuenow", String(Math.round((st.fraction || 0) * 100)));
       $("#m-dl-label").textContent = t("Downloading {done}/{total}").replace("{done}", st.done).replace("{total}", st.total);
     } catch {}
   }, 500);
@@ -2643,16 +3082,30 @@ $("#btn-f-check").onclick = async () => {
 function openModal(fields, onOk) {
   const mask = document.createElement("div");
   mask.className = "modal-mask";
-  mask.innerHTML = `<div class="modal">
-    <h3>${esc(t("Add book"))}</h3>
-    ${fields.map(f => `<div class="field"><input id="${f.id}" placeholder="${esc(t(f.ph))}" autocomplete="off"></div>`).join("")}
+  // role=dialog + aria-modal: the page behind is inert for assistive tech, so
+  // the trap below is the keyboard equivalent of that promise.
+  mask.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h3 id="modal-title">${esc(t("Add book"))}</h3>
+    ${fields.map(f => `<div class="field"><input id="${f.id}" aria-label="${esc(t(f.ph))}" placeholder="${esc(t(f.ph))}" autocomplete="off"></div>`).join("")}
     <div class="modal-actions">
       <button class="btn btn-ghost" data-no>${esc(t("Cancel"))}</button>
       <button class="btn btn-primary" data-ok>${esc(t("OK"))}</button>
     </div></div>`;
+  // Remembered before the dialog moves focus: closing must hand it back to
+  // the control that opened it (the Add book button), not to <body>.
+  const returnTo = document.activeElement;
   document.body.appendChild(mask);
-  mask.addEventListener("mousedown", e => { if (e.target === mask) mask.remove(); });
-  const close = () => mask.remove();
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    mask.remove();
+    const target = (returnTo && document.contains(returnTo) && typeof returnTo.focus === "function")
+      ? returnTo
+      : $("#btn-f-add");
+    if (target) target.focus({ preventScroll: true });
+  };
+  mask.addEventListener("mousedown", e => { if (e.target === mask) close(); });
   mask.querySelector("[data-no]").onclick = close;
   mask.querySelector("[data-ok]").onclick = async () => {
     const vals = {};
@@ -2661,8 +3114,12 @@ function openModal(fields, onOk) {
     close();
     await onOk(vals);
   };
-  mask.querySelector(".field input").focus();
-  mask.addEventListener("keydown", e => { if (e.key === "Escape") close(); });
+  const firstInput = mask.querySelector(".field input");
+  if (firstInput) firstInput.focus();
+  mask.addEventListener("keydown", e => {
+    if (e.key === "Escape" && !e.isComposing) { e.preventDefault(); close(); return; }
+    trapTab(mask, e);
+  });
 }
 
 /* ================================================================ shortcuts */

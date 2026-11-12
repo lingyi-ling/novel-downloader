@@ -19,6 +19,7 @@ import io
 import json
 import re
 import sys
+import urllib.error
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,6 +86,21 @@ def test_parse_version(text: str, expected: tuple[int, ...]) -> None:
         ("1.2.3", "1.2.3.0", False),
         ("banana", "1.0.0", False),
         ("1.0.0", "", True),
+        # A final release is newer than its own pre-releases.
+        ("1.5.0", "1.5.0-rc1", True),
+        ("1.5.0-rc1", "1.5.0", False),
+        # Pre-release identifiers order among themselves.
+        ("1.5.0-rc2", "1.5.0-rc1", True),
+        ("1.5.0-rc1", "1.5.0-rc2", False),
+        ("1.5.0-rc.2", "1.5.0-rc.1", True),
+        ("1.5.0-beta", "1.5.0-alpha", True),
+        ("1.5.0-rc2", "1.5.0-RC1", True),
+        # Build metadata never changes precedence.
+        ("1.5.0+build.7", "1.5.0", False),
+        ("1.5.0", "1.5.0+build.7", False),
+        ("1.5.0-rc1+build.7", "1.5.0-rc1", False),
+        # Leading zeros are numeric, not lexical.
+        ("01.5.0", "1.5.0", False),
     ],
 )
 def test_is_newer(latest: str, current: str, expected: bool) -> None:
@@ -803,6 +819,33 @@ class TestFetchLatestRelease:
         assert updater.fetch_latest_release(opener=lambda url, t: []) is None
 
 
+class TestFetchJson:
+    def test_refuses_an_https_document_that_redirected_to_http(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A downgraded feed could otherwise rewrite the manifest silently."""
+
+        class Downgraded:
+            headers: dict[str, str] = {}
+
+            def read(self, _size: int) -> bytes:  # pragma: no cover - not reached
+                raise AssertionError("must refuse before reading the body")
+
+            def geturl(self) -> str:
+                return "http://evil.example/latest.json"
+
+            def __enter__(self) -> Downgraded:
+                return self
+
+            def __exit__(self, *_exc: object) -> None:
+                return None
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: Downgraded())
+
+        with pytest.raises(ValueError, match="plain HTTP"):
+            updater._fetch_json("https://example.invalid/latest.json", 1.0)
+
+
 class TestCheckForUpdate:
     def test_reports_an_available_update(self) -> None:
         payload = {
@@ -883,20 +926,23 @@ class TestUpdateState:
 # ---------------------------------------------------------------------------
 
 
+_TEST_REPO = updater.DEFAULT_REPO
+
+
 def _manifest(version: str = "9.9.9", **platforms: Any) -> dict[str, Any]:
     return {
         "schema": updater.MANIFEST_SCHEMA,
         "version": version,
         "tag": f"v{version}",
-        "repo": "o/r",
+        "repo": _TEST_REPO,
         "platforms": platforms,
     }
 
 
-def _entry(name: str) -> dict[str, Any]:
+def _entry(name: str, *, tag: str = "v9.9.9") -> dict[str, Any]:
     return {
         "name": name,
-        "url": f"https://github.com/o/r/releases/download/v9.9.9/{name}",
+        "url": f"https://github.com/{_TEST_REPO}/releases/download/{tag}/{name}",
         "sha256": "a" * 64,
         "size": 1234,
     }
@@ -916,7 +962,7 @@ class TestManifestUrl:
 class TestSelectManifestAsset:
     def test_prefers_the_installer_over_the_portable_archive(self) -> None:
         platforms = {
-            "windows-x64-portable": _entry("portable.zip"),
+            "windows-x64-portable": _entry("NovelDownloader-9.9.9-windows-x64.zip"),
             "windows-x64-installer": _entry("setup.exe"),
         }
 
@@ -926,20 +972,22 @@ class TestSelectManifestAsset:
         assert asset.name == "setup.exe"
 
     def test_falls_back_to_the_portable_archive(self) -> None:
-        platforms = {"windows-x64-portable": _entry("portable.zip")}
+        name = "NovelDownloader-9.9.9-windows-x64.zip"
+        platforms = {"windows-x64-portable": _entry(name)}
 
         asset = updater.select_manifest_asset(platforms, "windows-x64")
 
         assert asset is not None
-        assert asset.name == "portable.zip"
+        assert asset.name == name
 
     def test_android_uses_its_own_key(self) -> None:
-        platforms = {"android": _entry("app.apk")}
+        name = "novel-downloader-9.9.9-android.apk"
+        platforms = {"android": _entry(name)}
 
         asset = updater.select_manifest_asset(platforms, "android")
 
         assert asset is not None
-        assert asset.name == "app.apk"
+        assert asset.name == name
 
     def test_an_entry_without_a_valid_checksum_is_ignored(self) -> None:
         bad = {**_entry("setup.exe"), "sha256": "not-a-digest"}
@@ -956,6 +1004,158 @@ class TestSelectManifestAsset:
             updater.select_manifest_asset({"windows-x64-installer": bad}, "windows-x64")
             is None
         )
+
+    def test_an_entry_larger_than_the_download_cap_is_ignored(self) -> None:
+        huge = {**_entry("setup.exe"), "size": updater._MAX_ASSET_BYTES + 1}
+
+        assert (
+            updater.select_manifest_asset(
+                {"windows-x64-installer": huge}, "windows-x64"
+            )
+            is None
+        )
+
+
+class TestSelectManifestAssetShape:
+    def test_a_desktop_key_never_yields_an_apk(self) -> None:
+        platforms = {"windows-x64-installer": _entry("app.apk")}
+
+        assert updater.select_manifest_asset(platforms, "windows-x64") is None
+
+    def test_an_android_key_never_yields_a_desktop_installer(self) -> None:
+        platforms = {"android": _entry("NovelDownloader-setup-9.9.9-x64.exe")}
+
+        assert updater.select_manifest_asset(platforms, "android") is None
+
+    def test_the_requested_shape_is_tried_first(self) -> None:
+        platforms = {
+            "windows-x64-installer": _entry("NovelDownloader-setup-9.9.9-x64.exe"),
+            "windows-x64-cli": _entry("novel-cli-9.9.9-windows-x64.zip"),
+        }
+
+        chosen = updater.select_manifest_asset(platforms, "windows-x64", shape="cli")
+
+        assert chosen is not None
+        assert chosen.name == "novel-cli-9.9.9-windows-x64.zip"
+
+    def test_a_split_apk_matches_its_abi_key(self) -> None:
+        name = "novel-downloader-9.9.9-android-app-arm64-v8a-release.apk"
+
+        chosen = updater.select_manifest_asset(
+            {"android-arm64-v8a": _entry(name)}, "android"
+        )
+
+        assert chosen is not None
+        assert chosen.name == name
+
+    def test_a_windows_key_never_yields_another_platform_archive(self) -> None:
+        name = "NovelDownloader-9.9.9-linux-x64.zip"
+
+        assert (
+            updater.select_manifest_asset(
+                {"windows-x64-portable": _entry(name)}, "windows-x64"
+            )
+            is None
+        )
+
+    def test_a_portable_key_never_yields_the_cli_archive(self) -> None:
+        name = "novel-cli-9.9.9-windows-x64.zip"
+
+        assert (
+            updater.select_manifest_asset(
+                {"windows-x64-portable": _entry(name)}, "windows-x64"
+            )
+            is None
+        )
+
+    def test_an_android_key_never_yields_a_foreign_apk(self) -> None:
+        name = "some-other-tool-9.9.9-android.apk"
+
+        assert (
+            updater.select_manifest_asset({"android": _entry(name)}, "android") is None
+        )
+
+
+class TestManifestBinding:
+    """A manifest must describe *this* repository and release, nothing else."""
+
+    def test_accepts_a_manifest_bound_to_the_requested_repo(self) -> None:
+        info = updater.parse_update_manifest(
+            _manifest(**{"windows-x64-installer": _entry("setup.exe")}),
+            current="1.0.0",
+            platform_tag="windows-x64",
+            slug=_TEST_REPO,
+        )
+
+        assert info.asset is not None
+        assert info.available is True
+
+    def test_rejects_a_manifest_for_another_repository(self) -> None:
+        payload = _manifest(**{"windows-x64-installer": _entry("setup.exe")})
+        payload["repo"] = "evil/repo"
+
+        with pytest.raises(ValueError, match="repository"):
+            updater.parse_update_manifest(payload, current="1.0.0", slug=_TEST_REPO)
+
+    def test_rejects_a_manifest_without_a_repository(self) -> None:
+        payload = _manifest(**{"windows-x64-installer": _entry("setup.exe")})
+        del payload["repo"]
+
+        with pytest.raises(ValueError, match="repository"):
+            updater.parse_update_manifest(payload, current="1.0.0", slug=_TEST_REPO)
+
+    def test_rejects_a_tag_that_disagrees_with_the_version(self) -> None:
+        payload = _manifest(**{"windows-x64-installer": _entry("setup.exe")})
+        payload["tag"] = "v0.0.1"
+
+        with pytest.raises(ValueError, match="tag"):
+            updater.parse_update_manifest(payload, current="1.0.0")
+
+    def test_rejects_an_asset_hosted_outside_the_repository(self) -> None:
+        entry = _entry("setup.exe")
+        entry["url"] = "https://evil.example/setup.exe"
+
+        payload = _manifest(**{"windows-x64-installer": entry})
+
+        with pytest.raises(ValueError, match="url"):
+            updater.parse_update_manifest(payload, current="1.0.0", slug=_TEST_REPO)
+
+    def test_rejects_an_asset_from_another_repository(self) -> None:
+        entry = _entry("setup.exe")
+        entry["url"] = "https://github.com/evil/repo/releases/download/v9.9.9/setup.exe"
+
+        payload = _manifest(**{"windows-x64-installer": entry})
+
+        with pytest.raises(ValueError, match="url"):
+            updater.parse_update_manifest(payload, current="1.0.0", slug=_TEST_REPO)
+
+    def test_rejects_an_asset_from_another_tag(self) -> None:
+        entry = _entry("setup.exe")
+        entry["url"] = (
+            f"https://github.com/{_TEST_REPO}/releases/download/v0.0.1/setup.exe"
+        )
+
+        payload = _manifest(**{"windows-x64-installer": entry})
+
+        with pytest.raises(ValueError, match="url"):
+            updater.parse_update_manifest(payload, current="1.0.0", slug=_TEST_REPO)
+
+    def test_rejects_an_asset_url_naming_another_file(self) -> None:
+        entry = _entry("setup.exe")
+        entry["url"] = (
+            f"https://github.com/{_TEST_REPO}/releases/download/v9.9.9/other.exe"
+        )
+
+        payload = _manifest(**{"windows-x64-installer": entry})
+
+        with pytest.raises(ValueError, match="url"):
+            updater.parse_update_manifest(payload, current="1.0.0", slug=_TEST_REPO)
+
+    def test_rejects_a_platform_entry_whose_name_has_the_wrong_shape(self) -> None:
+        payload = _manifest(**{"windows-x64-installer": _entry("app.apk")})
+
+        with pytest.raises(ValueError, match="platform"):
+            updater.parse_update_manifest(payload, current="1.0.0", slug=_TEST_REPO)
 
 
 class TestParseUpdateManifest:
@@ -988,7 +1188,10 @@ class TestParseUpdateManifest:
 
     def test_an_older_manifest_is_not_available(self) -> None:
         info = updater.parse_update_manifest(
-            _manifest(version="0.9.0", **{"windows-x64-installer": _entry("s.exe")}),
+            _manifest(
+                version="0.9.0",
+                **{"windows-x64-installer": _entry("s.exe", tag="v0.9.0")},
+            ),
             current="1.0.0",
             platform_tag="windows-x64",
         )
@@ -1040,6 +1243,40 @@ class TestCheckForUpdatePrefersTheManifest:
         )
 
         assert result.source == "api"
+
+    def test_a_manifest_for_another_repository_is_not_used(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The manifest must describe the repository the client asked about."""
+        payload = _manifest(**{"windows-x64-installer": _entry("setup.exe")})
+        payload["repo"] = "evil/repo"
+
+        def opener(url: str, timeout: float) -> Any:
+            if url.endswith("latest.json"):
+                return payload
+            return {"tag_name": "v9.9.9", "assets": []}
+
+        result = updater.check_for_update(
+            "1.0.0", platform_tag="windows-x64", opener=opener
+        )
+
+        assert result.source == "api", "an unpinned manifest failure may fall back"
+
+        signed, public = _sign_manifest(payload, _seed())
+        monkeypatch.setattr(updater, "TRUSTED_UPDATE_KEYS", {signed["key_id"]: public})
+
+        def signed_opener(url: str, timeout: float) -> Any:
+            if url.endswith("latest.json"):
+                return signed
+            raise AssertionError("a pinned client must never consult the API")
+
+        result = updater.check_for_update(
+            "1.0.0", platform_tag="windows-x64", opener=signed_opener
+        )
+
+        assert result.available is False
+        assert result.error is not None
+        assert result.error.startswith("untrusted-manifest")
 
 
 # ---------------------------------------------------------------------------
@@ -1230,8 +1467,8 @@ def test_manifest_selection_follows_the_install_shape() -> None:
             "size": 10,
         },
         "windows-x64-portable": {
-            "name": "bundle.zip",
-            "url": "https://x/b.zip",
+            "name": "NovelDownloader-9.9.9-windows-x64.zip",
+            "url": "https://x/NovelDownloader-9.9.9-windows-x64.zip",
             "sha256": "b" * 64,
             "size": 10,
         },
@@ -1241,33 +1478,209 @@ def test_manifest_selection_follows_the_install_shape() -> None:
     portable = updater.select_manifest_asset(platforms, "windows-x64", shape="portable")
 
     assert installed is not None and installed.name == "setup.exe"
-    assert portable is not None and portable.name == "bundle.zip"
+    assert portable is not None and portable.name.endswith("-windows-x64.zip")
+
+
+def _use_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend the process runs on Windows (registry/path branches)."""
+    monkeypatch.setattr(sys, "platform", "win32")
+
+
+#: Constants of the fake ``winreg`` module below; only their identity matters.
+_FAKE_HKCU = "HKCU"
+_FAKE_HKLM = "HKLM"
+_FAKE_KEY_READ = 1
+_FAKE_WOW64_32 = 2
+_FAKE_WOW64_64 = 4
+
+
+class _FakeRegistryKey:
+    def __init__(self, values: dict[str, str]) -> None:
+        self.values = values
+
+    def __enter__(self) -> _FakeRegistryKey:
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+
+class _FakeWinreg(SimpleNamespace):
+    """Minimal ``winreg`` stand-in keyed by ``(hive, view)``."""
+
+    HKEY_CURRENT_USER = _FAKE_HKCU
+    HKEY_LOCAL_MACHINE = _FAKE_HKLM
+    KEY_READ = _FAKE_KEY_READ
+    KEY_WOW64_32KEY = _FAKE_WOW64_32
+    KEY_WOW64_64KEY = _FAKE_WOW64_64
+
+    def __init__(self, records: dict[tuple[str, int], dict[str, str]]) -> None:
+        super().__init__()
+        self.records = records
+
+    def OpenKey(
+        self, hive: str, path: str, _reserved: int, access: int
+    ) -> _FakeRegistryKey:
+        view = access & (_FAKE_WOW64_32 | _FAKE_WOW64_64)
+        try:
+            values = self.records[(hive, view)]
+        except KeyError:
+            raise FileNotFoundError(path) from None
+        return _FakeRegistryKey(values)
+
+    @staticmethod
+    def QueryValueEx(key: _FakeRegistryKey, name: str) -> tuple[str, int]:
+        try:
+            return key.values[name], 1
+        except KeyError:
+            raise FileNotFoundError(name) from None
+
+
+def _fake_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    records: dict[tuple[str, int], dict[str, str]],
+) -> None:
+    """Install a fake ``winreg`` with the given uninstall records."""
+    monkeypatch.setitem(sys.modules, "winreg", _FakeWinreg(records))
+
+
+def _frozen_exe(monkeypatch: pytest.MonkeyPatch, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(path))
+    return path
 
 
 def test_detect_install_shape_for_an_installed_copy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     installed = tmp_path / "Programs" / "NovelDownloader" / "NovelDownloader.exe"
-    installed.parent.mkdir(parents=True)
-    installed.write_bytes(b"x")
-    monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(updater.sys, "executable", str(installed))
+    _frozen_exe(monkeypatch, installed)
+    _use_windows(monkeypatch)
+    _fake_registry(monkeypatch, {})
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
 
     assert updater.detect_install_shape() == "installer"
+
+
+def test_detect_install_shape_reads_display_icon_from_machine_hive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``DisplayIcon`` (quoted, with an icon index) also identifies the install."""
+    custom = tmp_path / "Corp" / "BookTone"
+    _frozen_exe(monkeypatch, custom / "NovelDownloader.exe")
+    _use_windows(monkeypatch)
+    _fake_registry(
+        monkeypatch,
+        {
+            (_FAKE_HKLM, _FAKE_WOW64_64): {
+                "DisplayIcon": f'"{custom / "NovelDownloader.exe"}",0'
+            }
+        },
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
+
+    assert updater.detect_install_shape() == "installer"
+
+
+def test_install_dir_from_registry_value_parses_inno_spellings() -> None:
+    assert updater._install_dir_from_registry_value(
+        "InstallLocation", r"C:\Games\BookTone"
+    ) == Path(r"C:\Games\BookTone")
+    assert updater._install_dir_from_registry_value(
+        "DisplayIcon", r'"C:\Games\BookTone\NovelDownloader.exe",0'
+    ) == Path(r"C:\Games\BookTone")
+    assert updater._install_dir_from_registry_value("DisplayIcon", "  ") is None
+    assert updater._install_dir_from_registry_value("InstallLocation", 3) is None
+
+
+def test_detect_install_shape_ignores_a_registry_entry_for_another_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An installed copy elsewhere must not make this portable exe an installer."""
+    installed_elsewhere = tmp_path / "Programs" / "NovelDownloader"
+    portable = tmp_path / "Downloads" / "NovelDownloader" / "NovelDownloader.exe"
+    _frozen_exe(monkeypatch, portable)
+    _use_windows(monkeypatch)
+    _fake_registry(
+        monkeypatch,
+        {(_FAKE_HKCU, 0): {"InstallLocation": str(installed_elsewhere)}},
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
+
+    assert updater.detect_install_shape() == "portable"
+
+
+def test_detect_install_shape_uses_the_uninstaller_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without a readable registry entry, ``unins000.exe`` marks an install."""
+    app_dir = tmp_path / "Custom" / "NovelDownloader"
+    _frozen_exe(monkeypatch, app_dir / "NovelDownloader.exe")
+    (app_dir / "unins000.exe").write_bytes(b"x")
+    _use_windows(monkeypatch)
+    _fake_registry(monkeypatch, {})
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
+
+    assert updater.detect_install_shape() == "installer"
+
+
+def test_detect_install_shape_never_uses_the_registry_for_source_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    custom = tmp_path / "NovelDownloader"
+    exe = custom / "python.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    _use_windows(monkeypatch)
+    _fake_registry(
+        monkeypatch,
+        {(_FAKE_HKCU, 0): {"InstallLocation": str(custom)}},
+    )
+
+    assert updater.detect_install_shape() == "source"
+
+
+def test_detect_install_shape_is_source_on_non_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exe = tmp_path / "NovelDownloader" / "NovelDownloader.exe"
+    _frozen_exe(monkeypatch, exe)
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert updater.detect_install_shape() == "source"
 
 
 def test_detect_install_shape_for_a_portable_copy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     portable = tmp_path / "Downloads" / "NovelDownloader" / "NovelDownloader.exe"
-    portable.parent.mkdir(parents=True)
-    portable.write_bytes(b"x")
-    monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(updater.sys, "executable", str(portable))
+    _frozen_exe(monkeypatch, portable)
+    _use_windows(monkeypatch)
+    _fake_registry(monkeypatch, {})
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
 
     assert updater.detect_install_shape() == "portable"
+
+
+def test_detect_install_shape_honours_a_custom_install_location(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A registry-recorded custom directory is an installer copy, not portable."""
+    custom = tmp_path / "D" / "Games" / "NovelDownloader"
+    _frozen_exe(monkeypatch, custom / "NovelDownloader.exe")
+    _use_windows(monkeypatch)
+    _fake_registry(
+        monkeypatch,
+        {(_FAKE_HKCU, 0): {"InstallLocation": str(custom)}},
+    )
+    # The default path does not contain this executable; only the registry does.
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
+
+    assert updater.detect_install_shape() == "installer"
 
 
 # ---------------------------------------------------------------------------
@@ -1276,12 +1689,20 @@ def test_detect_install_shape_for_a_portable_copy(
 
 
 class _FakeResponse:
-    def __init__(self, payload: bytes, status: int, length: int | None) -> None:
+    def __init__(
+        self,
+        payload: bytes,
+        status: int,
+        length: int | None,
+        content_range: str | None = None,
+    ) -> None:
         self._stream = io.BytesIO(payload)
         self.status = status
         self.headers = {}
         if length is not None:
             self.headers["Content-Length"] = str(length)
+        if content_range is not None:
+            self.headers["Content-Range"] = content_range
 
     def read(self, size: int = -1) -> bytes:
         return self._stream.read(size)
@@ -1303,7 +1724,7 @@ def test_download_asset_resumes_from_a_partial_file(
 
     def fake_urlopen(request: object, timeout: float = 0) -> _FakeResponse:
         requests.append(dict(getattr(request, "headers", {})))
-        return _FakeResponse(b"world", 206, 5)
+        return _FakeResponse(b"world", 206, 5, content_range="bytes 6-10/11")
 
     monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
     progress: list[tuple[int, int]] = []
@@ -1343,6 +1764,127 @@ def test_download_asset_restarts_when_the_server_ignores_range(
     assert final.read_bytes() == b"fresh"
 
 
+def test_download_asset_restarts_when_the_range_start_does_not_match(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A 206 body starting at another offset must never be appended."""
+    final = tmp_path / "asset.bin"
+    final.with_name("asset.bin.part").write_bytes(b"hello ")
+    payload = b"hello world"
+    requests: list[dict[str, str]] = []
+
+    def fake_urlopen(request: object, timeout: float = 0) -> _FakeResponse:
+        headers = dict(getattr(request, "headers", {}))
+        requests.append(headers)
+        if "Range" in headers:
+            # Wrong start: appending this would corrupt the file.
+            return _FakeResponse(b"hello world", 206, len(payload), "bytes 0-10/11")
+        return _FakeResponse(payload, 200, len(payload))
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+
+    written = updater.download_asset(
+        "https://example.test/asset.bin",
+        Path("asset.bin"),
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+        root=tmp_path,
+        resume=True,
+    )
+
+    assert written == final
+    assert final.read_bytes() == payload
+    assert requests[0].get("Range") == "bytes=6-"
+    assert "Range" not in requests[1]
+
+
+def test_download_asset_restarts_when_a_206_has_no_content_range(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without ``Content-Range`` the offset is unverifiable, so resume is unsafe."""
+    final = tmp_path / "asset.bin"
+    final.with_name("asset.bin.part").write_bytes(b"hello ")
+    payload = b"hello world"
+    requests: list[dict[str, str]] = []
+
+    def fake_urlopen(request: object, timeout: float = 0) -> _FakeResponse:
+        headers = dict(getattr(request, "headers", {}))
+        requests.append(headers)
+        if "Range" in headers:
+            return _FakeResponse(b"world", 206, 5)
+        return _FakeResponse(payload, 200, len(payload))
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+
+    updater.download_asset(
+        "https://example.test/asset.bin",
+        Path("asset.bin"),
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+        root=tmp_path,
+        resume=True,
+    )
+
+    assert final.read_bytes() == payload
+    assert requests[0].get("Range") == "bytes=6-"
+    assert "Range" not in requests[1]
+
+
+def test_download_asset_discards_a_partial_the_server_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stale/oversized ``.part`` makes the Range unsatisfiable (416)."""
+    final = tmp_path / "asset.bin"
+    part = final.with_name("asset.bin.part")
+    part.write_bytes(b"x" * 40)
+    payload = b"fresh bytes"
+    requests: list[dict[str, str]] = []
+
+    def fake_urlopen(request: object, timeout: float = 0) -> _FakeResponse:
+        headers = dict(getattr(request, "headers", {}))
+        requests.append(headers)
+        if "Range" in headers:
+            raise urllib.error.HTTPError(
+                "https://example.test/asset.bin", 416, "range", None, None
+            )
+        return _FakeResponse(payload, 200, len(payload))
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+
+    written = updater.download_asset(
+        "https://example.test/asset.bin",
+        Path("asset.bin"),
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+        root=tmp_path,
+        resume=True,
+    )
+
+    assert written == final
+    assert final.read_bytes() == payload
+    assert requests[0].get("Range") == "bytes=40-"
+    assert "Range" not in requests[1]
+
+
+def test_download_asset_removes_the_partial_it_cannot_finish(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unbounded body is cut off at the limit and leaves nothing behind."""
+
+    def fake_urlopen(_request: object, timeout: float = 0) -> _FakeResponse:
+        return _FakeResponse(b"0123456789", 200, None)
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(ValueError, match="larger than"):
+        updater.download_asset(
+            "https://example.test/asset.bin",
+            Path("asset.bin"),
+            root=tmp_path,
+            max_bytes=5,
+        )
+
+    assert not (tmp_path / "asset.bin").exists()
+    assert not (tmp_path / "asset.bin.part").exists()
+
+
 def test_download_asset_refuses_an_oversized_transfer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1357,6 +1899,52 @@ def test_download_asset_refuses_an_oversized_transfer(
             Path("asset.bin"),
             root=tmp_path,
             max_bytes=5,
+        )
+
+    assert not (tmp_path / "asset.bin").exists()
+    assert not (tmp_path / "asset.bin.part").exists()
+
+
+def test_download_asset_treats_a_short_body_as_a_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A body shorter than Content-Length is never promoted to the final file."""
+    final = tmp_path / "asset.bin"
+    part = final.with_name("asset.bin.part")
+
+    def fake_urlopen(_request: object, timeout: float = 0) -> _FakeResponse:
+        return _FakeResponse(b"short", 200, 10)
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(OSError, match="ended after"):
+        updater.download_asset(
+            "https://example.test/asset.bin",
+            Path("asset.bin"),
+            root=tmp_path,
+            resume=True,
+        )
+
+    assert not final.exists()
+    assert part.read_bytes() == b"short"
+
+
+def test_download_asset_refuses_when_the_disk_is_too_small(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A known length is checked against free space before anything is written."""
+
+    def fake_urlopen(_request: object, timeout: float = 0) -> _FakeResponse:
+        return _FakeResponse(b"0123456789", 200, 10)
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        updater.shutil, "disk_usage", lambda _path: SimpleNamespace(free=3)
+    )
+
+    with pytest.raises(ValueError, match="disk space"):
+        updater.download_asset(
+            "https://example.test/asset.bin", Path("asset.bin"), root=tmp_path
         )
 
     assert not (tmp_path / "asset.bin").exists()
@@ -1671,7 +2259,10 @@ class TestSignedManifestEndToEnd:
             return {"tag_name": f"v{_E2E_VERSION}", "assets": []}
 
         result = updater.check_for_update(
-            "1.0.0", platform_tag="windows-x64", opener=opener
+            "1.0.0",
+            slug=_E2E_REPO,
+            platform_tag="windows-x64",
+            opener=opener,
         )
 
         assert result.source == "manifest"
@@ -1696,7 +2287,10 @@ class TestSignedManifestEndToEnd:
             return {"tag_name": f"v{_E2E_VERSION}", "assets": []}
 
         result = updater.check_for_update(
-            "1.0.0", platform_tag="windows-x64", opener=opener
+            "1.0.0",
+            slug=_E2E_REPO,
+            platform_tag="windows-x64",
+            opener=opener,
         )
 
         assert result.error is not None
