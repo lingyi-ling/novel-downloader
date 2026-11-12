@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -176,18 +177,49 @@ def _failure_message(error: BaseException, retries: int) -> str:
     return message
 
 
+#: Upper bound accepted for a persisted counter. Real chapter/retry counts are
+#: far below it; anything larger is a corrupt or hand-edited value that would
+#: otherwise be carried around (and re-serialised) forever.
+_MAX_PERSISTED_COUNT = 1_000_000_000
+
+
 def _as_count(value: Any) -> int:
     """
     Coerce a persisted counter (``int``/``float``/numeric string) to ``int``.
 
     A garbled field -- hand-edited JSON, a partially written value -- must not
     abort the restore of the whole queue, so anything unparsable becomes ``0``.
+    ``json`` accepts ``Infinity``/``NaN`` and Python ints of any size, but
+    ``int(float("inf"))`` raises ``OverflowError`` and a 400-digit counter is
+    meaningless; both are treated as corrupt too.
     """
+    if isinstance(value, bool):
+        # bool is an int subclass; a JSON ``true`` is never a valid count.
+        return 0
     try:
         number = int(value or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
-    return max(0, number)
+    if number < 0 or number > _MAX_PERSISTED_COUNT:
+        return 0
+    return number
+
+
+def _as_timestamp(value: Any, default: float | None) -> float | None:
+    """
+    Coerce a persisted timestamp, rejecting non-finite / overflowing values.
+
+    ``float(10**400)`` raises ``OverflowError`` and ``json`` can carry
+    ``Infinity``/``NaN``; neither must abort the whole restore nor be written
+    back forever.
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        stamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return stamp if math.isfinite(stamp) else default
 
 
 class TaskManager:
@@ -323,9 +355,18 @@ class TaskManager:
         book_id)`` while it is queued, running or being processed returns the
         existing task instead of downloading the book twice.  A book that has
         already finished can be enqueued again (an intentional re-download).
+
+        Raises :class:`RuntimeError` once :meth:`close` has been called: the
+        manager is terminal, and accepting the task would either spawn a worker
+        after shutdown or silently drop it.
         """
         await self.start()
         async with self._lock:
+            if self._closed:
+                # ``close()`` is terminal. Accepting here would either spawn a
+                # worker after shutdown cancelled everything (a zombie download)
+                # or silently queue a task nothing will ever run / persist.
+                raise RuntimeError("TaskManager is closed; cannot add a task")
             existing = self._find_active_locked(site, book_id)
             if existing is not None:
                 return existing
@@ -472,6 +513,12 @@ class TaskManager:
         older write can never replace a newer one: ``close()`` and the
         background flusher may both have a write in flight.
         """
+        # A direct flush before ``start()`` must adopt the persisted queue
+        # first; otherwise an empty snapshot would replace the saved one.
+        if not self._restored:
+            if self._persist and self._state_path is None:
+                self._state_path = default_tasks_state_path()
+            self._restore_locked()
         self._dirty = False
         self._write_seq += 1
         seq = self._write_seq
@@ -498,14 +545,22 @@ class TaskManager:
         * ``pending``/``completed`` that are not lists are ignored;
         * entries without a usable ``site``/``book_id`` are skipped;
         * a task repeated by ``task_id`` is restored once;
+        * the same active ``(site, book_id)`` repeated under different ids (or
+          no id) is restored once, so a corrupted file cannot download a book
+          twice;
         * a task that already reached a terminal status (a crash between
           recording the outcome and the queue flush) is restored as finished
           instead of being downloaded again.
+
+        Temporary files left by an interrupted write are removed first.
         """
         if self._restored:
             return
         self._restored = True
-        if self._state_path is None or not self._state_path.exists():
+        if self._state_path is None:
+            return
+        self._cleanup_orphaned_temps_locked()
+        if not self._state_path.exists():
             return
         try:
             payload = json.loads(self._state_path.read_text(encoding="utf-8"))
@@ -538,6 +593,16 @@ class TaskManager:
                 logger.warning("Ignoring non-list 'pending' section in task queue")
             pending_entries = []
         seen: set[str] = set(self._completed_ids)
+        # Active tasks are deduplicated by book as well: a hand-edited file can
+        # repeat a book under two ids (or with no id at all, which gets a fresh
+        # uuid on every restore), and enqueuing it twice would download it
+        # twice. Seeds cover anything already queued before ``start()``.
+        seen_active: set[tuple[str, str]] = {
+            (task.site, task.book_id)
+            for queue in self.pending.values()
+            for task in queue
+        }
+        seen_active.update((task.site, task.book_id) for task in self.running.values())
         for entry in pending_entries:
             task = self._task_from_payload(entry)
             if task is None:
@@ -555,6 +620,15 @@ class TaskManager:
                 task.asyncio_task = None
                 self._append_completed(task)
                 continue
+            key = (task.site, task.book_id)
+            if key in seen_active:
+                logger.warning(
+                    "Skipping duplicated queued book %s/%s in the persisted queue",
+                    task.site,
+                    task.book_id,
+                )
+                continue
+            seen_active.add(key)
             # Anything that was mid-flight comes back as queued; on-disk
             # chapters are reused by the downloader.
             task.status = Status.QUEUED
@@ -566,16 +640,55 @@ class TaskManager:
                 "Restored %d queued task(s) from %s", restored, self._state_path
             )
 
+    def _cleanup_orphaned_temps_locked(self) -> None:
+        """
+        Remove temporary files left by a write that was interrupted by a crash.
+
+        Each flush writes ``.<name>.<random>.tmp`` next to the queue and renames
+        it into place. A process kill between those two steps leaves the temp
+        file behind forever; they are never read, so they can be dropped. The
+        non-blocking write-lock acquisition avoids deleting a temp file another
+        flush of this process is still writing.
+        """
+        if self._state_path is None:
+            return
+        parent = self._state_path.parent
+        if not parent.is_dir():
+            return
+        if not self._write_lock.acquire(blocking=False):
+            return
+        try:
+            try:
+                entries = list(parent.iterdir())
+            except OSError:
+                return
+            # Match by name (not a glob) so metacharacters in a custom state
+            # path cannot change what gets deleted.
+            prefix = f".{self._state_path.name}."
+            for stale in entries:
+                if stale.name.startswith(prefix) and stale.name.endswith(".tmp"):
+                    with contextlib.suppress(OSError):
+                        stale.unlink(missing_ok=True)
+        finally:
+            self._write_lock.release()
+
     def _quarantine_queue_locked(self) -> None:
         """
         Move an unusable ``tasks.json`` aside (best effort).
 
         The next flush writes a fresh file; without this the only copy of the
-        (possibly hand-edited or half-written) queue would be lost.
+        (possibly hand-edited or half-written) queue would be lost. An existing
+        backup is never overwritten: a second corruption keeps its own copy so
+        the first one stays recoverable.
         """
         if self._state_path is None:
             return
         target = self._state_path.with_name(self._state_path.name + ".corrupt")
+        if target.exists():
+            suffix = f"{time.time_ns():x}"
+            target = self._state_path.with_name(
+                f"{self._state_path.name}.corrupt.{suffix}"
+            )
         with contextlib.suppress(OSError):
             os.replace(self._state_path, target)
 
@@ -671,15 +784,13 @@ class TaskManager:
             status = Status(str(entry.get("status") or "queued"))
         except ValueError:
             status = Status.QUEUED
-        try:
-            created_at = float(entry.get("created_at") or time.time())
-        except (TypeError, ValueError):
-            created_at = time.time()
+        created_raw = _as_timestamp(entry.get("created_at"), None)
+        # A missing/zero/garbled creation time is "now", not the Unix epoch.
+        created_at = created_raw if created_raw and created_raw > 0 else time.time()
         finished_raw = entry.get("finished_at")
-        try:
-            finished_at = float(finished_raw) if finished_raw is not None else None
-        except (TypeError, ValueError):
-            finished_at = None
+        finished_at = (
+            _as_timestamp(finished_raw, None) if finished_raw is not None else None
+        )
         paths: dict[str, Path] = {}
         raw_paths = entry.get("exported_paths")
         if isinstance(raw_paths, dict):

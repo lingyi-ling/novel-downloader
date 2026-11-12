@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from novel_downloader.infra.persistence.chapter_storage import ChapterStorage
 from novel_downloader.plugins.common.client import CommonClient
+from novel_downloader.plugins.mixins import cleanup as cleanup_module
 from novel_downloader.schemas import BookConfig, BookInfoDict, ClientConfig
 
 SITE = "demo"
@@ -76,8 +79,26 @@ def _seed_book(tmp_path: Path, chapters: int = 2) -> None:
             )
 
 
-def _book() -> BookConfig:
-    return BookConfig(book_id=BOOK_ID)
+def _book(book_id: str = BOOK_ID) -> BookConfig:
+    return BookConfig(book_id=book_id)
+
+
+def _make_dir_link(link: Path, target: Path) -> None:
+    """Create a directory symlink, or a junction on Windows without privileges."""
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).decode(errors="replace")
+            pytest.skip(f"cannot create junction: {detail}")
+        return
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - platform dependent
+        pytest.skip(f"cannot create directory symlink: {exc}")
 
 
 # --------------------------------------------------------------------------- #
@@ -231,3 +252,161 @@ def test_cleanup_media_missing_dir_is_a_noop(tmp_path: Path) -> None:
     client = _client(tmp_path)
     client.cleanup_media(BOOK_ID)  # nothing to do
     assert not (_book_path(tmp_path) / "media").exists()
+
+
+# --------------------------------------------------------------------------- #
+# path safety: the book ID is joined onto the raw-data root
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "book_id", ["..", "../..", "", "a/b", "a\\b", ".. ", "...", "a.", "a "]
+)
+def test_cleanup_book_remove_all_rejects_traversal_book_id(
+    book_id: str, tmp_path: Path
+) -> None:
+    _seed_book(tmp_path)
+    marker = tmp_path / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    client = _client(tmp_path)
+
+    with pytest.raises(ValueError):
+        client.cleanup_book(_book(book_id), remove_all=True)
+
+    assert (_book_path(tmp_path) / "book_info.raw.json").is_file()
+    assert marker.is_file()
+
+
+def test_cleanup_book_remove_all_rejects_absolute_book_id(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    client = _client(tmp_path)
+
+    with pytest.raises(ValueError):
+        client.cleanup_book(_book(str(outside)), remove_all=True)
+
+    assert (outside / "keep.txt").is_file()
+
+
+def test_cleanup_media_rejects_traversal_book_id(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    (outside / "media").mkdir(parents=True)
+    (outside / "media" / "keep.png").write_bytes(b"png")
+
+    with pytest.raises(ValueError):
+        _client(tmp_path).cleanup_media("../outside")
+
+    assert (outside / "media" / "keep.png").is_file()
+
+
+def test_cleanup_metadata_rejects_traversal_book_id(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "book_info.raw.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        _client(tmp_path).cleanup_metadata("../outside")
+
+    assert (outside / "book_info.raw.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "stage", ["..", "../raw", "a/b", "a\\b", "", ".. ", "...", "raw "]
+)
+def test_cleanup_rejects_traversal_stage(stage: str, tmp_path: Path) -> None:
+    _seed_book(tmp_path)
+    client = _client(tmp_path)
+
+    with pytest.raises(ValueError):
+        client.cleanup_metadata(BOOK_ID, stage=stage)
+    with pytest.raises(ValueError):
+        client.cleanup_chapters(BOOK_ID, stage=stage)
+
+    assert (_book_path(tmp_path) / "book_info.raw.json").is_file()
+
+
+# --------------------------------------------------------------------------- #
+# links: remove the link, never the data it points at
+# --------------------------------------------------------------------------- #
+
+
+def test_cleanup_book_remove_all_removes_junction_not_its_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep", encoding="utf-8")
+    book_dir = _book_path(tmp_path)
+    book_dir.parent.mkdir(parents=True)
+    _make_dir_link(book_dir, target)
+
+    _client(tmp_path).cleanup_book(_book(), remove_all=True)
+
+    assert not os.path.lexists(book_dir)
+    assert (target / "keep.txt").is_file()
+
+
+def test_cleanup_media_removes_junction_not_its_target(tmp_path: Path) -> None:
+    book_dir = _book_dir(tmp_path)
+    target = tmp_path / "media-target"
+    target.mkdir()
+    (target / "keep.png").write_bytes(b"png")
+    _make_dir_link(book_dir / "media", target)
+
+    _client(tmp_path).cleanup_media(BOOK_ID)
+
+    assert not os.path.lexists(book_dir / "media")
+    assert (target / "keep.png").is_file()
+
+
+def test_cleanup_selective_skips_linked_book_directory(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "book_info.raw.json").write_text("{}", encoding="utf-8")
+    (target / "media").mkdir()
+    (target / "media" / "keep.png").write_bytes(b"png")
+    book_dir = _book_path(tmp_path)
+    book_dir.parent.mkdir(parents=True)
+    _make_dir_link(book_dir, target)
+
+    # No exception: the link is skipped, not followed.
+    _client(tmp_path).cleanup_book(_book(), remove_media=True)
+
+    assert (target / "book_info.raw.json").is_file()
+    assert (target / "media" / "keep.png").is_file()
+    assert os.path.lexists(book_dir)
+
+
+# --------------------------------------------------------------------------- #
+# failures must be reported (no ``ignore_errors=True``)
+# --------------------------------------------------------------------------- #
+
+
+def test_cleanup_book_remove_all_failure_is_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_book(tmp_path)
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise OSError("locked")
+
+    monkeypatch.setattr(cleanup_module, "remove_path_safely", _boom)
+
+    with pytest.raises(OSError, match="locked"):
+        _client(tmp_path).cleanup_book(_book(), remove_all=True)
+
+
+def test_cleanup_media_failure_is_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_book(tmp_path)
+    (tmp_path / "raw" / SITE / BOOK_ID / "media").mkdir(exist_ok=True)
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise OSError("locked")
+
+    monkeypatch.setattr(cleanup_module, "remove_path_safely", _boom)
+
+    with pytest.raises(OSError, match="locked"):
+        _client(tmp_path).cleanup_media(BOOK_ID)

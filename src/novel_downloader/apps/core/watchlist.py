@@ -19,19 +19,38 @@ The list lives in ``<app_home>/watchlist.json`` where ``app_home`` follows
 overridable with ``NOVEL_HOME``).
 
 Writes are atomic: the new document is written to a temporary file in the same
-directory, flushed and then moved into place with :func:`os.replace`, so a
-reader never observes a half-written file and a crash leaves the previous
+directory, flushed, fsynced and then moved into place with :func:`os.replace`,
+so a reader never observes a half-written file and a crash leaves the previous
 version intact.
+
+Corruption and migration
+------------------------
+
+A missing or unreadable file is treated as an empty list so read-only commands
+keep working. Reading never touches the bytes. Before a mutation replaces an
+existing file, the file is decoded again; if it is not a document this version
+fully understands (unparsable JSON, invalid UTF-8, an unsupported shape, a
+non-integer schema version, an unknown/newer schema, or entries that cannot be
+turned into a :class:`WatchEntry`), a byte-exact quarantine copy is written to
+``<name>.corrupt`` (or ``<name>.corrupt.<id>`` when that name is taken) and
+only then is the file replaced. Invalid entries therefore never disappear from
+disk without a recoverable copy.
+
+Documents without a ``version`` and documents with version ``0`` (bare lists
+included) are legacy files: they are read as-is and rewritten as the current
+schema version. A newer schema is still read, but its original bytes are
+quarantined before the first downgrade.
 
 Concurrency
 -----------
 
 Every read-modify-write mutation (``add``, ``remove``, ``update_latest``) holds
-a per-store :class:`threading.Lock`, so several threads may share one store
-instance — the desktop calls it from worker threads (follow add/remove and the
-follow check). Writes themselves stay atomic: the new document is written to a
-temporary file in the same directory, flushed and then moved into place with
-:func:`os.replace`, so a reader never observes a half-written file.
+one :class:`threading.Lock` *per resolved path*, shared by every store instance
+in the process — the desktop builds a fresh store for each operation and calls
+it from worker threads (follow add/remove and the follow check). Writes
+themselves stay atomic: the new document is written to a temporary file in the
+same directory, flushed and then moved into place with :func:`os.replace`, so a
+reader never observes a half-written file.
 
 Threads within one process are therefore safe. Two *processes* writing
 simultaneously are serialized by the filesystem only at the ``os.replace``
@@ -59,9 +78,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -108,6 +129,124 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+# One lock per resolved path, not per instance: every surface builds its own
+# ``WatchlistStore`` (the desktop/routes do), and two instances racing on the
+# same file would otherwise lose one of the read-modify-write cycles.  The
+# guard only protects the mapping; the returned lock is held while the file is
+# read and rewritten.
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    """
+    Return the process-wide mutation lock for ``path``, creating it once.
+
+    :param path: Watchlist file path.
+    :return: Shared :class:`threading.Lock` for that file.
+    """
+    try:
+        key = os.path.normcase(str(path.resolve()))
+    except OSError:  # pragma: no cover - ``resolve`` is effectively total
+        key = os.path.normcase(str(path.absolute()))
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LOCKS[key] = lock
+        return lock
+
+
+def _as_text(value: Any) -> str:
+    """
+    Coerce one decoded JSON field to a stripped string.
+
+    JSON can hold any type at any key, and a hand-edited file may put a list,
+    an object or ``true`` where a string belongs.  Those values are ignored
+    (``""``) instead of being stringified into junk such as ``"{'a': 1}"`` or
+    ``"True"``.  Finite numbers are accepted because ids are sometimes written
+    as numbers; ``NaN``/``inf`` are not meaningful text.
+
+    :param value: Raw value from a decoded watchlist entry.
+    :return: The field as a stripped string, never ``None``.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return ""
+        return str(value)
+    return ""
+
+
+@dataclass(frozen=True)
+class _DecodedDocument:
+    """Outcome of decoding the raw watchlist text."""
+
+    #: Entry values, or ``None`` when the document itself is unusable.
+    raw_entries: list[Any] | None
+    #: Why the document is unusable (for the log), when it is.
+    problem: str | None = None
+    #: Whether rewriting it would lose information (newer/unknown schema).
+    lossy: bool = False
+
+
+def _decode_document(text: str) -> _DecodedDocument:
+    """
+    Decode watchlist text without mutating anything.
+
+    :param text: File contents decoded as UTF-8.
+    :return: The raw entry list plus any document-level defect.
+    """
+    try:
+        document = json.loads(text)
+    except (ValueError, TypeError, RecursionError) as exc:
+        return _DecodedDocument(None, f"invalid JSON ({exc})")
+
+    if isinstance(document, dict):
+        version = document.get("version")
+        if version is not None and (
+            isinstance(version, bool) or not isinstance(version, int) or version < 0
+        ):
+            return _DecodedDocument(None, f"invalid schema version {version!r}")
+        raw_entries = document.get("books")
+        if not isinstance(raw_entries, list):
+            return _DecodedDocument(None, "'books' is not a list")
+        newer = version is not None and version > _SCHEMA_VERSION
+        unknown = bool(set(document) - {"version", "books"})
+        return _DecodedDocument(raw_entries, None, newer or unknown)
+
+    if isinstance(document, list):
+        # Accept a bare list written by older/hand-made files.
+        return _DecodedDocument(document)
+
+    return _DecodedDocument(None, "unsupported document")
+
+
+def _fsync_directory(path: Path) -> None:
+    """
+    Flush a directory entry after :func:`os.replace`, best effort.
+
+    Without this a crash right after the rename can resurrect the previous
+    file on some filesystems.  Directories cannot be opened on Windows, and
+    the rename is already durable there, so the call is a no-op.
+    """
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 @dataclass(frozen=True)
 class WatchEntry:
     """One followed book."""
@@ -138,25 +277,26 @@ class WatchEntry:
         """
         Build an entry from decoded JSON, returning ``None`` when unusable.
 
-        Only ``site`` and ``book_id`` are mandatory; every other field is
-        coerced to a string and defaults to an empty string. Entries with an
-        empty identity are dropped so a hand-edited file cannot poison the
-        list.
+        Only ``site`` and ``book_id`` are mandatory; every other field defaults
+        to an empty string.  Values with the wrong JSON type are ignored rather
+        than stringified (see :func:`_as_text`), so a nested object cannot turn
+        into a bogus title.  Entries with an empty identity are dropped so a
+        hand-edited file cannot poison the list.
         """
         if not isinstance(data, dict):
             return None
 
-        site = str(data.get("site") or "").strip()
-        book_id = str(data.get("book_id") or "").strip()
+        site = _as_text(data.get("site"))
+        book_id = _as_text(data.get("book_id"))
         if not site or not book_id:
             return None
 
         return cls(
             site=site,
             book_id=book_id,
-            title=str(data.get("title") or "").strip(),
-            last_chapter=str(data.get("last_chapter") or "").strip(),
-            updated_at=str(data.get("updated_at") or "").strip(),
+            title=_as_text(data.get("title")),
+            last_chapter=_as_text(data.get("last_chapter")),
+            updated_at=_as_text(data.get("updated_at")),
         )
 
 
@@ -186,11 +326,13 @@ class WatchlistStore:
     File-backed CRUD store for followed books.
 
     Every public mutation reads the current file, applies the change and
-    atomically writes the result back while holding a per-store
-    :class:`threading.Lock`, so one store instance may be shared by several
-    threads (the desktop does) without losing updates. A corrupt or unreadable
-    file is treated as an empty list (and logged), so a broken file never
-    prevents the CLI from running; the first successful write replaces it.
+    atomically writes the result back while holding the process-wide
+    per-path :class:`threading.Lock`, so any number of store instances may be
+    used from several threads (the desktop and the API do) without losing
+    updates. A corrupt or unreadable file is treated as an empty list (and
+    logged), so a broken file never prevents the CLI from running. If a
+    mutation is about to replace a file this version cannot fully understand,
+    its bytes are first copied to ``<name>.corrupt``; see the module docstring.
 
     :param path: Watchlist file to use; defaults to
         :func:`default_watchlist_path`.
@@ -198,8 +340,8 @@ class WatchlistStore:
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = Path(path) if path is not None else default_watchlist_path()
-        #: Serializes read-modify-write cycles across threads.
-        self._lock = threading.Lock()
+        #: Serializes read-modify-write cycles across threads and instances.
+        self._lock = _lock_for(self._path)
 
     @property
     def path(self) -> Path:
@@ -350,33 +492,30 @@ class WatchlistStore:
             text = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return []
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             logger.warning("Could not read watchlist %s: %s", self._path, exc)
             return []
 
-        try:
-            document = json.loads(text)
-        except (ValueError, TypeError) as exc:
-            logger.warning("Ignoring corrupt watchlist %s: %s", self._path, exc)
+        if not text.strip():
+            # An empty file has no entries and nothing to preserve.
             return []
 
-        if isinstance(document, dict):
-            raw_entries = document.get("books")
-            if not isinstance(raw_entries, list):
-                logger.warning(
-                    "Ignoring watchlist %s: 'books' is not a list", self._path
-                )
-                return []
-        elif isinstance(document, list):
-            # Accept a bare list written by older/hand-made files.
-            raw_entries = document
-        else:
-            logger.warning("Ignoring watchlist %s: unsupported document", self._path)
+        decoded = _decode_document(text)
+        if decoded.raw_entries is None:
+            logger.warning(
+                "Ignoring corrupt watchlist %s: %s", self._path, decoded.problem
+            )
             return []
+        if decoded.lossy:
+            logger.warning(
+                "Watchlist %s uses a newer schema or has unknown fields; "
+                "its original bytes will be preserved before the next rewrite",
+                self._path,
+            )
 
         entries: list[WatchEntry] = []
         seen: set[tuple[str, str]] = set()
-        for raw in raw_entries:
+        for raw in decoded.raw_entries:
             entry = WatchEntry.from_dict(raw)
             if entry is None or entry.key in seen:
                 continue
@@ -384,8 +523,92 @@ class WatchlistStore:
             entries.append(entry)
         return entries
 
+    def _preserve_unsafe_document(self) -> None:
+        """
+        Copy a document this version cannot fully understand out of harm's way.
+
+        Called before every write. A file that disappears meanwhile needs no
+        protection; a file that cannot be read at all is *not* replaced (the
+        caller sees the ``OSError``), because writing blind would destroy bytes
+        nobody has seen. Everything else -- invalid UTF-8/JSON, an unsupported
+        shape or version, an unknown/newer schema, or entries that
+        :meth:`WatchEntry.from_dict` rejects -- is copied byte-for-byte to a
+        quarantine file first. The live file is then replaced by the caller.
+
+        :raises OSError: when the existing file cannot be read or its copy
+            cannot be written; the old document is left untouched.
+        """
+        try:
+            data = self._path.read_bytes()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "Refusing to rewrite unreadable watchlist %s: %s", self._path, exc
+            )
+            raise
+
+        if not data.strip():
+            return
+
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            self._quarantine(data)
+            return
+
+        decoded = _decode_document(text)
+        if decoded.raw_entries is None or decoded.lossy:
+            self._quarantine(data)
+            return
+        if any(WatchEntry.from_dict(raw) is None for raw in decoded.raw_entries):
+            self._quarantine(data)
+
+    def _quarantine(self, data: bytes) -> None:
+        """
+        Write ``data`` to a fresh ``<name>.corrupt*`` file next to the watchlist.
+
+        An existing quarantine file is never overwritten: corruption has to be
+        preserved every time, so a second copy gets a unique suffix.
+
+        :param data: Exact bytes of the document being replaced.
+        :raises OSError: when no quarantine copy can be written.
+        """
+        target = self._write_quarantine_copy(data)
+        logger.warning("Preserved unreadable watchlist %s as %s", self._path, target)
+
+    def _write_quarantine_copy(self, data: bytes) -> Path:
+        """Create the first unused ``<name>.corrupt*`` file containing ``data``."""
+        base = self._path.with_name(f"{self._path.name}.corrupt")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        for attempt in range(100):
+            if attempt == 0:
+                target = base
+            else:
+                suffix = f"{time.time_ns():x}"
+                target = self._path.with_name(f"{self._path.name}.corrupt.{suffix}")
+            try:
+                fd = os.open(target, flags, 0o600)
+            except FileExistsError:
+                continue
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    target.unlink(missing_ok=True)
+                raise
+            return target
+        raise OSError(f"could not create a quarantine copy next to {self._path}")
+
     def _write(self, entries: list[WatchEntry]) -> None:
         """Atomically replace the watchlist file with ``entries``."""
+        # Never replace a document whose bytes this version cannot account
+        # for: the original is copied to ``.corrupt`` first.
+        self._preserve_unsafe_document()
+
         payload = {
             "version": _SCHEMA_VERSION,
             "books": [entry.to_dict() for entry in entries],
@@ -407,6 +630,7 @@ class WatchlistStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp_path, self._path)
+            _fsync_directory(parent)
         except BaseException:
             # Never leave a temporary file behind, and keep the old file as-is.
             with contextlib.suppress(OSError):

@@ -14,6 +14,7 @@ ever calling the plugin registrar). No real download is performed.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -270,6 +271,27 @@ def test_non_network_exception_without_flag_is_not_retried() -> None:
 def test_unknown_exceptions_are_not_retried() -> None:
     assert not is_retryable_error(Exception("who knows"))
     assert not is_retryable_error(RuntimeError("logic bug"))
+
+
+def test_parse_failures_are_not_retried() -> None:
+    """A JSON/parse failure is deterministic, never a transient transport blip."""
+    from novel_downloader.infra.sessions.response import ResponseJSONError
+
+    error = ResponseJSONError(
+        "Failed to parse response body as JSON",
+        status=200,
+        content_type="application/json",
+        encoding="utf-8",
+        body_preview="{",
+    )
+    assert isinstance(error, ValueError)
+    assert not is_retryable_error(error)
+
+
+def test_cancellation_is_never_retryable() -> None:
+    """Cancellation and interrupts are control flow, not failed attempts."""
+    assert not is_retryable_error(asyncio.CancelledError())
+    assert not is_retryable_error(KeyboardInterrupt())
 
 
 def test_name_matched_backend_errors_are_retryable() -> None:
@@ -1054,3 +1076,310 @@ def test_failure_message_preserves_type_name_for_bare_exception() -> None:
 def test_retry_message_uses_type_name_for_bare_exception() -> None:
     message = _retry_message(TimeoutError(), spent=1, budget=2)
     assert message == "[retry 1/2] TimeoutError"
+
+
+# ---------------------------------------------------------------------------
+# Persistence: crash / corruption recovery
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def parked_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep restored queues from touching a real site client."""
+
+    async def _idle(self: TaskManager, site: str) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(TaskManager, "_site_worker", _idle)
+
+
+def _state_path(tmp_path: Path) -> Path:
+    return tmp_path / "state" / "tasks.json"
+
+
+def _seed_queue(
+    path: Path,
+    pending: list[dict[str, Any]],
+    *,
+    completed: list[dict[str, Any]] | None = None,
+    version: Any = 1,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": version,
+                "pending": pending,
+                "completed": completed or [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _entry(book_id: str, **overrides: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "task_id": f"t-{book_id}",
+        "title": f"Book {book_id}",
+        "site": "demo",
+        "book_id": book_id,
+        "status": "queued",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _persisted_pending_ids(path: Path) -> list[str]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return [entry["book_id"] for entry in payload.get("pending", [])]
+
+
+@pytest.mark.asyncio
+async def test_start_removes_orphaned_temporary_files(
+    tmp_path: Path, parked_workers: None
+) -> None:
+    """A crash mid-write leaves ``.tasks.json.*.tmp`` files: drop them."""
+    path = _state_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    stale = path.parent / f".{path.name}.deadbeef.tmp"
+    stale.write_text('{"version": 1, "pending": [', encoding="utf-8")
+    unrelated = path.parent / "keep.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    await manager.close()
+
+    assert not stale.exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.asyncio
+async def test_restore_tolerates_overflowing_numbers(
+    tmp_path: Path, parked_workers: None
+) -> None:
+    """``Infinity`` counters and 400-digit timestamps must not abort restore."""
+    path = _state_path(tmp_path)
+    payload = {
+        "version": 1,
+        "pending": [
+            {
+                "site": "demo",
+                "book_id": "1",
+                "created_at": 10**400,
+                "finished_at": 10**400,
+                "chapters_total": float("inf"),
+                "chapters_done": 10**400,
+                "retry_count": float("inf"),
+            }
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # ``json.dumps`` emits non-standard ``Infinity``; ``json.loads`` accepts it,
+    # which is exactly the kind of hand-edited value that used to crash start().
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    [restored] = manager.snapshot()["pending"]
+    await manager.close()
+
+    assert restored.chapters_total == 0
+    assert restored.chapters_done == 0
+    assert restored.retry_count == 0
+    assert restored.created_at > 0
+    assert restored.finished_at is None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_active_book_with_different_ids_restores_once(
+    tmp_path: Path, parked_workers: None
+) -> None:
+    """Two ids for the same active book must not download it twice."""
+    path = _state_path(tmp_path)
+    _seed_queue(
+        path,
+        [_entry("1", task_id="a"), _entry("1", task_id="b")],
+    )
+
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    pending = manager.snapshot()["pending"]
+    await manager.close()
+
+    assert [task.book_id for task in pending] == ["1"]
+    assert pending[0].task_id == "a"  # first occurrence wins
+
+
+@pytest.mark.asyncio
+async def test_duplicate_active_book_without_ids_restores_once(
+    tmp_path: Path, parked_workers: None
+) -> None:
+    """Entries without a ``task_id`` get fresh ids; dedup must not rely on them."""
+    path = _state_path(tmp_path)
+    _seed_queue(
+        path,
+        [
+            {"site": "demo", "book_id": "1"},
+            {"site": "demo", "book_id": "1"},
+        ],
+    )
+
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    pending = manager.snapshot()["pending"]
+    await manager.close()
+
+    assert [task.book_id for task in pending] == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_books_are_kept_per_site(
+    tmp_path: Path, parked_workers: None
+) -> None:
+    """The same book id on two sites is two independent tasks."""
+    path = _state_path(tmp_path)
+    _seed_queue(
+        path,
+        [_entry("1", site="a", task_id="a-1"), _entry("1", site="b", task_id="b-1")],
+    )
+
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    pending = manager.snapshot()["pending"]
+    await manager.close()
+
+    assert sorted((task.site, task.book_id) for task in pending) == [
+        ("a", "1"),
+        ("b", "1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_flush_before_start_does_not_erase_the_saved_queue(
+    tmp_path: Path,
+) -> None:
+    """A flush that runs before ``start()`` must restore first, not write empty."""
+    path = _state_path(tmp_path)
+    _seed_queue(path, [_entry("1")])
+
+    manager = TaskManager(state_path=path)
+    await manager._flush_now()
+
+    assert _persisted_pending_ids(path) == ["1"]
+    assert [task.book_id for task in manager.snapshot()["pending"]] == ["1"]
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_add_task_after_close_is_refused(tmp_path: Path) -> None:
+    """Enqueuing into a closed manager must not spawn a zombie worker."""
+    path = _state_path(tmp_path)
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    await manager.close()
+
+    with pytest.raises(RuntimeError):
+        await manager.add_task(title="T", site="demo", book_id="1")
+
+    assert manager._worker_tasks == {}
+    assert manager.snapshot()["pending"] == []
+    assert _persisted_pending_ids(path) == []
+
+
+@pytest.mark.asyncio
+async def test_add_task_racing_close_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent enqueue during shutdown is rejected, never left running."""
+    path = _state_path(tmp_path)
+    real_write = TaskManager._write_payload
+    gate = threading.Event()
+    entered = threading.Event()
+
+    def _blocked_write(self: TaskManager, payload: dict[str, Any], *args: Any) -> None:
+        entered.set()
+        assert gate.wait(5)
+        real_write(self, payload, *args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(TaskManager, "_write_payload", _blocked_write)
+
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    closer = asyncio.create_task(manager.close())
+    assert await asyncio.to_thread(entered.wait, 5)
+
+    with pytest.raises(RuntimeError):
+        await manager.add_task(title="T", site="demo", book_id="1")
+
+    gate.set()
+    await asyncio.wait_for(closer, timeout=5)
+
+    assert manager._worker_tasks == {}
+    assert manager.snapshot()["pending"] == []
+
+
+@pytest.mark.asyncio
+async def test_second_corrupt_file_does_not_overwrite_the_first_backup(
+    tmp_path: Path,
+) -> None:
+    """Quarantining twice must keep the original bytes recoverable."""
+    path = _state_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    first_backup = path.with_name(path.name + ".corrupt")
+    first_backup.write_text("older queue", encoding="utf-8")
+
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    await manager.close()
+
+    assert first_backup.read_text(encoding="utf-8") == "older queue"
+    backups = sorted(path.parent.glob(path.name + ".corrupt*"))
+    assert len(backups) == 2
+    new_backups = [item for item in backups if item != first_backup]
+    assert len(new_backups) == 1
+    assert new_backups[0].read_text(encoding="utf-8") == "{not json"
+
+
+@pytest.mark.asyncio
+async def test_an_unwritable_state_directory_is_not_fatal(
+    tmp_path: Path, parked_workers: None
+) -> None:
+    """Disk-full / read-only style failures stay a retryable dirty flag."""
+    blocker = tmp_path / "blocked"
+    blocker.write_text("not a directory", encoding="utf-8")
+    path = blocker / "tasks.json"
+
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    await manager.add_task(title="T", site="demo", book_id="1")
+
+    await manager._flush_now()  # must not raise
+    assert manager._dirty is True
+
+    await manager.close()  # must not raise either
+    assert manager._dirty is True
+
+
+@pytest.mark.asyncio
+async def test_a_minimal_v1_entry_is_migrated_with_defaults(
+    tmp_path: Path, parked_workers: None
+) -> None:
+    """A version-1 file from an older build lacks newer optional fields."""
+    path = _state_path(tmp_path)
+    _seed_queue(path, [{"site": "demo", "book_id": "1"}])
+
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    [restored] = manager.snapshot()["pending"]
+    await manager.close()
+
+    assert restored.title == "1"
+    assert restored.status is Status.QUEUED
+    assert restored.chapters_total == 0
+    assert restored.chapters_done == 0
+    assert restored.retry_count == 0
+    assert restored.exported_paths == {}
+    assert not path.with_name(path.name + ".corrupt").exists()
