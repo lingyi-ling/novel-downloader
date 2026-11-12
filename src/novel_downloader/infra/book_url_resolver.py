@@ -14,13 +14,28 @@ import logging
 import re
 from collections.abc import Callable
 from typing import TypedDict, TypeVar
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlsplit
 
 logger = logging.getLogger(__name__)
 
 BookURLFunc = Callable[[str, str], "BookURLInfo | None"]
 E = TypeVar("E", bound=BookURLFunc)
 _REGISTRY: dict[str, BookURLFunc] = {}
+
+# Book URLs are short; anything longer is paste garbage and is rejected before
+# it reaches the regexes.  Generous enough for any real page (query strings
+# included) while bounding the work done on hostile input.
+_MAX_URL_LENGTH = 8192
+
+_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
+# ``host:port/path`` pasted without a scheme (the "scheme" is not a scheme).
+_HOST_PORT_RE = re.compile(r"^[^/?#:]+:\d+(?:[/?#]|$)")
+_PERCENT_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+_UNRESERVED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+# U+3002 / U+FF0E / U+FF61 are treated as dots by browsers.
+_DOT_VARIANTS = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
 
 
 class BookURLInfo(TypedDict):
@@ -38,34 +53,150 @@ def register_extractor(hosts: list[str]) -> Callable[[E], E]:
     return decorator
 
 
-def _normalize_host_and_path(url: str) -> tuple[str, str, str]:
+def _decode_unreserved(text: str) -> str:
     """
-    Normalize a URL into ``(canonical_host, path, query)``.
+    Decode ``%XX`` escapes that stand for unreserved characters only.
 
-      * Trim surrounding whitespace and a possible BOM (pasted input).
-      * Treat the scheme case-insensitively; a protocol-relative
-        ``//host/path`` link is read as ``http``.
-      * Lowercase the netloc, drop credentials (``user:pass@``) and strip a
-        redundant default port (``:80`` for http, ``:443`` for https) so both
-        the extractor registry and the rule-based host map see the canonical
-        host. Non-default ports are kept: they are meaningful.
+    Reserved escapes (``%2F``, ``%3F``, ``%40`` …) are left untouched so a
+    pasted URL can never smuggle a path separator or an authority delimiter
+    into the host/path we match on.
     """
-    text = url.strip().lstrip("\ufeff").strip()
-    lowered = text.lower()
-    if lowered.startswith("//"):
-        text = "http:" + text
-    elif not lowered.startswith(("http://", "https://")):
-        text = "http://" + text
-    parsed = urlparse(text)
-    host = parsed.netloc.lower()
-    if "@" in host:
-        host = host.rpartition("@")[2]
-    scheme = parsed.scheme.lower()
+    if "%" not in text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        char = chr(int(match.group(1), 16))
+        return char if char in _UNRESERVED else match.group(0)
+
+    return _PERCENT_RE.sub(_replace, text)
+
+
+def _prepare_url(text: str) -> str | None:
+    """
+    Turn pasted/scraped input into an absolute ``http(s)`` URL.
+
+    :return: the URL to parse, or None when the input uses a scheme that can
+        never be a book page (``javascript:``, ``data:``, ``file:`` …).
+    """
+    match = _SCHEME_RE.match(text)
+    if match is not None:
+        scheme = match.group(1).lower()
+        if scheme in ("http", "https"):
+            # WHATWG parsing: after a special scheme, zero or more slashes
+            # still introduce the authority (``https:/host`` == ``https://host``).
+            rest = text[match.end() :].lstrip("/")
+            return f"{scheme}://{rest}"
+        # ``host:port/path`` without a scheme is not an unsupported scheme.
+        if _HOST_PORT_RE.match(text):
+            return "http://" + text
+        return None
+    if text.startswith("//"):
+        return "http://" + text.lstrip("/")
+    return "http://" + text
+
+
+def _canonical_host(netloc: str, scheme: str) -> str:
+    """Lower-case, de-credential, de-port and IDNA-normalize a netloc."""
+    host = netloc.rpartition("@")[2].lower()
     if scheme == "http" and host.endswith(":80"):
         host = host[:-3]
     elif scheme == "https" and host.endswith(":443"):
         host = host[:-4]
-    return host, parsed.path or "/", parsed.query or ""
+    # IP literals and the empty host can never match a registered site host;
+    # leave them as-is instead of mangling the brackets.
+    if not host or host.startswith("["):
+        return host
+    host = _decode_unreserved(host).translate(_DOT_VARIANTS)
+    while host.endswith(".") and len(host) > 1:
+        host = host[:-1]
+    if not host.isascii():
+        try:
+            host = host.encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            # Keep the raw spelling: it will not match any registry entry.
+            return host
+    return host
+
+
+def _canonical_path(raw_path: str) -> str:
+    """Normalize a path the way a browser does before sending a request."""
+    path = _decode_unreserved(raw_path or "/")
+    if not path.startswith("/"):
+        path = "/" + path
+    # Trailing ``;params`` (``;jsessionid=…``) are session bookkeeping, not
+    # part of the resource the site serves.
+    head, sep, last = path.rpartition("/")
+    if ";" in last:
+        path = head + sep + last.split(";", 1)[0]
+    path = re.sub(r"/{2,}", "/", path)
+    segments: list[str] = []
+    for segment in path.split("/"):
+        if segment == ".":
+            continue
+        if segment == "..":
+            if len(segments) > 1:
+                segments.pop()
+            continue
+        segments.append(segment)
+    return "/".join(segments) or "/"
+
+
+def _backslash_to_slash(text: str) -> str:
+    """Read ``\\`` as ``/`` in the authority/path, as browsers do."""
+    cut = len(text)
+    for marker in ("?", "#"):
+        index = text.find(marker)
+        if index != -1:
+            cut = min(cut, index)
+    return text[:cut].replace("\\", "/") + text[cut:]
+
+
+def _normalize_host_and_path(url: str) -> tuple[str, str, str]:
+    """
+    Normalize a URL into ``(canonical_host, path, query)``.
+
+      * Trim surrounding whitespace and a possible BOM (pasted input); reject
+        absurdly long input outright.
+      * Read ``\\`` as ``/`` (browser behaviour for http(s) URLs).
+      * Reject non-HTTP(S) schemes (``javascript:``, ``data:``, ``file:`` …)
+        and malformed authorities instead of raising ``ValueError``.
+      * Treat the scheme case-insensitively; a protocol-relative
+        ``//host/path`` link is read as ``http``.
+      * Lowercase the host, drop credentials (``user:pass@``), strip a
+        redundant default port (``:80`` for http, ``:443`` for https) and a
+        trailing root dot, and IDNA-normalize non-ASCII hosts. Non-default
+        ports are kept: they are meaningful.
+      * Normalize the path (unreserved percent-escapes, duplicate slashes,
+        dot segments) but never decode reserved escapes, so ``%2F`` stays a
+        path *segment* character rather than becoming a separator.
+    """
+    text = url.strip().lstrip("\ufeff").strip()
+    if len(text) > _MAX_URL_LENGTH:
+        return "", "", ""
+    prepared = _prepare_url(_backslash_to_slash(text))
+    if prepared is None:
+        return "", "", ""
+    try:
+        parsed = urlsplit(prepared)
+    except ValueError:
+        return "", "", ""
+    host = _canonical_host(parsed.netloc, parsed.scheme.lower())
+    return host, _canonical_path(parsed.path), parsed.query or ""
+
+
+def _query_param(query: str, name: str, pattern: str | None = None) -> str | None:
+    """
+    Return the first value of an *exact* query parameter ``name``.
+
+    Substring matching would let ``?chapterid=9`` masquerade as ``?id=9``.
+    """
+    values = parse_qs(query, keep_blank_values=True).get(name)
+    if not values:
+        return None
+    value = values[0]
+    if pattern is not None and re.fullmatch(pattern, value) is None:
+        return None
+    return value
 
 
 def _make_info(
@@ -580,12 +711,8 @@ def extract_n69yue(path: str, query: str) -> BookURLInfo | None:
         return _make_info("n69yue", None, m.group(1))
     if m := re.search("^/articlecategroy/([^.]+)\\.html$", path):
         return _make_info("n69yue", m.group(1), None)
-    if (
-        path == "/mulu.html"
-        and query
-        and (mq := re.search("pid=([A-Za-z0-9]+)", query))
-    ):
-        return _make_info("n69yue", mq.group(1), None)
+    if path == "/mulu.html" and (pid := _query_param(query, "pid", "[A-Za-z0-9]+")):
+        return _make_info("n69yue", pid, None)
     return None
 
 
@@ -601,7 +728,8 @@ def extract_n71ge(path: str, query: str) -> BookURLInfo | None:
 @register_extractor(["www.8novel.com", "article.8novel.com"])
 def extract_n8novel(path: str, query: str) -> BookURLInfo | None:
     if m := re.search("^/read/(\\d+)/?$", path):
-        if query and (mq := re.search("(\\d+)", query)):
+        # Chapter links carry the id as a bare query token (``?106235``).
+        if mq := re.match(r"(\d+)", query):
             return _make_info("n8novel", m.group(1), mq.group(1))
         return _make_info("n8novel", m.group(1), None)
     if m := re.search("^/novelbooks/(\\d+)/?$", path):
@@ -849,10 +977,10 @@ def extract_twkan(path: str, query: str) -> BookURLInfo | None:
 
 @register_extractor(["www.uaa.com"])
 def extract_uaa(path: str, query: str) -> BookURLInfo | None:
-    if path == "/novel/chapter" and query and (mq := re.search("id=(\\d+)", query)):
-        return _make_info("uaa", None, mq.group(1))
-    if path == "/novel/intro" and query and (mq := re.search("id=(\\d+)", query)):
-        return _make_info("uaa", mq.group(1), None)
+    if path == "/novel/chapter" and (chapter_id := _query_param(query, "id", r"\d+")):
+        return _make_info("uaa", None, chapter_id)
+    if path == "/novel/intro" and (book_id := _query_param(query, "id", r"\d+")):
+        return _make_info("uaa", book_id, None)
     return None
 
 
@@ -936,12 +1064,10 @@ def extract_xshbook(path: str, query: str) -> BookURLInfo | None:
 
 @register_extractor(["www.yamibo.com"])
 def extract_yamibo(path: str, query: str) -> BookURLInfo | None:
-    if (
-        path == "/novel/view-chapter"
-        and query
-        and (mq := re.search("id=(\\d+)", query))
+    if path == "/novel/view-chapter" and (
+        chapter_id := _query_param(query, "id", r"\d+")
     ):
-        return _make_info("yamibo", None, mq.group(1))
+        return _make_info("yamibo", None, chapter_id)
     if m := re.search("^/novel/(\\d+)", path):
         return _make_info("yamibo", m.group(1), None)
     return None

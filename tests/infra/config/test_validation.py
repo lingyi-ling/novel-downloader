@@ -448,8 +448,10 @@ def test_legacy_cache_dir_notice_for_explicit_old_default(tmp_path):
     infos = [p for p in problems if p.level == "info"]
     assert len(infos) == 1
     assert infos[0].path == "general.cache_dir"
-    assert str(legacy) in infos[0].message
-    assert str(tmp_path / "app-home" / "cache") in infos[0].message
+    # Diagnostics redact the user's home directory (no absolute home path).
+    home = str(Path.home())
+    assert str(legacy).replace(home, "~") in infos[0].message
+    assert str(tmp_path / "app-home" / "cache").replace(home, "~") in (infos[0].message)
     assert "not migrated" in infos[0].fix_hint
 
 

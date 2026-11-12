@@ -789,6 +789,62 @@ EQUIVALENT_URLS = [
     ),
     # protocol-relative links scraped from HTML
     EquivalentUrlCase("//www.qidian.com/book/1010868264/", "qidian", "1010868264"),
+    # a trailing root dot is the same FQDN
+    EquivalentUrlCase(
+        "https://www.qidian.com./book/1010868264/", "qidian", "1010868264"
+    ),
+    # percent-encoded unreserved characters in the host
+    EquivalentUrlCase(
+        "https://www.qidian.com%2e/book/1010868264/", "qidian", "1010868264"
+    ),
+    # single / extra slashes after the scheme (browsers normalize these)
+    EquivalentUrlCase("https:/www.qidian.com/book/1010868264/", "qidian", "1010868264"),
+    EquivalentUrlCase(
+        "https:///www.qidian.com/book/1010868264/", "qidian", "1010868264"
+    ),
+    # backslashes are path separators for http(s) URLs (browser behaviour)
+    EquivalentUrlCase(
+        r"https:\\www.qidian.com\book\1010868264\\", "qidian", "1010868264"
+    ),
+    EquivalentUrlCase(r"\\www.qidian.com\book\1010868264\\", "qidian", "1010868264"),
+    # duplicate slashes and dot segments in the path
+    EquivalentUrlCase(
+        "https://www.qidian.com//book/1010868264/", "qidian", "1010868264"
+    ),
+    EquivalentUrlCase(
+        "https://www.qidian.com/book/./1010868264/", "qidian", "1010868264"
+    ),
+    EquivalentUrlCase(
+        "https://www.qidian.com/book/nope/../1010868264/", "qidian", "1010868264"
+    ),
+    # IDN spellings of an ASCII host (ideographic dot / fullwidth letters)
+    EquivalentUrlCase(
+        "https://www.qidian\u3002com/book/1010868264/", "qidian", "1010868264"
+    ),
+    EquivalentUrlCase(
+        "https://\uff57\uff57\uff57.qidian.com/book/1010868264/",
+        "qidian",
+        "1010868264",
+    ),
+    # percent-encoded unreserved characters in the path
+    EquivalentUrlCase(
+        "https://www.linovelib.com/novel/1234%2Ehtml", "linovelib", "1234"
+    ),
+    # trailing session parameters are not part of the resource path
+    EquivalentUrlCase(
+        "https://www.linovelib.com/novel/1234.html;jsessionid=DEADBEEF",
+        "linovelib",
+        "1234",
+    ),
+    # query and fragment are parsed separately, never folded into the path
+    EquivalentUrlCase(
+        "https://www.linovelib.com/novel/1234.html?from=search#catalog",
+        "linovelib",
+        "1234",
+    ),
+    EquivalentUrlCase(
+        "https://www.uaa.com/novel/intro?id=11304099#reader", "uaa", "11304099"
+    ),
 ]
 
 
@@ -811,4 +867,116 @@ def test_resolver_accepts_equivalent_url_spellings(case: EquivalentUrlCase):
     ],
 )
 def test_resolver_keeps_non_default_ports(url: str):
+    assert resolve_book_url(url) is None
+
+
+# ---------------------------------------------------------------------------
+# Hostile / malformed input hardening (hand-written).
+# ---------------------------------------------------------------------------
+MALFORMED_URLS = [
+    # non-HTTP schemes are never book URLs, even with a site host after them
+    "javascript:alert(1)",
+    "JavaScript:alert(document.cookie)",
+    "javascript://www.qidian.com/book/1010868264/",
+    "vbscript:msgbox(1)",
+    "data:text/html;base64,PHNjcmlwdD4=",
+    "file:///C:/Windows/win.ini",
+    "file://www.qidian.com/book/1010868264/",
+    "ftp://www.qidian.com/book/1010868264/",
+    "mailto:reader@example.com",
+    # a Windows path is not a URL
+    r"C:\Users\reader\book.html",
+    # malformed authorities make urllib raise ValueError; never leak that
+    "http://[::1/book/1010868264/",
+    "http://[abc]/book/1010868264/",
+    "https://www.qidian.com\uff0fbook\uff0f1010868264\uff0f",
+    # relative input has no host of its own; never guess a site for it
+    "/book/1010868264/",
+    "book/1010868264/",
+    "?id=1",
+    "",
+    "   ",
+]
+
+
+@pytest.mark.parametrize("url", MALFORMED_URLS)
+def test_resolver_returns_none_for_hostile_inputs(url: str):
+    assert resolve_book_url(url) is None
+
+
+FOREIGN_HOST_URLS = [
+    # a registered host must match on a dot boundary, never as a bare suffix
+    "https://www.qidian.com.evil.example/book/1010868264/",
+    "https://xwww.qidian.com/book/1010868264/",
+    "https://www.qidian.co/book/1010868264/",
+    "https://www.69shuba.com.evil.example/book/88724.htm",
+    # the site name appearing in the path or userinfo is not the host
+    "https://evil.example/www.qidian.com/book/1010868264/",
+    "https://evil.example/www.69shuba.com/book/88724.htm",
+    # a backslash ends the authority the way a slash does (browser behaviour):
+    # this navigates to evil.example, so it must not resolve to qidian
+    r"https://evil.example\@www.qidian.com/book/1010868264/",
+    "https://www.qidian.com@evil.example/book/1010868264/",
+    "https://www.qidian.com:443@evil.example/book/1010868264/",
+    "https://www.qidian.com%2eevil.example/book/1010868264/",
+]
+
+
+@pytest.mark.parametrize("url", FOREIGN_HOST_URLS)
+def test_resolver_does_not_match_lookalike_hosts(url: str):
+    assert resolve_book_url(url) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # IPv6 literals are valid URLs but are not novel sites
+        "https://[::1]/book/1010868264/",
+        "https://[::1]:443/book/1010868264/",
+        "https://[2001:db8::1]/book/1010868264/",
+        "https://[::ffff:127.0.0.1]/book/1010868264/",
+    ],
+)
+def test_resolver_rejects_ip_literal_hosts(url: str):
+    assert resolve_book_url(url) is None
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # an ``id`` parameter must match exactly, not inside ``chapterid``
+        (
+            "https://www.uaa.com/novel/intro?chapterid=999&id=1",
+            {"site_key": "uaa", "book_id": "1", "chapter_id": None},
+        ),
+        (
+            "https://www.uaa.com/novel/chapter?bookid=999&id=5",
+            {"site_key": "uaa", "book_id": None, "chapter_id": "5"},
+        ),
+        ("https://www.uaa.com/novel/intro?xid=999", None),
+        # same for yamibo / 69yue
+        (
+            "https://www.yamibo.com/novel/view-chapter?id=77&xid=8",
+            {"site_key": "yamibo", "book_id": None, "chapter_id": "77"},
+        ),
+        ("https://www.yamibo.com/novel/view-chapter?xid=777", None),
+        (
+            "https://www.69yue.top/mulu.html?pid=15yu&xpid=zz",
+            {"site_key": "n69yue", "book_id": "15yu", "chapter_id": None},
+        ),
+        ("https://www.69yue.top/mulu.html?xpid=zz", None),
+        # a non-numeric id must not be truncated into a valid one
+        ("https://www.uaa.com/novel/intro?id=11304099x", None),
+    ],
+)
+def test_resolver_matches_query_parameters_exactly(
+    url: str, expected: dict[str, str | None] | None
+):
+    assert resolve_book_url(url) == expected
+
+
+def test_resolver_rejects_overlong_url():
+    # Without a cap this would resolve: the site host is present behind a very
+    # long (meaningless) userinfo chunk.
+    url = "https://" + "a" * 20000 + "@www.qidian.com/book/1010868264/"
     assert resolve_book_url(url) is None

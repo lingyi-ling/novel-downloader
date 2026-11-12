@@ -6,10 +6,12 @@ novel_downloader.infra.sessions._curl_cffi
 
 # mypy: disable-error-code=unused-ignore
 
+from http.cookiejar import Cookie
 from http.cookies import CookieError
 from pathlib import Path
 from typing import Any, Unpack
 
+from curl_cffi import CurlOpt
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import (
     CertificateVerifyError as CurlCertificateVerifyError,
@@ -33,6 +35,9 @@ from curl_cffi.requests.exceptions import (
     ProxyError as CurlProxyError,
 )
 from curl_cffi.requests.exceptions import (
+    RequestException as CurlRequestException,
+)
+from curl_cffi.requests.exceptions import (
     Timeout as CurlTimeout,
 )
 from curl_cffi.requests.exceptions import (
@@ -45,23 +50,25 @@ from .base import (
     BaseSession,
     GetRequestKwargs,
     PostRequestKwargs,
-    as_connection_error,
-    as_non_retryable_connection_error,
-    as_timeout_error,
-    as_too_many_redirects_error,
     close_backend_session,
     is_proxy_authentication_error,
 )
 from .cookie_io import (
+    _cookie_rest,
+    _rest_has,
+    _rest_value,
     load_cookie_items,
     resolve_cookie_path,
     write_cookie_items,
 )
+from .proxy import ALL_PROXY_SCHEMES
 from .response import BaseResponse
 
 
 class CurlCffiSession(BaseSession):
     """Session backend using curl_cffi for browser-like HTTP requests."""
+
+    backend_name = "curl_cffi"
 
     _session: AsyncSession[Any] | None
 
@@ -69,29 +76,42 @@ class CurlCffiSession(BaseSession):
         self,
         **kwargs: Any,
     ) -> None:
-        if self._session:
-            return
+        async with self._init_lock:
+            if self._session is not None:
+                return
+            self._validate_proxy_schemes(
+                ALL_PROXY_SCHEMES,
+                "use an http://, https:// or socks5:// proxy URL",
+            )
 
-        proxy_auth = None
-        if self._proxy_user and self._proxy_pass:
-            proxy_auth = (self._proxy_user, self._proxy_pass)
-
-        self._session = AsyncSession(
-            headers=self._headers,
-            cookies=self._cookies,
-            timeout=self._timeout,
-            impersonate=self._impersonate,  # type: ignore[arg-type]
-            verify=self._verify_ssl,
-            # curl_cffi defaults to 30 redirects; pin it to the unified
-            # ceiling so a long chain behaves like on the other backends.
-            max_redirects=DEFAULT_MAX_REDIRECTS,
-            # Without this curl_cffi opens one connection per request, so a
-            # 16-worker download ignores ``max_connections`` entirely.
-            max_clients=self._max_connections,
-            proxy=self._proxy,
-            proxy_auth=proxy_auth,
-            trust_env=self._trust_env,
-        )
+            self._session = AsyncSession(
+                headers=self._headers,
+                cookies=self._cookies,
+                # ``None`` disables the deadline; the stub only advertises
+                # floats, but libcurl treats a missing value as "no timeout".
+                timeout=self._timeout,  # type: ignore[arg-type]
+                impersonate=self._impersonate,  # type: ignore[arg-type]
+                verify=self._verify_ssl,
+                # curl_cffi defaults to 30 redirects; pin it to the unified
+                # ceiling so a long chain behaves like on the other backends.
+                max_redirects=DEFAULT_MAX_REDIRECTS,
+                # Without this curl_cffi opens one connection per request, so a
+                # 16-worker download ignores ``max_connections`` entirely.
+                max_clients=self._max_connections,
+                # ``trust_env`` is stored by curl_cffi 0.16 but never read, and
+                # libcurl consults the environment unless a proxy option is
+                # set: HTTP_PROXY was silently used even with trust_env=False.
+                # An empty per-scheme entry makes every request that the
+                # facade leaves proxy-less explicitly direct, and a per-request
+                # ``proxy=`` still takes precedence over this base map.
+                proxies={"http": "", "https": ""},
+                # libcurl applies NO_PROXY from the environment even to an
+                # explicit proxy, which would bypass the facade's own decision
+                # on the curl backend only.  An empty bypass list hands that
+                # decision back to us.
+                curl_options={CurlOpt.NOPROXY: ""},
+                trust_env=False,
+            )
 
     async def close(self) -> None:
         """
@@ -100,10 +120,13 @@ class CurlCffiSession(BaseSession):
         Safe to call repeatedly and concurrently: the backend reference is
         detached before awaiting so a second caller becomes a no-op.  This
         matters for curl_cffi, whose ``AsyncSession.close`` cannot run twice;
-        the shielded close also keeps a cancelled caller from aborting the
+        the detach happens under the init lock so a concurrent ``init()``
+        cannot install a client that an in-flight ``close()`` never sees, and
+        the shielded close keeps a cancelled caller from aborting the
         shutdown after the reference is gone.
         """
-        session, self._session = self._session, None
+        async with self._init_lock:
+            session, self._session = self._session, None
         if session is not None:
             await close_backend_session(session.close())
 
@@ -116,32 +139,28 @@ class CurlCffiSession(BaseSession):
         encoding: str = "utf-8",
         **kwargs: Unpack[GetRequestKwargs],
     ) -> BaseResponse:
-        if verify is not None:
-            kwargs.setdefault("verify", verify)  # type: ignore[typeddict-item]
-        redirect = (
-            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
-        )
-        kwargs.setdefault("allow_redirects", redirect)  # type: ignore[typeddict-item]
+        options: dict[str, Any] = dict(kwargs)
+        self._prepare_request(url, options, verify, allow_redirects)
 
         try:
-            r = await self.session.get(url, **kwargs)
+            r = await self.session.get(url, **options)
         except CurlTimeout as exc:
             # Must precede the connection clause: ConnectTimeout inherits
             # from both ConnectionError and Timeout, and the timeout
             # classification wins.
-            raise as_timeout_error(exc) from exc
+            raise self._timeout_error(exc) from exc
         except CurlTooManyRedirects as exc:
-            raise as_too_many_redirects_error(exc) from exc
+            raise self._redirect_error(exc) from exc
         except CurlCertificateVerifyError as exc:
             # Must precede ConnectionError: CertificateVerifyError is one, and
             # the peer's certificate cannot become valid between attempts.
-            raise as_non_retryable_connection_error(exc) from exc
+            raise self._non_retryable_transport_error(exc) from exc
         except CurlProxyError as exc:
             # CONNECT tunnel failures carry the proxy status in the message
             # ("... response 407"); only credential refusals are permanent.
             if is_proxy_authentication_error(exc):
-                raise as_non_retryable_connection_error(exc) from exc
-            raise as_connection_error(exc) from exc
+                raise self._non_retryable_transport_error(exc) from exc
+            raise self._transport_error(exc) from exc
         except (
             CurlConnectionError,
             CurlIncompleteRead,
@@ -152,7 +171,15 @@ class CurlCffiSession(BaseSession):
             # CurlHTTPError is how curl reports a corrupt Content-Encoding
             # (CURLE_BAD_CONTENT_ENCODING), which aiohttp and httpx classify
             # as a payload/connection failure.
-            raise as_connection_error(exc) from exc
+            raise self._transport_error(exc) from exc
+        except CurlRequestException as exc:
+            # Everything else the library raises (setopt failures, session
+            # state, ...) must not escape as a raw curl_cffi class; invalid
+            # URLs are programming errors and stay ValueError, like on the
+            # other backends.
+            if isinstance(exc, ValueError):
+                raise
+            raise self._transport_error(exc) from exc
         return BaseResponse(
             content=r.content,
             headers=r.headers,
@@ -169,32 +196,28 @@ class CurlCffiSession(BaseSession):
         encoding: str = "utf-8",
         **kwargs: Unpack[PostRequestKwargs],
     ) -> BaseResponse:
-        if verify is not None:
-            kwargs.setdefault("verify", verify)  # type: ignore[typeddict-item]
-        redirect = (
-            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
-        )
-        kwargs.setdefault("allow_redirects", redirect)  # type: ignore[typeddict-item]
+        options: dict[str, Any] = dict(kwargs)
+        self._prepare_request(url, options, verify, allow_redirects)
 
         try:
-            r = await self.session.post(url, **kwargs)
+            r = await self.session.post(url, **options)
         except CurlTimeout as exc:
             # Must precede the connection clause: ConnectTimeout inherits
             # from both ConnectionError and Timeout, and the timeout
             # classification wins.
-            raise as_timeout_error(exc) from exc
+            raise self._timeout_error(exc) from exc
         except CurlTooManyRedirects as exc:
-            raise as_too_many_redirects_error(exc) from exc
+            raise self._redirect_error(exc) from exc
         except CurlCertificateVerifyError as exc:
             # Must precede ConnectionError: CertificateVerifyError is one, and
             # the peer's certificate cannot become valid between attempts.
-            raise as_non_retryable_connection_error(exc) from exc
+            raise self._non_retryable_transport_error(exc) from exc
         except CurlProxyError as exc:
             # CONNECT tunnel failures carry the proxy status in the message
             # ("... response 407"); only credential refusals are permanent.
             if is_proxy_authentication_error(exc):
-                raise as_non_retryable_connection_error(exc) from exc
-            raise as_connection_error(exc) from exc
+                raise self._non_retryable_transport_error(exc) from exc
+            raise self._transport_error(exc) from exc
         except (
             CurlConnectionError,
             CurlIncompleteRead,
@@ -202,13 +225,40 @@ class CurlCffiSession(BaseSession):
             CurlContentDecodingError,
             CurlChunkedEncodingError,
         ) as exc:
-            raise as_connection_error(exc) from exc
+            raise self._transport_error(exc) from exc
+        except CurlRequestException as exc:
+            if isinstance(exc, ValueError):
+                raise
+            raise self._transport_error(exc) from exc
         return BaseResponse(
             content=r.content,
             headers=r.headers,
             status=r.status_code,
             encoding=r.charset_encoding or encoding,
         )
+
+    def _prepare_request(
+        self,
+        url: str,
+        options: dict[str, Any],
+        verify: bool | None,
+        allow_redirects: bool | None,
+    ) -> None:
+        """Apply the facade's option defaults and the resolved proxy."""
+        if verify is not None:
+            options.setdefault("verify", verify)
+        redirect = (
+            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
+        )
+        options.setdefault("allow_redirects", redirect)
+
+        proxy = self._proxy_for_url(url)
+        if proxy is None:
+            return
+        options.setdefault("proxy", proxy.url)
+        auth = proxy.auth
+        if auth is not None:
+            options.setdefault("proxy_auth", auth)
 
     def load_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:
         if self._session is None:
@@ -221,13 +271,44 @@ class CurlCffiSession(BaseSession):
 
         for item in items:
             try:
-                self._session.cookies.set(
-                    item["name"],
-                    item["value"],
-                    domain=item.get("domain", ""),
-                    path=item.get("path", "/"),
+                domain = item.get("domain") or ""
+                cookie_path = item.get("path") or "/"
+                expires = item.get("expires")
+                rest: dict[str, Any] = dict(item.get("rest") or {})
+                if item.get("http_only") and not _rest_has(rest, "httponly"):
+                    rest["HttpOnly"] = None
+                same_site = item.get("same_site")
+                if isinstance(same_site, str) and not _rest_has(rest, "samesite"):
+                    rest["SameSite"] = same_site
+                max_age = item.get("max_age")
+                if isinstance(max_age, int) and not _rest_has(rest, "max-age"):
+                    rest["Max-Age"] = str(max_age)
+
+                cookie = Cookie(
+                    version=0,
+                    name=item["name"],
+                    value=item["value"],
+                    port=None,
+                    port_specified=False,
+                    domain=domain,
+                    domain_specified=bool(item.get("domain_specified", bool(domain))),
+                    domain_initial_dot=bool(
+                        item.get("domain_initial_dot", domain.startswith("."))
+                    ),
+                    path=cookie_path,
+                    path_specified=bool(item.get("path_specified", bool(cookie_path))),
+                    secure=bool(item.get("secure")),
+                    expires=int(expires) if expires is not None else None,
+                    # No expires means a session cookie.  ``discard`` is what
+                    # http.cookiejar uses to decide whether to persist it.
+                    discard=expires is None,
+                    comment=None,
+                    comment_url=None,
+                    rest=_cookie_rest(rest),
+                    rfc2109=False,
                 )
-            except (CookieError, ValueError):
+                self._session.cookies.jar.set_cookie(cookie)
+            except (CookieError, ValueError, TypeError, OverflowError):
                 continue
         return True
 
@@ -237,14 +318,26 @@ class CurlCffiSession(BaseSession):
 
         path = resolve_cookie_path(cookies_dir, filename or "curl_cffi.cookies")
 
-        cookies: list[dict[str, str]] = []
+        cookies: list[dict[str, Any]] = []
         for cookie in self._session.cookies.jar:
-            item = {"name": cookie.name, "value": cookie.value or ""}
-            if cookie.domain:
-                item["domain"] = cookie.domain
-            if cookie.path:
-                item["path"] = cookie.path
-            cookies.append(item)
+            rest = dict(getattr(cookie, "_rest", None) or {})
+            cookies.append(
+                {
+                    "name": cookie.name,
+                    "value": cookie.value or "",
+                    "domain": cookie.domain or "",
+                    "path": cookie.path or "/",
+                    "secure": bool(cookie.secure),
+                    "http_only": _rest_has(rest, "httponly"),
+                    "same_site": _rest_value(rest, "samesite"),
+                    "expires": cookie.expires,
+                    "max_age": _rest_value(rest, "max-age"),
+                    "domain_specified": bool(cookie.domain_specified),
+                    "domain_initial_dot": bool(cookie.domain_initial_dot),
+                    "path_specified": bool(cookie.path_specified),
+                    "rest": rest,
+                }
+            )
 
         try:
             write_cookie_items(path, cookies)

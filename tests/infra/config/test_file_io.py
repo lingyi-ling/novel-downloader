@@ -1,7 +1,9 @@
+import os
 from pathlib import Path
 
 import pytest
 
+from novel_downloader.infra.config import file_io
 from novel_downloader.infra.config.file_io import (
     _load_by_extension,
     _resolve_file_path,
@@ -42,11 +44,10 @@ def test_validate_dict_success(tmp_path):
     assert _validate_dict({"a": 1}, path, "json") == {"a": 1}
 
 
-def test_validate_dict_failure_logs_warning(tmp_path, caplog):
+def test_validate_dict_rejects_non_table_root(tmp_path):
     path = tmp_path / "bad.json"
-    result = _validate_dict("not a dict", path, "json")
-    assert result == {}
-    assert "JSON content is not a dictionary" in caplog.text
+    with pytest.raises(ValueError, match="root"):
+        _validate_dict("not a dict", path, "json")
 
 
 # ------------------------------------
@@ -78,6 +79,92 @@ def test_load_toml_invalid(tmp_path):
     p.write_text("a = ", encoding="utf-8")
     with pytest.raises(ValueError):
         _load_by_extension(p)
+
+
+def test_load_toml_accepts_utf8_bom(tmp_path):
+    p = tmp_path / "bom.toml"
+    p.write_bytes(b"\xef\xbb\xbfvalue = 1\n")
+    assert _load_by_extension(p) == {"value": 1}
+
+
+def test_load_toml_accepts_crlf(tmp_path):
+    p = tmp_path / "crlf.toml"
+    p.write_bytes(b"[general]\r\ntimeout = 10.0\r\n")
+    assert _load_by_extension(p) == {"general": {"timeout": 10.0}}
+
+
+def test_load_toml_rejects_non_utf8_with_position(tmp_path):
+    p = tmp_path / "latin1.toml"
+    p.write_bytes(b'name = "caf\xe9"\n')
+    with pytest.raises(ValueError) as excinfo:
+        _load_by_extension(p)
+    message = str(excinfo.value)
+    assert "UTF-8" in message
+    assert "position" in message
+
+
+def test_load_toml_duplicate_key_reports_location(tmp_path):
+    p = tmp_path / "dup.toml"
+    p.write_text("a = 1\na = 2\n", encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        _load_by_extension(p)
+    message = str(excinfo.value)
+    assert "line" in message and "column" in message
+
+
+def test_load_json_duplicate_key_is_rejected(tmp_path):
+    p = tmp_path / "dup.json"
+    p.write_text('{"a": 1, "a": 2}', encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        _load_by_extension(p)
+    assert "duplicate" in str(excinfo.value).lower()
+    assert "'a'" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_load_json_rejects_non_finite_numbers(tmp_path, literal):
+    p = tmp_path / "nan.json"
+    p.write_text(f'{{"value": {literal}}}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        _load_by_extension(p)
+
+
+def test_load_config_rejects_non_table_root(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path / "home"))
+    (tmp_path / "settings.json").write_text("[1, 2]\n", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_config(None)
+
+
+def test_load_config_rejects_oversized_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(file_io, "MAX_CONFIG_FILE_BYTES", 64)
+    (tmp_path / "settings.toml").write_text(
+        "value = '" + "x" * 200 + "'\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        load_config(None)
+    assert "too large" in str(excinfo.value).lower()
+
+
+def test_error_message_redacts_home_directory(tmp_path, monkeypatch):
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    bad = home / "settings.toml"
+    bad.write_text("timeout = ", encoding="utf-8")
+
+    with pytest.raises(ValueError) as excinfo:
+        _load_by_extension(bad)
+
+    message = str(excinfo.value)
+    assert str(home) not in message
+    assert "~" + os.sep + "settings.toml" in message
 
 
 def test_load_by_extension_unsupported(tmp_path):
@@ -194,3 +281,56 @@ def test_copy_default_config(tmp_path, monkeypatch):
     copy_default_config(out)
 
     assert out.read_text(encoding="utf-8") == "x = 1"
+
+
+def test_copy_default_config_replaces_existing_file(tmp_path, monkeypatch):
+    default = tmp_path / "default.toml"
+    default.write_text("new = true\n", encoding="utf-8")
+    monkeypatch.setattr(file_io, "DEFAULT_CONFIG_FILE", default)
+
+    target = tmp_path / "settings.toml"
+    target.write_text("old = true\n", encoding="utf-8")
+
+    copy_default_config(target)
+
+    assert target.read_text(encoding="utf-8") == "new = true\n"
+
+
+def test_copy_default_config_failure_keeps_original_intact(tmp_path, monkeypatch):
+    default = tmp_path / "default.toml"
+    default.write_text("new = true\n", encoding="utf-8")
+    monkeypatch.setattr(file_io, "DEFAULT_CONFIG_FILE", default)
+
+    target = tmp_path / "settings.toml"
+    target.write_text("old = true\n", encoding="utf-8")
+
+    def _fail_replace(src, dst):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(file_io.os, "replace", _fail_replace)
+
+    with pytest.raises(PermissionError):
+        copy_default_config(target)
+
+    # The original file must never be truncated or partially replaced.
+    assert target.read_text(encoding="utf-8") == "old = true\n"
+    assert list(tmp_path.glob("settings.toml.*.tmp")) == []
+
+
+def test_copy_default_config_does_not_leave_temp_on_write_error(tmp_path, monkeypatch):
+    default = tmp_path / "default.toml"
+    default.write_text("new = true\n", encoding="utf-8")
+    monkeypatch.setattr(file_io, "DEFAULT_CONFIG_FILE", default)
+
+    target = tmp_path / "settings.toml"
+
+    def _fail_fsync(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(file_io.os, "fsync", _fail_fsync)
+
+    with pytest.raises(OSError):
+        copy_default_config(target)
+
+    assert not target.exists()
+    assert list(tmp_path.glob("settings.toml.*.tmp")) == []

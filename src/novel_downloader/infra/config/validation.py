@@ -28,10 +28,12 @@ import copy
 import difflib
 import math
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 
 from novel_downloader.infra.i18n import t
 from novel_downloader.schemas.config import default_cache_dir
@@ -40,6 +42,7 @@ __all__ = [
     "DEFAULT_DOWNLOAD_RETRY_TIMES",
     "ConfigError",
     "Problem",
+    "expand_env_path",
     "migrate_config",
     "validate_config",
 ]
@@ -179,6 +182,15 @@ _SITE_KEYS = frozenset(
 
 _BACKENDS = ("aiohttp", "httpx", "curl_cffi")
 _LOCALE_STYLES = ("simplified", "traditional")
+_PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks4a", "socks5", "socks5h"})
+#: Environment placeholders are expanded in path/proxy values.  The loop is
+#: bounded so a cycle (``A=${B}``, ``B=${A}``) or a value that grows on every
+#: pass can never make validation hang or allocate without limit.
+_MAX_ENV_EXPANSIONS = 16
+_MAX_EXPANDED_PATH = 32768
+_ENV_BRACED = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_ENV_PERCENT = re.compile(r"%([A-Za-z_][A-Za-z0-9_]*)%")
+_ENV_BARE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 _FORMATS = ("epub", "html", "txt")
 _SPLIT_MODES = ("book", "volume", "chapter")
@@ -345,6 +357,82 @@ def _is_number(value: Any) -> bool:
         and not isinstance(value, bool)
         and math.isfinite(value)
     )
+
+
+def _substitute_env_tokens(text: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        value = os.environ.get(name)
+        return match.group(0) if value is None else value
+
+    text = _ENV_BRACED.sub(_replace, text)
+    text = _ENV_PERCENT.sub(_replace, text)
+    return _ENV_BARE.sub(_replace, text)
+
+
+def expand_env_path(value: str) -> str:
+    """Expand ``~``, ``${VAR}``, ``$VAR`` and ``%VAR%`` in a path-like value.
+
+    Expansion is deliberately bounded:
+
+    * undefined variables are left untouched (so the user can see what is
+      missing instead of silently getting an empty path),
+    * recursive or self-referential values stop after a fixed number of
+      passes, and
+    * a value that grows beyond :data:`_MAX_EXPANDED_PATH` is returned
+      unexpanded for that pass.
+
+    The input is stripped first, because a leading/trailing space in TOML is
+    almost always accidental and would otherwise become part of the path.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    seen = {text}
+    for _ in range(_MAX_ENV_EXPANSIONS):
+        expanded = _substitute_env_tokens(text)
+        if expanded == text:
+            break
+        if expanded in seen or len(expanded) > _MAX_EXPANDED_PATH:
+            text = expanded
+            break
+        seen.add(expanded)
+        text = expanded
+    try:
+        return os.path.expanduser(text)
+    except (KeyError, RuntimeError):
+        return text
+
+
+def _unresolved_env_vars(text: str) -> list[str]:
+    """Return the names of explicit placeholders left after expansion.
+
+    Only ``${NAME}`` and ``%NAME%`` are reported: a bare ``$NAME`` is also
+    valid Windows path text (``C:\\$Recycle.Bin``), so flagging it would
+    produce false positives.
+    """
+    names = {match.group(1) for match in _ENV_BRACED.finditer(text)}
+    names.update(match.group(1) for match in _ENV_PERCENT.finditer(text))
+    return sorted(names)
+
+
+def _display_path(value: str | Path) -> str:
+    """Render a path for a diagnostic without exposing the user's home path."""
+    text = str(value)
+    try:
+        home = os.path.expanduser("~")
+    except (KeyError, RuntimeError):
+        return text
+    if not home or home == "~":
+        return text
+    base = home.rstrip("\\/")
+    if not base:
+        return text
+    if os.path.normcase(text) == os.path.normcase(base):
+        return "~"
+    if os.path.normcase(text).startswith(os.path.normcase(base) + os.sep):
+        return "~" + text[len(base) :]
+    return text
 
 
 def _type_problem(
@@ -587,6 +675,97 @@ def _check_headers(
             return
 
 
+def _check_proxy(
+    mapping: Mapping[str, Any], key: str, prefix: str, problems: list[Problem]
+) -> None:
+    """Validate a proxy address without ever echoing credentials.
+
+    Messages name the scheme/host class of problem, never the configured
+    value (it can contain a password).
+    """
+    if key not in mapping:
+        return
+    value = mapping[key]
+    path = _join(prefix, key)
+    if value is None:
+        return
+    if not isinstance(value, str):
+        _type_problem(problems, path, "string or null", value)
+        return
+    raw = value.strip()
+    if not raw:
+        problems.append(
+            Problem(
+                "error",
+                path,
+                "must not be empty.",
+                "Remove the key or use e.g. http://127.0.0.1:7890.",
+            )
+        )
+        return
+
+    expanded = expand_env_path(raw)
+    missing = _unresolved_env_vars(expanded)
+    if missing:
+        problems.append(
+            Problem(
+                "error",
+                path,
+                "references undefined or recursive environment variable(s): "
+                f"{', '.join(missing)}.",
+                "Define the variable(s) or use a literal proxy address.",
+            )
+        )
+        return
+
+    if any(char.isspace() for char in expanded):
+        problems.append(
+            Problem(
+                "error",
+                path,
+                "must not contain whitespace.",
+                "Use e.g. http://127.0.0.1:7890.",
+            )
+        )
+        return
+
+    try:
+        parts = urlsplit(expanded)
+        # ``urlsplit`` defers port validation; touch it to surface a bad port.
+        _ = parts.port
+    except ValueError:
+        problems.append(
+            Problem(
+                "error",
+                path,
+                "is not a valid proxy URL.",
+                "Use e.g. http://127.0.0.1:7890.",
+            )
+        )
+        return
+
+    if parts.scheme.lower() not in _PROXY_SCHEMES:
+        problems.append(
+            Problem(
+                "error",
+                path,
+                "uses an unsupported proxy scheme.",
+                f"Use one of: {', '.join(sorted(_PROXY_SCHEMES))}.",
+            )
+        )
+        return
+
+    if not parts.hostname:
+        problems.append(
+            Problem(
+                "error",
+                path,
+                "must include a proxy host.",
+                "Use e.g. http://127.0.0.1:7890.",
+            )
+        )
+
+
 def _check_directory(
     mapping: Mapping[str, Any], key: str, prefix: str, problems: list[Problem]
 ) -> None:
@@ -609,13 +788,28 @@ def _check_directory(
         )
         return
 
-    target = Path(raw).expanduser()
+    expanded = expand_env_path(raw)
+    missing = _unresolved_env_vars(expanded)
+    if missing:
+        problems.append(
+            Problem(
+                "error",
+                path,
+                "references undefined or recursive environment variable(s): "
+                f"{', '.join(missing)}.",
+                "Define the variable(s) or use a literal directory path.",
+            )
+        )
+        return
+
+    target = Path(expanded)
     if not target.is_absolute():
         target = Path.cwd() / target
     # Keep the unresolved path on failure; the checks below still report a
     # useful problem instead of raising.
     with contextlib.suppress(OSError):
         target = target.resolve()
+    display = _display_path(target)
 
     if target.exists():
         if not target.is_dir():
@@ -623,7 +817,7 @@ def _check_directory(
                 Problem(
                     "error",
                     path,
-                    f"'{target}' exists but is not a directory.",
+                    f"'{display}' exists but is not a directory.",
                     "Point this setting at a directory, not a file.",
                 )
             )
@@ -632,7 +826,7 @@ def _check_directory(
                 Problem(
                     "error",
                     path,
-                    f"directory '{target}' is not writable.",
+                    f"directory '{display}' is not writable.",
                     "Choose a writable directory or fix its permissions.",
                 )
             )
@@ -646,7 +840,7 @@ def _check_directory(
             Problem(
                 "error",
                 path,
-                f"cannot create '{target}': parent directory does not exist.",
+                f"cannot create '{display}': parent directory does not exist.",
                 "Create the parent directory first or use an existing path.",
             )
         )
@@ -655,7 +849,8 @@ def _check_directory(
             Problem(
                 "error",
                 path,
-                f"cannot create '{target}': '{ancestor}' is not writable.",
+                f"cannot create '{display}': "
+                f"'{_display_path(ancestor)}' is not writable.",
                 "Choose a writable directory or fix its permissions.",
             )
         )
@@ -996,7 +1191,7 @@ def _validate_site(
     _check_bool(site, "trust_env", prefix, problems)
     _check_str(site, "impersonate", prefix, problems, optional=True)
     _check_str(site, "user_agent", prefix, problems, optional=True)
-    _check_str(site, "proxy", prefix, problems, optional=True)
+    _check_proxy(site, "proxy", prefix, problems)
     _check_str(site, "proxy_user", prefix, problems, optional=True)
     _check_str(site, "proxy_pass", prefix, problems, optional=True)
     _check_str(site, "username", prefix, problems, optional=True, allow_empty=True)
@@ -1053,7 +1248,7 @@ def _check_legacy_cache_dir(
         if not isinstance(raw, str) or not raw.strip():
             # Type/length errors are reported by ``_check_directory``.
             return
-        configured = Path(raw.strip()).expanduser()
+        configured = Path(expand_env_path(raw))
         if configured.is_absolute() or configured != Path(_LEGACY_CACHE_DIRNAME):
             return
 
@@ -1069,8 +1264,9 @@ def _check_legacy_cache_dir(
         Problem(
             "info",
             "general.cache_dir",
-            f"legacy cache directory '{legacy}' still exists in the working "
-            f"directory; the default cache directory is now '{new_default}'.",
+            f"legacy cache directory '{_display_path(legacy)}' still exists in "
+            f"the working directory; the default cache directory is now "
+            f"'{_display_path(new_default)}'.",
             "Data was not migrated automatically. Move the old directory "
             "contents manually if you still need the cached files or cookies.",
         )
@@ -1118,7 +1314,7 @@ def _validate_general(
 
     _check_str(general, "impersonate", prefix, problems, optional=True)
     _check_str(general, "user_agent", prefix, problems, optional=True)
-    _check_str(general, "proxy", prefix, problems, optional=True)
+    _check_proxy(general, "proxy", prefix, problems)
     _check_str(general, "proxy_user", prefix, problems, optional=True)
     _check_str(general, "proxy_pass", prefix, problems, optional=True)
     _check_headers(general, "headers", prefix, problems)
@@ -1259,7 +1455,7 @@ def validate_config(
                     Problem(
                         "error",
                         "<file>",
-                        f"configuration file not found: {path}",
+                        f"configuration file not found: {_display_path(path)}",
                         "Check the path passed to --config.",
                     )
                 ]

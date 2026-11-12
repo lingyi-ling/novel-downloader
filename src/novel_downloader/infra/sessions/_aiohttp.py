@@ -4,6 +4,7 @@ novel_downloader.infra.sessions._aiohttp
 ----------------------------------------
 """
 
+from email.utils import formatdate
 from http.cookies import CookieError, Morsel
 from pathlib import Path
 from typing import Any, Unpack
@@ -15,15 +16,12 @@ from .base import (
     BaseSession,
     GetRequestKwargs,
     PostRequestKwargs,
-    as_connection_error,
-    as_non_retryable_connection_error,
-    as_timeout_error,
-    as_too_many_redirects_error,
     close_backend_session,
     is_certificate_verification_error,
     is_proxy_authentication_error,
 )
 from .cookie_io import (
+    _as_expiry,
     load_cookie_items,
     resolve_cookie_path,
     write_cookie_items,
@@ -34,45 +32,51 @@ from .response import BaseResponse
 class AiohttpSession(BaseSession):
     """Session backend implemented with aiohttp for asynchronous HTTP requests."""
 
+    backend_name = "aiohttp"
+
     _session: aiohttp.ClientSession | None
 
     async def init(
         self,
         **kwargs: Any,
     ) -> None:
-        if self._session and not self._session.closed:
-            return
+        async with self._init_lock:
+            if self._session and not self._session.closed:
+                return
 
-        proxy_auth: aiohttp.BasicAuth | None = None
-        if self._proxy_user and self._proxy_pass:
-            # Deprecation warning is accepted for now: the recommended
-            # per-request ``proxy_headers`` replacement does not deliver
-            # credentials for plain-HTTP targets on aiohttp 3.14 (it only
-            # feeds the CONNECT tunnel), so ``proxy_auth`` stays until the
-            # replacement actually works.
-            proxy_auth = aiohttp.BasicAuth(self._proxy_user, self._proxy_pass)
+            # aiohttp cannot tunnel HTTP over SOCKS or TLS-to-proxy: it would
+            # try to speak HTTP to the SOCKS port until the timeout expires.
+            # Failing here names the backend and the alternative instead.
+            self._validate_proxy_schemes(
+                {"http"},
+                "use the curl_cffi backend (socks4/4a/5/5h are supported) or "
+                "point the proxy setting at an http:// endpoint",
+            )
 
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        connector = aiohttp.TCPConnector(
-            ssl=self._verify_ssl,
-            limit_per_host=self._max_connections,
-        )
+            timeout = aiohttp.ClientTimeout(total=self._timeout)
+            connector = aiohttp.TCPConnector(
+                ssl=self._verify_ssl,
+                limit_per_host=self._max_connections,
+            )
 
-        self._session = aiohttp.ClientSession(
-            connector=connector,
-            # httpx and curl_cffi accept and send cookies for IP-host
-            # origins; aiohttp's default jar silently drops them, which
-            # loses logins on sites served from bare IPs.  ``unsafe`` only
-            # relaxes that IP handling — cross-domain cookies are still
-            # rejected, so site A's cookies never reach site B.
-            cookie_jar=aiohttp.CookieJar(unsafe=True),
-            timeout=timeout,
-            headers=self._headers,
-            cookies=self._cookies,
-            trust_env=self._trust_env,
-            proxy=self._proxy,
-            proxy_auth=proxy_auth,
-        )
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                # httpx and curl_cffi accept and send cookies for IP-host
+                # origins; aiohttp's default jar silently drops them, which
+                # loses logins on sites served from bare IPs.  ``unsafe`` only
+                # relaxes that IP handling — cross-domain cookies are still
+                # rejected, so site A's cookies never reach site B.
+                cookie_jar=aiohttp.CookieJar(unsafe=True),
+                timeout=timeout,
+                headers=self._headers,
+                cookies=self._cookies,
+                # Proxy selection belongs to the facade: it resolves
+                # HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY the same way for
+                # every backend and passes the chosen proxy per request.
+                # aiohttp's own env handling ignores ALL_PROXY and silently
+                # drops https:// proxies, so it must stay off.
+                trust_env=False,
+            )
 
     async def close(self) -> None:
         """
@@ -80,10 +84,13 @@ class AiohttpSession(BaseSession):
 
         Safe to call repeatedly and concurrently: the backend reference is
         detached before awaiting so a second caller becomes a no-op.  The
-        backend close is shielded, so cancelling this caller cannot abort the
-        shutdown after the reference is gone.
+        detach happens under the init lock, so a concurrent ``init()`` cannot
+        install a new client that an in-flight ``close()`` then never sees.
+        The backend close is shielded, so cancelling this caller cannot abort
+        the shutdown after the reference is gone.
         """
-        session, self._session = self._session, None
+        async with self._init_lock:
+            session, self._session = self._session, None
         if session is not None and not session.closed:
             await close_backend_session(session.close())
 
@@ -96,15 +103,11 @@ class AiohttpSession(BaseSession):
         encoding: str = "utf-8",
         **kwargs: Unpack[GetRequestKwargs],
     ) -> BaseResponse:
-        if verify is not None:
-            kwargs.setdefault("ssl", verify)  # type: ignore[typeddict-item]
-        redirect = (
-            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
-        )
-        kwargs.setdefault("allow_redirects", redirect)  # type: ignore[typeddict-item]
+        options: dict[str, Any] = dict(kwargs)
+        self._prepare_request(url, options, verify, allow_redirects)
 
         try:
-            async with self.session.get(url, **kwargs) as r:
+            async with self.session.get(url, **options) as r:
                 content = await r.read()
                 return BaseResponse(
                     content=content,
@@ -116,22 +119,27 @@ class AiohttpSession(BaseSession):
             # aiohttp's ServerTimeoutError family is both a TimeoutError and
             # a ClientConnectionError; normalise to the builtin type (the
             # timeout classification wins, as on the other backends).
-            raise as_timeout_error(exc) from exc
+            raise self._timeout_error(exc) from exc
         except aiohttp.TooManyRedirects as exc:
-            raise as_too_many_redirects_error(exc) from exc
+            raise self._redirect_error(exc) from exc
         except aiohttp.ClientHttpProxyError as exc:
             # A proxy that refused our credentials will refuse them again; a
             # proxy that answered 502/503 is a transient upstream failure.
             if is_proxy_authentication_error(exc):
-                raise as_non_retryable_connection_error(exc) from exc
-            raise as_connection_error(exc) from exc
+                raise self._non_retryable_transport_error(exc) from exc
+            raise self._transport_error(exc) from exc
         except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
             # ClientConnectorCertificateError is a ClientConnectionError and
             # an ssl.SSLCertVerificationError; replaying the handshake cannot
             # turn an untrusted certificate into a trusted one.
             if is_certificate_verification_error(exc):
-                raise as_non_retryable_connection_error(exc) from exc
-            raise as_connection_error(exc) from exc
+                raise self._non_retryable_transport_error(exc) from exc
+            raise self._transport_error(exc) from exc
+        except aiohttp.ClientError as exc:
+            # Anything else aiohttp raises (e.g. a response-protocol error)
+            # is still a transport failure, not a raw backend exception
+            # leaking into the fetcher's retry loop.
+            raise self._transport_error(exc) from exc
 
     async def post(
         self,
@@ -142,15 +150,11 @@ class AiohttpSession(BaseSession):
         encoding: str = "utf-8",
         **kwargs: Unpack[PostRequestKwargs],
     ) -> BaseResponse:
-        if verify is not None:
-            kwargs.setdefault("ssl", verify)  # type: ignore[typeddict-item]
-        redirect = (
-            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
-        )
-        kwargs.setdefault("allow_redirects", redirect)  # type: ignore[typeddict-item]
+        options: dict[str, Any] = dict(kwargs)
+        self._prepare_request(url, options, verify, allow_redirects)
 
         try:
-            async with self.session.post(url, **kwargs) as r:
+            async with self.session.post(url, **options) as r:
                 content = await r.read()
                 return BaseResponse(
                     content=content,
@@ -162,22 +166,53 @@ class AiohttpSession(BaseSession):
             # aiohttp's ServerTimeoutError family is both a TimeoutError and
             # a ClientConnectionError; normalise to the builtin type (the
             # timeout classification wins, as on the other backends).
-            raise as_timeout_error(exc) from exc
+            raise self._timeout_error(exc) from exc
         except aiohttp.TooManyRedirects as exc:
-            raise as_too_many_redirects_error(exc) from exc
+            raise self._redirect_error(exc) from exc
         except aiohttp.ClientHttpProxyError as exc:
             # A proxy that refused our credentials will refuse them again; a
             # proxy that answered 502/503 is a transient upstream failure.
             if is_proxy_authentication_error(exc):
-                raise as_non_retryable_connection_error(exc) from exc
-            raise as_connection_error(exc) from exc
+                raise self._non_retryable_transport_error(exc) from exc
+            raise self._transport_error(exc) from exc
         except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
             # ClientConnectorCertificateError is a ClientConnectionError and
             # an ssl.SSLCertVerificationError; replaying the handshake cannot
             # turn an untrusted certificate into a trusted one.
             if is_certificate_verification_error(exc):
-                raise as_non_retryable_connection_error(exc) from exc
-            raise as_connection_error(exc) from exc
+                raise self._non_retryable_transport_error(exc) from exc
+            raise self._transport_error(exc) from exc
+        except aiohttp.ClientError as exc:
+            raise self._transport_error(exc) from exc
+
+    def _prepare_request(
+        self,
+        url: str,
+        kwargs: dict[str, Any],
+        verify: bool | None,
+        allow_redirects: bool | None,
+    ) -> None:
+        """Apply the facade's option defaults and the resolved proxy."""
+        if verify is not None:
+            kwargs.setdefault("ssl", verify)
+        redirect = (
+            DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
+        )
+        kwargs.setdefault("allow_redirects", redirect)
+
+        proxy = self._proxy_for_url(url)
+        if proxy is None:
+            return
+        kwargs.setdefault("proxy", proxy.url)
+        auth = proxy.auth
+        if auth is not None:
+            # aiohttp 3.14's recommended replacement (per-request
+            # ``proxy_headers``) does not send credentials for plain-HTTP
+            # targets — verified against a 407-checking proxy — so the
+            # deprecated ``proxy_auth`` stays.  It is the same deprecated
+            # parameter the session-level proxy used before, but per
+            # request, which is what per-URL NO_PROXY needs.
+            kwargs.setdefault("proxy_auth", aiohttp.BasicAuth(auth[0], auth[1]))
 
     def load_cookies(self, cookies_dir: Path, filename: str | None = None) -> bool:
         if self._session is None:
@@ -191,16 +226,35 @@ class AiohttpSession(BaseSession):
         jar = self._session.cookie_jar
         for item in items:
             try:
+                morsel: Morsel[str] = Morsel()
+                morsel.set(item["name"], item["value"], item["value"])
                 domain = item.get("domain")
                 if domain:
-                    morsel: Morsel[str] = Morsel()
-                    morsel.set(item["name"], item["value"], item["value"])
                     morsel["domain"] = domain
-                    morsel["path"] = item.get("path", "/")
-                    jar.update_cookies({item["name"]: morsel})
+                cookie_path = item.get("path")
+                if isinstance(cookie_path, str) and cookie_path.startswith("/"):
+                    morsel["path"] = cookie_path
+                if item.get("secure"):
+                    morsel["secure"] = True
+                if item.get("http_only"):
+                    morsel["httponly"] = True
+                same_site = item.get("same_site")
+                if isinstance(same_site, str) and same_site:
+                    morsel["samesite"] = same_site
+
+                expires = item.get("expires")
+                if isinstance(expires, int | float) and not isinstance(expires, bool):
+                    # aiohttp stores the absolute deadline separately; feed it
+                    # back as an HTTP date so a reload keeps the same deadline
+                    # instead of turning the cookie into a session cookie.
+                    morsel["expires"] = formatdate(float(expires), usegmt=True)
                 else:
-                    jar.update_cookies({item["name"]: item["value"]})
-            except (CookieError, ValueError):
+                    max_age = item.get("max_age")
+                    if isinstance(max_age, int) and max_age > 0:
+                        morsel["max-age"] = str(max_age)
+
+                jar.update_cookies({item["name"]: morsel})
+            except (CookieError, ValueError, OverflowError):
                 continue
         return True
 
@@ -210,17 +264,40 @@ class AiohttpSession(BaseSession):
 
         path = resolve_cookie_path(cookies_dir, filename or "aiohttp.cookies")
 
-        cookies: list[dict[str, str]] = []
+        # aiohttp keeps absolute deadlines out of the Morsel itself.  The
+        # private map is the same one its own ``CookieJar.save`` reads; fall
+        # back to the Morsel's Expires attribute for jars without one.
+        expirations = getattr(self._session.cookie_jar, "_expirations", None)
+        if not isinstance(expirations, dict):
+            expirations = {}
+
+        cookies: list[dict[str, Any]] = []
         for cookie in self._session.cookie_jar:
-            item = {"name": cookie.key, "value": cookie.value}
+            domain = cookie["domain"] or ""
+            cookie_path = cookie["path"] or "/"
+            expires = expirations.get((domain, cookie_path.rstrip("/"), cookie.key))
+            if expires is None:
+                expires = _as_expiry(cookie["expires"])
             # The domain is kept even for IP hosts: the session jar is
             # created with unsafe=True, so an IP-scoped cookie round-trips
             # scoped instead of being widened to every host.
-            if cookie["domain"]:
-                item["domain"] = cookie["domain"]
-            if cookie["path"]:
-                item["path"] = cookie["path"]
-            cookies.append(item)
+            cookies.append(
+                {
+                    "name": cookie.key,
+                    "value": cookie.value,
+                    "domain": domain,
+                    "path": cookie_path,
+                    "secure": bool(cookie["secure"]),
+                    "http_only": bool(cookie["httponly"]),
+                    "same_site": cookie["samesite"] or None,
+                    "expires": expires,
+                    "max_age": cookie["max-age"] or None,
+                    "domain_specified": bool(domain),
+                    "domain_initial_dot": domain.startswith("."),
+                    "path_specified": bool(cookie_path),
+                    "rest": {},
+                }
+            )
 
         try:
             write_cookie_items(path, cookies)

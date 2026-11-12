@@ -113,7 +113,7 @@ def test_load_normalizes_full_entry(tmp_path: Path) -> None:
 def test_load_ignores_unknown_keys(tmp_path: Path) -> None:
     path = _write_json(
         tmp_path / "cookies.json",
-        [{"name": "sess", "value": "v1", "secure": True, "httpOnly": 1, "extra": "x"}],
+        [{"name": "sess", "value": "v1", "comment": "x", "priority": "high"}],
     )
     assert load_cookie_items(path) == [{"name": "sess", "value": "v1"}]
 
@@ -217,13 +217,26 @@ def test_write_round_trip(tmp_path: Path) -> None:
         {"name": "b", "value": "2"},
     ]
     write_cookie_items(target, items)
-    assert load_cookie_items(target) == items
+
+    loaded = load_cookie_items(target)
+    assert loaded is not None
+    assert [
+        (item["name"], item["value"], item["domain"], item["path"]) for item in loaded
+    ] == [
+        ("a", "1", ".example.com", "/"),
+        ("b", "2", "", "/"),
+    ]
+    assert all(item["version"] == 1 for item in loaded)
+    assert all(item["expires"] is None for item in loaded)
 
 
 def test_write_accepts_any_iterable(tmp_path: Path) -> None:
     target = tmp_path / "cookies.json"
     write_cookie_items(target, (item for item in [{"name": "a", "value": "1"}]))
-    assert load_cookie_items(target) == [{"name": "a", "value": "1"}]
+
+    loaded = load_cookie_items(target)
+    assert loaded is not None
+    assert [(item["name"], item["value"]) for item in loaded] == [("a", "1")]
 
 
 def test_write_empty_items(tmp_path: Path) -> None:
@@ -237,14 +250,19 @@ def test_write_creates_missing_parent_directories(tmp_path: Path) -> None:
     target = tmp_path / "deep" / "nested" / "dir" / "cookies.json"
     write_cookie_items(target, [VALID_ITEM])
     assert target.is_file()
-    assert load_cookie_items(target) == [VALID_ITEM]
+    loaded = load_cookie_items(target)
+    assert loaded is not None
+    assert [(item["name"], item["value"]) for item in loaded] == [("session", "abc")]
 
 
 def test_write_overwrites_existing_file(tmp_path: Path) -> None:
     target = tmp_path / "cookies.json"
     write_cookie_items(target, [{"name": "old", "value": "1"}])
     write_cookie_items(target, [{"name": "new", "value": "2"}])
-    assert load_cookie_items(target) == [{"name": "new", "value": "2"}]
+
+    loaded = load_cookie_items(target)
+    assert loaded is not None
+    assert [(item["name"], item["value"]) for item in loaded] == [("new", "2")]
 
 
 def test_write_is_utf8_without_ascii_escaping_and_uses_lf(tmp_path: Path) -> None:

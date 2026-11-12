@@ -6,12 +6,22 @@ novel_downloader.infra.cookies
 Utility for normalizing cookie input from user configuration.
 """
 
-__all__ = ["parse_cookies", "CookieStore"]
+__all__ = ["MAX_COOKIE_FILE_BYTES", "parse_cookies", "CookieStore"]
 
 import json
+import logging
+import ntpath
+import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+#: Refuse to parse absurdly large cookie files instead of reading an arbitrary
+#: file into memory.  Real cookie files are a few kilobytes; the cap matches
+#: the configuration file limit and still leaves room for large cookie jars.
+MAX_COOKIE_FILE_BYTES = 8 * 1024 * 1024
 
 # Cookie pairs are normally separated by ``;``. Users frequently paste values
 # that also contain CR/LF (copied from a multi-line editor) and, less often,
@@ -86,6 +96,49 @@ def parse_cookies(cookies: str | Mapping[str, str]) -> dict[str, str]:
     raise TypeError("Unsupported cookie format: must be str or dict-like")
 
 
+def _cookie_filename_is_safe(filename: object) -> bool:
+    """Whether *filename* is a plain name that stays inside its directory."""
+    if isinstance(filename, str):
+        name = filename
+    elif isinstance(filename, os.PathLike):
+        try:
+            name = os.fspath(filename)
+        except TypeError:
+            return False
+    else:
+        return False
+    if not isinstance(name, str):
+        return False
+    if not name or name in {".", ".."}:
+        return False
+    if "/" in name or "\\" in name or "\x00" in name:
+        return False
+    # ``C:foo`` is drive-relative on Windows and replaces the base directory.
+    # Reject it everywhere so the answer does not depend on the host platform.
+    return not ntpath.splitdrive(name)[0]
+
+
+def _read_cookie_text(path: Path) -> str:
+    """
+    Read a cookie file as UTF-8, tolerating a BOM and refusing huge files.
+
+    :raises OSError: When the file cannot be read.
+    :raises ValueError: When the file is too large or not valid UTF-8.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    if size > MAX_COOKIE_FILE_BYTES:
+        raise ValueError("cookie file is too large")
+
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_COOKIE_FILE_BYTES + 1)
+    if len(raw) > MAX_COOKIE_FILE_BYTES:
+        raise ValueError("cookie file is too large")
+    return raw.decode("utf-8-sig")
+
+
 class CookieStore:
     """
     A simple cookie storage and loader utility that reads cookies from multiple
@@ -129,9 +182,11 @@ class CookieStore:
         Load or refresh cookies from all known cookie files.
 
         For each configured cookie file, this method:
+          * Rejects filenames that could escape ``cookies_dir``.
           * Checks whether the file exists.
           * Compares its modification time (`mtime`) to the last cached value.
-          * If changed, reads and parses the JSON content.
+          * If changed, reads and parses the JSON content, tolerating a BOM and
+            refusing files larger than :data:`MAX_COOKIE_FILE_BYTES`.
           * Extracts valid `name`/`value` string pairs into the in-memory cache.
 
         Malformed files and entries are ignored.  When a file changes (or is
@@ -139,6 +194,15 @@ class CookieStore:
         """
         changed = False
         for filename in self.filenames:
+            if not _cookie_filename_is_safe(filename):
+                logger.warning("ignoring an unsafe cookie filename")
+                if (
+                    isinstance(filename, str)
+                    and self._file_cookies.pop(filename, None) is not None
+                ):
+                    self.mtimes.pop(filename, None)
+                    changed = True
+                continue
             state_file = self.cookies_dir / filename
             if not state_file.exists():
                 if self._file_cookies.pop(filename, None) is not None:
@@ -148,12 +212,17 @@ class CookieStore:
             try:
                 mtime = state_file.stat().st_mtime
             except OSError:
+                # A file we can no longer inspect must not keep serving the
+                # credentials cached from an earlier successful read.
+                if self._file_cookies.pop(filename, None) is not None:
+                    self.mtimes.pop(filename, None)
+                    changed = True
                 continue
             if self.mtimes.get(filename) == mtime:
                 continue
             try:
-                data = json.loads(state_file.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                data = json.loads(_read_cookie_text(state_file))
+            except (OSError, ValueError, RecursionError):
                 # A half-written file must not keep serving the previous
                 # cookies, and recording its mtime stops every later call from
                 # re-reading it.
