@@ -9,7 +9,7 @@ import os
 from abc import ABC, abstractmethod
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from novel_downloader.infra.i18n import t
 from novel_downloader.schemas import BookConfig
@@ -19,10 +19,13 @@ __all__ = [
     "EXIT_SUCCESS",
     "EXIT_USAGE",
     "Command",
+    "expand_config_paths",
     "expand_path",
     "fail",
     "localize_help",
     "parse_book_args",
+    "require_safe_book_id",
+    "require_safe_site",
 ]
 
 #: Exit code for a successful run.
@@ -66,6 +69,122 @@ def expand_path(value: str) -> Path:
     :return: The same path with user/environment parts resolved.
     """
     return Path(os.path.expandvars(os.path.expanduser(str(value))))
+
+
+#: ``general`` keys that hold directories consumed by the client/exporter.
+_CONFIG_DIR_KEYS: tuple[str, ...] = ("output_dir", "raw_data_dir", "cache_dir")
+
+
+def _needs_path_expansion(value: str) -> bool:
+    """True when ``value`` can contain a user home or environment reference."""
+    # ``~`` (POSIX/Windows home), ``$VAR``/``${VAR}`` (POSIX) and ``%VAR%``
+    # (Windows). Plain relative paths are left byte-for-byte alone so the
+    # configured spelling survives into logs and error messages.
+    return "~" in value or "$" in value or "%" in value
+
+
+def expand_config_paths(config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Expand ``~`` and environment variables in the configured directories.
+
+    ``ConfigAdapter`` passes ``general.output_dir``, ``general.raw_data_dir``,
+    ``general.cache_dir`` and ``general.debug.log_dir`` to the client/exporter
+    as literal strings, while every path *option* (``--config``, ``batch
+    --out``, ``--not-found``, ...) goes through :func:`expand_path`. A config
+    value such as ``~/books`` would therefore create a literal ``~`` directory
+    under the working directory on Windows (whose shell expands neither form)
+    instead of writing to the user's home -- and ``batch --out ~/books`` would
+    land somewhere else again.
+
+    The config is expanded once, at the CLI boundary, so config-driven and
+    flag-driven directories mean the same thing. Values without a ``~``/env
+    marker are returned untouched.
+
+    :param config: Loaded configuration mapping.
+    :return: The same mapping (a copy when something changed); the input is
+        never mutated.
+    """
+    general = config.get("general")
+    if not isinstance(general, dict):
+        return config
+
+    updated = dict(general)
+    changed = False
+
+    for key in _CONFIG_DIR_KEYS:
+        value = updated.get(key)
+        if isinstance(value, str) and value.strip() and _needs_path_expansion(value):
+            expanded = str(expand_path(value))
+            if expanded != value:
+                updated[key] = expanded
+                changed = True
+
+    debug = updated.get("debug")
+    if isinstance(debug, dict):
+        log_dir = debug.get("log_dir")
+        if (
+            isinstance(log_dir, str)
+            and log_dir.strip()
+            and _needs_path_expansion(log_dir)
+        ):
+            expanded = str(expand_path(log_dir))
+            if expanded != log_dir:
+                updated["debug"] = {**debug, "log_dir": expanded}
+                changed = True
+
+    if not changed:
+        return config
+    return {**config, "general": updated}
+
+
+def _is_path_component(value: str) -> bool:
+    """
+    True when ``value`` is usable as a single directory/file name.
+
+    Site keys and book IDs are joined onto the raw-data/output roots, so a
+    value containing a separator, a drive/stream colon or a ``.``/``..``
+    segment would step outside the directory the user selected. Real keys are
+    plain identifiers (``b520``, ``8_8187``), so an escaping value is a bad
+    argument rather than a runtime condition.
+    """
+    text = str(value)
+    path = Path(text)
+    return not (
+        not text.strip()
+        or text in {".", ".."}
+        or "/" in text
+        or "\\" in text
+        or ":" in text
+        or path.is_absolute()
+        or path.name != text
+        or any(ord(char) < 32 for char in text)
+    )
+
+
+def require_safe_site(site: str) -> str:
+    """
+    Return ``site`` when it can be used as one path component, else exit 2.
+
+    :param site: Raw site key (from ``--site`` or a URL/not-found header).
+    :return: The unchanged key when it is safe to join onto a base directory.
+    """
+    if not _is_path_component(site):
+        fail(t("Unsupported site: {site!r}").format(site=str(site)), EXIT_USAGE)
+    return site
+
+
+def require_safe_book_id(book_id: str) -> str:
+    """
+    Return ``book_id`` when it can be used as one path component, else exit 2.
+
+    :param book_id: Raw book ID (from the command line or a provider).
+    :return: The unchanged ID when it is safe to join onto a base directory.
+    """
+    if not _is_path_component(book_id):
+        # "Invalid input." is an existing catalogued string; the offending
+        # value is raw diagnostic text appended as a detail.
+        fail(f"{t('Invalid input.')} (book_id={str(book_id)!r})", EXIT_USAGE)
+    return book_id
 
 
 def localize_help(parser: ArgumentParser) -> None:

@@ -22,9 +22,12 @@ from .base import (
     EXIT_FAILURE,
     EXIT_USAGE,
     Command,
+    expand_config_paths,
     expand_path,
     fail,
     parse_book_args,
+    require_safe_book_id,
+    require_safe_site,
 )
 
 
@@ -82,10 +85,20 @@ class ExportCmd(Command):
         config_path: Path | None = expand_path(args.config) if args.config else None
         formats: list[str] | None = args.format
 
+        # Reject an escaping --site before it is joined onto the raw-data root
+        # (the same rule ``clean`` applies to its destructive paths).
+        if site:
+            require_safe_site(site)
+
         config_data = load_or_init_config(config_path)
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)
+
+        # ``raw_data_dir`` is read directly below (site/book selection) and via
+        # the client config later; expand it once so both agree with the
+        # ``~``/env handling of every CLI path option.
+        config_data = expand_config_paths(config_data)
 
         raw_cfg = config_data.get("general") or {}
         raw_dir = Path(raw_cfg.get("raw_data_dir", "./raw_data"))
@@ -152,13 +165,17 @@ class ExportCmd(Command):
 
         formats = formats or adapter.get_export_fmt(site)
         books = parse_book_args(book_ids, args.start, args.end)
+        # A book ID becomes a directory name under the raw-data root; refuse
+        # values that would step outside it instead of reading elsewhere.
+        for book in books:
+            require_safe_book_id(book.book_id)
 
         client = registrar.get_client(site, adapter.get_client_config(site))
 
         export_ui = CLIExportUI()
 
         exported: dict[str, dict[str, list[str]]] = {}
-        export_failed = False
+        failed_books: list[str] = []
         for book in books:
             results = client.export_book(
                 book,
@@ -171,8 +188,11 @@ class ExportCmd(Command):
                 fmt: [str(path) for path in paths] for fmt, paths in results.items()
             }
             exported[book.book_id] = paths_by_fmt
+            # An export that produces nothing (no downloaded data, a missing
+            # stage, a rejected write, ...) is a failure even though the
+            # client reports it as an empty list rather than an exception.
             if not any(paths_by_fmt.values()):
-                export_failed = True
+                failed_books.append(book.book_id)
 
         if as_json:
             ui.emit(
@@ -192,5 +212,8 @@ class ExportCmd(Command):
                 )
             )
 
-        if export_failed:
+        if failed_books:
+            # Machine consumers already got the JSON above; tell the human (and
+            # the logs) which book(s) produced no file before failing.
+            ui.error(t("Export failed: {err}").format(err=", ".join(failed_books)))
             raise SystemExit(EXIT_FAILURE)

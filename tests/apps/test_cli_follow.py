@@ -141,6 +141,132 @@ def test_follow_list_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     assert any("No followed books." in message for message in messages)
 
 
+def test_follow_add_empty_identifiers_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowAddCmd)
+
+    args = parser.parse_args(["add", "", ""])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 2
+    assert any("Unsupported site" in message for message in messages)
+    assert not (tmp_path / "watchlist.json").exists()
+
+
+def test_follow_add_unsafe_book_id_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowAddCmd)
+
+    args = parser.parse_args(["add", "b520", "../escape"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 2
+    assert any("Invalid input" in message for message in messages)
+
+
+def test_follow_add_write_failure_reports_path_and_exits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowAddCmd)
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(WatchlistStore, "add", _boom)
+
+    args = parser.parse_args(["add", "b520", "1"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    assert any("Could not write" in message for message in messages)
+    assert any("watchlist.json" in message for message in messages)
+    assert any("disk full" in message for message in messages)
+
+
+def test_follow_remove_write_failure_reports_path_and_exits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    WatchlistStore().add("b520", "1")
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowRemoveCmd)
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(WatchlistStore, "remove", _boom)
+
+    args = parser.parse_args(["remove", "b520", "1"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    assert any("Could not write" in message for message in messages)
+    assert any("read-only filesystem" in message for message in messages)
+
+
+def test_follow_mutations_refuse_a_corrupt_watchlist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A broken file must not be silently replaced by a one-entry list."""
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    watchlist = tmp_path / "watchlist.json"
+    watchlist.write_text("{not json", encoding="utf-8")
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowAddCmd, FollowRemoveCmd)
+
+    for argv in (["add", "b520", "1"], ["remove", "b520", "1"]):
+        args = parser.parse_args(argv)
+        with pytest.raises(SystemExit) as exc_info:
+            args.func(args)
+
+        assert exc_info.value.code == 1
+        assert any("Could not read" in message for message in messages)
+
+    # The unreadable file is left exactly as it was.
+    assert watchlist.read_text(encoding="utf-8") == "{not json"
+
+
+def test_follow_add_treats_an_empty_file_as_an_empty_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    (tmp_path / "watchlist.json").write_text("", encoding="utf-8")
+    _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowAddCmd)
+
+    args = parser.parse_args(["add", "b520", "1"])
+    args.func(args)
+
+    assert WatchlistStore().get("b520", "1") is not None
+
+
+def test_follow_list_json_stays_pure_when_the_file_is_corrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Diagnostics stay on stderr; stdout remains one JSON document."""
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    (tmp_path / "watchlist.json").write_text("{not json", encoding="utf-8")
+    parser = _parser(FollowListCmd)
+
+    parser.parse_args(["list", "--json"]).func(parser.parse_args(["list", "--json"]))
+
+    assert json.loads(capsys.readouterr().out) == []
+
+
 # ---------------------------------------------------------------------------
 # follow check
 # ---------------------------------------------------------------------------
@@ -280,6 +406,61 @@ def test_follow_check_failure_exits_nonzero(
     assert exc_info.value.code == 1
     assert any("site down" in message for message in messages)
     assert store.get("b520", "1").last_chapter == ""
+
+
+def test_follow_check_failure_summary_counts_partial_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One broken book fails the sweep but is not hidden among successes."""
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    store = WatchlistStore()
+    store.add("b520", "1", title="Book A", last_chapter="Chapter 1")
+    store.add("qidian", "2", title="Book B")
+
+    monkeypatch.setattr(
+        search_module,
+        "search",
+        _fake_search(
+            {"Book A": [_result("b520", "1", "Book A", "Chapter 2")]},
+            errors={"Book B": RuntimeError("site down")},
+        ),
+    )
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    joined = "\n".join(messages)
+    assert "site down" in joined
+    assert "1 check(s) failed." in joined
+    assert "New chapter for b520/1: Chapter 2" in joined
+
+
+def test_follow_check_non_finite_timeout_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    WatchlistStore().add("b520", "1", title="Book A")
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    for value in ("inf", "nan"):
+        args = parser.parse_args(["check", "--timeout", value])
+        with pytest.raises(SystemExit) as exc_info:
+            args.func(args)
+
+        assert exc_info.value.code == 2
+        assert any("Invalid input" in message for message in messages)
+
+    args = parser.parse_args(["check", "--download", "--wait", "--wait-timeout", "inf"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 2
+    assert any("Invalid input" in message for message in messages)
 
 
 def test_follow_check_empty_list(
@@ -1127,3 +1308,115 @@ def test_storage_missing_directories_are_zero(
 
     stats = storage._collect(paths)
     assert [(stat.files, stat.bytes) for stat in stats] == [(0, 0)] * 4
+
+
+def test_storage_clean_confirmation_defaults_to_no(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = _storage_paths(tmp_path)
+    paths["logs"].mkdir()
+    (paths["logs"] / "file").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    _capture_ui(monkeypatch, storage)
+    monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
+
+    captured: dict[str, Any] = {}
+
+    def confirm(_question: str, *, default: bool = True) -> bool:
+        captured["default"] = default
+        return False
+
+    monkeypatch.setattr(storage.ui, "confirm", confirm)
+    parser = _parser(StorageCmd)
+
+    args = parser.parse_args(["storage", "--clean"])
+    args.func(args)
+
+    assert captured["default"] is False
+    assert paths["logs"].exists()
+
+
+def test_storage_clean_handles_nested_directories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Removing ``raw`` also removes the ``cache``/``downloads`` inside it."""
+    raw = tmp_path / "raw"
+    paths = {
+        "raw": raw,
+        "cache": raw / "cache",
+        "downloads": raw / "downloads",
+        "logs": tmp_path / "logs",
+    }
+    paths["cache"].mkdir(parents=True)
+    paths["downloads"].mkdir(parents=True)
+    paths["logs"].mkdir()
+    for path in paths.values():
+        (path / "file").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    messages = _capture_ui(monkeypatch, storage)
+    monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
+    parser = _parser(StorageCmd)
+
+    args = parser.parse_args(["storage", "--clean", "--yes"])
+    args.func(args)  # nothing failed: no SystemExit
+
+    assert not any(path.exists() for path in paths.values())
+    assert not any("Failed to remove" in message for message in messages)
+
+
+def test_storage_clean_deduplicates_a_shared_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "file").write_text("x", encoding="utf-8")
+    paths = {
+        "raw": shared,
+        "cache": shared,
+        "downloads": tmp_path / "downloads",
+        "logs": tmp_path / "logs",
+    }
+    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    messages = _capture_ui(monkeypatch, storage)
+    monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
+    parser = _parser(StorageCmd)
+
+    args = parser.parse_args(["storage", "--clean", "--yes"])
+    args.func(args)  # the duplicate is removed once, not twice
+
+    assert not shared.exists()
+    assert not any("Failed to remove" in message for message in messages)
+
+
+def test_storage_clean_failure_exits_nonzero_and_keeps_going(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = _storage_paths(tmp_path)
+    for path in paths.values():
+        path.mkdir()
+        (path / "file").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    messages = _capture_ui(monkeypatch, storage)
+    monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
+    real_rmtree = storage.shutil.rmtree
+
+    def rmtree(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == paths["cache"]:
+            raise OSError("locked")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(storage.shutil, "rmtree", rmtree)
+    parser = _parser(StorageCmd)
+
+    args = parser.parse_args(["storage", "--clean", "--yes"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    assert paths["cache"].exists()
+    assert not paths["logs"].exists()  # later buckets are still attempted
+    assert any(
+        "locked" in message and str(paths["cache"]) in message for message in messages
+    )

@@ -228,6 +228,13 @@ class CleanCacheCmd(Command):
 
     @classmethod
     def run(cls, args: Namespace) -> None:
+        # Validate the site before loading the config: loading may offer to
+        # create a default config file, and a bad argument must not cause a
+        # side effect (or a prompt) first.
+        # ``--site ""`` is an explicit (bad) key, not "no site": treating it
+        # as the latter would silently delete every site's cache.
+        site = _validated_site(args.site) if args.site is not None else None
+
         config_path: Path | None = expand_path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
@@ -237,8 +244,7 @@ class CleanCacheCmd(Command):
         adapter = ConfigAdapter(config=config_data)
         cache_base = adapter.get_cache_dir()
 
-        if args.site:
-            site = _validated_site(args.site)
+        if site is not None:
             target_dir = cache_base / site
             target_desc = t("site cache for '{site}'").format(site=site)
         else:
@@ -339,6 +345,12 @@ class CleanBookCmd(Command):
 
     @classmethod
     def _remove_all(cls, args: Namespace) -> None:
+        # Same ordering as ``clean cache``: reject an escaping site key before
+        # a config load can prompt or create files.
+        # ``--site ""`` is an explicit (bad) key, not "no site": treating it
+        # as the latter would silently delete every site's raw data.
+        site = _validated_site(args.site) if args.site is not None else None
+
         config_path: Path | None = expand_path(args.config) if args.config else None
         config_data = load_or_init_config(config_path)
         if config_data is None:
@@ -348,8 +360,7 @@ class CleanBookCmd(Command):
         adapter = ConfigAdapter(config=config_data)
         raw_data_base = adapter.get_raw_data_dir()
 
-        if args.site:
-            site = _validated_site(args.site)
+        if site is not None:
             target_dir = raw_data_base / site
             desc = t("all data for site '{site}'").format(site=site)
         else:
@@ -386,9 +397,9 @@ class CleanBookCmd(Command):
         if not books:
             fail(t("No book IDs provided. Exiting."), EXIT_USAGE)
 
-        # Determine site
+        # Determine site; ``--site ""`` is bad input, not a request to prompt.
         site: str | None = args.site
-        if not site:
+        if site is None:
             if not sys.stdin.isatty():
                 fail(
                     t(
@@ -452,11 +463,10 @@ class CleanBookCmd(Command):
                         )
                     )
 
-            ui.success(t("Finished cleaning all requested books."))
             if cleanup_failed:
                 raise SystemExit(EXIT_FAILURE)
+            ui.success(t("Finished cleaning all requested books."))
             return
-
         summary = []
         if remove_chapters:
             summary.append(t("chapters"))
@@ -470,6 +480,12 @@ class CleanBookCmd(Command):
                 what=", ".join(summary) if summary else t("nothing")
             )
         )
+
+        if not summary:
+            # ``--no-chapters`` alone (or with only disabled flags) is a no-op;
+            # asking to "remove  for N book(s)" would be a malformed prompt.
+            ui.info(t("Nothing to clean."))
+            return
 
         if not args.yes:
             q = t("Proceed with removing {what} for {count} book(s)?").format(
@@ -498,6 +514,6 @@ class CleanBookCmd(Command):
                     )
                 )
 
-        ui.success(t("Finished cleaning all requested books."))
         if cleanup_failed:
             raise SystemExit(EXIT_FAILURE)
+        ui.success(t("Finished cleaning all requested books."))

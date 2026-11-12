@@ -64,7 +64,15 @@ from novel_downloader.plugins import registrar
 from novel_downloader.plugins.ranking import normalize_text
 from novel_downloader.schemas import BookConfig, SearchResult
 
-from .base import EXIT_FAILURE, EXIT_USAGE, Command, expand_path, fail
+from .base import (
+    EXIT_FAILURE,
+    EXIT_USAGE,
+    Command,
+    expand_config_paths,
+    expand_path,
+    fail,
+    require_safe_site,
+)
 
 #: Guards against a pathological line being used as a search keyword or
 #: written back verbatim into the not-found file.
@@ -272,6 +280,10 @@ class BatchCmd(Command):
             hint = parsed.site_hint
             site = hint if hint and hint != "all" else None
         if site:
+            # The key can come from a not-found file header, i.e. from a file
+            # the user may have edited by hand; it is joined onto the raw-data
+            # root, so refuse escaping values like ``--site`` does.
+            require_safe_site(site)
             ui.info(t("Using site: {site}").format(site=site))
 
         _report_input_problems(parsed)
@@ -281,6 +293,11 @@ class BatchCmd(Command):
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)
+
+        # Expand ``~``/env in configured directories before ``--out`` is
+        # applied, so the override and the config fall back to the same
+        # platform-independent meaning (see ``expand_config_paths``).
+        config_data = expand_config_paths(config_data)
 
         out_dir: Path | None = None
         if args.out:
@@ -1007,12 +1024,20 @@ def _download_site(
                 processors=adapter.get_processor_configs(site),
                 ui=process_ui,
             )
-            client.export_book(
+            exported = client.export_book(
                 book,
                 cfg=adapter.get_exporter_config(site),
                 formats=adapter.get_export_fmt(site),
                 ui=export_ui,
             )
+            # ``CommonClient.export_book`` swallows per-format failures and
+            # returns ``{fmt: []}``, so an exception is not the only way an
+            # export can produce nothing. A requested export that wrote no
+            # file must not let the batch report success. Older/third-party
+            # clients may return ``None``; that carries no verdict.
+            if isinstance(exported, dict) and not any(exported.values()):
+                all_ok = False
+                ui.error(t("Export failed: {err}").format(err=book.book_id))
         except Exception as err:
             # Same rule as the download loop: continue with the next book.
             ui.error(
