@@ -1,3 +1,45 @@
+## v1.30.0 (2026-11-12)
+
+第二批并行加固（30 个改进批次），重点是搜索可解释性、站点覆盖、API/网络安全、桌面设置页与安装包体积。
+
+### Feature
+
+- **搜索可解释性**：最终结果新增只读 `rank_score`（0..1）与 `match_tier`（4 精确/3 前缀/2 包含/1 部分/0 无匹配），不进入缓存与流式分片
+- **多词查询**：`"书名 作者"`（2–4 个 token，空格/`·`/`,`/`，`/`-`）分别匹配标题与作者，相关性从 0.275 提升到 1.0；单 token 与含标点书名行为不变
+- **桌面「设置」页（Ctrl+6）**：存储目录、代理、更新开关、外观/语言、应用信息；保存有白名单与原子写，首启目录不可写会提示
+- **桌面大结果集**：一次搜索 200+ 行时分块渲染（首屏 60 +「显示更多」），索引/滚动/详情保持一致；歌单同名文件需二次确认才覆盖
+- **Android**：应用内更新强制 HTTPS/摘要/空间/大小上限/安装前复算、跨 scheme 重定向不跟随；网络层整体超时、POST 不自动重放、API Key 仅同源发送、响应体 8 MiB 上限；按 `supports_offset` 停止分页
+- **站点覆盖**：新增 D/E/F 组 30 个站点的真实探测与修复（piaotia 精确匹配书页、n8novel、xiguashuwu、sfacg、ruochu、akatsuki、alicesw、ciyuanji、czbooks 等）
+
+### Fix
+
+- **排序确定性**：预排序键补齐为全序，修复并列行随到达顺序变化；意图判定改用 `fsum`；NaN priority 视为缺失
+- **搜索流式清洗**：`search_stream` 分片与最终结果共用清洗规则（脏行、非 http URL、同站重复），缓存仍存原文
+- **代理/输出目录**：桌面设置支持 `~`/环境变量展开、可写性探测、TOML/JSON 注释保留式回写；代理密码不回显
+- **CLI**：`clean --site ""` 原本会删全部缓存、`follow` 空站点/损坏列表不再覆盖原文件、`storage --clean` 嵌套目录误报、`search --first` 空导出退出码
+- **API 安全**：请求体上限覆盖全部写路由、限流内存上限与 XFF 防伪、CORS 收紧、非本地关闭 docs、下载响应 CSP sandbox、watchlist 错误脱敏
+- **HTTP**：429/503 + Retry-After 触发**共享冷却**（同 limiter 并发 worker 一起暂停、60s 上限、抖动、不叠加）；`qidian`/`n17k` 自定义 fetch 也接入
+- **重试预算**：`HttpStatusError` 不再被任务级二次重试（最坏请求数 9 → 3）
+- **规则签名**：修复 `--keygen` 直接运行的 `NameError`、拒绝覆盖已有私钥、校验 key_id 与公钥一致；签名覆盖资产字段
+- **Android 构建**：`gradlew.bat` 成功时不再返回 exit 1
+
+### Build
+
+- PyInstaller 裁掉 setuptools、numpy.testing/f2py/random、emoji 多语言表：三端各减约 **7 MiB（-5.9%）**，安装包减 2.18 MiB；`verify_frozen` 增加卫生检查
+- 新增 `scripts/push_via_api.py`：github.com 被墙时通过 Git Data API 逐提交推送（tree 边界、非 force、dry-run）
+- `latest.json` 校验资产形态/版本/SHA256SUMS 一致，重复发版字节幂等
+
+### Docs
+
+- 新增音乐指南（中英）与 `rule-dsl` 英文版，`guide/` 配对 18/18
+- 用真实 argparse 校验 367 条文档命令、138 条 REST 示例、293 个链接，修复 `search`/`doctor` 过期 synopsis
+- 补 `rank_score`/`match_tier`、多词查询、音乐分页能力、429 `Retry-After` 说明
+
+### Test
+
+- 全量 `pytest` **10156 passed / 31 skipped**；`ruff`、`format`、`mypy` 全绿
+- Android `compileDebugKotlin` + `testDebugUnitTest` **343 tests** 通过；`lintDebug` 0 error
+
 ## v1.29.0 (2026-11-10)
 
 一次大规模的并行加固（30 个独立改进批次），覆盖搜索、站点、CLI、桌面、Android、下载管线、打包与文档。
