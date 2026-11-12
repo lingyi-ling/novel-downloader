@@ -10,6 +10,7 @@ import logging
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import chapter_id_from_href
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -36,6 +37,8 @@ class Ixdzs8Searcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         rows = doc.xpath("//ul[contains(@class,'u-list')]/li[contains(@class,'burl')]")
         results: list[SearchResult] = []
@@ -52,7 +55,8 @@ class Ixdzs8Searcher(BaseSearcher):
             if limit is not None and idx >= limit:
                 break
 
-            book_id = book_path.strip("/").split("/")[-1]
+            # Ignore ``?from=`` / ``#...`` decorations when deriving the id.
+            book_id = chapter_id_from_href(book_path)
             book_url = self._abs_url(book_path)
 
             cover_rel = self._first_str(

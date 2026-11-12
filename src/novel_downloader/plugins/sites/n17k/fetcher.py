@@ -72,6 +72,9 @@ class N17kFetcher(GenericFetcher):
             try:
                 resp = await self.session.get(url, encoding=encoding, **kwargs)
                 if not resp.ok:
+                    # Register the shared cooldown before the generic retry
+                    # below; the site's own retry/backoff semantics stay.
+                    self._register_shared_cooldown(resp.status, resp.headers)
                     raise ConnectionError(f"HTTP {resp.status} for {url}")
 
                 text = resp.text
@@ -86,6 +89,7 @@ class N17kFetcher(GenericFetcher):
 
                     resp2 = await self.session.get(url, encoding=encoding, **kwargs)
                     if not resp2.ok:
+                        self._register_shared_cooldown(resp2.status, resp2.headers)
                         raise ConnectionError(
                             f"HTTP {resp2.status} for {url} after cookie update"
                         )

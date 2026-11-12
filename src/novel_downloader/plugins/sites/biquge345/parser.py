@@ -9,6 +9,7 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import resolve_url, strip_label
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -53,11 +54,14 @@ class Biquge345Parser(BaseParser):
             tree.xpath('//div[@class="xinxi"]/span[@class="x1"][1]/a/text()')
         )
 
-        cover_url = self._first_str(tree.xpath('//div[@class="zhutu"]/img/@src'))
-        if cover_url.startswith("//"):
-            cover_url = "https:" + cover_url
-        elif cover_url.startswith("/"):
-            cover_url = self.BASE_URL + cover_url
+        # Live pages carry a root-relative ``/files/...`` path, but the same
+        # template is served from mirrors with protocol-relative and plain
+        # relative paths; resolve all three against the site origin.
+        cover_url = resolve_url(
+            tree,
+            self._first_str(tree.xpath('//div[@class="zhutu"]/img/@src')),
+            fallback_base=self.BASE_URL,
+        )
 
         update_time = self._first_str(
             tree.xpath('//div[@class="xinxi"]/span[@class="x2"][1]/text()'),
@@ -70,9 +74,13 @@ class Biquge345Parser(BaseParser):
         )
         tags = [genre] if genre else []
 
-        summary = self._join_strs(
+        # The intro node is a single text run that starts with the literal
+        # label ("简介：") followed by template padding; neither belongs in the
+        # stored summary.
+        summary_raw = self._join_strs(
             tree.xpath('//div[@class="xinxi"]/div[@class="x3"]/text()')
         )
+        summary = self._norm_space(strip_label(summary_raw, "简介"))
 
         # Chapters from the book_list
         chapters: list[ChapterInfoDict] = []

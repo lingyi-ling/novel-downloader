@@ -115,8 +115,10 @@ class N8novelFetcher(BaseFetcher):
         Slices out a 5-character segment of `seed` at offset
         and build content url.
         """
-        # Compute start index and slice out 5 chars
-        start = (int(chapter_id) * 3) % 100
+        # Compute start index and slice out 5 chars.  The seed offset is
+        # defined in terms of the numeric chapter id; a malformed id must not
+        # turn into a ValueError halfway through a download.
+        start = (int(chapter_id) * 3) % 100 if chapter_id.isdigit() else 0
         seed_segment = seed[start : start + 5]
 
         return cls.CHAPTER_CONTENT_URL.format(

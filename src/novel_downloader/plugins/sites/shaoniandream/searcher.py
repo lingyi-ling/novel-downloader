@@ -11,10 +11,10 @@ returns a ``BookPicList`` of matching works, no login required.
 """
 
 import logging
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -45,25 +45,32 @@ class ShaoniandreamSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
+
         rows = doc.xpath('//div[@class="BookPicList"]//dl')
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
             href = self._first_str(row.xpath('dd[@class="img"]/a/@href'))
-            if not href:
+            if not href or href.lower().startswith(("javascript:", "#")):
                 continue
 
-            if limit is not None and idx >= limit:
-                break
-
-            # 'https://www.shaoniandream.com/book_detail/6686' -> '6686'
-            book_id = href.rstrip("/").split("/")[-1]
+            # '.../book_detail/6686?from=list#top' -> '6686'
+            path = urlsplit(href).path.rstrip("/")
+            book_id = path.rsplit("/", 1)[-1]
             if not book_id:
                 continue
-            book_url = self._abs_url(href)
+            book_url = self._abs_url(path)
 
             title = self._first_str(row.xpath('dd[@class="title"]/a/text()'))
+            if not title:
+                continue
+
+            if limit is not None and len(results) >= limit:
+                break
+
             author = self._first_str(row.xpath('dd[@class="author"]/a[1]/text()'))
 
             latest_chapter = (
@@ -74,11 +81,11 @@ class ShaoniandreamSearcher(BaseSearcher):
                 or "-"
             )
 
-            cover_url = self._first_str(
+            cover_rel = self._first_str(
                 row.xpath('dd[@class="img"]//img/@data-original')
-            )
+            ) or self._first_str(row.xpath('dd[@class="img"]//img/@src'))
+            cover_url = self._abs_url(cover_rel) if cover_rel else ""
 
-            prio = self.priority + idx
             results.append(
                 SearchResult(
                     site=self.site_name,
@@ -90,7 +97,7 @@ class ShaoniandreamSearcher(BaseSearcher):
                     latest_chapter=latest_chapter,
                     update_date="-",
                     word_count="-",
-                    priority=prio,
+                    priority=self.priority + len(results),
                 )
             )
         return results

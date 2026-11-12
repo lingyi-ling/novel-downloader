@@ -8,9 +8,8 @@ import json
 import logging
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -32,7 +31,7 @@ class CiyuanjiSearcher(BaseSearcher):
                 resp.raise_for_status()
                 return await self._response_to_str(resp)
         except Exception as exc:
-            self._log_fetch_failure(keyword, self.SEARCH_URL, exc)
+            self._log_fetch_failure(keyword, url, exc)
             return ""
 
     def _parse_html(
@@ -42,17 +41,23 @@ class CiyuanjiSearcher(BaseSearcher):
         rows = self._extract_search_list(data)
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
-            if limit is not None and idx >= limit:
+        for row in rows:
+            if limit is not None and len(results) >= limit:
                 break
+            if not isinstance(row, dict):
+                continue
 
-            book_id = str(row.get("bookId", ""))
-            title = row.get("bookName", "").strip()
-            author = row.get("authorName", "").strip()
-            cover_url = row.get("imgUrl") or row.get("blurryImgUrl") or ""
-            word_count = str(row.get("wordCount", ""))
-            update_date = row.get("latestUpdateTime", "")
-            latest_chapter = row.get("latestChapterName", "")
+            book_id = str(row.get("bookId") or "")
+            if not book_id:
+                continue
+            title = str(row.get("bookName") or "").strip()
+            author = str(row.get("authorName") or "").strip()
+            cover_url = str(row.get("imgUrl") or row.get("blurryImgUrl") or "")
+            if cover_url:
+                cover_url = self._abs_url(cover_url)
+            word_count = str(row.get("wordCount") or "")
+            update_date = str(row.get("latestUpdateTime") or "")
+            latest_chapter = str(row.get("latestChapterName") or "")
             book_url = self.BOOK_INFO_URL.format(book_id=book_id)
 
             results.append(
@@ -66,7 +71,7 @@ class CiyuanjiSearcher(BaseSearcher):
                     latest_chapter=latest_chapter,
                     update_date=update_date,
                     word_count=word_count,
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
         return results
@@ -76,9 +81,17 @@ class CiyuanjiSearcher(BaseSearcher):
         """
         Extract SSR JSON from <script id="__NEXT_DATA__">.
         """
-        tree = html.fromstring(html_str)
+        tree = parse_html_tree(html_str)
+        if tree is None:
+            return {}
         script = tree.xpath('//script[@id="__NEXT_DATA__"]/text()')
-        return json.loads(script[0].strip()) if script else {}
+        if not script:
+            return {}
+        try:
+            data = json.loads(script[0].strip())
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     @staticmethod
     def _extract_search_list(data: dict[str, Any]) -> list[dict[str, Any]]:

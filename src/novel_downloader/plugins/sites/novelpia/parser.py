@@ -11,6 +11,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -28,6 +32,7 @@ class NovelpiaParser(BaseParser):
     """
 
     site_name: str = "novelpia"
+    BASE_URL = "https://novelpia.jp"
 
     IMG_SRC_PATTERN = re.compile(r'src="([^"]+)"')
 
@@ -36,32 +41,41 @@ class NovelpiaParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if len(raw_pages) < 2:
+        if len(raw_pages) < 2 or not raw_pages[0].strip():
             return None
 
-        info = json.loads(raw_pages[0])
-        novel = info.get("novel", {})
-        if not novel:
+        try:
+            info = json.loads(raw_pages[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(info, dict):
+            return None
+        novel = info.get("novel")
+        if not isinstance(novel, dict) or not novel:
             return None
 
         # --- base info ---
-        book_name = novel.get("novel_name", "").strip()
-        author = novel.get("writer_nick", "").strip()
-        cover_url = novel.get("cover_img") or novel.get("novel_img_all", "")
-        if cover_url and cover_url.startswith("//"):
-            cover_url = "https:" + cover_url
+        book_name = str(novel.get("novel_name", "")).strip()
+        author = str(novel.get("writer_nick", "")).strip()
+        cover_url = str(novel.get("cover_img") or novel.get("novel_img_all") or "")
+        cover_url = resolve_url(None, cover_url, fallback_base=self.BASE_URL)
 
-        update_time = novel.get("last_write_date") or novel.get("status_date", "")
-        tags = novel.get("novel_genre_arr", [])
+        update_time = str(
+            novel.get("last_write_date") or novel.get("status_date") or ""
+        )
+        raw_tags = novel.get("novel_genre_arr") or []
+        tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
 
-        summary = novel.get("novel_story", "") or ""
+        summary = str(novel.get("novel_story", "") or "")
         summary = summary.replace("\r", "").replace("\n", "")
         summary = summary.replace("<br />", "\n").replace("<br>", "\n")
 
         # --- Chapter volumes & listings ---
         chapters: list[ChapterInfoDict] = []
         for curr_html in raw_pages[1:]:
-            t = html.fromstring(curr_html)
+            t = parse_html_tree(curr_html)
+            if t is None:
+                continue
             rows = t.xpath("//tr[contains(@class,'ep_style5')]")
             for r in rows:
                 chapter_id = r.xpath(
@@ -69,13 +83,17 @@ class NovelpiaParser(BaseParser):
                 )
                 if not chapter_id:
                     continue
-                cid = chapter_id[0].strip()
+                cid = str(chapter_id[0]).strip()
+                if not cid:
+                    continue
 
-                b_elem = r.xpath(".//td[contains(@class,'font12')]//b")[0]
-                title = "".join(b_elem.itertext()).strip()
-                title = title.replace("無料", "").strip()
+                b_elems = r.xpath(".//td[contains(@class,'font12')]//b")
+                if not b_elems:
+                    continue
+                title = "".join(b_elems[0].itertext()).strip()
+                title = self._norm_space(title.replace("無料", ""))
 
-                url = f"https://novelpia.jp/viewer/{cid}"
+                url = f"{self.BASE_URL}/viewer/{cid}"
                 chapters.append(
                     {
                         "chapterId": cid,
@@ -109,14 +127,25 @@ class NovelpiaParser(BaseParser):
         if not raw_pages:
             return None
 
-        data = json.loads(raw_pages[0])
-        s: list[dict[str, str]] = data.get("s", [])
-        if not s:
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
+        try:
+            data = json.loads(raw_pages[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        s = data.get("s")
+        if not isinstance(s, list):
             return None
 
         html_fragments: list[str] = []
         for p in s:
-            text = (p.get("text") or "").strip()
+            if not isinstance(p, dict):
+                continue
+            text = str(p.get("text") or "").strip()
             if not text or "<div class='cover-wrapper'>" in text:
                 continue
             html_fragments.append(f"<p>{text}</p>")

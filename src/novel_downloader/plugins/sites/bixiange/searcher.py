@@ -28,10 +28,10 @@ Three site quirks the searcher compensates for:
 """
 
 import logging
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -103,12 +103,14 @@ class BixiangeSearcher(BaseSearcher):
             )
             return []
 
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath('//div[contains(@class, "list")]//li')
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
-            if limit is not None and idx >= limit:
+        for row in rows:
+            if limit is not None and len(results) >= limit:
                 break
 
             href = self._first_str(row.xpath('.//div[@class="cover"]/a/@href'))
@@ -118,8 +120,16 @@ class BixiangeSearcher(BaseSearcher):
             book_url = self._abs_url(href)
             # "/khjj/11945.html" -> "khjj-11945"
             # "/trxs/19408" -> "trxs-19408"
-            href_path = href.strip("/").split(".", 1)[0].split("/")
+            # Absolute/protocol-relative links and query strings resolve to
+            # the same path-only id.
+            href_path = [
+                part
+                for part in urlsplit(href).path.strip("/").split(".", 1)[0].split("/")
+                if part
+            ]
             book_id = "-".join(href_path)
+            if not book_id:
+                continue
 
             cover_url = self._first_str(row.xpath('.//div[@class="cover"]//img/@src'))
             if cover_url:
@@ -145,7 +155,7 @@ class BixiangeSearcher(BaseSearcher):
                     latest_chapter="-",
                     update_date=update_date,
                     word_count="-",
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
         return results

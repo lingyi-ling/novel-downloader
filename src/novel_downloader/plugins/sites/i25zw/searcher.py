@@ -10,6 +10,7 @@ import logging
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import chapter_id_from_href
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 class I25zwSearcher(BaseSearcher):
     site_name = "i25zw"
     priority = 30
+    BASE_URL = "https://www.i25zw.com"
     SEARCH_URL = "https://www.i25zw.com/search.html"
 
     async def _fetch_html(self, keyword: str) -> str:
@@ -39,20 +41,25 @@ class I25zwSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         rows = doc.xpath("//div[@id='alistbox']")
         results: list[SearchResult] = []
 
         for idx, row in enumerate(rows):
-            book_url = self._first_str(row.xpath(".//div[@class='pic']/a/@href"))
-            if not book_url:
+            href = self._first_str(row.xpath(".//div[@class='pic']/a/@href"))
+            if not href:
                 continue
 
             if limit is not None and idx >= limit:
                 break
 
-            # 'https://www.i25zw.com/book/309209.html' -> "309209"
-            book_id = book_url.split("/")[-1].split(".")[0]
+            # Keep query/fragment bytes in the URL but never in the id, and
+            # make relative hits absolute so downstream fetchers can use them.
+            book_url = self._abs_url(href)
+            # '/book/309209.html' -> "309209"
+            book_id = chapter_id_from_href(book_url)
 
             title = self._first_str(row.xpath(".//div[@class='title']/h2/a/text()"))
 

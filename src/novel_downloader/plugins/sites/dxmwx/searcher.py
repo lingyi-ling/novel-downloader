@@ -5,9 +5,10 @@ novel_downloader.plugins.sites.dxmwx.searcher
 
 """
 
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -32,25 +33,29 @@ class DxmwxSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath(
             "//div[@id='ListContents']/div[contains(@style,'position: relative')]"
         )
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
+            if limit is not None and len(results) >= limit:
+                break
+
             href = self._first_str(
                 row.xpath(".//div[contains(@class,'margin0h5')]//a[1]/@href")
             )
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
-                break
-
             book_url = self._abs_url(href)
-            # "/book/10409.html" -> "10409"
-            book_id = href.split("/")[-1].split(".", 1)[0]
+            # "/book/10409.html?from=list" -> "10409"
+            book_id = urlsplit(href).path.rsplit("/", 1)[-1].split(".", 1)[0]
+            if not book_id:
+                continue
 
             title = self._first_str(
                 row.xpath(".//div[contains(@class,'margin0h5')]//a[1]/text()")
@@ -76,8 +81,7 @@ class DxmwxSearcher(BaseSearcher):
                 row.xpath(".//span[contains(@class,'lefth5')]/text()")
             )
 
-            # Compute priority
-            prio = self.priority + idx
+            prio = self.priority + len(results)
 
             results.append(
                 SearchResult(

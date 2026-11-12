@@ -11,6 +11,7 @@ import json
 import logging
 import re
 from typing import Any, ClassVar
+from urllib.parse import urljoin
 
 from Crypto.Cipher import DES
 from lxml import html
@@ -74,6 +75,8 @@ class QimaoParser(BaseParser):
 
         book_id = str(detail.get("book_id") or "")
         words_raw = str(detail.get("words_num") or "")
+        cover_raw = str(detail.get("image_link") or "")
+        cover_url = urljoin(self.BASE_URL + "/", cover_raw) if cover_raw else ""
 
         tags: list[str] = []
         for key in ("category_1_name", "category_2_name"):
@@ -107,7 +110,7 @@ class QimaoParser(BaseParser):
         return {
             "book_name": str(detail.get("title") or ""),
             "author": str(detail.get("author") or ""),
-            "cover_url": str(detail.get("image_link") or ""),
+            "cover_url": cover_url,
             "update_time": str(detail.get("update_time") or ""),
             "word_count": f"{words_raw}万字" if words_raw else "",
             "serial_status": "完结" if str(detail.get("is_over")) == "1" else "连载",

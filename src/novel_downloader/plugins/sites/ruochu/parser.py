@@ -7,9 +7,12 @@ novel_downloader.plugins.sites.ruochu.parser
 import json
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,17 +29,20 @@ class RuochuParser(BaseParser):
     """
 
     site_name: str = "ruochu"
+    BASE_URL = "https://www.ruochu.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if len(raw_pages) < 2:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
-        info_tree = html.fromstring(raw_pages[0])
-        catalog_tree = html.fromstring(raw_pages[1])
+        info_tree = parse_html_tree(raw_pages[0])
+        catalog_tree = parse_html_tree(raw_pages[1])
+        if info_tree is None or catalog_tree is None:
+            return None
 
         # --- base info ---
         book_name = self._first_str(
@@ -44,14 +50,23 @@ class RuochuParser(BaseParser):
                 '//div[contains(@class,"pattern-cover-detail")]//h1//span/text()'
             )
         )
+        # The author link is in the cover breadcrumb ("作者：<a class=author>").
+        # The previous selector matched the site-wide disclaimer paragraph,
+        # which also contains the word "作者".
         author = self._first_str(
             info_tree.xpath(
-                '//div[contains(@class,"notify")]//text()[contains(.,"作者")]'
+                '//div[contains(@class,"cover-breadcrumb")]'
+                '//a[contains(@class,"author")]/text()'
             )
         )
-        cover_url = self._first_str(
+        if not author:
+            author = self._first_str(
+                info_tree.xpath('//a[contains(@class,"author")]/text()')
+            )
+        cover_src = self._first_str(
             info_tree.xpath('//div[@class="pic"]//img[@class="book-cover"]/@src')
         )
+        cover_url = resolve_url(info_tree, cover_src, fallback_base=self.BASE_URL)
         word_count = self._first_str(
             info_tree.xpath('//span[contains(@class,"words")]/text()')
         )
@@ -71,11 +86,13 @@ class RuochuParser(BaseParser):
         # --- Chapter volumes & listings ---
         chapters: list[ChapterInfoDict] = []
         for a in catalog_tree.xpath('//div[contains(@class,"chapter-list")]//ul/li/a'):
-            url = a.get("href", "").strip()
-            if not url:
+            url = (a.get("href") or "").strip()
+            if not url or url.lower().startswith(("javascript:", "#")):
                 continue
             title = a.text_content().strip()
-            chap_id = url.strip("/").rsplit("/", 1)[-1]
+            chap_id = chapter_id_from_href(url)
+            if not chap_id:
+                continue
             accessible = "isvip" not in (a.get("class") or "")
             chapters.append(
                 {
@@ -112,6 +129,10 @@ class RuochuParser(BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         text = raw_pages[0]
         if '"chapter"' not in text:
             return None
@@ -120,16 +141,23 @@ class RuochuParser(BaseParser):
         else:
             return None
 
-        data = json.loads(json_str)
+        try:
+            data = json.loads(json_str)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
         chapter = data.get("chapter")
-        if not chapter:
+        if not isinstance(chapter, dict):
             return None
         html_content = chapter.get("htmlContent")
         if not html_content:
             return None
 
         title = chapter.get("title") or ""
-        tree = html.fromstring(html_content)
+        tree = parse_html_tree(str(html_content))
+        if tree is None:
+            return None
 
         paragraphs: list[str] = [
             text for p in tree.xpath("//p") if (text := p.text_content().strip())

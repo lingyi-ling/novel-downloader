@@ -11,6 +11,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -37,8 +41,14 @@ class QbtrParser(BaseParser):
         if not raw_pages:
             return None
 
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
         # Parse the main info page
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
         # Book name
         book_name = self._first_str(tree.xpath('//div[@class="infos"]/h1/text()'))
         # Tags: the second breadcrumb (e.g., "同人小说")
@@ -49,7 +59,10 @@ class QbtrParser(BaseParser):
 
         # Author & update_time from the date div
         date_div = tree.xpath('//div[@class="date"]')
-        date_text = html.tostring(date_div[0], encoding="unicode", method="text")
+        if date_div:
+            date_text = html.tostring(date_div[0], encoding="unicode", method="text")
+        else:
+            date_text = tree.text_content()
         author_match = re.search(r"作者[：:]\s*([^日]+)", date_text)
         author = author_match.group(1).strip() if author_match else ""
         date_match = re.search(r"日期[：:]\s*([\d-]+)", date_text)
@@ -62,11 +75,13 @@ class QbtrParser(BaseParser):
         # Chapters from the book_list
         chapters: list[ChapterInfoDict] = []
         for a in tree.xpath('//div[contains(@class,"book_list")]//li/a'):
-            url = a.get("href", "").strip()
+            url = (a.get("href") or "").strip()
+            if not url or url.lower().startswith(("javascript:", "#")):
+                continue
             title = a.text_content().strip()
-            # General regex: /{category}/{bookId}/{chapterId}.html
-            m = re.search(r"^/[^/]+/\d+/(\d+)\.html$", url)
-            cid = m.group(1) if m else ""
+            cid = chapter_id_from_href(url)
+            if not cid:
+                continue
             chapters.append({"title": title, "url": url, "chapterId": cid})
 
         if not chapters:
@@ -103,7 +118,13 @@ class QbtrParser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        raw_pages = self._usable_pages(raw_pages)
+        if not raw_pages:
+            return None
+
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         raw_title = self._first_str(
             tree.xpath('//div[contains(@class,"read_chapterName")]//h1/text()')
@@ -133,5 +154,12 @@ class QbtrParser(BaseParser):
 
     @classmethod
     def _fix_download_link(cls, link: str) -> str:
+        link = (link or "").strip()
+        if not link:
+            return ""
+        if link.startswith(("http://", "https://")):
+            return link
+        if link.startswith("//"):
+            return "https:" + link
         true_link = link.replace("qb../", "/e/DownSys/")
         return f"{cls.BASE_URL}{true_link}"

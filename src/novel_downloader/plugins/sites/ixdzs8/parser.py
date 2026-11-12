@@ -12,6 +12,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -28,13 +32,14 @@ class Ixdzs8Parser(BaseParser):
     """
 
     site_name: str = "ixdzs8"
+    BASE_URL: str = "https://ixdzs8.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if len(raw_pages) < 2 or not raw_pages[0] or not raw_pages[1]:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
         # Parse HTML
@@ -50,7 +55,8 @@ class Ixdzs8Parser(BaseParser):
 
         cover_url = self._meta(tree, "og:image")
         if not cover_url:
-            cover_url = self._first_str(tree.xpath("//div[@class='n-img']//img/@src"))
+            cover_rel = self._first_str(tree.xpath("//div[@class='n-img']//img/@src"))
+            cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
 
         serial_status = self._meta(tree, "og:novel:status")
 
@@ -85,9 +91,7 @@ class Ixdzs8Parser(BaseParser):
             tags.append(category)
 
         book_path = self._meta(tree, "og:novel:read_url") or self._meta(tree, "og:url")
-        book_id = ""
-        if book_path:
-            book_id = book_path.strip("/").split("/")[-1]
+        book_id = chapter_id_from_href(book_path)
 
         data = {}
         with contextlib.suppress(Exception):
@@ -133,7 +137,7 @@ class Ixdzs8Parser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
         tree = html.fromstring(raw_pages[0])
 

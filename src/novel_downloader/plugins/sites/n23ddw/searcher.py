@@ -6,10 +6,10 @@ novel_downloader.plugins.sites.n23ddw.searcher
 """
 
 import logging
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -33,23 +33,54 @@ class N23ddwSearcher(BaseSearcher):
             self._log_fetch_failure(keyword, self.SEARCH_URL, exc)
             return ""
 
+    @staticmethod
+    def _url_to_id(url: str) -> str:
+        """
+        Derive the book id from a search-result link.
+
+        The fetcher expects ``<parent>-<book>`` and turns ``-`` back into
+        ``/``.  Only the URL path may be used: absolute links, query strings
+        and fragments must not become part of the id.
+        """
+        value = url.strip()
+        if value.startswith("//"):
+            value = "https:" + value
+        parts = urlsplit(value)
+        if parts.scheme not in ("", "http", "https"):
+            return ""
+        path = parts.path or value
+        path = path.strip("/")
+        prefix, sep, rest = path.partition("/du/")
+        if sep:
+            path = rest
+        elif path.startswith("du/"):
+            path = path[len("du/") :]
+        if not path:
+            return ""
+        return path.replace("/", "-")
+
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath('//div[@id="hotcontent"]//div[@class="item"]')
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
             href = self._first_str(row.xpath(".//dl/dt/a/@href"))
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
+            # "/du/291/291325/" -> "291-291325"
+            book_id = self._url_to_id(href)
+            if not book_id:
+                continue
+
+            if limit is not None and len(results) >= limit:
                 break
 
-            # "/du/291/291325/" -> "291-291325"
-            book_id = href.replace("/du/", "").strip("/").replace("/", "-")
             book_url = self._abs_url(href)
 
             title = self._first_str(row.xpath(".//dl/dt/a/text()"))
@@ -92,7 +123,7 @@ class N23ddwSearcher(BaseSearcher):
                     latest_chapter="-",
                     update_date=update_date,
                     word_count=word_count,
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
         return results

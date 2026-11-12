@@ -128,9 +128,12 @@ class QidianParser(YuewenQDFontMixin, BaseParser):
         )
 
         # --- Update time ---
+        # The page renders the label with a full-width colon ("更新时间：");
+        # only stripping the ASCII form used to leave the whole label (and
+        # its colon) glued to the value.
         update_time = self._first_str(
             doc.xpath('//span[@class="update-time"]/text()'),
-            replaces=[("更新时间:", "")],
+            replaces=[("更新时间:", ""), ("更新时间：", "")],
         )
         if not update_time:
             update_time = self._first_str(

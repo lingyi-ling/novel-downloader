@@ -145,6 +145,9 @@ class QidianFetcher(BaseFetcher):
             self.session.update_cookies({self._cookie_key: refreshed_token})
             resp = await self.session.get(url, encoding=encoding, **kwargs)
             if not resp.ok:
+                # Share a 429/503 ``Retry-After`` with every worker using the
+                # same limiter; the local retry schedule below is unchanged.
+                self._register_shared_cooldown(resp.status, resp.headers)
                 if attempt < self._retry_times:
                     await async_jitter_sleep(
                         self._backoff_factor,

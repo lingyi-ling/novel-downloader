@@ -10,6 +10,7 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import resolve_url
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,6 +27,7 @@ class KunnuParser(BaseParser):
     """
 
     site_name: str = "kunnu"
+    BASE_URL: str = "https://www.kunnu.com/"
     ADS = {
         r"鲲\W*弩\W*小\W*说",
     }
@@ -35,18 +37,25 @@ class KunnuParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
 
         # ---- Metadata ----
-        book_intro = tree.xpath('//div[contains(@class,"book-intro")]')[0]
-        book_describe = book_intro.xpath('.//div[contains(@class,"book-describe")]')[0]
+        intro_nodes = tree.xpath('//div[contains(@class,"book-intro")]')
+        if not intro_nodes:
+            return None
+        book_intro = intro_nodes[0]
+        describe_nodes = book_intro.xpath('.//div[contains(@class,"book-describe")]')
+        if not describe_nodes:
+            return None
+        book_describe = describe_nodes[0]
 
-        cover_url = self._first_str(
+        cover_rel = self._first_str(
             book_intro.xpath('.//div[@class="book-img"]//img/@src')
         )
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
         book_name = self._first_str(book_describe.xpath("./h1/text()"))
 
         author = self._first_str(
@@ -138,7 +147,7 @@ class KunnuParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])

@@ -21,6 +21,12 @@ from lxml import html
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
 from novel_downloader.infra.paths import XIGUASHUWU_MAP_PATH
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+    strip_page_marker,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -43,6 +49,12 @@ class XiguashuwuParser(BaseParser):
     _CONF_THRESHOLD = 0.60
     _FONT_MAP: dict[str, str] = {}
     _GLYPH_CACHE: dict[str, str] = {}
+
+    #: Watermark lines injected at the end of the decrypted pages.
+    ADS = {
+        r"^\s*s\s*i\s*m\s*i\s*s\s*h\s*u\s*w\s*u\s*\.\s*c\s*o\s*m\s*$",
+        r"^\s*(?:www\.)?xiguashuwu\.(?:com|net)\s*$",
+    }
 
     _CODEURL_PATTERN = re.compile(
         r"""var\s+codeurl\s*=\s*['"]?(\d+)['"]?;?""", re.IGNORECASE
@@ -74,7 +86,9 @@ class XiguashuwuParser(BaseParser):
         """
         if not raw_pages:
             return None
-        info_tree = html.fromstring(raw_pages[0])
+        info_tree = parse_html_tree(raw_pages[0])
+        if info_tree is None:
+            return None
 
         book_name = self._first_str(info_tree.xpath('//p[@class="title"]/text()'))
 
@@ -83,10 +97,18 @@ class XiguashuwuParser(BaseParser):
         cover_rel = info_tree.xpath(
             '//div[@class="BGsectionOne-top-left"]//img/@_src'
         ) or info_tree.xpath('//div[@class="BGsectionOne-top-left"]//img/@src')
-        cover_url = self.BASE_URL + self._first_str(cover_rel)
+        cover_url = resolve_url(
+            info_tree, self._first_str(cover_rel), fallback_base=self.BASE_URL
+        )
 
         tags = [
-            self._first_str(info_tree.xpath('//p[@class="category"]/span[1]/a/text()'))
+            tag
+            for tag in [
+                self._first_str(
+                    info_tree.xpath('//p[@class="category"]/span[1]/a/text()')
+                )
+            ]
+            if tag
         ]
 
         update_time = self._first_str(info_tree.xpath('//p[@class="time"]/span/text()'))
@@ -96,7 +118,9 @@ class XiguashuwuParser(BaseParser):
 
         chapters: list[ChapterInfoDict] = []
         for catalog_html in raw_pages[1:]:
-            cat_tree = html.fromstring(catalog_html)
+            cat_tree = parse_html_tree(catalog_html)
+            if cat_tree is None:
+                continue
             links = cat_tree.xpath(
                 '//section[contains(@class,"BCsectionTwo")]'
                 '[.//h3[text()="正文"]]//ol//li/a'
@@ -104,12 +128,16 @@ class XiguashuwuParser(BaseParser):
             for a in links:
                 title = a.xpath("string()").strip()
                 href = a.get("href", "").strip()
+                if not href or href.lower().startswith(("javascript:", "#")):
+                    continue
                 # chapterId is filename sans extension
-                chapter_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
+                chapter_id = chapter_id_from_href(href)
+                if not chapter_id or not title:
+                    continue
                 chapters.append(
                     ChapterInfoDict(
                         title=title,
-                        url=self.BASE_URL + href,
+                        url=resolve_url(cat_tree, href, fallback_base=self.BASE_URL),
                         chapterId=chapter_id,
                     )
                 )
@@ -153,7 +181,9 @@ class XiguashuwuParser(BaseParser):
 
         for page_idx, html_str in enumerate(raw_pages, start=1):
             if page_idx == 1:
-                tree = html.fromstring(html_str)
+                tree = parse_html_tree(html_str)
+                if tree is None:
+                    continue
                 title_text = self._extract_chapter_title(tree)
                 paragraphs.extend(self._parse_chapter_page1(tree))
             elif page_idx == 2:
@@ -173,8 +203,7 @@ class XiguashuwuParser(BaseParser):
             "extra": {"site": self.site_name},
         }
 
-    @classmethod
-    def _parse_chapter_page1(cls, tree: html.HtmlElement) -> list[str]:
+    def _parse_chapter_page1(self, tree: html.HtmlElement) -> list[str]:
         """
         Parse page 1 of the chapter: plain text, no encryption or obfuscation.
 
@@ -196,7 +225,11 @@ class XiguashuwuParser(BaseParser):
                 ad.getparent().remove(ad)
 
             lines = content_div.xpath(".//text()")
-            return [line.strip() for line in lines if line.strip()]
+            return [
+                line
+                for line in (raw.strip() for raw in lines)
+                if line and not self._is_ad_line(line)
+            ]
         except Exception as e:
             logger.warning("xiguashuwu parser: failed to parse chapter page 1: %s", e)
             return []
@@ -210,7 +243,9 @@ class XiguashuwuParser(BaseParser):
         :return: List of text lines extracted in correct reading order.
         """
         try:
-            tree = html.fromstring(html_str)
+            tree = parse_html_tree(html_str)
+            if tree is None:
+                return []
             # Extract ordering metadata
             order_raw = self._parse_client_meta(tree)
             codeurl = self._parse_codeurl(html_str)
@@ -245,7 +280,9 @@ class XiguashuwuParser(BaseParser):
             newcon = self._parse_newcon(html_str)
             d_key = self._parse_d_key(html_str)
             full_html = self._decrypt_d(newcon, d_key)
-            tree = html.fromstring(full_html)
+            tree = parse_html_tree(full_html)
+            if tree is None:
+                return []
             paragraphs = self._rebuild_paragraphs(tree)
             return paragraphs
         except Exception as e:
@@ -260,10 +297,13 @@ class XiguashuwuParser(BaseParser):
         The title is expected to be located inside:
         <h1 id="chapterTitle">...</h1>
 
-        :param tree: Parsed HTML element tree of the chapter page.
+        The page counter suffix (``(1/3)``) is not part of the title.
+
+        :param tree: Parsed HTML tree of the chapter page.
         :return: Chapter title as a string, or an empty string if not found.
         """
-        return cls._first_str(tree.xpath('//h1[@id="chapterTitle"]/text()'))
+        title = cls._first_str(tree.xpath('//h1[@id="chapterTitle"]/text()'))
+        return strip_page_marker(title)
 
     def _char_from_img(self, url: str) -> str:
         """
@@ -426,5 +466,6 @@ class XiguashuwuParser(BaseParser):
                     parts.append(child.tail.strip())
 
             paragraph = "".join(parts).strip()
-            paragraphs.append(paragraph)
+            if paragraph and not self._is_ad_line(paragraph):
+                paragraphs.append(paragraph)
         return paragraphs

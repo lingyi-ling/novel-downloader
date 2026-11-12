@@ -5,10 +5,10 @@ novel_downloader.plugins.sites.czbooks.searcher
 """
 
 import logging
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -40,13 +40,18 @@ class CzbooksSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath(
             "//ul[contains(@class,'novel-list')]//li[contains(@class,'novel-item-wrapper')]"
         )
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
+            if limit is not None and len(results) >= limit:
+                break
+
             href = self._first_str(
                 row.xpath(
                     ".//div[contains(@class,'novel-item-cover-wrapper')]//a/@href"
@@ -55,12 +60,11 @@ class CzbooksSearcher(BaseSearcher):
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
-                break
-
             book_url = self._abs_url(href)
-            # "//czbooks.net/n/c8idd3" -> "c8idd3"
-            book_id = href.rsplit("/", 1)[-1]
+            # "//czbooks.net/n/c8idd3?from=list#top" -> "c8idd3"
+            book_id = urlsplit(href).path.rsplit("/", 1)[-1]
+            if not book_id:
+                continue
 
             title = self._first_str(
                 row.xpath(".//div[contains(@class,'novel-item-title')]/text()")
@@ -93,7 +97,7 @@ class CzbooksSearcher(BaseSearcher):
                     latest_chapter=latest_chapter,
                     update_date=update_date,
                     word_count="-",
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
         return results

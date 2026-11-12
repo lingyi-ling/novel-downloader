@@ -6,10 +6,10 @@ novel_downloader.plugins.sites.trxs.searcher
 """
 
 import logging
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -44,23 +44,41 @@ class TrxsSearcher(BaseSearcher):
             self._log_fetch_failure(keyword, self.SEARCH_URL, exc)
             return ""
 
+    @staticmethod
+    def _url_to_id(url: str) -> str:
+        """Derive the numeric book id from a ``/tongren/<id>.html`` link."""
+        value = url.strip()
+        if value.startswith("//"):
+            value = "https:" + value
+        parts = urlsplit(value)
+        if parts.scheme not in ("", "http", "https"):
+            return ""
+        path = parts.path or value
+        leaf = path.rstrip("/").rsplit("/", 1)[-1]
+        return leaf.split(".", 1)[0]
+
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath('//div[@class="books m-cols"]/div[@class="bk"]')
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
             href = self._first_str(row.xpath(".//h3/a[1]/@href"))
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
+            # '/tongren/9302.html' -> "9302"
+            book_id = self._url_to_id(href)
+            if not book_id:
+                continue
+
+            if limit is not None and len(results) >= limit:
                 break
 
-            # '/tongren/9302.html' -> "9302"
-            book_id = href.split("/")[-1].split(".")[0]
             book_url = self._abs_url(href)
 
             cover_rel = self._first_str(
@@ -87,7 +105,7 @@ class TrxsSearcher(BaseSearcher):
             )
 
             # Compute priority
-            prio = self.priority + idx
+            prio = self.priority + len(results)
 
             results.append(
                 SearchResult(

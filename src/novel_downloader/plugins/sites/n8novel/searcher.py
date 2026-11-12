@@ -6,10 +6,10 @@ novel_downloader.plugins.sites.n8novel.searcher
 """
 
 import logging
-
-from lxml import html
+from urllib.parse import urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -33,23 +33,45 @@ class N8novelSearcher(BaseSearcher):
             self._log_fetch_failure(keyword, self.SEARCH_URL, exc)
             return ""
 
+    @staticmethod
+    def _url_to_id(url: str) -> str:
+        """
+        Derive the book id from a search-result link.
+
+        The live cards link with ``/novelbooks/6045``, but an absolute or
+        protocol-relative copy (plus a tracking query/fragment) must yield the
+        same id, because the fetcher rebuilds the URL from it.
+        """
+        url = url.strip()
+        if url.startswith("//"):
+            url = "https:" + url
+        parts = urlsplit(url)
+        if parts.scheme not in ("", "http", "https"):
+            return ""
+        path = parts.path or url
+        return path.rstrip("/").rsplit("/", 1)[-1]
+
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         anchors = doc.xpath("//div[contains(@class,'picsize')]/a")
         results: list[SearchResult] = []
 
-        for idx, a in enumerate(anchors):
+        for a in anchors:
             href = self._first_str(a.xpath("./@href"))
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
+            book_id = self._url_to_id(href)
+            if not book_id:
+                continue
+
+            if limit is not None and len(results) >= limit:
                 break
 
-            # '/novelbooks/6045' -> "6045"
-            book_id = href.rstrip("/").split("/")[-1]
             book_url = self._abs_url(href)
 
             cover_rel = self._first_str(a.xpath(".//img/@src"))
@@ -60,7 +82,7 @@ class N8novelSearcher(BaseSearcher):
             word_count = self._first_str(a.xpath(".//eps//text()")) or "-"
 
             # Compute priority
-            prio = self.priority + idx
+            prio = self.priority + len(results)
 
             results.append(
                 SearchResult(

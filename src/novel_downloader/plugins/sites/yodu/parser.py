@@ -9,10 +9,12 @@ import json
 import re
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.infra.paths import YODU_MAP_PATH
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -42,7 +44,9 @@ class YoduParser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         # --- Metadata ---
         book_name = (
@@ -140,12 +144,12 @@ class YoduParser(BaseParser):
             if not a:
                 continue
             href = (a[0].get("href") or "").strip()
-            if not href:
+            if not href or href.lower().startswith(("javascript:", "#")):
                 continue
             title = self._first_str(a[0].xpath(".//text()"))
-            chapter_id = (
-                "" if "javascript" in href else href.rsplit("/", 1)[-1].split(".", 1)[0]
-            )
+            chapter_id = chapter_id_from_href(href)
+            if not chapter_id:
+                continue
             current_chapters.append(
                 {"title": title, "url": href, "chapterId": chapter_id}
             )
@@ -183,7 +187,9 @@ class YoduParser(BaseParser):
         curr_paragraph_idx = 0
 
         for curr_html in raw_pages:
-            tree = html.fromstring(curr_html)
+            tree = parse_html_tree(curr_html)
+            if tree is None:
+                continue
             decrypt: bool = "/en/common/read.ttf" in curr_html
 
             if not title:

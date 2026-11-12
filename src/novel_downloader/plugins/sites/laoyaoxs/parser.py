@@ -10,6 +10,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,6 +30,7 @@ class LaoyaoxsParser(BaseParser):
     """
 
     site_name: str = "laoyaoxs"
+    BASE_URL: str = "https://www.laoyaoxs.org"
 
     def parse_book_info(
         self,
@@ -59,13 +64,12 @@ class LaoyaoxsParser(BaseParser):
             info_tree.xpath('//meta[@property="og:novel:category"]/@content')
         )
 
-        cover_url = self._first_str(
+        cover_rel = self._first_str(
             info_tree.xpath('//meta[@property="og:image"]/@content')
         ) or self._first_str(
             info_tree.xpath('//a[contains(@class,"bookimg")]//img/@src')
         )
-        if cover_url.startswith("//"):
-            cover_url = "https:" + cover_url
+        cover_url = resolve_url(info_tree, cover_rel, fallback_base=self.BASE_URL)
 
         update_time = self._first_str(
             info_tree.xpath('//meta[@property="og:novel:update_time"]/@content'),
@@ -81,7 +85,9 @@ class LaoyaoxsParser(BaseParser):
             {
                 "title": (a.get("title") or (a.text or "")).strip(),
                 "url": (a.get("href") or "").strip(),
-                "chapterId": (a.get("href") or "").split(".", 1)[0],
+                # '/list/7449/1.html' -> '1' (a path-shaped id breaks the
+                # CHAPTER_URL template).
+                "chapterId": chapter_id_from_href(a.get("href") or ""),
             }
             for a in catalog_tree.xpath(
                 '//div[contains(@class,"read")]//dl[@id="newlist"]//dd//a[1]'

@@ -56,8 +56,10 @@ class SfacgSearcher(BaseSearcher):
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
         try:
-            data: dict[str, Any] = json.loads(html_str)
-        except json.JSONDecodeError:
+            data: Any = json.loads(html_str)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(data, dict):
             return []
 
         novels = data.get("Novels")
@@ -65,9 +67,7 @@ class SfacgSearcher(BaseSearcher):
             return []
 
         results: list[SearchResult] = []
-        for idx, item in enumerate(novels):
-            if limit is not None and idx >= limit:
-                break
+        for item in novels:
             if not isinstance(item, dict):
                 continue
 
@@ -76,9 +76,19 @@ class SfacgSearcher(BaseSearcher):
             if not book_id or not title:
                 continue
 
+            if limit is not None and len(results) >= limit:
+                break
+
             author = str(item.get("AuthorName") or "").strip()
             cover_path = str(item.get("NovelCover") or "").strip()
-            cover_url = self._COVER_BASE + cover_path if cover_path else ""
+            if cover_path.startswith(("http://", "https://")):
+                cover_url = cover_path
+            elif cover_path.startswith("//"):
+                cover_url = "https:" + cover_path
+            elif cover_path:
+                cover_url = self._COVER_BASE + cover_path.lstrip("/")
+            else:
+                cover_url = ""
 
             results.append(
                 SearchResult(
@@ -91,7 +101,7 @@ class SfacgSearcher(BaseSearcher):
                     latest_chapter="-",
                     update_date="-",
                     word_count="-",
-                    priority=self.priority + idx,
+                    priority=self.priority + len(results),
                 )
             )
         return results
