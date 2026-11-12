@@ -26,8 +26,11 @@ Design decisions (borrowed from how larger release pipelines do it)
   was installed from.
 * **Strict equality in ``--check``** so a stale manifest is a hard failure
   rather than a silent downgrade.
-* **Canonical JSON** (sorted keys, no insignificant whitespace) so the file is
-  reproducible and can be signed byte-for-byte later.
+* **Canonical JSON** (sorted keys, no insignificant whitespace, UTF-8) so the
+  file is reproducible and can be signed byte-for-byte later.  An optional
+  Ed25519 signature covers every field except ``signature``/``key_id``
+  itself -- including each platform's ``name``, ``url``, ``sha256`` and
+  ``size`` -- and clients verify those exact canonical bytes.
 
 Usage::
 
@@ -35,14 +38,18 @@ Usage::
         --release-json payload.json --version 1.4.1 --tag v1.4.1 \\
         --repo lingyi-ling/novel-downloader --out latest.json
     python scripts/build_update_manifest.py ... --check latest.json
+    python scripts/build_update_manifest.py --keygen ~/.novel_downloader/update.key
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
+import hmac
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -183,6 +190,17 @@ def _classify(name: str) -> str | None:
             return None
         return f"{platform_tag}-{arch}-{shape}"
     return None
+
+
+def classify_asset(name: str) -> str | None:
+    """
+    Public wrapper around :func:`_classify`.
+
+    The release script re-derives the target key from each asset name so a
+    manifest entry cannot point at a file of a different shape; keeping the
+    rule in one place means the producer and the verifier cannot drift apart.
+    """
+    return _classify(name)
 
 
 def build_manifest(
@@ -344,7 +362,10 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         metavar="PATH",
-        help="write a fresh Ed25519 seed to PATH and print its public key",
+        help=(
+            "write a fresh Ed25519 seed to PATH and print its public key; "
+            "refuses to replace an existing file"
+        ),
     )
     parser.add_argument(
         "--public-key",
@@ -356,16 +377,43 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.keygen is not None:
         seed, public = generate_keypair()
+        identifier = key_id(public)
         try:
             args.keygen.parent.mkdir(parents=True, exist_ok=True)
-            args.keygen.write_text(seed + chr(10), encoding="ascii")
+            # ``O_EXCL`` refuses to replace an existing seed: it is the only
+            # way to sign future manifests, so clobbering it would strand
+            # every client that trusts the matching public key.  ``0o600`` is
+            # applied at creation on POSIX so the file is never group/world
+            # readable, even for an instant.
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            descriptor = os.open(args.keygen, flags, 0o600)
+            try:
+                with os.fdopen(
+                    descriptor, "w", encoding="ascii", newline="\n"
+                ) as handle:
+                    handle.write(seed + chr(10))
+            except OSError:
+                with contextlib.suppress(OSError):
+                    args.keygen.unlink()
+                raise
+            # Windows ignores the creation mode; re-assert the intended
+            # permissions where the platform honours them.
             args.keygen.chmod(0o600)
+        except FileExistsError:
+            print(
+                f"error: refusing to overwrite the existing key file "
+                f"{args.keygen} (move it away first)",
+                file=sys.stderr,
+            )
+            return 1
         except OSError as exc:
             print(f"error: cannot write {args.keygen}: {exc}", file=sys.stderr)
             return 1
         print(f"private seed: {args.keygen} (keep it out of the repository)")
         print(f"public key  : {public}")
-        print(f"key id      : {key_id(public)}")
+        print(f"key id      : {identifier}")
+        print("trusted key entry for updater.TRUSTED_UPDATE_KEYS:")
+        print(f'    "{identifier}": "{public}",')
         return 0
 
     missing = [
@@ -455,10 +503,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 # ---------------------------------------------------------------------------
 # signing (optional)
 # ---------------------------------------------------------------------------
@@ -473,7 +517,16 @@ def key_id(public_hex: str) -> str:
 
 
 def _signing_bytes(document: dict[str, Any]) -> bytes:
-    """The bytes a signature covers: the document without its signature."""
+    """
+    The bytes a signature covers: the document without its signature fields.
+
+    Every other top-level field is signed, and because :func:`canonical_bytes`
+    sorts nested objects too, each ``platforms.<key>`` entry is signed in full
+    (``name``, ``url``, ``sha256``, ``size``).  Retargeting a download or
+    swapping a digest therefore always invalidates the signature.
+    ``key_id`` is deliberately excluded: it is only the selector a client uses
+    to look the public key up, not part of the trusted payload.
+    """
     payload = {k: v for k, v in document.items() if k not in {"signature", "key_id"}}
     return canonical_bytes(payload)
 
@@ -493,7 +546,8 @@ def sign_document(document: dict[str, Any], private_seed_hex: str) -> dict[str, 
     Return a copy of *document* with ``signature`` and ``key_id`` added.
 
     The signature covers the canonical JSON of the document **without** those
-    two fields, so a client can recompute the same bytes after parsing.
+    two fields, so a client can recompute the same bytes after parsing.  All
+    other fields, ``platforms`` included, are authenticated by it.
     """
     from Crypto.Signature import eddsa
 
@@ -517,16 +571,37 @@ def sign_document(document: dict[str, Any], private_seed_hex: str) -> dict[str, 
 
 
 def verify_document(document: dict[str, Any], public_hex: str) -> bool:
-    """Whether *document* carries a valid signature from *public_hex*."""
+    """
+    Whether *document* carries a valid signature from *public_hex*.
+
+    The recorded ``key_id`` must also name *public_hex*: a client resolves the
+    key by that id, so a valid signature under a different id would be refused
+    by the client.  Checking both here keeps ``--check --public-key`` in step
+    with :func:`novel_downloader.apps.common.updater.verify_manifest_signature`.
+
+    :param document: a parsed manifest.
+    :param public_hex: the Ed25519 public key to verify against, in hex.
+    :return: ``True`` only for a signature this key made over this document.
+    """
     from Crypto.Signature import eddsa
 
     encoded = document.get("signature")
-    if not isinstance(encoded, str):
+    claimed = document.get("key_id")
+    if not isinstance(encoded, str) or not isinstance(claimed, str):
         return False
     try:
+        digest = key_id(public_hex.strip())
+        if not hmac.compare_digest(claimed, digest):
+            return False
         signature = base64.b64decode(encoded, validate=True)
         public = eddsa.import_public_key(bytes.fromhex(public_hex.strip()))
         eddsa.new(public, "rfc8032").verify(_signing_bytes(document), signature)
     except Exception:  # noqa: BLE001 - any failure means "not verified"
         return False
     return True
+
+
+# Kept last: ``main`` reaches symbols defined throughout this module, so the
+# entry point must only run after the whole file has been executed.
+if __name__ == "__main__":
+    raise SystemExit(main())

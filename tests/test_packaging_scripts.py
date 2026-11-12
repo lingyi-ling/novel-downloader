@@ -23,10 +23,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
+import fnmatch
 import importlib.util
 import io
 import json
 import re
+import ssl
 import subprocess
 import sys
 import tomllib
@@ -177,6 +180,79 @@ class TestSpecExcludes:
     def test_entry_scripts_exist(self) -> None:
         for name in ("cli_entry.py", "api_entry.py", "desktop_entry.py"):
             assert (PACKAGING / name).is_file(), f"spec entry script missing: {name}"
+
+
+class TestSpecSizePruning:
+    """Build/test-only code and unreadable hook payload stay out of bundles."""
+
+    def test_dev_and_test_packages_excluded(self, spec_common: Any) -> None:
+        for module in (
+            "setuptools",
+            "_distutils_hack",
+            "numpy.testing",
+            "numpy.f2py",
+            "numpy.random",
+        ):
+            assert module in spec_common.EXCLUDES, f"{module} must stay excluded"
+
+    def test_pruned_numpy_submodules_are_unused(self) -> None:
+        # numpy exposes testing/f2py/random only through ``__getattr__``; no
+        # module in this repository may reference them (the specs drop them).
+        joined = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(SRC_PACKAGE.rglob("*.py"))
+            if "__pycache__" not in path.parts
+        )
+        for name in (
+            "numpy.testing",
+            "numpy.f2py",
+            "numpy.random",
+            "np.testing",
+            "np.f2py",
+            "np.random",
+        ):
+            assert name not in joined, f"source still uses pruned submodule {name}"
+
+    def test_prune_bundle_toc_drops_only_the_named_trees(
+        self, spec_common: Any
+    ) -> None:
+        toc = [
+            ("emoji\\unicode_codes\\emoji_zh.json", "C:\\x\\zh.json", "DATA"),
+            ("emoji/unicode_codes/emoji.json", "/x/emoji.json", "DATA"),
+            ("emoji\\py.typed", "C:\\x\\py.typed", "DATA"),
+            ("numpy\\random\\mtrand.pyd", "C:\\x\\mtrand.pyd", "BINARY"),
+            ("numpy\\_core\\_multiarray_umath.pyd", "C:\\x\\core.pyd", "BINARY"),
+            ("numpy.libs\\libscipy_openblas.dll", "C:\\x\\openblas.dll", "BINARY"),
+        ]
+        data = spec_common.prune_bundle_toc(toc, spec_common.UNUSED_DATA_PREFIXES)
+        binaries = spec_common.prune_bundle_toc(toc, spec_common.UNUSED_BINARY_PREFIXES)
+        # ``emoji.json`` is opened by ``import emoji`` and must survive; only
+        # the ``emoji_<lang>.json`` overlays are pruned.
+        assert [entry[0] for entry in data] == [
+            "emoji/unicode_codes/emoji.json",
+            "emoji\\py.typed",
+            "numpy\\random\\mtrand.pyd",
+            "numpy\\_core\\_multiarray_umath.pyd",
+            "numpy.libs\\libscipy_openblas.dll",
+        ]
+        assert [entry[0] for entry in binaries] == [
+            "emoji\\unicode_codes\\emoji_zh.json",
+            "emoji/unicode_codes/emoji.json",
+            "emoji\\py.typed",
+            "numpy\\_core\\_multiarray_umath.pyd",
+            "numpy.libs\\libscipy_openblas.dll",
+        ]
+
+    @pytest.mark.parametrize(
+        "spec_path", [_CLI_SPEC, _API_SPEC, _DESKTOP_SPEC], ids=lambda path: path.name
+    )
+    def test_specs_prune_hook_payload(self, spec_path: Path) -> None:
+        text = spec_path.read_text(encoding="utf-8")
+        assert "prune_bundle_toc" in text
+        assert "UNUSED_DATA_PREFIXES" in text
+        assert "UNUSED_BINARY_PREFIXES" in text
+        assert "a.datas = prune_bundle_toc(a.datas" in text
+        assert "a.binaries = prune_bundle_toc(a.binaries" in text
 
 
 class TestNoCrossAppImports:
@@ -1424,7 +1500,58 @@ class TestTagPushFallback:
 
         assert release_script.remote_tag_exists(tmp_path, _TAG) is False
         assert seen[0]["timeout"] == release_script.GIT_REMOTE_TIMEOUT
-        assert "assuming it is not pushed" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "assuming it is not pushed" in err
+        # A blocked git endpoint is exactly when the API-based helper helps.
+        assert "push_via_api.py" in err
+
+    def test_blocked_push_prints_the_api_helper_hint(
+        self,
+        release_script: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        def fake_run(command: Any, **kwargs: Any) -> Any:
+            raise release_script.ReleaseError("could not resolve host: github.com")
+
+        monkeypatch.setattr(release_script, "_run", fake_run)
+
+        with pytest.raises(release_script.ReleaseError, match="resolve host"):
+            release_script.push_tag(tmp_path, _TAG, None, _SLUG)
+
+        err = capsys.readouterr().err
+        assert "push_via_api.py" in err
+        assert "--dry-run" in err
+
+    def test_rest_fallback_still_points_at_the_helper(
+        self,
+        release_script: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        def fake_run(command: Any, **kwargs: Any) -> Any:
+            recorded = list(command)
+            if recorded[:2] == ["git", "push"]:
+                raise release_script.ReleaseError("host down")
+            return types.SimpleNamespace(returncode=0, stdout="abc\n", stderr="")
+
+        class StubClient:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def ensure_tag_ref(self, tag: str, sha: str) -> None:
+                pass
+
+        monkeypatch.setattr(release_script, "_run", fake_run)
+        monkeypatch.setattr(release_script, "GitHubClient", StubClient)
+
+        release_script.push_tag(tmp_path, _TAG, "tok", _SLUG)
+
+        err = capsys.readouterr().err
+        assert "git push failed" in err
+        assert "push_via_api.py" in err
 
 
 class _SyncClient:
@@ -1616,6 +1743,49 @@ class TestLatestManifestValidation:
             written, specs, version=_VER, tag=_TAG, slug=_SLUG
         )
 
+    def test_signed_latest_json_verifies_and_still_validates(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        """The release path must publish a manifest the client's verifier accepts."""
+        specs = self._specs(release_script, tmp_path)
+        builder = release_script._manifest_builder()
+        seed, public = builder.generate_keypair()
+        key = tmp_path / "update.key"
+        key.write_text(seed + "\n", encoding="ascii")
+        release_dir = tmp_path / "out"
+        release_dir.mkdir()
+
+        asset = release_script.build_latest_manifest(
+            specs, release_dir, _VER, _TAG, _SLUG, sign_key=key
+        )
+
+        payload = (release_dir / "latest.json").read_bytes()
+        written = json.loads(payload.decode("utf-8"))
+        assert written["key_id"] == builder.key_id(public)
+        assert builder.verify_document(written, public)
+        # Signature fields are metadata; they must not disturb validation.
+        release_script.validate_latest_manifest(
+            written, specs, version=_VER, tag=_TAG, slug=_SLUG
+        )
+        # The published digest covers the signed bytes, not a pre-sign draft.
+        assert asset.sha256 == sha256(payload).hexdigest()
+
+    def test_a_bad_signing_key_aborts_before_writing(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        specs = self._specs(release_script, tmp_path)
+        key = tmp_path / "update.key"
+        key.write_text("not-hex\n", encoding="ascii")
+        release_dir = tmp_path / "out"
+        release_dir.mkdir()
+
+        with pytest.raises(release_script.ReleaseError, match="cannot sign"):
+            release_script.build_latest_manifest(
+                specs, release_dir, _VER, _TAG, _SLUG, sign_key=key
+            )
+
+        assert not (release_dir / "latest.json").exists()
+
     def test_manifest_digest_is_required_at_verification(
         self, release_script: Any, tmp_path: Path
     ) -> None:
@@ -1629,6 +1799,262 @@ class TestLatestManifestValidation:
             release_script.ReleaseError, match="no digest for latest.json"
         ):
             release_script.verify_assets(_Client(), _TAG, [asset])
+
+    def _full_specs(self, release_script: Any, tmp_path: Path) -> list[Any]:
+        """Every shape a real release publishes, with its real name."""
+        return [
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"NovelDownloader-setup-{_VER}-x64.exe",
+                b"setup",
+            ),
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"NovelDownloader-{_VER}-windows-x64.zip",
+                b"portable",
+            ),
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"novel-cli-{_VER}-windows-x64.zip",
+                b"cli",
+            ),
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"novel-api-{_VER}-windows-x64.zip",
+                b"api",
+            ),
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"novel-downloader-{_VER}-android.apk",
+                b"android",
+            ),
+        ]
+
+    def test_full_shape_matrix_points_at_the_right_file(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        specs = self._full_specs(release_script, tmp_path)
+        document = release_script.build_manifest_document(specs, _VER, _TAG, _SLUG)
+
+        expected = {
+            "windows-x64-installer": f"NovelDownloader-setup-{_VER}-x64.exe",
+            "windows-x64-portable": f"NovelDownloader-{_VER}-windows-x64.zip",
+            "windows-x64-cli": f"novel-cli-{_VER}-windows-x64.zip",
+            "windows-x64-api": f"novel-api-{_VER}-windows-x64.zip",
+            "android": f"novel-downloader-{_VER}-android.apk",
+        }
+        assert {
+            key: entry["name"] for key, entry in document["platforms"].items()
+        } == expected
+        by_name = {asset.name: asset for asset in specs}
+        for key, name in expected.items():
+            entry = document["platforms"][key]
+            asset = by_name[name]
+            assert entry["url"] == (
+                f"https://github.com/{_SLUG}/releases/download/{_TAG}/{name}"
+            )
+            assert entry["sha256"] == asset.sha256
+            assert entry["size"] == asset.path.stat().st_size
+
+    def test_split_apks_get_distinct_keys(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        specs = [
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"novel-downloader-{_VER}-android-arm64-v8a.apk",
+                b"arm64",
+            ),
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"novel-downloader-{_VER}-android-universal.apk",
+                b"universal",
+            ),
+        ]
+        document = release_script.build_manifest_document(specs, _VER, _TAG, _SLUG)
+
+        assert set(document["platforms"]) == {"android-arm64-v8a", "android-universal"}
+
+    def test_entry_for_another_shape_is_rejected(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        specs, document = self._document(release_script, tmp_path)
+        document["platforms"]["windows-x64-installer"]["name"] = (
+            f"NovelDownloader-{_VER}-windows-x64.zip"
+        )
+        with pytest.raises(release_script.ReleaseError, match="classifies as"):
+            release_script.validate_latest_manifest(
+                document, specs, version=_VER, tag=_TAG, slug=_SLUG
+            )
+
+    def test_stale_version_asset_is_rejected(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        specs = [
+            _asset_spec(
+                release_script,
+                tmp_path,
+                "novel-cli-0.0.1-windows-x64.zip",
+                b"old",
+            )
+        ]
+        with pytest.raises(
+            release_script.ReleaseError, match="does not carry the release version"
+        ):
+            release_script.build_manifest_document(specs, _VER, _TAG, _SLUG)
+
+
+class TestSumsManifestConsistency:
+    """SHA256SUMS.txt and latest.json are published together; they must agree."""
+
+    def _release(self, release_script: Any, tmp_path: Path) -> tuple[Path, Path, Any]:
+        specs = [
+            _asset_spec(
+                release_script, tmp_path, f"novel-cli-{_VER}-windows-x64.zip", b"cli"
+            ),
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"NovelDownloader-{_VER}-windows-x64.zip",
+                b"portable",
+            ),
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"novel-downloader-{_VER}-android.apk",
+                b"android",
+            ),
+        ]
+        release_dir = tmp_path / "out"
+        release_dir.mkdir()
+        manifest = release_script.build_latest_manifest(
+            specs, release_dir, _VER, _TAG, _SLUG
+        )
+        sums_path = release_dir / "SHA256SUMS.txt"
+        release_script.merge_sums(
+            sums_path, [(asset.name, asset.sha256) for asset in [*specs, manifest]]
+        )
+        return release_dir, sums_path, manifest
+
+    def test_matching_digests_pass(
+        self,
+        release_script: Any,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        release_dir, sums_path, _ = self._release(release_script, tmp_path)
+        release_script.validate_sums_against_manifest(
+            sums_path, release_dir / "latest.json"
+        )
+        assert "agrees with latest.json" in capsys.readouterr().out
+
+    def test_platform_digest_mismatch_is_rejected(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        release_dir, sums_path, _ = self._release(release_script, tmp_path)
+        # Flip one digest deterministically: replace the cli line's digest.
+        lines = sums_path.read_text(encoding="utf-8").splitlines()
+        flipped = []
+        for line in lines:
+            if line.endswith(f"novel-cli-{_VER}-windows-x64.zip"):
+                line = "0" * 64 + "  " + f"novel-cli-{_VER}-windows-x64.zip"
+            flipped.append(line)
+        sums_path.write_text("\n".join(flipped) + "\n", encoding="utf-8")
+        with pytest.raises(release_script.ReleaseError, match="disagree"):
+            release_script.validate_sums_against_manifest(
+                sums_path, release_dir / "latest.json"
+            )
+
+    def test_platform_missing_from_sums_is_rejected(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        release_dir, sums_path, _ = self._release(release_script, tmp_path)
+        lines = [
+            line
+            for line in sums_path.read_text(encoding="utf-8").splitlines()
+            if not line.endswith(f"novel-cli-{_VER}-windows-x64.zip")
+        ]
+        sums_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with pytest.raises(release_script.ReleaseError, match="missing"):
+            release_script.validate_sums_against_manifest(
+                sums_path, release_dir / "latest.json"
+            )
+
+    def test_manifest_own_digest_mismatch_is_rejected(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        release_dir, sums_path, _ = self._release(release_script, tmp_path)
+        lines = []
+        for line in sums_path.read_text(encoding="utf-8").splitlines():
+            if line.endswith("latest.json"):
+                line = "0" * 64 + "  latest.json"
+            lines.append(line)
+        sums_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with pytest.raises(release_script.ReleaseError, match="latest.json is"):
+            release_script.validate_sums_against_manifest(
+                sums_path, release_dir / "latest.json"
+            )
+
+    def test_manifest_missing_from_sums_is_rejected(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        release_dir, sums_path, _ = self._release(release_script, tmp_path)
+        lines = [
+            line
+            for line in sums_path.read_text(encoding="utf-8").splitlines()
+            if not line.endswith("latest.json")
+        ]
+        sums_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with pytest.raises(release_script.ReleaseError, match="missing"):
+            release_script.validate_sums_against_manifest(
+                sums_path, release_dir / "latest.json"
+            )
+
+    def test_repeated_release_is_byte_identical(
+        self, release_script: Any, tmp_path: Path
+    ) -> None:
+        """Re-running a release with the same tag/assets changes nothing."""
+        release_dir, sums_path, first_manifest = self._release(release_script, tmp_path)
+        first_json = (release_dir / "latest.json").read_bytes()
+        first_sums = sums_path.read_bytes()
+
+        specs = [
+            _asset_spec(
+                release_script, tmp_path, f"novel-cli-{_VER}-windows-x64.zip", b"cli"
+            ),
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"NovelDownloader-{_VER}-windows-x64.zip",
+                b"portable",
+            ),
+            _asset_spec(
+                release_script,
+                tmp_path,
+                f"novel-downloader-{_VER}-android.apk",
+                b"android",
+            ),
+        ]
+        second_manifest = release_script.build_latest_manifest(
+            specs, release_dir, _VER, _TAG, _SLUG
+        )
+        release_script.merge_sums(
+            sums_path,
+            [(asset.name, asset.sha256) for asset in [*specs, second_manifest]],
+        )
+        assert (release_dir / "latest.json").read_bytes() == first_json
+        assert sums_path.read_bytes() == first_sums
+        assert second_manifest.sha256 == first_manifest.sha256
+        release_script.validate_sums_against_manifest(
+            sums_path, release_dir / "latest.json"
+        )
 
 
 class TestTransientClassification:
@@ -1708,7 +2134,45 @@ class TestDryRunManifestPreview:
         assert "windows-x64-api" in out
         assert "windows-x64-portable" in out
         assert "unsigned (pass --sign-key to sign)" in out
+        # The plan must name the API-based push helper for a blocked
+        # github.com:443, without running it.
+        assert "push_via_api.py --dry-run" in out
         assert not (release_dir / "latest.json").exists()
+
+    def test_android_is_only_previewed_when_it_would_be_uploaded(
+        self,
+        release_script: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A stale APK on disk must not be promised when Android is skipped."""
+        root, _ = self._make_repo(tmp_path)
+        android = root / "android"
+        apk_dir = android / "app" / "build" / "outputs" / "apk" / "release"
+        apk_dir.mkdir(parents=True)
+        (apk_dir / "app-release.apk").write_bytes(b"stale-apk")
+        (android / "keystore.properties").write_text(
+            "storeFile=release.jks\nstorePassword=x\nkeyAlias=k\nkeyPassword=x\n",
+            encoding="utf-8",
+        )
+        (android / "release.jks").write_bytes(b"jks")
+
+        def forbidden(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError(f"dry run must not execute anything: {args!r}")
+
+        monkeypatch.setattr(release_script, "REPO_ROOT", root)
+        monkeypatch.setattr(
+            release_script, "subprocess", types.SimpleNamespace(run=forbidden)
+        )
+        monkeypatch.setattr(urllib.request, "urlopen", forbidden)
+
+        apk_name = f"novel-downloader-{_VER}-android.apk"
+        assert release_script.main(["--dry-run"]) == 0
+        assert apk_name in capsys.readouterr().out
+
+        assert release_script.main(["--dry-run", "--skip-android"]) == 0
+        assert apk_name not in capsys.readouterr().out
 
 
 class TestEnsureTagRef:
@@ -1951,6 +2415,99 @@ class TestFrozenVerification:
         assert "fontTools" in font_utils
         assert set(verify_frozen.IMAGE_STACK_MODULES) >= {"numpy", "fontTools"}
 
+    def test_pruning_contract_matches_spec_common(
+        self, verify_frozen: Any, spec_common: Any
+    ) -> None:
+        assert set(verify_frozen.PRUNED_MODULES) <= set(spec_common.EXCLUDES)
+        assert set(verify_frozen.PRUNED_DATA_GLOBS) == {
+            "emoji/unicode_codes/emoji_*.json",
+            "numpy/random/*.pyd",
+        }
+        # The base table ``import emoji`` opens must never be pruned.
+        base = "emoji/unicode_codes/emoji.json"
+        assert base in verify_frozen.REQUIRED_DATA_FILES
+        assert not any(
+            fnmatch.fnmatch(base, pattern)
+            for pattern in verify_frozen.PRUNED_DATA_GLOBS
+        )
+        assert not base.startswith(spec_common.UNUSED_DATA_PREFIXES[0])
+
+    def test_hygiene_check_reports_leftover_payload(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        internal = tmp_path / "dist" / "novel-cli" / "_internal"
+        (internal / "emoji" / "unicode_codes").mkdir(parents=True)
+        (internal / "emoji" / "unicode_codes" / "emoji_zh.json").write_text("{}")
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "novel-cli.exe")
+        monkeypatch.setattr(
+            verify_frozen,
+            "_pyz_modules",
+            lambda work: {"emoji.unicode_codes.data_dict"},
+        )
+        verify_frozen._check_bundle_hygiene(report, internal.parent, tmp_path / "work")
+        assert not report.ok()
+        assert "pruned payload" in " ".join(report.problems)
+
+    def test_hygiene_check_reports_a_reintroduced_module(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        internal = tmp_path / "dist" / "novel-cli" / "_internal"
+        internal.mkdir(parents=True)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "novel-cli.exe")
+        monkeypatch.setattr(
+            verify_frozen,
+            "_pyz_modules",
+            lambda work: {"setuptools", "emoji.unicode_codes.data_dict"},
+        )
+        verify_frozen._check_bundle_hygiene(report, internal.parent, tmp_path / "work")
+        assert not report.ok()
+        assert "setuptools" in " ".join(report.problems)
+
+    def test_hygiene_check_reports_a_missing_emoji_base_table(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ``import emoji`` opens emoji.json at load time: pruning it is fatal.
+        internal = tmp_path / "dist" / "novel-cli" / "_internal"
+        internal.mkdir(parents=True)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "novel-cli.exe")
+        monkeypatch.setattr(
+            verify_frozen,
+            "_pyz_modules",
+            lambda work: {"emoji.unicode_codes.data_dict"},
+        )
+        verify_frozen._check_bundle_hygiene(report, internal.parent, tmp_path / "work")
+        assert not report.ok()
+        assert "missing required data" in " ".join(report.problems)
+
+    def test_hygiene_check_accepts_a_pruned_bundle(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        internal = tmp_path / "dist" / "novel-cli" / "_internal"
+        emoji_data = internal / "emoji" / "unicode_codes"
+        emoji_data.mkdir(parents=True)
+        (emoji_data / "emoji.json").write_text("{}")
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "novel-cli.exe")
+        monkeypatch.setattr(
+            verify_frozen,
+            "_pyz_modules",
+            lambda work: {"emoji.unicode_codes.data_dict", "emoji.core"},
+        )
+        verify_frozen._check_bundle_hygiene(report, internal.parent, tmp_path / "work")
+        assert report.ok(), report.problems
+        assert any("size hygiene" in check for check in report.checks)
+
     def test_build_workflow_runs_the_smoke_test(self) -> None:
         document = _load_workflow(BUILD_YML)
         python_job = "\n".join(
@@ -1977,5 +2534,778 @@ class TestSpecImageStack:
         assert set(spec_common.IMAGE_STACK_HIDDEN_IMPORTS) <= hidden
 
     def test_image_modules_are_never_excluded(self, spec_common: Any) -> None:
-        excluded_roots = {name.split(".")[0] for name in spec_common.EXCLUDES}
-        assert not excluded_roots & {"numpy", "PIL", "fontTools"}
+        # Dead submodules may be pruned (see TestSpecSizePruning), but the
+        # image-stack packages themselves must never be excluded wholesale.
+        assert not {"numpy", "PIL", "fontTools"} & set(spec_common.EXCLUDES)
+
+
+# ---------------------------------------------------------------------------
+# 12. scripts/push_via_api.py (Git Data API push when github.com:443 is blocked)
+# ---------------------------------------------------------------------------
+
+_PUSH_SCRIPT = SCRIPTS / "push_via_api.py"
+
+
+@pytest.fixture(scope="module")
+def push_api() -> Any:
+    return _load_script(_PUSH_SCRIPT, "audit_push_via_api")
+
+
+class _PushResponse:
+    """The narrow ``HTTPResponse`` surface GitHubClient reads."""
+
+    def __init__(
+        self,
+        status: int,
+        payload: Any,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.status = status
+        self.headers = headers or {}
+        self._body = b"" if payload is None else json.dumps(payload).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> _PushResponse:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+class _PushHTTP:
+    """A ``urlopen`` double routing (method, URL fragment) to scripted replies."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._routes: list[tuple[str, str, Any]] = []
+
+    def route(
+        self,
+        method: str,
+        fragment: str,
+        status: int = 200,
+        payload: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self._routes.append((method, fragment, (status, payload, headers)))
+
+    def route_dynamic(self, method: str, fragment: str, reply: Any) -> None:
+        self._routes.append((method, fragment, reply))
+
+    def __call__(
+        self, request: urllib.request.Request, timeout: float | None = None
+    ) -> _PushResponse:
+        method = request.get_method()
+        url = request.full_url
+        self.requests.append(
+            {
+                "method": method,
+                "url": url,
+                "data": request.data,
+                "headers": dict(request.headers),
+                "timeout": timeout,
+            }
+        )
+        for route_method, fragment, reply in self._routes:
+            if route_method == method and fragment in url:
+                if callable(reply):
+                    reply = reply(request)
+                if isinstance(reply, Exception):
+                    raise reply
+                status, payload, headers = reply
+                return _PushResponse(status, payload, headers)
+        raise AssertionError(f"unexpected HTTP request: {method} {url}")
+
+    def signal(self) -> list[tuple[str, str]]:
+        """Requests as ``(method, path+query)``, in arrival order."""
+        return [
+            (item["method"], item["url"].split("api.github.com", 1)[-1])
+            for item in self.requests
+        ]
+
+    def writes(self) -> list[tuple[str, str]]:
+        return [item for item in self.signal() if item[0] in {"POST", "PATCH", "PUT"}]
+
+    def bodies(self, method: str, suffix: str) -> list[dict[str, Any]]:
+        return [
+            json.loads(item["data"])
+            for item in self.requests
+            if item["method"] == method
+            and item["data"]
+            and item["url"].endswith(suffix)
+        ]
+
+
+class _PushGit:
+    """An in-memory git repository for the read-only commands the script runs."""
+
+    def __init__(self, order: list[str]) -> None:
+        self.order = list(order)  # newest first, like ``git log``
+        self.commits: dict[str, dict[str, Any]] = {}
+        self.blobs: dict[str, bytes] = {}
+
+    def add(
+        self,
+        sha: str,
+        tree: str,
+        *,
+        parents: tuple[str, ...] = (),
+        files: dict[str, tuple[str, str, bytes]] | None = None,
+        message: str = "commit",
+        author: tuple[str, str, str] = (
+            "Alice",
+            "alice@example.com",
+            "2026-01-01T00:00:00+00:00",
+        ),
+        committer: tuple[str, str, str] | None = None,
+    ) -> None:
+        self.commits[sha] = {
+            "tree": tree,
+            "parents": parents,
+            "files": files or {},
+            "message": message,
+            "author": author,
+            "committer": committer or author,
+        }
+        for _mode, blob_sha, content in (files or {}).values():
+            self.blobs[blob_sha] = content
+
+    def sha_for_content(self, content: bytes) -> str:
+        for sha, data in self.blobs.items():
+            if data == content:
+                return sha
+        raise AssertionError(f"unknown blob content: {content!r}")
+
+    def text(self, args: list[str], root: Path) -> str:
+        command = args[0]
+        if command == "log":
+            assert args[-1] == "HEAD"
+            return "".join(f"{sha} {self.commits[sha]['tree']}\n" for sha in self.order)
+        if command == "rev-list":
+            revision = args[-1]
+            if revision == "HEAD":
+                selected = self.order
+            else:
+                base = revision.split("..", 1)[0]
+                selected = self.order[: self.order.index(base)]
+            return "\n".join(reversed(selected)) + ("\n" if selected else "")
+        if command == "show":
+            sha = args[-1]
+            commit = self.commits[sha]
+            return "\x00".join(
+                [
+                    sha,
+                    commit["tree"],
+                    " ".join(commit["parents"]),
+                    *commit["author"],
+                    *commit["committer"],
+                    commit["message"],
+                ]
+            )
+        if command == "ls-tree":
+            sha = args[-1]
+            records = [
+                f"{mode} blob {blob_sha}\t{path}\x00"
+                for path, (mode, blob_sha, _content) in self.commits[sha][
+                    "files"
+                ].items()
+            ]
+            return "".join(records)
+        if command == "remote":
+            raise AssertionError("tests pass --repo; origin must not be queried")
+        raise AssertionError(f"unexpected git command: {args}")
+
+    def bytes(self, args: list[str], root: Path) -> bytes:
+        assert args[:2] == ["cat-file", "blob"]
+        return self.blobs[args[2]]
+
+
+def _route_uploads(
+    http: _PushHTTP,
+    git: _PushGit,
+    tree_shas: list[str],
+    commit_shas: list[str],
+) -> None:
+    """Register the three POST endpoints with deterministic fake SHAs."""
+
+    def blob(request: urllib.request.Request) -> tuple[int, Any, None]:
+        body = json.loads(request.data or b"{}")
+        content = base64.b64decode(body["content"])
+        return 201, {"sha": git.sha_for_content(content)}, None
+
+    trees = list(tree_shas)
+    commits = list(commit_shas)
+
+    def tree(request: urllib.request.Request) -> tuple[int, Any, None]:
+        return 201, {"sha": trees.pop(0)}, None
+
+    def commit(request: urllib.request.Request) -> tuple[int, Any, None]:
+        return 201, {"sha": commits.pop(0)}, None
+
+    http.route_dynamic("POST", "/git/blobs", blob)
+    http.route_dynamic("POST", "/git/trees", tree)
+    http.route_dynamic("POST", "/git/commits", commit)
+
+
+def _serve_branch(
+    http: _PushHTTP,
+    git: _PushGit,
+    *,
+    remote_sha: str,
+    remote_tree: str,
+    branch: str = "main",
+) -> None:
+    """Register the two reads build_plan always makes for an existing branch."""
+    http.route(
+        "GET",
+        f"/git/ref/heads/{branch}",
+        200,
+        {"ref": f"refs/heads/{branch}", "object": {"sha": remote_sha}},
+    )
+    http.route(
+        "GET",
+        f"/git/commits/{remote_sha}",
+        200,
+        {"sha": remote_sha, "tree": {"sha": remote_tree}},
+    )
+    owner = next(
+        (sha for sha, data in git.commits.items() if data["tree"] == remote_tree),
+        None,
+    )
+    if owner is None:
+        # A divergent remote tree has no local owner; the script refuses
+        # before it ever asks for the blobs inside it.
+        return
+    remote_blobs = {
+        blob_sha
+        for _path, (_mode, blob_sha, _content) in git.commits[owner]["files"].items()
+    }
+    http.route(
+        "GET",
+        f"/git/trees/{remote_tree}?recursive=1",
+        200,
+        {
+            "truncated": False,
+            "tree": [
+                {"path": sha, "mode": "100644", "type": "blob", "sha": sha}
+                for sha in sorted(remote_blobs)
+            ],
+        },
+    )
+
+
+def _run_push(
+    push_api: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    git: _PushGit,
+    http: _PushHTTP,
+    argv: list[str] | None = None,
+) -> int:
+    monkeypatch.setattr(push_api, "ROOT", tmp_path)
+    monkeypatch.setattr(push_api, "_git_text", git.text)
+    monkeypatch.setattr(push_api, "_git_bytes", git.bytes)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(urllib.request, "urlopen", http)
+    monkeypatch.setattr(push_api, "RETRY_BASE_DELAY", 0.0)
+    return int(push_api.main(["--repo", "acme/demo", *(argv or [])]))
+
+
+def _two_commit_repo() -> _PushGit:
+    """Remote c1, local adds c2 (new file) and c3 (changes README)."""
+    git = _PushGit(["c3", "c2", "c1"])
+    readme = ("100644", "blob-readme", b"# demo\n")
+    app = ("100644", "blob-app", b"print('hi')\n")
+    readme2 = ("100644", "blob-readme2", b"# demo v2\n")
+    git.add("c1", "tree-c1", files={"README.md": readme}, message="init")
+    git.add(
+        "c2",
+        "tree-c2",
+        parents=("c1",),
+        files={"README.md": readme, "src/app.py": app},
+        message="feat: add app",
+    )
+    git.add(
+        "c3",
+        "tree-c3",
+        parents=("c2",),
+        files={"README.md": readme2, "src/app.py": app},
+        message="docs: update readme",
+        author=("Bob", "bob@example.com", "2026-01-02T03:04:05+00:00"),
+    )
+    return git
+
+
+class TestPushApiParsing:
+    def test_remote_url_forms(self, push_api: Any) -> None:
+        cases = {
+            "https://github.com/acme/demo.git": "acme/demo",
+            "https://github.com/acme/demo": "acme/demo",
+            "git@github.com:acme/demo.git": "acme/demo",
+            "ssh://git@github.com/acme/demo.git": "acme/demo",
+            "https://token@github.com/acme/demo.git": "acme/demo",
+        }
+        for url, expected in cases.items():
+            assert push_api.parse_remote_slug(url) == expected
+
+    def test_remote_url_without_a_repository_is_rejected(self, push_api: Any) -> None:
+        with pytest.raises(push_api.PushError, match="OWNER/NAME"):
+            push_api.parse_remote_slug("https://github.com/onlyone")
+
+    def test_explicit_repo_must_have_two_parts(self, push_api: Any) -> None:
+        assert push_api.normalize_slug("acme/demo.git") == "acme/demo"
+        with pytest.raises(push_api.PushError, match="owner/name"):
+            push_api.normalize_slug("acme")
+
+    def test_branch_forms_normalize(self, push_api: Any) -> None:
+        assert push_api.normalize_branch("main") == "main"
+        assert push_api.normalize_branch("heads/main") == "main"
+        assert push_api.normalize_branch("refs/heads/release/1.0") == "release/1.0"
+        with pytest.raises(push_api.PushError, match="分支"):
+            push_api.normalize_branch("refs/tags/v1")
+
+    def test_help_is_chinese(self, push_api: Any) -> None:
+        help_text = push_api.build_parser().format_help()
+        assert "推送" in help_text
+        assert "OWNER/NAME" in help_text
+        assert "--dry-run" in help_text
+
+    def test_exact_sha_beats_a_tree_match(self, push_api: Any) -> None:
+        # The empty commit after the real base must still be replayed.
+        history = [("empty", "tree-b"), ("base", "tree-b")]
+        base = push_api.find_base(history, "base", "tree-b")
+        assert base == push_api.Base(local_sha="base", remote_sha="base")
+
+    def test_tree_equality_finds_a_rewritten_base(self, push_api: Any) -> None:
+        history = [("local-tip", "tree-c"), ("local-base", "tree-b")]
+        base = push_api.find_base(history, "remote-sha", "tree-b")
+        assert base == push_api.Base(local_sha="local-base", remote_sha="remote-sha")
+
+    def test_unrelated_remote_history_has_no_base(self, push_api: Any) -> None:
+        assert push_api.find_base([("local", "tree-a")], "remote", "tree-b") is None
+
+
+class TestPushApiPlanning:
+    def test_already_synced_branch_makes_no_writes(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        git = _PushGit(["c1"])
+        git.add("c1", "tree-c1", files={}, message="init")
+        http = _PushHTTP()
+        _serve_branch(http, git, remote_sha="c1", remote_tree="tree-c1")
+
+        assert _run_push(push_api, monkeypatch, tmp_path, git, http) == 0
+        assert http.writes() == []
+        assert "已同步" in capsys.readouterr().out
+
+    def test_dry_run_prints_the_plan_without_writing(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        git = _two_commit_repo()
+        http = _PushHTTP()
+        _serve_branch(http, git, remote_sha="c1", remote_tree="tree-c1")
+
+        assert _run_push(push_api, monkeypatch, tmp_path, git, http, ["--dry-run"]) == 0
+        assert http.writes() == []
+        assert [item[0] for item in http.signal()] == ["GET", "GET"]
+
+        out = capsys.readouterr().out
+        assert "feat: add app" in out
+        assert "docs: update readme" in out
+        assert "合计 2 个提交、4 个文件条目" in out
+        assert "dry-run" in out
+
+    def test_diverged_remote_is_refused_without_force(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        git = _two_commit_repo()
+        http = _PushHTTP()
+        _serve_branch(http, git, remote_sha="remote-x", remote_tree="tree-x")
+
+        assert _run_push(push_api, monkeypatch, tmp_path, git, http) == 1
+        assert http.writes() == []
+        assert "不会 force" in capsys.readouterr().err
+
+    def test_base_branch_override_changes_the_target_ref(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        git = _PushGit(["c1"])
+        git.add("c1", "tree-c1", files={}, message="init")
+        http = _PushHTTP()
+        _serve_branch(
+            http, git, remote_sha="c1", remote_tree="tree-c1", branch="release/1.0"
+        )
+
+        assert (
+            _run_push(
+                push_api,
+                monkeypatch,
+                tmp_path,
+                git,
+                http,
+                ["--base", "release/1.0", "--dry-run"],
+            )
+            == 0
+        )
+        assert http.signal()[0][1].endswith("/git/ref/heads/release/1.0")
+
+
+class TestPushApiReplay:
+    def test_normal_replay_posts_blobs_trees_commits_then_updates_ref(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        git = _two_commit_repo()
+        http = _PushHTTP()
+        _serve_branch(http, git, remote_sha="c1", remote_tree="tree-c1")
+        _route_uploads(
+            http,
+            git,
+            tree_shas=[
+                "rtree-c2-src",
+                "rtree-c2",
+                "rtree-c3-src",
+                "rtree-c3",
+            ],
+            commit_shas=["rcommit-c2", "rcommit-c3"],
+        )
+        http.route("PATCH", "/git/refs/heads/main", 200, {"ref": "refs/heads/main"})
+
+        assert _run_push(push_api, monkeypatch, tmp_path, git, http) == 0
+
+        signal = http.signal()
+        assert signal[0] == ("GET", "/repos/acme/demo/git/ref/heads/main")
+        assert signal[-1] == ("PATCH", "/repos/acme/demo/git/refs/heads/main")
+        assert all(method != "PUT" for method, _ in signal)
+
+        posts = [(method, path) for method, path in signal if method == "POST"]
+        assert posts == [
+            ("POST", "/repos/acme/demo/git/blobs"),
+            ("POST", "/repos/acme/demo/git/trees"),
+            ("POST", "/repos/acme/demo/git/trees"),
+            ("POST", "/repos/acme/demo/git/commits"),
+            ("POST", "/repos/acme/demo/git/blobs"),
+            ("POST", "/repos/acme/demo/git/trees"),
+            ("POST", "/repos/acme/demo/git/trees"),
+            ("POST", "/repos/acme/demo/git/commits"),
+        ]
+
+        commits = http.bodies("POST", "/git/commits")
+        assert [body["message"] for body in commits] == [
+            "feat: add app",
+            "docs: update readme",
+        ]
+        assert commits[0]["author"] == {
+            "name": "Alice",
+            "email": "alice@example.com",
+            "date": "2026-01-01T00:00:00+00:00",
+        }
+        assert commits[1]["author"]["name"] == "Bob"
+        assert commits[0]["parents"] == ["c1"]
+        assert commits[1]["parents"] == ["rcommit-c2"]
+
+        patches = http.bodies("PATCH", "/git/refs/heads/main")
+        assert patches == [{"sha": "rcommit-c3", "force": False}]
+
+        out, err = capsys.readouterr()
+        assert "已更新远端分支 main" in out
+        assert "test-token" not in out + err
+
+    def test_only_changed_blobs_are_uploaded(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        git = _two_commit_repo()
+        http = _PushHTTP()
+        _serve_branch(http, git, remote_sha="c1", remote_tree="tree-c1")
+        _route_uploads(
+            http,
+            git,
+            tree_shas=[
+                "rtree-c2-src",
+                "rtree-c2",
+                "rtree-c3-src",
+                "rtree-c3",
+            ],
+            commit_shas=["rcommit-c2", "rcommit-c3"],
+        )
+        http.route("PATCH", "/git/refs/heads/main", 200, {})
+
+        assert _run_push(push_api, monkeypatch, tmp_path, git, http) == 0
+        blob_posts = [
+            request
+            for request in http.requests
+            if request["method"] == "POST" and request["url"].endswith("/git/blobs")
+        ]
+        # README.md is unchanged across c2; only the new app and the edited
+        # README are uploaded.
+        assert len(blob_posts) == 2
+
+    def test_empty_remote_replays_every_commit_and_creates_the_ref(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        git = _PushGit(["c2", "c1"])
+        readme = ("100644", "blob-readme", b"# demo\n")
+        app = ("100644", "blob-app", b"print('hi')\n")
+        git.add("c1", "tree-c1", files={"README.md": readme}, message="init")
+        git.add(
+            "c2",
+            "tree-c2",
+            parents=("c1",),
+            files={"README.md": readme, "src/app.py": app},
+            message="feat: add app",
+        )
+        http = _PushHTTP()
+        http.route("GET", "/git/ref/heads/main", 404, {"message": "Not Found"})
+        _route_uploads(
+            http,
+            git,
+            tree_shas=["rtree-c1", "rtree-c2-src", "rtree-c2"],
+            commit_shas=["rcommit-c1", "rcommit-c2"],
+        )
+        http.route("POST", "/git/refs", 201, {"ref": "refs/heads/main"})
+
+        assert _run_push(push_api, monkeypatch, tmp_path, git, http) == 0
+        creates = [
+            request
+            for request in http.requests
+            if request["method"] == "POST" and request["url"].endswith("/git/refs")
+        ]
+        assert len(creates) == 1
+        assert json.loads(creates[0]["data"]) == {
+            "ref": "refs/heads/main",
+            "sha": "rcommit-c2",
+        }
+
+    def test_tree_equivalent_remote_base_maps_the_parent_to_the_remote_sha(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Remote history was rewritten: its SHA is not local, but its tree is
+        # exactly c2's. Only c3 may be replayed, on top of the remote SHA.
+        git = _two_commit_repo()
+        http = _PushHTTP()
+        _serve_branch(http, git, remote_sha="remote-c2", remote_tree="tree-c2")
+        _route_uploads(
+            http,
+            git,
+            tree_shas=["rtree-c3-src", "rtree-c3"],
+            commit_shas=["rcommit-c3"],
+        )
+        http.route("PATCH", "/git/refs/heads/main", 200, {})
+
+        assert _run_push(push_api, monkeypatch, tmp_path, git, http) == 0
+        commits = http.bodies("POST", "/git/commits")
+        assert len(commits) == 1
+        assert commits[0]["parents"] == ["remote-c2"]
+        assert commits[0]["message"] == "docs: update readme"
+        patch = http.bodies("PATCH", "/git/refs/heads/main")
+        assert patch == [{"sha": "rcommit-c3", "force": False}]
+
+
+class TestPushApiErrorHandling:
+    def test_server_error_is_retried_and_never_forces(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        git = _two_commit_repo()
+        http = _PushHTTP()
+        _serve_branch(http, git, remote_sha="c1", remote_tree="tree-c1")
+        http.route("POST", "/git/blobs", 500, {"message": "boom"})
+
+        assert _run_push(push_api, monkeypatch, tmp_path, git, http) == 1
+        assert http.writes()
+        assert all(method != "PATCH" for method, _ in http.signal())
+        assert "500" in capsys.readouterr().err
+
+    def test_non_fast_forward_patch_is_a_clear_error(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        http = _PushHTTP()
+        http.route(
+            "PATCH", "/git/refs/heads/main", 422, {"message": "not fast forward"}
+        )
+        http.route(
+            "GET",
+            "/git/ref/heads/main",
+            200,
+            {"ref": "refs/heads/main", "object": {"sha": "other"}},
+        )
+        monkeypatch.setattr(urllib.request, "urlopen", http)
+        client = push_api.GitHubClient("acme/demo", "tok")
+
+        with pytest.raises(push_api.PushError, match="不会 force"):
+            client.update_ref("main", "target")
+        bodies = http.bodies("PATCH", "/git/refs/heads/main")
+        assert bodies == [{"sha": "target", "force": False}]
+
+    def test_existing_ref_at_another_sha_is_not_force_created(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        http = _PushHTTP()
+        http.route("POST", "/git/refs", 422, {"message": "Reference already exists"})
+        http.route(
+            "GET",
+            "/git/ref/heads/main",
+            200,
+            {"ref": "refs/heads/main", "object": {"sha": "other"}},
+        )
+        monkeypatch.setattr(urllib.request, "urlopen", http)
+        client = push_api.GitHubClient("acme/demo", "tok")
+
+        with pytest.raises(push_api.PushError, match="拒绝 force"):
+            client.create_ref("main", "target")
+
+    def test_429_honours_retry_after(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        http = _PushHTTP()
+        replies = iter(
+            [
+                (429, {"message": "slow down"}, {"retry-after": "0"}),
+                (201, {"sha": "blob-ok"}, None),
+            ]
+        )
+        http.route_dynamic("POST", "/git/blobs", lambda request: next(replies))
+        sleeps: list[float] = []
+        monkeypatch.setattr(urllib.request, "urlopen", http)
+        monkeypatch.setattr(push_api.time, "sleep", sleeps.append)
+        client = push_api.GitHubClient("acme/demo", "tok")
+
+        assert client.create_blob(b"payload") == "blob-ok"
+        assert sleeps == [0.0]
+        assert len(http.requests) == 2
+
+    def test_ssl_error_is_retried(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        http = _PushHTTP()
+        attempts: list[int] = []
+
+        def flaky(request: urllib.request.Request) -> tuple[int, Any, None]:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise urllib.error.URLError(ssl.SSLError("bad record mac"))
+            return 201, {"sha": "blob-ok"}, None
+
+        http.route_dynamic("POST", "/git/blobs", flaky)
+        monkeypatch.setattr(urllib.request, "urlopen", http)
+        monkeypatch.setattr(push_api.time, "sleep", lambda seconds: None)
+        monkeypatch.setattr(push_api, "RETRY_BASE_DELAY", 0.0)
+        client = push_api.GitHubClient("acme/demo", "tok")
+
+        assert client.create_blob(b"payload") == "blob-ok"
+        assert len(attempts) == 2
+
+
+class TestPushApiCredentials:
+    def test_environment_token_wins(
+        self, push_api: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GITHUB_TOKEN", "env-token")
+        assert push_api.github_token(tmp_path) == "env-token"
+
+    def test_git_credential_fill_is_the_fallback(
+        self,
+        push_api: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        seen: dict[str, Any] = {}
+
+        def fake_run(args: Any, root: Path, **kwargs: Any) -> Any:
+            seen["args"] = list(args)
+            seen["input"] = kwargs.get("input_text")
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="protocol=https\nusername=x\npassword=secret\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(push_api, "_run_git_raw", fake_run)
+        assert push_api.github_token(tmp_path) == "secret"
+        assert seen["args"] == ["credential", "fill"]
+        assert str(seen["input"]).startswith("protocol=https")
+        out, err = capsys.readouterr()
+        assert "secret" not in out + err
+
+
+class TestPushApiServerRetry:
+    def test_5xx_is_retried_then_succeeds(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        http = _PushHTTP()
+        replies = iter(
+            [
+                (500, {"message": "boom"}, None),
+                (201, {"sha": "blob-ok"}, None),
+            ]
+        )
+        http.route_dynamic("POST", "/git/blobs", lambda request: next(replies))
+        monkeypatch.setattr(urllib.request, "urlopen", http)
+        monkeypatch.setattr(push_api.time, "sleep", lambda seconds: None)
+        monkeypatch.setattr(push_api, "RETRY_BASE_DELAY", 0.0)
+        client = push_api.GitHubClient("acme/demo", "tok")
+
+        assert client.create_blob(b"payload") == "blob-ok"
+        assert len(http.requests) == 2
+
+
+class TestPushApiEmptyRepository:
+    def test_empty_local_history_is_an_error(
+        self,
+        push_api: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        git = _PushGit([])
+        http = _PushHTTP()
+
+        assert _run_push(push_api, monkeypatch, tmp_path, git, http) == 1
+        assert "没有提交" in capsys.readouterr().err
+        assert http.requests == []

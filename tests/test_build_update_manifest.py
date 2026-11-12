@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -206,6 +209,88 @@ class TestSigning:
 
         assert not manifest.verify_document(_build(), public)
 
+    def test_key_id_must_match_the_public_key(self) -> None:
+        """The client resolves the key by ``key_id``; a mismatched id is refused."""
+        seed, public = manifest.generate_keypair()
+        _, other_public = manifest.generate_keypair()
+        signed = manifest.sign_document(_build(), seed)
+        signed["key_id"] = manifest.key_id(other_public)
+
+        assert not manifest.verify_document(signed, public)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("version", "9.9.9"),
+            ("tag", "v9.9.9"),
+            ("repo", "evil/repo"),
+            ("schema", 2),
+            ("generated_from", "https://evil.example/release"),
+        ],
+    )
+    def test_every_top_level_field_is_signed(self, field: str, value: object) -> None:
+        seed, public = manifest.generate_keypair()
+        signed = manifest.sign_document(_build(), seed)
+        signed[field] = value
+
+        assert not manifest.verify_document(signed, public)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("name", "novel-downloader-1.5.0-android-evil.apk"),
+            ("url", "https://evil.example/app.apk"),
+            ("sha256", "0" * 64),
+            ("size", 1),
+        ],
+    )
+    def test_every_platform_asset_field_is_signed(
+        self, field: str, value: object
+    ) -> None:
+        seed, public = manifest.generate_keypair()
+        signed = manifest.sign_document(_build(), seed)
+        signed["platforms"]["android"][field] = value  # type: ignore[index]
+
+        assert not manifest.verify_document(signed, public)
+
+    def test_adding_or_removing_a_platform_invalidates_the_signature(self) -> None:
+        seed, public = manifest.generate_keypair()
+        signed = manifest.sign_document(_build(), seed)
+
+        removed = json.loads(json.dumps(signed))
+        del removed["platforms"]["android"]
+        assert not manifest.verify_document(removed, public)
+
+        added = json.loads(json.dumps(signed))
+        added["platforms"]["linux-x64-portable"] = {"name": "evil.zip"}
+        assert not manifest.verify_document(added, public)
+
+    def test_optional_fields_are_signed_when_present(self) -> None:
+        seed, public = manifest.generate_keypair()
+        signed = manifest.sign_document(_build(notes_url="https://x"), seed)
+        assert manifest.verify_document(signed, public)
+
+        removed = json.loads(json.dumps(signed))
+        del removed["notes_url"]
+        assert not manifest.verify_document(removed, public)
+
+        added = json.loads(json.dumps(signed))
+        added["pub_date"] = "2026-01-01T00:00:00Z"
+        assert not manifest.verify_document(added, public)
+
+    def test_signature_uses_utf8_canonical_json(self) -> None:
+        """Non-ASCII text is signed as UTF-8, not ``\\u`` escapes."""
+        document = _build(notes_url="https://example.invalid/版本说明")
+        seed, public = manifest.generate_keypair()
+        signed = manifest.sign_document(document, seed)
+
+        body = {k: v for k, v in signed.items() if k not in {"signature", "key_id"}}
+        expected = json.dumps(
+            body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        assert manifest._signing_bytes(signed) == expected
+        assert manifest.verify_document(signed, public)
+
     @pytest.mark.parametrize("seed", ["zz", "", "00" * 31])
     def test_bad_seeds_are_rejected(self, seed: str) -> None:
         with pytest.raises(manifest.ManifestError):
@@ -323,6 +408,47 @@ class TestCli:
         assert "public key" in out
         assert "key id" in out
 
+    def test_keygen_prints_a_paste_ready_trusted_entry(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        key = tmp_path / "keys" / "update.key"
+
+        assert manifest.main(["--keygen", str(key), "--release-json", "x"]) == 0
+
+        from Crypto.Signature import eddsa
+
+        seed = bytes.fromhex(key.read_text(encoding="ascii").strip())
+        public = eddsa.import_private_key(seed).public_key().export_key(format="raw")
+        identifier = manifest.key_id(public.hex())
+        out = capsys.readouterr().out
+
+        assert "TRUSTED_UPDATE_KEYS" in out
+        assert f'    "{identifier}": "{public.hex()}",' in out
+        # The printed seed really is the one the public key belongs to.
+        assert manifest.sign_document(_build(), seed.hex())["key_id"] == identifier
+
+    def test_keygen_refuses_to_overwrite_an_existing_key(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        key = tmp_path / "update.key"
+        assert manifest.main(["--keygen", str(key), "--release-json", "x"]) == 0
+        before = key.read_bytes()
+        capsys.readouterr()
+
+        rc = manifest.main(["--keygen", str(key), "--release-json", "x"])
+
+        assert rc == 1
+        assert key.read_bytes() == before
+        assert "refusing to overwrite" in capsys.readouterr().err
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits only")
+    def test_keygen_creates_the_seed_with_0600(self, tmp_path: Path) -> None:
+        key = tmp_path / "update.key"
+
+        assert manifest.main(["--keygen", str(key), "--release-json", "x"]) == 0
+
+        assert stat.S_IMODE(key.stat().st_mode) == 0o600
+
     def test_signing_and_checking_with_a_public_key(self, tmp_path: Path) -> None:
         key = tmp_path / "update.key"
         assert manifest.main(["--keygen", str(key), "--release-json", "x"]) == 0
@@ -391,3 +517,18 @@ class TestCli:
 
         assert manifest.main(base + ["--check", str(out), "--public-key", public]) == 1
         assert "does not verify" in capsys.readouterr().err
+
+    def test_the_script_is_runnable_from_the_command_line(self, tmp_path: Path) -> None:
+        """The entry point must sit after every function ``main`` can reach."""
+        key = tmp_path / "update.key"
+
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPT), "--keygen", str(key)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "public key" in result.stdout
+        assert len(key.read_text(encoding="ascii").strip()) == 64

@@ -98,6 +98,14 @@ _REMOTE_SLUG_RE = re.compile(
 _TOKEN_IN_URL_RE = re.compile(r"x-access-token:[^@\s]+@")
 _APK_GLOB = "app/build/outputs/apk/release/*.apk"
 
+#: Printed when github.com:443 is unreachable.  ``scripts/push_via_api.py``
+#: pushes the *commit* (not just the tag) through api.github.com and never
+#: force-updates a ref, but it is never run automatically from here.
+PUSH_API_HINT = (
+    "hint: if github.com:443 is blocked, push the commit with "
+    "`python scripts/push_via_api.py` (api.github.com only, never force-updates)"
+)
+
 
 class ReleaseError(RuntimeError):
     """A release step failed; the message is safe to print."""
@@ -571,6 +579,22 @@ def validate_latest_manifest(
             raise ReleaseError(
                 f"latest.json platform {key!r} advertises unknown asset {name!r}"
             )
+        # Re-derive the key from the name: a manifest that says
+        # ``windows-x64-installer`` but points at the portable zip would send
+        # an installed copy the wrong package.  Both sides use the same rule.
+        derived = builder.classify_asset(name)
+        if derived != key:
+            raise ReleaseError(
+                f"latest.json platform {key!r} points at {name!r}, which "
+                f"classifies as {derived or 'a non-updatable asset'}"
+            )
+        # A stale file left in the release directory (or an installer from
+        # another version) must never be advertised as this release.
+        if f"-{version}-" not in name:
+            raise ReleaseError(
+                f"latest.json platform {key!r} points at {name!r}, which does "
+                f"not carry the release version {version!r}"
+            )
         asset = by_name[name]
         want_url = builder.expected_url(slug, tag, name)
         if entry.get("url") != want_url:
@@ -740,6 +764,83 @@ def merge_sums(sums_path: Path, entries: list[tuple[str, str]]) -> list[str]:
     sums_path.parent.mkdir(parents=True, exist_ok=True)
     sums_path.write_text(text, encoding="utf-8", newline="\n")
     return lines
+
+
+def parse_sums(sums_path: Path) -> dict[str, str]:
+    """
+    Parse ``SHA256SUMS.txt`` into ``{asset_name: sha256}``.
+
+    Blank lines and anything that is not the conventional
+    ``<64 hex>  <name>`` line are ignored, so a hand-edited header does not
+    turn into a bogus asset.
+    """
+    digests: dict[str, str] = {}
+    for line in sums_path.read_text(encoding="utf-8").splitlines():
+        match = _SUMS_LINE_RE.match(line.strip())
+        if match is None:
+            continue
+        digests[match["name"].strip()] = match["sha"].lower()
+    return digests
+
+
+def validate_sums_against_manifest(sums_path: Path, manifest_path: Path) -> None:
+    """
+    Assert ``SHA256SUMS.txt`` and ``latest.json`` describe the same bytes.
+
+    Both files are published side by side and a client may verify a download
+    against either one.  If they disagree, one of them is stale: the updater
+    would accept a file the checksum list rejects (or vice versa), and which
+    one is right is impossible to tell after the fact.  So this is a hard
+    gate, run after the manifest is written and the checksums are merged.
+
+    ``latest.json`` itself must be listed too: it is the document clients
+    trust before downloading anything, so its own digest has to be
+    verifiable from the same checksum file.
+
+    :raises ReleaseError: when a platform is missing, a digest differs, or
+        the manifest's own checksum does not match the file on disk.
+    """
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseError(f"cannot read {manifest_path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ReleaseError(f"{manifest_path}: expected a JSON object")
+
+    sums = parse_sums(sums_path)
+    problems: list[str] = []
+    platforms = document.get("platforms")
+    if not isinstance(platforms, dict):
+        raise ReleaseError(f"{manifest_path}: platforms is not an object")
+    for key in sorted(platforms):
+        entry = platforms[key]
+        if not isinstance(entry, dict):
+            raise ReleaseError(f"{manifest_path}: platform {key!r} is not an object")
+        name = entry.get("name")
+        digest = str(entry.get("sha256") or "").lower()
+        listed = sums.get(str(name))
+        if listed is None:
+            problems.append(f"{name} is missing from SHA256SUMS.txt")
+        elif listed != digest:
+            problems.append(
+                f"{name} is {listed} in SHA256SUMS.txt but {digest} in latest.json"
+            )
+
+    manifest_digest = _sha256_file(manifest_path)
+    listed_manifest = sums.get(manifest_path.name)
+    if listed_manifest is None:
+        problems.append("latest.json is missing from SHA256SUMS.txt")
+    elif listed_manifest != manifest_digest:
+        problems.append(
+            f"latest.json is {listed_manifest} in SHA256SUMS.txt but hashes "
+            f"to {manifest_digest}"
+        )
+
+    if problems:
+        raise ReleaseError(
+            "SHA256SUMS.txt and latest.json disagree: " + "; ".join(problems)
+        )
+    print(f"==> SHA256SUMS.txt agrees with latest.json ({len(platforms)} platform(s))")
 
 
 # ---------------------------------------------------------------------------
@@ -1144,6 +1245,20 @@ def tag_exists_local(repo_root: Path, tag: str) -> bool:
     return proc.returncode == 0
 
 
+def print_push_api_hint() -> None:
+    """
+    Point at ``scripts/push_via_api.py`` when the git endpoint is blocked.
+
+    Only a hint: the helper rewrites a branch ref, so it stays a deliberate
+    manual step instead of something a release run does on its own.
+    """
+    print(PUSH_API_HINT, file=sys.stderr)
+    print(
+        "      dry run first: python scripts/push_via_api.py --dry-run",
+        file=sys.stderr,
+    )
+
+
 def remote_tag_exists(repo_root: Path, tag: str) -> bool:
     """
     Whether *tag* is already on the origin remote (one network query).
@@ -1166,6 +1281,7 @@ def remote_tag_exists(repo_root: Path, tag: str) -> bool:
             "assuming it is not pushed yet",
             file=sys.stderr,
         )
+        print_push_api_hint()
         return False
     return bool(proc.stdout.strip())
 
@@ -1211,9 +1327,11 @@ def push_tag(
         _run(command, cwd=repo_root, timeout=PUSH_TIMEOUT)
         return
     except ReleaseError as exc:
+        print(f"git push failed ({exc})", file=sys.stderr)
+        print_push_api_hint()
         if not token:
             raise
-        print(f"git push failed ({exc}); creating the tag ref through the REST API")
+        print("creating the tag ref through the REST API")
         # The ref must point at the tag's own commit: HEAD may be ahead of it
         # (a docs commit after the build), and GitHub rejects unknown objects.
         target = _run(
@@ -1311,6 +1429,10 @@ def _dry_run(
         f"  5. Push     : git push origin {tag} (skipped if already on the "
         "remote; falls back to the REST tag ref when github.com is unreachable)"
     )
+    print(
+        "              if github.com:443 is blocked: "
+        "python scripts/push_via_api.py --dry-run"
+    )
     flags = ""
     if args.draft:
         flags += ", draft"
@@ -1318,8 +1440,12 @@ def _dry_run(
         flags += ", prerelease"
     print(f"  6. Release  : create {tag} on GitHub with the notes above{flags}")
     if release_dir is not None:
+        # Mirror the real run: an APK is uploaded only when Android actually
+        # builds, so a preview must not advertise one that --skip-android (or
+        # missing signing material) would leave out.
+        include_apks = signing_ok and not args.skip_android
         assets = collect_content_assets(
-            repo_root, release_dir, version, include_apks=True
+            repo_root, release_dir, version, include_apks=include_apks
         )
         print("  7. Assets   :")
         for asset in assets:
@@ -1520,6 +1646,9 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     sums_path = release_dir / "SHA256SUMS.txt"
     lines = merge_sums(sums_path, [(asset.name, asset.sha256) for asset in content])
     print(f"==> SHA256SUMS: {len(lines)} entries in {sums_path}")
+    # The two files are published together and a client may verify against
+    # either, so a disagreement between them is a release-blocking bug.
+    validate_sums_against_manifest(sums_path, release_dir / "latest.json")
 
     upload_assets = list(content)
     upload_assets.append(AssetSpec(sums_path, sums_path.name, _sha256_file(sums_path)))
