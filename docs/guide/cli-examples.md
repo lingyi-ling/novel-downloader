@@ -139,7 +139,7 @@ novel-cli download --site n23qb
 **Synopsis**
 
 ```bash
-novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] keyword
+novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] [--group | --no-group] keyword
 ```
 
 **Options**
@@ -153,6 +153,8 @@ novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit 
 * `--json`: 将所有搜索结果以 JSON 输出到标准输出后退出 (便于脚本消费)
 * `--first`: 直接下载排名第一的结果, 无需确认 (非交互模式)
 * `--sort {quality,priority,site,title,author,words,update}`: 结果排序方式, 默认为 `quality` (优选)
+* `--group` / `--no-group`: 合并跨站点的同名书, 每本书只占一行, `site` 列列出全部来源 (`*` 标记最佳来源)。默认不合并 (`--no-group`)。
+* 关键词支持 2–4 个词的「书名 + 作者」式查询: 空格 (含全角)、`·`、`,`、`，`、`-` 会把它拆成多个词, 分别匹配标题与作者; 整串关键词仍参与评分。例如 `"斗破苍穹 天蚕土豆"`。多词拆分只影响排序评分, **不改变缓存 key**。
 
 **Examples**
 
@@ -173,6 +175,9 @@ novel-cli search --limit 20 --site-limit 5 三体
 
 # 指定多个站点 (b520 和 n23qb)
 novel-cli search -s b520 -s n23qb 三体
+
+# 书名 + 作者一起搜: 两个词分别匹配标题与作者
+novel-cli search "斗破苍穹 天蚕土豆"
 ```
 
 !!! note "番茄为什么不在聚合搜索里"
@@ -404,7 +409,10 @@ novel-cli clean cache [-h] [--config CONFIG] [--site SITE] [-y]
 **Options**
 
 * `--config CONFIG`: 配置文件路径
-* `--site SITE`: 站点键值 (如 `qidian`, `b520`), 省略时清理全部站点缓存
+* `--site SITE`: 站点键值 (如 `qidian`, `b520`), 省略时清理全部站点缓存。
+  该值会被拼到缓存根目录下再删除, 因此只接受**单个目录名**: `..`、`../..`、
+  `/etc`、含 `/`、`\`、`:` 或控制字符的值都会以用法错误退出 (`2`),
+  不会触碰缓存目录之外的任何文件
 * `-y, --yes`: 跳过确认提示
 
 **Examples**
@@ -452,7 +460,8 @@ novel-cli clean book [-h]
 **Options**
 
 * `book_ids`: 一个或多个书籍 ID
-* `--site SITE`: 站点键值
+* `--site SITE`: 站点键值 (与 `clean cache --site` 相同, 只接受单个目录名;
+  `..`、路径分隔符、盘符等越界值以 `2` 退出)
 * `--config CONFIG`: 配置文件路径
 * `--start START`: 起始章节 ID (仅对第一本书生效)
 * `--end END`: 结束章节 ID (仅对第一本书生效, **包含 end**)
@@ -802,7 +811,7 @@ novel-cli storage --clean -y
 **Synopsis**
 
 ```bash
-novel-cli doctor [-h] [--port N]
+novel-cli doctor [-h] [--port N] [--json] [--online]
 ```
 
 **检查项**
@@ -820,6 +829,8 @@ novel-cli doctor [-h] [--port N]
 **Options**
 
 * `--port N`: 要检查可用性的 API 端口, 默认 `8081`。
+* `--json`: 以 JSON 输出检查结果 (`summary` + `checks`) 到标准输出并退出。
+* `--online`: 额外探测网络出口 (请求 `https://www.baidu.com` 与 `https://github.com`, 每个 2.5 秒超时); 该项仅为提示, 失败不会让命令退出非零。
 
 **Examples**
 
@@ -944,6 +955,17 @@ novel-cli update [-h] [--check] [--json] [-y] [--no-mirror]
 * `-y, --yes`: 非交互下载; 下载并校验 SHA-256 后打印文件路径, 但**不安装**。缺少摘要的资产会被拒绝
 * `--no-mirror`: 忽略 `NOVEL_UPDATE_MIRROR`, 直接从发布地址下载
 
+**安全约束**:
+
+* 清单里的资产 URL 必须是 `https://`; 明文地址在提示/下载之前就被拒绝,
+  以退出码 `1` 结束 (`--json --yes` 时 `error` 为 `insecure-url`)。
+* 没有 SHA-256 摘要的资产不会被下载 (`missing-digest`); 下载后先校验摘要,
+  再打印文件路径。
+* 单个资产上限 `1 GiB`; 若 HTTPS 请求被重定向到明文 HTTP, 下载会被拒绝。
+* 失败时: 非续传模式在**下一次重试**前删除 `.part`; 启用续传时保留已下载前缀供下次续传;
+  摘要不匹配一定删除 `.part`; 所有重试都失败后, 未完成文件可能留在 `updates/`,
+  桌面端会在 1 天后清理。完整排查见[故障排查](./troubleshooting.md)第 13 节。
+
 **环境变量**
 
 * `NOVEL_UPDATE_MIRROR`: 逗号分隔的镜像前缀, 依次探测可用者并优先使用; 全部不可用时回退到原始发布地址, 未设置时不走镜像。
@@ -976,7 +998,7 @@ novel-cli update --json
 | --- | --- | --- |
 | `0` | 成功 | 命令正常完成; 搜索无结果、追更无新章节也属于成功 |
 | `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败、`batch` 存在未匹配/格式错误/下载失败、`update` 检查失败 (以及 `--yes` 时无匹配资产、缺少摘要或下载失败) |
-| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`--json` 与 `--first` 同用、`--json` 与 `--clean` 同用、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`batch` 未提供输入文件或 `--interval` 为负 |
+| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`--json` 与 `--first` 同用、`--json` 与 `--clean` 同用、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`batch` 未提供输入文件或 `--interval` 为负、`clean --site` 传入 `..`/路径分隔符等越界值 |
 
 `update --check` 的退出码表示**检查**是否成功, 而不是是否有新版本: 发现有更新仍返回 `0`。`sources list --probe` 本身不改变退出码——网络不可达只在 `Latency`/`HTTP` 列显示为 `-`, 只有 `--check` 的结构校验失败才会以 `1` 退出。
 
@@ -993,7 +1015,7 @@ novel-cli update --json
 | 命令 | 选项 | stdout 结构 |
 | --- | --- | --- |
 | `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; `failed` 为缺失章节数 (`0` 表示完整); `exported` 为 `{格式: [路径...]}`; 指定 `--no-export` 时为 `null` |
-| `search` | `--json` | 搜索结果数组, 每项含 `site`、`book_id`、`book_url`、`cover_url`、`title`、`author`、`latest_chapter`、`update_date`、`word_count`、`priority` |
+| `search` | `--json` | 搜索结果数组, 每项含 `site`、`book_id`、`book_url`、`cover_url`、`title`、`author`、`latest_chapter`、`update_date`、`word_count`、`priority`, 以及只读派生字段 `rank_score` (`0..1`) 与 `match_tier` (`0..4`: `4` 精确 / `3` 前缀 / `2` 包含 / `1` 部分 / `0` 无匹配) |
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
 | `sources list` | `--json` | 数组, 每项含 `site_key`、`name`、`search`、`hosts`、`origin`; 加 `--check` 时 `status` 才有值 (否则为 `null`); 加 `--probe` 时额外含 `latency_ms`、`http_status` (探测不到时为 `null`) |
 | `update` | `--json` | 单个对象, 固定含 `current`、`latest`、`available`、`asset_name`、`asset_size`、`sha256`、`download_path`、`error` 八个字段; 无对应值时除 `current`/`available` 外为 `null` (或 `latest` 为空串) |

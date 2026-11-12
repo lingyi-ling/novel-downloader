@@ -114,7 +114,7 @@ novel-cli music search "关键词"
 novel-cli music download "关键词" --pick 1
 ```
 
-更多示例见: [CLI 使用示例](./docs/guide/cli-examples.md)
+更多示例见: [CLI 使用示例](./docs/guide/cli-examples.md)；音乐引擎的聚合搜索、来源合并、歌单导出、平台健康与 DRM 限制见 [音乐下载指南](./docs/guide/music.md)。
 
 ## 本地 REST API
 
@@ -132,7 +132,8 @@ novel-api
 novel-desktop
 ```
 
-提供搜索、下载队列、历史导出与音乐下载的图形界面。
+提供搜索、下载队列、历史导出与音乐下载的图形界面。搜索结果按 60 条一批渲染，
+底部「显示更多 (Show more)」追加下一批；歌单导出遇到同名文件会先提示，点击后才覆盖。
 
 ## 规则书源 (无需写代码即可新增站点)
 

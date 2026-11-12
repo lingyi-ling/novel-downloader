@@ -118,7 +118,7 @@ novel-cli music search "keyword"
 novel-cli music download "keyword" --pick 1
 ```
 
-More examples: [CLI Examples](./docs/guide/cli-examples.en.md)
+More examples: [CLI Examples](./docs/guide/cli-examples.en.md). For aggregate search, source merging, playlist export, platform health and DRM limits, see the [Music Downloads guide](./docs/guide/music.en.md).
 
 ---
 
@@ -140,7 +140,7 @@ See [Local REST API](docs/guide/api.en.md) for endpoints, authentication, and re
 novel-desktop
 ```
 
-A graphical interface for search, the download queue, export history, and music downloads.
+A graphical interface for search, the download queue, export history, and music downloads. Search results render 60 rows at a time with a "Show more" button, and playlist export asks before overwriting an existing file.
 
 ---
 

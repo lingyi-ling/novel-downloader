@@ -139,7 +139,7 @@ Search for novels by keyword
 **Synopsis**
 
 ```bash
-novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] keyword
+novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] [--group | --no-group] keyword
 ```
 
 **Options**
@@ -153,6 +153,8 @@ novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit 
 * `--json`: print all search results to stdout as JSON and exit (for scripts)
 * `--first`: download the top-ranked result directly without confirmation (non-interactive)
 * `--sort {quality,priority,site,title,author,words,update}`: result ordering, defaults to `quality`
+* `--group` / `--no-group`: merge the same book across sites into one row, with the `site` column listing every source (`*` marks the best source). Default: no grouping (`--no-group`).
+* A keyword may be a two-to-four-token "title + author" query: spaces (including the full-width space), `·`, `,`, `，` and `-` split it into tokens matched against the title and author separately, while the whole keyword still participates in the score. For example, `"斗破苍穹 天蚕土豆"`. Multi-token matching only affects ranking and does **not** change the cache key.
 
 **Examples**
 
@@ -173,6 +175,9 @@ novel-cli search --limit 20 --site-limit 5 三体
 
 # Specify multiple sites (b520 and n23qb)
 novel-cli search -s b520 -s n23qb 三体
+
+# Search title + author together: the two tokens match title and author separately
+novel-cli search "斗破苍穹 天蚕土豆"
 ```
 
 !!! note "Why fanqienovel is excluded from aggregate searches"
@@ -404,7 +409,11 @@ novel-cli clean cache [-h] [--config CONFIG] [--site SITE] [-y]
 **Options**
 
 * `--config CONFIG`: configuration file path
-* `--site SITE`: site key (e.g. `qidian`, `b520`); when omitted, the cache of all sites is cleaned
+* `--site SITE`: site key (e.g. `qidian`, `b520`); when omitted, the cache of all sites is cleaned.
+  The value is joined onto the cache root and then deleted, so it must be a
+  **single directory name**: `..`, `../..`, `/etc`, values containing `/`, `\`,
+  `:`, or control characters exit with a usage error (`2`) and never touch
+  anything outside the cache root
 * `-y, --yes`: skip the confirmation prompt
 
 **Examples**
@@ -452,7 +461,9 @@ novel-cli clean book [-h]
 **Options**
 
 * `book_ids`: one or more book IDs
-* `--site SITE`: site key
+* `--site SITE`: site key (same rule as `clean cache --site`: one directory
+  name only; `..`, path separators, drive letters, and similar escapes exit
+  with `2`)
 * `--config CONFIG`: configuration file path
 * `--start START`: start chapter ID (only effective for the first book)
 * `--end END`: end chapter ID (only effective for the first book, **inclusive of end**)
@@ -803,7 +814,7 @@ Run a set of **offline** self-checks to diagnose environment problems quickly.
 **Synopsis**
 
 ```bash
-novel-cli doctor [-h] [--port N]
+novel-cli doctor [-h] [--port N] [--json] [--online]
 ```
 
 **Checks**
@@ -821,6 +832,8 @@ novel-cli doctor [-h] [--port N]
 **Options**
 
 * `--port N`: API port to check for availability, default `8081`.
+* `--json`: print the check results (`summary` + `checks`) to stdout as JSON and exit.
+* `--online`: additionally probe network egress (`https://www.baidu.com` and `https://github.com`, 2.5 s timeout each); the probe is advisory and never makes the command exit non-zero.
 
 **Examples**
 
@@ -946,6 +959,21 @@ novel-cli update [-h] [--check] [--json] [-y] [--no-mirror]
 * `-y, --yes`: non-interactive download; downloads, verifies the SHA-256 digest and prints the file path, but does **not** install it. An asset without a digest is refused
 * `--no-mirror`: ignore `NOVEL_UPDATE_MIRROR` and download from the release URL directly
 
+**Security constraints**:
+
+* The asset URL in the manifest must be `https://`; a plaintext address is
+  refused before prompting or downloading and exits with code `1` (`error` is
+  `insecure-url` with `--json --yes`).
+* An asset without a SHA-256 digest is never downloaded (`missing-digest`); the
+  digest is verified before the file path is printed.
+* One asset is capped at `1 GiB`; if an HTTPS request is redirected to plain
+  HTTP, the download is refused.
+* On failure: a non-resume transfer deletes `.part` before the next retry; a
+  resumable transfer keeps the downloaded prefix; a digest mismatch always
+  deletes `.part`. If every retry fails, the unfinished file may remain in
+  `updates/` and the desktop app removes it after 1 day. See section 13 of
+  [Troubleshooting](./troubleshooting.en.md) for the full diagnosis.
+
 **Environment variable**
 
 * `NOVEL_UPDATE_MIRROR`: comma-separated mirror prefixes, probed in order and used when one answers; when none answers the original release URL is used, and an unset variable means no mirror.
@@ -978,7 +1006,7 @@ novel-cli update --json
 | --- | --- | --- |
 | `0` | Success | The command completed; no search results or no new chapters is still success |
 | `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean`, unmatched/malformed/download-failed entries in `batch`, a failed `update` check (also no asset for the platform, missing digest, or a failed download with `--yes`) |
-| `2` | Usage error | Missing/conflicting arguments (including argparse errors), `--json` with `--first`, `--json` with `--clean`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, `batch` without an input file or with a negative `--interval` |
+| `2` | Usage error | Missing/conflicting arguments (including argparse errors), `--json` with `--first`, `--json` with `--clean`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, `batch` without an input file or with a negative `--interval`, `clean --site` given a traversal value such as `..` or a path separator |
 
 The `update --check` exit code reports whether the **check** succeeded, not whether an update exists: finding one still returns `0`. `sources list --probe` never changes the exit code by itself — network unreachability only shows as `-` in the `Latency`/`HTTP` columns, and only a failed structural `--check` exits with `1`.
 
@@ -995,7 +1023,7 @@ With `--json`:
 | Command | Option | stdout shape |
 | --- | --- | --- |
 | `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; `failed` is the number of missing chapters (`0` means complete); `exported` is `{format: [paths...]}`, or `null` with `--no-export` |
-| `search` | `--json` | Array of results with `site`, `book_id`, `book_url`, `cover_url`, `title`, `author`, `latest_chapter`, `update_date`, `word_count`, `priority` |
+| `search` | `--json` | Array of results with `site`, `book_id`, `book_url`, `cover_url`, `title`, `author`, `latest_chapter`, `update_date`, `word_count`, `priority`, plus the read-only derived fields `rank_score` (`0..1`) and `match_tier` (`0..4`: `4` exact / `3` prefix / `2` contains / `1` partial / `0` no match) |
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
 | `sources list` | `--json` | Array with `site_key`, `name`, `search`, `hosts`, `origin`; `status` is populated only with `--check` (otherwise `null`); with `--probe` each item also carries `latency_ms` and `http_status` (`null` when unreachable) |
 | `update` | `--json` | One object with exactly eight keys: `current`, `latest`, `available`, `asset_name`, `asset_size`, `sha256`, `download_path`, `error`; absent values are `null` (or an empty string for `latest`) |

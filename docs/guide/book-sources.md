@@ -67,7 +67,8 @@ novel-cli search "斗破苍穹" --first
 - **重复键**: 同一 JSON 对象中出现重复键名直接报错, 而不是静默地“后值覆盖前值”。重复键几乎总是复制粘贴或合并冲突的产物, 放过它会掩盖真实意图;
 - **未知键**: 顶层与各节 (`search` / `book` / `chapters` / `chapter` / `pages` / `resolve` / field) 只接受本文档列出的键, 出现未列出的键 (通常是拼写错误, 如 `prioroty`) 会报错, 而不是静默忽略;
 - **字段名**: `search.fields` 与 `book.fields` 只接受引擎实际消费的字段名, 其余同样报错;
-- **其余检查**: 缺少必填键、类型不符、非法正则、请求头含控制字符等均在解析时报错, 而不是等到抓取阶段才以晦涩的方式崩溃。
+- **其余检查**: 缺少必填键、类型不符、非法正则、请求头含控制字符等均在解析时报错, 而不是等到抓取阶段才以晦涩的方式崩溃;
+- **资源上限**: 单个规则文件最大 1 MiB; `fallback` 链最多 16 层、`search.json_body` 最多 32 层; URL 模板的字面量 scheme 只允许 `http` / `https` (相对路径仍允许)。详见 [规则 DSL 参考](./rule-dsl.md)。
 
 JSON 本身没有注释语法。约定**以 `_` 开头的键** (如 `_comment`) 是注释, 在任何层级都被忽略、不参与校验, 可用来存放备注; 仓库的示例模板 [`rules/_example-template.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-template.json) 就用 `_comment` 保存使用说明。注意与文件名约定区分: 键名以 `_` 开头表示该键被忽略; 文件名以 `_` 开头表示整个文件不加载。
 

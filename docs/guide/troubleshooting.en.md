@@ -539,7 +539,109 @@ See section 6 for dependency installation and self-check commands.
 
 ---
 
-## 12. Still Stuck?
+## 12. Music Playlist Export Returns 400 / Music Jobs Return 429
+
+**Symptoms**: `POST /api/v1/music/export` returns `400`; or `POST /api/v1/music/jobs`
+returns `429` even though the per-IP request rate limit was not hit.
+
+**Read `detail` first** (both messages are fixed and never echo the submitted
+path):
+
+| `detail` | Meaning |
+| --- | --- |
+| `Music out_dir must be inside the music output directory` | Download directory escaped the allowed roots |
+| `Playlist out_path must be a .m3u/.m3u8 file inside the music output directory` | Playlist path escaped the roots or had a bad suffix |
+| `Too many music jobs are already running (limit 4); retry later` | Active music-job limit reached |
+
+**Diagnosing the `out_dir` / `out_path` 400**:
+
+1. Only two roots are writable: the music setting `out_dir` and the platform
+   default music directory (usually `~/Music/novel_downloader`). On Windows the
+   music settings file is
+   `%LOCALAPPDATA%\novel_downloader\music\settings.json`; check its `out_dir`.
+   Setting `NOVEL_MUSIC_HOME` replaces the whole music data directory.
+
+   ```bash
+   # Git Bash
+   cat "$LOCALAPPDATA/novel_downloader/music/settings.json"
+   ```
+
+2. Use an absolute path inside one of those roots, or omit the field to use the
+   default directory. Relative paths are resolved against the **default
+   directory**, not the API process's current directory.
+3. If `out_path` has a suffix, it must be `.m3u` / `.m3u8`; `.txt`, `.json`, and
+   so on are rejected. A value without a suffix is treated as a directory. `..`,
+   a symlink pointing outside the roots, and an absolute path outside the roots
+   are all rejected even when the target exists.
+4. A `500` instead of `400` means the path passed validation but the write
+   failed (permissions, disk, locked file). The detail only contains the
+   exception class name (`"Could not write playlist: <class>"`); the cause is in
+   the server log.
+
+**Diagnosing the `429`**:
+
+1. Confirm the detail says `Too many music jobs...` rather than the rate-limit
+   message. Both carry `Retry-After`: the job-cap `429` is fixed at `5` seconds
+   (wait roughly one download slot), while the rate-limit `429` depends on when
+   the window drains.
+2. At most `4` music jobs may be `queued` / `running` at once (`done` / `failed`
+   do not count). Poll the existing jobs until they reach a terminal state, then
+   submit again:
+
+   ```bash
+   curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
+   ```
+
+3. For batch downloads you can also use the synchronous
+   `POST /api/v1/music/download` endpoint (it blocks until every track
+   finishes), or split the work into smaller batches.
+
+---
+
+## 13. Auto-update Refuses an http Asset / Download Was Cleaned Up
+
+**Symptoms**: the desktop app reports
+`Refusing to download an update from an insecure source`; `novel-cli update
+--yes` exits with code `1`; `novel-cli update --json --yes` has `error` set to
+`insecure-url`, `missing-digest`, or `no-asset`; a `.part` file is left in
+`updates\` after an interrupted transfer.
+
+**How it works** (the desktop app and CLI share `apps/common/updater.py`):
+
+* The asset URL in the release manifest must be `https://`. The CLI refuses a
+  plaintext address before prompting or downloading; the desktop client does the
+  same.
+* The downloader itself accepts only `http://` / `https://`; if an HTTPS request
+  is redirected to plain HTTP, it refuses the transfer (a digest proves
+  integrity, not confidentiality).
+* One asset is capped at `1 GiB` (`1024**3` bytes), so a tampered manifest or
+  mirror cannot fill the disk.
+* On failure: a non-resume transfer deletes `.part` before the **next retry**; a
+  resumable transfer keeps the downloaded prefix for the next `Range` attempt; a
+  SHA-256 mismatch always deletes `.part` (a stale prefix from an older release
+  is useless). If every retry fails, the unfinished file may remain under
+  `updates\`; the desktop app removes it after 1 day.
+
+**Diagnose**:
+
+1. `insecure-url`: use the official release page or an HTTPS mirror.
+   `NOVEL_UPDATE_MIRROR` is a user-configured prefix, but a mirror that redirects
+   HTTPS to HTTP is still refused during download.
+2. `missing-digest`: that release provides no SHA-256 for your platform asset, so
+   the client will not download an unverifiable file; download it manually from
+   the release page and check the digest.
+3. `no-asset`: no asset matches the current platform (for example, an
+   unsupported architecture).
+4. Repeated checksum failures: close the app, delete the corresponding `.part`
+   under `%LOCALAPPDATA%\novel_downloader\updates\`, and retry. The desktop app
+   also removes `.part` files older than 1 day automatically.
+5. For a machine-readable reason, run `novel-cli update --json --yes`: it never
+   prompts and puts the download failure in the `error` field (`--json` alone
+   behaves like `--check` and never attempts a download).
+
+---
+
+## 14. Still Stuck?
 
 Include the following information when opening an issue:
 

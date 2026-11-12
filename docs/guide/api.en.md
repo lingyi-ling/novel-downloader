@@ -150,6 +150,12 @@ Request body:
 - `sort` accepts `quality`, `priority`, `site`, `title`, `author`, `words`,
   `update`.
 - `limit` is the total result cap after merging.
+- `keyword` supports a two-to-four-token "title + author" style query: spaces
+  (including the full-width space), `·`, `,`, `，` and `-` split it into
+  tokens, which are compared against the title and author separately (for
+  example `"斗破苍穹 天蚕土豆"`); the whole keyword still participates in the
+  score. Multi-token matching only affects ranking — it does **not** change
+  the cache key, which is still the normalised full keyword.
 
 Response:
 
@@ -167,11 +173,27 @@ Response:
       "latest_chapter": "第 1 章",
       "update_date": "2024-01-01",
       "word_count": "100万字",
-      "priority": 1
+      "priority": 1,
+      "rank_score": 0.912345,
+      "match_tier": 4
     }
   ]
 }
 ```
+
+Every `results[]` row also carries two **read-only derived fields** (merged
+rows from `group: true` carry them too):
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `rank_score` | float | A `0..1` match-quality score computed from this keyword and row; it includes a small recency signal, so it is comparable within one call but may drift slightly between calls. |
+| `match_tier` | int | The `0..4` match tier: `4` exact equality, `3` prefix, `2` containment, `1` partial character coverage, `0` no match. Deterministic for a given keyword and row. |
+
+Both fields are response annotations: they are never written back to the cache
+and never modify the row a site returned, so clients that only persist books
+can ignore them. The streaming endpoint `/search/stream` emits each site's raw
+preview chunk and **does not** include `rank_score` / `match_tier`; only the
+final `POST /search` results carry them.
 
 ## Rankings and category browsing
 
@@ -196,8 +218,10 @@ curl -s -X POST "$BASE/api/v1/browse" \
   -d '{"site":"fanqienovel","category_id":"1141","gender":"male","limit":20}'
 ```
 
-The `POST /browse` response has the same shape as `/search`:
-`{site, total, results}`. When a site does not support browsing (its searcher
+The `POST /browse` response uses the same outer shape as `/search`
+(`{site, total, results}`), but its rows are the site's entries as returned and
+do not carry the search-only `rank_score` / `match_tier` annotations. When a
+site does not support browsing (its searcher
 has no `rank`/`categories` implementation), the API returns `400` with
 `Site '<site>' does not support browsing.` in `detail`.
 
@@ -593,8 +617,8 @@ The check runs one single-site search per book on its source site (the same as
 
 An all-platform search queries concurrently, merges the same song into one row,
 and `tracks[].sources` lists the platform keys that matched (best source first).
-The response additionally contains `search_id` and per-platform `platforms`
-statistics:
+The response additionally contains `search_id`, per-platform `platforms`
+statistics, and the paging echo:
 
 ```json
 {
@@ -607,14 +631,27 @@ statistics:
   "platforms": [
     {"platform": "netease", "ok": true, "count": 1, "error": ""},
     {"platform": "qq", "ok": true, "count": 1, "error": ""}
-  ]
+  ],
+  "offset": 0,
+  "supports_offset": false
 }
 ```
 
-A single-platform request (e.g. `"platform": "netease"`) keeps the
-`{"total", "tracks", "search_id", "platform"}` shape. `tracks` uses the unified
-Track structure and can be passed to the download endpoint unchanged;
-`search_id` should be sent back as well (see below).
+The request body also accepts `offset` (`>= 0`, default `0`), the number of
+hits to skip, and `limit` is limited to `1..100`. A single-platform request
+(e.g. `"platform": "netease"`) returns
+`{"total", "tracks", "search_id", "platform", "offset", "supports_offset"}`.
+`tracks` uses the unified Track structure and can be passed to the download
+endpoint unchanged; `search_id` should be sent back as well (see below).
+
+- `offset` is honoured only by an **explicit single-platform** search, and the
+  response echoes it. Aggregate searches (`platform="all"`) always start at the
+  first hit and return `"offset": 0`.
+- `supports_offset` says whether the platform actually implements paging.
+  musicdl-backed platforms have no paging concept: a non-zero `offset` yields
+  an empty page, so they return `false`. A client seeing `false` should stop
+  its "load more" control instead of requesting empty pages forever. Aggregate
+  searches also return `false`.
 
 `POST /api/v1/music/download`:
 
@@ -634,10 +671,25 @@ Track structure and can be passed to the download endpoint unchanged;
   search results cannot survive a JSON round trip, so sending it back lets the
   server restore the original Track objects; the cache keeps up to 32 entries
   for 30 minutes, after which (or after a process restart) you must search again.
-- `level` accepts `hires`, `lossless`, `exhigh`, `higher`, `standard`;
-  when `out_dir` is omitted, the music module's default download directory is
-  used. A single request accepts at most `200` tracks
-  (more returns `422`).
+- `level` accepts `hires`, `lossless`, `exhigh`, `higher`, `standard`.
+- `out_dir` must stay inside the music output directories: the music setting
+  `out_dir` and the platform default music directory (usually
+  `~/Music/novel_downloader`). A relative path is resolved against the default
+  directory; when omitted, the default directory is used.
+- An absolute path outside those roots, a `..` component, or a symlink escape is
+  rejected with `400` and the fixed detail
+  `"Music out_dir must be inside the music output directory"` (the submitted
+  path is never echoed).
+- A single request accepts at most `200` tracks (more returns `422`).
+- `results[].reason` is sanitised before it is returned: the query and fragment
+  are stripped from any embedded URL (signed tokens never leave the process),
+  every whitespace run is collapsed to one space, and the text is capped at
+  `200` characters; the full exception is only written to the server log.
+
+When the engine as a whole raises (other than a timeout, which returns `504`),
+the response is `502` with a detail such as
+`"Music download failed: <exception class>"`: the class name only, never the
+exception message.
 
 Response:
 
@@ -704,11 +756,23 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
 ```
 
 - `status` values: `queued`, `running`, `done`, `failed`.
+- At most `4` jobs may be `queued` / `running` at once; creating a fifth
+  returns `429` with the detail
+  `"Too many music jobs are already running (limit 4); retry later"`. This
+  `429` carries `Retry-After: 5` (wait roughly one download slot; it is a
+  **load** signal, not the per-IP request rate limit). The per-IP rate-limit
+  `429` also has `Retry-After`, but its value depends on when the window
+  drains; the two are distinguishable by `detail`.
 - `progress.done` increases as tracks finish; `progress.total` is the number of
   submitted tracks.
 - `results` matches the synchronous endpoint and follows submission order; a
   failed job includes the partial results that did finish.
-- `error` is non-empty only when `status=failed`.
+- `error` is non-empty only when `status=failed`: a timeout uses the fixed
+  message `"Music download timed out after ..."`; other engine errors contain
+  only the exception class name (`Music download failed: <class>`), not the
+  exception message. `results[].reason` goes through the same sanitiser as the
+  synchronous endpoint (URL query / fragment stripped, whitespace collapsed,
+  capped at `200` characters).
 - The job table lives in process memory and keeps the latest `100` jobs
   (finished jobs are evicted first); records are lost on restart.
 - A missing job returns `404`.
@@ -718,6 +782,12 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
     with multiple workers, route `POST /music/jobs` and the subsequent
     `GET /music/jobs/{job_id}` requests to the same process, or use the
     synchronous `POST /music/download` endpoint instead.
+
+!!! note "Desktop / Android embedded engine"
+    The embedded engine used by the desktop app and Android standalone mode
+    exposes the same music endpoints. Its `out_dir` / `out_path` confinement and
+    active-job cap match the REST API (`400` / `429`; the music-job cap `429`
+    also carries `Retry-After: 5`).
 
 ### Exporting playlists
 
@@ -742,15 +812,26 @@ tracks without `path` count toward `skipped`:
 }
 ```
 
-- When `out_path` ends with `.m3u` / `.m3u8` it is treated as a file path;
-  any other value is treated as a directory and a
-  `playlist-<UTC timestamp>.m3u8` file is created inside it.
+- When `out_path` ends with `.m3u` / `.m3u8` it is treated as a file path; any
+  other value **with a suffix** is rejected. A value without a suffix is treated
+  as a directory and a `playlist-<UTC timestamp>.m3u8` file is created inside
+  it.
+- The resolved target must stay inside the music output directories (the music
+  setting `out_dir` or the platform default music directory); an absolute path
+  outside them, a `..` component, or a symlink escape returns `400` with the
+  fixed detail
+  `"Playlist out_path must be a .m3u/.m3u8 file inside the music output directory"`
+  (the submitted path is never echoed).
 - When `out_path` is omitted, the playlist is written to the music setting
   `out_dir` (`music settings out_dir`).
 - `platform` may be `all` (when results from an aggregate search are mixed);
   passing a concrete platform key validates it and an unknown key returns
   `400`. The playlist only records file locations, so this field does not
   affect the written content.
+- If the write itself fails (`OSError`), the response is `500` and the detail
+  contains only the exception class name
+  (`"Could not write playlist: <class>"`), never the target path or OS error
+  text.
 
 Response:
 
@@ -879,14 +960,15 @@ clients can branch on it):
 
 | Status | Scenario |
 | --- | --- |
-| `400` | Unknown music platform; music platform initialization failure; synchronous music download failure; playlist write failure. |
+| `400` | Unknown music platform; `out_dir` / `out_path` outside the music output directories, or an `out_path` suffix other than `.m3u` / `.m3u8`. |
 | `401` | A token is configured but the request is missing it or carries a wrong one. |
 | `404` | Task ID not found; login credential request ID not found; music job ID not found; watchlist entry not found; static file not found. |
 | `409` | A completed login credential request is submitted again before the task takes its result. |
 | `413` | Request body exceeds the endpoint's size cap. |
 | `422` | Request parameter validation failed (missing required field, out-of-range value, too many `tracks`, etc.). |
-| `429` | Per-client-IP rate limit exceeded; the response carries a `Retry-After` header. |
-| `500` | Internal server error; always returns `{"detail": "Internal server error"}` without leaking a stack trace. |
+| `429` | Per-client-IP rate limit exceeded, with a `Retry-After` header; or `4` music jobs are already active (this `429` also carries `Retry-After: 5`, with detail `Too many music jobs are already running (limit 4); retry later`). |
+| `500` | Internal server error; the generic handler always returns `{"detail": "Internal server error"}` without leaking a stack trace. Music platform initialization and playlist write failures return their own fixed messages, containing only the exception class name. |
+| `502` | The music download engine failed as a whole; the detail contains only the exception class name (`"Music download failed: <class>"`). |
 | `503` | Optional music dependencies are missing; music endpoints are unavailable. |
 | `504` | A blocking endpoint exceeded its timeout budget. |
 
