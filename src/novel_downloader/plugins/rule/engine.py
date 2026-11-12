@@ -63,7 +63,14 @@ from lxml import html as lxml_html
 
 from novel_downloader.libs.mini_js import MiniJS
 
-from .model import Field, PagesRule, RuleError, Step, regex_backtracking_risk
+from .model import (
+    MAX_REGEX_LENGTH,
+    Field,
+    PagesRule,
+    RuleError,
+    Step,
+    regex_backtracking_risk,
+)
 
 __all__ = [
     "parse_page",
@@ -414,16 +421,20 @@ def _js_replace_all(args: list[Any]) -> str:
 def _js_regex_replace(args: list[Any]) -> str:
     """``regex_replace(text, pattern, repl)`` -- Python ``re.sub`` semantics."""
     value, pattern, repl = _js_args(args, 3, "regex_replace")
+    if len(pattern) > MAX_REGEX_LENGTH:
+        raise ValueError(f"pattern is too long (limit {MAX_REGEX_LENGTH} characters)")
     try:
         compiled = re.compile(pattern)
     except re.error as e:
-        raise ValueError(f"invalid pattern {pattern!r}: {e}") from e
+        # The pattern is rule-supplied and may contain a token; report only
+        # the syntax error (which names the position).
+        raise ValueError(f"invalid pattern: {e}") from e
     # ``re`` cannot be interrupted, so a pattern that backtracks exponentially
     # (``(a+)+$``) would hang the worker on one page of text.  The pattern is
     # only known at run time here, hence the check at this point.
     risk = regex_backtracking_risk(pattern)
     if risk is not None:
-        raise ValueError(f"pattern {pattern!r} risks catastrophic backtracking: {risk}")
+        raise ValueError(f"pattern risks catastrophic backtracking: {risk}")
     return compiled.sub(repl, value)
 
 

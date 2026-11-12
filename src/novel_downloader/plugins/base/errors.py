@@ -16,14 +16,25 @@ transient one:
 * :class:`HttpStatusError` — the server answered with a status the fetcher
   refused to retry (a deterministic 4xx) or a retryable one whose budget was
   spent. ``status`` lets the caller report ``http_404`` instead of a misleading
-  "network down".
+  "network down", and ``retry_after`` preserves a server ``Retry-After``.
 * :class:`RedirectLimitError` — the redirect chain exceeded the session limit.
   Like a deterministic 4xx, the same request would follow the same chain again,
   so neither the fetcher nor a chapter-level retry loop may spend attempts on
   it.
+
+Every message is translated and scrubbed before it is stored on a task: URL
+userinfo, token-like query parameters, header credentials and absolute local
+paths are replaced, so ``task.error`` never carries a signed URL or a
+machine-specific path.
 """
 
 from __future__ import annotations
+
+import re
+from typing import Any
+
+from novel_downloader.infra.i18n import t
+from novel_downloader.infra.logger import redact
 
 __all__ = [
     "RETRYABLE_STATUS",
@@ -37,6 +48,42 @@ __all__ = [
 #: deterministic (wrong id, forbidden, not found) and must not be retried.
 RETRYABLE_STATUS: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
 
+#: Absolute Windows paths (``C:\Users\...``) that a backend error may echo.
+_WINDOWS_PATH_RE = re.compile(r"(?<![\w:/])[A-Za-z]:[\\/][^\s\"'<>|]+")
+
+#: Absolute POSIX paths below commonly used home/scratch roots.
+_POSIX_PATH_RE = re.compile(
+    r"(?<![\w:/])/(?:home|Users|tmp|var|opt|root|private|data|mnt|media)/"
+    r"[^\s\"'<>]+"
+)
+
+
+def _text(value: object) -> str:
+    """Best-effort ``str()`` that never lets a hostile ``__str__`` escape."""
+    try:
+        return str(value)
+    except Exception:
+        return type(value).__name__
+
+
+def _scrub(message: str) -> str:
+    """
+    Remove credentials and local paths from a user-visible error message.
+
+    Backend exceptions routinely echo the request URL (including userinfo and
+    token-like query parameters) and sometimes an absolute path from the
+    machine that produced them.  Both are stripped before the message is
+    stored on a task, shown by an app surface or parsed by a webhook.
+    """
+    cleaned = redact(message)
+    cleaned = _WINDOWS_PATH_RE.sub("<redacted-path>", cleaned)
+    return _POSIX_PATH_RE.sub("<redacted-path>", cleaned)
+
+
+def _format_message(template: str, **fields: Any) -> str:
+    """Format an already-translated *template* and scrub the result."""
+    return _scrub(template.format(**fields))
+
 
 class HttpStatusError(ConnectionError):
     """A non-2xx response that survived (or skipped) the retry budget.
@@ -46,14 +93,30 @@ class HttpStatusError(ConnectionError):
     this error: doing so would multiply the request count by the task-level
     budget.  ``retryable`` states that explicitly, exactly like
     :class:`TransportError`.
+
+    ``retry_after`` carries the bounded delay from a server ``Retry-After``
+    header so a caller that reports (rather than retries) can tell the user
+    how long the site asked to wait.
     """
 
     retryable: bool = False
 
-    def __init__(self, url: str, status: int) -> None:
-        super().__init__(f"Request to {url} failed with status {status}")
+    def __init__(
+        self,
+        url: str,
+        status: int,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(
+            _format_message(
+                t("Request to {url} failed with status {status}"),
+                url=url,
+                status=status,
+            )
+        )
         self.url = url
         self.status = status
+        self.retry_after = retry_after
 
 
 class TransportError(ConnectionError):
@@ -65,7 +128,13 @@ class TransportError(ConnectionError):
     retryable: bool = False
 
     def __init__(self, url: str, reason: BaseException) -> None:
-        super().__init__(f"Request to {url} failed: {reason}")
+        super().__init__(
+            _format_message(
+                t("Request to {url} failed: {reason}"),
+                url=url,
+                reason=_text(reason),
+            )
+        )
         self.url = url
         self.reason = reason
 
@@ -83,9 +152,17 @@ class RedirectLimitError(Exception):
     retryable: bool = False
 
     def __init__(self, url: str, reason: BaseException | None = None) -> None:
-        message = f"Too many redirects for {url}"
-        if reason is not None:
-            message = f"{message}: {reason}"
+        if reason is None:
+            message = _format_message(
+                t("Too many redirects for {url}"),
+                url=url,
+            )
+        else:
+            message = _format_message(
+                t("Too many redirects for {url}: {reason}"),
+                url=url,
+                reason=_text(reason),
+            )
         super().__init__(message)
         self.url = url
         self.reason = reason
@@ -102,7 +179,9 @@ def is_transient_error(exc: BaseException) -> bool:
         fetcher's budget is the one that counts, so a higher-level loop must
         not multiply the request count.  Their transience is still visible
         from ``exc.status in RETRYABLE_STATUS`` for callers that report rather
-        than retry.
+        than retry.  An explicit ``retryable`` flag on the exception wins for
+        every other type, keeping this helper consistent with the task
+        manager's policy.
     """
     if isinstance(exc, (TransportError, HttpStatusError)):
         # The fetcher already spent its budget (or refused a deterministic
@@ -110,4 +189,9 @@ def is_transient_error(exc: BaseException) -> bool:
         # requests.  ``HttpStatusError`` covers both a deterministic 4xx and a
         # 5xx/429 whose retries are already exhausted.
         return False
+    declared = getattr(exc, "retryable", None)
+    if isinstance(declared, bool):
+        # ``NonRetryableConnectionError`` (TLS/proxy credentials) declares
+        # False even though it subclasses ``ConnectionError``.
+        return declared
     return isinstance(exc, (TimeoutError, ConnectionError))

@@ -5,6 +5,8 @@ novel_downloader.infra.sessions._httpx
 """
 
 import asyncio
+import importlib.util
+from http.cookiejar import Cookie
 from http.cookies import CookieError
 from pathlib import Path
 from typing import Any, Unpack
@@ -17,24 +19,26 @@ from .base import (
     BaseSession,
     GetRequestKwargs,
     PostRequestKwargs,
-    as_connection_error,
-    as_non_retryable_connection_error,
-    as_timeout_error,
-    as_too_many_redirects_error,
     close_backend_session,
     is_certificate_verification_error,
     is_proxy_authentication_error,
 )
 from .cookie_io import (
+    _cookie_rest,
+    _rest_has,
+    _rest_value,
     load_cookie_items,
     resolve_cookie_path,
     write_cookie_items,
 )
+from .proxy import ALL_PROXY_SCHEMES, no_proxy_patterns
 from .response import BaseResponse
 
 
 class HttpxSession(BaseSession):
     """Session backend based on httpx providing async HTTP/1.1 and HTTP/2 support."""
+
+    backend_name = "httpx"
 
     _session: httpx.AsyncClient | None
 
@@ -42,31 +46,88 @@ class HttpxSession(BaseSession):
         self,
         **kwargs: Any,
     ) -> None:
-        if self._session and not self._session.is_closed:
-            return
-        limits = httpx.Limits(
-            max_keepalive_connections=self._max_connections,
-            max_connections=self._max_connections,
-        )
-        proxy = self._build_proxy_config(
-            self._proxy,
-            self._proxy_user,
-            self._proxy_pass,
+        async with self._init_lock:
+            if self._session and not self._session.is_closed:
+                return
+            self._validate_proxy_schemes(
+                ALL_PROXY_SCHEMES,
+                "use an http://, https:// or socks5:// proxy URL",
+            )
+            if self._uses_socks_proxy() and importlib.util.find_spec("socksio") is None:
+                # httpx raises a bare ImportError from inside httpcore here;
+                # naming the extra tells the user what to install (or that
+                # curl_cffi supports SOCKS out of the box).
+                raise RuntimeError(
+                    "The httpx backend needs the optional 'socksio' package "
+                    "for SOCKS proxies (install it with "
+                    "`pip install httpx[socks]`) or use the curl_cffi "
+                    "backend."
+                )
+            limits = httpx.Limits(
+                max_keepalive_connections=self._max_connections,
+                max_connections=self._max_connections,
+            )
+
+            self._session = httpx.AsyncClient(
+                http2=self._http2,
+                timeout=self._timeout,
+                verify=self._verify_ssl,
+                headers=self._headers,
+                cookies=self._cookies,
+                limits=limits,
+                # httpx defaults to 20 redirects; pin it to the unified ceiling
+                # so a long chain behaves like on the other backends.
+                max_redirects=DEFAULT_MAX_REDIRECTS,
+                # Per-scheme proxy plus NO_PROXY entries.  ``mounts`` is the
+                # only way to give httpx per-host proxy rules; the facade
+                # resolves the environment itself so all three backends agree.
+                mounts=self._proxy_mounts(limits),
+                trust_env=False,
+            )
+
+    def _uses_socks_proxy(self) -> bool:
+        return any(
+            proxy is not None and proxy.is_socks
+            for proxy in (self._proxy_http, self._proxy_https)
         )
 
-        self._session = httpx.AsyncClient(
-            http2=self._http2,
-            timeout=self._timeout,
-            verify=self._verify_ssl,
-            headers=self._headers,
-            cookies=self._cookies,
-            limits=limits,
-            # httpx defaults to 20 redirects; pin it to the unified ceiling
-            # so a long chain behaves like on the other backends.
-            max_redirects=DEFAULT_MAX_REDIRECTS,
-            proxy=proxy,
-            trust_env=self._trust_env,
-        )
+    def _proxy_mounts(
+        self, limits: httpx.Limits
+    ) -> dict[str, httpx.AsyncBaseTransport | None] | None:
+        """Build httpx's per-scheme transport map from the facade's settings.
+
+        httpx 0.28 accepts transports (not ``Proxy`` objects) as mount
+        values, so each proxied scheme gets its own ``AsyncHTTPTransport``
+        with the same verification and pool limits as the main transport.
+        """
+        if (
+            self._proxy_http is None
+            and self._proxy_https is None
+            and not self._no_proxy
+        ):
+            return None
+
+        mounts: dict[str, httpx.AsyncBaseTransport | None] = {}
+        for scheme, proxy in (
+            ("http", self._proxy_http),
+            ("https", self._proxy_https),
+        ):
+            if proxy is not None:
+                mounts[f"{scheme}://"] = httpx.AsyncHTTPTransport(
+                    verify=self._verify_ssl,
+                    trust_env=False,
+                    http2=self._http2,
+                    limits=limits,
+                    proxy=httpx.Proxy(proxy.url, auth=proxy.auth),
+                )
+
+        for pattern in no_proxy_patterns(self._no_proxy):
+            if pattern == "*":
+                # NO_PROXY=* means "never proxy", matching the other
+                # backends' matcher.
+                return {}
+            mounts[f"all://{pattern}"] = None
+        return mounts
 
     async def close(self) -> None:
         """
@@ -74,10 +135,13 @@ class HttpxSession(BaseSession):
 
         Safe to call repeatedly and concurrently: the backend reference is
         detached before awaiting so a second caller becomes a no-op.  The
-        backend close is shielded, so cancelling this caller cannot abort the
-        shutdown after the reference is gone.
+        detach happens under the init lock, so a concurrent ``init()`` cannot
+        install a new client that an in-flight ``close()`` then never sees.
+        The backend close is shielded, so cancelling this caller cannot abort
+        the shutdown after the reference is gone.
         """
-        session, self._session = self._session, None
+        async with self._init_lock:
+            session, self._session = self._session, None
         if session is not None and not session.is_closed:
             await close_backend_session(session.aclose())
 
@@ -94,34 +158,36 @@ class HttpxSession(BaseSession):
         redirect = (
             DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
         )
-        kwargs.setdefault("follow_redirects", redirect)  # type: ignore[typeddict-item]
+        options: dict[str, Any] = dict(kwargs)
+        options.setdefault("follow_redirects", redirect)
 
         try:
             # ``httpx.Timeout`` applies per operation, so a server that
             # trickles bytes every timeout-1 seconds could hold the request
             # open forever.  The outer deadline restores the per-request
-            # guarantee the other backends already provide.
-            r = await asyncio.wait_for(self.session.get(url, **kwargs), self._timeout)
+            # guarantee the other backends already provide.  ``None``
+            # disables it, exactly like the other two backends.
+            r = await asyncio.wait_for(self.session.get(url, **options), self._timeout)
         except TimeoutError as exc:
-            raise as_timeout_error(exc) from exc
+            raise self._timeout_error(exc) from exc
         except httpx.TimeoutException as exc:
-            raise as_timeout_error(exc) from exc
+            raise self._timeout_error(exc) from exc
         except httpx.TooManyRedirects as exc:
-            raise as_too_many_redirects_error(exc) from exc
+            raise self._redirect_error(exc) from exc
         except httpx.ProxyError as exc:
             # CONNECT refusals surface here (httpcore raises
             # "407 Proxy Authentication Required"); a proxy that is merely
             # unreachable stays a retryable connection failure.
             if is_proxy_authentication_error(exc):
-                raise as_non_retryable_connection_error(exc) from exc
-            raise as_connection_error(exc) from exc
+                raise self._non_retryable_transport_error(exc) from exc
+            raise self._transport_error(exc) from exc
         except httpx.ConnectError as exc:
             # Must precede NetworkError: a certificate rejection arrives as a
             # ConnectError wrapping ssl.SSLCertVerificationError, and retrying
             # cannot repair the certificate.
             if is_certificate_verification_error(exc):
-                raise as_non_retryable_connection_error(exc) from exc
-            raise as_connection_error(exc) from exc
+                raise self._non_retryable_transport_error(exc) from exc
+            raise self._transport_error(exc) from exc
         except (
             httpx.NetworkError,
             httpx.RemoteProtocolError,
@@ -130,7 +196,12 @@ class HttpxSession(BaseSession):
             # DecodingError covers a body whose Content-Encoding is corrupt;
             # aiohttp classifies the same failure as a payload/connection
             # error, so it is translated here too.
-            raise as_connection_error(exc) from exc
+            raise self._transport_error(exc) from exc
+        except httpx.RequestError as exc:
+            # Remaining request failures (unsupported protocol, invalid
+            # header, ...) are transport problems too; leaking a raw httpx
+            # class would make the fetcher's classification backend-dependent.
+            raise self._transport_error(exc) from exc
         return BaseResponse(
             content=r.content,
             headers=r.headers,
@@ -151,36 +222,39 @@ class HttpxSession(BaseSession):
         redirect = (
             DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
         )
-        kwargs.setdefault("follow_redirects", redirect)  # type: ignore[typeddict-item]
+        options: dict[str, Any] = dict(kwargs)
+        options.setdefault("follow_redirects", redirect)
 
         try:
-            r = await asyncio.wait_for(self.session.post(url, **kwargs), self._timeout)
+            r = await asyncio.wait_for(self.session.post(url, **options), self._timeout)
         except TimeoutError as exc:
-            raise as_timeout_error(exc) from exc
+            raise self._timeout_error(exc) from exc
         except httpx.TimeoutException as exc:
-            raise as_timeout_error(exc) from exc
+            raise self._timeout_error(exc) from exc
         except httpx.TooManyRedirects as exc:
-            raise as_too_many_redirects_error(exc) from exc
+            raise self._redirect_error(exc) from exc
         except httpx.ProxyError as exc:
             # CONNECT refusals surface here (httpcore raises
             # "407 Proxy Authentication Required"); a proxy that is merely
             # unreachable stays a retryable connection failure.
             if is_proxy_authentication_error(exc):
-                raise as_non_retryable_connection_error(exc) from exc
-            raise as_connection_error(exc) from exc
+                raise self._non_retryable_transport_error(exc) from exc
+            raise self._transport_error(exc) from exc
         except httpx.ConnectError as exc:
             # Must precede NetworkError: a certificate rejection arrives as a
             # ConnectError wrapping ssl.SSLCertVerificationError, and retrying
             # cannot repair the certificate.
             if is_certificate_verification_error(exc):
-                raise as_non_retryable_connection_error(exc) from exc
-            raise as_connection_error(exc) from exc
+                raise self._non_retryable_transport_error(exc) from exc
+            raise self._transport_error(exc) from exc
         except (
             httpx.NetworkError,
             httpx.RemoteProtocolError,
             httpx.DecodingError,
         ) as exc:
-            raise as_connection_error(exc) from exc
+            raise self._transport_error(exc) from exc
+        except httpx.RequestError as exc:
+            raise self._transport_error(exc) from exc
         return BaseResponse(
             content=r.content,
             headers=r.headers,
@@ -199,13 +273,44 @@ class HttpxSession(BaseSession):
 
         for item in items:
             try:
-                self._session.cookies.set(
-                    item["name"],
-                    item["value"],
-                    domain=item.get("domain", ""),
-                    path=item.get("path", "/"),
+                domain = item.get("domain") or ""
+                cookie_path = item.get("path") or "/"
+                expires = item.get("expires")
+                rest: dict[str, Any] = dict(item.get("rest") or {})
+                if item.get("http_only") and not _rest_has(rest, "httponly"):
+                    rest["HttpOnly"] = None
+                same_site = item.get("same_site")
+                if isinstance(same_site, str) and not _rest_has(rest, "samesite"):
+                    rest["SameSite"] = same_site
+                max_age = item.get("max_age")
+                if isinstance(max_age, int) and not _rest_has(rest, "max-age"):
+                    rest["Max-Age"] = str(max_age)
+
+                cookie = Cookie(
+                    version=0,
+                    name=item["name"],
+                    value=item["value"],
+                    port=None,
+                    port_specified=False,
+                    domain=domain,
+                    domain_specified=bool(item.get("domain_specified", bool(domain))),
+                    domain_initial_dot=bool(
+                        item.get("domain_initial_dot", domain.startswith("."))
+                    ),
+                    path=cookie_path,
+                    path_specified=bool(item.get("path_specified", bool(cookie_path))),
+                    secure=bool(item.get("secure")),
+                    expires=int(expires) if expires is not None else None,
+                    # No expires means a session cookie.  ``discard`` is what
+                    # http.cookiejar uses to decide whether to persist it.
+                    discard=expires is None,
+                    comment=None,
+                    comment_url=None,
+                    rest=_cookie_rest(rest),
+                    rfc2109=False,
                 )
-            except (CookieError, ValueError):
+                self._session.cookies.jar.set_cookie(cookie)
+            except (CookieError, ValueError, TypeError, OverflowError):
                 continue
         return True
 
@@ -215,14 +320,24 @@ class HttpxSession(BaseSession):
 
         path = resolve_cookie_path(cookies_dir, filename or "httpx.cookies")
 
-        cookies: list[dict[str, str]] = []
+        cookies: list[dict[str, Any]] = []
         for cookie in self.session.cookies.jar:
+            rest = dict(getattr(cookie, "_rest", None) or {})
             cookies.append(
                 {
                     "name": cookie.name,
                     "value": cookie.value or "",
                     "domain": cookie.domain or "",
                     "path": cookie.path or "/",
+                    "secure": bool(cookie.secure),
+                    "http_only": _rest_has(rest, "httponly"),
+                    "same_site": _rest_value(rest, "samesite"),
+                    "expires": cookie.expires,
+                    "max_age": _rest_value(rest, "max-age"),
+                    "domain_specified": bool(cookie.domain_specified),
+                    "domain_initial_dot": bool(cookie.domain_initial_dot),
+                    "path_specified": bool(cookie.path_specified),
+                    "rest": rest,
                 }
             )
         try:
@@ -308,21 +423,3 @@ class HttpxSession(BaseSession):
                 "on the session instead, or use the aiohttp/curl_cffi "
                 "backend."
             )
-
-    @staticmethod
-    def _build_proxy_config(
-        proxy: str | None = None,
-        proxy_user: str | None = None,
-        proxy_pass: str | None = None,
-    ) -> str | httpx.Proxy | None:
-        """Builds proxy configuration."""
-        if not proxy:
-            return None
-
-        if "@" in proxy:
-            return proxy
-
-        if proxy_user and proxy_pass:
-            return httpx.Proxy(proxy, auth=(proxy_user, proxy_pass))
-
-        return proxy

@@ -387,7 +387,12 @@ def _allow_ip_cookies(monkeypatch: pytest.MonkeyPatch) -> None:
 def _cfg(backend: str) -> FetcherConfig:
     return FetcherConfig(
         backend=backend,
-        timeout=5.0,
+        # No per-request deadline: these decoding tests talk to an in-process
+        # loopback server, so success is decided by the handler finishing,
+        # not by the machine being fast enough. A 5 s budget made the suite
+        # flaky whenever the box was busy with parallel builds; the deadline
+        # is not what any assertion here is about.
+        timeout=None,  # type: ignore[arg-type] - None disables the deadline
         headers={"User-Agent": "pytest-response-decoding"},
         trust_env=False,
         verify_ssl=False,

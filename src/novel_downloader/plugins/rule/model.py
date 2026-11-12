@@ -115,6 +115,7 @@ __all__ = [
     "loads_rule_json",
     "apply_limits",
     "MAX_EXTRA_PAGES",
+    "MAX_REGEX_LENGTH",
 ]
 
 #: Hard upper bound on the extra pagination pages the fetcher will fetch.
@@ -122,6 +123,22 @@ __all__ = [
 #: honoured; it was previously clamped silently at runtime (the walk simply
 #: stopped), which hid a misconfigured rule.  It is now rejected at load time.
 MAX_EXTRA_PAGES = 50
+
+#: Hard upper bound on the length of a single regex pattern.  A rule document
+#: is capped at 1 MiB, but a 1 MiB pattern makes ``re`` compile for minutes and
+#: adds nothing a real selector needs.  The limit also keeps the static
+#: backtracking analysis linear in practice.
+MAX_REGEX_LENGTH = 8192
+
+#: Maximum nesting depth accepted in a rule JSON document.  Real rules nest a
+#: handful of levels (``book.chapters.fields.title.steps[0]``); a document
+#: nested hundreds of levels deep is only useful for exhausting the stack.
+_MAX_DOCUMENT_DEPTH = 64
+
+#: Maximum number of object keys accepted in one rule document.  A 1 MiB file
+#: can carry ~100k keys; a real rule has a few dozen.  Refusing the flood keeps
+#: validation (and the duplicate-key hook) bounded.
+_MAX_DOCUMENT_KEYS = 4096
 
 
 class RuleError(ValueError):
@@ -156,15 +173,48 @@ def _pairs_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return obj
 
 
+def _check_document_shape(data: Any, *, source: str) -> None:
+    """
+    Bound the depth and object-key count of an already-decoded document.
+
+    ``json.loads`` rejects nesting only once it hits Python's recursion limit
+    (and then with an opaque ``RecursionError``).  A document that stays just
+    below that limit still makes every later recursive walk expensive, and a
+    key flood bloats the duplicate-key hook.  Both are rejected here, before
+    any section parser runs.
+    """
+    stack: list[tuple[Any, int]] = [(data, 1)]
+    keys = 0
+    while stack:
+        node, depth = stack.pop()
+        if depth > _MAX_DOCUMENT_DEPTH:
+            raise RuleError(
+                f"{source}: rule JSON is nested too deeply "
+                f"(limit {_MAX_DOCUMENT_DEPTH} levels)"
+            )
+        if isinstance(node, dict):
+            keys += len(node)
+            if keys > _MAX_DOCUMENT_KEYS:
+                raise RuleError(
+                    f"{source}: rule JSON has too many keys "
+                    f"(limit {_MAX_DOCUMENT_KEYS})"
+                )
+            stack.extend((value, depth + 1) for value in node.values())
+        elif isinstance(node, list):
+            stack.extend((value, depth + 1) for value in node)
+
+
 def loads_rule_json(text: str | bytes, *, source: str = "<memory>") -> dict[str, Any]:
     """
     Decode a rule document, requiring a JSON object as the root.
 
     Unlike a plain ``json.loads``, duplicate object keys are rejected: for a
     rule document a duplicate key is a copy/paste error, and silently keeping
-    the last value hides the conflict from the author.
+    the last value hides the conflict from the author.  The decoded document is
+    also bounded in depth and key count (see :func:`_check_document_shape`).
 
-    :raises RuleError: on invalid JSON, a non-object root, or duplicate keys.
+    :raises RuleError: on invalid JSON, a non-object root, duplicate keys, or
+        a document that is too deeply nested / has too many keys.
     """
     try:
         data: Any = json.loads(text, object_pairs_hook=_pairs_without_duplicates)
@@ -179,6 +229,7 @@ def loads_rule_json(text: str | bytes, *, source: str = "<memory>") -> dict[str,
         ) from e
     if not isinstance(data, dict):
         raise RuleError(t("{source}: rule must be a JSON object").format(source=source))
+    _check_document_shape(data, source=source)
     return data
 
 
@@ -600,11 +651,13 @@ def regex_backtracking_risk(pattern: str) -> str | None:
             while body.startswith("(") and _atom_end(body, 0) == len(body):
                 body = _group_body(body, 1, len(body) - 1)
             if not body or _can_match_empty(body) or _is_quantified_single_atom(body):
+                # Deliberately does not echo the pattern (or a group of it):
+                # rule documents may carry secrets, and the location is enough
+                # for the author to find the pattern.
                 return (
-                    f"group {pattern[start - 1 : i + 1]!r} is repeated "
-                    "(unbounded quantifier) but its body can match the empty "
-                    "string or a single repeated atom, so matching backtracks "
-                    "exponentially"
+                    "a group is repeated with an unbounded quantifier but its "
+                    "body can match the empty string or a single repeated atom, "
+                    "so matching backtracks exponentially"
                 )
         i = after
     return None
@@ -625,26 +678,27 @@ def _check_regex(pattern: Any, *, where: str) -> str | None:
         return None
     if not isinstance(pattern, str):
         raise RuleError(f"{where} must be a regex string, got {type(pattern).__name__}")
+    if len(pattern) > MAX_REGEX_LENGTH:
+        raise RuleError(
+            f"{where}: regex is too long "
+            f"({len(pattern)} characters, limit {MAX_REGEX_LENGTH})"
+        )
     try:
         re.compile(pattern)
     except re.error as e:
-        raise RuleError(f"{where}: invalid regex {pattern!r}: {e}") from e
+        # Do not interpolate the pattern: it comes from an untrusted rule file
+        # and may contain a token.  ``re.error`` itself names the position.
+        raise RuleError(f"{where}: invalid regex: {e}") from e
     except RecursionError as e:
         # ``sre_parse`` recurses into nested groups; the error is not a
         # ``re.error``, so it used to escape as a bare ``RecursionError``.
-        raise RuleError(
-            f"{where}: regex {pattern!r} is nested too deeply to be validated"
-        ) from e
+        raise RuleError(f"{where}: regex is nested too deeply to be validated") from e
     try:
         risk = regex_backtracking_risk(pattern)
     except RecursionError as e:
-        raise RuleError(
-            f"{where}: regex {pattern!r} is nested too deeply to be validated"
-        ) from e
+        raise RuleError(f"{where}: regex is nested too deeply to be validated") from e
     if risk is not None:
-        raise RuleError(
-            f"{where}: regex {pattern!r} risks catastrophic backtracking: {risk}"
-        )
+        raise RuleError(f"{where}: regex risks catastrophic backtracking: {risk}")
     return pattern
 
 
@@ -1120,19 +1174,25 @@ class Field:
 
     def __post_init__(self) -> None:
         if self.regex:
+            if isinstance(self.regex, str) and len(self.regex) > MAX_REGEX_LENGTH:
+                raise RuleError(
+                    "field regex is too long "
+                    f"({len(self.regex)} characters, limit {MAX_REGEX_LENGTH})"
+                )
             try:
                 self._pattern = re.compile(self.regex, re.S)
             except RecursionError as e:
                 # Deeply nested groups exhaust ``sre_parse``'s recursion before
                 # it can report a normal ``re.error``.
-                raise RuleError(
-                    f"field regex {self.regex!r} is nested too deeply to compile"
-                ) from e
+                raise RuleError("field regex is nested too deeply to compile") from e
             except (re.error, TypeError) as e:
                 # TypeError covers a non-string ``regex`` (e.g. a number/list).
+                # The pattern itself is not echoed: it may carry a secret.  The
+                # existing message id is kept (with a redacted value) so the
+                # translation catalog stays valid.
                 raise RuleError(
                     t("invalid field regex {regex!r}: {err}").format(
-                        regex=self.regex, err=e
+                        regex="<redacted>", err=e
                     )
                 ) from e
             # ``Field`` is the one place that compiles a rule regex without
@@ -1144,14 +1204,9 @@ class Field:
                     else None
                 )
             except RecursionError as e:
-                raise RuleError(
-                    f"field regex {self.regex!r} is nested too deeply to analyse"
-                ) from e
+                raise RuleError("field regex is nested too deeply to analyse") from e
             if risk is not None:
-                raise RuleError(
-                    f"field regex {self.regex!r} risks catastrophic backtracking: "
-                    f"{risk}"
-                )
+                raise RuleError(f"field regex risks catastrophic backtracking: {risk}")
 
     @classmethod
     def from_dict(cls, data: Any, *, where: str = "field", _depth: int = 0) -> Field:

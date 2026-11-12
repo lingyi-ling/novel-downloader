@@ -8,15 +8,17 @@ Abstract base class providing common HTTP session handling for fetchers.
 
 import abc
 import asyncio
+import contextlib
 import hashlib
 import logging
 import random
 import types
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal, Self
+from urllib.parse import urljoin
 
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS, IMAGE_HEADERS
 from novel_downloader.infra.i18n import t
@@ -25,7 +27,13 @@ from novel_downloader.infra.sessions.base import (
     NonRetryableConnectionError,
     TooManyRedirectsError,
 )
-from novel_downloader.libs.filesystem import font_filename, image_filename, write_file
+from novel_downloader.infra.sessions.response import BaseResponse
+from novel_downloader.libs.filesystem import (
+    font_filename,
+    image_filename,
+    sanitize_filename,
+    write_file,
+)
 from novel_downloader.libs.time_utils import async_jitter_sleep
 from novel_downloader.plugins.base.errors import (
     RETRYABLE_STATUS,
@@ -55,6 +63,86 @@ _RETRY_AFTER_JITTER_FRACTION = 0.1
 #: without the header may be one broken route rather than a rate limit, so it
 #: keeps the local exponential backoff only.
 _SHARED_COOLDOWN_STATUS: frozenset[int] = frozenset({429, 503})
+
+#: Ceiling for a single media payload.  The number is generous for an inline
+#: illustration while still refusing a multi-gigabyte body that would fill the
+#: disk (or a cache quota) from one buggy or hostile URL.
+DEFAULT_MAX_MEDIA_BYTES = 64 * 1024 * 1024
+
+#: Content types that are never a media body.  A login wall, an error document
+#: and an expired-URL JSON response are served with 200 often enough that the
+#: status code alone is not a completeness signal.
+_REJECTED_MEDIA_CONTENT_TYPES: frozenset[str] = frozenset(
+    {
+        "application/json",
+        "application/problem+json",
+        "application/xhtml+xml",
+        "application/xml",
+        "text/xml",
+    }
+)
+
+#: First bytes of an HTML document (BOM/whitespace already stripped).
+_HTML_PREFIXES: tuple[bytes, ...] = (
+    b"<!doctype html",
+    b"<html",
+    b"<head",
+    b"<body",
+)
+
+
+def _media_content_type(headers: Mapping[str, str]) -> str:
+    """Return the lower-cased ``Content-Type`` media type, if declared."""
+    raw = headers.get("content-type") or headers.get("Content-Type") or ""
+    return str(raw).split(";", 1)[0].strip().lower()
+
+
+def _looks_like_html(content: bytes) -> bool:
+    """Heuristic: does this body start with an HTML document?"""
+    head = content[:256].lstrip().lower()
+    return head.startswith(_HTML_PREFIXES)
+
+
+def _unique_non_empty(urls: list[str]) -> list[str]:
+    """Strip and de-duplicate URLs while preserving their first-seen order."""
+    return list(dict.fromkeys(u.strip() for u in urls if u and u.strip()))
+
+
+def _non_empty_file(path: Path) -> bool:
+    """Return whether *path* exists and holds at least one byte."""
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _media_rejection_reason(
+    content: bytes,
+    headers: Mapping[str, str],
+    max_bytes: int,
+) -> str | None:
+    """
+    Return why *content* must not be stored as media, or ``None`` if it may.
+
+    Missing or generic content types (``application/octet-stream``, no header)
+    are accepted: many CDNs and mirror hosts do not label images.  Only a
+    clearly textual/document type or an HTML body is refused, so a perfect
+    server response is never dropped on a guess.
+    """
+    if len(content) > max_bytes:
+        return f"payload too large ({len(content)} bytes > {max_bytes})"
+
+    content_type = _media_content_type(headers)
+    if (
+        content_type.startswith("text/")
+        or content_type in _REJECTED_MEDIA_CONTENT_TYPES
+    ):
+        return f"non-media content-type {content_type!r}"
+
+    if _looks_like_html(content):
+        return "HTML document instead of media"
+
+    return None
 
 
 def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
@@ -102,6 +190,9 @@ class BaseFetcher(abc.ABC):
     #: Safety valve for :meth:`_paginate`: a site that always confirms a next
     #: page must not grow the page list (and the request count) without bound.
     MAX_PAGES: int = 500
+    #: Hard ceiling for one image/font payload.  Sites that legitimately host
+    #: larger artwork can raise it on the subclass.
+    MAX_MEDIA_BYTES: int = DEFAULT_MAX_MEDIA_BYTES
 
     def __init__(
         self,
@@ -134,6 +225,13 @@ class BaseFetcher(abc.ABC):
         self._rate_limiter: TokenBucketRateLimiter | None = (
             TokenBucketRateLimiter(config.max_rps) if config.max_rps > 0 else None
         )
+
+        # Per-destination serialisation for media writes.  Concurrent chapter
+        # workers (and duplicate URLs inside one chapter) otherwise download
+        # the same image several times and race on the same path.  Entries are
+        # reference-counted and removed when the last waiter leaves, so the
+        # dict stays proportional to the in-flight set, not the book size.
+        self._media_locks: dict[Path, tuple[asyncio.Lock, int]] = {}
 
     async def init(
         self,
@@ -209,6 +307,23 @@ class BaseFetcher(abc.ABC):
         :param url: The target URL.
         :return: raw content if success, else None
         """
+        response = await self._fetch_data_response(url, **kwargs)
+        return response.content if response is not None else None
+
+    async def _fetch_data_response(
+        self, url: str, **kwargs: Any
+    ) -> BaseResponse | None:
+        """
+        Fetch binary data and keep the response headers.
+
+        The media path needs ``Content-Type`` to tell an image from a login
+        page, so the retry loop returns the whole response and
+        :meth:`fetch_data` unwraps the body for existing callers.
+
+        :param url: The target URL.
+        :return: the successful response, or ``None`` when the fetcher's
+            retries are exhausted.
+        """
         for attempt in range(self._retry_times + 1):
             if self._rate_limiter:
                 await self._rate_limiter.wait()
@@ -230,6 +345,17 @@ class BaseFetcher(abc.ABC):
                 # and every retry would fail the same way.
                 logger.warning(
                     "Request failed (site=%s) %s: %s (not retrying)",
+                    self.site_name,
+                    url,
+                    exc,
+                )
+                return None
+            except ValueError as exc:
+                # A malformed/unsupported URL is deterministic.  Media is
+                # best-effort, so one broken reference must not abort the
+                # chapter or the book.
+                logger.warning(
+                    "Invalid media URL (site=%s) %s: %s",
                     self.site_name,
                     url,
                     exc,
@@ -286,9 +412,9 @@ class BaseFetcher(abc.ABC):
                 )
                 return None
 
-            return resp.content
+            return resp
 
-        return None
+        raise AssertionError("unreachable: the retry loop always returns or raises")
 
     async def fetch_media(
         self,
@@ -369,19 +495,22 @@ class BaseFetcher(abc.ABC):
         """
         Download images to `img_dir` in batches.
 
-        Any HTTP error (raise_for_status) is logged and skipped.
+        Any HTTP error (raise_for_status) is logged and skipped.  Repeated
+        URLs collapse to one download: a chapter often references the same
+        decoration or watermark image several times.
 
         :param img_dir: Destination folder.
         :param urls: List of image URLs (http/https).
         :param on_exist: What to do when file exists.
         :param concurrent: Concurrency per batch.
         """
-        if not urls:
+        unique_urls = _unique_non_empty(urls)
+        if not unique_urls:
             return
 
         batch_size = max(1, concurrent)
-        for i in range(0, len(urls), batch_size):
-            batch = urls[i : i + batch_size]
+        for i in range(0, len(unique_urls), batch_size):
+            batch = unique_urls[i : i + batch_size]
             tasks = [
                 self._fetch_one_image(url, img_dir, on_exist=on_exist) for url in batch
             ]
@@ -399,12 +528,13 @@ class BaseFetcher(abc.ABC):
         concurrent: int = 5,
     ) -> None:
         """Download fonts to `font_dir` in batches."""
-        if not urls:
+        unique_urls = _unique_non_empty(urls)
+        if not unique_urls:
             return
 
         batch_size = max(1, concurrent)
-        for i in range(0, len(urls), batch_size):
-            batch = urls[i : i + batch_size]
+        for i in range(0, len(unique_urls), batch_size):
+            batch = unique_urls[i : i + batch_size]
             tasks = [
                 self._fetch_one_font(url, font_dir, on_exist=on_exist) for url in batch
             ]
@@ -519,14 +649,20 @@ class BaseFetcher(abc.ABC):
 
             if resp.status not in RETRYABLE_STATUS:
                 # Deterministic failure (404/401/403...): another attempt
-                # returns the same answer and only amplifies traffic.
-                raise HttpStatusError(url, resp.status)
+                # returns the same answer and only amplifies traffic.  A
+                # ``Retry-After`` is still surfaced for reporting callers.
+                raise HttpStatusError(
+                    url,
+                    resp.status,
+                    retry_after=_retry_after_seconds(resp.headers),
+                )
 
             if attempt >= self._retry_times:
                 # This request gives up, but the header is still evidence for
                 # the peers that are about to hit the same rate limit.
+                delay = _retry_after_seconds(resp.headers)
                 self._register_shared_cooldown(resp.status, resp.headers)
-                raise HttpStatusError(url, resp.status)
+                raise HttpStatusError(url, resp.status, retry_after=delay)
 
             logger.info(
                 "Retrying (site=%s, attempt=%d/%d) %s: HTTP %s",
@@ -677,21 +813,41 @@ class BaseFetcher(abc.ABC):
         on_exist: Literal["overwrite", "skip"],
     ) -> Path | None:
         """Download a single image and save with a hashed filename."""
-        save_path = folder / image_filename(url, name=name)
-
-        if save_path.exists() and on_exist == "skip":
-            logger.debug("Skip existing image: %s", save_path)
-            return save_path
-
-        content = await self.fetch_data(url, headers=self.IMAGE_HEADERS)
-        if content is None:
+        # Exporters prepend ``https:`` to a protocol-relative resource URL
+        # before hashing it; use the same form so the file they look for is
+        # the one saved here.
+        filename_url = url.strip()
+        if filename_url.startswith("//"):
+            filename_url = "https:" + filename_url
+        try:
+            filename = image_filename(filename_url, name=name)
+        except ValueError as exc:
+            logger.warning(
+                "Invalid image URL (site=%s) %s: %s", self.site_name, url, exc
+            )
             return None
+        save_path = self._media_path(folder, filename)
 
-        await asyncio.to_thread(
-            write_file, content=content, filepath=save_path, on_exist="overwrite"
-        )
-        logger.debug("Saved image: %s <- %s", save_path, url)
-        return save_path
+        async with self._media_guard(save_path):
+            if save_path.exists() and on_exist == "skip":
+                if _non_empty_file(save_path):
+                    logger.debug("Skip existing image: %s", save_path)
+                    return save_path
+                # A zero-byte leftover (interrupted write, pre-atomic version)
+                # would otherwise stay broken forever under "skip".
+                logger.warning("Empty cached image, re-downloading: %s", save_path)
+
+            content = await self._fetch_media_bytes(
+                url, headers=self.IMAGE_HEADERS, kind="image"
+            )
+            if content is None:
+                return None
+
+            if not await self._save_media(save_path, content, kind="image", url=url):
+                return None
+
+            logger.debug("Saved image: %s <- %s", save_path, url)
+            return save_path
 
     async def _fetch_one_font(
         self,
@@ -702,21 +858,161 @@ class BaseFetcher(abc.ABC):
         on_exist: Literal["overwrite", "skip"],
     ) -> Path | None:
         """Download a single font and save with a hashed filename."""
-        save_path = folder / font_filename(url, name=name)
+        try:
+            filename = font_filename(url, name=name)
+        except ValueError as exc:
+            logger.warning(
+                "Invalid font URL (site=%s) %s: %s", self.site_name, url, exc
+            )
+            return None
+        save_path = self._media_path(folder, filename)
 
-        if save_path.exists() and on_exist == "skip":
-            logger.debug("Skip existing font: %s", save_path)
+        async with self._media_guard(save_path):
+            if save_path.exists() and on_exist == "skip":
+                if _non_empty_file(save_path):
+                    logger.debug("Skip existing font: %s", save_path)
+                    return save_path
+                logger.warning("Empty cached font, re-downloading: %s", save_path)
+
+            content = await self._fetch_media_bytes(
+                url, headers=DEFAULT_USER_HEADERS, kind="font"
+            )
+            if content is None:
+                return None
+
+            if not await self._save_media(save_path, content, kind="font", url=url):
+                return None
+
+            logger.debug("Saved font: %s <- %s", save_path, url)
             return save_path
 
-        content = await self.fetch_data(url, headers=DEFAULT_USER_HEADERS)
-        if content is None:
+    def _media_path(self, folder: Path, filename: str) -> Path:
+        """
+        Build a media destination path that cannot leave *folder*.
+
+        ``image_filename``/``font_filename`` hash the URL by default, but an
+        explicit ``name=`` is caller-controlled and may contain separators.
+        Sanitising here (rather than only inside :func:`write_file`) keeps the
+        existence check and the actual write on the same path.
+        """
+        return folder / sanitize_filename(filename)
+
+    def _resolve_media_url(self, url: str) -> str:
+        """
+        Turn a resource URL into something the HTTP session can request.
+
+        Protocol-relative (``//host/x``) and root-relative (``/uploads/x``)
+        image URLs appear in several site parsers.  Both used to reach the
+        session untouched, where the backend rejected them and the image was
+        silently missing.  Relative URLs are resolved against the site origin;
+        the filename stays derived from the original URL so exporters, which
+        only know the stored value, find the file.
+        """
+        candidate = url.strip()
+        if candidate.startswith("//"):
+            return "https:" + candidate
+        if candidate.startswith(("http://", "https://")):
+            return candidate
+        if self._base_url:
+            try:
+                return urljoin(self._base_url, candidate)
+            except ValueError:
+                # A malformed base/host must not fail before the session gets
+                # a chance to classify the URL.
+                return candidate
+        return candidate
+
+    @contextlib.asynccontextmanager
+    async def _media_guard(self, save_path: Path) -> AsyncIterator[None]:
+        """
+        Serialise downloads that target the same file.
+
+        Two chapter workers may reference the same illustration, and a single
+        chapter may repeat it.  Without this guard both requests are in flight
+        at once and the URL is downloaded twice; with it the second waiter
+        wakes after the first write and honours ``on_exist="skip"``.
+        """
+        lock, refs = self._media_locks.get(save_path, (asyncio.Lock(), 0))
+        self._media_locks[save_path] = (lock, refs + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, refs = self._media_locks[save_path]
+            if refs <= 1:
+                del self._media_locks[save_path]
+            else:
+                self._media_locks[save_path] = (lock, refs - 1)
+
+    async def _fetch_media_bytes(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        kind: str,
+    ) -> bytes | None:
+        """
+        Fetch a media body and refuse anything that is clearly not media.
+
+        The check is intentionally conservative: unknown or generic content
+        types are accepted, while an HTML login/error page (with 200 OK) or a
+        body above :attr:`MAX_MEDIA_BYTES` is rejected before it can become a
+        corrupt image on disk.
+        """
+        request_url = self._resolve_media_url(url)
+        response = await self._fetch_data_response(request_url, headers=headers)
+        if response is None:
             return None
 
-        await asyncio.to_thread(
-            write_file, content=content, filepath=save_path, on_exist="overwrite"
+        reason = _media_rejection_reason(
+            response.content, response.headers, self.MAX_MEDIA_BYTES
         )
-        logger.debug("Saved font: %s <- %s", save_path, url)
-        return save_path
+        if reason is not None:
+            logger.warning(
+                "Rejected %s (site=%s) %s: %s",
+                kind,
+                self.site_name,
+                url,
+                reason,
+            )
+            return None
+
+        return response.content
+
+    async def _save_media(
+        self,
+        save_path: Path,
+        content: bytes,
+        *,
+        kind: str,
+        url: str,
+    ) -> bool:
+        """
+        Write *content* atomically, turning disk errors into a skipped item.
+
+        A full disk or a read-only media directory must not abort the book:
+        the chapter text is still valuable, and the failure is already logged
+        per URL.  Cancellation is not caught (it is a ``BaseException``), so a
+        stopped download still propagates.
+        """
+        try:
+            await asyncio.to_thread(
+                write_file,
+                content=content,
+                filepath=save_path,
+                on_exist="overwrite",
+            )
+        except OSError as exc:
+            logger.warning(
+                "Failed to save %s (site=%s) %s -> %s: %s",
+                kind,
+                self.site_name,
+                url,
+                save_path,
+                exc,
+            )
+            return False
+        return True
 
     def _resolve_base_url(self, locale_style: str) -> str:
         key = locale_style.strip().lower()

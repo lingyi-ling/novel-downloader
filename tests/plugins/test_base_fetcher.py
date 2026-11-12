@@ -9,7 +9,8 @@ what is retried, what is swallowed, and what is left on disk after a failure.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import inspect
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from pathlib import Path
@@ -35,7 +36,8 @@ from novel_downloader.plugins.base.fetcher import (
 )
 from novel_downloader.schemas import FetcherConfig
 
-Handler = Callable[[str, dict[str, Any]], BaseResponse | BaseException]
+HandlerResult = BaseResponse | BaseException | Awaitable[BaseResponse | BaseException]
+Handler = Callable[[str, dict[str, Any]], HandlerResult]
 
 
 class FakeSession:
@@ -62,6 +64,8 @@ class FakeSession:
     async def get(self, url: str, **kwargs: Any) -> BaseResponse:
         self.calls.append((url, kwargs))
         result = self.handler(url, kwargs)
+        if inspect.isawaitable(result):
+            result = await result
         if isinstance(result, BaseException):
             raise result
         return result
@@ -305,6 +309,139 @@ def test_typed_http_status_error_is_not_transient() -> None:
         error = HttpStatusError("https://demo/1", status)
         assert error.retryable is False
         assert is_transient_error(error) is False
+
+
+@pytest.mark.asyncio
+async def test_http_status_error_carries_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused 429 keeps the server's delay available to reporting callers."""
+    handler = lambda url, kw: BaseResponse(  # noqa: E731
+        content=b"", status=429, headers={"Retry-After": "7"}
+    )
+    fetcher, session = _make(monkeypatch, handler, retry_times=0)
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await fetcher.fetch("https://demo/1")
+
+    error = excinfo.value
+    assert error.status == 429
+    assert error.retry_after == 7.0
+    assert error.retryable is False
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_http_status_error_has_no_retry_after_without_the_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = lambda url, kw: BaseResponse(content=b"", status=404)  # noqa: E731
+    fetcher, _ = _make(monkeypatch, handler, retry_times=0)
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await fetcher.fetch("https://demo/1")
+
+    assert excinfo.value.status == 404
+    assert excinfo.value.retry_after is None
+
+
+def test_is_transient_error_honours_an_explicit_retryable_flag() -> None:
+    """The flag must win in both directions, exactly like the task manager."""
+    assert (
+        is_transient_error(NonRetryableConnectionError("certificate expired")) is False
+    )
+
+    class _RetryableConnectionError(ConnectionError):
+        retryable = True
+
+    assert is_transient_error(_RetryableConnectionError("flaky")) is True
+
+
+@pytest.mark.asyncio
+async def test_http_status_error_redacts_url_credentials_and_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user sees the failure, never the signed URL it came from."""
+    url = "https://alice:s3cret@demo/1?token=abc123&page=2"
+    handler = lambda u, kw: BaseResponse(content=b"", status=403)  # noqa: E731
+    fetcher, _ = _make(monkeypatch, handler, retry_times=0)
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await fetcher.fetch(url)
+
+    message = str(excinfo.value)
+    assert "alice" not in message
+    assert "s3cret" not in message
+    assert "abc123" not in message
+    assert "demo/1" in message
+    # The structured field stays the exact URL the caller passed in.
+    assert excinfo.value.url == url
+
+
+@pytest.mark.asyncio
+async def test_transport_error_redacts_credentials_and_local_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backend messages can echo URLs and local paths; neither may leak."""
+    raw = (
+        "connect failed for https://bob:hunter2@demo/1?token=xyz "
+        r"while reading C:\Users\bob\.cache\chapter.tmp"
+    )
+    handler = lambda url, kw: ConnectionError(raw)  # noqa: E731
+    fetcher, _ = _make(monkeypatch, handler, retry_times=0)
+
+    with pytest.raises(TransportError) as excinfo:
+        await fetcher.fetch("https://demo/1")
+
+    message = str(excinfo.value)
+    assert "hunter2" not in message
+    assert "bob" not in message
+    assert "xyz" not in message
+    assert "C:\\Users" not in message
+    assert "<redacted-path>" in message
+
+
+@pytest.mark.asyncio
+async def test_fetch_does_not_retry_proxy_authentication_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct 407 is deterministic: one request, no retry budget spent."""
+    handler = lambda url, kw: BaseResponse(content=b"", status=407)  # noqa: E731
+    fetcher, session = _make(monkeypatch, handler, retry_times=3)
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await fetcher.fetch("https://demo/1")
+
+    assert excinfo.value.status == 407
+    assert excinfo.value.retryable is False
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_does_not_retry_a_parse_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body that cannot be parsed is deterministic, not transient."""
+    handler = lambda url, kw: ValueError("Failed to parse response body as JSON")  # noqa: E731
+    fetcher, session = _make(monkeypatch, handler, retry_times=3)
+
+    with pytest.raises(ValueError):
+        await fetcher.fetch("https://demo/1")
+
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_data_never_swallows_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The media path only catches transport errors, never BaseException."""
+    fetcher, session = _make(monkeypatch, lambda url, kw: KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        await fetcher.fetch_data("https://demo/cover.jpg")
+
+    assert len(session.calls) == 1
 
 
 @pytest.mark.asyncio

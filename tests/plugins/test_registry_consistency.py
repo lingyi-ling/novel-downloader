@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Consistency tests for :mod:`novel_downloader.plugins.registry`.
 
-These tests intentionally freeze the *current* semantics, including the known
-asymmetries between registration helpers and lookup normalization.  A fresh
-``PluginRegistry`` is used so the global registrar (and rule discovery) is not
-mutated.
+These tests intentionally freeze the *current* semantics, including the
+deliberate asymmetries (clients have a generic fallback, ``[]`` means "all",
+the rule loader normalizes empty keys differently).  Registration helpers now
+share the lookup normalization.  A fresh ``PluginRegistry`` is used so the
+global registrar (and rule discovery) is not mutated.
 """
 
 from __future__ import annotations
@@ -123,26 +124,24 @@ def test_register_site_keeps_existing_components() -> None:
     assert isinstance(registry.get_parser("alpha", ParserConfig()), _Parser)
 
 
-def test_decorator_with_digit_prefix_is_not_reachable() -> None:
-    # Known asymmetry: ``register_fetcher`` lowercases but does NOT apply the
-    # "prefix n when the key starts with a digit" rule, while every lookup does.
+def test_decorator_with_digit_prefix_uses_the_lookup_normalization() -> None:
+    # Registration and lookup share ``_normalize_key``, so a digit-leading
+    # explicit key is stored under the "n"-prefixed name and stays reachable.
     registry = PluginRegistry()
     registry.register_fetcher("123abc")(_Fetcher)
 
-    assert "123abc" in registry._fetchers
-    with pytest.raises(ValueError, match="Unsupported site"):
-        registry.get_fetcher("123abc", FetcherConfig())
+    assert "n123abc" in registry._fetchers
+    assert isinstance(registry.get_fetcher("123abc", FetcherConfig()), _Fetcher)
 
 
-def test_register_searcher_does_not_lowercase_an_explicit_key() -> None:
-    # Known asymmetry: ``register_searcher`` stores an explicit key verbatim,
-    # whereas the other register_* decorators lowercase it.
+def test_register_searcher_normalizes_an_explicit_key() -> None:
+    # A verbatim key used to be unreachable from ``get_searcher_class``; the
+    # decorator now normalizes it like every other registration helper.
     registry = PluginRegistry()
     registry.register_searcher("UPPER")(_Searcher)
 
-    assert "UPPER" in registry._searchers
-    with pytest.raises(ValueError, match="Unsupported site"):
-        registry.get_searcher_class("UPPER")
+    assert "upper" in registry._searchers
+    assert registry.get_searcher_class("UPPER") is _Searcher
 
 
 # --------------------------------------------------------------------------- #

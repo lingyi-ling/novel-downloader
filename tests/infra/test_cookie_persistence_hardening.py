@@ -23,7 +23,22 @@ FILENAMES = {
     "httpx": "httpx.cookies",
     "curl_cffi": "curl_cffi.cookies",
 }
-ALLOWED_KEYS = {"name", "value", "domain", "path"}
+ALLOWED_KEYS = {
+    "name",
+    "value",
+    "version",
+    "domain",
+    "path",
+    "secure",
+    "http_only",
+    "same_site",
+    "expires",
+    "max_age",
+    "domain_specified",
+    "domain_initial_dot",
+    "path_specified",
+    "rest",
+}
 
 
 @pytest.fixture(autouse=True)

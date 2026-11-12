@@ -12,13 +12,20 @@ import re
 import ssl
 import types
 from abc import ABC, abstractmethod
-from collections.abc import Coroutine, Iterator, Mapping, Sequence
+from collections.abc import Coroutine, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Self, TypedDict, Unpack
+from urllib.parse import urlsplit
 
 from novel_downloader.infra.http_defaults import DEFAULT_USER_HEADERS
 from novel_downloader.schemas import FetcherConfig
 
+from .proxy import (
+    ProxyConfig,
+    redact_secrets,
+    should_bypass_proxy,
+    split_proxy_settings,
+)
 from .response import BaseResponse
 
 logger = logging.getLogger(__name__)
@@ -84,49 +91,63 @@ DEFAULT_MAX_REDIRECTS = 10
 #: policy) see the same type regardless of the selected backend.
 
 
-def _error_message(exc: BaseException) -> str:
+def _error_message(exc: BaseException, secrets: Iterable[str] = ()) -> str:
     """Best-effort text for *exc*; never raises.
 
     Backend exceptions can have a ``__str__`` that dereferences optional
     constructor arguments (e.g. aiohttp's ``ClientResponseError`` reads
     ``request_info.real_url``), so the translation helpers must not let a
     malformed instance crash the mapping itself.
+
+    Proxy credentials are masked here, at the single place every backend
+    funnels its messages through: libcurl and httpx copy the proxy URL into
+    some error strings, and those strings end up in the fetcher's retry
+    logs.
     """
     try:
         message = str(exc)
     except Exception:
         return type(exc).__name__
-    return message or type(exc).__name__
+    return redact_secrets(message, secrets) or type(exc).__name__
 
 
-def as_timeout_error(exc: BaseException) -> TimeoutError:
+def as_timeout_error(
+    exc: BaseException, *, secrets: Iterable[str] = ()
+) -> TimeoutError:
     """
     Translate a backend-specific timeout into the unified builtin type.
 
     :param exc: Original backend exception.
+    :param secrets: Proxy credentials to mask in the message.
     :return: A builtin :class:`TimeoutError` carrying the original message.
     """
-    return TimeoutError(_error_message(exc))
+    return TimeoutError(_error_message(exc, secrets))
 
 
-def as_too_many_redirects_error(exc: BaseException) -> TooManyRedirectsError:
+def as_too_many_redirects_error(
+    exc: BaseException, *, secrets: Iterable[str] = ()
+) -> TooManyRedirectsError:
     """
     Translate a backend-specific redirect excess into the unified type.
 
     :param exc: Original backend exception.
+    :param secrets: Proxy credentials to mask in the message.
     :return: A :class:`TooManyRedirectsError` carrying the original message.
     """
-    return TooManyRedirectsError(_error_message(exc))
+    return TooManyRedirectsError(_error_message(exc, secrets))
 
 
-def as_connection_error(exc: BaseException) -> ConnectionError:
+def as_connection_error(
+    exc: BaseException, *, secrets: Iterable[str] = ()
+) -> ConnectionError:
     """
     Translate a backend-specific transport failure into the unified type.
 
     :param exc: Original backend exception.
+    :param secrets: Proxy credentials to mask in the message.
     :return: A builtin :class:`ConnectionError` carrying the original message.
     """
-    return ConnectionError(_error_message(exc))
+    return ConnectionError(_error_message(exc, secrets))
 
 
 class NonRetryableConnectionError(ConnectionError):
@@ -150,15 +171,16 @@ class NonRetryableConnectionError(ConnectionError):
 
 
 def as_non_retryable_connection_error(
-    exc: BaseException,
+    exc: BaseException, *, secrets: Iterable[str] = ()
 ) -> NonRetryableConnectionError:
     """
     Translate a deterministic transport failure into the unified type.
 
     :param exc: Original backend exception.
+    :param secrets: Proxy credentials to mask in the message.
     :return: A :class:`NonRetryableConnectionError` carrying the message.
     """
-    return NonRetryableConnectionError(_error_message(exc))
+    return NonRetryableConnectionError(_error_message(exc, secrets))
 
 
 def iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
@@ -256,6 +278,9 @@ class PostRequestKwargs(BaseRequestKwargs, total=False):
 
 
 class BaseSession(ABC):
+    #: Name used in diagnostics (proxy-scheme errors, doctor output).
+    backend_name: str = "unknown"
+
     def __init__(
         self,
         config: FetcherConfig,
@@ -265,21 +290,41 @@ class BaseSession(ABC):
         """
         Initialize the async session with configuration.
 
+        ``timeout`` is a *total* per-request deadline on every backend.  A
+        positive value is enforced from connect to the last body byte;
+        ``None`` explicitly disables the deadline; zero and negative values
+        are rejected instead of meaning "no deadline" on aiohttp/curl_cffi
+        and "fail immediately" on httpx.
+
+        Proxy settings are resolved once, here: the explicit config wins,
+        otherwise ``trust_env`` reads the standard variables (see
+        :mod:`novel_downloader.infra.sessions.proxy`).  Backends receive a
+        credential-free URL plus an explicit ``(user, password)`` pair, so
+        no library can echo the password from a URL it was handed.
+
         :param config: Configuration object for session behavior
         :param cookies: Optional initial cookies to set on the session.
+        :raises ValueError: If ``timeout`` is zero/negative, or a proxy URL
+            is unusable.
         """
         self._backoff_factor = config.backoff_factor
         self._request_interval = config.request_interval
         self._retry_times = config.retry_times
-        self._timeout = config.timeout
+        self._timeout = self._validated_timeout(config.timeout)
         self._max_connections = config.max_connections
         self._verify_ssl = config.verify_ssl
         self._impersonate = config.impersonate
         self._http2 = config.http2
-        self._proxy = config.proxy
-        self._proxy_user = config.proxy_user
-        self._proxy_pass = config.proxy_pass
-        self._trust_env = config.trust_env
+        self._proxy_http, self._proxy_https, self._no_proxy = split_proxy_settings(
+            config.proxy,
+            config.proxy_user,
+            config.proxy_pass,
+            config.trust_env,
+        )
+        # Backends are created once, but callers can reach ``init()`` from
+        # several tasks (``async with`` in two workers).  Without the lock
+        # both would build a client and one pool of sockets would leak.
+        self._init_lock = asyncio.Lock()
         # Copy the mapping: callers commonly reuse a shared cookie dict for
         # several sessions and later mutate it for another account.
         self._cookies = dict(cookies) if cookies else {}
@@ -297,6 +342,96 @@ class BaseSession(ABC):
         )
         if config.user_agent:
             self._headers["User-Agent"] = config.user_agent
+
+    @staticmethod
+    def _validated_timeout(timeout: float | None) -> float | None:
+        """Return *timeout* unchanged, or raise for a value backends read
+        differently.
+
+        aiohttp and curl_cffi treat ``0`` as "no deadline" while httpx turns
+        it into an immediate timeout (and rejects negatives only when the
+        request is made).  Config validation already requires ``> 0``; this
+        catches programmatic configs before a single request is sent.
+        """
+        if timeout is None:
+            return None
+        if timeout <= 0:
+            raise ValueError(
+                "timeout must be a positive number of seconds or None to "
+                f"disable the deadline, got {timeout!r}"
+            )
+        return timeout
+
+    def _proxy_for_url(self, url: str) -> ProxyConfig | None:
+        """
+        Return the proxy to use for *url*, or ``None`` to connect directly.
+
+        Applies the per-scheme proxy and ``NO_PROXY``.  Credentials are
+        intentionally split out of :attr:`ProxyConfig.url`.
+        """
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return None
+        scheme = parts.scheme.lower()
+        proxy = self._proxy_https if scheme == "https" else self._proxy_http
+        if proxy is None:
+            return None
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        if port is None:
+            # A NO_PROXY entry may name a port (``example.com:8080``); compare
+            # against the effective port so a URL without an explicit one is
+            # still matched correctly.
+            port = {"http": 80, "https": 443}.get(scheme)
+        if should_bypass_proxy(self._no_proxy, parts.hostname or "", port):
+            return None
+        return proxy
+
+    def _proxy_secrets(self) -> tuple[str, ...]:
+        """Credential strings to mask in backend error messages."""
+        values: list[str] = []
+        for proxy in (self._proxy_http, self._proxy_https):
+            if proxy is not None:
+                values.extend(proxy.secret_values())
+        return tuple(dict.fromkeys(values))
+
+    def _validate_proxy_schemes(self, allowed: Iterable[str], hint: str) -> None:
+        """
+        Reject proxy schemes the backend cannot speak.
+
+        Every backend otherwise fails differently and late: aiohttp tries to
+        talk HTTP to a SOCKS port until the timeout expires, httpx raises a
+        bare ``ImportError`` for a missing optional dependency, and libcurl
+        reports its own curl code.  The message is scheme-only — never the
+        host or credentials.
+
+        :param allowed: Schemes the backend supports.
+        :param hint: What the user can do instead.
+        """
+        permitted = frozenset(allowed)
+        for proxy in (self._proxy_http, self._proxy_https):
+            if proxy is not None and proxy.scheme not in permitted:
+                raise ValueError(
+                    f"The {self.backend_name} backend does not support "
+                    f"{proxy.scheme}:// proxies: {hint}"
+                )
+
+    def _timeout_error(self, exc: BaseException) -> TimeoutError:
+        return as_timeout_error(exc, secrets=self._proxy_secrets())
+
+    def _redirect_error(self, exc: BaseException) -> TooManyRedirectsError:
+        return as_too_many_redirects_error(exc, secrets=self._proxy_secrets())
+
+    def _transport_error(self, exc: BaseException) -> ConnectionError:
+        return as_connection_error(exc, secrets=self._proxy_secrets())
+
+    def _non_retryable_transport_error(
+        self, exc: BaseException
+    ) -> NonRetryableConnectionError:
+        return as_non_retryable_connection_error(exc, secrets=self._proxy_secrets())
 
     @abstractmethod
     async def init(

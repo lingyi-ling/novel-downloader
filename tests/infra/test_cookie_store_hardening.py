@@ -8,7 +8,7 @@ import os
 
 import pytest
 
-from novel_downloader.infra.cookies import CookieStore
+from novel_downloader.infra.cookies import MAX_COOKIE_FILE_BYTES, CookieStore
 
 
 def _write(path, payload: object) -> None:
@@ -153,6 +153,122 @@ def test_corrupt_rewrite_drops_the_previous_cookies(tmp_path) -> None:
     assert store.cache == {}
     # The broken file's mtime is recorded, so it is not re-read every call.
     assert store.mtimes[str(path.name)] == path.stat().st_mtime
+
+
+def test_unreadable_file_drops_previous_cookies(tmp_path, monkeypatch) -> None:
+    """Credentials from an earlier read must not survive a failed stat."""
+    path = tmp_path / "aiohttp.cookies"
+    _write(path, [{"name": "sid", "value": "old"}])
+
+    store = CookieStore(tmp_path)
+    store.load_all()
+    assert store.cache == {"sid": "old"}
+
+    path_type = type(path)
+    real_stat = path_type.stat
+    real_exists = path_type.exists
+
+    def _stat(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if self == path:
+            raise PermissionError("denied")
+        return real_stat(self, *args, **kwargs)
+
+    def _exists(self) -> bool:
+        return True if self == path else real_exists(self)
+
+    monkeypatch.setattr(path_type, "stat", _stat)
+    monkeypatch.setattr(path_type, "exists", _exists)
+    store.load_all()
+
+    assert store.cache == {}
+    assert "aiohttp.cookies" not in store.mtimes
+
+
+def test_utf8_bom_is_tolerated(tmp_path) -> None:
+    """Editors on Windows often save a UTF-8 BOM; cookies must still load."""
+    path = tmp_path / "aiohttp.cookies"
+    path.write_bytes(
+        b"\xef\xbb\xbf" + json.dumps([{"name": "sid", "value": "v"}]).encode()
+    )
+
+    store = CookieStore(tmp_path)
+    store.load_all()
+
+    assert store.cache == {"sid": "v"}
+
+
+def test_deeply_nested_json_does_not_raise(tmp_path) -> None:
+    """A hostile/broken file must not turn into a RecursionError."""
+    (tmp_path / "aiohttp.cookies").write_text("[" * 100_000, encoding="utf-8")
+
+    store = CookieStore(tmp_path)
+    store.load_all()  # must not raise
+
+    assert store.cache == {}
+
+
+def test_oversized_file_is_ignored(tmp_path) -> None:
+    """A valid but absurdly large cookie file is skipped instead of read."""
+    payload = json.dumps([{"name": "sid", "value": "secret"}])
+    padding = " " * (MAX_COOKIE_FILE_BYTES + 1 - len(payload))
+    path = tmp_path / "aiohttp.cookies"
+    path.write_text(payload + padding, encoding="utf-8")
+
+    store = CookieStore(tmp_path)
+    store.load_all()
+
+    assert store.cache == {}
+    # The ignored file's mtime is recorded so it is not re-read on every call.
+    assert store.mtimes["aiohttp.cookies"] == path.stat().st_mtime
+
+
+def test_filename_traversal_is_not_read(tmp_path) -> None:
+    """A caller-supplied filename must not escape the cookies directory."""
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.cookies"
+    outside.write_text(
+        json.dumps([{"name": "leaked", "value": "OUTSIDE"}]), encoding="utf-8"
+    )
+
+    store = CookieStore(
+        tmp_path,
+        filenames=["aiohttp.cookies", os.path.relpath(outside, tmp_path)],
+    )
+    store.load_all()
+
+    assert store.cache == {}
+    assert outside.exists()
+
+
+def test_absolute_filename_is_not_read(tmp_path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-absolute.cookies"
+    outside.write_text(
+        json.dumps([{"name": "leaked", "value": "OUTSIDE"}]), encoding="utf-8"
+    )
+
+    store = CookieStore(tmp_path, filenames=[str(outside)])
+    store.load_all()
+
+    assert store.cache == {}
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "",
+        ".",
+        "..",
+        "sub/cookies.json",
+        "sub\\cookies.json",
+        "a\x00b",
+        "/etc/passwd",
+        "C:\\tmp\\cookies.json",
+        "C:cookies.json",  # drive-relative: resolves outside the directory
+    ],
+)
+def test_unsafe_filenames_are_ignored(tmp_path, filename: str) -> None:
+    store = CookieStore(tmp_path, filenames=[filename])
+    store.load_all()
+    assert store.cache == {}
 
 
 def test_corrupt_file_is_not_reread_on_every_access(tmp_path, monkeypatch) -> None:

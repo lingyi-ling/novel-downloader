@@ -30,8 +30,10 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Iterator, Mapping, Sequence
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, TypedDict
@@ -100,6 +102,11 @@ _host_map: dict[str, str] = {}
 _registered: set[str] = set()
 _loaded = False
 
+#: Serializes rule loading/registration.  Several threads may search (and ask
+#: for the same rule source) at once; without this the "already registered?"
+#: check is a race and the plugin classes are built twice.
+_REGISTRATION_LOCK = threading.RLock()
+
 
 # --------------------------------------------------------------------------- #
 # discovery
@@ -164,21 +171,51 @@ def _load_payload(text: str, origin: str, filename: str) -> None:
 
 def _read_rule_text(path: Path) -> str:
     """
-    Read one rule file, refusing an oversized one before loading it.
+    Read one rule file, refusing anything that is not a bounded regular file.
 
-    :raises RuleError: when the file exceeds :data:`_MAX_RULE_FILE_BYTES`.
-    :raises OSError: when the file cannot be read.
+    ``read_text`` follows a symlink (possibly to a device or FIFO) and reads
+    until EOF, so a hostile entry in a rules directory could block the loader
+    forever or bypass the size cap.  The file is opened first and ``fstat`` is
+    taken on the *open descriptor*: a non-regular file is rejected before a
+    byte is read, and a file that grows after the stat is still capped.
+
+    :raises RuleError: when the entry is not a regular file, exceeds
+        :data:`_MAX_RULE_FILE_BYTES`, or is not valid UTF-8.
+    :raises OSError: when the file cannot be opened/read at all.
     """
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
     try:
-        size = path.stat().st_size
-    except OSError:
-        size = 0  # let ``read_text`` report the real problem
-    if size > _MAX_RULE_FILE_BYTES:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuleError(f"{path}: not a regular file")
+        if info.st_size > _MAX_RULE_FILE_BYTES:
+            raise RuleError(
+                f"{path}: rule file is too large "
+                f"({info.st_size} bytes, limit {_MAX_RULE_FILE_BYTES})"
+            )
+
+        chunks = bytearray()
+        remaining = _MAX_RULE_FILE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.extend(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+
+    if len(chunks) > _MAX_RULE_FILE_BYTES:
         raise RuleError(
-            f"{path}: rule file is too large "
-            f"({size} bytes, limit {_MAX_RULE_FILE_BYTES})"
+            f"{path}: rule file is too large (limit {_MAX_RULE_FILE_BYTES} bytes)"
         )
-    return path.read_text(encoding="utf-8-sig")
+    try:
+        return bytes(chunks).decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        # A single non-UTF-8 file used to abort the whole scan with a bare
+        # ``UnicodeDecodeError`` (``load_rules`` only catches OSError/RuleError).
+        raise RuleError(f"{path}: rule file is not valid UTF-8") from e
 
 
 def _is_ignored(filename: str) -> bool:
@@ -186,8 +223,55 @@ def _is_ignored(filename: str) -> bool:
     return filename.startswith("_")
 
 
+def _is_plain_rule_file(path: Path, root: Path) -> bool:
+    """
+    Whether ``path`` is a regular file inside the scanned ``root``.
+
+    A symlink is followed only when its resolved target stays inside the rule
+    directory: a symlink to ``/etc/passwd`` (or any file outside) is not a rule
+    source, even though it ends in ``.json``.  Hard links are indistinguishable
+    from a regular file at this layer and are accepted.
+    """
+    try:
+        if path.is_symlink():
+            resolved = path.resolve()
+            if resolved != root and root not in resolved.parents:
+                return False
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _iter_rule_files(directory: Path) -> Iterator[Path]:
+    """Yield the rule files in ``directory`` that are safe to read."""
+    try:
+        root = directory.resolve()
+    except OSError:  # pragma: no cover - pathological path
+        root = directory
+    try:
+        candidates = sorted(directory.glob("*.json"), key=lambda p: p.name)
+    except OSError as e:  # pragma: no cover - unreadable directory
+        logger.warning("Could not list rule directory %s: %s", directory, e)
+        return
+    for path in candidates:
+        if _is_ignored(path.name):
+            continue
+        if not _is_plain_rule_file(path, root):
+            logger.warning(
+                "Skip rule file %s: not a regular file inside the rule directory",
+                path,
+            )
+            continue
+        yield path
+
+
 def load_rules(*, force: bool = False) -> dict[str, Rule]:
     """Discover and parse every available rule file (idempotent)."""
+    with _REGISTRATION_LOCK:
+        return _load_rules(force=force)
+
+
+def _load_rules(*, force: bool) -> dict[str, Rule]:
     global _loaded
     if _loaded and not force:
         return _rules
@@ -210,9 +294,7 @@ def load_rules(*, force: bool = False) -> dict[str, Rule]:
     for directory in _user_dirs():
         if not directory.is_dir():
             continue
-        for path in sorted(directory.glob("*.json")):
-            if _is_ignored(path.name):
-                continue
+        for path in _iter_rule_files(directory):
             try:
                 _load_payload(_read_rule_text(path), "user", str(path))
             except (OSError, RuleError) as e:
@@ -364,11 +446,7 @@ def _shadowing_rule_file(key: str, target: Path) -> Path | None:
         directory = directories[position]
         if not directory.is_dir():
             continue
-        candidates = sorted(
-            path
-            for path in directory.glob("*.json")
-            if path != target and not _is_ignored(path.name)
-        )
+        candidates = [path for path in _iter_rule_files(directory) if path != target]
         if position == start:
             # Model inserting the not-yet-written target into the scan order:
             # only the files sorted after it are scanned later and can win.
@@ -447,6 +525,16 @@ def install_rule(
     # scanned before the user config directory -- both used to let a stale rule
     # silently override a fresh install.
     key = _normalize_key(rule.site_key)
+    # Overriding a shipped source is a supported (and tested) workflow, but it
+    # is security-relevant: the replacement decides every future request for
+    # that site.  Make it visible instead of letting a stale/malicious rule
+    # silently take over a built-in name.
+    if key in _builtin_keys():
+        logger.warning(
+            "Rule '%s' overrides a built-in source; the installed rule will be "
+            "used for every request to that site",
+            key,
+        )
     shadowing = _shadowing_rule_file(key, target)
     if shadowing is not None:
         raise RuleError(
@@ -575,10 +663,7 @@ def refresh_rules(names: Sequence[str] | None = None) -> RefreshResult:
     for directory in _user_dirs():
         if not directory.is_dir():
             continue
-        for path in sorted(directory.glob("*.json")):
-            if _is_ignored(path.name):
-                continue
-
+        for path in _iter_rule_files(directory):
             stem = path.stem
             matched.update({path.name.lower(), stem.lower()})
 
@@ -684,14 +769,54 @@ def _make_searcher(rule: Rule, key: str) -> type[RuleSearcher]:
     )
 
 
-def _register(key: str, rule: Rule) -> None:
-    registrar.register_site(
-        key,
-        fetcher=_make_fetcher(rule, key),
-        parser=_make_parser(rule, key),
-        searcher=_make_searcher(rule, key) if rule.search is not None else None,
+def _is_rule_plugin(builder: Any) -> bool:
+    """Whether *builder* was generated from a rule (and may be replaced)."""
+    return isinstance(builder, type) and issubclass(
+        builder, (RuleFetcher, RuleParser, RuleSearcher)
     )
-    _registered.add(key)
+
+
+def _foreign_plugins(key: str) -> list[str]:
+    """
+    Kinds of *key* that a hand-written plugin already provides.
+
+    A rule may only take over a key that no real site package implements:
+    otherwise a rule JSON named like a built-in site would silently replace the
+    fetcher/parser that actually knows how to talk to that site.
+    """
+    foreign: list[str] = []
+    for kind in ("fetcher", "parser", "client", "searcher"):
+        builder = registrar.get_registered(key, kind)
+        if builder is not None:
+            if not _is_rule_plugin(builder):
+                foreign.append(kind)
+        elif registrar.has_plugin(key, kind):
+            foreign.append(kind)
+    return foreign
+
+
+def _register(key: str, rule: Rule) -> None:
+    with _REGISTRATION_LOCK:
+        if key in _registered:
+            return
+        foreign = _foreign_plugins(key)
+        if foreign:
+            logger.warning(
+                "Rule source %r collides with the built-in plugin(s) for %s; "
+                "keeping the existing implementation and ignoring the rule",
+                key,
+                ", ".join(foreign),
+            )
+            # Remember the decision so every lookup does not repeat the scan.
+            _registered.add(key)
+            return
+        registrar.register_site(
+            key,
+            fetcher=_make_fetcher(rule, key),
+            parser=_make_parser(rule, key),
+            searcher=_make_searcher(rule, key) if rule.search is not None else None,
+        )
+        _registered.add(key)
 
 
 def ensure_registered(site_key: str) -> bool:
@@ -701,20 +826,26 @@ def ensure_registered(site_key: str) -> bool:
     :return: True if a rule exists for ``site_key`` (registered or already so).
     """
     key = _normalize_key(site_key)
-    load_rules()
-    if key not in _rules:
-        return False
-    if key not in _registered:
-        _register(key, _rules[key])
+    with _REGISTRATION_LOCK:
+        load_rules()
+        if key not in _rules:
+            return False
+        try:
+            _register(key, _rules[key])
+        except Exception as e:  # noqa: BLE001 - one bad rule is not fatal
+            logger.warning("Failed to register rule source %r: %s", key, e)
     return True
 
 
 def register_all() -> None:
     """Register every loaded rule-based source."""
     load_rules()
-    for key, rule in _rules.items():
-        if key not in _registered:
-            _register(key, rule)
+    with _REGISTRATION_LOCK:
+        for key, rule in _rules.items():
+            try:
+                _register(key, rule)
+            except Exception as e:  # noqa: BLE001 - one bad rule is not fatal
+                logger.warning("Failed to register rule source %r: %s", key, e)
 
 
 # --------------------------------------------------------------------------- #
