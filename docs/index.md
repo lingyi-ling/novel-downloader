@@ -202,6 +202,10 @@ novel-desktop
 | 音乐 | 多平台搜索与下载, 平台健康检查 (依赖可选组 `music`) |
 | 追更 | 维护追更列表, 检查新章节, 新章节加入下载队列 |
 
+搜索结果按 `60` 条一批渲染: 列表底部显示「显示更多 (Show more)」和
+`已显示/总数`, 点一次追加下一批, 大结果集不会一次建满页面。音乐页导出歌单
+遇到同名 `.m3u8` 时不会静默覆盖: 先提示「歌单已存在」, 点击提示后才替换。
+
 ### 音乐下载 (CLI)
 
 音乐功能依赖可选组 `music`:
@@ -224,7 +228,7 @@ novel-cli music search "关键词" --platform netease
 novel-cli music download "关键词" --pick 1
 ```
 
-参数说明见: [CLI 使用说明 - music 子命令](guide/cli-examples.md#7-music)。
+参数说明见: [CLI 使用说明 - music 子命令](guide/cli-examples.md#7-music)。引擎行为 (聚合搜索、来源合并、歌单导出、平台健康、DRM 限制) 见 [音乐下载指南](guide/music.md)。
 
 ---
 

@@ -141,6 +141,7 @@ The API server, the desktop client and the Android standalone engine persist the
 * Writes are atomic (temp file + `os.replace`), throttled to one every 1.5 s, with a final write on `close()`. The snapshot is taken on the event-loop thread; only the disk write runs in a thread.
 * On startup (API lifespan / desktop window / embedded engine bind) `manager.start()` restores it: pending tasks and anything interrupted come back as `QUEUED` and are re-queued per site.
 * Downloaded chapters already live in the chapter store, so a resumed task continues where it stopped instead of re-fetching.
+* Stopping or cancelling never drops chapters silently: the storage worker exits by **draining** its queue, and chapters fetched but not yet queued are handed back. Anything that cannot be persisted in time is written to the book's failure ledger `chapter.failures.jsonl` and counted in `failed`, never presented as saved in `succeeded`.
 * The last 50 finished tasks are restored too. A corrupt file or an unknown schema version is ignored rather than blocking startup.
 * The CLI `download`/`follow` commands do not enable it (one-shot processes with no shared queue).
 

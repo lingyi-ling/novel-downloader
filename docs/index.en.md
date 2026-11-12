@@ -170,7 +170,7 @@ novel-cli download --help
 * For supported sites, see: [Supported Sites List](supported-sites/index.md)
 * For more examples, see: [CLI Usage Guide](guide/cli-examples.md)
 * You can use `CTRL+C` during a run to cancel the task
-* For music downloads, see: [CLI Usage Guide - music subcommand](guide/cli-examples.md#7-music-subcommand)
+* For music downloads, see: [CLI Usage Guide - music subcommand](guide/cli-examples.en.md#7-music-subcommand)
 
 ### Local REST API
 
@@ -202,6 +202,13 @@ novel-desktop
 | Music | multi-platform search and download, platform health check (requires the `music` extra) |
 | Follow | maintain the follow list, check for new chapters, queue new chapters for download |
 
+Search results render `60` rows at a time: the bottom of the list shows
+"Show more" with a `shown/total` counter, and each click appends the next
+batch so a large result set never builds the whole page up front. Exporting a
+playlist from the Music tab never silently overwrites an existing `.m3u8`:
+it reports "The playlist already exists" first and only replaces the file
+after you click that message.
+
 ### Music Download (CLI)
 
 Music support depends on the optional `music` group:
@@ -224,7 +231,7 @@ novel-cli music search "keyword" --platform netease
 novel-cli music download "keyword" --pick 1
 ```
 
-For option details, see: [CLI Usage Guide - music subcommand](guide/cli-examples.en.md#7-music-subcommand).
+For option details, see: [CLI Usage Guide - music subcommand](guide/cli-examples.en.md#7-music-subcommand). For engine behaviour (aggregate search, source merging, playlist export, platform health, DRM limits), see the [Music Downloads guide](guide/music.en.md).
 
 ---
 

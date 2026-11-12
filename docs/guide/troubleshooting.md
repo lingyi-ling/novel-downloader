@@ -535,7 +535,90 @@ novel-cli music search "关键词" --platform tidal --limit 5
 
 ---
 
-## 12. 仍有问题？
+## 12. 音乐歌单导出返回 400 / 音乐任务返回 429
+
+**现象**：`POST /api/v1/music/export` 返回 `400`；或 `POST /api/v1/music/jobs`
+返回 `429`，即使并没有触发按 IP 的请求限流。
+
+**先看 `detail`**（两种情况的消息都是固定的，不会回显你提交的路径）：
+
+| `detail` | 含义 |
+| --- | --- |
+| `Music out_dir must be inside the music output directory` | 下载目录越界 |
+| `Playlist out_path must be a .m3u/.m3u8 file inside the music output directory` | 歌单路径越界或后缀不合法 |
+| `Too many music jobs are already running (limit 4); retry later` | 活跃音乐任务已达上限 |
+
+**排查 `out_dir` / `out_path` 的 400**：
+
+1. 允许写入的根目录只有两个：音乐设置里的 `out_dir`，以及平台默认音乐目录
+   （通常是 `~/Music/novel_downloader`）。Windows 上音乐设置文件在
+   `%LOCALAPPDATA%\novel_downloader\music\settings.json`，检查其中的 `out_dir`；
+   设置 `NOVEL_MUSIC_HOME` 会整体替换音乐数据目录。
+
+   ```bash
+   # Git Bash
+   cat "$LOCALAPPDATA/novel_downloader/music/settings.json"
+   ```
+
+2. 把 `out_dir` 改成上述根目录内的绝对路径，或直接省略该字段使用默认目录。
+   相对路径是相对**默认目录**解析的，不是相对 API 进程的当前目录。
+3. `out_path` 只要带后缀，就必须是 `.m3u` / `.m3u8`；`.txt`、`.json` 等会被拒绝。
+   不带后缀的值按目录处理。`..`、指向根目录之外的软链接、以及根目录之外的绝对路径
+   都会被拒绝，即使目标目录确实存在。
+4. 如果返回的是 `500` 而不是 `400`，说明路径已通过校验但写入失败（权限、磁盘、
+   目录被占用）。`detail` 只含异常类名（`"Could not write playlist: <类名>"`），
+   具体原因在服务端日志里。
+
+**排查 `429`**：
+
+1. 确认 `detail` 是 `Too many music jobs...` 而不是限流消息。两者都带
+   `Retry-After` 头：任务上限的 `429` 固定为 `5` 秒（等待约一个下载槽位），
+   限流 `429` 的值取决于限流窗口何时排空。
+2. 同时 `queued` / `running` 的音乐任务最多 `4` 个（`done` / `failed` 不计数）。
+   先轮询已有任务，等它们进入终态后再提交：
+
+   ```bash
+   curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
+   ```
+
+3. 批量下载也可以改用同步端点 `POST /api/v1/music/download`（会阻塞到全部完成），
+   或拆成更小的批次。
+
+---
+
+## 13. 自动更新拒绝 http 资产 / 下载被清理
+
+**现象**：桌面端更新提示 `Refusing to download an update from an insecure source`；
+`novel-cli update --yes` 以退出码 `1` 结束；`novel-cli update --json --yes`
+输出里 `error` 为 `insecure-url`、`missing-digest` 或 `no-asset`；下载中断后
+`updates\` 里留下 `.part` 文件。
+
+**机制**（桌面端与 CLI 共用 `apps/common/updater.py`）：
+
+* 发布清单提供的资产 URL 必须是 `https://`。CLI 在询问/下载之前就拒绝明文地址；
+  桌面端同样拒绝。
+* 下载器本身只接受 `http://` / `https://`；如果 HTTPS 请求被重定向到明文 HTTP，
+  会直接拒绝（校验和只能保证完整性，不能保证保密性）。
+* 单个资产上限 `1 GiB`（`1024**3` 字节），超过即拒绝，避免被篡改的清单/镜像写满磁盘。
+* 下载失败时：非续传模式在**下一次重试**前删除 `.part`；启用续传时保留已下载前缀，
+  下次用 `Range` 继续；SHA-256 校验失败则一定删除 `.part`（旧版本残留没有继续使用的价值）。
+  所有重试都失败后，未完成文件可能留在 `updates\`，桌面端会在 1 天后自动清理。
+
+**排查**：
+
+1. `insecure-url`：确认用的是官方发布页或 HTTPS 镜像。`NOVEL_UPDATE_MIRROR`
+   是用户自己配置的前缀，但镜像若把 HTTPS 重定向到 HTTP，也会在下载阶段被拒绝。
+2. `missing-digest`：该 release 没有为你的平台资产提供 SHA-256，客户端不会下载
+   无法校验的文件；到发布页手动下载并核对摘要。
+3. `no-asset`：当前平台没有匹配的资产（例如在不受支持的架构上运行）。
+4. 反复校验失败：关闭应用后删除 `%LOCALAPPDATA%\novel_downloader\updates\`
+   下对应的 `.part` 再重试；桌面端也会自动清理超过 1 天的 `.part`。
+5. 需要机器可读原因时用 `novel-cli update --json --yes`：它不会进入交互，
+   下载失败的原因在 `error` 字段里（只加 `--json` 等价于 `--check`，不会尝试下载）。
+
+---
+
+## 14. 仍有问题？
 
 带上下面的信息提交 Issue：
 

@@ -68,6 +68,7 @@ Rules go through a typo-guard validation pass at parse time; failing any check m
 - **Unknown keys**: the top level and every section (`search` / `book` / `chapters` / `chapter` / `pages` / `resolve` / field) only accept the keys listed in this document; an unlisted key (typically a typo such as `prioroty`) is an error rather than being silently ignored.
 - **Field names**: `search.fields` and `book.fields` only accept the field names the engine actually consumes; anything else is rejected.
 - **Other checks**: missing required keys, type mismatches, invalid regular expressions, and control characters in headers are all reported at parse time instead of failing obscurely during a fetch.
+- **Resource limits**: a rule file may be at most 1 MiB; a `fallback` chain is limited to 16 levels and `search.json_body` to 32; literal URL-template schemes must be `http` / `https` (relative paths are still allowed). See the [Rule DSL Reference](./rule-dsl.md).
 
 JSON itself has no comment syntax. By convention, **keys starting with `_`** (such as `_comment`) are comments: they are ignored at any nesting level and exempt from validation, so they can hold notes; the repository's example template [`rules/_example-template.json`](https://github.com/lingyi-ling/novel-downloader/blob/main/rules/_example-template.json) uses `_comment` for its usage notes. Do not confuse the two underscore conventions: a *key* starting with `_` means that key is ignored, while a *file name* starting with `_` means the whole file is not loaded.
 

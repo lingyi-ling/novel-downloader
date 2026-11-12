@@ -143,6 +143,10 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 - `sort` 可选 `quality`、`priority`、`site`、`title`、`author`、
   `words`、`update`。
 - `limit` 为合并后的总结果上限。
+- `keyword` 支持 2–4 个词的「书名 + 作者」式查询：空格（含全角）、`·`、
+  `,`、`，`、`-` 会把关键词拆成多个 token，分别与标题、作者比较
+  （例如 `"斗破苍穹 天蚕土豆"`）；整串关键词仍参与评分。多词拆分只影响
+  排序评分，**不改变缓存 key**：缓存仍按归一化后的完整关键词命中。
 
 响应：
 
@@ -160,11 +164,25 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
       "latest_chapter": "第 1 章",
       "update_date": "2024-01-01",
       "word_count": "100万字",
-      "priority": 1
+      "priority": 1,
+      "rank_score": 0.912345,
+      "match_tier": 4
     }
   ]
 }
 ```
+
+`results[]` 额外携带两个**只读派生字段**（`group: true` 时合并后的行同样有）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `rank_score` | float | `0..1` 的匹配质量分，由本次关键词与结果行计算；含少量时间衰减信号，同一次调用内可比，不同调用之间可能轻微漂移。 |
+| `match_tier` | int | `0..4` 的匹配层级：`4` 精确相等、`3` 前缀、`2` 包含、`1` 部分字符覆盖、`0` 无匹配。对同一关键词与行是确定的。 |
+
+这两个字段是响应附加信息，不写回缓存，也不会修改站点返回的原始行；只需要
+持久化书目的客户端可以忽略它们。流式端点 `/search/stream` 推送的是各站点
+的原始预览分片，**不包含** `rank_score` / `match_tier`，只有 `POST /search`
+的最终结果才带这两个字段。
 
 ## 榜单与分类浏览
 
@@ -188,7 +206,9 @@ curl -s -X POST "$BASE/api/v1/browse" \
   -d '{"site":"fanqienovel","category_id":"1141","gender":"male","limit":20}'
 ```
 
-`POST /browse` 的响应与 `/search` 同形：`{site, total, results}`。站点不支持浏览
+`POST /browse` 的响应使用与 `/search` 相同的外层结构
+`{site, total, results}`，但结果行是站点原样返回的条目，不带搜索的
+`rank_score` / `match_tier` 派生字段。站点不支持浏览
 （该站点的 searcher 没实现 `rank`/`categories`）时返回 `400`，`detail` 里带
 `Site '<site>' does not support browsing.`。
 
@@ -549,7 +569,7 @@ curl -s -X POST "$BASE/api/v1/login/requests/<req_id>" \
 {"platform": "all", "keyword": "晴天", "limit": 20}
 ```
 
-全部平台搜索会并发查询，同一首歌合并为一行，`tracks[].sources` 列出命中的平台 key（最佳来源在前）。响应额外包含 `search_id` 与 `platforms` 统计：
+全部平台搜索会并发查询，同一首歌合并为一行，`tracks[].sources` 列出命中的平台 key（最佳来源在前）。响应额外包含 `search_id`、`platforms` 统计与分页回显：
 
 ```json
 {
@@ -562,11 +582,23 @@ curl -s -X POST "$BASE/api/v1/login/requests/<req_id>" \
   "platforms": [
     {"platform": "netease", "ok": true, "count": 1, "error": ""},
     {"platform": "qq", "ok": true, "count": 1, "error": ""}
-  ]
+  ],
+  "offset": 0,
+  "supports_offset": false
 }
 ```
 
-单平台请求（如 `"platform": "netease"`）保持 `{"total", "tracks", "search_id", "platform"}` 形状。`tracks` 使用统一的 Track 结构，可直接原样传给下载端点；`search_id` 建议一并回传（见下）。
+请求体还接受 `offset`（`>= 0`，默认 `0`）表示跳过前多少条命中，`limit` 范围
+`1..100`。单平台请求（如 `"platform": "netease"`）返回
+`{"total", "tracks", "search_id", "platform", "offset", "supports_offset"}`
+形状。`tracks` 使用统一的 Track 结构，可直接原样传给下载端点；`search_id`
+建议一并回传（见下）。
+
+- `offset` 只对**显式单平台**搜索生效，响应回显该值；聚合搜索（`platform="all"`）
+  总是从第一条命中开始，固定返回 `"offset": 0`。
+- `supports_offset` 说明该平台是否真的支持分页。musicdl 驱动的平台没有分页概念，
+  非零 `offset` 会得到空页，因此返回 `false`；客户端看到 `false` 应停止
+  「加载更多」，不要继续请求空页。聚合搜索同样返回 `false`。
 
 `POST /api/v1/music/download`：
 
@@ -582,9 +614,19 @@ curl -s -X POST "$BASE/api/v1/login/requests/<req_id>" \
 
 - `platform` 默认 `all`：每首歌按自己的 `provider` 下载；显式传平台 key 会覆盖该行为。
 - `search_id` 取自搜索响应。搜索结果里的直链解析数据无法经 JSON 往返，回传它可让服务端取回原始 Track 对象；缓存保留 30 分钟、最多 32 份，过期或进程重启后需重新搜索。
-- `level` 可选 `hires`、`lossless`、`exhigh`、`higher`、`standard`；
-  `out_dir` 省略时使用音乐模块的默认下载目录。单次请求最多提交 `200` 首曲目
-  （`tracks` 超限返回 `422`）。
+- `level` 可选 `hires`、`lossless`、`exhigh`、`higher`、`standard`。
+- `out_dir` 只能落在音乐输出目录内：音乐设置里的 `out_dir`，以及平台默认音乐目录
+  （通常是 `~/Music/novel_downloader`）。相对路径按默认目录解析；省略时直接使用默认目录。
+- 绝对路径越界、包含 `..` 或经软链接逃逸的 `out_dir` 会被拒绝，返回 `400`，
+  `detail` 固定为 `"Music out_dir must be inside the music output directory"`
+  （不回显提交的路径）。
+- 单次请求最多提交 `200` 首曲目（`tracks` 超限返回 `422`）。
+- `results[].reason` 在返回前会统一脱敏：剥离其中 URL 的 query 与 fragment
+  （签名 token 等不回传）、把连续空白折叠成单个空格，并截断到 `200` 字符；
+  完整异常只写服务端日志。
+
+引擎整体抛错（超时除外，超时返回 `504`）时返回 `502`，`detail` 形如
+`"Music download failed: <异常类名>"`，只含类名，不含异常消息。
 
 响应：
 
@@ -649,9 +691,17 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
 ```
 
 - `status` 取值：`queued`、`running`、`done`、`failed`。
+- 同时最多允许 `4` 个 `queued` / `running` 任务；创建第 5 个时返回 `429`，
+  `detail` 为 `"Too many music jobs are already running (limit 4); retry later"`。
+  这个 `429` 带 `Retry-After: 5`（等待约一个下载槽位释放；它是**负载**信号，
+  不是按 IP 的请求限流）。按 IP 的限流 `429` 也带 `Retry-After`，但数值取决于
+  限流窗口排空时间，两者可用 `detail` 区分。
 - `progress.done` 随已完成曲目递增，`progress.total` 为提交的曲目数。
 - `results` 与同步端点相同，按提交顺序排列；任务失败时包含已完成的部分结果。
-- `error` 仅在 `status=failed` 时非空。
+- `error` 仅在 `status=failed` 时非空：超时是固定消息
+  `"Music download timed out after ..."`；其它引擎错误只含异常类名
+  （`Music download failed: <类名>`），不含异常消息。`results[].reason` 与同步端点
+  一样经过同一套脱敏（剥离 URL 的 query / fragment、折叠连续空白、截断到 `200` 字符）。
 - 任务表保存在进程内存中，最多保留最近 `100` 个任务（优先清理已结束的任务）；
   进程重启后任务记录丢失。
 - 任务不存在返回 `404`。
@@ -660,6 +710,11 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
     异步任务不跨进程共享。多 worker 部署 uvicorn 时，请将 `POST /music/jobs`
     与后续 `GET /music/jobs/{job_id}` 请求路由到同一进程，或改用
     `POST /music/download` 同步端点。
+
+!!! note "桌面端 / Android 内嵌引擎"
+    桌面端与 Android 独立模式使用的内嵌引擎提供同名音乐端点，`out_dir` /
+    `out_path` 的目录约束与活跃任务上限和这里一致（同样返回 `400` / `429`，
+    音乐任务上限的 `429` 也带 `Retry-After: 5`）。
 
 ### 导出歌单
 
@@ -683,10 +738,16 @@ curl -s "$BASE/api/v1/music/jobs/<job_id>" -H "Authorization: Bearer $TOKEN"
 }
 ```
 
-- `out_path` 以 `.m3u` / `.m3u8` 结尾时视为文件路径；其他值视为目录，
-  并在其中生成 `playlist-<UTC 时间戳>.m3u8`。
+- `out_path` 以 `.m3u` / `.m3u8` 结尾时视为文件路径；其他**带后缀**的值会被拒绝。
+  不带后缀的值视为目录，并在其中生成 `playlist-<UTC 时间戳>.m3u8`。
+- 最终解析结果必须位于音乐输出目录内（音乐设置 `out_dir` 或平台默认音乐目录）；
+  绝对路径越界、`..` 与软链接逃逸都会返回 `400`，`detail` 固定为
+  `"Playlist out_path must be a .m3u/.m3u8 file inside the music output directory"`
+  （不回显提交的路径）。
 - 省略 `out_path` 时写入音乐设置的 `out_dir`（`music settings out_dir`）。
 - `platform` 可传 `all`（聚合搜索的结果混在一起时使用）；传具体平台 key 时会校验，未知 key 返回 `400`。歌单只记录文件位置，因此这个字段不影响写入内容。
+- 写入本身失败（`OSError`）返回 `500`，`detail` 只含异常类名
+  （`"Could not write playlist: <类名>"`），不含目标路径或系统错误文本。
 
 响应：
 
@@ -804,14 +865,15 @@ API 默认启用按客户端 IP 的滑动窗口限流：每个 IP 在 `--rate-li
 
 | 状态码 | 场景 |
 | --- | --- |
-| `400` | 未知音乐平台；音乐平台初始化失败；同步音乐下载失败；歌单写入失败。 |
+| `400` | 未知音乐平台；`out_dir` / `out_path` 越出音乐输出目录，或 `out_path` 后缀不是 `.m3u` / `.m3u8`。 |
 | `401` | 已配置 token，但请求缺少或携带了错误的 token。 |
 | `404` | 任务 ID 不存在；登录凭据请求 ID 不存在；音乐任务 ID 不存在；追更条目不存在；静态文件不存在。 |
 | `409` | 登录凭据请求已完成、尚未被任务取走时再次提交。 |
 | `413` | 请求体超过该端点的大小上限。 |
 | `422` | 请求参数校验失败（缺少必填字段、数值越界、`tracks` 过多等）。 |
-| `429` | 超出按客户端 IP 的请求频率限制，响应带 `Retry-After` 头。 |
-| `500` | 服务端内部错误，固定返回 `{"detail": "Internal server error"}`，不泄漏堆栈。 |
+| `429` | 超出按客户端 IP 的请求频率限制，响应带 `Retry-After` 头；或活跃音乐任务已达 `4` 个（该 `429` 也带 `Retry-After: 5`，`detail` 为 `Too many music jobs are already running (limit 4); retry later`）。 |
+| `500` | 服务端内部错误，通用处理器固定返回 `{"detail": "Internal server error"}`，不泄漏堆栈；音乐平台初始化失败与歌单写入失败返回各自的固定消息，只含异常类名。 |
+| `502` | 音乐下载引擎整体失败，`detail` 只含异常类名（`"Music download failed: <类名>"`）。 |
 | `503` | 未安装音乐可选依赖，音乐相关端点不可用。 |
 | `504` | 阻塞型端点超过超时预算。 |
 
