@@ -8,7 +8,7 @@
 ## 0. 一句话现状
 
 - **版本 v1.28.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.28.0>
-- 全量测试 **9536 passed / 30 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
+- 全量测试 **10156 passed / 31 skipped**；`ruff check`、`ruff format --check`、`mypy src` 全绿
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
@@ -95,6 +95,27 @@ ovel_downloader` 不受影响
 - 下载：`download_update_async` + `update_download_state` 提供字节进度；`download_asset(resume=True, attempts=3)` 支持 Range 续传
 - 清理：`updates/` 里 `.part` 1 天、安装包/zip 7 天后自动删除
 - 仍是未启用状态：清单签名（`TRUSTED_UPDATE_KEYS` 为空）。启用后必须每次都发布 `latest.json`，且私钥丢失会导致无法再签新清单
+
+### 搜索可解释性与确定性（v1.30）
+
+- 最终结果带只读 `rank_score`/`match_tier`（在 `plugins/search.py` 注解，不写回缓存；流式分片不含）
+- 多词查询（2–4 token）在 `ranking.py`；缓存 key 仍用原始关键词
+- `sort_results` 的预排序键是行内容全序（`_tie_break_key`），并行/乱序到达结果一致
+
+### HTTP 冷却与重试预算（v1.30）
+
+- `TokenBucketRateLimiter.penalize()`：429/503 + Retry-After 时同一 limiter 的并发 worker 一起暂停（≤60s、仅向上抖动、取最新截止点）
+- `HttpStatusError.retryable=False`；任务级不会再重试 fetch 层已耗尽预算的错误
+
+### 桌面设置页（v1.30）
+
+- 第 6 个页面（Ctrl+6）：存储/网络/更新/外观/应用；`save_prefs` 白名单 + 原子写；输出目录展开与可写探测
+- 结果列表分块渲染（首屏 60，`#results-more`）；歌单同名覆盖需确认
+
+### 发布工具（v1.30）
+
+- `scripts/push_via_api.py`：github.com 被墙时走 Git Data API（支持 `--dry-run`、非 force）
+- 安装包裁剪：`packaging/_spec_common.py` 的 `UNCUSED_*`/`prune_bundle_toc`；`verify_frozen` 会检查被剪内容不回归
 
 ### 并行改进批次（2026-11-10）
 
