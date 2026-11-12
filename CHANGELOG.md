@@ -1,3 +1,46 @@
+## v1.31.0 (2026-11-13)
+
+第三批并行加固，覆盖搜索/音乐/桌面/Android/API/CLI/发布工具与数据安全，共修复 100+ 个可复现问题；Python 门禁 **12095 passed / 42 skipped**，Android **425 tests / lint 0 error**。
+
+### Feature
+
+- **CLI 存储**：`storage backup/restore`（SQLite 在线备份、WAL 一致、完整性/schema 校验、`--yes` 前自动 `.bak`）；`clean cache/book` 与 `storage --clean` 支持 `--dry-run`，零删除预览
+- **CLI 导出/更新**：`export --out DIR`、按真实 pipeline 选择 stage、空书/损坏元数据明确报错；`update` 只选择 CLI 资产（`asset_shape`、`no-cli-asset`），不再回退桌面安装包
+- **CLI 体验**：`search` 支持多词查询与单行 JSON；`download` 单行 JSON、ID 去空白/重复请求去重；`music health/platforms --json`、平台别名；`config init` 默认不覆盖、`--force` 先备份；补全支持 fish
+- **搜索缓存**：可选磁盘持久层（`NOVELDL_SEARCH_CACHE_DIR`，256 条/2 MiB/TTL/原子写），默认行为不变
+- **音乐平台能力矩阵**：CLI/API/桌面共用搜索/下载/账号/依赖/CDM 状态；桌面新增音乐账号设置与「前往设置」引导
+- **桌面搜索**：逐来源进度、失败数、耗时与取消；新查询自动取消旧搜索，迟到结果丢弃
+- **桌面可访问性**：skip link、tablist 方向键、模态焦点陷阱/归还、轮询保焦、toast live region、进度条语义
+- **Android**：任务快照持久化与「已中断」恢复、音乐下载路径持久化（重启后可导出歌单）、通知唯一 ID 与脱敏、无障碍/大字号布局、Chaquopy 依赖补齐
+
+### Fix
+
+- **搜索正确性**：重复 token/全角分隔符/NaN priority/未知排序键修复；分组 primary 跟随 intent 与 tier；病态长标题 O(n²) → 线性（5s → 1ms）
+- **搜索输出安全**：封面/正文文本清洗、URL 身份去重、`site`/`book_id` 白名单，阻断 `javascript:`/控制字符/路径穿越
+- **清理安全**：book ID/stage/`..`/Windows 尾部点、junction/symlink 只删链接、根目录/home/cwd 保护
+- **数据完整性**：章节库 schema 版本迁移/损坏备份/WAL/事务回滚；任务队列孤儿临时文件、溢出计数、同书去重；watchlist 损坏备份与共享锁
+- **桌面设置/更新**：NUL 路径、代理凭据剥离、prefs 损坏备份、跨进程文件锁；更新 ready 状态与版本绑定、便携版清理 `_internal`、安装器静默更新后重启
+- **HTTP/会话**：三后端统一代理/`NO_PROXY`/超时/脱敏；429 共享冷却生效；Cookie 保留 Secure/HttpOnly/SameSite/过期属性；媒体下载拒绝 HTML/超限、按路径串行
+- **规则书源**：本地符号链接/FIFO/越界、远程 SSRF/重定向降级、JSON 深度/正则长度/键洪泛防护
+- **API**：请求 schema 边界返回 422、任务列表 status/site/分页稳定排序、OpenAPI 安全方案与 401/429、embedded 与 REST 字段/错误码对齐、webhook SSRF 防护与签名
+- **Android**：SemVer 预发布/降级拒绝、更新前重算摘要、通知渠道幂等、备份排除全部私有数据域
+- **安装/发布**：安装包 x64 守卫、版本资源、`.pyd` 关闭过滤、升级清理 `_internal`；发布强制 installer 资产（`--skip-installer` 显式跳过）、CHANGELOG/tag 预检
+
+### Build
+
+- 16 KB 对齐检查改为逐 `PT_LOAD`、流式读 ELF、符号链接成员审计；`cacert.pem` 内容扫描私钥
+- CI：翻译目录包含 untracked 检查、release 并发组常量、workflow 契约测试扩展
+- Android Chaquopy 补 `pathvalidate`/`beautifulsoup4`/`cryptography`/`typing-extensions`，锁定 `pywidevine<1.9`/`protobuf<5` 兼容 wheel
+
+### Docs
+
+- 新增/更新存储备份恢复、dry-run、`export --out`、fish 补全、安装形态识别、便携更新清理、音乐平台账号说明；站点文档 92 项与注册表自动校验（含 b520 域名修正）
+
+### Test
+
+- Python **12095 passed / 42 skipped**；`ruff check`、`ruff format --check`（790 files）、`mypy src`（548 files）全绿
+- Android **425 unit tests**、`lintDebug` **0 error / 22 warning**（已接受的局域网明文配置）
+
 ## v1.30.0 (2026-11-12)
 
 第二批并行加固（30 个改进批次），重点是搜索可解释性、站点覆盖、API/网络安全、桌面设置页与安装包体积。

@@ -41,8 +41,8 @@ android {
         applicationId = "com.lingyi.noveldl"
         minSdk = 26
         targetSdk = 35
-        versionCode = 42
-        versionName = "1.30.0"
+        versionCode = 43
+        versionName = "1.31.0"
         // Chaquopy requires explicit ABIs; arm64 covers modern phones, x86_64
         // keeps the emulator usable.
         ndk.abiFilters += listOf("arm64-v8a", "x86_64")
@@ -112,10 +112,17 @@ chaquopy {
             install("pycryptodome")
             install("rich")
             install("platformdirs")
+            // Core TLS trust store (pyproject pins a security floor; requests
+            // would pull it transitively, but listing it keeps this block the
+            // complete core dependency set).
+            install("certifi")
             // Optional music engine (search / download / tagging). All of
             // these ship Android-compatible wheels through Chaquopy.
             install("requests")
             install("mutagen")
+            // Chaquopy's repository tops out at Pillow 11.0.0, so do not copy
+            // pyproject's >=13 security floor here: the APK would fail to
+            // resolve. See tests/test_android_deps.py for the tracked gap.
             install("Pillow")
             install("qrcode")
             install("websocket-client")
@@ -131,14 +138,34 @@ chaquopy {
             install("prettytable")
             install("wcwidth")
             install("prompt_toolkit")
+            // Direct imports of the vendored musicdl adapters (module level,
+            // not lazy). Without them the 5sing / kuwo / qq / fivesing / ...
+            // clients register but fail on the first search:
+            //   pathvalidate       -> every source's file-name sanitizer
+            //   beautifulsoup4     -> HTML scraping in 9 platform clients
+            //   cryptography       -> AES/RSA/HKDF in qq/qobuz/netease/soda
+            //   typing-extensions  -> Unpack annotations evaluated at import
+            install("pathvalidate")
+            install("beautifulsoup4")
+            install("cryptography")
+            install("typing-extensions")
             // 重型平台依赖：TIDAL / YouTube Music / Apple Music / SoundCloud
             install("aigpy")
             install("ytmusicapi")
-            install("pywidevine")
+            // pywidevine 1.9 requires pycryptodome >=3.23, but Chaquopy's
+            // repository tops out at 3.21.0. 1.8.0 has the same public API
+            // (PSSH/Cdm/Device) and accepts the wheel we can ship.
+            install("pywidevine<1.9")
             install("pymp4")
             install("Unidecode")
             install("PyYAML")
-            install("protobuf")
+            // pywidevine 1.8.0 owns the generated bindings and requires
+            // protobuf <5 (the 1.9 bindings need >=6.33).
+            install("protobuf<5")
+            // NOTE: `orjson` (QQ Music JSON) has no Android wheel. The QQ
+            // provider is therefore gated by musicdl.PLATFORM_DEPS instead of
+            // being installed here; tests/test_android_deps.py enforces both
+            // sides of that contract.
         }
     }
     sourceSets {
