@@ -26,13 +26,11 @@ from .engine import (
     render,
     should_stop_pagination,
 )
-from .model import PagesRule, Rule, RuleError
+from .model import MAX_EXTRA_PAGES, PagesRule, Rule, RuleError
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["RuleFetcher"]
-
-_MAX_EXTRA_PAGES = 50
 
 #: Control characters never valid in a rendered header value (CRLF injection).
 _HEADER_CTRL_RE = re.compile(r"[\r\n\x00]")
@@ -181,7 +179,7 @@ class RuleFetcher(BaseFetcher):
         if matches_stop_when(pages_rule, current):
             return []
 
-        while len(extra) < _MAX_EXTRA_PAGES and (last is None or page <= last):
+        while len(extra) < MAX_EXTRA_PAGES and (last is None or page <= last):
             next_url = render(pages_rule.url, base_url=base, page=page, **fmt)
             if next_url in seen:
                 break  # the template rendered an already-collected page

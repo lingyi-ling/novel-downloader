@@ -1,5 +1,6 @@
 import asyncio
 import json
+import ssl
 
 import aiohttp.web
 import httpx
@@ -7,6 +8,7 @@ import pytest
 import pytest_asyncio
 
 from novel_downloader.infra.sessions._httpx import HttpxSession
+from novel_downloader.infra.sessions.base import NonRetryableConnectionError
 from novel_downloader.schemas import FetcherConfig
 
 
@@ -214,3 +216,70 @@ async def test_post_honours_a_total_deadline(cfg):
 
     with pytest.raises(TimeoutError):
         await session.post("https://demo/drip")
+
+
+# ------------------------------------------------
+# deterministic failure types
+# ------------------------------------------------
+class _RaisingClient:
+    """AsyncClient double whose requests raise a prepared exception."""
+
+    is_closed = False
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    async def get(self, url: str, **kwargs: object) -> object:
+        raise self.exc
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _session_raising(cfg: FetcherConfig, exc: BaseException) -> HttpxSession:
+    session = HttpxSession(cfg, cookies=None)
+    session._session = _RaisingClient(exc)  # type: ignore[assignment]
+    return session
+
+
+@pytest.mark.asyncio
+async def test_certificate_error_is_non_retryable(cfg):
+    """httpcore wraps the TLS rejection, so the cause chain must be inspected."""
+    error = httpx.ConnectError("certificate verify failed")
+    error.__cause__ = ssl.SSLCertVerificationError(1, "self signed certificate")
+    session = _session_raising(cfg, error)
+
+    with pytest.raises(NonRetryableConnectionError):
+        await session.get("https://demo/")
+
+
+@pytest.mark.asyncio
+async def test_plain_connect_error_stays_retryable(cfg):
+    error = httpx.ConnectError("connection refused")
+    error.__cause__ = ConnectionRefusedError("refused")
+    session = _session_raising(cfg, error)
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await session.get("https://demo/")
+
+    assert not isinstance(excinfo.value, NonRetryableConnectionError)
+
+
+@pytest.mark.asyncio
+async def test_proxy_407_is_non_retryable(cfg):
+    error = httpx.ProxyError("407 Proxy Authentication Required")
+    session = _session_raising(cfg, error)
+
+    with pytest.raises(NonRetryableConnectionError):
+        await session.get("https://demo/")
+
+
+@pytest.mark.asyncio
+async def test_proxy_5xx_stays_retryable(cfg):
+    error = httpx.ProxyError("502 Bad Gateway from proxy")
+    session = _session_raising(cfg, error)
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await session.get("https://demo/")
+
+    assert not isinstance(excinfo.value, NonRetryableConnectionError)

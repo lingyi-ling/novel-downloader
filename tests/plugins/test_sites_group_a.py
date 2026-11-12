@@ -655,6 +655,7 @@ def test_quanben5_book_info_and_chapter_ids(parser_cfg: ParserConfig) -> None:
     # ``spell`` would become ``spe`` under the old rstrip(".html"), and the
     # query string would be glued onto the id.
     assert [c["chapterId"] for c in chapters] == ["3682", "spell"]
+    assert info["serial_status"] == "完结"
 
 
 def test_quanben5_chapter_content(parser_cfg: ParserConfig) -> None:
@@ -1516,3 +1517,114 @@ async def test_n23qb_chain_search_info_catalog_chapters(
     assert parser.parse_book_info(["", ""]) is None
     assert parser.parse_book_info([_ANTI_BOT_SHELL, _ANTI_BOT_SHELL]) is None
     assert parser.parse_chapter_content([_ANTI_BOT_SHELL], "1") is None
+
+
+# =========================================================================== #
+# Field quality: labels, whitespace and URL absolutisation observed on the
+# 2026-11 live pages.
+# =========================================================================== #
+def test_qidian_book_info_strips_fullwidth_update_label(
+    parser_cfg: ParserConfig,
+) -> None:
+    # The live label uses a full-width colon ("更新时间：2026-01-01"); only
+    # replacing the ASCII form left the whole label in ``update_time``.
+    info = QidianParser(parser_cfg).parse_book_info([QIDIAN_CHAIN_BOOK_HTML])
+
+    assert info is not None
+    assert info["update_time"] == "2026-01-01"
+
+
+def test_qimao_search_relative_cover_is_absolutized() -> None:
+    payload = json.dumps(
+        {
+            "data": {
+                "search_list": [
+                    {
+                        "book_id": "1784900",
+                        "title": "书",
+                        "image_link": "//cdn.wtzw.com/cover.jpg",
+                    }
+                ]
+            }
+        },
+        ensure_ascii=False,
+    )
+
+    result = _parse(QimaoSearcher, payload)[0]
+
+    assert result["cover_url"] == "https://cdn.wtzw.com/cover.jpg"
+
+
+QIMAO_DETAIL_JSON = json.dumps(
+    {
+        "data": {
+            "book_detail": {
+                "book_id": "1996719",
+                "title": "书",
+                "author": "作者",
+                "words_num": "36.22",
+                "image_link": "/bookimg/cover.jpg",
+                "update_time": "2025-01-01",
+                "is_over": "1",
+                "category_1_name": "玄幻",
+            }
+        }
+    },
+    ensure_ascii=False,
+)
+QIMAO_INTRO_JSON = json.dumps({"data": {"intro": "简介"}}, ensure_ascii=False)
+QIMAO_CATALOG_JSON = json.dumps(
+    {"data": {"chapters": [{"id": "1", "title": "第1章"}]}}, ensure_ascii=False
+)
+
+
+def test_qimao_book_info_absolutizes_root_relative_cover(
+    parser_cfg: ParserConfig,
+) -> None:
+    info = QimaoParser(parser_cfg).parse_book_info(
+        [QIMAO_DETAIL_JSON, QIMAO_INTRO_JSON, QIMAO_CATALOG_JSON]
+    )
+
+    assert info is not None
+    assert info["cover_url"] == "https://www.qimao.com/bookimg/cover.jpg"
+    assert info["word_count"] == "36.22万字"
+
+
+def test_biquge345_summary_drops_label_and_template_padding(
+    parser_cfg: ParserConfig,
+) -> None:
+    page = BIQUGE345_BOOK_HTML.replace(
+        "简介：穿越凡人……",
+        "简介：    穿越凡人……\n--完",
+    )
+    info = Biquge345Parser(parser_cfg).parse_book_info([page])
+
+    assert info is not None
+    assert info["summary"] == "穿越凡人…… --完"
+
+
+def test_biquge345_cover_supports_protocol_relative_url(
+    parser_cfg: ParserConfig,
+) -> None:
+    page = BIQUGE345_BOOK_HTML.replace(
+        'src="/files/article/image/240/240541/240541s.jpg"',
+        'src="//cdn.example.com/240541s.jpg"',
+    )
+    info = Biquge345Parser(parser_cfg).parse_book_info([page])
+
+    assert info is not None
+    assert info["cover_url"] == "https://cdn.example.com/240541s.jpg"
+
+
+def test_n23qb_book_info_reads_update_time(parser_cfg: ParserConfig) -> None:
+    # Same node the detail-page searcher reads; the book-info parser used to
+    # emit an empty update_time unconditionally.
+    info_html = N23QB_BOOK_HTML.replace(
+        '<div class="novel-info-item novel-info-content">',
+        '<div class="module-heading newchapter"><time>更新时间：2024-01-02</time>'
+        '</div><div class="novel-info-item novel-info-content">',
+    )
+    info = N23qbParser(parser_cfg).parse_book_info([info_html, N23QB_CATALOG_HTML])
+
+    assert info is not None
+    assert info["update_time"] == "2024-01-02"

@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import ssl
 import types
 from abc import ABC, abstractmethod
-from collections.abc import Coroutine, Mapping, Sequence
+from collections.abc import Coroutine, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Self, TypedDict, Unpack
 
@@ -125,6 +127,105 @@ def as_connection_error(exc: BaseException) -> ConnectionError:
     :return: A builtin :class:`ConnectionError` carrying the original message.
     """
     return ConnectionError(_error_message(exc))
+
+
+class NonRetryableConnectionError(ConnectionError):
+    """
+    A connection-level failure that another attempt cannot fix.
+
+    TLS certificate verification failures (expired/mismatched/untrusted
+    certificate) and proxy authentication refusals (HTTP 407) are
+    deterministic: the retry would use the same configuration against the same
+    endpoint and fail identically.  Retrying them burns the request budget and
+    can look like a hammering client to the proxy.
+
+    It subclasses :class:`ConnectionError` so existing callers that catch
+    transport failures keep working, while the fetcher can check the concrete
+    type and skip its retry loop.
+    """
+
+    #: Duck-typed hint for retry policies that inspect the attribute instead
+    #: of the class (see ``apps.core.task_manager.is_retryable_error``).
+    retryable: bool = False
+
+
+def as_non_retryable_connection_error(
+    exc: BaseException,
+) -> NonRetryableConnectionError:
+    """
+    Translate a deterministic transport failure into the unified type.
+
+    :param exc: Original backend exception.
+    :return: A :class:`NonRetryableConnectionError` carrying the message.
+    """
+    return NonRetryableConnectionError(_error_message(exc))
+
+
+def iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """
+    Walk an exception's ``__cause__``/``__context__`` chain.
+
+    Backends wrap the real failure several levels deep (httpx re-raises
+    ``httpcore.ConnectError``, which in turn wraps ``ssl.SSLCertVerificationError``),
+    so classifying an error often means inspecting what it was raised from.
+    Cycles are tolerated: an exception re-raised from itself (or a context
+    loop) yields each link once.
+
+    :param exc: Outermost exception.
+    :return: Iterator starting with *exc* and following the chain.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def is_certificate_verification_error(exc: BaseException) -> bool:
+    """
+    Whether *exc* (or one of its causes) is a TLS certificate rejection.
+
+    :param exc: Backend exception.
+    :return: True for certificate verification failures.
+    """
+    return any(
+        isinstance(link, ssl.SSLCertVerificationError)
+        for link in iter_exception_chain(exc)
+    )
+
+
+#: Text a proxy library uses when it refused the supplied credentials.  The
+#: status is only exposed as an attribute by aiohttp; httpx and curl_cffi
+#: surface it in the message ("407 Proxy Authentication Required",
+#: "CONNECT tunnel failed, response 407", "Invalid username/password" for
+#: SOCKS proxies).  ``\b407\b`` deliberately does not match a port such as
+#: ``:4070`` that merely starts with the same digits.
+_PROXY_AUTH_STATUS_RE = re.compile(r"\b407\b")
+_PROXY_AUTH_MARKERS = (
+    "proxy authentication required",
+    "invalid username/password",
+)
+
+
+def is_proxy_authentication_error(exc: BaseException) -> bool:
+    """
+    Whether *exc* is a proxy refusing our credentials rather than a proxy that
+    is temporarily unreachable.
+
+    A proxy connection failure (resolver/connect error, 502/503 from the
+    proxy) is transient and stays retryable; only credential refusals are
+    deterministic.
+
+    :param exc: Proxy-related backend exception.
+    :return: True when the proxy answered with an authentication failure.
+    """
+    if getattr(exc, "status", None) == 407:
+        return True
+    text = _error_message(exc).lower()
+    return bool(_PROXY_AUTH_STATUS_RE.search(text)) or any(
+        marker in text for marker in _PROXY_AUTH_MARKERS
+    )
 
 
 class TooManyRedirectsError(Exception):

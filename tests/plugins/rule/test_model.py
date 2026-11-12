@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from novel_downloader.plugins.rule.model import (
+    MAX_EXTRA_PAGES,
     Field,
     Rule,
     RuleError,
@@ -409,3 +410,56 @@ def test_pages_max_pages_defaults_to_none() -> None:
     assert rule.book.pages is not None
     assert rule.book.pages.start == 2
     assert rule.book.pages.max_pages is None
+
+
+def test_pages_max_pages_at_fetcher_limit_is_accepted() -> None:
+    rule = parse_rule(
+        {
+            **MINIMAL,
+            "chapter": {
+                "url": "{base_url}/{book_id}/{chapter_id}.html",
+                "pages": {
+                    "url": "https://api.demo.example/{book_id}?page={page}",
+                    "max_pages": MAX_EXTRA_PAGES,
+                },
+            },
+        }
+    )
+
+    assert rule.chapter is not None
+    assert rule.chapter.pages is not None
+    assert rule.chapter.pages.max_pages == MAX_EXTRA_PAGES
+
+
+def test_pages_max_pages_above_fetcher_limit_is_rejected() -> None:
+    """A value the fetcher cannot honour must fail at load, not be clipped."""
+    with pytest.raises(RuleError, match="pages.max_pages must be <= 50"):
+        parse_rule(
+            {
+                **MINIMAL,
+                "chapter": {
+                    "url": "{base_url}/{book_id}/{chapter_id}.html",
+                    "pages": {
+                        "url": "https://api.demo.example/{book_id}?page={page}",
+                        "max_pages": MAX_EXTRA_PAGES + 1,
+                    },
+                },
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
+# encoding
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("encoding", ["utf-8", "UTF-8", "gbk", "gb18030", "big5"])
+def test_encoding_known_codec_is_accepted(encoding: str) -> None:
+    rule = parse_rule({**MINIMAL, "encoding": encoding})
+
+    assert rule.encoding == encoding
+
+
+@pytest.mark.parametrize("encoding", ["utf8-bom", "not-a-codec", ""])
+def test_encoding_unknown_codec_is_rejected(encoding: str) -> None:
+    """A typo must be a readable RuleError, not a LookupError at request time."""
+    with pytest.raises(RuleError, match="not a known text encoding"):
+        parse_rule({**MINIMAL, "encoding": encoding})

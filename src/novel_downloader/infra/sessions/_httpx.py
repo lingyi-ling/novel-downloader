@@ -18,9 +18,12 @@ from .base import (
     GetRequestKwargs,
     PostRequestKwargs,
     as_connection_error,
+    as_non_retryable_connection_error,
     as_timeout_error,
     as_too_many_redirects_error,
     close_backend_session,
+    is_certificate_verification_error,
+    is_proxy_authentication_error,
 )
 from .cookie_io import (
     load_cookie_items,
@@ -105,9 +108,22 @@ class HttpxSession(BaseSession):
             raise as_timeout_error(exc) from exc
         except httpx.TooManyRedirects as exc:
             raise as_too_many_redirects_error(exc) from exc
+        except httpx.ProxyError as exc:
+            # CONNECT refusals surface here (httpcore raises
+            # "407 Proxy Authentication Required"); a proxy that is merely
+            # unreachable stays a retryable connection failure.
+            if is_proxy_authentication_error(exc):
+                raise as_non_retryable_connection_error(exc) from exc
+            raise as_connection_error(exc) from exc
+        except httpx.ConnectError as exc:
+            # Must precede NetworkError: a certificate rejection arrives as a
+            # ConnectError wrapping ssl.SSLCertVerificationError, and retrying
+            # cannot repair the certificate.
+            if is_certificate_verification_error(exc):
+                raise as_non_retryable_connection_error(exc) from exc
+            raise as_connection_error(exc) from exc
         except (
             httpx.NetworkError,
-            httpx.ProxyError,
             httpx.RemoteProtocolError,
             httpx.DecodingError,
         ) as exc:
@@ -145,9 +161,22 @@ class HttpxSession(BaseSession):
             raise as_timeout_error(exc) from exc
         except httpx.TooManyRedirects as exc:
             raise as_too_many_redirects_error(exc) from exc
+        except httpx.ProxyError as exc:
+            # CONNECT refusals surface here (httpcore raises
+            # "407 Proxy Authentication Required"); a proxy that is merely
+            # unreachable stays a retryable connection failure.
+            if is_proxy_authentication_error(exc):
+                raise as_non_retryable_connection_error(exc) from exc
+            raise as_connection_error(exc) from exc
+        except httpx.ConnectError as exc:
+            # Must precede NetworkError: a certificate rejection arrives as a
+            # ConnectError wrapping ssl.SSLCertVerificationError, and retrying
+            # cannot repair the certificate.
+            if is_certificate_verification_error(exc):
+                raise as_non_retryable_connection_error(exc) from exc
+            raise as_connection_error(exc) from exc
         except (
             httpx.NetworkError,
-            httpx.ProxyError,
             httpx.RemoteProtocolError,
             httpx.DecodingError,
         ) as exc:

@@ -36,6 +36,8 @@ from novel_downloader.apps.core.task_manager import (
     _retry_message,
     is_retryable_error,
 )
+from novel_downloader.infra.sessions.base import NonRetryableConnectionError
+from novel_downloader.plugins.base.errors import HttpStatusError, TransportError
 
 
 # A transport-looking exception from an optional backend (httpx/curl_cffi).
@@ -113,11 +115,13 @@ class FakeClient:
         export: Any = None,
         process: Any = None,
         login_result: bool = True,
+        login_error: BaseException | None = None,
     ) -> None:
         self._download = download
         self._export = export
         self._process = process
         self.login_result = login_result
+        self.login_error = login_error
         self.download_calls: list[str] = []
         self.export_calls: list[str] = []
         self.process_calls: list[str] = []
@@ -131,6 +135,8 @@ class FakeClient:
 
     async def login(self, *, ui: Any, login_cfg: Any = None, **kwargs: Any) -> bool:
         self.login_calls += 1
+        if self.login_error is not None:
+            raise self.login_error
         return self.login_result
 
     async def download_book(self, book: Any, *, ui: Any = None, **kwargs: Any) -> None:
@@ -213,6 +219,52 @@ def test_explicit_task_error_markers_win() -> None:
 def test_retryable_attribute_convention() -> None:
     assert is_retryable_error(_WithRetryFlag("maybe"))
     assert not is_retryable_error(_WithoutRetryFlag("never"))
+
+
+def test_typed_transport_error_is_not_retried() -> None:
+    """The fetcher already spent its budget, so the task must not repeat it."""
+    error = TransportError("https://demo/1", ConnectionError("reset"))
+    assert isinstance(error, ConnectionError)  # the generic branch used to win
+    assert not is_retryable_error(error)
+
+
+def test_http_status_error_is_not_retried() -> None:
+    """5xx/429 are spent fetcher budget; 4xx are deterministic.
+
+    Both are ``ConnectionError`` subclasses, so only the explicit
+    ``retryable = False`` marker keeps the generic transport branch from
+    multiplying the request count by the task-level budget.
+    """
+    for status in (503, 429, 500, 404, 403, 401):
+        error = HttpStatusError("https://demo/1", status)
+        assert isinstance(error, ConnectionError)
+        assert error.retryable is False
+        assert not is_retryable_error(error)
+
+
+def test_non_retryable_connection_error_is_not_retried() -> None:
+    """Certificate/proxy-credential refusals never become retryable."""
+    error = NonRetryableConnectionError("certificate expired")
+    assert isinstance(error, ConnectionError)
+    assert not is_retryable_error(error)
+
+
+def test_plain_connection_error_is_still_retried() -> None:
+    assert is_retryable_error(ConnectionError("net down"))
+
+
+def test_custom_connection_error_with_retryable_true_is_retried() -> None:
+    """The explicit flag wins in both directions."""
+
+    class RetryableConnectionError(ConnectionError):
+        retryable = True
+
+    assert is_retryable_error(RetryableConnectionError("proxy 502"))
+
+
+def test_non_network_exception_without_flag_is_not_retried() -> None:
+    assert not is_retryable_error(Exception("who knows"))
+    assert not is_retryable_error(RuntimeError("logic bug"))
 
 
 def test_unknown_exceptions_are_not_retried() -> None:
@@ -349,6 +401,28 @@ async def test_permission_error_is_not_retried() -> None:
 
 
 @pytest.mark.asyncio
+async def test_typed_transport_error_is_not_retried_at_task_level() -> None:
+    """A spent fetcher budget must not be multiplied by the task retry loop."""
+    attempts = 0
+
+    async def download(book: Any, ui: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise TransportError("https://demo/1", ConnectionError("reset"))
+
+    client = FakeClient(download=download)
+    manager = _manager(client, max_download_retries=3, retry_backoff=0.0)
+
+    task = await manager.add_task(title="T", site="a", book_id="1")
+    await _wait_until(lambda: task.status is Status.FAILED)
+
+    assert attempts == 1
+    assert task.retry_count == 0
+    assert "Request to https://demo/1 failed" in (task.error or "")
+    await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_login_failure_is_not_retried() -> None:
     client = FakeClient(login_result=False)
     adapter = FakeAdapter(login_required=True)
@@ -363,6 +437,86 @@ async def test_login_failure_is_not_retried() -> None:
     assert client.download_calls == []
     assert task.retry_count == 0
     assert task.error == "Login failed."
+    await manager.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [503, 429])
+async def test_spent_http_status_budget_is_not_retried_at_task_level(
+    status: int,
+) -> None:
+    """``HttpStatusError`` after fetcher retries must reach the task once.
+
+    ``download_book`` is called once per task attempt, so this asserts the
+    task loop does not multiply the fetcher's ``retry_times + 1`` requests.
+    """
+    attempts = 0
+
+    async def download(book: Any, ui: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise HttpStatusError("https://demo/1", status)
+
+    client = FakeClient(download=download)
+    manager = _manager(client, max_download_retries=3, retry_backoff=0.0)
+
+    task = await manager.add_task(title="T", site="a", book_id="1")
+    await _wait_until(lambda: task.status is Status.FAILED)
+
+    assert client.download_calls == ["1"]
+    assert attempts == 1
+    assert task.retry_count == 0
+    assert task.error is not None and str(status) in task.error
+    await manager.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 403, 401])
+async def test_deterministic_http_status_is_not_retried_at_task_level(
+    status: int,
+) -> None:
+    """A 4xx is the same answer every time; one call, no task retries."""
+    attempts = 0
+
+    async def download(book: Any, ui: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise HttpStatusError("https://demo/1", status)
+
+    client = FakeClient(download=download)
+    manager = _manager(client, max_download_retries=3, retry_backoff=0.0)
+
+    task = await manager.add_task(title="T", site="a", book_id="1")
+    await _wait_until(lambda: task.status is Status.FAILED)
+
+    assert client.download_calls == ["1"]
+    assert attempts == 1
+    assert task.retry_count == 0
+    await manager.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [503, 403])
+async def test_login_probe_failure_is_not_retried_at_task_level(status: int) -> None:
+    """A login probe that raised must not re-run the whole task.
+
+    Deterministic failures (403) and a 5xx whose fetcher budget is spent both
+    surface from ``_check_login_status`` as ``HttpStatusError``; the login
+    probe runs once and ``download_book`` is never reached.
+    """
+    client = FakeClient(login_error=HttpStatusError("https://demo/login", status))
+    adapter = FakeAdapter(login_required=True)
+    manager = _manager(
+        client, adapter=adapter, max_download_retries=3, retry_backoff=0.0
+    )
+
+    task = await manager.add_task(title="T", site="a", book_id="1")
+    await _wait_until(lambda: task.status is Status.FAILED)
+
+    assert client.login_calls == 1
+    assert client.download_calls == []
+    assert task.retry_count == 0
+    assert task.error is not None and str(status) in task.error
     await manager.close()
 
 
