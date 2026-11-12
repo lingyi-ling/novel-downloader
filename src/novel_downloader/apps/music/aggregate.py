@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import multiprocessing
 import os
 import pickle
@@ -31,7 +32,8 @@ import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 from .providers import available, create
 from .providers.base import Track
@@ -110,40 +112,220 @@ _SEARCH_PRIORITY = (
 #: 落盘到 ``<音乐数据目录>/search_stats.json``：重启后仍然知道哪些站是死的，
 #: 第一次搜索就不会再为同一批被墙平台等满预算。
 _STATS: dict[str, dict[str, Any]] | None = None
-_FAILURE_LOCK = threading.Lock()
+_FAILURE_LOCK = threading.RLock()
+
+#: 统计文件本该只有几十个平台条目；比这还大说明文件已损坏（或被别的程序
+#: 写坏），整份读取会在 ``json.load`` 里吃掉任意内存。
+_STATS_MAX_BYTES = 256 * 1024
+_STATS_MAX_ENTRIES = 128
+_STATS_MAX_KEY_CHARS = 64
+_STATS_MAX_MS = 24 * 60 * 60 * 1000
+#: ``failed_until`` 最多允许比当前时间晚这么多秒。合法值是 now + 600，
+#: 超过这个余量只能是损坏数据或时钟大幅回拨；不截断的话一个 NaN/超大数
+#: 就能把平台永久拉黑（NaN 的比较永远为 False，熔断器再也关不上）。
+_STATS_FUTURE_SLACK = 3600.0
+
+#: 最近一次读取的磁盘状态。``_STATS_WRITABLE`` 为 False 表示文件存在但
+#: 读不出来（共享冲突、权限、目录被占用……）：此时内存里的空统计并不是
+#: 磁盘内容，写回去会毁掉一份本来完好的熔断记录，所以先不写，等后续某次
+#: 读取成功再合并落盘。
+_STATS_WRITABLE = True
+_STATS_SIG: tuple[int, int] | None = None
 
 
-def _stats_file() -> Any:
+def _now() -> float:
+    """熔断截止时间用的墙钟（独立函数，便于测试替换成确定性的时钟）。"""
+    return time.time()
+
+
+class _SearchClock:
+    """可注入的计时/等待接缝，供搜索预算与「提前收工」宽限使用。
+
+    生产环境用真实时间；测试替换 :data:`_clock` 后，预算到期与宽限触发
+    由显式事件驱动，不再依赖线程恰好何时被调度，也不需要用 sleep 制造
+    时间窗口。
+    """
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def wait(self, event: threading.Event, timeout: float) -> bool:
+        return event.wait(timeout)
+
+    def schedule(self, delay: float, callback: Callable[[], None]) -> threading.Timer:
+        timer = threading.Timer(delay, callback)
+        timer.daemon = True
+        timer.start()
+        return timer
+
+
+#: 单测会替换成确定性实现；模块内所有预算/宽限计时都走这里。
+_clock = _SearchClock()
+
+
+def _stats_file() -> Path:
     from .paths import music_data_dir
 
     return music_data_dir() / "search_stats.json"
 
 
-def _load_stats() -> dict[str, dict[str, Any]]:
-    global _STATS
-    if _STATS is not None:
-        return _STATS
-    data: dict[str, dict[str, Any]] = {}
+def _stats_path() -> Path | None:
+    """统计文件路径；数据目录不可用时返回 ``None``（统计只是最佳努力）。"""
     try:
-        with _stats_file().open(encoding="utf-8") as fh:
-            raw = json.load(fh)
-        platforms = raw.get("platforms") if isinstance(raw, dict) else None
-        if isinstance(platforms, dict):
-            for key, value in platforms.items():
-                if not isinstance(value, dict):
-                    continue
-                data[str(key)] = {
-                    "ok": bool(value.get("ok")),
-                    "last_ms": int(value.get("last_ms") or 0),
-                    "failed_until": float(value.get("failed_until") or 0.0),
-                }
-    except (OSError, ValueError, TypeError):
-        data = {}
-    _STATS = data
-    return data
+        return _stats_file()
+    except Exception:  # noqa: BLE001 - 路径/目录错误不能拖垮搜索
+        logger.debug("music aggregate: music data dir unavailable", exc_info=True)
+        return None
 
 
-def _save_stats() -> None:
+def _finite_float(value: object, default: float = 0.0) -> float:
+    """把任意 JSON 值转成有限浮点；NaN/Infinity/垃圾类型返回默认值。"""
+    if isinstance(value, bool):
+        return float(value)
+    try:
+        number = float(cast(Any, value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _bounded_int(value: object, default: int = 0, *, maximum: int) -> int:
+    """把任意值转成 ``0..maximum`` 的整数。"""
+    try:
+        if isinstance(value, bool):
+            number = int(value)
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                return default
+            number = int(value)
+        else:
+            number = int(cast(Any, value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(0, min(number, maximum))
+
+
+def _coerce_stats_entry(value: object, now: float) -> dict[str, Any] | None:
+    """规范化一条平台记录；字段类型错误的结果是“按默认值”，不是整份丢弃。"""
+    if not isinstance(value, dict):
+        return None
+    until = max(0.0, _finite_float(value.get("failed_until")))
+    if until > now + _STATS_FUTURE_SLACK:
+        until = 0.0
+    entry: dict[str, Any] = {
+        "ok": value.get("ok") is True,
+        "last_ms": _bounded_int(value.get("last_ms"), 0, maximum=_STATS_MAX_MS),
+        "failed_until": until,
+    }
+    streak = _bounded_int(value.get("empty_streak"), 0, maximum=SLOW_EMPTY_STREAK * 10)
+    if streak:
+        entry["empty_streak"] = streak
+    return entry
+
+
+def _file_signature(path: Path) -> tuple[int, int] | None:
+    """``(mtime_ns, size)``，用于判断有没有别的进程改过文件。"""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _read_stats_file(
+    path: Path,
+) -> tuple[dict[str, dict[str, Any]], bool, tuple[int, int] | None]:
+    """
+    读取并规范化统计文件。
+
+    :return: ``(entries, readable, signature)``。``readable`` 只在“文件存在
+        但读不出来”时为 False——调用方此时绝不能覆盖它。文件缺失、内容损坏
+        或超大都返回空表 + ``readable=True``：这些都是可以安全重写的垃圾。
+    """
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return {}, True, None
+    except OSError:
+        return {}, False, None
+
+    signature = (stat.st_mtime_ns, stat.st_size)
+    if stat.st_size > _STATS_MAX_BYTES:
+        logger.warning(
+            "music aggregate: ignoring oversized search stats (%d bytes)", stat.st_size
+        )
+        return {}, True, signature
+
+    try:
+        # Read at most the cap + 1: the file can grow between stat() and open().
+        with path.open("rb") as fh:
+            blob = fh.read(_STATS_MAX_BYTES + 1)
+    except OSError:
+        return {}, False, None
+    if len(blob) > _STATS_MAX_BYTES:
+        return {}, True, signature
+
+    try:
+        raw = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        logger.warning("music aggregate: ignoring malformed search stats")
+        return {}, True, signature
+
+    platforms = raw.get("platforms") if isinstance(raw, dict) else None
+    entries: dict[str, dict[str, Any]] = {}
+    if isinstance(platforms, dict):
+        now = _now()
+        for key, value in platforms.items():
+            if len(entries) >= _STATS_MAX_ENTRIES:
+                break
+            name = str(key).strip()
+            if not name or len(name) > _STATS_MAX_KEY_CHARS:
+                continue
+            entry = _coerce_stats_entry(value, now)
+            if entry is not None:
+                entries[name] = entry
+    return entries, True, signature
+
+
+def _load_stats() -> dict[str, dict[str, Any]]:
+    """载入并缓存平台统计；任何失败都 fail-open 到空统计。"""
+    global _STATS, _STATS_SIG, _STATS_WRITABLE
+    with _FAILURE_LOCK:
+        if _STATS is not None:
+            return _STATS
+        path = _stats_path()
+        if path is None:
+            _STATS, _STATS_WRITABLE, _STATS_SIG = {}, False, None
+            return _STATS
+        try:
+            data, readable, signature = _read_stats_file(path)
+        except Exception:  # noqa: BLE001 - 解析/文件系统怪异行为都不能上抛
+            logger.debug("music aggregate: could not read search stats", exc_info=True)
+            data, readable, signature = {}, False, None
+        _STATS = data
+        _STATS_WRITABLE = readable
+        _STATS_SIG = signature
+        return _STATS
+
+
+def _merge_stats(
+    disk: dict[str, dict[str, Any]], memory: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """合并另一个进程写入的记录；同名条目以本进程的观察为准。"""
+    merged: dict[str, dict[str, Any]] = {}
+    for key, entry in memory.items():
+        if len(merged) >= _STATS_MAX_ENTRIES:
+            break
+        merged[key] = dict(entry)
+    for key, entry in disk.items():
+        if len(merged) >= _STATS_MAX_ENTRIES:
+            break
+        if key not in merged:
+            merged[key] = dict(entry)
+    return merged
+
+
+def _save_stats(*, merge: bool = True) -> None:
     """Best-effort atomic write; never let stats break a search.
 
     The whole snapshot + write happens under ``_FAILURE_LOCK``: concurrent
@@ -154,12 +336,42 @@ def _save_stats() -> None:
     per-thread temp file: two searches (or a forked worker) saving at the same
     time must never interleave bytes in one ``.tmp`` and then ``os.replace``
     the garbage over the real file.
+
+    When the file on disk changed since it was loaded (another process saved),
+    its entries are merged in first: the atomic replace still makes the last
+    writer win for the same platform, but platforms recorded by the other
+    process are not silently dropped. ``merge=False`` is used by
+    :func:`clear_failure_cache`, which must actually erase the file.
     """
-    target = _stats_file()
+    global _STATS, _STATS_SIG, _STATS_WRITABLE
+    target = _stats_path()
+    if target is None:
+        return
     tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         with _FAILURE_LOCK:
             data = _load_stats()
+            if not _STATS_WRITABLE:
+                # The file exists but could not be read: its contents may be
+                # perfectly good, so never replace it with this partial view.
+                disk, readable, signature = _read_stats_file(target)
+                if not readable:
+                    logger.debug(
+                        "music aggregate: stats unreadable; keeping them untouched"
+                    )
+                    return
+                _STATS_WRITABLE = True
+                _STATS_SIG = signature
+                data = _merge_stats(disk, data) if merge else data
+                _STATS = data
+            elif merge:
+                signature = _file_signature(target)
+                if signature != _STATS_SIG:
+                    disk, readable, fresh_sig = _read_stats_file(target)
+                    if readable:
+                        data = _merge_stats(disk, data)
+                        _STATS = data
+                        _STATS_SIG = fresh_sig
             # Shallow-copied mapping still shares the inner dicts; copy them
             # too so the payload is a true snapshot.
             payload = {
@@ -169,6 +381,7 @@ def _save_stats() -> None:
             with tmp.open("w", encoding="utf-8", newline="\n") as fh:
                 json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
             os.replace(tmp, target)
+            _STATS_SIG = _file_signature(target)
     except Exception:  # noqa: BLE001 - stats must never break a search
         logger.debug("music aggregate: could not persist search stats", exc_info=True)
         with contextlib.suppress(OSError):
@@ -177,14 +390,20 @@ def _save_stats() -> None:
 
 def _breaker_open(key: str, now: float | None = None) -> bool:
     """该平台是否在熔断期（失败或连续「慢且空」）。"""
-    stamp = now if now is not None else time.time()
+    stamp = _now() if now is None else now
     with _FAILURE_LOCK:
         entry = _load_stats().get(key)
         if entry is None:
             return False
-        until = float(entry.get("failed_until") or 0.0)
+        raw_until = entry.get("failed_until")
+        until = _finite_float(raw_until)
         if until <= stamp:
-            entry["failed_until"] = 0.0
+            if raw_until:
+                # The ban expired: clear it *and* the slow-empty counter, or
+                # one more slow empty result would immediately re-open it and
+                # the platform would never get a fresh observation window.
+                entry["failed_until"] = 0.0
+                entry.pop("empty_streak", None)
             return False
         return True
 
@@ -194,24 +413,34 @@ def _record_failure(key: str, elapsed_ms: int = 0) -> None:
         entry = _load_stats().setdefault(key, {})
         entry.update(
             ok=False,
-            last_ms=int(elapsed_ms or 0),
-            failed_until=time.time() + FAILURE_TTL,
+            last_ms=_bounded_int(elapsed_ms, 0, maximum=_STATS_MAX_MS),
+            failed_until=_now() + FAILURE_TTL,
         )
+        # A hard failure supersedes any half-built slow-empty streak: after the
+        # ban expires the platform starts counting from zero again.
+        entry.pop("empty_streak", None)
 
 
 def _record_success(key: str, elapsed_ms: int = 0, count: int = 0) -> None:
     with _FAILURE_LOCK:
         entry = _load_stats().setdefault(key, {})
-        slow_empty = int(elapsed_ms or 0) >= SLOW_EMPTY_MS and int(count) == 0
-        streak = int(entry.get("empty_streak") or 0) + 1 if slow_empty else 0
+        elapsed = _bounded_int(elapsed_ms, 0, maximum=_STATS_MAX_MS)
+        slow_empty = (
+            elapsed >= SLOW_EMPTY_MS
+            and _bounded_int(count, 0, maximum=_STATS_MAX_MS) == 0
+        )
+        streak = _bounded_int(
+            entry.get("empty_streak"), 0, maximum=SLOW_EMPTY_STREAK * 10
+        )
+        streak = streak + 1 if slow_empty else 0
         entry.update(
             ok=True,
-            last_ms=int(elapsed_ms or 0),
+            last_ms=elapsed,
             empty_streak=streak,
             failed_until=0.0,
         )
         if streak >= SLOW_EMPTY_STREAK:
-            entry["failed_until"] = time.time() + SLOW_EMPTY_TTL
+            entry["failed_until"] = _now() + SLOW_EMPTY_TTL
             logger.info(
                 "music aggregate: %s keeps returning nothing slowly; skipping for %gs",
                 key,
@@ -221,20 +450,24 @@ def _record_success(key: str, elapsed_ms: int = 0, count: int = 0) -> None:
 
 def clear_failure_cache() -> None:
     """清空平台熔断记录（健康检查成功或用户手动重试时使用）。"""
-    global _STATS
+    global _STATS, _STATS_SIG, _STATS_WRITABLE
     with _FAILURE_LOCK:
         _STATS = {}
-    _save_stats()
+        _STATS_WRITABLE = True
+        _STATS_SIG = None
+    # merge=False: an explicit clear must wipe the file, even if another
+    # process wrote entries after we loaded it.
+    _save_stats(merge=False)
 
 
 def failed_platforms() -> list[str]:
     """当前处于熔断期的平台（调试/界面提示用）。"""
-    now = time.time()
+    now = _now()
     with _FAILURE_LOCK:
         return [
             key
             for key, entry in _load_stats().items()
-            if float(entry.get("failed_until") or 0.0) > now
+            if _finite_float(entry.get("failed_until")) > now
         ]
 
 
@@ -524,17 +757,34 @@ def search_all(
         except TypeError:
             provider = create(key)
         tracks, total = provider.search(text, limit=per_platform)
-        return list(tracks or ()), int(total or len(tracks or ()))
+        items = list(tracks or ())
+        # A provider returning dicts/objects instead of Tracks must only lose
+        # its own rows: merge_tracks mutates attributes and would otherwise
+        # raise while building the snapshot, failing the whole aggregate
+        # search for every platform.
+        valid = [item for item in items if isinstance(item, Track)]
+        if len(valid) != len(items):
+            logger.warning(
+                "music aggregate: %s returned %d malformed track(s); dropped",
+                key,
+                len(items) - len(valid),
+            )
+        return valid, int(total or len(valid))
 
     state_lock = threading.Lock()
     callback_lock = threading.Lock()
     finished = threading.Event()
     results: dict[str, tuple[list[Track], int] | BaseException] = {}
+    #: Keys that were actually handed to a worker. A platform still sitting in
+    #: ``pending`` when the deadline hits had no chance to answer, so it must
+    #: not be penalised in the breaker (see the close block below).
+    started: set[str] = set()
     timeouts: set[str] = set()
     first_hit: list[float] = []
     closed = [False]
     early_stop = [False]
     early_timer: list[threading.Timer] = []
+    deadline_at = _clock.monotonic() + deadline_seconds
 
     def end_early() -> None:
         """Stop waiting for the slow tail once a usable batch is on screen."""
@@ -582,21 +832,26 @@ def search_all(
             if closed[0]:
                 return
             results[key] = outcome
-            if not isinstance(outcome, BaseException) and outcome[0] and not first_hit:
-                first_hit.append(time.monotonic())
+            is_failure = isinstance(outcome, BaseException)
+            # Record platform health *inside* this lock. The final
+            # ``_save_stats()`` runs after ``closed`` is set; if a worker
+            # published its result and then lost the race to update the stats,
+            # the last success/failure of the search would never be persisted.
+            try:
+                if is_failure:
+                    _record_failure(key, elapsed_ms)
+                elif isinstance(outcome, tuple):
+                    _record_success(key, elapsed_ms, len(outcome[0]))
+            except Exception:  # noqa: BLE001 - stats must never break a search
+                logger.debug("music aggregate: could not update stats", exc_info=True)
+            if isinstance(outcome, tuple) and outcome[0] and not first_hit:
+                first_hit.append(_clock.monotonic())
                 # Start the grace clock now instead of waiting for the next
                 # platform to finish: the tail may take the whole budget.
-                timer = threading.Timer(EARLY_EXIT_GRACE, end_early)
-                timer.daemon = True
-                timer.start()
-                early_timer.append(timer)
+                early_timer.append(_clock.schedule(EARLY_EXIT_GRACE, end_early))
             done = len(results) >= len(keys)
             if done:
                 finished.set()
-        if isinstance(outcome, BaseException):
-            _record_failure(key, elapsed_ms)
-        else:
-            _record_success(key, elapsed_ms, len(outcome[0]))
         if on_update is not None:
             try:
                 # Serialise callbacks and take the snapshot *inside* the lock:
@@ -609,39 +864,62 @@ def search_all(
                 logger.debug("music aggregate: on_update failed", exc_info=True)
 
     def worker(key: str) -> None:
-        started = time.monotonic()
+        started_at = _clock.monotonic()
         try:
             outcome: tuple[list[Track], int] | BaseException = run_one(key)
         except BaseException as exc:  # noqa: BLE001 - 单平台失败不影响全局
             outcome = exc
-        record(key, outcome, int((time.monotonic() - started) * 1000))
+        record(key, outcome, int((_clock.monotonic() - started_at) * 1000))
 
     # A bounded pool, not one thread per platform and not ``keys[:workers]``:
     # slicing silently dropped every platform after the Nth (it was never
     # started yet reported as timed out, or omitted entirely on early exit).
-    pool_lock = threading.Lock()
     pending = list(keys)
 
     def next_key() -> str | None:
-        with pool_lock:
-            if not pending or closed[0] or early_stop[0]:
+        """Take the next platform, under the same lock that guards results."""
+        with state_lock:
+            if closed[0] or early_stop[0] or not pending:
                 return None
-            return pending.pop(0)
+            # Do not start new requests after the budget: their result could
+            # never be delivered, and blaming them for the timeout would put a
+            # platform that never ran into the 10-minute breaker.
+            if _clock.monotonic() >= deadline_at:
+                return None
+            key = pending.pop(0)
+            started.add(key)
+            return key
 
-    def pool_worker() -> None:
+    def pool_worker(first: str) -> None:
+        worker(first)
         while (key := next_key()) is not None:
             worker(key)
 
     thread_count = max(1, min(int(workers), len(keys)))
+    # Give every worker its first platform up front. Thread startup can take a
+    # while on a loaded machine; a platform that was already assigned to a
+    # worker must not be reclassified as "never started" just because the
+    # thread had not been scheduled before the deadline.
+    initial: list[str] = []
+    with state_lock:
+        while pending and len(initial) < thread_count:
+            key = pending.pop(0)
+            started.add(key)
+            initial.append(key)
     threads = [
-        threading.Thread(target=pool_worker, name=f"music-search-{index}", daemon=True)
+        threading.Thread(
+            target=pool_worker,
+            args=(initial[index],),
+            name=f"music-search-{index}",
+            daemon=True,
+        )
         for index in range(thread_count)
     ]
     for thread in threads:
         thread.start()
     # 到点就返回：还在跑的平台由 daemon 线程自行结束，进程退出不会被它们
     # 拦住；它们的结果也不会再被使用。
-    finished.wait(deadline_seconds)
+    _clock.wait(finished, deadline_seconds)
 
     for timer in early_timer:
         timer.cancel()
@@ -656,20 +934,32 @@ def search_all(
             pass
         else:
             for key in missing:
+                if key not in started:
+                    # The pool never picked it up inside the budget: it had no
+                    # chance to answer, so it is neither a success nor a
+                    # failure (same rule as the early-exit tail). Reporting it
+                    # as a timeout used to blacklist an entire unsearched tail.
+                    continue
                 timeouts.add(key)
                 timed_out.append(key)
                 results[key] = TimeoutError(f"搜索超时（{deadline_seconds:g}s）")
 
     # A budget timeout *is* a failure: the platform never answered inside the
     # window, so the next aggregate search should not pay the same budget for
-    # it again. Early-stopped platforms are deliberately excluded above --
-    # they may have been mid-request and are retried next time.
+    # it again. Early-stopped and never-started platforms are deliberately
+    # excluded above -- they may have been mid-request or never ran at all.
     timeout_ms = int(deadline_seconds * 1000)
     for key in timed_out:
         _record_failure(key, timeout_ms)
     _save_stats()
 
-    final = snapshot()
+    # Take the final snapshot under ``callback_lock``: an in-flight callback
+    # merges the same Track objects (``sources``/``_alternatives`` are mutated
+    # in place), and a callback queued behind it must not deliver a snapshot
+    # older than the returned result. Waiting here also guarantees no late
+    # callback can run after ``search_all`` returns.
+    with callback_lock:
+        final = snapshot()
     return AggregateResult(
         tracks=final.tracks, platforms=final.platforms, total=final.total
     )
@@ -677,7 +967,11 @@ def search_all(
 
 def _short_error(exc: BaseException) -> str:
     """把平台异常压成一行可读原因（完整堆栈由调用方按需记录）。"""
-    message = str(exc).strip() or type(exc).__name__
+    try:
+        message = str(exc).strip()
+    except Exception:  # noqa: BLE001 - 自定义异常可能带坏掉的 __str__
+        message = ""
+    message = message or type(exc).__name__
     # Strip signed query strings *before* truncating, or a partially cut URL
     # could still leak most of a token.
     return strip_url_query(message)[:200]

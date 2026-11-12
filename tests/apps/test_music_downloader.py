@@ -53,7 +53,9 @@ def test_export_m3u_writes_header_extinf_and_relative_path(tmp_path: Path) -> No
     result = export_m3u([track], playlist)
 
     assert result == str(playlist)
-    content = playlist.read_text(encoding="utf-8")
+    # A ``.m3u`` with non-ASCII content carries a UTF-8 BOM; ``utf-8-sig``
+    # strips it so the line assertions stay about the format, not the marker.
+    content = playlist.read_text(encoding="utf-8-sig")
     lines = content.splitlines()
     assert lines[0] == "#EXTM3U"
     assert lines[1] == "#EXTINF:269,周杰伦 - 晴天"

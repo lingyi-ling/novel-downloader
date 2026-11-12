@@ -13,7 +13,9 @@
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Mapping
 from typing import Any
 
 __all__ = [
@@ -58,6 +60,28 @@ _STR_FIELDS = (
 )
 _INT_FIELDS = ("duration_s", "track_no")
 
+#: Integers on the wire are durations/track numbers. A provider that returns
+#: a 10**100 ``duration_s`` would otherwise put that huge number into every
+#: JSON response (and some clients cannot parse it).
+_INT_MAX = 2**31 - 1
+
+
+def _field(track: object, name: str, default: Any) -> Any:
+    """Read a public field, tolerating provider objects with broken properties."""
+    try:
+        return getattr(track, name, default)
+    except Exception:  # noqa: BLE001 - one bad track must not break the response
+        return default
+
+
+def _as_str(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        return str(value)
+    except Exception:  # noqa: BLE001 - __str__ may raise on provider objects
+        return ""
+
 
 def track_dict(track: object) -> dict[str, Any]:
     """
@@ -73,27 +97,26 @@ def track_dict(track: object) -> dict[str, Any]:
     """
     payload: dict[str, Any] = {}
     for name in _STR_FIELDS:
-        value = getattr(track, name, "")
-        payload[name] = "" if value is None else str(value)
+        payload[name] = _as_str(_field(track, name, ""))
     for name in _INT_FIELDS:
-        payload[name] = _as_int(getattr(track, name, 0))
+        payload[name] = _as_int(_field(track, name, 0))
 
-    vip = getattr(track, "vip", False)
+    vip = _field(track, "vip", False)
     if isinstance(vip, str):
         vip = vip.strip().lower() in {"1", "true", "yes", "on"}
     payload["vip"] = bool(vip)
 
-    headers = getattr(track, "http_headers", {}) or {}
-    if isinstance(headers, dict):
+    headers = _field(track, "http_headers", {}) or {}
+    if isinstance(headers, Mapping):
         payload["http_headers"] = {
-            str(key): str(value) for key, value in headers.items()
+            _as_str(key): _as_str(value) for key, value in headers.items()
         }
     else:
         payload["http_headers"] = {}
 
-    sources = getattr(track, "sources", []) or []
+    sources = _field(track, "sources", []) or []
     if isinstance(sources, (list, tuple, set, frozenset)):
-        payload["sources"] = [str(item) for item in sources]
+        payload["sources"] = [_as_str(item) for item in sources]
     elif isinstance(sources, str):
         payload["sources"] = [sources] if sources else []
     else:
@@ -108,15 +131,17 @@ def _as_int(value: object) -> int:
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
-        return value
+        return max(0, min(value, _INT_MAX))
     if isinstance(value, float):
+        if not math.isfinite(value):
+            return 0
         try:
-            return int(value)
+            return max(0, min(int(value), _INT_MAX))
         except (OverflowError, ValueError):
             return 0
     if isinstance(value, str):
         try:
-            return int(value.strip() or 0)
+            return max(0, min(int(value.strip() or 0), _INT_MAX))
         except ValueError:
             return 0
     return 0

@@ -7,9 +7,11 @@ v1.0 关键决策：
 """
 
 import contextlib
+import errno
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 from collections.abc import Mapping
@@ -810,7 +812,11 @@ def _playlist_entry(item):
 
 
 def _playlist_location(file_path, playlist_dir, absolute):
-    """生成写入 M3U 的路径：默认相对歌单所在目录，统一用正斜杠。"""
+    """生成写入 M3U 的路径：默认相对歌单所在目录，统一用正斜杠。
+
+    M3U 用 ``/`` 作目录分隔符，而 Windows 的播放器也接受它，所以只在与
+    ``os.sep`` 不同时才替换：POSIX 上反斜杠是合法文件名字符，不能被改写。
+    """
     if absolute:
         location = os.path.abspath(file_path)
     else:
@@ -819,11 +825,70 @@ def _playlist_location(file_path, playlist_dir, absolute):
         except ValueError:
             # Windows 跨盘符没有相对路径，退回绝对路径
             location = os.path.abspath(file_path)
-    location = _CONTROL.sub(" ", location.replace("\\", "/")).strip()
+    if os.sep != "/":
+        location = location.replace(os.sep, "/")
+    location = _CONTROL.sub(" ", location).strip()
     # 「#」开头的行会被 M3U 当作注释/指令，相对路径前加 ./ 规避
     if not absolute and location.startswith("#"):
         location = "./" + location
     return location
+
+
+def _playlist_encoding(playlist_path, text):
+    """选择歌单文件的编码。
+
+    ``.m3u8`` 的定义就是 UTF-8，不加 BOM，避免严格解析器把 BOM 当成路径的
+    一部分。``.m3u`` 没有编码声明：纯 ASCII 时保持原样，含非 ASCII 时写
+    UTF-8 BOM——否则 Windows 上按 ANSI（如 GBK）解码的播放器会把中文标题和
+    路径显示成乱码。未知后缀（CLI 先写 ``*.tmp`` 再改名）按 UTF-8 处理。
+    """
+    suffix = os.path.splitext(str(playlist_path))[1].lower()
+    if suffix == ".m3u" and not text.isascii():
+        return "utf-8-sig"
+    return "utf-8"
+
+
+def _write_playlist_text(playlist_path, text):
+    """原子写入歌单：先写同目录临时文件，再 ``os.replace``。
+
+    直接 ``open(path, "w")`` 会先截断目标文件；磁盘满或写入中断时，用户原有
+    的歌单就被毁掉了。临时文件放在同一目录，保证 ``os.replace`` 是原子改名，
+    并且 ``export_m3u`` 计算出的相对路径仍然以歌单目录为基准。
+    """
+    if os.path.isdir(playlist_path):
+        # 各平台 open() 对目录报的错不同（Windows 是 PermissionError），
+        # 统一成 IsADirectoryError，调用方才能稳定区分。
+        raise IsADirectoryError(errno.EISDIR, "Is a directory", playlist_path)
+
+    directory = os.path.dirname(os.path.abspath(playlist_path)) or os.curdir
+    os.makedirs(directory, exist_ok=True)
+    encoding = _playlist_encoding(playlist_path, text)
+    # ``mkstemp`` would create the file as 0600 on POSIX; opening with
+    # ``0o666`` lets the umask decide, so the playlist keeps the permissions a
+    # plain ``open(path, "w")`` used to give it.
+    prefix = f".{os.path.basename(playlist_path)}."
+    fd = -1
+    temp_path = ""
+    for _ in range(8):
+        temp_path = os.path.join(directory, f"{prefix}{secrets.token_hex(6)}.tmp")
+        try:
+            fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            continue
+        break
+    else:  # pragma: no cover - eight random collisions are not realistic
+        raise FileExistsError(
+            errno.EEXIST, "Could not create a temporary playlist file", playlist_path
+        )
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="\n") as handle:
+            handle.write(text)
+        os.replace(temp_path, playlist_path)
+    except BaseException:
+        # 失败时绝不留下半个歌单或临时文件。
+        with contextlib.suppress(OSError):
+            os.unlink(temp_path)
+        raise
 
 
 def export_m3u(tracks, path, *, absolute=False):
@@ -833,12 +898,24 @@ def export_m3u(tracks, path, *, absolute=False):
     ``(track, file_path)`` 元组，或包含 ``path``/``file`` 的 dict。
     ``absolute=False``（默认）写入相对歌单目录的路径，便于整个目录搬家。
     列表为空时也会写入只有 ``#EXTM3U`` 头的合法歌单。
+
+    同一个文件（按 ``normcase(abspath(...))`` 判断）只写一条，保留第一次出现
+    的顺序。写入是原子的：失败不会毁掉已有的同名歌单。
     """
     playlist_path = str(path)
     playlist_dir = os.path.dirname(os.path.abspath(playlist_path))
     entries = []
+    seen = set()
     for item in tracks or ():
         track, file_path = _playlist_entry(item)
+        try:
+            identity = os.path.normcase(os.path.abspath(file_path))
+        except (OSError, ValueError):
+            identity = ""
+        if identity:
+            if identity in seen:
+                continue
+            seen.add(identity)
         name = _CONTROL.sub(
             " ", str(_playlist_field(track, "name", "title", default="未知歌曲"))
         ).strip()
@@ -855,17 +932,15 @@ def export_m3u(tracks, path, *, absolute=False):
         duration = _playlist_field(track, "duration_s", "duration", default=0)
         try:
             duration = int(float(duration or 0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # ``float("inf")`` raises OverflowError, not ValueError; it is as
+            # unusable as a non-numeric duration.
             duration = 0
         if duration <= 0:
             duration = -1  # M3U 用 -1 表示时长未知
         location = _playlist_location(file_path, playlist_dir, absolute)
         entries.append(f"#EXTINF:{duration},{artists} - {name}\n{location}")
 
-    if playlist_dir:
-        os.makedirs(playlist_dir, exist_ok=True)
-    with open(playlist_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write("#EXTM3U\n")
-        for entry in entries:
-            f.write(entry + "\n")
+    text = "#EXTM3U\n" + "".join(entry + "\n" for entry in entries)
+    _write_playlist_text(playlist_path, text)
     return playlist_path

@@ -15,10 +15,13 @@ traceback when it is missing.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import json
 import os
 import re
 import sys
+import tempfile
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from dataclasses import dataclass
 from typing import Any
@@ -33,6 +36,40 @@ _LEVELS = ("hires", "lossless", "exhigh", "higher", "standard")
 
 #: Rows per page in the interactive result selector.
 _PER_PAGE = 10
+
+#: Handy aliases for the platform keys printed by ``music platforms``.  Keys
+#: are compared case-insensitively; a platform's display label (``网易云音乐``
+#: or ``国内 · 网易云音乐``) is accepted as well, so users can paste either.
+_PLATFORM_ALIASES: dict[str, str] = {
+    "163": "netease",
+    "wangyiyun": "netease",
+    "neteasecloudmusic": "netease",
+    "网易云": "netease",
+    "网易云音乐": "netease",
+    "qqmusic": "qq",
+    "qq音乐": "qq",
+    "kugoumusic": "kugou",
+    "酷狗": "kugou",
+    "酷狗音乐": "kugou",
+    "kuwomusic": "kuwo",
+    "酷我": "kuwo",
+    "酷我音乐": "kuwo",
+    "migu music": "migu",
+    "咪咕": "migu",
+    "咪咕音乐": "migu",
+    "qianqianmusic": "qianqian",
+    "baidu": "qianqian",
+    "千千": "qianqian",
+    "千千音乐": "qianqian",
+    "b站": "bilibili",
+    "哔哩哔哩": "bilibili",
+    "汽水": "soda",
+    "汽水音乐": "soda",
+    "apple music": "apple",
+    "applemusic": "apple",
+    "youtube music": "youtube",
+    "ytmusic": "youtube",
+}
 
 
 class _MusicUnavailable(Exception):
@@ -121,7 +158,7 @@ def _require_engine() -> _MusicEngine:
                 'pip install "novel-downloader[music]" ({error})'
             ).format(error=exc)
         )
-        raise SystemExit(1) from exc
+        raise SystemExit(EXIT_FAILURE) from exc
 
 
 def _create_provider(engine: _MusicEngine, platform: str) -> Any:
@@ -135,10 +172,10 @@ def _create_provider(engine: _MusicEngine, platform: str) -> Any:
                 keys=", ".join(engine.platform_keys()),
             )
         )
-        raise SystemExit(2) from exc
+        raise SystemExit(EXIT_USAGE) from exc
     except Exception as exc:
         ui.error(t("Could not start this platform: {error}").format(error=exc))
-        raise SystemExit(1) from exc
+        raise SystemExit(EXIT_FAILURE) from exc
 
 
 def _print_platform_note(engine: _MusicEngine, platform: str) -> None:
@@ -179,7 +216,7 @@ def _search(
             _login_expired_hint()
         else:
             ui.error(t("Search failed: {err}").format(err=exc))
-        raise SystemExit(1) from exc
+        raise SystemExit(EXIT_FAILURE) from exc
 
     result = list(tracks)[: max(1, limit)]
     return result, int(total or len(result))
@@ -215,7 +252,7 @@ def _search_all(
             result = search_all_isolated(keyword, limit=limit)
     except Exception as exc:
         ui.error(t("Search failed: {err}").format(err=exc))
-        raise SystemExit(1) from exc
+        raise SystemExit(EXIT_FAILURE) from exc
     return list(result.tracks), int(result.total), list(result.platforms)
 
 
@@ -237,6 +274,61 @@ def _every_platform_failed(outcomes: list[Any]) -> bool:
     return bool(outcomes) and all(
         not bool(getattr(outcome, "ok", False)) for outcome in outcomes
     )
+
+
+def _platform_lookup(engine: _MusicEngine) -> dict[str, str]:
+    """
+    Build a case-insensitive lookup from keys, labels and aliases to keys.
+
+    ``music platforms`` prints keys like ``netease`` and localized labels like
+    ``国内 · 网易云音乐``.  Users should be able to pass either (and common
+    aliases such as ``163``) instead of guessing the exact spelling.
+    """
+    lookup: dict[str, str] = {}
+    labels = engine.labels()
+    for key, label in labels:
+        lookup.setdefault(key.casefold(), key)
+        text = str(label or "").strip()
+        if not text:
+            continue
+        lookup.setdefault(text.casefold(), key)
+        # ``国内 · 网易云音乐`` -> also accept the part after the group prefix.
+        tail = text.split("·", 1)[-1].strip()
+        if tail and tail != text:
+            lookup.setdefault(tail.casefold(), key)
+
+    registered = {key for key, _label in labels}
+    for alias, target in _PLATFORM_ALIASES.items():
+        if target in registered:
+            lookup.setdefault(alias.casefold(), target)
+    return lookup
+
+
+def _normalize_platform(engine: _MusicEngine, platform: object) -> str:
+    """
+    Resolve a user-supplied platform name to its canonical registry key.
+
+    Empty input and ``all`` (case-insensitive) become :data:`ALL_PLATFORM_KEY`
+    (``"all"``).  Unknown names are returned unchanged (trimmed) so the
+    caller's ``create`` path still reports the usual "unknown platform" usage
+    error -- showing exactly what the user typed -- while listing the
+    registered keys.
+    """
+    text = str(platform or "").strip()
+    if _is_all_platforms(text):
+        return "all"
+    return _platform_lookup(engine).get(text.casefold(), text)
+
+
+def _unknown_platform(engine: _MusicEngine, platform: str) -> None:
+    """Report an unknown platform and exit with the usage status."""
+    ui.error(
+        t("Unknown music platform: {platform}. Available: {keys}").format(
+            platform=platform,
+            keys=", ".join(engine.platform_keys()),
+        )
+    )
+    raise SystemExit(EXIT_USAGE)
 
 
 def _sources_text(track: Any) -> str:
@@ -381,7 +473,7 @@ def _pick_tracks(tracks: list[Any], pick: str) -> list[Any]:
                     value=token
                 )
             )
-            raise SystemExit(2)
+            raise SystemExit(EXIT_USAGE)
 
         if index not in seen:
             seen.add(index)
@@ -499,9 +591,9 @@ class MusicSearchCmd(Command):
         keyword = str(args.keyword or "").strip()
         if not keyword:
             ui.error(t("No keyword entered."))
-            raise SystemExit(2)
+            raise SystemExit(EXIT_USAGE)
 
-        platform = str(args.platform)
+        platform = _normalize_platform(engine, args.platform)
         limit = max(1, int(args.limit))
         as_json = bool(args.as_json)
 
@@ -533,7 +625,9 @@ class MusicSearchCmd(Command):
             }
             if outcomes:
                 payload["platforms"] = [item.as_dict() for item in outcomes]
-            ui.emit(json.dumps(payload, ensure_ascii=False, indent=2))
+            # One line: a consumer can ``json.loads`` the whole stdout even
+            # when the command is run through a pipe or a log collector.
+            ui.emit(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             if _every_platform_failed(outcomes):
                 raise SystemExit(EXIT_FAILURE)
             return
@@ -629,9 +723,9 @@ class MusicDownloadCmd(Command):
         keyword = str(args.keyword or args.query or "").strip()
         if not keyword:
             ui.error(t("No keyword entered."))
-            raise SystemExit(2)
+            raise SystemExit(EXIT_USAGE)
 
-        platform = str(args.platform)
+        platform = _normalize_platform(engine, args.platform)
         limit = max(1, int(args.limit))
         settings = engine.settings.load_settings()
         out_dir = _expand_path(
@@ -679,7 +773,7 @@ class MusicDownloadCmd(Command):
             ui.error(
                 t("Non-interactive input requires --pick N or --yes to choose songs.")
             )
-            raise SystemExit(2)
+            raise SystemExit(EXIT_USAGE)
 
         if not selected:
             ui.warn(t("Cancelled."))
@@ -734,7 +828,7 @@ class MusicDownloadCmd(Command):
                 _login_expired_hint()
             else:
                 ui.error(t("Download failed: {error}").format(error=exc))
-            raise SystemExit(1) from exc
+            raise SystemExit(EXIT_FAILURE) from exc
         finally:
             progress.stop()
 
@@ -805,6 +899,49 @@ def _playlist_filename(keyword: str) -> str:
 def _default_playlist_path(keyword: str, out_dir: str) -> str:
     """Return the default playlist path inside the music output directory."""
     return os.path.join(out_dir, _playlist_filename(keyword))
+
+
+def _write_playlist_atomic(
+    engine: _MusicEngine, tracks: list[Any], out_path: str
+) -> None:
+    """
+    Write the playlist through a sibling temp file, then atomically replace.
+
+    ``export_m3u`` opens the destination directly.  A full disk or an I/O
+    error halfway through would otherwise leave a truncated ``.m3u8`` at the
+    user's path -- and, when replacing an existing playlist, destroy the
+    previous good one.  Writing next to the target keeps the relative paths
+    the exporter computes intact (they are relative to the playlist folder).
+
+    The temp file keeps the destination's extension: ``export_m3u`` picks the
+    encoding from the path suffix (``.m3u`` with non-ASCII content gets a
+    UTF-8 BOM, ``.m3u8`` stays plain UTF-8).  A generic ``.tmp`` name would
+    look like an unknown format and silently drop that BOM.
+    """
+    target = os.path.abspath(out_path)
+    if os.path.isdir(target):
+        # Opening a directory raises a platform-specific error (EACCES on
+        # Windows); make the message unambiguous everywhere.
+        raise IsADirectoryError(errno.EISDIR, "Is a directory", target)
+
+    parent = os.path.dirname(target) or os.curdir
+    os.makedirs(parent, exist_ok=True)
+    suffix = os.path.splitext(target)[1]
+    prefix = f".{os.path.basename(target)}."
+    if len(prefix) > 120:
+        # Stay inside filesystem component limits; only the suffix carries
+        # meaning for the exporter, the prefix is for human recognition.
+        prefix = f".{os.path.basename(target)[:100]}."
+    fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=parent)
+    os.close(fd)
+    try:
+        engine.export_m3u(tracks, temp_path)
+        os.replace(temp_path, target)
+    except BaseException:
+        # Never leave the half-written temp file (or a partial target) behind.
+        with contextlib.suppress(OSError):
+            os.unlink(temp_path)
+        raise
 
 
 def _track_path(track: Any) -> str:
@@ -938,7 +1075,7 @@ class MusicExportM3uCmd(Command):
             ui.error(t("No keyword entered."))
             raise SystemExit(EXIT_USAGE)
 
-        platform = str(args.platform)
+        platform = _normalize_platform(engine, args.platform)
         limit = max(1, int(args.limit))
 
         provider = _create_provider(engine, platform)
@@ -982,14 +1119,14 @@ class MusicExportM3uCmd(Command):
         )
 
         try:
-            playlist = engine.export_m3u(ready, out_path)
+            _write_playlist_atomic(engine, ready, out_path)
         except Exception as exc:
             ui.error(t("Could not write playlist: {error}").format(error=exc))
             raise SystemExit(EXIT_FAILURE) from exc
 
         ui.success(
             t("Exported {count} track(s) to {path}").format(
-                count=len(ready), path=playlist
+                count=len(ready), path=out_path
             )
         )
 
@@ -1011,50 +1148,91 @@ class MusicHealthCmd(Command):
             metavar="KEYWORD",
             help=t("Keyword used for the connectivity probe (default: test)."),
         )
+        parser.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help=t("Print machine-readable JSON on stdout and exit."),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
         engine = _require_engine()
+        keyword = str(args.keyword or "test").strip() or "test"
+        as_json = bool(getattr(args, "as_json", False))
         keys = engine.platform_keys()
         if not keys:
-            ui.warn(t("No music platforms are available."))
-            return
-
-        requested = str(args.platform or "").strip()
-        if requested:
-            if requested not in keys:
-                ui.error(
-                    t("Unknown music platform: {platform}. Available: {keys}").format(
-                        platform=requested,
-                        keys=", ".join(keys),
+            if as_json:
+                # Keep the promised machine-readable contract even when the
+                # registry is empty: an empty document still parses.
+                ui.emit(
+                    json.dumps(
+                        {"keyword": keyword, "platforms": [], "failed": 0},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
                     )
                 )
-                raise SystemExit(EXIT_USAGE)
+            else:
+                ui.warn(t("No music platforms are available."))
+            return
+
+        requested_raw = str(args.platform or "").strip()
+        if requested_raw and not _is_all_platforms(requested_raw):
+            requested = _normalize_platform(engine, requested_raw)
+            if requested not in keys:
+                _unknown_platform(engine, requested)
             selected = [requested]
         else:
             selected = keys
 
-        keyword = str(args.keyword or "test").strip() or "test"
         rows: list[list[str]] = []
+        payload: list[dict[str, Any]] = []
         failed = 0
+
+        def _probe(key: str) -> dict[str, Any]:
+            # ``health_check`` already reports failures as data, but a mock or
+            # a future provider can still raise; one platform must never take
+            # the whole command (and its JSON document) down.
+            try:
+                result = engine.health_check(key, keyword)
+                return dict(result or {})
+            except Exception as exc:  # noqa: BLE001 - report as unhealthy
+                return {
+                    "ok": False,
+                    "elapsed_ms": 0,
+                    "error": str(exc) or type(exc).__name__,
+                }
 
         # 并发探测：以前是逐站 15 秒串行，25 个平台要等好几分钟。
         from concurrent.futures import ThreadPoolExecutor
 
-        with (
-            ui.status(t("Checking {count} platform(s)...").format(count=len(selected))),
-            ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool,
-        ):
-            results = list(
-                pool.map(lambda key: engine.health_check(key, keyword), selected)
+        status = (
+            contextlib.nullcontext()
+            if as_json
+            else ui.status(
+                t("Checking {count} platform(s)...").format(count=len(selected))
             )
+        )
+        with status, ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool:
+            results = list(pool.map(_probe, selected))
 
         for key, result in zip(selected, results, strict=True):
             ok = bool(result.get("ok"))
-            elapsed = int(result.get("elapsed_ms") or 0)
+            try:
+                elapsed = int(result.get("elapsed_ms") or 0)
+            except (TypeError, ValueError):
+                elapsed = 0
             error_text = str(result.get("error") or "")
             if not ok:
                 failed += 1
+            payload.append(
+                {
+                    "platform": key,
+                    "ok": ok,
+                    "elapsed_ms": elapsed,
+                    "error": error_text,
+                }
+            )
             rows.append(
                 [
                     key,
@@ -1064,11 +1242,26 @@ class MusicHealthCmd(Command):
                 ]
             )
 
-        ui.render_table(
-            t("Music platform health"),
-            [t("Platform"), t("Status"), t("Time (ms)"), t("Error")],
-            rows,
-        )
+        if as_json:
+            # Field names match ``GET /api/v1/music/health`` (``platform``,
+            # ``ok``, ``elapsed_ms``, ``error``), so scripts can reuse them.
+            ui.emit(
+                json.dumps(
+                    {
+                        "keyword": keyword,
+                        "platforms": payload,
+                        "failed": failed,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        else:
+            ui.render_table(
+                t("Music platform health"),
+                [t("Platform"), t("Status"), t("Time (ms)"), t("Error")],
+                rows,
+            )
 
         if failed:
             raise SystemExit(EXIT_FAILURE)

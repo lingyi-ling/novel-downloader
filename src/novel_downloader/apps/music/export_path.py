@@ -185,9 +185,12 @@ def resolve_playlist_target(
             # A relative name is relative to the primary output directory,
             # never to the daemon's current working directory.
             candidate = roots[0] / candidate
-        suffix = candidate.suffix.lower()
-        if suffix:
-            if suffix not in PLAYLIST_SUFFIXES:
+        if candidate.is_dir():
+            # An existing directory whose name merely ends in ``.m3u`` /
+            # ``.m3u8`` is still a directory: writing to it would always fail.
+            target = candidate / name
+        elif candidate.suffix:
+            if candidate.suffix.lower() not in PLAYLIST_SUFFIXES:
                 raise PlaylistTargetError(MSG_PLAYLIST_TARGET_INVALID)
             target = candidate
         else:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import secrets
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 
@@ -28,6 +29,11 @@ DEFAULT_TTL = 30 * 60.0
 
 #: 同时保留多少份搜索结果（最近使用的在前）。
 DEFAULT_MAX_ENTRIES = 32
+
+#: 生成 id 时最多重试几次。24 位十六进制的碰撞率可以忽略，但“可以忽略”
+#: 不等于“不会”：真撞上时静默覆盖会把另一份搜索结果换成这次的对象，
+#: 回传的旧 ``search_id`` 会解析出错误的 Track。重试几次后改用 uuid 兜底。
+_ID_ATTEMPTS = 8
 
 
 class TrackCache:
@@ -45,18 +51,30 @@ class TrackCache:
         self._max_entries = max(1, int(max_entries))
         self._ttl = max(0.0, float(ttl))
         self._clock = clock
+        self._fallback_counter = 0
 
     def put(self, tracks: Sequence[Track]) -> str:
-        """保存一次搜索的曲目，返回新的 ``search_id``。"""
-        search_id = secrets.token_hex(12)
+        """保存一次搜索的曲目，返回新的、不会与现存条目冲突的 ``search_id``。"""
         now = self._clock()
         with self._lock:
             self._prune(now)
+            search_id = self._fresh_id()
             self._entries[search_id] = (now, list(tracks))
             self._entries.move_to_end(search_id)
             while len(self._entries) > self._max_entries:
                 self._entries.popitem(last=False)
         return search_id
+
+    def _fresh_id(self) -> str:
+        """调用方必须持有 ``_lock``：检查与插入之间不能有别的 ``put``。"""
+        for _ in range(_ID_ATTEMPTS):
+            candidate = secrets.token_hex(12)
+            if candidate not in self._entries:
+                return candidate
+        # token_hex 被替换/熵源异常时仍要给出唯一 id，而不是覆盖活条目。
+        # 计数器保证即使 uuid 也被替换成常量，长度不同的兜底 id 仍不重复。
+        self._fallback_counter += 1
+        return f"{uuid.uuid4().hex}{self._fallback_counter:x}"
 
     def get(self, search_id: str | None) -> list[Track] | None:
         """按 ``search_id`` 取回曲目；未知或过期返回 ``None``。"""

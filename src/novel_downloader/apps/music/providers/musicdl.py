@@ -68,8 +68,12 @@ def _deps_ok(needs):
 #: 轻档平台里仍依赖额外可选包的（其余依赖由 base 的公共依赖保证）。
 #: TIDAL 的 vendor 模块在 import 时就 ``import aigpy``；缺包时如果照常注册，
 #: 用户会在平台列表里看到它，一搜就得到一个「缺少可选依赖」的报错。
+#: QQ 的 qqutils 在 import 时就 ``import orjson``；orjson 是编译扩展，
+#: Chaquopy 仓库没有 Android wheel，所以 Android 上必须在这里把它挡掉，
+#: 而不是让平台注册成功、搜索时才炸。
 PLATFORM_DEPS = {
     "tidal": ("aigpy",),
+    "qq": ("orjson",),
 }
 
 
