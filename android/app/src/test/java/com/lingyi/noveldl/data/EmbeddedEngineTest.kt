@@ -23,6 +23,12 @@ class EmbeddedEngineTest {
 
     @After
     fun resetEngine() {
+        // A bootstrap still parked in a previous test must finish before the
+        // state is reset, otherwise it can flip `ready` back on afterwards.
+        assertTrue(
+            "bootstrap thread did not finish",
+            EmbeddedEngine.awaitBootstrapForTest(),
+        )
         EmbeddedEngine.resetForTest()
     }
 

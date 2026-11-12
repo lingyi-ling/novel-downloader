@@ -15,8 +15,11 @@ import com.lingyi.noveldl.data.encodeDownloadPathSegment
  * (see [TaskActionsTest]).
  */
 
-/** Task statuses the user may re-queue: only failed or cancelled tasks. */
-private val RETRYABLE_STATUSES = setOf("failed", "cancelled")
+/**
+ * Task statuses the user may re-queue: failed, cancelled, or a task the client
+ * marked interrupted after the app/server process died mid-flight.
+ */
+private val RETRYABLE_STATUSES = setOf("failed", "cancelled", "interrupted")
 
 /** Whether [status] is one a retry button may be attached to. */
 fun isRetryableTaskStatus(status: String): Boolean =

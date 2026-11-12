@@ -3,7 +3,10 @@ package com.lingyi.noveldl.ui.music
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiErrorCode
 import com.lingyi.noveldl.data.ApiFailure
+import com.lingyi.noveldl.data.MusicPathPersistence
 import com.lingyi.noveldl.data.MusicTrack
+import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -82,6 +85,20 @@ class MusicExportViewModelTest {
 
     private suspend fun export(tracks: List<MusicTrack>): MusicExportOutcome =
         MusicExportViewModel().export("netease", tracks)
+
+    /** In-memory stand-in for the on-disk cache written by the job ViewModel. */
+    private class MemoryPaths(initial: Map<String, String> = emptyMap()) :
+        MusicPathPersistence {
+        var stored: Map<String, String> = initial
+        override suspend fun snapshot(): Map<String, String> = stored
+        override suspend fun putAll(paths: Map<String, String>) {
+            stored = stored + paths
+        }
+
+        override suspend fun remove(keys: Collection<String>) {
+            stored = stored - keys.toSet()
+        }
+    }
 
     // ---------- success ----------
 
@@ -316,6 +333,80 @@ class MusicExportViewModelTest {
         assertNull(state.failure)
         assertEquals("/p.m3u8", state.lastPath)
         assertEquals(1, server.requestCount)
+    }
+
+    // ---------- persisted paths (app restart) ----------
+
+    @Test
+    fun exportUsesAPersistedPathForARowWithoutOne() = runBlocking {
+        // After a restart the search result rows have no path; the cache from
+        // the finished download job supplies it, so no re-download is needed.
+        server.enqueue(json("""{"tracks_written":1,"skipped":0,"path":"/p.m3u8"}"""))
+        Api.configure(server.url("/").toString(), null)
+        val persisted = mapOf(MusicJobResults.trackKey(track("1")) to "/data/music/a.mp3")
+        val model = MusicExportViewModel(paths = MemoryPaths(persisted))
+
+        val outcome = model.export("netease", listOf(track("1")))
+
+        assertTrue(outcome is MusicExportOutcome.Success)
+        val sent = Json.parseToJsonElement(server.takeRequest().body.readUtf8())
+            .jsonObject["tracks"]!!.jsonArray
+        assertEquals(1, sent.size)
+        assertEquals(
+            "/data/music/a.mp3",
+            sent.single().jsonObject["path"]!!.jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun aSessionPathWinsOverThePersistedOne() = runBlocking {
+        server.enqueue(json("""{"tracks_written":1,"skipped":0,"path":"/p.m3u8"}"""))
+        Api.configure(server.url("/").toString(), null)
+        val persisted = mapOf(MusicJobResults.trackKey(track("1")) to "/old/a.mp3")
+        val model = MusicExportViewModel(paths = MemoryPaths(persisted))
+
+        model.export("netease", listOf(track("1", "/fresh/a.mp3")))
+
+        val sent = Json.parseToJsonElement(server.takeRequest().body.readUtf8())
+            .jsonObject["tracks"]!!.jsonArray
+        assertEquals(
+            "/fresh/a.mp3",
+            sent.single().jsonObject["path"]!!.jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun exportSkipsPersistedLocalFilesThatNoLongerExist() = runBlocking {
+        val dir = Files.createTempDirectory("music-export").toFile()
+        try {
+            val present = File(dir, "present.mp3").apply { writeText("audio") }
+            val gone = File(dir, "gone.mp3")
+            val persisted = mapOf(
+                MusicJobResults.trackKey(track("1")) to present.absolutePath,
+                MusicJobResults.trackKey(track("2")) to gone.absolutePath,
+            )
+            server.enqueue(json("""{"tracks_written":1,"skipped":0,"path":"/p.m3u8"}"""))
+            Api.configure(server.url("/").toString(), null)
+            val model = MusicExportViewModel(
+                paths = MemoryPaths(persisted),
+                localRoots = listOf(dir.absolutePath),
+            )
+
+            val outcome = model.export("netease", listOf(track("1"), track("2")))
+
+            val success = outcome as MusicExportOutcome.Success
+            assertEquals(1, success.written)
+            // The missing file is reported as skipped, not exported.
+            assertEquals(1, success.skipped)
+            val sent = Json.parseToJsonElement(server.takeRequest().body.readUtf8())
+                .jsonObject["tracks"]!!.jsonArray
+            assertEquals(
+                listOf("1"),
+                sent.map { it.jsonObject["id"]!!.jsonPrimitive.content },
+            )
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 
     // ---------- destination helper ----------

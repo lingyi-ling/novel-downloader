@@ -8,7 +8,8 @@ import android.content.IntentFilter
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,10 +35,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.lingyi.noveldl.R
@@ -53,9 +57,10 @@ import com.lingyi.noveldl.data.downloadFileName
 import com.lingyi.noveldl.data.resolveDownloadTarget
 import com.lingyi.noveldl.ui.formatTimestamp
 import com.lingyi.noveldl.ui.humanSize
+import com.lingyi.noveldl.ui.listPlaceholderRes
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
     val context = LocalContext.current
@@ -64,6 +69,9 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
     var files by remember { mutableStateOf<List<HistoryFile>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
+    // True once the first response arrived, so the empty state is not shown
+    // while the initial load is still in flight.
+    var loaded by remember { mutableStateOf(false) }
     val pendingDownloads = remember { mutableStateMapOf<Long, String>() }
     val latestMessage by rememberUpdatedState(onMessage)
 
@@ -126,6 +134,7 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                 }
                 .onFailure { error = apiErrorMessage(context, it) }
             loading = false
+            loaded = true
         }
     }
 
@@ -178,10 +187,10 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
         modifier = Modifier.fillMaxSize(),
     ) {
         Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
                     stringResource(R.string.history_files, files.size),
@@ -197,27 +206,46 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                     stringResource(R.string.state_error, it),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
                 TextButton(onClick = { load() }) {
                     Text(stringResource(R.string.action_retry))
                 }
             }
             Spacer(Modifier.height(8.dp))
-            if (files.isEmpty() && !loading && error == null) {
-                Text(
-                    stringResource(R.string.state_no_items),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            if (files.isEmpty()) {
+                listPlaceholderRes(
+                    loading = !loaded || loading,
+                    hasError = error != null,
+                    emptyRes = R.string.state_no_items,
+                )?.let { placeholder ->
+                    Text(
+                        stringResource(placeholder),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(files) { file ->
+                    // Same fallback as the download path, so a nameless entry
+                    // still has a visible title and an actionable label.
+                    val displayName = file.name.ifBlank {
+                        downloadFileName(file.name, file.download_url, file.ext)
+                    }
+                    // Every row's button says "Download"; the description
+                    // names the file so screen reader users can tell them
+                    // apart, including in the controls list.
+                    val downloadLabel = stringResource(
+                        R.string.history_download_named,
+                        displayName,
+                    )
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(12.dp)) {
-                            Text(file.name, style = MaterialTheme.typography.titleSmall)
+                            Text(displayName, style = MaterialTheme.typography.titleSmall)
                             Spacer(Modifier.height(4.dp))
                             Text(
                                 "${formatTimestamp(file.mtime)} · " +
@@ -226,7 +254,12 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Spacer(Modifier.height(4.dp))
-                            Button(onClick = { download(file) }) {
+                            Button(
+                                onClick = { download(file) },
+                                modifier = Modifier.semantics {
+                                    contentDescription = downloadLabel
+                                },
+                            ) {
                                 Text(stringResource(R.string.action_download))
                             }
                         }

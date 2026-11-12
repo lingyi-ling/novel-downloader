@@ -1,5 +1,6 @@
 package com.lingyi.noveldl.ui.music
 
+import com.lingyi.noveldl.data.MusicLocalPaths
 import com.lingyi.noveldl.data.MusicTrack
 
 /** Default playlist name; matches the embedded engine's own default. */
@@ -33,6 +34,57 @@ object MusicExport {
         tracks.filter { it.path.isNotBlank() }
 
     /**
+     * Fills blank paths from the persisted `provider\u0000id -> path` map.
+     *
+     * A path already present on the visible row wins: it was produced by the
+     * current session (or restored with the search state) and is fresher than
+     * the cache. Returns [tracks] itself when nothing changes.
+     */
+    fun mergePersistedPaths(
+        tracks: List<MusicTrack>,
+        persisted: Map<String, String>,
+    ): List<MusicTrack> {
+        if (tracks.isEmpty() || persisted.isEmpty()) return tracks
+        var changed = false
+        val merged = tracks.map { track ->
+            if (track.path.isNotBlank()) {
+                track
+            } else {
+                val path = persisted[MusicJobResults.trackKey(track)]
+                if (path.isNullOrBlank() || path == track.path) {
+                    track
+                } else {
+                    changed = true
+                    track.copy(path = path)
+                }
+            }
+        }
+        return if (changed) merged else tracks
+    }
+
+    /**
+     * Whether [path] may be written into a playlist.
+     *
+     * Device-local paths (under [localRoots]) must still exist — a stale cache
+     * entry for a deleted file would otherwise produce a dead playlist line.
+     * Paths outside those roots are engine/server-side paths in remote mode:
+     * the phone cannot inspect them, so they are left for the engine to
+     * validate when it writes the playlist.
+     */
+    fun isExportablePath(
+        path: String,
+        localRoots: List<String>,
+        exists: (String) -> Boolean,
+    ): Boolean {
+        val trimmed = path.trim()
+        if (trimmed.isEmpty()) return false
+        if (!MusicLocalPaths.isLocal(trimmed, localRoots)) return true
+        // If the check itself fails (permissions), keep the path rather than
+        // silently dropping a file that may well still be there.
+        return runCatching { exists(trimmed) }.getOrDefault(true)
+    }
+
+    /**
      * Directory part of [path] using either separator; empty when [path] is
      * just a file name (or a root-relative name such as `/a.mp3`).
      */
@@ -43,19 +95,29 @@ object MusicExport {
     }
 
     /**
-     * Builds the export request plan, or `null` when no track has a local
-     * path (the caller then reports "nothing to export" instead of sending a
-     * request the server would answer with an empty playlist).
+     * Builds the export request plan, or `null` when no track has a usable
+     * local path (the caller then reports "nothing to export" instead of
+     * sending a request the server would answer with an empty playlist).
+     *
+     * [persisted] supplies paths for rows whose in-memory path died with the
+     * previous process; [isUsable] rejects entries pointing at files that no
+     * longer exist (the persisted store already prunes them, but a file can be
+     * deleted between the read and the request).
      */
-    fun plan(tracks: List<MusicTrack>): MusicExportPlan? {
-        val usable = tracksWithLocalPath(tracks)
+    fun plan(
+        tracks: List<MusicTrack>,
+        persisted: Map<String, String> = emptyMap(),
+        isUsable: (String) -> Boolean = { true },
+    ): MusicExportPlan? {
+        val merged = mergePersistedPaths(tracks, persisted)
+        val usable = merged.filter { it.path.isNotBlank() && isUsable(it.path) }
         if (usable.isEmpty()) return null
         val directory = usable.firstNotNullOfOrNull {
             directoryOf(it.path).ifBlank { null }
         }
         return MusicExportPlan(
             tracks = usable,
-            skippedTracks = tracks.size - usable.size,
+            skippedTracks = merged.size - usable.size,
             outPath = directory?.let { "$it/$MUSIC_PLAYLIST_FILE_NAME" },
         )
     }

@@ -8,6 +8,8 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,6 +20,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
@@ -42,7 +46,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -56,16 +66,24 @@ import com.lingyi.noveldl.data.HistoryFile
 import com.lingyi.noveldl.data.LoginRequestDto
 import com.lingyi.noveldl.data.LoginRequestsResponse
 import com.lingyi.noveldl.data.LoginSubmitRequest
+import com.lingyi.noveldl.data.StoredTask
 import com.lingyi.noveldl.data.Task
+import com.lingyi.noveldl.data.TaskStore
 import com.lingyi.noveldl.data.TasksResponse
 import com.lingyi.noveldl.data.downloadFileName
+import com.lingyi.noveldl.data.isInterruptedTaskStatus
+import com.lingyi.noveldl.data.mergeTaskSnapshot
+import com.lingyi.noveldl.data.storedTasksToResponse
 import com.lingyi.noveldl.notifications.TaskNotifier
 import com.lingyi.noveldl.ui.TASKS_POLL_INTERVAL_MS
 import com.lingyi.noveldl.ui.awaitResumed
 import com.lingyi.noveldl.ui.apiErrorMessage
+import com.lingyi.noveldl.ui.listPlaceholderRes
 import com.lingyi.noveldl.ui.pollWhileComposed
 import com.lingyi.noveldl.ui.taskStatusLabelRes
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -73,6 +91,15 @@ fun TasksScreen(onMessage: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
+    // Local snapshot of the task list, written atomically on every meaningful
+    // change. The API (and the embedded engine) only keeps tasks in process
+    // memory, so without this a killed process loses the queue and its history.
+    val taskStore = remember(context) { TaskStore(context) }
+    var storedTasks by remember { mutableStateOf(emptyList<StoredTask>()) }
+    var snapshotRestored by remember { mutableStateOf(false) }
+    // True once the first poll has answered, so an empty screen can tell
+    // "still loading" from "no tasks at all".
+    var loaded by remember { mutableStateOf(false) }
     var snapshot by remember { mutableStateOf(TasksResponse()) }
     var loginReqs by remember { mutableStateOf(LoginRequestsResponse()) }
     // Credential request currently opened in the submit dialog.
@@ -103,6 +130,21 @@ fun TasksScreen(onMessage: (String) -> Unit) {
 
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(refreshKey) {
+        // Restore the on-disk snapshot before the first poll. `TaskStore.load`
+        // already reapplies the restart rule: nothing can still be running in
+        // a process that has just started, so active records come back as
+        // "interrupted" (retryable) until the server proves otherwise. The
+        // normalized list is written back so the correction survives another
+        // kill before the first successful poll.
+        if (!snapshotRestored) {
+            val restored = withContext(Dispatchers.IO) { taskStore.load() }
+            storedTasks = restored
+            if (restored.isNotEmpty()) {
+                snapshot = storedTasksToResponse(restored)
+                withContext(Dispatchers.IO) { taskStore.save(restored) }
+            }
+            snapshotRestored = true
+        }
         // Navigating away cancels this effect (Api.call rethrows
         // CancellationException, so cancellation stays clean). Composition
         // alone survives the activity being STOPPED, so the loop also parks
@@ -112,31 +154,50 @@ fun TasksScreen(onMessage: (String) -> Unit) {
             intervalMs = TASKS_POLL_INTERVAL_MS,
             awaitForeground = { lifecycleOwner.lifecycle.awaitResumed() },
         ) {
-            Api.call { Api.service().tasks() }
-                .onSuccess { response ->
-                    val tasks = response.allTasks()
-                    val previous = knownStatuses.toMap()
-                    knownStatuses.clear()
-                    knownStatuses.putAll(taskStatusSnapshot(tasks))
-                    detectTerminalTaskEvents(previous, tasks).forEach { event ->
-                        val posted = TaskNotifier.notify(context, event)
-                        // Silently dropping the alert would look like a lost
-                        // task; tell the user once per screen why nothing
-                        // popped up (POST_NOTIFICATIONS denied, or the channel
-                        // blocked in system settings).
-                        if (!posted && !notificationHintShown) {
-                            notificationHintShown = true
-                            onMessage(context.getString(R.string.tasks_notification_off_hint))
-                        }
+            val tasksResult = Api.call { Api.service().tasks() }
+            val response = tasksResult.getOrNull()
+            if (response != null) {
+                val tasks = response.allTasks()
+                val previous = knownStatuses.toMap()
+                knownStatuses.clear()
+                knownStatuses.putAll(taskStatusSnapshot(tasks))
+                detectTerminalTaskEvents(previous, tasks).forEach { event ->
+                    val posted = TaskNotifier.notify(context, event)
+                    // Silently dropping the alert would look like a lost
+                    // task; tell the user once per screen why nothing
+                    // popped up (POST_NOTIFICATIONS denied, or the channel
+                    // blocked in system settings).
+                    if (!posted && !notificationHintShown) {
+                        notificationHintShown = true
+                        onMessage(context.getString(R.string.tasks_notification_off_hint))
                     }
-                    snapshot = response
-                    error = null
                 }
-                .onFailure { error = apiErrorMessage(context, it) }
+                // Merge the authoritative live list into the persisted
+                // history. A stored task that is active but absent from the
+                // response is marked interrupted (and therefore retryable)
+                // instead of being shown as in progress forever. The write
+                // only happens when the merged content actually changed, so
+                // the 2 s poll does not churn the disk.
+                val merged = mergeTaskSnapshot(
+                    stored = storedTasks,
+                    live = tasks,
+                    nowMillis = System.currentTimeMillis(),
+                )
+                val changed = merged != storedTasks
+                storedTasks = merged
+                snapshot = storedTasksToResponse(merged)
+                if (changed) {
+                    withContext(Dispatchers.IO) { taskStore.save(merged) }
+                }
+                error = null
+            } else {
+                error = apiErrorMessage(context, tasksResult.exceptionOrNull())
+            }
             // Login-required sites park their task until credentials arrive;
             // the pending-request list rides along with the task poll.
             Api.call { Api.service().loginRequests() }
                 .onSuccess { loginReqs = it }
+            loaded = true
             refreshing = false
         }
     }
@@ -256,6 +317,7 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                     stringResource(R.string.state_error, it),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
                 TextButton(onClick = { refreshNow() }) {
                     Text(stringResource(R.string.action_retry))
@@ -266,13 +328,19 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                 snapshot.pending.isEmpty() &&
                 snapshot.completed.isEmpty() &&
                 loginReqs.requests.isEmpty()
-            if (isEmpty && error == null) {
-                Text(
-                    stringResource(R.string.tasks_empty),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(8.dp))
+            if (isEmpty) {
+                listPlaceholderRes(
+                    loading = !loaded || refreshing,
+                    hasError = error != null,
+                    emptyRes = R.string.tasks_empty,
+                )?.let { placeholder ->
+                    Text(
+                        stringResource(placeholder),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
             }
             LazyColumn(
                 modifier = Modifier.weight(1f),
@@ -402,7 +470,10 @@ private fun LoginRequestDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.login_dialog_title)) },
         text = {
-            Column {
+            // A site plugin may ask for several fields; scrolling keeps the
+            // submit button reachable at a 2.0 font scale or with the keyboard
+            // open instead of clipping the lower fields.
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 if (req.fields.isEmpty()) {
                     Text(stringResource(R.string.login_dialog_hint))
                 }
@@ -463,7 +534,7 @@ private fun SectionHeader(title: String, count: Int) {
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun TaskCard(
     task: Task,
@@ -478,14 +549,51 @@ private fun TaskCard(
     onCopyError: (String) -> Unit,
 ) {
     val totalText = if (task.chapters_total > 0) task.chapters_total.toString() else "?"
-    Card(onClick = onToggleExpand, modifier = Modifier.fillMaxWidth()) {
+    // Every card's action buttons carry the same visible word; naming the
+    // task in the description tells a screen reader user which card they are
+    // on (and survives an empty server title).
+    val taskLabel = task.title.ifBlank {
+        task.book_id.ifBlank { task.task_id }
+    }
+    val detailAction = stringResource(
+        if (expanded) R.string.tasks_detail_collapse else R.string.tasks_detail_expand,
+    )
+    val detailLabel = stringResource(
+        if (expanded) {
+            R.string.tasks_detail_collapse_named
+        } else {
+            R.string.tasks_detail_expand_named
+        },
+        taskLabel,
+    )
+    val retryLabel = stringResource(R.string.tasks_retry_named, taskLabel)
+    val cancelLabel = stringResource(R.string.tasks_cancel_named, taskLabel)
+    // A bar without a range would be announced as an unlabelled progress
+    // control; the fraction also guards against a NaN reported by an old
+    // server, which would make TalkBack read "not available".
+    val progressValue = task.progress
+        .takeIf { it.isFinite() }
+        ?.toFloat()
+        ?.coerceIn(0f, 1f)
+        ?: 0f
+    val progressState = stringResource(R.string.tasks_progress_state)
+    // The card itself is not clickable: a clickable ancestor would merge the
+    // retry/cancel/download buttons into one node and make them unreachable
+    // for TalkBack. The detail button below owns the expand action instead.
+    Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(task.title, style = MaterialTheme.typography.titleSmall)
+                // Weighted so a long title wraps inside the row instead of
+                // squeezing the status label off-screen at a 2.0 font scale.
+                Text(
+                    taskLabel,
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f),
+                )
                 Text(
                     stringResource(taskStatusLabelRes(task.status)),
                     style = MaterialTheme.typography.labelSmall,
@@ -500,41 +608,72 @@ private fun TaskCard(
             )
             Spacer(Modifier.height(6.dp))
             LinearProgressIndicator(
-                progress = { task.progress.toFloat().coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth(),
+                progress = { progressValue },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics {
+                        contentDescription = progressState
+                        progressBarRangeInfo = ProgressBarRangeInfo(progressValue, 0f..1f)
+                    },
             )
             Spacer(Modifier.height(4.dp))
-            Row(
+            Text(
+                stringResource(R.string.tasks_progress, task.chapters_done, totalText),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // Actions wrap onto a second line on a narrow screen or at a 2.0
+            // font scale instead of clipping the cancel button.
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    stringResource(R.string.tasks_progress, task.chapters_done, totalText),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (retryable) {
-                        TextButton(
-                            onClick = { onRetry(task) },
-                            enabled = retryEnabled,
-                        ) {
-                            Text(stringResource(R.string.action_retry))
-                        }
+                TextButton(
+                    onClick = onToggleExpand,
+                    modifier = Modifier.semantics { contentDescription = detailLabel },
+                ) {
+                    Text(detailAction)
+                }
+                if (retryable) {
+                    TextButton(
+                        onClick = { onRetry(task) },
+                        enabled = retryEnabled,
+                        modifier = Modifier.semantics {
+                            contentDescription = retryLabel
+                        },
+                    ) {
+                        Text(stringResource(R.string.action_retry))
                     }
-                    if (cancellable) {
-                        TextButton(onClick = { onCancel(task) }) {
-                            Text(stringResource(R.string.action_cancel))
-                        }
+                }
+                if (cancellable) {
+                    TextButton(
+                        onClick = { onCancel(task) },
+                        modifier = Modifier.semantics {
+                            contentDescription = cancelLabel
+                        },
+                    ) {
+                        Text(stringResource(R.string.action_cancel))
                     }
                 }
             }
-            task.error?.takeIf { it.isNotBlank() }?.let {
+            val errorText = task.error?.takeIf { it.isNotBlank() }
+            if (errorText != null) {
                 Text(
-                    it,
+                    errorText,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            } else if (isInterruptedTaskStatus(task.status)) {
+                // The process died (or the server stopped reporting the task)
+                // while it was in flight. Say so instead of leaving a stale
+                // progress bar that looks healthy; retry is offered above.
+                Text(
+                    stringResource(R.string.tasks_interrupted_hint),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
             AnimatedVisibility(

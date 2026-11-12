@@ -23,6 +23,7 @@ fun taskStatusLabelRes(status: String): Int = when (status) {
     "exporting" -> R.string.tasks_status_exporting
     "completed" -> R.string.tasks_status_completed
     "cancelled" -> R.string.tasks_status_cancelled
+    "interrupted" -> R.string.tasks_status_interrupted
     else -> R.string.tasks_status_failed
 }
 
@@ -61,15 +62,52 @@ fun formatTimestamp(seconds: Double, locale: Locale = Locale.getDefault()): Stri
  * persistent connection row on the settings screen, e.g. `ok · 1.2.0`.
  *
  * Either side may be missing (older servers omit `version`); two blanks mean
- * the fields never arrived, which reads as "unknown".
+ * the fields never arrived and [unknown] is shown. The caller passes the
+ * localized word so the line does not mix an English fallback into a
+ * translated UI.
  */
-fun healthSummary(status: String, version: String): String {
+fun healthSummary(status: String, version: String, unknown: String): String {
     val trimmedStatus = status.trim()
     val trimmedVersion = version.trim()
     return when {
-        trimmedStatus.isEmpty() && trimmedVersion.isEmpty() -> "unknown"
+        trimmedStatus.isEmpty() && trimmedVersion.isEmpty() -> unknown
         trimmedStatus.isEmpty() -> trimmedVersion
         trimmedVersion.isEmpty() -> trimmedStatus
         else -> "$trimmedStatus · $trimmedVersion"
     }
+}
+
+/**
+ * The resource for an empty list area, or `null` when an error banner already
+ * explains the screen (the caller renders its retry entry next to it).
+ *
+ * Loading wins over "empty": before the first response the list is empty for
+ * an uninteresting reason, and "nothing here yet" would be a false statement
+ * (notably while the 2 s task poll is still in flight).
+ */
+@StringRes
+fun listPlaceholderRes(
+    loading: Boolean,
+    hasError: Boolean,
+    @StringRes emptyRes: Int,
+): Int? = when {
+    hasError -> null
+    loading -> R.string.state_loading
+    else -> emptyRes
+}
+
+/**
+ * The resource for the search result area, or `null` when there is nothing
+ * truthful to say: a fresh screen has not searched yet, and during a request
+ * or after an error the state is already shown elsewhere.
+ */
+@StringRes
+fun searchPlaceholderRes(
+    hasSearched: Boolean,
+    loading: Boolean,
+    hasError: Boolean,
+): Int? = when {
+    loading || hasError -> null
+    hasSearched -> R.string.search_no_results
+    else -> null
 }

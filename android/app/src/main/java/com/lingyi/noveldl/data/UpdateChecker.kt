@@ -45,6 +45,13 @@ enum class UpdateFailure {
     NO_CHECKSUM,
     CHECKSUM_MISMATCH,
     INSECURE_URL,
+
+    /**
+     * The candidate is the running version or older (a pre-release of it
+     * included). Installing it would be a rollback or a pointless reinstall,
+     * so the download is refused before the network is touched.
+     */
+    NOT_NEWER,
     DOWNLOAD_FAILED,
     INSUFFICIENT_SPACE,
     INSTALL_FAILED,
@@ -64,6 +71,7 @@ internal fun UpdateFailure.message(): String = when (this) {
     UpdateFailure.NO_CHECKSUM -> "missing checksum"
     UpdateFailure.CHECKSUM_MISMATCH -> "checksum mismatch"
     UpdateFailure.INSECURE_URL -> "insecure asset url"
+    UpdateFailure.NOT_NEWER -> "not newer than the installed version"
     UpdateFailure.DOWNLOAD_FAILED -> "download failed"
     UpdateFailure.INSUFFICIENT_SPACE -> "insufficient storage"
     UpdateFailure.INSTALL_FAILED -> "install failed"
@@ -71,25 +79,39 @@ internal fun UpdateFailure.message(): String = when (this) {
 
 /**
  * Pre-flight checks that must pass before a single byte is fetched: there has
- * to be an APK, its URL must be HTTPS, and a SHA-256 digest must be published.
- * A missing digest is a hard refusal — an APK that cannot be verified is never
- * handed to the installer.
+ * to be an APK, its URL must be HTTPS, the candidate must actually be newer
+ * than the running version, and a SHA-256 digest must be published. A missing
+ * digest is a hard refusal — an APK that cannot be verified is never handed to
+ * the installer.
+ *
+ * The version gate is re-evaluated here (rather than trusting
+ * [UpdateInfo.available]) because the info may come from a stale dialog state:
+ * a manifest that ranks the running version, or an older one, must never
+ * reach the download path. Android's installer would refuse a downgrade
+ * anyway, but a same-version APK would still be fetched, verified and offered.
  */
 internal fun downloadRequestFailure(info: UpdateInfo): UpdateFailure? {
     val url = info.assetUrl.orEmpty().trim()
     return when {
         url.isEmpty() -> UpdateFailure.NO_ASSET
         !url.lowercase().startsWith("https://") -> UpdateFailure.INSECURE_URL
+        !VersionCompare.isNewer(info.latest, info.current) -> UpdateFailure.NOT_NEWER
         Checksums.normalizeDigest(info.sha256) == null -> UpdateFailure.NO_CHECKSUM
         else -> null
     }
 }
 
 /**
- * Version ordering shared with the desktop updater
- * (`src/novel_downloader/apps/common/updater.py`): the leading `v` and any
- * `-suffix` are ignored and the remaining numeric segments are compared with
- * missing trailing segments counted as zero, so `1.4` and `1.4.0` are equal.
+ * Version ordering shared with the desktop updater for final releases
+ * (`src/novel_downloader/apps/common/updater.py`): the leading `v` is ignored
+ * and the remaining numeric segments are compared with missing trailing
+ * segments counted as zero, so `1.4` and `1.4.0` are equal.
+ *
+ * A pre-release suffix (`-rc1`, `-beta.2`) ranks *below* the final release of
+ * the same numeric version, following SemVer precedence. Without that rule an
+ * app installed from an RC could never be offered the final release, because
+ * both sides parse to the same numeric tuple; it also keeps an RC from being
+ * mistaken for a downgrade target of the final build.
  */
 object VersionCompare {
 
@@ -125,7 +147,55 @@ object VersionCompare {
             val b = right.getOrElse(index) { 0 }
             if (a != b) return a > b
         }
-        return false
+        // Equal numeric version: only the pre-release suffix can break the tie.
+        val pending = preRelease(latest)
+        val running = preRelease(current)
+        return when {
+            pending == null && running == null -> false
+            // A final release supersedes its own release candidate.
+            pending == null -> true
+            // An RC (or beta) is never an upgrade over the final release.
+            running == null -> false
+            else -> comparePreRelease(pending, running) > 0
+        }
+    }
+
+    /**
+     * The `-suffix` part of [value] (without `+build` metadata), or `null` for
+     * a final release. A blank suffix is treated as absent.
+     */
+    private fun preRelease(value: String): String? {
+        // Build metadata (`+build-9`) may itself contain a dash, so it is
+        // removed before the pre-release separator is looked for.
+        val trimmed = value.trim().substringBefore('+')
+        val dash = trimmed.indexOf('-')
+        if (dash < 0) return null
+        return trimmed.substring(dash + 1).trim().ifEmpty { null }
+    }
+
+    /**
+     * SemVer precedence between two dot-separated pre-release strings:
+     * numeric identifiers compare numerically and rank below alphanumeric
+     * ones; otherwise the comparison is lexicographic. A shorter identifier
+     * list ranks first when every common part is equal.
+     */
+    private fun comparePreRelease(a: String, b: String): Int {
+        val left = a.split('.')
+        val right = b.split('.')
+        for (index in 0 until maxOf(left.size, right.size)) {
+            val x = left.getOrNull(index) ?: return -1
+            val y = right.getOrNull(index) ?: return 1
+            val numericX = x.toIntOrNull()
+            val numericY = y.toIntOrNull()
+            val compared = when {
+                numericX != null && numericY != null -> numericX.compareTo(numericY)
+                numericX != null -> -1
+                numericY != null -> 1
+                else -> x.compareTo(y)
+            }
+            if (compared != 0) return compared
+        }
+        return 0
     }
 
     /** Display form of a release tag: no `v` prefix, no surrounding blanks. */
@@ -687,19 +757,24 @@ object UpdateChecker {
         client: OkHttpClient? = null,
     ): UpdateInfo? = withContext(Dispatchers.IO) {
         val http = client ?: updaterHttpClient(timeoutMs, timeoutMs, callTimeoutMs = timeoutMs)
+        // The caller's list wins; when it has none (JVM callers, unusual
+        // devices) the platform ABIs are read here. Both lookup paths must use
+        // the same list, otherwise an injected/tested ABI preference would be
+        // ignored exactly when a multi-APK manifest is resolved.
+        val abis = preferredAbis.ifEmpty { deviceAbis() }
 
         // 1. The manifest: one small request that also carries the checksums.
         // A multi-APK release publishes `android-<abi>` keys, so the device
         // ABI list decides which entry is the right one.
         fetchBody(http, manifestUrl, manifestHeaders)
-            ?.let { body -> parseManifest(body, currentVersion, deviceAbis()) }
+            ?.let { body -> parseManifest(body, currentVersion, abis) }
             ?.let { info -> return@withContext info }
 
         // 2. Fallback: releases published before the manifest existed, or a
         // manifest that could not be trusted (including one without an
         // Android entry). The API is the final authority on "up to date".
         fetchBody(http, apiUrl, jsonHeaders)
-            ?.let { body -> parseRelease(body, currentVersion, preferredAbis) }
+            ?.let { body -> parseRelease(body, currentVersion, abis) }
     }
 
     /**

@@ -1,10 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 11 and below (fullBackupContent). The DataStore file holds the
-     server URL, the API key and a SAF download-directory grant. The key is a
-     credential and the grant is device-bound, so neither belongs in a cloud
-     backup; the app simply starts with defaults on a restored device. -->
+<!-- Android 11 and below (fullBackupContent).
+
+     The app's private storage mixes credentials with content: DataStore holds
+     the API key and the device-bound SAF grant, engine_home holds
+     settings.toml / site cookies / the task queue, and the music engine writes
+     session.json (MUSIC_U) and platform_creds.json. The exact directory of the
+     latter depends on platformdirs' Android detection (files/novel_downloader)
+     versus its Unix fallback (files/.local/share/...), so enumerating paths is
+     fragile and a missed path is a silent credential leak.
+
+     The whole private tree is therefore excluded from cloud backup. The app
+     starts with defaults on a restored device. Device-to-device transfer is a
+     separate, user-initiated path and stays unrestricted (see
+     data_extraction_rules.xml).
+
+     Keep this list identical to the <cloud-backup> section of
+     data_extraction_rules.xml (Android 12+): a path excluded from only one of
+     them still leaks on the other OS version. -->
 <full-backup-content>
+    <!-- "root" is the app data directory; file/database/sharedpref/external
+         are its sibling domains, so each must be excluded explicitly.
+         "path=." means the domain root (recursive). -->
+    <exclude
+        domain="root"
+        path="." />
     <exclude
         domain="file"
-        path="datastore/novel_dl_settings.preferences_pb" />
+        path="." />
+    <exclude
+        domain="database"
+        path="." />
+    <exclude
+        domain="sharedpref"
+        path="." />
+    <exclude
+        domain="external"
+        path="." />
 </full-backup-content>

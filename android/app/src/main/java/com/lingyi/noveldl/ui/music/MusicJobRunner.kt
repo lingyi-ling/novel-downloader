@@ -23,6 +23,12 @@ data class MusicJobRun(
     val counts: MusicJobResults.Counts,
     val firstFailure: String?,
     val pathsByTrack: Map<String, String>,
+    /**
+     * Keys of tracks whose result was an explicit `fail`. The persisted path
+     * cache removes them, so a stale path from a previous attempt is not
+     * exported after the file was replaced/failed.
+     */
+    val failedTrackKeys: Set<String> = emptySet(),
     val saveFailures: Int,
     val firstSaveFailure: String?,
     /** First successful local path when nothing was downloadable (remote mode). */
@@ -67,6 +73,7 @@ class MusicJobRunner(
         val total = chosen.size
         val results = mutableListOf<MusicJobResult>()
         val paths = LinkedHashMap<String, String>()
+        val failedKeys = LinkedHashSet<String>()
         val errors = mutableListOf<Throwable>()
         var jobFailure: String? = null
         var saveFailures = 0
@@ -102,6 +109,7 @@ class MusicJobRunner(
                     is Watch.Done -> {
                         results += watch.results
                         paths.putAll(MusicJobResults.pathsByTrack(batch.tracks, watch.results))
+                        failedKeys += MusicJobResults.failedTrackKeys(batch.tracks, watch.results)
                         MusicJobResults.downloadable(watch.results).forEach { result ->
                             saver.save(result).onFailure { failure ->
                                 saveFailures++
@@ -125,6 +133,7 @@ class MusicJobRunner(
             counts = MusicJobResults.counts(results),
             firstFailure = MusicJobResults.firstFailureReason(results),
             pathsByTrack = paths,
+            failedTrackKeys = failedKeys,
             saveFailures = saveFailures,
             firstSaveFailure = firstSaveFailure,
             // No loopback URLs means the job ran on a remote server: the files

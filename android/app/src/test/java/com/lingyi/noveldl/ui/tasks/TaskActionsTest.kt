@@ -71,11 +71,14 @@ class TaskActionsTest {
     )
 
     @Test
-    fun onlyFailedAndCancelledStatusesAreRetryable() {
+    fun onlyFailedCancelledAndInterruptedStatusesAreRetryable() {
         assertTrue(isRetryableTaskStatus("failed"))
         assertTrue(isRetryableTaskStatus("cancelled"))
+        assertTrue(isRetryableTaskStatus("interrupted"))
         assertTrue(isRetryableTaskStatus(" FAILED "))
+        assertTrue(isRetryableTaskStatus(" INTERRUPTED "))
         assertTrue(task(status = "Cancelled").isRetryable())
+        assertTrue(task(status = "interrupted").isRetryable())
         assertFalse(isRetryableTaskStatus("queued"))
         assertFalse(isRetryableTaskStatus("running"))
         assertFalse(isRetryableTaskStatus("processing"))
@@ -88,6 +91,7 @@ class TaskActionsTest {
     fun retryIsOfferedOnlyForRetryableTasksWithAnIdentity() {
         assertTrue(task(status = "failed").retryOffered())
         assertTrue(task(status = "cancelled").retryOffered())
+        assertTrue(task(status = "interrupted").retryOffered())
         assertFalse(task(status = "completed").retryOffered())
         assertFalse(task(site = "  ").retryOffered())
         assertFalse(task(bookId = "").retryOffered())

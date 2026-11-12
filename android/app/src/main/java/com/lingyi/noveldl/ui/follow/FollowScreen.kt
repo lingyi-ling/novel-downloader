@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -33,6 +35,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.Api
@@ -41,6 +47,7 @@ import com.lingyi.noveldl.data.WatchEntry
 import com.lingyi.noveldl.data.WatchlistAddRequest
 import com.lingyi.noveldl.data.WatchlistCheckRequest
 import com.lingyi.noveldl.ui.apiErrorMessage
+import com.lingyi.noveldl.ui.listPlaceholderRes
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -50,6 +57,9 @@ fun FollowScreen(onMessage: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     var books by remember { mutableStateOf<List<WatchEntry>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
+    // True once the first watchlist response arrived, so the screen does not
+    // show "nothing followed yet" while the initial load is still in flight.
+    var loaded by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableIntStateOf(0) }
     var refreshing by remember { mutableStateOf(false) }
     var checking by remember { mutableStateOf(false) }
@@ -73,6 +83,7 @@ fun FollowScreen(onMessage: (String) -> Unit) {
                 error = null
             }
             .onFailure { error = apiErrorMessage(context, it) }
+        loaded = true
         refreshing = false
     }
 
@@ -179,7 +190,13 @@ fun FollowScreen(onMessage: (String) -> Unit) {
                     Text(stringResource(R.string.follow_add))
                 }
                 TextButton(onClick = { checkUpdates() }, enabled = !checking) {
-                    Text(stringResource(R.string.follow_check_updates))
+                    // The button greys out while the request runs; the label
+                    // says why instead of leaving a dead control.
+                    Text(
+                        stringResource(
+                            if (checking) R.string.follow_checking else R.string.follow_check_updates,
+                        ),
+                    )
                 }
                 TextButton(onClick = { refreshNow() }) {
                     Text(stringResource(R.string.action_refresh))
@@ -190,20 +207,27 @@ fun FollowScreen(onMessage: (String) -> Unit) {
                     stringResource(R.string.state_error, it),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
                 TextButton(onClick = { refreshNow() }) {
                     Text(stringResource(R.string.action_retry))
                 }
                 Spacer(Modifier.height(8.dp))
             }
-            if (books.isEmpty() && error == null) {
-                Text(
-                    stringResource(R.string.follow_empty),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(8.dp))
-            } else if (books.isNotEmpty()) {
+            if (books.isEmpty()) {
+                listPlaceholderRes(
+                    loading = !loaded || refreshing,
+                    hasError = error != null,
+                    emptyRes = R.string.follow_empty,
+                )?.let { placeholder ->
+                    Text(
+                        stringResource(placeholder),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+            } else {
                 Spacer(Modifier.height(8.dp))
                 Text(
                     stringResource(R.string.follow_books, books.size),
@@ -253,8 +277,12 @@ private fun WatchCard(
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
+            val bookLabel = entry.title.ifBlank { entry.book_id }
+            // "Remove" alone repeats on every card; name the book so screen
+            // reader users know which follow entry the button affects.
+            val removeLabel = stringResource(R.string.follow_remove_named, bookLabel)
             Text(
-                entry.title.ifBlank { entry.book_id },
+                bookLabel,
                 style = MaterialTheme.typography.titleSmall,
             )
             Spacer(Modifier.height(4.dp))
@@ -308,7 +336,10 @@ private fun WatchCard(
                         )
                     }
                 }
-                TextButton(onClick = onRemove) {
+                TextButton(
+                    onClick = onRemove,
+                    modifier = Modifier.semantics { contentDescription = removeLabel },
+                ) {
                     Text(stringResource(R.string.follow_remove))
                 }
             }
@@ -330,7 +361,13 @@ private fun AddFollowDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.follow_add_dialog_title)) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                // Three fields plus their labels do not fit a dialog at a
+                // 2.0 font scale or with the keyboard open; scroll instead of
+                // clipping the title field or the confirm button.
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 OutlinedTextField(
                     value = site,
                     onValueChange = { site = it },
