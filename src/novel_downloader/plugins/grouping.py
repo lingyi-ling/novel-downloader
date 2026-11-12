@@ -31,12 +31,12 @@ Merging is deliberately conservative:
   matched fuzzily.  Volume/part numbers live outside the whitelist, so
   ``第①卷`` and ``第2卷`` stay separate books.
 
-Each group exposes ``primary`` (the entry with the highest
-:func:`~novel_downloader.plugins.ranking.rank_score`, earliest input
-position on ties) and ``sources`` (every entry of the group, best first,
-ties keeping input order).  Groups are ordered by the input position of
-their primaries, so callers that sort the flat list first and group
-second get a stable, predictable layout.
+Each group exposes ``primary`` (the entry with the best ranking -- the same
+tier-then-score order ``sort_results`` uses, under the caller's ``intent``;
+earliest input position on ties) and ``sources`` (every entry of the group,
+best first, ties keeping input order).  Groups are ordered by the input
+position of their primaries, so callers that sort the flat list first and
+group second get a stable, predictable layout.
 
 Everything in this module is a pure plugin-layer function: no I/O, no UI
 imports, and the input sequence is never modified.
@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 
-from novel_downloader.plugins.ranking import normalize_text, rank_score
+from novel_downloader.plugins.ranking import match_tier_of, normalize_text, rank_score
 from novel_downloader.schemas import SearchResult
 
 __all__ = [
@@ -61,9 +61,16 @@ __all__ = [
 
 #: Bracket pairs that may carry a decorative publication marker.  The title is
 #: NFKC-folded before matching, so ``［网游］`` and ``（全本）`` go through the
-#: same ASCII-bracket rules as ``[网游]`` and ``(全本)``.
-_LEADING_TAG_RE = re.compile(r"^(?:\[([^\]]*)\]|【([^】]*)】|\(([^)]*)\))")
-_TRAILING_TAG_RE = re.compile(r"(?:\[([^\]]*)\]|【([^】]*)】|\(([^)]*)\))$")
+#: same ASCII-bracket rules as ``[网游]`` and ``(全本)``.  The pattern has no
+#: ``^`` anchor: :func:`_core_title_cached` calls ``match(text, start)`` to
+#: continue after an already-stripped tag, which anchors at ``start`` itself.
+_LEADING_TAG_RE = re.compile(r"(?:\[([^\]]*)\]|【([^】]*)】|\(([^)]*)\))")
+
+#: Closing bracket -> opening bracket for the trailing pass.  The suffix is
+#: parsed by index instead of with a ``$``-anchored ``re.search``: that search
+#: retried every start position and rescanned to the end, so a title such as
+#: ``"[" * 50_000`` was quadratic.  Index parsing touches each character once.
+_TRAILING_PAIRS = {"]": "[", "】": "【", ")": "("}
 
 #: Contents (after :func:`normalize_text`) that are publication markers rather
 #: than part of a title.  Deliberately a small closed set: anything else --
@@ -139,20 +146,41 @@ def _is_decorative(content: str) -> bool:
 @lru_cache(maxsize=8192)
 def _core_title_cached(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).strip()
+    start = 0
+    end = len(text)
+
     # Strip every paired leading decorative tag, then every paired trailing
     # one.  A tag whose content is not whitelisted stops the loop, which keeps
-    # titles such as ``[同人]斗罗`` or ``斗罗（第1卷）`` untouched.
+    # titles such as ``[同人]斗罗`` or ``斗罗（第1卷）`` untouched.  Both passes
+    # keep an index into ``text`` instead of slicing on every step, so a title
+    # made of thousands of tags (or thousands of unclosed brackets) is scanned
+    # once: stripping used to copy the remaining suffix each time, and the old
+    # trailing regex rescanned the whole title from every start position.
     while True:
-        match = _LEADING_TAG_RE.match(text)
+        match = _LEADING_TAG_RE.match(text, start)
         if match is None or not _is_decorative(_tag_content(match)):
             break
-        text = text[match.end() :].strip()
-    while True:
-        match = _TRAILING_TAG_RE.search(text)
-        if match is None or not _is_decorative(_tag_content(match)):
+        start = match.end()
+        while start < end and text[start].isspace():
+            start += 1
+
+    while end > start:
+        close = text[end - 1]
+        opener = _TRAILING_PAIRS.get(close)
+        if opener is None:
             break
-        text = text[: match.start()].strip()
-    return normalize_text(text)
+        # The regex equivalent is ``(?:\[[^\]]*\]|【[^】]*】|\([^)]*\))$``: the
+        # opener must be the leftmost one after the last inner ``close`` so
+        # the bracketed content cannot contain its own closing bracket.
+        inner_close = text.rfind(close, start, end - 1)
+        open_index = text.find(opener, max(start, inner_close + 1), end - 1)
+        if open_index < 0 or not _is_decorative(text[open_index + 1 : end - 1]):
+            break
+        end = open_index
+        while end > start and text[end - 1].isspace():
+            end -= 1
+
+    return normalize_text(text[start:end])
 
 
 def _core_title(value: object) -> str:
@@ -198,6 +226,7 @@ def group_results(
     keyword: str = "",
     *,
     now: datetime | None = None,
+    intent: str = "either",
 ) -> list[ResultGroup]:
     """
     Fold ``results`` into one :class:`ResultGroup` per distinct book.
@@ -209,12 +238,18 @@ def group_results(
     whose decorative-stripped core titles are exactly equal are folded
     across title keys; see the module docstring for the full rationale.
 
-    Each group's ``primary`` is its highest-ranked entry (by
-    :func:`rank_score` with ``keyword``; ties go to the entry appearing
-    first in ``results``) and ``sources`` lists the whole group by
-    descending score, ties keeping input order.  The returned groups
-    themselves are ordered by the input position of their primaries, so
-    an already sorted input keeps its relative order.
+    Each group's ``primary`` is its best-ranked entry and ``sources`` lists
+    the whole group best first (ties keep input order).  "Best" is the same
+    ordering ``sort_results`` uses for ``by="quality"``: with a decided
+    ``intent`` (``"title"``/``"author"``) the match tier of the primary field
+    comes first, then the :func:`rank_score` for that intent; otherwise it is
+    the ``"either"`` score alone.  Without ``intent`` the historical layout is
+    unchanged.  Passing the same intent a caller used to rank the flat list
+    keeps the grouped row identical to that list's first row for the book --
+    re-scoring with ``"either"`` used to pick a different primary whenever the
+    two fields disagreed.  The returned groups themselves are ordered by the
+    input position of their primaries, so an already sorted input keeps its
+    relative order.
 
     The input sequence is left untouched and the grouping / tie-breaking
     logic is fully deterministic: the same input always yields the same
@@ -229,10 +264,28 @@ def group_results(
     :param now: the instant the recency signal is measured against; defaults
         to :func:`datetime.now`.  Callers that also rank and annotate the same
         rows can pass one instant so every score of the call is comparable.
+    :param intent: ``"title"``, ``"author"`` or ``"either"`` (default); any
+        other value is treated as ``"either"``, mirroring ``rank_score``.
     :returns: one :class:`ResultGroup` per book, ordered by the input
         position of each group's ``primary``.
     """
     current = now or datetime.now()
+    decided = isinstance(intent, str) and intent in {"author", "title"}
+    resolved_intent = intent if decided else "either"
+
+    def _order_key(item: tuple[int, SearchResult]) -> tuple[int, float, int]:
+        # (-tier, -score, position) keys: descending tier/score, ascending
+        # input position on ties.  Under "either" every tier is 0, so this is
+        # exactly the historical (-score, position) order.
+        index, result = item
+        score = rank_score(result, keyword, intent=resolved_intent, now=current)
+        tier = (
+            match_tier_of(result, keyword, intent=resolved_intent)
+            if resolved_intent != "either"
+            else 0
+        )
+        return (-tier, -score, index)
+
     by_title: dict[str, list[_Cluster]] = {}
     # title -> (normalized author -> cluster); built incrementally so each
     # entry is dispatched in O(1) instead of scanning the title's clusters.
@@ -279,13 +332,9 @@ def group_results(
 
     groups: list[tuple[int, ResultGroup]] = []
     for cluster in _merge_decorated(by_title):
-        # (-score, position) keys are unique per entry, so a plain
-        # stable sort is fully deterministic: descending score,
-        # ascending input position on ties.
-        scored = sorted(
-            cluster.entries,
-            key=lambda item: (-rank_score(item[1], keyword, now=current), item[0]),
-        )
+        # ``_order_key`` keys are unique per entry (the input position is the
+        # last component), so a plain sort is fully deterministic.
+        scored = sorted(cluster.entries, key=_order_key)
         primary_pos, primary = scored[0]
         groups.append(
             (

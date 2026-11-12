@@ -10,10 +10,11 @@ implementation of the previous O(n^2) scan.
 from __future__ import annotations
 
 import random
+import time
 from datetime import datetime
 from itertools import permutations
 
-from novel_downloader.plugins.grouping import ResultGroup, group_results
+from novel_downloader.plugins.grouping import ResultGroup, _core_title, group_results
 from novel_downloader.plugins.ranking import normalize_text, rank_score, sort_results
 from novel_downloader.schemas import SearchResult
 
@@ -582,3 +583,244 @@ def test_group_layout_is_deterministic_after_canonical_sort() -> None:
 
     for order in permutations(range(len(rows))):
         assert layout(order) == baseline
+
+
+# --------------------------------------------------------------------------- #
+# the primary must follow the ranking the caller used
+# --------------------------------------------------------------------------- #
+def test_group_primary_follows_the_caller_intent() -> None:
+    # Same book, two spellings.  Under "either" the exact title wins the
+    # primary slot; under an author search both rows tie on relevance and the
+    # richer copy is the better source.  ``group_results`` used to re-score
+    # with "either" even when the caller ranked by an author intent, so the
+    # grouped row could disagree with the flat ranking's first row.
+    decorated = _result(
+        site="alpha",
+        book_id="decorated",
+        title="[网游]甲",
+        author="甲",
+        word_count="1万字",
+        cover_url="https://example.com/c.jpg",
+    )
+    plain = _result(site="beta", book_id="plain", title="甲", author="甲")
+
+    assert _shape(
+        group_results([decorated, plain], keyword="甲", now=_ARRIVAL_NOW)
+    ) == [("plain", ["plain", "decorated"])]
+    assert _shape(
+        group_results(
+            [decorated, plain], keyword="甲", intent="author", now=_ARRIVAL_NOW
+        )
+    ) == [("decorated", ["decorated", "plain"])]
+
+
+def test_group_primary_uses_the_intent_match_tier() -> None:
+    # A decorated mirror with richer metadata must not become the primary over
+    # an exact-title source: under a title intent the match tier (4 vs 2) is
+    # the outer key, exactly like ``sort_results``.
+    decorated = _result(
+        site="alpha",
+        book_id="decorated",
+        title="[网游]斗罗",
+        author="甲",
+        word_count="300万字",
+        update_date="2024-06-14",
+        cover_url="https://example.com/c.jpg",
+        latest_chapter="第100章",
+        priority=5,
+    )
+    plain = _result(site="beta", book_id="plain", title="斗罗", author="甲")
+
+    groups = group_results(
+        [decorated, plain], keyword="斗罗", intent="title", now=_ARRIVAL_NOW
+    )
+
+    assert _shape(groups) == [("plain", ["plain", "decorated"])]
+
+
+def test_group_primary_matches_the_first_sorted_row_for_every_intent() -> None:
+    # ``group_results`` must use the exact ordering ``sort_results`` used:
+    # within one group, ``sources`` is the group's subsequence of the sorted
+    # flat list and ``primary`` is its first row.  A mismatch means the grouped
+    # view silently disagrees with the flat ranking the caller just displayed.
+    rng = random.Random(20240616)
+    titles = (
+        "三体",
+        "《三体》",
+        "[TXT]三体",
+        "斗罗",
+        "[网游]斗罗",
+        "斗罗（全本）",
+        "斗罗（上）",
+        "",
+    )
+    authors = ("", "甲", "乙", "刘慈欣")
+    rows = [
+        _result(
+            site=f"site{index % 3}",
+            book_id=str(index),
+            book_url=f"https://example.com/{index}",
+            title=rng.choice(titles),
+            author=rng.choice(authors),
+            word_count=rng.choice(("", "1万字", "300万字")),
+            update_date=rng.choice(("", "2024-06-01", "3天前")),
+            priority=rng.choice((5, 100, 1000)),
+        )
+        for index in range(60)
+    ]
+    keyword = "三体"
+
+    for intent in ("either", "title", "author"):
+        work = [dict(row) for row in rows]  # type: ignore[misc]
+        sort_results(work, keyword=keyword, intent=intent, now=_ARRIVAL_NOW)
+        groups = group_results(work, keyword=keyword, intent=intent, now=_ARRIVAL_NOW)
+
+        positions = {id(row): index for index, row in enumerate(work)}
+        seen: set[int] = set()
+        for group in groups:
+            ids = [id(row) for row in group.sources]
+            id_set = set(ids)
+            assert ids[0] == id(group.primary)
+            assert len(id_set) == len(ids)
+            assert not (seen & id_set)
+            seen.update(id_set)
+            # ``sources`` is exactly the sorted-list subsequence of the group.
+            assert ids == [id(row) for row in work if id(row) in id_set]
+            assert positions[id(group.primary)] == min(positions[i] for i in ids)
+        assert seen == {id(row) for row in work}
+        # Groups follow their primary's position in the sorted flat list.
+        group_positions = [positions[id(group.primary)] for group in groups]
+        assert group_positions == sorted(group_positions)
+
+
+def test_group_layout_is_order_independent_after_canonical_sort() -> None:
+    # After the canonical pre-sort every arrival order must produce the same
+    # membership and the same primary (the rows tie on score, so only the
+    # canonical key can decide).  This extends the fixed permutation test above
+    # with decorated duplicates and empty authors.
+    rows = [
+        _result(book_id="1", title="斗罗", author="甲"),
+        _result(book_id="2", title="[网游]斗罗", author="甲"),
+        _result(book_id="3", title="斗罗（全本）", author="甲"),
+        _result(book_id="4", title="斗罗", author=""),
+        _result(book_id="5", title="斗罗", author="乙"),
+        _result(book_id="6", title="另一本", author="甲"),
+        _result(book_id="7", title="[TXT]另一本", author="甲"),
+    ]
+
+    def layout(order: list[SearchResult]) -> list[tuple[frozenset[str], str]]:
+        work = [dict(row) for row in order]  # type: ignore[misc]
+        sort_results(work, keyword="斗罗", now=_ARRIVAL_NOW)
+        groups = group_results(work, keyword="斗罗", now=_ARRIVAL_NOW)
+        return sorted(
+            (
+                frozenset(str(row["book_id"]) for row in group.sources),
+                str(group.primary["book_id"]),
+            )
+            for group in groups
+        )
+
+    baseline = layout(rows)
+    rng = random.Random(20240617)
+    for _ in range(300):
+        shuffled = list(rows)
+        rng.shuffle(shuffled)
+        assert layout(shuffled) == baseline
+
+
+# --------------------------------------------------------------------------- #
+# NFKC equivalence beyond full/half-width
+# --------------------------------------------------------------------------- #
+def test_nfkc_composed_and_compatibility_characters_merge() -> None:
+    # NFKC folds decomposed accents onto their composed form and compatibility
+    # characters (the "fi" ligature) onto their canonical spelling, so these
+    # mirror spellings of one book must land in one group.
+    composed = _result(book_id="1", title="Café", author="Résumé")
+    decomposed = _result(
+        book_id="2",
+        site="beta",
+        title="Cafe\u0301",
+        author="Re\u0301sume\u0301",
+    )
+    ligature = _result(book_id="3", site="gamma", title="ﬁnal", author="作者")
+    plain = _result(book_id="4", site="delta", title="final", author="作者")
+
+    groups = group_results([composed, decomposed, ligature, plain])
+
+    members = {
+        tuple(sorted(str(row["book_id"]) for row in group.sources)) for group in groups
+    }
+    assert members == {("1", "2"), ("3", "4")}
+
+
+# --------------------------------------------------------------------------- #
+# decorative markers: only exact, edge-anchored whitelist contents are stripped
+# --------------------------------------------------------------------------- #
+def test_decorative_markers_are_only_stripped_at_the_edges() -> None:
+    plain = _result(book_id="plain", title="斗罗", author="甲")
+    interior = _result(book_id="interior", title="斗罗[网游]外传", author="甲")
+    extended = _result(book_id="extended", title="斗罗（全本）外传", author="甲")
+    variant = _result(book_id="variant", title="[网游版]斗罗", author="甲")
+
+    groups = group_results([plain, interior, extended, variant])
+
+    assert len(groups) == 4
+    assert all(len(group.sources) == 1 for group in groups)
+
+
+def test_empty_author_cannot_bridge_two_authors_across_a_decoration() -> None:
+    # The decorated pass requires a known author on both sides, so an
+    # anonymous "[全本]斗罗" row must not join (or fuse) the same-title books
+    # of two different authors.
+    author_a = _result(book_id="a", title="斗罗", author="甲")
+    author_b = _result(book_id="b", title="斗罗", author="乙")
+    anonymous = _result(book_id="anon", title="[全本]斗罗", author="")
+
+    groups = group_results([author_a, author_b, anonymous])
+
+    assert _shape(groups) == [("a", ["a"]), ("b", ["b"]), ("anon", ["anon"])]
+
+
+# --------------------------------------------------------------------------- #
+# pathological titles must not turn tag stripping quadratic
+# --------------------------------------------------------------------------- #
+def test_core_title_of_unbalanced_brackets_is_linear() -> None:
+    # Regression lock: the old trailing-tag regex tried every start position
+    # and rescanned to the end each time, so a title of unclosed brackets took
+    # O(n^2).  32k characters used to take seconds; the linear scan takes ~1 ms
+    # and the 2 s budget leaves >1000x headroom for slow CI machines.
+    title = "[" * 32_000 + "三体"
+
+    started = time.perf_counter()
+    core = _core_title(title)
+    elapsed = time.perf_counter() - started
+
+    assert core == "三体"
+    assert elapsed < 2.0, f"core-title parsing took {elapsed:.3f}s"
+
+
+def test_very_long_authors_never_fuse_distinct_books() -> None:
+    # Author normalization must stay linear as well, and a shared 50k-character
+    # prefix must not make two different authors compare equal.
+    first = _result(book_id="1", title="三体", author="甲" * 50_000)
+    second = _result(book_id="2", site="beta", title="三体", author="乙" * 50_000)
+
+    groups = group_results([first, second])
+
+    assert _shape(groups) == [("1", ["1"]), ("2", ["2"])]
+
+
+def test_core_title_handles_nested_and_mismatched_brackets() -> None:
+    # The edge-anchored, whitelist-only contract also holds for malformed
+    # nesting: only a well-formed decorative suffix is removed, and a bracketed
+    # fragment that is neither leading nor trailing stays part of the title.
+    cases = {
+        "[TXT]三体[TXT]": "三体",
+        "[全本][斗罗]": "斗罗",
+        "[全本]]斗罗": "斗罗",
+        "（全本]斗罗": "全本斗罗",
+        "斗罗[网游]外传": "斗罗网游外传",
+        "[网游版]斗罗": "网游版斗罗",
+    }
+    for title, expected in cases.items():
+        assert _core_title(title) == expected

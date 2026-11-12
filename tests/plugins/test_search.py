@@ -2,6 +2,7 @@
 """Tests for the cross-site search orchestration."""
 
 import asyncio
+import unicodedata
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any, cast
 
@@ -829,6 +830,53 @@ def _cache_snapshot(keyword: str) -> list[SearchResult]:
     return cached
 
 
+def test_finalize_group_primary_honours_the_detected_intent() -> None:
+    """The grouped row must match the flat ranking's first row."""
+    from novel_downloader.plugins.search import _finalize
+
+    results: list[SearchResult] = [
+        {
+            "site": "alpha",
+            "book_id": "decorated",
+            "title": "[网游]甲",
+            "author": "甲",
+            "cover_url": "https://example.com/c.jpg",
+        },
+        {
+            "site": "beta",
+            "book_id": "plain",
+            "title": "甲",
+            "author": "甲",
+        },
+    ]
+
+    # "甲" is detected as an author query.  Both rows match the author
+    # exactly, so the richer copy is the best source -- the same row the flat
+    # ranking puts first.  Grouping used to re-score with "either", where the
+    # exact title won and the sparse row became the primary.
+    flat = _finalize(
+        [dict(row) for row in results],
+        keyword="甲",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=False,
+    )
+    merged = _finalize(
+        [dict(row) for row in results],
+        keyword="甲",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=True,
+    )
+
+    assert flat[0]["book_id"] == "decorated"
+    assert len(merged) == 1
+    assert merged[0]["book_id"] == flat[0]["book_id"]
+    assert merged[0]["sources"] == ["alpha", "beta"]
+
+
 def test_finalize_group_merges_decorated_duplicate_titles() -> None:
     """A decorative ``[网游]`` prefix must not leave a duplicate book row."""
     from novel_downloader.plugins.search import _finalize
@@ -1503,6 +1551,211 @@ def test_sanitize_keeps_a_row_without_a_book_id_and_does_not_guess_one() -> None
     assert cleaned == [row]
     assert cleaned[0]["book_id"] == ""
     assert cleaned[0]["book_url"] == "https://example.com/novel/42"
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        "",
+        "   ",
+        "alpha\x00",
+        "al\x1bpha",
+        "alpha\nbeta",
+        "../alpha",
+        "alpha/beta",
+        "alpha\\beta",
+        ".",
+        "..",
+        ".hidden",
+        "alpha.",
+        "alpha beta",
+        "a" * 65,
+    ],
+)
+def test_sanitize_results_drops_rows_with_unsafe_site_keys(site: str) -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    # ``site`` is a registry key joined onto the cache/raw-data roots, so a
+    # blank, separator-carrying, dot-only or overlong value must drop the row
+    # instead of routing a download through it.
+    row = _search_result(site, "good", "三体")
+
+    assert _sanitize_results([row]) == []
+
+
+@pytest.mark.parametrize(
+    "book_id",
+    [
+        "../1",
+        "1/2",
+        "1\\2",
+        ".",
+        "..",
+        "a\x00b",
+        "a\nb",
+        "a b",
+        "a.b",
+        "书",
+        "a" * 129,
+    ],
+)
+def test_sanitize_results_drops_rows_with_unsafe_book_ids(book_id: str) -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    # The row has a usable URL, but an unsafe id must not be forwarded to a
+    # downloader that joins it onto a path -- and it must not be silently
+    # rewritten into a different id either.
+    row = _search_result("alpha", book_id, "三体")
+
+    assert _sanitize_results([row]) == []
+
+
+@pytest.mark.parametrize(
+    "site",
+    ["alpha", "mangg_net", "westnovel_sub", "n101kanshu", "demo-api", "a1", "n23qb"],
+)
+def test_sanitize_results_preserves_real_site_keys(site: str) -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    row = _search_result(site, "123", "三体")
+
+    assert _sanitize_results([row]) == [row]
+
+
+@pytest.mark.parametrize(
+    "book_id",
+    [
+        "123",
+        "fanrenxiuxianchuan",
+        "0_143",
+        "8-8717",
+        "q-list-8156",
+        "95139-95139418",
+        "id21201",
+        "u81a",
+        "a" * 128,
+    ],
+)
+def test_sanitize_results_preserves_real_book_ids(book_id: str) -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    row = _search_result("alpha", book_id, "三体")
+
+    assert _sanitize_results([row]) == [row]
+
+
+def test_sanitize_results_accepts_a_registered_non_slug_site_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    # A dynamic rule source may choose a key outside the ASCII slug alphabet;
+    # if the registry knows it as a searcher, the row is routable and kept.
+    monkeypatch.setattr(
+        registrar,
+        "get_registered",
+        lambda site, kind: object() if (site, kind) == ("来源", "searcher") else None,
+    )
+
+    row = _search_result("来源", "good", "三体")
+
+    assert _sanitize_results([row]) == [row]
+
+
+@pytest.mark.parametrize(
+    "site", [".", "..", "a:b", "a*b", "a?b", "a|b", 'a"b', "a<b", "a>b"]
+)
+def test_safe_site_key_rejects_path_like_names_even_if_registered(
+    monkeypatch: pytest.MonkeyPatch, site: str
+) -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    # The registered-key branch must not become a bypass: a dot segment or a
+    # Windows-reserved character is unsafe no matter who registered the key.
+    monkeypatch.setattr(registrar, "get_registered", lambda *args: object())
+
+    row = _search_result(site, "good", "三体")
+
+    assert _sanitize_results([row]) == []
+
+
+def test_unsafe_identity_rows_are_dropped_before_the_limit() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    unsafe_site = _search_result("../alpha", "x", "三体")
+    unsafe_id = _search_result("alpha", "../x", "三体")
+    first = _search_result("alpha", "a", "三体")
+    second = _search_result("alpha", "b", "三体")
+
+    ranked = _finalize(
+        [unsafe_site, unsafe_id, first, second],
+        keyword="三体",
+        sort="title",
+        order="asc",
+        limit=2,
+        group=False,
+    )
+
+    # Both slots go to real rows; the unsafe identities were rejected before
+    # the limit could be spent on them.
+    assert [row["book_id"] for row in ranked] == ["a", "b"]
+
+
+class _UnsafeIdentitySearcher(BaseSearcher):
+    """Searcher returning rows whose site or book id must be rejected."""
+
+    site_name = "ident"
+
+    async def _fetch_html(self, keyword: str) -> str:
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        rows: list[SearchResult] = [
+            _search_result("ident", "good", "三体"),
+            _search_result("ident", "../escape", "三体"),
+            _search_result("../ident", "escape", "三体"),
+            _search_result("ident", "bad\x00id", "三体"),
+        ]
+        return rows if limit is None else rows[:limit]
+
+
+@pytest.mark.asyncio
+async def test_stream_drops_unsafe_identities_on_fresh_and_cached_runs(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_UnsafeIdentitySearcher]),
+    )
+
+    fresh = [chunk async for chunk in search_stream("三体", sites=["ident"])]
+    cached = [chunk async for chunk in search_stream("三体", sites=["ident"])]
+
+    # Cleaning is an output-time concern shared by the fresh and cache-hit
+    # paths, so a warmed stream must drop exactly the same rows.
+    assert cached == fresh
+    assert [item["book_id"] for item in fresh[0]] == ["good"]
+    assert fresh[0][0]["site"] == "ident"
+
+
+@pytest.mark.asyncio
+async def test_search_drops_unsafe_identities_on_fresh_and_cached_runs(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_UnsafeIdentitySearcher]),
+    )
+
+    fresh = await search("三体", sites=["ident"], sort="priority", min_relevance=None)
+    cached = await search("三体", sites=["ident"], sort="priority", min_relevance=None)
+
+    assert [item["book_id"] for item in fresh] == ["good"]
+    assert [item["book_id"] for item in cached] == ["good"]
 
 
 def test_same_site_title_and_url_is_folded_before_the_limit() -> None:
@@ -2393,3 +2646,344 @@ async def test_search_layout_is_independent_of_arrival_order(
     if limit is None:
         twin_authors = [item["author"] for item in first if item["title"] == "三体外传"]
         assert twin_authors == ["丁", "丙"]
+
+
+# --------------------------------------------------------------------------- #
+# output hygiene: URL schemes/limits/characters, cover URLs, display text
+# --------------------------------------------------------------------------- #
+
+
+def _assert_clean_output_row(row: SearchResult) -> None:
+    """Assert every field handed to a UI/browser is safe to render."""
+    for field in ("book_url", "cover_url"):
+        value = row[field]
+        assert isinstance(value, str)
+        if value:
+            assert value.lower().startswith(("http://", "https://")), (field, value)
+            # A literal space/control character or a backslash would be parsed
+            # differently by Python, a browser and a WebView.
+            assert not any(ch.isspace() for ch in value), (field, value)
+            assert "\\" not in value, (field, value)
+    for field in ("title", "author", "latest_chapter", "update_date", "word_count"):
+        value = row[field]
+        assert isinstance(value, str)
+        assert not any(
+            unicodedata.category(ch) in {"Cc", "Cf", "Cs"} for ch in value
+        ), (field, value)
+
+
+def test_sanitize_clears_unsafe_cover_urls_and_upgrades_protocol_relative() -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    unsafe = [
+        "javascript:alert(1)",
+        "data:image/svg+xml;base64,PHN2Zz4=",
+        "file:///C:/Windows/win.ini",
+        "vbscript:msgbox(1)",
+        "/covers/1.jpg",
+        "covers/1.jpg",
+    ]
+    rows = [
+        _search_result("alpha", f"c{index}", "三体", cover_url=value)
+        for index, value in enumerate(unsafe)
+    ]
+    rows.append(
+        _search_result("alpha", "relative", "三体", cover_url="//cdn.example.com/c.jpg")
+    )
+    rows.append(
+        _search_result("alpha", "ok", "三体", cover_url="https://cdn.example.com/c.jpg")
+    )
+    rows.append(
+        _search_result(
+            "alpha", "padded", "三体", cover_url="  https://cdn.example.com/c.jpg  "
+        )
+    )
+    rows.append(_search_result("alpha", "none", "三体", cover_url=None))
+
+    cleaned = _sanitize_results(rows)
+
+    by_id = {row["book_id"]: row for row in cleaned}
+    for index in range(len(unsafe)):
+        assert by_id[f"c{index}"]["cover_url"] == ""
+    # A protocol-relative cover is a real image URL: upgrade it instead of
+    # dropping it (the desktop renderer already did the same).
+    assert by_id["relative"]["cover_url"] == "https://cdn.example.com/c.jpg"
+    assert by_id["ok"]["cover_url"] == "https://cdn.example.com/c.jpg"
+    assert by_id["padded"]["cover_url"] == "https://cdn.example.com/c.jpg"
+    assert by_id["none"]["cover_url"] == ""
+    # The row dicts themselves are untouched (cache snapshots share them).
+    assert rows[0]["cover_url"] == "javascript:alert(1)"
+
+
+def test_sanitize_rejects_overlong_or_dirty_urls() -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    rejected = {
+        "overlong": "https://example.com/" + "a" * 3000,
+        "nul": "https://example.com/x\x00y",
+        "newline": "https://example.com/x\ny",
+        "space": "https://example.com/a b",
+        "backslash": "https://example.com\\@evil.com/x",
+        "bad_port": "https://example.com:99999/x",
+        "no_host": "https:///x",
+        "protocol_relative": "//example.com/x",
+        # A control character in front of the scheme, or a tab inside it, is
+        # stripped by browsers -- never let such a scheme through.
+        "hidden_scheme": "\x01javascript:alert(1)",
+        "tabbed_scheme": "java\tscript:alert(1)",
+    }
+    kept = {
+        "idn": "https://例子.测试/书/1",
+        "unicode_path": "https://example.com/书/1",
+        "upper": "HTTPS://Example.COM/Book/1",
+        "port": "https://example.com:8443/x",
+    }
+    rows = [
+        _search_result("alpha", key, "三体", book_url=value)
+        for key, value in {**rejected, **kept}.items()
+    ]
+
+    cleaned = _sanitize_results(rows)
+    by_id = {row["book_id"]: row for row in cleaned}
+
+    # A row with a book id survives with its URL cleared; only the URL is lost.
+    assert set(by_id) == set(rejected) | set(kept)
+    for key in rejected:
+        assert by_id[key]["book_url"] == "", key
+    for key, value in kept.items():
+        assert by_id[key]["book_url"] == value, key
+    for row in cleaned:
+        _assert_clean_output_row(row)
+
+
+def test_sanitize_strips_control_characters_from_display_text() -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    noisy = _search_result(
+        "alpha",
+        "ansi",
+        "\x1b[31m三体\x1b[0m",
+        author="刘\x00慈欣",
+        latest_chapter="\u202e第1章",
+        update_date="2024-06-14\x07",
+        word_count=None,
+    )
+    marked_up = _search_result(
+        "alpha",
+        "markup",
+        "<img src=x onerror=alert(1)>三体",
+        author="<b>刘慈欣</b>",
+    )
+
+    cleaned = _sanitize_results([noisy, marked_up])
+    by_id = {row["book_id"]: row for row in cleaned}
+
+    assert by_id["ansi"]["title"] == "三体"
+    assert by_id["ansi"]["author"] == "刘慈欣"
+    assert by_id["ansi"]["latest_chapter"] == "第1章"
+    assert by_id["ansi"]["update_date"] == "2024-06-14"
+    assert by_id["ansi"]["word_count"] == ""
+    # Markup is kept as literal text: escaping belongs to each renderer, and
+    # the aggregator never builds or interprets HTML itself.
+    assert by_id["markup"]["title"] == "<img src=x onerror=alert(1)>三体"
+    assert by_id["markup"]["author"] == "<b>刘慈欣</b>"
+    _assert_clean_output_row(by_id["ansi"])
+    # The input rows are not mutated (a cache snapshot shares them).
+    assert noisy["title"] == "\x1b[31m三体\x1b[0m"
+    assert noisy["author"] == "刘\x00慈欣"
+
+
+def test_cover_url_is_not_a_row_identity() -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    # A cover alone names no downloadable book.
+    row = _search_result(
+        "alpha", "", "三体", book_url="", cover_url="https://cdn.example.com/c.jpg"
+    )
+
+    assert _sanitize_results([row]) == []
+
+
+def test_same_site_url_variants_are_folded_before_the_limit() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    variants = [
+        ("v1", "https://Example.COM/Book/1#c1", 10),
+        ("v2", "https://example.com/Book/1", 20),
+        ("v3", "https://example.com/Book/1/", 30),
+        ("v4", "https://example.com/Book/1?b=2&a=1", 40),
+        ("v5", "https://example.com:443/Book/1?a=1&b=2", 50),
+        # A trailing dot on the host is the same DNS name.
+        ("v6", "https://example.com./Book/1", 55),
+        # A different query is a different page and must survive.
+        ("other-query", "https://example.com/Book/1?a=1&b=3", 60),
+        # Paths are case-sensitive on most servers.
+        ("other-path-case", "https://example.com/book/1", 70),
+        # A different scheme is a different endpoint.
+        ("http-scheme", "http://example.com:80/Book/1", 80),
+        # An IDN host folds onto its punycode spelling.
+        ("idn-unicode", "https://例子.测试/Book/1", 90),
+        ("idn-punycode", "https://xn--fsqu00a.xn--0zwm56d/Book/1", 100),
+    ]
+    rows = [
+        _search_result("alpha", book_id, "三体", book_url=url, priority=priority)
+        for book_id, url, priority in variants
+    ]
+
+    ranked = _finalize(
+        rows,
+        keyword="三体",
+        sort="priority",
+        order="asc",
+        limit=None,
+        group=False,
+    )
+
+    # Case of the scheme/host, a default port, a trailing dot on the host, an
+    # IDN host in either spelling, a fragment, a trailing slash and the order
+    # of query parameters do not make another book.  A different query set
+    # does: ``?b=2&a=1`` and ``?a=1&b=2`` are one page, but an empty query is
+    # not the same page as a query-scoped one.
+    assert [row["book_id"] for row in ranked] == [
+        "v1",
+        "v4",
+        "other-query",
+        "other-path-case",
+        "http-scheme",
+        "idn-unicode",
+    ]
+
+
+def test_group_primary_cannot_carry_an_unsafe_url() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    # The unsafe row is the richer one and wins the primary slot; sanitization
+    # must have cleared its URLs before ranking and grouping ever see it.
+    unsafe = _search_result(
+        "alpha",
+        "unsafe",
+        "三体",
+        author="刘慈欣",
+        book_url="javascript:alert(1)",
+        cover_url="javascript:alert(1)",
+        word_count="300万字",
+        update_date="2024-06-14",
+        latest_chapter="第100章",
+    )
+    safe = _search_result("beta", "safe", "三体", author="刘慈欣", word_count="1万字")
+
+    merged = _finalize(
+        [unsafe, safe],
+        keyword="三体",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=True,
+        min_relevance=None,
+    )
+
+    assert len(merged) == 1
+    entry = merged[0]
+    assert entry["site"] == "alpha"
+    assert entry["book_id"] == "unsafe"
+    assert entry["book_url"] == ""
+    assert entry["cover_url"] == ""
+    assert entry["sources"] == ["alpha", "beta"]
+    _assert_clean_output_row(entry)
+
+
+class _HygieneSearcher(BaseSearcher):
+    """Searcher returning rows that need every output-cleaning rule."""
+
+    site_name = "hygiene"
+
+    async def _fetch_html(self, keyword: str) -> str:
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        rows: list[SearchResult] = [
+            {
+                **_search_result("hygiene", "good", "三体", author="刘慈欣"),
+                "title": "\x1b[31m三体\x1b[0m",
+                "cover_url": "javascript:alert(1)",
+            },
+            {
+                **_search_result("hygiene", "long", "球状闪电", author="刘慈欣"),
+                "book_url": "https://example.com/" + "a" * 3000,
+                "cover_url": "data:image/svg+xml,<svg onload=alert(1)/>",
+            },
+            # Same page as "good", spelled with an upper-case host, a fragment
+            # and a trailing slash: the URL identity must fold it away.
+            _search_result(
+                "hygiene",
+                "duplicate",
+                "三体",
+                author="刘慈欣",
+                book_url="https://EXAMPLE.com/hygiene/good/#part",
+                cover_url="//cdn.example.com/c.jpg",
+            ),
+        ]
+        return rows if limit is None else rows[:limit]
+
+
+@pytest.mark.asyncio
+async def test_stream_chunks_apply_the_same_url_and_text_cleaning(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    import novel_downloader.plugins.search as search_module
+    from novel_downloader.plugins.search_cache import build_key
+
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_HygieneSearcher])
+    )
+
+    fresh = [chunk async for chunk in search_stream("三体", sites=["hygiene"])]
+    cached = [chunk async for chunk in search_stream("三体", sites=["hygiene"])]
+
+    # A warmed stream must not leak anything the fresh run cleaned.
+    assert cached == fresh
+    assert len(fresh) == 1
+    chunk = fresh[0]
+    assert [row["book_id"] for row in chunk] == ["good", "long"]
+    by_id = {row["book_id"]: row for row in chunk}
+    assert by_id["good"]["title"] == "三体"
+    assert by_id["good"]["cover_url"] == ""
+    assert by_id["long"]["book_url"] == ""
+    assert by_id["long"]["cover_url"] == ""
+    for row in chunk:
+        _assert_clean_output_row(row)
+
+    # The cache itself still holds what the site returned, not the cleaned
+    # view: cleaning stays an output-time concern.
+    raw = search_module._CACHE.get(build_key("三体", ["hygiene"], 5, False, 5.0))
+    assert raw is not None
+    assert any(row["cover_url"] == "javascript:alert(1)" for row in raw)
+    assert any(len(row["book_url"]) > 2048 for row in raw)
+
+
+@pytest.mark.asyncio
+async def test_search_output_cleans_urls_and_text_like_the_stream(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_HygieneSearcher])
+    )
+
+    results = await search(
+        "三体", sites=["hygiene"], sort="priority", min_relevance=None
+    )
+
+    assert [row["book_id"] for row in results] == ["good", "long"]
+    for row in results:
+        _assert_clean_output_row(row)
+
+    # The stream's chunk is the same cleaned view of the same payload.
+    chunks = [chunk async for chunk in search_stream("三体", sites=["hygiene"])]
+    assert [sorted(row["book_id"] for row in chunk) for chunk in chunks] == [
+        ["good", "long"]
+    ]
+    for chunk in chunks:
+        for row in chunk:
+            _assert_clean_output_row(row)

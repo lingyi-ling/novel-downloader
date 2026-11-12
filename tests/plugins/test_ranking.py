@@ -398,6 +398,33 @@ def test_sort_results_honours_arrival_order_only_for_identical_rows() -> None:
     assert results[1] is second
 
 
+def test_rank_score_treats_nan_priority_as_unknown() -> None:
+    # ``_site_score`` must classify NaN like a missing priority (neutral 0.6).
+    # Falling through every ``<=`` bound used to land it in the *worst* bucket
+    # (0.2), so one mis-scraped "nan" silently demoted an otherwise good row.
+    keyword = "斗破苍穹"
+    missing: SearchResult = _result()
+    del missing["priority"]
+
+    nan_score = rank_score(_result(priority=float("nan")), keyword, now=NOW)
+    assert nan_score == pytest.approx(rank_score(missing, keyword, now=NOW))
+    assert nan_score > rank_score(_result(priority=1000), keyword, now=NOW)
+
+
+def test_sort_results_unknown_key_uses_the_quality_direction() -> None:
+    # An unrecognised ``by`` falls back to the quality key.  The direction must
+    # fall back with it: using the unknown key's default ("asc") returned the
+    # *worst* rows first.
+    keyword = "斗破苍穹"
+    strong = _result(book_id="strong", title=keyword, word_count="300万字")
+    weak = _result(book_id="weak", title="无关书名", word_count="1万字")
+
+    results = [weak, strong]
+    sort_results(results, by="not-a-sort-key", keyword=keyword, now=NOW)
+
+    assert [r["book_id"] for r in results] == ["strong", "weak"]
+
+
 def test_sort_results_treats_nan_priority_as_unknown() -> None:
     # A NaN sort key makes every comparison false, so Timsort's outcome would
     # depend on arrival order.  It must behave like a missing priority and let

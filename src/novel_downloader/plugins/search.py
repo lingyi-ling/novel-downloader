@@ -19,11 +19,13 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import re
+import unicodedata
 from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, cast
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import aiohttp
 
@@ -113,11 +115,56 @@ _DNS_CACHE_SECONDS = 300
 #: :func:`~novel_downloader.plugins.ranking.filter_by_relevance`.
 DEFAULT_MIN_RELEVANCE = 0.45
 
-#: Schemes a ``book_url`` may use.  Anything else -- ``javascript:``,
-#: ``file:``, ``data:``, ``vbscript:`` or a scheme-less/relative string -- is
-#: cleared before the row reaches a UI that might open it in a browser or
-#: hand it to a downloader.
+#: Schemes a ``book_url``/``cover_url`` may use.  Anything else --
+#: ``javascript:``, ``file:``, ``data:``, ``vbscript:`` or a
+#: scheme-less/relative string -- is cleared before the row reaches a UI that
+#: might open it in a browser, load it as an image, or hand it to a downloader.
 _SAFE_BOOK_URL_SCHEMES = frozenset({"http", "https"})
+
+#: Longest URL kept on an output row.  Real result links are far shorter; a
+#: multi-kilobyte value is either a broken extraction or an attempt to bloat
+#: the cache/UI payload, and truncating it would produce a wrong link.
+_MAX_URL_LENGTH = 2048
+
+#: A site key is a registry key: it selects a plugin module, names the
+#: cache/raw-data directory and appears in log lines.  Built-in keys are
+#: lowercase module names (``qidian``, ``mangg_net``); dynamic rule sources may
+#: also use ``-`` (``demo-api``).  Dots, separators and whitespace are refused
+#: -- the registry refuses them too -- and every real key starts with a letter.
+_SAFE_SITE_KEY_RE = re.compile(r"[a-z][a-z0-9_-]*")
+
+#: Longest site key accepted; matches ``apps.api.schemas.MAX_SITE_KEY_LENGTH``.
+_MAX_SITE_KEY_LENGTH = 64
+
+#: Every book id a built-in site produces is ASCII letters/digits plus ``_`` or
+#: ``-``: ``123``, ``0_143``, ``8-8717``, ``q-list-8156``,
+#: ``95139-95139418``, ``fanrenxiuxianchuan``.  No real id contains whitespace,
+#: dots, path separators or non-ASCII text, so a value outside this alphabet is
+#: the id of no book and is rejected instead of being "repaired" into a
+#: different one.
+_SAFE_BOOK_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+#: Longest book id accepted; matches ``apps.api.schemas._MAX_BOOK_ID_LENGTH``.
+_MAX_BOOK_ID_LENGTH = 128
+
+#: Unicode categories never allowed in a URL or a display field: control
+#: characters (``Cc``, including NUL and ANSI's ESC), format characters
+#: (``Cf``, e.g. bidi overrides and zero-width joiners) and surrogates (``Cs``,
+#: which cannot be encoded as UTF-8).
+_CONTROL_CATEGORIES = frozenset({"Cc", "Cf", "Cs"})
+
+#: ANSI escape sequences a terminal would execute: CSI (colors, cursor
+#: movement) and OSC (window title, clipboard).  They are removed from display
+#: text instead of being printed raw by a CLI.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"  # OSC
+)
+
+#: Text fields carrying site-provided display strings.  They are output as
+#: plain text; renderers escape markup themselves, so the aggregator only has
+#: to guarantee there are no control sequences in them.
+_TEXT_FIELDS = ("title", "author", "latest_chapter", "update_date", "word_count")
 
 #: Upper bound (seconds) on how long cancelled site tasks may take to unwind
 #: after the per-site deadline.  Cancellation is only a *request* -- on the
@@ -137,6 +184,9 @@ def _make_connector() -> aiohttp.TCPConnector:
 
 
 #: Process-wide short-lived cache shared by ``search`` and ``search_stream``.
+#: It is memory-only unless ``NOVELDL_SEARCH_CACHE_DIR`` was set when this
+#: module was imported; the disk layer is opt-in and never touches a file
+#: otherwise.
 _CACHE = SearchCache()
 
 #: Browser-assisted sites are configured in ``settings.toml``.  The fallback
@@ -556,17 +606,44 @@ def _chunks_by_site(results: Sequence[SearchResult]) -> list[list[SearchResult]]
     return list(buckets.values())
 
 
-def _safe_book_url(value: object) -> str:
+def _has_unsafe_url_char(url: str) -> bool:
+    """
+    Return whether ``url`` contains a character no browser/parser agrees on.
+
+    Whitespace and backslashes are rejected because Python's ``urlsplit`` and a
+    browser disagree about them (``https://good.example\\@evil.example`` is two
+    different hosts), and control/format characters are invisible or terminal
+    instructions rather than URL syntax.
+    """
+    for char in url:
+        if char == "\\" or char.isspace():
+            return True
+        if unicodedata.category(char) in _CONTROL_CATEGORIES:
+            return True
+    return False
+
+
+def _safe_http_url(value: object, *, allow_protocol_relative: bool = False) -> str:
     """
     Return ``value`` when it is an absolute http(s) URL, else ``""``.
 
     Aggregated rows come from arbitrary site plugins (and, through the rule
-    engine, from arbitrary page markup), so a ``book_url`` is untrusted input
-    for every UI: a ``javascript:`` value handed to a WebView/browser helper
-    would execute in the app's context, and ``file:``/``data:`` would reach
-    local or inline content.  Only ``http``/``https`` URLs with a host are
-    therefore kept; everything else becomes an empty string (the row itself
-    is kept unless it has no other identifier, see :func:`_sanitize_results`).
+    engine, from arbitrary page markup), so both ``book_url`` and ``cover_url``
+    are untrusted input for every UI: a ``javascript:`` value handed to a
+    WebView/browser helper would execute in the app's context, ``file:`` and
+    ``data:`` would reach local or inline content, and a relative string would
+    resolve against whichever page happens to host it.  Only ``http``/
+    ``https`` URLs with a host and a sane port are therefore kept; everything
+    else becomes an empty string (the row itself is kept unless it has no
+    other identifier, see :func:`_sanitize_results`).
+
+    ``allow_protocol_relative`` upgrades a ``//host/path`` cover to ``https:``
+    instead of dropping it: that spelling is a real image URL, and the desktop
+    renderer already prefixed it the same way.
+
+    Over-long values, embedded whitespace/control characters and backslashes
+    are rejected rather than truncated or "repaired": the id remains usable
+    for the site-keyed download path, while a mangled URL does not.
 
     The string is stripped but otherwise returned verbatim, so a legitimate
     URL keeps its exact form (including its query and fragment).
@@ -574,52 +651,252 @@ def _safe_book_url(value: object) -> str:
     url = str(value if value is not None else "").strip()
     if not url:
         return ""
+    if allow_protocol_relative and url.startswith("//"):
+        url = f"https:{url}"
+    if len(url) > _MAX_URL_LENGTH:
+        return ""
+    if _has_unsafe_url_char(url):
+        return ""
     try:
         parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
     except ValueError:
-        # ``urlsplit`` raises on malformed IPv6 literals and similar input.
+        # ``urlsplit`` raises on malformed IPv6 literals; the ``hostname`` and
+        # ``port`` properties raise on invalid hosts and non-numeric/out-of-
+        # range ports.
         return ""
     if parsed.scheme.lower() not in _SAFE_BOOK_URL_SCHEMES:
         return ""
-    if not parsed.netloc:
+    if not parsed.netloc or not host:
+        return ""
+    if port is not None and not 1 <= port <= 65535:
         return ""
     return url
 
 
+def _plain_text(value: object) -> str:
+    """
+    Return ``value`` as a display-safe string.
+
+    ANSI escape sequences are removed (a terminal would otherwise execute
+    them), and control/format characters are dropped so a title cannot inject
+    line breaks, NUL bytes or bidi overrides into a UI, a log line or a JSON
+    payload.  Horizontal whitespace controls become a single space; every
+    other control character disappears.  Markup such as ``<b>`` is left as
+    literal text -- escaping is each renderer's job, and the aggregator never
+    treats a title or author as HTML.
+
+    ``None`` becomes ``""`` instead of the string ``"None"``.
+    """
+    if value is None:
+        return ""
+    text = str(value)
+    if not text:
+        return ""
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    chars: list[str] = []
+    for char in text:
+        if unicodedata.category(char) in _CONTROL_CATEGORIES:
+            if char in "\t\n\r\f\v":
+                chars.append(" ")
+            continue
+        chars.append(char)
+    return "".join(chars).strip()
+
+
+def _safe_site_key(value: object) -> str:
+    """
+    Return ``value`` when it is usable as a site key, else ``""``.
+
+    ``site`` is a registry key, not a display string: it is interpolated into
+    an import path and joined onto the cache/raw-data roots.  Rewriting it
+    would route the row to a different site (or no site at all), so an unsafe
+    value invalidates the row instead.
+
+    A value is accepted when it is a lowercase slug (built-in keys and most
+    dynamic rule sources) *or* the registry already knows it as a searcher
+    (a rule source may choose a non-ASCII key).  In both cases it must be
+    non-empty, at most :data:`_MAX_SITE_KEY_LENGTH` characters, and free of
+    whitespace, control/format characters, path separators, dot segments and
+    Windows-reserved characters (``<>:"|?*``).  Dots are not part of either
+    form: the registry refuses them, and ``.``/``..`` would escape (or Windows
+    would strip them from) the directory the key is joined onto.
+    """
+    key = "" if value is None else str(value)
+    if not key or len(key) > _MAX_SITE_KEY_LENGTH:
+        return ""
+    if any(
+        char.isspace() or unicodedata.category(char) in _CONTROL_CATEGORIES
+        for char in key
+    ):
+        return ""
+    if (
+        "/" in key
+        or "\\" in key
+        or "." in key
+        or any(char in key for char in '<>:"|?*')
+    ):
+        # Path separators, dot segments and Windows-reserved characters make
+        # the key unjoinable onto the cache/raw-data root; the registry
+        # refuses dots separators too, but this check does not depend on it.
+        return ""
+    if _SAFE_SITE_KEY_RE.fullmatch(key):
+        return key
+    try:
+        registered = registrar.get_registered(key, "searcher") is not None
+    except ValueError:
+        # The registry rejects dots/whitespace/empties while normalizing.
+        return ""
+    return key if registered else ""
+
+
+def _safe_book_id(value: object) -> str:
+    """
+    Return ``value`` when it is a usable book id, else ``""``.
+
+    An empty or whitespace-only id returns ``""`` -- a row may still carry a
+    usable ``book_url``, and the caller keeps that historical behaviour.  A
+    *non-empty* value that fails the whitelist has no sensible replacement:
+    truncating it would name another book and clearing it would turn a usable
+    row into a URL-only one, so it is rejected by returning ``""`` as well and
+    :func:`_sanitize_results` drops the row.
+
+    A real id is ASCII letters/digits plus ``_``/``-`` (see
+    :data:`_SAFE_BOOK_ID_RE`); it never needs stripping, so a padded value is
+    treated as invalid rather than normalized.
+    """
+    raw = "" if value is None else str(value)
+    if not raw.strip():
+        return ""
+    if len(raw) > _MAX_BOOK_ID_LENGTH:
+        return ""
+    if not _SAFE_BOOK_ID_RE.fullmatch(raw):
+        return ""
+    return raw
+
+
+def _url_identity(url: str) -> str:
+    """
+    Return the identity of a sanitized http(s) URL for duplicate folding.
+
+    Two spellings of the same page differ in scheme/host case, a default port,
+    a trailing dot on the host, an IDN host written as Unicode or punycode, a
+    fragment, a trailing slash or the order of query parameters; none of those
+    make a different book.  The path's case is preserved because servers may
+    treat it as significant, and query *values* are never discarded (two
+    different ids are two different books).
+    """
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return url
+    scheme = parsed.scheme.lower()
+    if port is not None and (
+        (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+    ):
+        port = None
+    host = host.rstrip(".")
+    if host:
+        with contextlib.suppress(UnicodeError):
+            host = host.encode("idna").decode("ascii")
+    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
+    return "\x1f".join(
+        (
+            scheme,
+            host,
+            "" if port is None else str(port),
+            parsed.path.rstrip("/"),
+            query,
+        )
+    )
+
+
 def _sanitize_results(results: list[SearchResult]) -> list[SearchResult]:
     """
-    Drop unusable aggregate rows and neutralize unsafe ``book_url`` values.
+    Drop unusable aggregate rows and neutralize unsafe output values.
 
     This runs first in :func:`_finalize`, before de-duplication, ranking,
     grouping and slicing, so a dirty row can never consume a ``limit`` slot,
-    win a group's primary position, or influence the relevance floor.
+    win a group's primary position, or influence the relevance floor.  The
+    streaming path applies the same function to every chunk (see
+    :func:`_sanitize_chunk`).
 
     Rules (deliberately minimal -- anything else is left untouched):
 
-    * a row whose ``site`` is empty/blank is dropped: no downstream consumer
-      can route a download without a site key;
-    * a row with neither a ``book_id`` nor a usable ``book_url`` is dropped:
-      it names no book at all;
+    * a row whose ``site`` is empty/blank, or is not a registered/safe key
+      (control characters, whitespace, path separators, dots, overlong), is
+      dropped: it cannot be routed to a plugin nor joined onto a directory
+      safely (see :func:`_safe_site_key`);
+    * a row whose non-empty ``book_id`` is not a real id (control characters,
+      whitespace, path separators, dots, non-ASCII, overlong) is dropped
+      rather than rewritten: the id is a route and a raw-data directory name
+      (see :func:`_safe_book_id`);
+    * a row with neither a usable ``book_id`` nor a usable ``book_url`` is
+      dropped: it names no book at all (a ``cover_url`` alone is not an
+      identity); a row with a blank ``book_id`` but a usable ``book_url`` is
+      still kept, because that is the historical partial-row contract;
     * a non-http(s) ``book_url`` is cleared.  A row that still has a
       ``book_id`` is kept -- it is usable for the site-keyed download path --
-      but its URL will not be opened anywhere.
+      but its URL will not be opened anywhere;
+    * a non-http(s) ``cover_url`` is cleared the same way; a protocol-relative
+      cover (``//cdn.example.com/c.jpg``) is upgraded to ``https:`` because it
+      names a real image;
+    * a URL longer than :data:`_MAX_URL_LENGTH`, or containing whitespace,
+      control characters or a backslash, is cleared instead of truncated;
+    * display text (title, author, latest chapter, update date, word count)
+      loses ANSI escape sequences and control/format characters.
 
-    Rows are not mutated: a row whose URL must be cleared is copied, so a
+    Rows are not mutated: a row that needs a value cleared is copied, so a
     cached snapshot stays pristine.  The input list is returned unchanged
     when nothing needed cleaning.
     """
     cleaned: list[SearchResult] = []
     changed = False
     for result in results:
-        site = str(result.get("site") or "").strip()
-        book_id = str(result.get("book_id") or "").strip()
-        raw_url = str(result.get("book_url") or "")
-        book_url = _safe_book_url(raw_url)
-        if not site or (not book_id and not book_url):
+        # Reading through a plain mapping keeps the field loops below typed:
+        # ``SearchResult`` requires literal keys, the loops name them by list.
+        row = cast("dict[str, object]", result)
+        site = _safe_site_key(row.get("site"))
+        raw_book_id = "" if row.get("book_id") is None else str(row.get("book_id"))
+        book_id = _safe_book_id(raw_book_id)
+        # A non-empty id that failed the whitelist is a bad identity, not an
+        # absent one: clearing it would keep a row nobody can download.
+        bad_book_id = bool(raw_book_id.strip()) and not book_id
+        replacements: dict[str, str] = {}
+        for field, allow_relative in (
+            ("book_url", False),
+            ("cover_url", True),
+        ):
+            # Only rewrite fields the row actually carries: a partial row is
+            # left partial (its type contract is the searcher's business), and
+            # it can still be sorted in place without a copy.
+            if field not in row:
+                continue
+            stored = row[field]
+            raw = "" if stored is None else str(stored)
+            safe = _safe_http_url(raw, allow_protocol_relative=allow_relative)
+            if safe != stored:
+                replacements[field] = safe
+        for field in _TEXT_FIELDS:
+            if field not in row:
+                continue
+            stored = row[field]
+            plain = _plain_text(stored)
+            if plain != stored:
+                replacements[field] = plain
+
+        raw_book_url = row.get("book_url")
+        book_url = replacements.get(
+            "book_url", "" if raw_book_url is None else str(raw_book_url)
+        )
+        if not site or bad_book_id or (not book_id and not book_url):
             changed = True
             continue
-        if book_url != raw_url:
-            result = cast("SearchResult", {**result, "book_url": book_url})
+        if replacements:
+            result = cast("SearchResult", {**result, **replacements})
             changed = True
         cleaned.append(result)
 
@@ -639,12 +916,14 @@ def _dedupe_exact(results: list[SearchResult]) -> list[SearchResult]:
 
     Two rows are the same book when they come from the same site and either
     share a non-empty ``book_id``, share both a normalized title and the same
-    non-empty ``book_url``, or -- for rows without an id -- share the same
-    normalized title and author.  The URL rule folds a site that lists one
-    page twice under different (or missing) ids; it deliberately also requires
-    the same title, so two entries pointing at one omnibus page are not fused.
-    Cross-site copies are deliberately *not* folded here: that is what
-    ``group=True`` is for.
+    ``book_url``, or -- for rows without an id -- share the same normalized
+    title and author.  The URL rule folds a site that lists one page twice
+    under different (or missing) ids; it deliberately also requires the same
+    title, so two entries pointing at one omnibus page are not fused.  URLs
+    are compared by :func:`_url_identity`, so case in the scheme/host, a
+    default port, a fragment, a trailing slash or the order of query
+    parameters do not turn one page into two rows.  Cross-site copies are
+    deliberately *not* folded here: that is what ``group=True`` is for.
 
     ``book_url`` is expected to be sanitized already (see
     :func:`_sanitize_results`): a cleared URL never matches another row's.
@@ -669,7 +948,7 @@ def _dedupe_exact(results: list[SearchResult]) -> list[SearchResult]:
                 continue
             seen_ids.add(key)
         if book_url:
-            url_key = (site, title, book_url)
+            url_key = (site, title, _url_identity(book_url))
             if url_key in seen_urls:
                 continue
             seen_urls.add(url_key)
@@ -698,9 +977,11 @@ def _sanitize_chunk(chunk: list[SearchResult]) -> list[SearchResult]:
     ever finalize them.  Running the same first two steps of
     :func:`_finalize` here keeps the preview honest:
 
-    * :func:`_sanitize_results` drops rows with no site key and rows that name
-      no book at all, and clears non-http(s) ``book_url`` values (so a
-      ``javascript:`` link never reaches a WebView);
+    * :func:`_sanitize_results` drops rows with an unsafe site key or book id
+      and rows that name no book at all, clears non-http(s)
+      ``book_url``/``cover_url`` values (so a ``javascript:`` link never
+      reaches a WebView), removes control characters from display text, and
+      folds URL spellings that name one page;
     * :func:`_dedupe_exact` folds same-site duplicates.  Its keys are all
       site-scoped, so applying it to a single-site chunk drops exactly the
       rows :func:`_finalize` would drop for that site -- no cross-site
@@ -767,10 +1048,11 @@ def _finalize(
 
     The steps run in this order:
 
-    1. unusable rows are dropped and unsafe ``book_url`` values are cleared
-       (see :func:`_sanitize_results`); this happens before every other step,
-       so a dirty row can neither consume a ``limit`` slot nor become a
-       group's primary;
+    1. unusable rows are dropped, unsafe ``book_url``/``cover_url`` values are
+       cleared and display text is stripped of control sequences (see
+       :func:`_sanitize_results`); this happens before every other step, so a
+       dirty row can neither consume a ``limit`` slot nor become a group's
+       primary;
     2. exact duplicate rows are folded (see :func:`_dedupe_exact`);
     3. the list is ranked (grouping and limiting both build on that order);
     4. with ``group=True`` the rows are grouped, and the relevance floor is
@@ -818,7 +1100,10 @@ def _finalize(
         # own).  The group survives as long as its best row is relevant.
         # ``now`` is forwarded so the primary choice and the annotations below
         # are scored against one instant.
-        groups = group_results(work, keyword=keyword, now=current)
+        # ``intent`` is forwarded so the grouped row's primary is the same
+        # ranking the flat list used; without it ``group_results`` re-scores
+        # with ``"either"`` and can pick a different (worse) primary.
+        groups = group_results(work, keyword=keyword, now=current, intent=intent)
         if sort == "quality" and min_relevance is not None:
             primaries = filter_by_relevance(
                 [group.primary for group in groups],
@@ -1034,9 +1319,11 @@ async def search_stream(
     instead of a new chunk type.
 
     Rows are cleaned before they are yielded, exactly like :func:`search`
-    cleans its final list: blank-site rows and rows naming no book are
-    dropped, non-http(s) ``book_url`` values are cleared, and same-site
-    duplicates are folded (see :func:`_sanitize_chunk`).  A chunk emptied by
+    cleans its final list: rows with an unsafe site key or book id, blank-site
+    rows and rows naming no book are dropped, non-http(s)
+    ``book_url``/``cover_url`` values are cleared, control characters are
+    removed from display text, and same-site duplicates are folded (see
+    :func:`_sanitize_chunk`).  A chunk emptied by
     that cleaning is not yielded, and cleaning never fetches extra rows, so
     ``per_site_limit`` keeps its meaning (a chunk can only shrink, never grow
     past the site's own limit).  Ranking and relevance filtering stay out of
