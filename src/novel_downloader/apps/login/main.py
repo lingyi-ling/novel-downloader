@@ -30,21 +30,26 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import logging
+import math
 import os
 import re
 import sys
 import time
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from http.cookies import BaseCookie
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from novel_downloader.infra.config import get_config_value
 from novel_downloader.infra.cookies import parse_cookies
 from novel_downloader.infra.i18n import t
+from novel_downloader.infra.logger import redact
 from novel_downloader.infra.sessions.cookie_io import (
     resolve_cookie_path,
     write_cookie_items,
@@ -76,6 +81,7 @@ __all__ = [
     "login_main",
     "run_login",
     "run_login_result",
+    "save_cookie_items",
     "save_cookies",
     "site_cache_dir",
 ]
@@ -107,6 +113,36 @@ _MIN_POLL_INTERVAL = 0.05
 #: Site keys become directory names, so they must not contain path separators
 #: (or any other character that could escape the cache directory).
 _SITE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+#: Diagnostic detail is shown in a terminal, so strip control characters and
+#: keep it short: a broken backend must not be able to inject escape sequences
+#: or flood the prompt.
+_DETAIL_MAX = 300
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
+#: Browser backends expose session cookies without a real expiry (WebView2
+#: uses ``DateTime.MaxValue``, older engines use the Unix epoch/1601).  Only
+#: an expiry that is plausibly a persistent cookie is written to disk; a
+#: sentinel value would otherwise make the loader discard the cookie as
+#: already expired (or overflow while formatting the date).
+_MAX_COOKIE_LIFETIME = 10 * 365 * 24 * 60 * 60
+
+#: Cookie attributes understood by :func:`write_cookie_items`, mapped from
+#: both the ``Morsel`` spelling and the dict spelling used by backends.
+_COOKIE_ATTRIBUTE_ALIASES: dict[str, str] = {
+    "domain": "domain",
+    "path": "path",
+    "secure": "secure",
+    "httponly": "http_only",
+    "http_only": "http_only",
+    "httpOnly": "http_only",
+    "samesite": "same_site",
+    "same_site": "same_site",
+    "sameSite": "same_site",
+    "max-age": "max_age",
+    "max_age": "max_age",
+    "maxAge": "max_age",
+}
 
 #: Process exit codes used by :func:`login_main`.
 EXIT_LOGIN_SUCCESS = 0
@@ -195,14 +231,31 @@ def _emit(notify: Callable[[str], None], message: str) -> None:
         logger.debug("login notification callback failed", exc_info=True)
 
 
+def _redact_detail(detail: object) -> str:
+    """
+    Turn a backend error into safe one-line diagnostic text.
+
+    Errors can contain a URL with a token, a ``Cookie`` header, or terminal
+    escape sequences supplied by a broken GUI backend.  Redaction happens
+    before the text is shown or stored in :attr:`LoginOutcome.error`.
+    """
+    text = redact(detail)
+    text = _CONTROL_CHARS_RE.sub(" ", text).strip()
+    if len(text) > _DETAIL_MAX:
+        text = text[: _DETAIL_MAX - 3].rstrip() + "..."
+    return text
+
+
 def _with_detail(message: str, detail: object) -> str:
     """
     Append a diagnostic detail to a translated message.
 
     The base message is a catalogued msgid; the detail is raw diagnostic text,
     so the translation catalog does not have to grow for every backend error.
+    The detail is redacted and sanitized because it may quote a credential or
+    a terminal control sequence.
     """
-    text = str(detail).strip()
+    text = _redact_detail(detail)
     return f"{message} ({text})" if text else message
 
 
@@ -233,26 +286,262 @@ def site_cache_dir(site: str) -> Path:
     return base.expanduser().resolve() / key
 
 
+def _coerce_expiry(value: Any, *, now: float) -> float | None:
+    """
+    Return a usable absolute expiry, or ``None`` for a session cookie.
+
+    ``value`` may be an epoch number, an HTTP date (WebView2/CEF) or a numeric
+    string.  Unparsable values and implausible sentinels (in the past, or far
+    beyond any real cookie lifetime) are treated as "no expiry" so a session
+    cookie is never saved in a form the loader would immediately discard.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    timestamp: float | None = None
+    if isinstance(value, int | float):
+        try:
+            timestamp = float(value)
+        except OverflowError:
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            timestamp = float(text)
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(text)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if parsed is None:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            try:
+                timestamp = parsed.timestamp()
+            except (OverflowError, OSError, ValueError):
+                return None
+    if timestamp is None or not math.isfinite(timestamp):
+        return None
+    if timestamp <= now or timestamp > now + _MAX_COOKIE_LIFETIME:
+        return None
+    return timestamp
+
+
+def _cookie_item_from_entry(entry: Mapping[str, Any], *, now: float) -> dict[str, Any]:
+    """Convert one backend cookie record (dict or morsel) to a writer entry."""
+    name = entry.get("name")
+    if not isinstance(name, str) or not name:
+        return {}
+    value = entry.get("value")
+    # Validate the pair the same way pasted cookies are validated: a control
+    # character in a value (or a space in a name) must never reach the probe
+    # ``Cookie`` header or the on-disk file.
+    normalized = parse_cookies({name: "" if value is None else str(value)})
+    if not normalized:
+        return {}
+    clean_name, clean_value = next(iter(normalized.items()))
+    item: dict[str, Any] = {"name": clean_name, "value": clean_value}
+    for source, target in _COOKIE_ATTRIBUTE_ALIASES.items():
+        if source in entry and entry[source] is not None:
+            item[target] = entry[source]
+    expires = _coerce_expiry(entry.get("expires"), now=now)
+    if expires is not None:
+        item["expires"] = expires
+    return item
+
+
+def _cookie_entries(item: Any) -> list[dict[str, Any]]:
+    """
+    Flatten one pywebview cookie item into rich writer entries.
+
+    pywebview backends disagree on the representation: some return a list of
+    ``dict`` records, others a list of ``http.cookies.SimpleCookie`` objects
+    (one morsel each, with ``domain``/``path``/``secure``/``httponly`` and
+    ``samesite`` attributes).  Both shapes are accepted.
+    """
+    now = time.time()
+    if isinstance(item, BaseCookie):
+        entries: list[dict[str, Any]] = []
+        for name, morsel in item.items():
+            data: dict[str, Any] = dict(morsel)
+            data["name"] = name
+            data["value"] = getattr(morsel, "value", "")
+            entry = _cookie_item_from_entry(data, now=now)
+            if entry:
+                entries.append(entry)
+        return entries
+    if isinstance(item, Mapping):
+        entry = _cookie_item_from_entry(item, now=now)
+        return [entry] if entry else []
+    return []
+
+
+def _dedupe_cookie_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Collapse duplicate ``(name, domain, path)`` records, keeping the last.
+
+    A cookie is identified by its name together with its scope; two cookies
+    with the same name on different domains are distinct and both are kept.
+    """
+    unique: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in items:
+        domain = str(item.get("domain") or "").strip().lower()
+        path = str(item.get("path") or "/")
+        unique[(str(item.get("name") or ""), domain, path)] = item
+    return list(unique.values())
+
+
+def _collect_cookie_items(window: Any) -> list[dict[str, Any]]:
+    """
+    Return the login window's cookies as rich, de-duplicated entries.
+
+    Reading cookies is best-effort (a closed window raises): an unavailable
+    browser is treated as an empty jar so the poll loop can keep waiting.
+    """
+    try:
+        raw = window.get_cookies()
+    except Exception:
+        logger.debug("could not read cookies from the login window", exc_info=True)
+        return []
+
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, (list, tuple, set)) else [raw]
+
+    jar: list[dict[str, Any]] = []
+    for item in items:
+        jar.extend(_cookie_entries(item))
+    return _dedupe_cookie_items(jar)
+
+
+def _host_from_url(url: str) -> str:
+    """Return the lower-case host of *url*, or ``""`` when it has none."""
+    try:
+        return (urlsplit(url).hostname or "").strip().lower()
+    except ValueError:
+        return ""
+
+
+def _cookie_domain_allowed(host: str, domain: str) -> bool:
+    """
+    Whether a cookie scoped to *domain* belongs to *host*.
+
+    A browser may expose cookies for other domains (Qt keeps every cookie it
+    has seen).  Persisting those would leak the user's cookies for unrelated
+    sites into this site's file, so only the host itself and its parent or
+    child domains are accepted.
+    """
+    candidate = domain.strip().lower().lstrip(".").rstrip(".")
+    target = host.strip().lower().rstrip(".")
+    if not candidate or not target:
+        # No domain information: the backend already scoped this cookie to
+        # the current page, so it has to be kept.
+        return True
+    return (
+        candidate == target
+        or target.endswith("." + candidate)
+        or candidate.endswith("." + target)
+    )
+
+
+def _filter_cookie_items(
+    config: SiteLoginConfig,
+    items: list[dict[str, Any]],
+    *,
+    current_url: str = "",
+) -> list[dict[str, Any]]:
+    """
+    Apply the site's allow-list and drop cookies scoped to other sites.
+
+    Both the start URL and the page currently shown in the window are
+    consulted, so a redirect to a passport subdomain keeps working.
+    """
+    allowed = config.filter_cookie_items(items)
+    hosts = {
+        host
+        for host in (
+            _host_from_url(config.start_url),
+            _host_from_url(current_url),
+        )
+        if host
+    }
+    if not hosts:
+        return allowed
+
+    kept: list[dict[str, Any]] = []
+    for item in allowed:
+        domain = item.get("domain")
+        if isinstance(domain, str) and not any(
+            _cookie_domain_allowed(host, domain) for host in hosts
+        ):
+            logger.debug(
+                "ignoring a cookie scoped to another domain for %s", config.site
+            )
+            continue
+        kept.append(item)
+    return kept
+
+
+def save_cookie_items(site: str, items: Iterable[Mapping[str, Any]]) -> Path:
+    """
+    Persist rich cookie entries in the versioned aiohttp session format.
+
+    Entries keep their ``domain``/``path``/``secure``/``http_only``/
+    ``same_site``/``expires`` attributes, so a replayed session behaves like
+    the browser session that produced it.  Names and values are validated and
+    control characters are removed.  The write is atomic and replaces the
+    previous file: the browser jar is authoritative for this site, so cookies
+    from an older login are not merged back in.
+
+    :param site: Site key.
+    :param items: Cookie-entry mappings (``name``/``value`` plus attributes).
+    :return: The path the cookies were written to.
+    :raises ValueError: When no usable cookie remains.
+    """
+    target = site_cache_dir(site)
+    path = resolve_cookie_path(target, COOKIE_FILENAME)
+
+    prepared: list[dict[str, Any]] = []
+    for raw in items:
+        if not isinstance(raw, Mapping):
+            continue
+        name = raw.get("name")
+        value = raw.get("value")
+        if not isinstance(name, str) or not isinstance(value, str):
+            continue
+        normalized = parse_cookies({name: value})
+        if not normalized:
+            continue
+        clean_name, clean_value = next(iter(normalized.items()))
+        entry = dict(raw)
+        entry["name"] = clean_name
+        entry["value"] = clean_value
+        prepared.append(entry)
+
+    if not prepared:
+        raise ValueError("No usable cookies to save.")
+    write_cookie_items(path, _dedupe_cookie_items(prepared))
+    return path
+
+
 def save_cookies(site: str, cookies: Mapping[str, str]) -> Path:
     """
-    Persist cookies in the format the aiohttp session backend reads.
+    Persist cookie name/value pairs in the format the session backend reads.
 
-    The write is atomic (temporary file + ``os.replace``) and malformed names
-    or control characters are dropped before serialization, so a cookie file
-    is never observed half-written and can always be parsed back.
+    Backwards-compatible wrapper around :func:`save_cookie_items` for callers
+    that only have a name/value mapping (no browser attributes).
 
     :param site: Site key.
     :param cookies: Cookie name/value pairs.
     :return: The path the cookies were written to.
     """
-    target = site_cache_dir(site)
-    path = resolve_cookie_path(target, COOKIE_FILENAME)
     normalized = parse_cookies(cookies)
-    write_cookie_items(
-        path,
+    return save_cookie_items(
+        site,
         ({"name": name, "value": value} for name, value in normalized.items()),
     )
-    return path
 
 
 def _site_config(site: str) -> SiteLoginConfig | None:
@@ -387,19 +676,7 @@ def _collect_cookies(window: Any) -> dict[str, str]:
     ``SimpleCookie`` objects).  Invalid names and control characters are
     removed by :func:`novel_downloader.infra.cookies.parse_cookies`.
     """
-    try:
-        raw = window.get_cookies()
-    except Exception:
-        logger.debug("could not read cookies from the login window", exc_info=True)
-        return {}
-
-    if raw is None:
-        return {}
-    items = raw if isinstance(raw, (list, tuple, set)) else [raw]
-
-    jar: dict[str, str] = {}
-    for item in items:
-        jar.update(_cookie_pairs(item))
+    jar = {item["name"]: item["value"] for item in _collect_cookie_items(window)}
     return parse_cookies(jar)
 
 
@@ -574,7 +851,12 @@ def _watch_window(
             state["status"] = LoginStatus.TIMEOUT
             return
 
-        cookies = config.filter_cookies(_collect_cookies(window))
+        items = _filter_cookie_items(
+            config,
+            _collect_cookie_items(window),
+            current_url=_current_url(window),
+        )
+        cookies = {item["name"]: item["value"] for item in items}
         if _session_ready(
             config,
             cookies,
@@ -582,11 +864,11 @@ def _watch_window(
             timeout=min(PROBE_TIMEOUT, remaining),
         ):
             try:
-                path = save_cookies(config.site, cookies)
+                path = save_cookie_items(config.site, items)
             except Exception as exc:
                 logger.exception("failed to save login cookies")
                 state["status"] = LoginStatus.SAVE_ERROR
-                state["error"] = str(exc)
+                state["error"] = _redact_detail(exc)
                 _emit(
                     emit,
                     _with_detail(t("Login failed."), exc),
@@ -645,6 +927,12 @@ def run_login_result(
         )
         return LoginOutcome(LoginStatus.UNSUPPORTED_SITE, normalize_site(site))
 
+    # ``inf`` would make the deadline unreachable (the window would never
+    # close on its own); treat it like an already-expired deadline.  Negative
+    # and zero values keep their historical "immediate timeout" meaning.
+    if not math.isfinite(timeout):
+        timeout = 0.0
+
     try:
         import webview
     except ImportError:
@@ -676,7 +964,9 @@ def run_login_result(
             emit,
             _with_detail(t("Could not open the login window."), exc),
         )
-        return LoginOutcome(LoginStatus.WINDOW_ERROR, config.site, error=str(exc))
+        return LoginOutcome(
+            LoginStatus.WINDOW_ERROR, config.site, error=_redact_detail(exc)
+        )
     if window is None:
         logger.error("Failed to create the login window")
         _emit(emit, t("Could not open the login window."))
@@ -685,7 +975,6 @@ def run_login_result(
             config.site,
             error="create_window returned None",
         )
-
     state: dict[str, Any] = {"status": None, "path": None, "error": None}
 
     def _watch() -> None:
@@ -701,7 +990,7 @@ def run_login_result(
         except Exception as exc:  # never let an unexpected error kill the GUI loop
             logger.exception("login watcher failed")
             state["status"] = LoginStatus.WINDOW_ERROR
-            state["error"] = str(exc)
+            state["error"] = _redact_detail(exc)
             _emit(
                 emit,
                 _with_detail(t("Login failed."), exc),
@@ -713,9 +1002,17 @@ def run_login_result(
     start_error: str | None = None
     try:
         webview.start(_watch)
+    except KeyboardInterrupt:
+        # Ctrl+C while the GUI loop owns the main thread: still tear the
+        # window down so a backend that keeps a native handle does not leak
+        # it.  The interrupt is re-raised so the CLI reports "Aborted."
+        # (exit code 1) instead of pretending the login window was closed.
+        with contextlib.suppress(Exception):
+            window.destroy()
+        raise
     except Exception as exc:
         logger.exception("failed to start the login window")
-        start_error = str(exc)
+        start_error = _redact_detail(exc)
 
     status = state.get("status")
     if status is LoginStatus.SUCCESS:
@@ -819,9 +1116,12 @@ def login_main(argv: list[str] | None = None) -> int:
             print(key)
         return EXIT_LOGIN_SUCCESS
 
-    if args.timeout <= 0:
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
         _default_notify(
-            _with_detail(t("Invalid input."), "--timeout must be greater than zero")
+            _with_detail(
+                t("Invalid input."),
+                "--timeout must be a finite number greater than zero",
+            )
         )
         return EXIT_LOGIN_USAGE
 

@@ -9,6 +9,7 @@ Browser-assisted search helpers (see
 
 from novel_downloader.apps.browser.main import (
     BROWSER_SEARCH_TIMEOUT,
+    MAX_BROWSER_SEARCH_TIMEOUT,
     BrowserSearchResult,
     BrowserSearchSpec,
     browser_search_main,
@@ -30,6 +31,7 @@ from novel_downloader.apps.browser.settings import (
 __all__ = [
     "BROWSER_SEARCH_TIMEOUT",
     "DEFAULT_BROWSER_ASSISTED_SITES",
+    "MAX_BROWSER_SEARCH_TIMEOUT",
     "BrowserSearchResult",
     "BrowserSearchSpec",
     "browser_assisted_sites",

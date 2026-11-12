@@ -30,6 +30,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import math
 import os
 import socket
 import subprocess
@@ -50,6 +51,7 @@ from novel_downloader.infra.i18n import t
 
 __all__ = [
     "BROWSER_SEARCH_TIMEOUT",
+    "MAX_BROWSER_SEARCH_TIMEOUT",
     "BrowserSearchResult",
     "BrowserSearchSpec",
     "browser_search_main",
@@ -66,6 +68,11 @@ logger = logging.getLogger(__name__)
 
 #: Default seconds to wait for the site to produce the search response.
 BROWSER_SEARCH_TIMEOUT = 60.0
+
+#: Upper bound accepted for a search timeout.  Much larger values overflow the
+#: platform timeout arithmetic in :mod:`threading`/:mod:`subprocess` instead of
+#: waiting; real searches finish within the default.
+MAX_BROWSER_SEARCH_TIMEOUT = 24 * 60 * 60.0
 
 #: Attribute a site plugin module has to expose as its search description.
 SPEC_ATTR = "BROWSER_SEARCH"
@@ -133,6 +140,42 @@ def _default_notify(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def _valid_timeout(value: object, *, allow_zero: bool = False) -> float | None:
+    """
+    Validate a timeout (or lock timeout) before it reaches platform APIs.
+
+    Negative, NaN, infinite and absurdly large values make
+    :meth:`threading.Lock.acquire` and :meth:`subprocess.Popen.communicate`
+    raise ``ValueError``/``OverflowError`` instead of waiting.  Returning
+    ``None`` lets callers turn that into an ordinary diagnostic.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout < 0:
+        return None
+    if timeout == 0 and not allow_zero:
+        return None
+    if timeout > MAX_BROWSER_SEARCH_TIMEOUT:
+        return None
+    return timeout
+
+
+def _invalid_timeout_message(
+    label: str, value: object, *, allow_zero: bool = False
+) -> str:
+    lower = "0 < " if not allow_zero else "0 <= "
+    return (
+        f"invalid {label} {value!r}; expected {lower}{label} <= "
+        f"{MAX_BROWSER_SEARCH_TIMEOUT:.0f} seconds"
+    )
+
+
+def _wait_budget(deadline: float, cap: float) -> float:
+    """Seconds left before *deadline*, never more than *cap* or below zero."""
+    return max(0.0, min(cap, deadline - time.monotonic()))
+
+
 def resolve_spec(site: str) -> BrowserSearchSpec | None:
     """
     Look up the browser search description of a site plugin.
@@ -183,6 +226,29 @@ def _profile_dir(site: str) -> Path:
     from novel_downloader.apps.login import site_cache_dir
 
     return site_cache_dir(site) / PROFILE_DIRNAME
+
+
+def _private_profile_dir(site: str) -> Path:
+    """
+    Return the persistent browser profile dir, created owner-only if possible.
+
+    The profile keeps the site's cookie jar, so on POSIX it must not be
+    readable by other local users.  Windows does not implement POSIX mode
+    bits; ``chmod`` there only toggles the read-only attribute, and Chromium
+    applies its own ACL to the profile.
+    """
+    path = _profile_dir(site)
+    try:
+        # Ask for owner-only permissions at creation time as well: an existing
+        # 0755 directory would otherwise be briefly readable before the chmod.
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError:
+        # Let the browser report the real problem when it tries to use it.
+        logger.debug("could not create the browser profile directory", exc_info=True)
+        return path
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o700)
+    return path
 
 
 def _free_port() -> int:
@@ -330,6 +396,12 @@ def capture_search_json(
     """
     emit = notify or _default_notify
 
+    if _valid_timeout(timeout) is None:
+        message = _invalid_timeout_message("timeout", timeout)
+        logger.warning("%s", message)
+        emit(message)
+        return None
+
     try:
         import webview
     except ImportError:
@@ -376,7 +448,9 @@ def capture_search_json(
 
     def _watch() -> None:
         try:
-            if not window.events.loaded.wait(_PAGE_LOAD_TIMEOUT):
+            if not window.events.loaded.wait(
+                _wait_budget(deadline, _PAGE_LOAD_TIMEOUT)
+            ):
                 result["error"] = "home page load timeout"
             else:
                 threading.Thread(
@@ -387,7 +461,7 @@ def capture_search_json(
                     ),
                     daemon=True,
                 ).start()
-                if ready.wait(_CDP_READY_TIMEOUT):
+                if ready.wait(_wait_budget(deadline, _CDP_READY_TIMEOUT)):
                     # A full page load is required; the site's router does not
                     # fire the search request on an in-page navigation.
                     window.evaluate_js(f"location.href = {json.dumps(search_url)}")
@@ -405,7 +479,9 @@ def capture_search_json(
 
     try:
         webview.start(
-            _watch, private_mode=False, storage_path=str(_profile_dir(spec.site))
+            _watch,
+            private_mode=False,
+            storage_path=str(_private_profile_dir(spec.site)),
         )
     except Exception as exc:  # pragma: no cover - depends on the GUI toolkit
         logger.exception("browser search: could not start the GUI loop")
@@ -610,8 +686,28 @@ def search_via_browser_result(
         ``timeout + grace`` (the worst-case duration of the current search).
     :return: The outcome, with ``error`` set when no body was captured.
     """
+    checked_timeout = _valid_timeout(timeout)
+    if checked_timeout is None:
+        message = _invalid_timeout_message("timeout", timeout)
+        logger.warning("%s", message)
+        return BrowserSearchResult(error=message)
+
+    checked_lock_timeout: float | None = None
+    if lock_timeout is not None:
+        checked_lock_timeout = _valid_timeout(lock_timeout, allow_zero=True)
+        if checked_lock_timeout is None:
+            message = _invalid_timeout_message(
+                "lock timeout", lock_timeout, allow_zero=True
+            )
+            logger.warning("%s", message)
+            return BrowserSearchResult(error=message)
+
     lock = _site_lock(site)
-    wait = timeout + _SUBPROCESS_GRACE if lock_timeout is None else lock_timeout
+    wait = (
+        checked_timeout + _SUBPROCESS_GRACE
+        if checked_lock_timeout is None
+        else checked_lock_timeout
+    )
     if not lock.acquire(timeout=max(0.0, wait)):
         message = (
             f"another browser-assisted search for {site!r} is already running; "
@@ -645,9 +741,11 @@ def search_via_browser_result(
             return BrowserSearchResult(error=message)
 
         logger.info(
-            "browser-assisted search: starting %s (timeout=%.1fs)", site, timeout
+            "browser-assisted search: starting %s (timeout=%.1fs)",
+            site,
+            checked_timeout,
         )
-        result = _run_browser_process(site, keyword, timeout=timeout)
+        result = _run_browser_process(site, keyword, timeout=checked_timeout)
         if result.body is not None:
             logger.info(
                 "browser-assisted search: %s captured %d bytes in %.1fs",
@@ -704,6 +802,13 @@ def run_browser_search_detailed(
     emit = notify or _default_notify
     started = time.monotonic()
 
+    checked_timeout = _valid_timeout(timeout)
+    if checked_timeout is None:
+        message = _invalid_timeout_message("timeout", timeout)
+        logger.warning("%s", message)
+        emit(message)
+        return BrowserSearchResult(error=message, elapsed=time.monotonic() - started)
+
     spec = resolve_spec(site)
     if spec is None:
         message = t("Site '{site}' does not support browser-assisted search.").format(
@@ -734,7 +839,7 @@ def run_browser_search_detailed(
         return BrowserSearchResult(error=message, elapsed=time.monotonic() - started)
 
     emit(t("Searching {site} in a browser window...").format(site=spec.site))
-    body = capture_search_json(spec, keyword, timeout=timeout, notify=emit)
+    body = capture_search_json(spec, keyword, timeout=checked_timeout, notify=emit)
     elapsed = time.monotonic() - started
     if body is not None:
         return BrowserSearchResult(body=body, used_browser=True, elapsed=elapsed)

@@ -83,7 +83,7 @@ HELP_TOKENS: dict[str, tuple[str, ...]] = {
     "login": ("--timeout", "--list"),
     "config": ("init", "set-lang"),
     "clean": ("state", "logs", "cache", "book"),
-    "storage": ("--json", "--clean", "--yes"),
+    "storage": ("--json", "--clean", "--yes", "--dry-run"),
     "doctor": ("--port",),
     "sources": ("list", "check", "add", "remove"),
     "music": ("platforms", "search", "download", "export-m3u", "health"),
@@ -94,6 +94,7 @@ HELP_TOKENS: dict[str, tuple[str, ...]] = {
 COMPLETION_MARKERS: dict[str, str] = {
     "bash": "complete -F _novel_cli_completion novel-cli",
     "zsh": "compdef _novel_cli_completion novel-cli",
+    "fish": "complete -c novel-cli -f -a '(__novel_cli_completion)'",
     "powershell": "Register-ArgumentCompleter",
 }
 

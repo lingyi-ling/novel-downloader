@@ -30,11 +30,13 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import socket
 import sys
 import tempfile
+import time
 from argparse import ArgumentParser, Namespace
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as dist_version
@@ -108,6 +110,96 @@ LOW_DISK_FREE_BYTES = 512 * 1024 * 1024
 #: Maximum length of one import failure detail.
 _MAX_FAILURE_TEXT = 120
 
+#: ``key=value`` pairs whose value is a credential.  Doctor details are mostly
+#: exception text, and a third-party library may echo a token or password
+#: without asking.  The key itself is kept for context; only the value goes.
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(token|api[_-]?key|secret|password|passwd|pwd|authorization|cookie)"
+    r"(\s*[:=]\s*)"
+    r"(\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+
+#: Windows absolute paths (``C:\...``), including spaces.
+_WINDOWS_ABS_PATH = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\"'<>|;,)\r\n]*")
+
+#: POSIX absolute paths under the directories user data normally lives in.
+_POSIX_ABS_PATH = re.compile(
+    r"(?<![\w:/])/(?:home|Users|root|tmp|var|opt|mnt|srv|private)"
+    r"(?:/[^\s\"'<>|;,)]*)?"
+)
+
+
+def _home_dir() -> str:
+    """Return the user's home directory without a trailing separator."""
+    try:
+        home = os.path.expanduser("~")
+    except (KeyError, RuntimeError):  # pragma: no cover - exotic environments
+        return ""
+    if not home or home == "~":
+        return ""
+    return home.rstrip("\\/")
+
+
+def _mask_path_text(text: str) -> str:
+    """Shorten an absolute path so diagnostics do not leak the user's layout.
+
+    Paths under the current directory become relative (``./...``), paths under
+    the home directory use ``~``, and any other absolute path keeps only its
+    tail behind an ``<abs>`` marker.  Relative paths and plain values are
+    returned unchanged.
+    """
+    value = str(text)
+    candidates = ((os.getcwd(), "."), (_home_dir(), "~"))
+    for base, label in candidates:
+        if not base:
+            continue
+        if os.path.normcase(value) == os.path.normcase(base):
+            return label
+        prefix = os.path.normcase(base) + os.sep
+        if os.path.normcase(value).startswith(prefix):
+            return label + value[len(base) :]
+    if os.path.isabs(value):
+        parts = Path(value).parts
+        tail = os.sep.join(parts[1:])
+        return f"<abs>{os.sep}{tail}" if tail else "<abs>"
+    return value
+
+
+def _redact_text(text: str) -> str:
+    """Remove credentials, tokens and absolute-path prefixes from *text*."""
+    if not text:
+        return text
+
+    # Reuse the session layer's proxy scrubber: it handles
+    # ``scheme://user:password@host`` exactly like the network backends do.
+    try:
+        from novel_downloader.infra.sessions.proxy import redact_secrets
+
+        text = redact_secrets(text)
+    except Exception:  # pragma: no cover - defensive; keep the other passes
+        pass
+
+    text = _SECRET_ASSIGNMENT.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}***", text
+    )
+    text = _WINDOWS_ABS_PATH.sub(lambda match: _mask_path_text(match.group(0)), text)
+    text = _POSIX_ABS_PATH.sub(lambda match: _mask_path_text(match.group(0)), text)
+    return text
+
+
+def _redact_data(value: Any) -> Any:
+    """Recursively redact strings inside a JSON-friendly structure."""
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, dict):
+        return {
+            _redact_text(key) if isinstance(key, str) else key: _redact_data(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_data(item) for item in value]
+    return value
+
 
 @dataclass
 class Check:
@@ -123,6 +215,8 @@ class Check:
     key: str = ""
     #: Structured extras for ``--json`` (already JSON-friendly values).
     data: dict[str, Any] | None = None
+    #: Wall-clock duration of the check, in seconds (filled by the runner).
+    elapsed: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return the JSON view of this check used by ``--json``."""
@@ -132,6 +226,11 @@ class Check:
             "ok": self.ok,
             "fatal": self.fatal,
         }
+        # Real runs time every check, so the field is present in the shipped
+        # document. Hand-built checks (tests, embedders) keep the historical
+        # shape instead of gaining a ``null`` field.
+        if self.elapsed is not None:
+            payload["elapsed"] = round(self.elapsed, 3)
         if self.detail:
             payload["detail"] = self.detail
         if self.suggestion:
@@ -139,6 +238,45 @@ class Check:
         if self.data is not None:
             payload["data"] = self.data
         return payload
+
+
+def _sanitize_check(check: Check) -> Check:
+    """Return ``check`` with secrets and absolute-path prefixes removed."""
+    return Check(
+        name=check.name,
+        ok=check.ok,
+        detail=_redact_text(check.detail),
+        suggestion=_redact_text(check.suggestion),
+        fatal=check.fatal,
+        key=check.key,
+        data=_redact_data(check.data) if check.data is not None else None,
+        elapsed=check.elapsed,
+    )
+
+
+def _run_check(key: str, name: str, func: Callable[[], Check]) -> Check:
+    """Run one check, converting an unexpected exception into a failed row.
+
+    A diagnostic command must finish its report even when one probe is broken
+    (an unreadable directory, a third-party import that raises during
+    ``find_spec``, ...).  The exception type and message are kept so the row is
+    actionable, but a traceback never escapes.
+    """
+    started = time.perf_counter()
+    try:
+        check = func()
+        if not isinstance(check, Check):
+            raise TypeError(f"check returned {type(check).__name__}, expected Check")
+        check.elapsed = round(time.perf_counter() - started, 3)
+    except Exception as exc:
+        check = Check(
+            name,
+            False,
+            f"{type(exc).__name__}: {exc}",
+            key=key,
+            elapsed=round(time.perf_counter() - started, 3),
+        )
+    return check
 
 
 def _settings_path() -> Path | None:
@@ -717,27 +855,34 @@ def collect_checks(port: int = API_PORT, *, online: bool = False) -> list[Check]
     """Run every check and return the results in display order.
 
     ``online`` appends the network-egress probe; by default the doctor is a
-    purely offline self-check.
+    purely offline self-check.  Each check is isolated: an exception raised by
+    one probe becomes a failed row instead of aborting the report.
     """
-    checks = [
-        _check_python(),
-        _check_package(),
-        _check_settings_file(),
-        _check_config(),
-        _check_dependencies(),
-        _check_output_dir(),
-        _check_log_dir(),
-        _check_disk_space(),
-        _check_cache_dir(),
-        _check_sites(),
-        _check_site_plugins(),
-        _check_searchers(),
-        _check_music(),
+    specs: list[tuple[str, str, Callable[[], Check]]] = [
+        ("python", t("Python version"), _check_python),
+        ("package", t("Package version"), _check_package),
+        ("settings", t("settings.toml"), _check_settings_file),
+        ("config", t("Configuration"), _check_config),
+        ("dependencies", t("Dependencies"), _check_dependencies),
+        ("output_dir", t("Output directory"), _check_output_dir),
+        ("log_dir", t("Log directory"), _check_log_dir),
+        ("disk_space", t("Disk space"), _check_disk_space),
+        ("cache", t("Cache directory"), _check_cache_dir),
+        ("sites", t("Sites"), _check_sites),
+        ("site_plugins", t("Site plugins"), _check_site_plugins),
+        ("searchers", t("Searchers"), _check_searchers),
+        ("music", t("Music dependencies"), _check_music),
     ]
     if online:
-        checks.append(_check_network())
-    checks.append(_check_api_port(port))
-    return checks
+        specs.append(("network", t("Network egress"), _check_network))
+    specs.append(
+        (
+            "api_port",
+            t("API port {port}").format(port=port),
+            lambda: _check_api_port(port),
+        )
+    )
+    return [_sanitize_check(_run_check(key, name, func)) for key, name, func in specs]
 
 
 class DoctorCmd(Command):
@@ -780,21 +925,33 @@ class DoctorCmd(Command):
         online = bool(getattr(args, "online", False))
         as_json = bool(getattr(args, "as_json", False))
         checks = collect_checks(port, online=True) if online else collect_checks(port)
+        # ``collect_checks`` already sanitizes; doing it again here keeps the
+        # contract for callers that replace it (tests, embedders) without
+        # exposing credentials or the user's directory layout.
+        checks = [_sanitize_check(check) for check in checks]
         fatal_failures = sum(1 for check in checks if not check.ok and check.fatal)
+        warnings = sum(1 for check in checks if not check.ok and not check.fatal)
+        status = "failed" if fatal_failures else ("warnings" if warnings else "ok")
 
         if as_json:
             payload = {
+                # ``status`` distinguishes "all good", "warnings only" and
+                # "hard failure" without changing the documented summary
+                # fields (an exact-match consumer keeps working).
+                "status": status,
+                "warnings": warnings,
                 "summary": {
                     "total": len(checks),
                     "failures": fatal_failures,
-                    "optional_failures": sum(
-                        1 for check in checks if not check.ok and not check.fatal
-                    ),
+                    "optional_failures": warnings,
                     "ok": fatal_failures == 0,
                 },
                 "checks": [check.to_dict() for check in checks],
             }
-            ui.emit(json.dumps(payload, ensure_ascii=False, indent=2))
+            # One line: the document is meant to be piped into ``jq`` and
+            # consumed by scripts; pretty-printing only risks truncation in
+            # line-oriented tooling.
+            ui.emit(json.dumps(payload, ensure_ascii=False))
             if fatal_failures:
                 raise SystemExit(EXIT_FAILURE)
             return
@@ -821,5 +978,16 @@ class DoctorCmd(Command):
         if fatal_failures:
             ui.error(t("{count} check(s) failed.").format(count=fatal_failures))
             raise SystemExit(EXIT_FAILURE)
+
+        if warnings:
+            preview = ", ".join(
+                check.name for check in checks if not check.ok and not check.fatal
+            )
+            ui.warn(
+                t("{count} warning(s): {preview}").format(
+                    count=warnings, preview=preview
+                )
+            )
+            return
 
         ui.success(t("All checks passed."))

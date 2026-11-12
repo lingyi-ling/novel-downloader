@@ -15,7 +15,7 @@ import asyncio
 from pathlib import Path
 
 from novel_downloader.apps.cli import prompts, ui
-from novel_downloader.apps.cli.commands.base import expand_config_paths
+from novel_downloader.apps.cli.commands.base import EXIT_FAILURE, expand_config_paths
 from novel_downloader.apps.utils import load_or_init_config
 from novel_downloader.infra.book_url_resolver import resolve_book_url
 from novel_downloader.infra.config import ConfigAdapter
@@ -38,7 +38,9 @@ def start_interactive() -> None:
 
     config_data = load_or_init_config()
     if config_data is None:
-        return
+        # ``load_or_init_config`` already reported the reason on stderr; a
+        # config that cannot be loaded is a failure, not a successful no-op.
+        raise SystemExit(EXIT_FAILURE)
 
     # Keep interactive mode on the same ``~``/env-expanded directories as the
     # subcommands (otherwise the export menu reads and writes elsewhere).
@@ -86,11 +88,26 @@ async def _interactive_search(adapter: ConfigAdapter) -> None:
 
     chosen = prompts.select_search_result(results)
     if chosen is None:
-        ui.warn(t("Cancelled."))
+        # The empty-result case already warned "No results found."; only a
+        # user backing out of real results is a cancellation.
+        if results:
+            ui.warn(t("Cancelled."))
         return
 
-    site = chosen["site"]
-    book = BookConfig(book_id=chosen["book_id"])
+    site = chosen.get("site")
+    book_id = chosen.get("book_id")
+    if not site or not book_id:
+        # A provider row without a usable site/id would otherwise become a
+        # ``KeyError`` traceback out of the wizard.
+        ui.error(
+            t(
+                "Failed to initialize download parameters. "
+                "Check settings.toml or run 'novel-cli doctor'."
+            )
+        )
+        return
+
+    book = BookConfig(book_id=book_id)
 
     if ui.confirm(t("Do you want to download this book now?"), default=True):
         await _do_download(adapter, site, book)
@@ -113,7 +130,10 @@ async def _interactive_download(adapter: ConfigAdapter) -> None:
         if not url:
             ui.warn(t("No URL provided."))
             return
-        info = resolve_book_url(url)
+        try:
+            info = resolve_book_url(url)
+        except Exception:  # noqa: BLE001 - a bad URL must not abort the wizard
+            info = None
         if not info:
             ui.error(
                 t(
@@ -158,11 +178,13 @@ async def _interactive_download(adapter: ConfigAdapter) -> None:
 
 async def _do_download(adapter: ConfigAdapter, site: str, book: BookConfig) -> None:
     """Shared routine to handle login + download + process."""
-    client = registrar.get_client(site, config=adapter.get_client_config(site))
     login_ui = CLILoginUI()
     download_ui = CLIDownloadUI()
 
     try:
+        # ``get_client`` is guarded too: it resolves the plugin and raises for
+        # an unusable site key, which used to escape as a traceback.
+        client = registrar.get_client(site, config=adapter.get_client_config(site))
         async with client:
             if adapter.get_login_required(site):
                 success = await client.login(
@@ -192,11 +214,21 @@ async def _do_download(adapter: ConfigAdapter, site: str, book: BookConfig) -> N
         return
 
     process_ui = CLIProcessUI()
-    client.process_book(
-        book,
-        processors=adapter.get_processor_configs(site),
-        ui=process_ui,
-    )
+    try:
+        client.process_book(
+            book,
+            processors=adapter.get_processor_configs(site),
+            ui=process_ui,
+        )
+    except Exception as e:  # noqa: BLE001 - reported to the user
+        # Processing runs after a successful download; a crashing processor
+        # must not turn the wizard into a traceback (or skip the report).
+        ui.error(
+            t("Process/export failed for book {book_id}: {err}").format(
+                book_id=book.book_id, err=e
+            )
+        )
+        return
 
     if ui.confirm(t("Do you want to export this book now?"), default=True):
         _interactive_export(adapter, site=site, book=book)
@@ -226,7 +258,6 @@ def _interactive_export(
     # Same config the ``export`` subcommand uses: the client's output/raw-data
     # directories must come from settings (``get_client()`` alone would export
     # to ``./downloads`` and read from ``./raw_data``).
-    client = registrar.get_client(site, config=adapter.get_client_config(site))
     export_ui = CLIExportUI()
 
     ui.info(
@@ -236,6 +267,9 @@ def _interactive_export(
     )
 
     try:
+        # Constructing the client is part of the operation: resolving an
+        # unusable site key raises, and used to escape as a traceback.
+        client = registrar.get_client(site, config=adapter.get_client_config(site))
         results = client.export_book(
             book,
             cfg=adapter.get_exporter_config(site),
@@ -243,8 +277,10 @@ def _interactive_export(
             ui=export_ui,
         )
         # ``export_book`` reports a failed format as an empty list instead of
-        # raising, so "no exception" must not be announced as success.
-        if isinstance(results, dict) and not any(results.values()):
+        # raising, so "no exception" must not be announced as success. A
+        # third-party client returning something other than a mapping cannot
+        # prove any format succeeded either.
+        if not isinstance(results, dict) or not any(results.values()):
             ui.error(t("Export failed: {err}").format(err=book.book_id))
             return
         ui.success(t("Export completed successfully."))

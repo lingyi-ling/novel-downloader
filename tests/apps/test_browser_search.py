@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import stat
 import subprocess
 import sys
+import threading
+import types
 from typing import Any
 
 import pytest
@@ -14,6 +18,7 @@ import pytest
 import novel_downloader.plugins.search as search_module
 from novel_downloader.apps.browser import (
     DEFAULT_BROWSER_ASSISTED_SITES,
+    MAX_BROWSER_SEARCH_TIMEOUT,
     BrowserSearchResult,
     BrowserSearchSpec,
     browser_search_main,
@@ -294,6 +299,48 @@ def test_search_via_browser_handles_oserror(
     assert result.used_browser is False
 
 
+@pytest.mark.parametrize(
+    "timeout",
+    [0.0, -1.0, float("nan"), float("inf"), MAX_BROWSER_SEARCH_TIMEOUT + 1.0],
+)
+def test_search_via_browser_rejects_invalid_timeout(
+    monkeypatch: pytest.MonkeyPatch, timeout: float
+) -> None:
+    _enable_browser(monkeypatch)
+
+    def _unexpected(*a: Any, **k: Any) -> None:
+        raise AssertionError("a subprocess must not be spawned")
+
+    monkeypatch.setattr(browser_main.subprocess, "Popen", _unexpected)
+
+    result = search_via_browser_result("fanqienovel", "kw", timeout=timeout)
+
+    assert result.body is None
+    assert result.used_browser is False
+    assert result.error is not None
+    assert "timeout" in result.error
+
+
+@pytest.mark.parametrize("lock_timeout", [float("nan"), float("inf"), -1.0])
+def test_search_via_browser_rejects_invalid_lock_timeout(
+    monkeypatch: pytest.MonkeyPatch, lock_timeout: float
+) -> None:
+    _enable_browser(monkeypatch)
+
+    def _unexpected(*a: Any, **k: Any) -> None:
+        raise AssertionError("a subprocess must not be spawned")
+
+    monkeypatch.setattr(browser_main.subprocess, "Popen", _unexpected)
+
+    result = search_via_browser_result(
+        "fanqienovel", "kw", timeout=1.0, lock_timeout=lock_timeout
+    )
+
+    assert result.body is None
+    assert result.error is not None
+    assert "timeout" in result.error
+
+
 def test_search_via_browser_kills_process_tree_on_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -476,6 +523,60 @@ def test_run_browser_search_reports_no_data(monkeypatch: pytest.MonkeyPatch) -> 
     assert any("returned no data" in message for message in messages)
 
 
+@pytest.mark.parametrize("timeout", [0.0, float("nan"), float("inf")])
+def test_run_browser_search_detailed_rejects_invalid_timeout(
+    monkeypatch: pytest.MonkeyPatch, timeout: float
+) -> None:
+    monkeypatch.setattr(browser_main, "is_browser_available", lambda: True)
+
+    def _unexpected(*a: Any, **k: Any) -> None:
+        raise AssertionError("the browser window must not be opened")
+
+    monkeypatch.setattr(browser_main, "capture_search_json", _unexpected)
+    messages: list[str] = []
+
+    result = run_browser_search_detailed(
+        "fanqienovel", "kw", timeout=timeout, notify=messages.append
+    )
+
+    assert result.body is None
+    assert result.error is not None
+    assert "timeout" in result.error
+    assert any("timeout" in message for message in messages)
+
+
+def test_capture_search_json_rejects_invalid_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A bare module is enough: the timeout is rejected before any webview call,
+    # so the module deliberately has no usable settings/create_window.
+    monkeypatch.setitem(sys.modules, "webview", types.ModuleType("webview"))
+    spec = resolve_spec("fanqienovel")
+    assert spec is not None
+    messages: list[str] = []
+
+    assert (
+        capture_search_json(spec, "kw", timeout=float("inf"), notify=messages.append)
+        is None
+    )
+    assert any("timeout" in message for message in messages)
+
+
+def test_browser_search_main_rejects_invalid_timeout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(browser_main, "is_browser_available", lambda: True)
+
+    def _unexpected(*a: Any, **k: Any) -> None:
+        raise AssertionError("the browser window must not be opened")
+
+    monkeypatch.setattr(browser_main, "capture_search_json", _unexpected)
+
+    assert browser_search_main(["fanqienovel", "kw", "--timeout", "nan"]) == 1
+    printed = json.loads(capsys.readouterr().out)
+    assert "timeout" in printed["error"]
+
+
 def test_capture_search_json_without_webview(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -633,3 +734,132 @@ def test_search_reports_failed_site(monkeypatch: pytest.MonkeyPatch) -> None:
     assert results == []
     assert [e.kind for e in events] == ["browser_assisted", "failed"]
     assert "exploded" in events[-1].message
+
+
+# --------------------------------------------------------------------------- #
+# Timeout budget and browser profile hardening
+# --------------------------------------------------------------------------- #
+
+
+class _FakeLoadedEvent:
+    def __init__(self, loaded: bool) -> None:
+        self._loaded = loaded
+        self.waits: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.waits.append(timeout)
+        return self._loaded
+
+
+class _FakeWindow:
+    def __init__(self, *, loaded: bool) -> None:
+        self.events = types.SimpleNamespace(loaded=_FakeLoadedEvent(loaded))
+        self.destroyed = False
+        self.scripts: list[str] = []
+
+    def evaluate_js(self, script: str) -> None:
+        self.scripts.append(script)
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+def _install_fake_webview(
+    monkeypatch: pytest.MonkeyPatch, window: _FakeWindow, profile_dir
+) -> None:
+    module = types.ModuleType("webview")
+    module.settings = {}  # type: ignore[attr-defined]
+    module.create_window = lambda **kwargs: window  # type: ignore[attr-defined]
+    module.start = lambda func, **kwargs: func()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "webview", module)
+    # Keep the persistent profile out of the real cache directory.
+    monkeypatch.setattr(browser_main, "_private_profile_dir", lambda site: profile_dir)
+
+
+def test_capture_search_json_bounds_home_page_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    window = _FakeWindow(loaded=False)
+    _install_fake_webview(monkeypatch, window, tmp_path / "profile")
+    spec = resolve_spec("fanqienovel")
+    assert spec is not None
+
+    assert (
+        capture_search_json(spec, "kw", timeout=0.5, notify=lambda message: None)
+        is None
+    )
+
+    assert window.destroyed
+    assert len(window.events.loaded.waits) == 1
+    waited = window.events.loaded.waits[0]
+    assert waited is not None
+    assert 0.0 <= waited <= 0.6
+
+
+def test_capture_search_json_bounds_devtools_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    window = _FakeWindow(loaded=True)
+    _install_fake_webview(monkeypatch, window, tmp_path / "profile")
+    spec = resolve_spec("fanqienovel")
+    assert spec is not None
+
+    waits: list[float | None] = []
+
+    class _RecordingEvent(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            waits.append(timeout)
+            return super().wait(timeout)
+
+    # Replace only the module's threading reference, so events created inside
+    # asyncio's machinery are not recorded as the DevTools wait.
+    monkeypatch.setattr(
+        browser_main,
+        "threading",
+        types.SimpleNamespace(Event=_RecordingEvent, Thread=threading.Thread),
+    )
+
+    async def _capture(port, marker, deadline, result, ready) -> None:  # type: ignore[no-untyped-def]
+        result["body"] = '{"ok": 1}'
+        result["done"] = True
+        ready.set()
+
+    monkeypatch.setattr(browser_main, "_capture_search_response", _capture)
+
+    body = capture_search_json(spec, "kw", timeout=1.5, notify=lambda message: None)
+
+    assert body == '{"ok": 1}'
+    assert waits
+    waited = waits[0]
+    assert waited is not None
+    assert 0.0 <= waited <= 1.6
+
+
+def test_private_profile_dir_is_created_owner_only(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cache" / "profile"
+    monkeypatch.setattr(browser_main, "_profile_dir", lambda site: target)
+
+    created = browser_main._private_profile_dir("fanqienovel")
+
+    assert created == target
+    assert target.is_dir()
+    if sys.platform != "win32":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows has no POSIX permission bits"
+)
+def test_private_profile_dir_tightens_existing_permissions(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cache" / "profile"
+    target.mkdir(parents=True, mode=0o755)
+    os.chmod(target, 0o755)
+    monkeypatch.setattr(browser_main, "_profile_dir", lambda site: target)
+
+    browser_main._private_profile_dir("fanqienovel")
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700

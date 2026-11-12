@@ -21,9 +21,9 @@ unit-test offline and makes adding a site a one-entry change.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 __all__ = [
     "LOGIN_SITE_CONFIGS",
@@ -107,6 +107,23 @@ class SiteLoginConfig:
             return dict(cookies)
         allowed = set(self.cookie_names)
         return {name: value for name, value in cookies.items() if name in allowed}
+
+    def filter_cookie_items(
+        self, items: Iterable[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """
+        Keep only the rich cookie entries this site wants persisted.
+
+        The rich form carries ``domain``/``path``/``secure``/... in addition
+        to ``name``/``value``; filtering must not throw those attributes away.
+
+        :param items: Cookie-entry mappings.
+        :return: A new list of entries; a copy when no allow-list is set.
+        """
+        if not self.cookie_names:
+            return [dict(item) for item in items]
+        allowed = set(self.cookie_names)
+        return [dict(item) for item in items if item.get("name") in allowed]
 
     def is_login_url(self, url: str) -> bool:
         """

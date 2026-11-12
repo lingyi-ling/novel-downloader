@@ -67,9 +67,7 @@ from tests.apps.test_cli_e2e import (
     CLI_MODULE,
     _bindable_port,
     _child_env,
-    _seed_config,
     run_cli,
-    run_cli_inproc,
 )
 
 #: Timeout for the shell syntax probes (they parse one small file).
@@ -472,7 +470,11 @@ def test_doctor_json_after_config_init_exits_zero(tmp_path: Path) -> None:
 
     checks = {check["key"]: check for check in payload["checks"]}
     assert checks["settings"]["ok"] is True
-    assert str(tmp_path / "settings.toml") in checks["settings"]["detail"]
+    # The diagnostics report the path relative to the working directory
+    # instead of echoing an absolute path into logs/CI output.
+    detail = checks["settings"]["detail"]
+    assert detail.endswith("settings.toml")
+    assert str(tmp_path) not in detail
     assert checks["api_port"]["ok"] is True
 
 
@@ -513,37 +515,18 @@ def test_search_without_keyword_is_usage_error(tmp_path: Path) -> None:
     assert "the following arguments are required: keyword" in result.stderr
 
 
-def test_search_empty_keyword_is_forwarded_not_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Documents the *current* contract, which differs from ``music search``.
+def test_search_empty_keyword_is_usage_error(tmp_path: Path) -> None:
+    """An empty keyword is rejected before any site or config work.
 
-    An empty-string keyword is not rejected with a usage error: the command
-    loads the config and hands ``keyword=""`` to the aggregate search (which
-    would go to the network in a real run). ``music search ""`` exits 2
-    instead -- see :func:`test_music_search_empty_keyword_is_usage_error`.
-    If the CLI ever grows empty-keyword validation, this test will fail and
-    should be updated to the exit-2 contract.
+    ``search`` and ``music search`` share the same contract: a blank query is
+    a usage error (exit 2), not a request that fans out to every site looking
+    for nothing.
     """
-    _seed_config(tmp_path)
-    captured: dict[str, Any] = {}
+    result = run_cli("search", "--json", "", cwd=tmp_path, home=tmp_path / "home")
 
-    async def fake_search(**kwargs: Any) -> list[Any]:
-        captured.update(kwargs)
-        return []
-
-    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
-
-    code = run_cli_inproc(
-        monkeypatch, ["search", "--json", ""], cwd=tmp_path, home=tmp_path / "home"
-    )
-
-    assert code == 0
-    out, _err = capsys.readouterr()
-    assert json.loads(out) == []
-    assert captured["keyword"] == ""
+    assert result.returncode == 2, result.stderr
+    assert "No keyword entered." in result.stderr
+    assert result.stdout == ""
 
 
 def test_music_search_empty_keyword_is_usage_error(tmp_path: Path) -> None:

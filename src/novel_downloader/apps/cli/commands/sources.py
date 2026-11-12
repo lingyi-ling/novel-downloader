@@ -80,15 +80,20 @@ def _validate_rule_url(url: str) -> str:
     """
     Validate and normalize a remote rule URL.
 
-    Only ``http`` and ``https`` are accepted; anything else (``file:``,
-    ``ftp:``, a bare path, ...) is a usage error.
+    Only ``http`` and ``https`` are accepted, and the shared rule-URL policy
+    (no credentials, no localhost/private/cloud-metadata host, bounded length)
+    is applied here too so ``sources add --url`` cannot reach an internal
+    service.  Anything else is a usage error.
 
-    :raises ValueError: When the URL is not an absolute HTTP(S) URL.
+    :raises ValueError: When the URL is not an absolute, public HTTP(S) URL.
     """
-    parsed = urlsplit(url.strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError(url)
-    return url.strip()
+    from novel_downloader.plugins.rule.remote import check_rule_url
+
+    try:
+        return check_rule_url(url)
+    except ValueError as e:
+        # The message names the reason without echoing the query/token.
+        raise ValueError(str(e)) from e
 
 
 def _download_rule(
@@ -103,7 +108,8 @@ def _download_rule(
     :param url: Absolute HTTP(S) URL.
     :param timeout: Socket timeout in seconds.
     :param max_bytes: Maximum accepted response size.
-    :raises ValueError: When ``url`` is not an HTTP(S) URL.
+    :raises ValueError: When ``url`` (or the URL a redirect landed on) is not
+        a safe public HTTP(S) URL.
     :raises _RuleDownloadError: When the response is empty/too large.
     :raises OSError: When the network request fails.
     """
@@ -113,6 +119,14 @@ def _download_rule(
         headers={"User-Agent": _RULE_USER_AGENT},
     )
     with urllib_request.urlopen(request, timeout=timeout) as response:
+        # ``urlopen`` follows redirects; validate where it actually landed so a
+        # public URL cannot bounce the request to a private host.
+        geturl = getattr(response, "geturl", None)
+        final = geturl() if callable(geturl) else target
+        if isinstance(final, str) and final.strip():
+            from novel_downloader.plugins.rule.remote import check_rule_redirect
+
+            check_rule_redirect(target, final.strip())
         data: bytes = response.read(max_bytes + 1)
 
     if len(data) > max_bytes:
@@ -341,8 +355,6 @@ class SourcesCmd(Command):
         probe_timeout: float = _PROBE_TIMEOUT,
         probe_concurrency: int = _PROBE_CONCURRENCY,
     ) -> None:
-        from novel_downloader.plugins.rule import iter_rules
-
         # Ordering by latency is only meaningful after probing, so the flag
         # implies ``--probe`` (never ``--check``: it must not silently start
         # validating registrations the user did not ask about).
@@ -367,7 +379,17 @@ class SourcesCmd(Command):
                     EXIT_USAGE,
                 )
 
-        rules = sorted(iter_rules(), key=lambda item: item[0])
+        try:
+            from novel_downloader.plugins.rule import iter_rules
+
+            # Sorting here (not in the registry) is the documented contract:
+            # table rows and ``--json`` entries are stable regardless of file
+            # discovery order or OS directory enumeration.
+            rules = sorted(iter_rules(), key=lambda item: item[0])
+        except Exception as exc:
+            # A broken registry (unreadable rules directory, import error in a
+            # rule module) is a runtime failure, not a traceback.
+            fail(str(exc), EXIT_FAILURE)
 
         # 1) The original, offline "can this source be instantiated?" check.
         #    ``--check`` stops here: no network I/O, ever.
@@ -389,11 +411,21 @@ class SourcesCmd(Command):
                 and (target := _probe_target(rule))
             ]
             if targets:
-                probes = _run_probes(
-                    targets,
-                    timeout=probe_timeout,
-                    concurrency=probe_concurrency,
-                )
+                try:
+                    probes = _run_probes(
+                        targets,
+                        timeout=probe_timeout,
+                        concurrency=probe_concurrency,
+                    )
+                except Exception as exc:
+                    # The probe is advisory (and never changes the exit code),
+                    # so a failure in the probe machinery itself leaves the
+                    # offline listing intact instead of aborting with a
+                    # traceback and no output.
+                    ui.warn(
+                        f"{t('Check the network, proxy or firewall settings.')} ({exc})"
+                    )
+                    probes = {}
 
         ordered = _order_by_latency(rules, probes) if by_latency else rules
 
@@ -414,6 +446,14 @@ class SourcesCmd(Command):
                     "hosts": list(rule.hosts),
                     "origin": meta.get("origin", "-"),
                     "status": status,
+                    # ``status`` is translated for humans; this stable token is
+                    # what scripts should branch on (it does not change with
+                    # the active language).
+                    "status_code": (
+                        None
+                        if status is None
+                        else ("ok" if status == t("ok") else "fail")
+                    ),
                 }
                 # Network fields only exist when a probe ran.  Omitting them
                 # otherwise keeps the offline JSON payload byte-compatible
@@ -565,18 +605,22 @@ class SourcesCmd(Command):
         """Download, validate and install a rule hosted at ``url``."""
         from novel_downloader.plugins.rule import RuleError, install_rule
         from novel_downloader.plugins.rule.model import loads_rule_json, parse_rule
+        from novel_downloader.plugins.rule.remote import safe_rule_url
+
+        # Error messages only ever show the origin: a query string commonly
+        # carries a one-time token and must not end up in a terminal/log.
+        shown = safe_rule_url(url)
 
         try:
             raw = _download_rule(url)
         except ValueError:
-            fail(
-                t("Unsupported rule URL: {url}").format(url=url),
-                EXIT_USAGE,
-            )
+            fail(t("Unsupported rule URL: {url}").format(url=shown), EXIT_USAGE)
         except _RuleDownloadError as e:
             fail(str(e))
         except Exception as e:
-            fail(t("Could not download {url}: {err}").format(url=url, err=e))
+            # Some backends embed the full request URL in the exception text.
+            err = str(e).replace(url, shown)
+            fail(t("Could not download {url}: {err}").format(url=shown, err=err))
 
         try:
             text = _decode_rule(raw)
@@ -587,12 +631,12 @@ class SourcesCmd(Command):
         try:
             payload = loads_rule_json(text, source=source)
         except RuleError as e:
-            fail(t("Invalid JSON in {path}: {err}").format(path=url, err=e))
+            fail(t("Invalid JSON in {path}: {err}").format(path=shown, err=e))
 
         try:
             rule = parse_rule(payload, source=source)
         except RuleError as e:
-            fail(t("Invalid rule in {path}: {err}").format(path=url, err=e))
+            fail(t("Invalid rule in {path}: {err}").format(path=shown, err=e))
 
         stem = _rule_name(name, url) or rule.site_key
         with tempfile.TemporaryDirectory(prefix="novel-rule-") as tmp:
@@ -607,7 +651,7 @@ class SourcesCmd(Command):
             try:
                 target = install_rule(temp_path, name=stem, force=force)
             except RuleError as e:
-                fail(t("Could not install {path}: {err}").format(path=url, err=e))
+                fail(t("Could not install {path}: {err}").format(path=shown, err=e))
 
         ui.success(t("Installed rule to {target}").format(target=target))
 

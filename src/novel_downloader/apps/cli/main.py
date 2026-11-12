@@ -82,6 +82,13 @@ def cli_main() -> None:
 
     _preparse_language()
 
+    # Every third-party logger (aiohttp/httpx/urllib3/musicdl/...) propagates
+    # to the root logger; redact at that boundary before any handler formats
+    # it. Subcommands still install their own package handlers below.
+    from novel_downloader.infra.logger import install_root_redaction
+
+    install_root_redaction()
+
     # Imported lazily so localized ``help`` strings pick up ``--lang``.
     from novel_downloader.apps.cli.commands import commands
     from novel_downloader.apps.cli.commands.batch import BatchCmd

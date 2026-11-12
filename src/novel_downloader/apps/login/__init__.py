@@ -25,6 +25,7 @@ __all__ = [
     "login_main",
     "run_login",
     "run_login_result",
+    "save_cookie_items",
     "save_cookies",
     "site_cache_dir",
     "supported_sites",
@@ -46,6 +47,7 @@ from .main import (
     login_main,
     run_login,
     run_login_result,
+    save_cookie_items,
     save_cookies,
     site_cache_dir,
 )

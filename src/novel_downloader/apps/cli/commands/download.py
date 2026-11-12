@@ -16,6 +16,7 @@ from novel_downloader.infra.config import ConfigAdapter
 from novel_downloader.infra.i18n import t
 from novel_downloader.plugins import registrar
 from novel_downloader.plugins.mixins.download import IncompleteDownloadError
+from novel_downloader.plugins.protocols import ClientProtocol
 from novel_downloader.schemas import BookConfig
 from novel_downloader.schemas.book import DownloadSummary
 
@@ -43,6 +44,49 @@ _MAX_LISTED_FAILURES = 5
 _MAX_LISTED_FAILURES_STRICT = 20
 
 
+def _clean_range(value: str | None, option: str) -> str | None:
+    """
+    Strip a ``--start`` / ``--end`` chapter ID and reject an empty one.
+
+    Chapter IDs are strings, not numbers (a site may use ``8_8187`` or a
+    UUID), so there is nothing numeric to validate here.  What must not slip
+    through is a blank value: ``--start ""`` would otherwise be forwarded as
+    an ID that can never match, and the book would silently fall back to an
+    empty plan ("No chapters downloaded") instead of a usage error.
+
+    :param value: Raw option value, or ``None`` when the option was omitted.
+    :param option: Option name used in the diagnostic (``--start``/``--end``).
+    :return: The trimmed chapter ID, or ``None`` when the option was omitted.
+    """
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        # Reuse an existing translated message; the option name is raw
+        # diagnostic detail, matching ``require_safe_book_id``.
+        fail(f"{t('Invalid input.')} ({option} must not be empty)", EXIT_USAGE)
+    return cleaned
+
+
+def _failed_chapters(raw: object) -> int:
+    """
+    Return the positive failed-chapter count of a summary-like value.
+
+    Clients are typed through :class:`ClientProtocol`, but third-party clients
+    may return ``None`` or a dict whose ``failed`` is not an integer. The check
+    is structural so a malformed summary cannot crash the report.
+
+    :param raw: Whatever ``client.download_book`` returned.
+    :return: ``failed`` when it is a positive ``int``, else ``0``.
+    """
+    if not isinstance(raw, dict):
+        return 0
+    failed = raw.get("failed")
+    if isinstance(failed, bool) or not isinstance(failed, int):
+        return 0
+    return failed if failed > 0 else 0
+
+
 def _collect_failures(raw: object, out: list[DownloadSummary]) -> None:
     """
     Append ``raw`` to ``out`` when it is a download summary with failures.
@@ -55,9 +99,7 @@ def _collect_failures(raw: object, out: list[DownloadSummary]) -> None:
     :param raw: Whatever ``client.download_book`` returned.
     :param out: Accumulator for summaries that report failures.
     """
-    if not isinstance(raw, dict):
-        return
-    if not raw.get("failed"):
+    if _failed_chapters(raw) <= 0:
         return
     out.append(cast(DownloadSummary, raw))
 
@@ -78,34 +120,45 @@ def _report_incomplete(summaries: list[DownloadSummary], *, strict: bool) -> Non
     report = ui.error if strict else ui.warn
 
     for summary in summaries:
+        # The summary is typed, but third-party clients are only checked
+        # structurally (see ``_collect_failures``): a dict that merely has a
+        # truthy ``failed`` must not crash the report with a ``KeyError``.
+        book_id = summary.get("book_id") or "?"
         report(
             t(
                 "Download incomplete for book {book_id}: "
                 "{failed} of {total} chapter(s) failed."
             ).format(
-                book_id=summary["book_id"],
-                failed=summary["failed"],
-                total=summary["total"],
+                book_id=book_id,
+                failed=summary.get("failed") or 0,
+                total=summary.get("total") or 0,
             )
         )
 
-        failures = summary["failures"]
+        failures = summary.get("failures") or []
+        if not isinstance(failures, list):
+            failures = []
         for failure in failures[:limit]:
+            if not isinstance(failure, dict):
+                continue
             report(
                 t("Failed: {name} ({reason})").format(
-                    name=failure["chapter_title"] or failure["chapter_id"],
-                    reason=failure["reason"],
+                    name=failure.get("chapter_title")
+                    or failure.get("chapter_id")
+                    or "?",
+                    reason=failure.get("reason") or "-",
                 )
             )
 
+        ledger_path = summary.get("ledger_path") or "-"
         if len(failures) > limit:
             report(
                 t("{count} more failure(s) not listed; see {path} for details.").format(
-                    count=len(failures) - limit, path=summary["ledger_path"]
+                    count=len(failures) - limit, path=ledger_path
                 )
             )
         else:
-            report(t("Failure ledger: {path}").format(path=summary["ledger_path"]))
+            report(t("Failure ledger: {path}").format(path=ledger_path))
 
 
 class DownloadCmd(Command):
@@ -163,14 +216,23 @@ class DownloadCmd(Command):
         as_json = bool(getattr(args, "as_json", False))
         strict = bool(getattr(args, "strict", False))
         config_path: Path | None = expand_path(args.config) if args.config else None
-        site: str | None = args.site
+        site: str | None = args.site.strip() if args.site is not None else None
         formats: list[str] | None = args.format
+        start = _clean_range(args.start, "--start")
+        end = _clean_range(args.end, "--end")
+        # IDs are joined onto the data directory exactly as typed. ``ConfigAdapter``
+        # already strips IDs read from the configuration file, so ``" 123"`` on the
+        # command line must name the same book (and directory) as ``123`` instead
+        # of starting a second, duplicate download.
+        book_args = [value.strip() for value in args.book_ids]
 
         # book_ids
-        if site:  # SITE MODE
-            books = parse_book_args(args.book_ids, args.start, args.end)
+        if site is not None:  # SITE MODE
+            if not site:
+                fail(t("Unsupported site: {site!r}").format(site=site), EXIT_USAGE)
+            books = parse_book_args(book_args, start, end)
         else:  # URL MODE
-            if not args.book_ids:
+            if not book_args:
                 fail(
                     t(
                         "No book ID or URL provided. Pass a book URL, "
@@ -179,11 +241,11 @@ class DownloadCmd(Command):
                     EXIT_USAGE,
                 )
 
-            if len(args.book_ids) != 1:
+            if len(book_args) != 1:
                 fail(
                     t(
                         "Expected exactly one URL argument when --site is omitted (got {n})."  # noqa: E501
-                    ).format(n=len(args.book_ids)),
+                    ).format(n=len(book_args)),
                     EXIT_USAGE,
                 )
 
@@ -191,7 +253,7 @@ class DownloadCmd(Command):
 
             ui.info(t("No --site provided; detecting site from URL..."))
 
-            raw_url = args.book_ids[0]
+            raw_url = book_args[0]
             resolved = resolve_book_url(raw_url)
             if not resolved:
                 fail(
@@ -201,7 +263,7 @@ class DownloadCmd(Command):
                     EXIT_USAGE,
                 )
 
-            site = resolved["site_key"]
+            site = resolved["site_key"].strip()
             book_id = resolved.get("book_id")
 
             if not book_id:
@@ -212,9 +274,9 @@ class DownloadCmd(Command):
 
             books = [
                 BookConfig(
-                    book_id=book_id,
-                    start_id=args.start,
-                    end_id=args.end,
+                    book_id=str(book_id).strip(),
+                    start_id=start,
+                    end_id=end,
                 )
             ]
             ui.info(
@@ -236,7 +298,7 @@ class DownloadCmd(Command):
         ui.info(t("Using site: {site}").format(site=site))
         adapter = ConfigAdapter(config=config_data)
 
-        if not books and args.site:
+        if not books and site:
             try:
                 books = adapter.get_book_ids(site)
             except Exception as e:
@@ -257,6 +319,14 @@ class DownloadCmd(Command):
         require_safe_site(site)
         for book in books:
             require_safe_book_id(book.book_id)
+
+        # The same book requested twice (a copy-pasted ID, a config entry that
+        # also appears on the command line) would otherwise be downloaded
+        # twice: the second pass finds every chapter cached, but it still costs
+        # a metadata round-trip, a second progress report and a duplicate JSON
+        # entry. Only *identical* configs collapse; a second request for the
+        # same book with a different range stays a separate job.
+        books = list(dict.fromkeys(books))
 
         ui.setup_logging(
             log_dir=adapter.get_log_dir(),
@@ -279,8 +349,6 @@ class DownloadCmd(Command):
         login_ui = CLILoginUI()
         download_ui = CLIDownloadUI()
 
-        client = registrar.get_client(site, adapter.get_client_config(site))
-
         # Errors are collected instead of raised so a ``--json`` caller still
         # gets a machine-readable summary before the non-zero exit code.
         download_error: str | None = None
@@ -294,12 +362,26 @@ class DownloadCmd(Command):
         # remaining books -- the same isolation ``batch --download`` provides.
         download_failed_books: list[str] = []
 
-        async def download_books() -> None:
+        # Client construction can fail (an unloadable plugin, a broken
+        # client config). That is a runtime failure like any other: record it
+        # and keep going to the report instead of dying with a traceback
+        # before ``--json`` has emitted anything.
+        client: ClientProtocol | None = None
+        try:
+            client = registrar.get_client(site, adapter.get_client_config(site))
+        except ValueError as e:
+            unsupported_error = t("'{site}' is currently not supported: {err}").format(
+                site=site, err=e
+            )
+        except Exception as e:
+            download_error = t("Site error ({site}): {err}").format(site=site, err=e)
+
+        async def download_books(active_client: ClientProtocol) -> None:
             nonlocal download_error, unsupported_error
             try:
-                async with client:
+                async with active_client:
                     if adapter.get_login_required(site):
-                        succ = await client.login(
+                        succ = await active_client.login(
                             ui=login_ui,
                             login_cfg=adapter.get_login_config(site),
                         )
@@ -315,11 +397,11 @@ class DownloadCmd(Command):
                             # ``strict`` is only forwarded when requested, so
                             # clients without the parameter keep working.
                             if strict:
-                                raw_summary = await client.download_book(
+                                raw_summary = await active_client.download_book(
                                     book, ui=download_ui, strict=True
                                 )
                             else:
-                                raw_summary = await client.download_book(
+                                raw_summary = await active_client.download_book(
                                     book, ui=download_ui
                                 )
                         except IncompleteDownloadError as exc:
@@ -348,7 +430,33 @@ class DownloadCmd(Command):
                     site=site, err=e
                 )
 
-        asyncio.run(download_books())
+        if client is not None:
+            asyncio.run(download_books(client))
+
+        # A download that returned without ``ui.on_complete`` did not produce
+        # a book (``CommonClient`` skips that call when the chapter plan is
+        # empty, e.g. an out-of-range --start/--end). If another book
+        # succeeded, that used to be skipped silently and the run exited 0.
+        if client is not None and download_error is None and unsupported_error is None:
+            incomplete_book_ids = {
+                summary.get("book_id")
+                for summary in incomplete
+                if summary.get("book_id")
+            }
+            completed_ids = {book.book_id for book in download_ui.completed_books}
+            for book in books:
+                if (
+                    book.book_id in completed_ids
+                    or book.book_id in incomplete_book_ids
+                    or book.book_id in download_failed_books
+                ):
+                    continue
+                download_failed_books.append(book.book_id)
+                ui.error(
+                    t("No chapters downloaded for book {book_id}.").format(
+                        book_id=book.book_id
+                    )
+                )
 
         # Report missing chapters before the (potentially slow) export so the
         # failure list is not buried under export output.
@@ -356,13 +464,17 @@ class DownloadCmd(Command):
             _report_incomplete(incomplete, strict=strict)
 
         # In strict mode an incomplete book must not be exported: the caller
-        # asked to fail rather than to produce a file with holes.
-        failed_book_ids = {summary["book_id"] for summary in incomplete}
+        # asked to fail rather than to produce a file with holes.  A summary
+        # that omits ``book_id`` (a third-party client) cannot name a book to
+        # skip, so it is ignored here and reported by ``_report_incomplete``.
+        failed_book_ids = {
+            summary["book_id"] for summary in incomplete if summary.get("book_id")
+        }
 
         # export
         exported: dict[str, dict[str, list[str]]] = {}
         failed_books: list[str] = []
-        if not args.no_export and download_ui.completed_books:
+        if client is not None and not args.no_export and download_ui.completed_books:
             process_ui = CLIProcessUI()
             export_ui = CLIExportUI()
 
@@ -377,20 +489,40 @@ class DownloadCmd(Command):
             ):
                 if strict and book.book_id in failed_book_ids:
                     continue
-                client.process_book(
-                    book,
-                    processors=adapter.get_processor_configs(site),
-                    ui=process_ui,
-                )
-                results = client.export_book(
-                    book,
-                    cfg=adapter.get_exporter_config(site),
-                    formats=formats,
-                    ui=export_ui,
-                )
-                paths_by_fmt = {
-                    fmt: [str(path) for path in paths] for fmt, paths in results.items()
-                }
+                # One book whose processing/export blows up must not cost the
+                # remaining books their export (this loop used to abort the
+                # whole command, JSON report included). Record it per book and
+                # keep going, exactly like the download loop above.
+                try:
+                    client.process_book(
+                        book,
+                        processors=adapter.get_processor_configs(site),
+                        ui=process_ui,
+                    )
+                    results = client.export_book(
+                        book,
+                        cfg=adapter.get_exporter_config(site),
+                        formats=formats,
+                        ui=export_ui,
+                    )
+                    if not isinstance(results, dict):
+                        # Older/third-party clients may return ``None``.
+                        raise TypeError(
+                            f"unexpected export result: {type(results).__name__}"
+                        )
+                    paths_by_fmt = {
+                        fmt: [str(path) for path in paths]
+                        for fmt, paths in results.items()
+                    }
+                except Exception as err:
+                    exported[book.book_id] = {}
+                    failed_books.append(book.book_id)
+                    ui.error(
+                        t("Process/export failed for book {book_id}: {err}").format(
+                            book_id=book.book_id, err=err
+                        )
+                    )
+                    continue
                 exported[book.book_id] = paths_by_fmt
                 # ``CommonClient.export_book`` catches per-format errors and
                 # returns an empty list, so "no exception" is not "wrote a
@@ -404,9 +536,11 @@ class DownloadCmd(Command):
             # ``downloaded`` means "the run finished", not "the book is whole".
             # Machine consumers need the gap size to tell the two apart, so
             # every book also reports how many chapters are missing.
-            failed_by_book = {
-                summary["book_id"]: int(summary["failed"]) for summary in incomplete
-            }
+            failed_by_book: dict[str, int] = {}
+            for summary in incomplete:
+                book_id = summary.get("book_id")
+                if book_id:
+                    failed_by_book[book_id] = _failed_chapters(summary)
             ui.emit(
                 json.dumps(
                     {
@@ -426,7 +560,7 @@ class DownloadCmd(Command):
                         ],
                     },
                     ensure_ascii=False,
-                    indent=2,
+                    separators=(",", ":"),
                 )
             )
 

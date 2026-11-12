@@ -106,7 +106,7 @@ def _capture_ui(monkeypatch: pytest.MonkeyPatch) -> _Messages:
 
 
 def _asset(
-    name: str = "NovelDownloader-setup-1.5.0-x64.exe",
+    name: str = "novel-cli-1.5.0-windows-x64.zip",
     *,
     url: str | None = None,
     size: int | None = 2048,
@@ -165,9 +165,28 @@ def test_check_with_update_exits_zero(
     text = messages.text()
     assert __version__ in text
     assert "1.5.0" in text
-    assert "NovelDownloader-setup-1.5.0-x64.exe" in text
+    assert "novel-cli-1.5.0-windows-x64.zip" in text
     assert "https://example.invalid/releases/latest" in text
     assert "2.0 KiB" in text
+
+
+def test_check_asks_the_release_feed_for_the_cli_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def _fake(current: str, **kwargs: object) -> updater.UpdateCheck:
+        seen.update(current=current, **kwargs)
+        return updater.UpdateCheck(info=_info(), error=None, checked_at=0.0)
+
+    monkeypatch.setattr(update_module, "check_for_update", _fake)
+    _capture_ui(monkeypatch)
+
+    _run(["update", "--check"])
+
+    assert seen["shape"] == "cli"
+    assert seen["platform_tag"] == update_module.detect_platform()
+    assert seen["current"] == __version__
 
 
 def test_check_without_update_exits_zero(
@@ -212,7 +231,7 @@ def test_check_reports_missing_platform_asset_but_still_succeeds(
     _run(["update", "--check"])
 
     assert messages.warn
-    assert "No release asset matches" in messages.text()
+    assert "No CLI release asset matches" in messages.text()
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +259,7 @@ def test_json_keys_are_complete_with_update(
         "latest",
         "available",
         "asset_name",
+        "asset_shape",
         "asset_size",
         "sha256",
         "download_path",
@@ -248,7 +268,8 @@ def test_json_keys_are_complete_with_update(
     assert doc["current"] == __version__
     assert doc["latest"] == "1.5.0"
     assert doc["available"] is True
-    assert doc["asset_name"] == "NovelDownloader-setup-1.5.0-x64.exe"
+    assert doc["asset_name"] == "novel-cli-1.5.0-windows-x64.zip"
+    assert doc["asset_shape"] == "cli"
     assert doc["asset_size"] == 2048
     assert doc["sha256"] == SHA
     assert doc["download_path"] is None
@@ -299,7 +320,8 @@ def test_json_stdout_is_a_single_parseable_document(
     captured = capsys.readouterr()
     doc = json.loads(captured.out)
     assert doc["available"] is True
-    assert doc["asset_name"] == "NovelDownloader-setup-1.5.0-x64.exe"
+    assert doc["asset_name"] == "novel-cli-1.5.0-windows-x64.zip"
+    assert doc["asset_shape"] == "cli"
     assert captured.err == ""
 
 
@@ -422,6 +444,86 @@ def test_yes_missing_asset_exits_one(
 
     assert excinfo.value.code == 1
     assert messages.error
+    assert "No CLI release asset matches" in messages.text()
+
+
+def test_desktop_installer_is_never_used_when_the_feed_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manifest fallback may select the installer; the CLI must reject it."""
+    installer = _asset(name="NovelDownloader-setup-1.5.0-x64.exe")
+    info = updater.UpdateInfo(
+        current=__version__,
+        latest="1.5.0",
+        available=True,
+        notes_url=None,
+        asset=installer,
+        assets=(installer,),
+    )
+    _patch_check(monkeypatch, info)
+    messages = _capture_ui(monkeypatch)
+    monkeypatch.setattr(
+        update_module,
+        "download_asset",
+        lambda *a, **k: pytest.fail("the desktop installer must not be downloaded"),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["update", "--yes"])
+
+    assert excinfo.value.code == 1
+    assert "No CLI release asset matches" in messages.text()
+
+
+def test_json_without_a_cli_asset_reports_a_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer = _asset(name="NovelDownloader-setup-1.5.0-x64.exe")
+    info = updater.UpdateInfo(
+        current=__version__,
+        latest="1.5.0",
+        available=True,
+        notes_url=None,
+        asset=installer,
+        assets=(installer,),
+    )
+    _patch_check(monkeypatch, info)
+    messages = _capture_ui(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(["update", "--json", "--yes"])
+
+    assert excinfo.value.code == 1
+    doc = _json_doc(messages)
+    assert doc["error"] == update_module.NO_CLI_ASSET_ERROR
+    assert doc["asset_name"] is None
+    assert doc["asset_shape"] is None
+    assert doc["download_path"] is None
+
+
+def test_cli_asset_is_preferred_from_the_api_asset_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The API selector never returns CLI bundles; the command finds one."""
+    installer = _asset(name="NovelDownloader-setup-1.5.0-x64.exe")
+    cli = _asset(name="novel-cli-1.5.0-windows-x64.zip", sha256="b" * 64)
+    info = updater.UpdateInfo(
+        current=__version__,
+        latest="1.5.0",
+        available=True,
+        notes_url=None,
+        asset=installer,
+        assets=(installer, cli),
+    )
+    _patch_check(monkeypatch, info)
+    messages = _capture_ui(monkeypatch)
+
+    _run(["update", "--json"])
+
+    doc = _json_doc(messages)
+    assert doc["asset_name"] == cli.name
+    assert doc["asset_shape"] == "cli"
+    assert doc["sha256"] == "b" * 64
 
 
 def test_download_failure_exits_one(
@@ -583,12 +685,12 @@ def test_bad_digest_is_deleted_and_never_executed(
 @pytest.mark.parametrize(
     "name",
     [
-        "../../evil.exe",
-        "nested/../../../evil.exe",
+        "novel-cli-x/../../evil.zip",
+        "novel-cli-x/nested/../../../evil.zip",
         pytest.param(
-            "C:/Windows/evil.exe",
+            "novel-cli-x\\..\\..\\evil.zip",
             marks=pytest.mark.skipif(
-                sys.platform != "win32", reason="drive-absolute path is Windows-only"
+                sys.platform != "win32", reason="backslash traversal is Windows-only"
             ),
         ),
     ],
@@ -612,7 +714,7 @@ def test_escaping_asset_name_is_refused_before_the_transfer(
     assert excinfo.value.code == 1
     assert "outside" in messages.text()
     # ``NOVEL_HOME`` lives below ``tmp_path``; the escaping name targeted it.
-    assert not list(tmp_path.rglob("evil.exe"))
+    assert not list(tmp_path.rglob("evil.zip"))
     assert executed == []
 
 
@@ -621,7 +723,7 @@ def test_verified_download_lands_inside_updates_and_is_not_executed(
 ) -> None:
     payload = b"PK\x03\x04 portable bundle"
     digest = hashlib.sha256(payload).hexdigest()
-    asset = _asset(name="NovelDownloader-1.5.0-windows-x64.zip", sha256=digest)
+    asset = _asset(name="novel-cli-1.5.0-windows-x64.zip", sha256=digest)
     _patch_check(monkeypatch, _info(asset=asset))
     messages = _capture_ui(monkeypatch)
     _real_download(monkeypatch)
@@ -643,10 +745,10 @@ def test_verified_download_lands_inside_updates_and_is_not_executed(
 def test_non_installer_asset_is_never_executed_or_unpacked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The CLI only fetches files: a script is stored, never launched."""
-    payload = b"console.log('not an installer')"
+    """The CLI only fetches files: an archive is stored, never launched."""
+    payload = b"PK\x03\x04 console.log('not an installer')"
     digest = hashlib.sha256(payload).hexdigest()
-    asset = _asset(name="update.js", sha256=digest)
+    asset = _asset(name="novel-cli-1.5.0-windows-x64.zip", sha256=digest)
     _patch_check(monkeypatch, _info(asset=asset))
     messages = _capture_ui(monkeypatch)
     _real_download(monkeypatch)
@@ -667,8 +769,8 @@ def test_plaintext_http_asset_is_refused_before_the_prompt(
 ) -> None:
     """A feed-supplied ``http://`` URL is never downloaded, even after a "yes"."""
     asset = _asset(
-        name="NovelDownloader-setup-1.5.0-x64.exe",
-        url="http://example.invalid/NovelDownloader-setup-1.5.0-x64.exe",
+        name="novel-cli-1.5.0-windows-x64.zip",
+        url="http://example.invalid/novel-cli-1.5.0-windows-x64.zip",
     )
     _patch_check(monkeypatch, _info(asset=asset))
     messages = _capture_ui(monkeypatch)
@@ -695,7 +797,7 @@ def test_plaintext_http_asset_is_refused_before_the_prompt(
 def test_json_yes_plaintext_http_reports_an_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    asset = _asset(url="http://example.invalid/NovelDownloader-setup.exe")
+    asset = _asset(url="http://example.invalid/novel-cli-1.5.0-windows-x64.zip")
     _patch_check(monkeypatch, _info(asset=asset))
     messages = _capture_ui(monkeypatch)
     monkeypatch.setattr(

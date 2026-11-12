@@ -113,6 +113,7 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     calls: dict[str, list[Any]] = {
         "warn": [],
         "error": [],
+        "success": [],
         "confirm": [],
         "prompt": [],
         "prompt_choice": [],
@@ -123,7 +124,9 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     }
 
     monkeypatch.setattr(interactive.ui, "info", lambda *a, **k: None)
-    monkeypatch.setattr(interactive.ui, "success", lambda *a, **k: None)
+    monkeypatch.setattr(
+        interactive.ui, "success", lambda msg, **k: calls["success"].append(msg)
+    )
     monkeypatch.setattr(
         interactive.ui, "warn", lambda msg, **k: calls["warn"].append(msg)
     )
@@ -213,17 +216,20 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # start_interactive
 # --------------------------------------------------------------------------- #
-def test_start_interactive_returns_without_config(
+def test_start_interactive_exits_nonzero_without_config(
     monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any]
 ) -> None:
+    """A missing/declined config is a failure, not a successful no-op."""
     monkeypatch.setattr(interactive, "load_or_init_config", lambda: None)
     prompted: list[bool] = []
     monkeypatch.setattr(
         interactive.prompts, "select_main_action", lambda: prompted.append(True) or ""
     )
 
-    interactive.start_interactive()
+    with pytest.raises(SystemExit) as excinfo:
+        interactive.start_interactive()
 
+    assert excinfo.value.code == 1
     assert prompted == [], "no menu prompt when the config cannot be loaded"
 
 
@@ -350,6 +356,51 @@ async def test_search_result_declined_skips_download(
     assert rec["calls"]["download"] == []
 
 
+@pytest.mark.asyncio
+async def test_search_without_results_does_not_claim_cancellation(
+    monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any]
+) -> None:
+    """An empty result list is not a user cancellation.
+
+    The real ``select_search_result`` already warned "No results found."; the
+    wizard must not then also report "Cancelled.", which reads like the user
+    backed out of results that never existed.
+    """
+    state = rec["state"]
+    state["prompts"] = ["keyword"]
+    state["search_results"] = []
+    state["selected_result"] = None
+
+    await interactive._interactive_search(FakeAdapter())
+
+    assert rec["calls"]["warn"] == []
+
+
+@pytest.mark.parametrize(
+    "selected",
+    [
+        {"site": "qidian"},  # no book_id
+        {"book_id": "42"},  # no site
+        {"site": "", "book_id": "42"},  # empty site
+        {"site": "qidian", "book_id": ""},  # empty book_id
+    ],
+)
+@pytest.mark.asyncio
+async def test_search_result_missing_identifiers_is_reported(
+    monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any], selected: dict[str, str]
+) -> None:
+    """A malformed selected row must be an error, not a ``KeyError``."""
+    state = rec["state"]
+    state["prompts"] = ["keyword"]
+    state["search_results"] = [{"title": "x"}]
+    state["selected_result"] = selected
+
+    await interactive._interactive_search(FakeAdapter())
+
+    assert rec["calls"]["error"]
+    assert rec["calls"]["download"] == []
+
+
 # --------------------------------------------------------------------------- #
 # _interactive_download
 # --------------------------------------------------------------------------- #
@@ -383,6 +434,25 @@ async def test_download_by_url_reports_unrecognized_url(
 ) -> None:
     rec["state"]["choice"] = "u"
     rec["state"]["prompts"] = ["https://unknown.example/book/1"]
+
+    await interactive._interactive_download(FakeAdapter())
+
+    assert rec["calls"]["error"]
+    assert rec["calls"]["download"] == []
+
+
+@pytest.mark.asyncio
+async def test_download_by_url_reports_resolver_failure(
+    monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any]
+) -> None:
+    """A crashing extractor is reported, never a raw traceback."""
+    rec["state"]["choice"] = "u"
+    rec["state"]["prompts"] = ["https://broken.example/book/1"]
+
+    def _boom(url: str) -> None:
+        raise RuntimeError("bad url")
+
+    monkeypatch.setattr(interactive, "resolve_book_url", _boom)
 
     await interactive._interactive_download(FakeAdapter())
 
@@ -552,6 +622,63 @@ async def test_do_download_generic_error_is_reported(
     assert rec["calls"]["export"] == []
 
 
+@pytest.mark.asyncio
+async def test_do_download_registry_failure_is_reported(
+    monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any]
+) -> None:
+    """``get_client`` runs before the download; it must be guarded too."""
+
+    def _boom(site: str, config: Any = None) -> None:
+        raise ValueError("Unsupported site: nope")
+
+    monkeypatch.setattr(interactive.registrar, "get_client", _boom)
+
+    await _REAL_DO_DOWNLOAD(FakeAdapter(), "nope", BookConfig(book_id="1"))
+
+    assert rec["calls"]["warn"]
+    assert rec["calls"]["error"] == []
+
+
+@pytest.mark.asyncio
+async def test_do_download_processing_failure_is_reported(
+    monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any]
+) -> None:
+    """A crashing processor must not escape the wizard as a traceback."""
+
+    class FailingProcessClient(FakeClient):
+        def process_book(self, book: BookConfig, *, processors: Any, ui: Any) -> None:
+            raise RuntimeError("bad processor")
+
+    monkeypatch.setattr(
+        interactive.registrar,
+        "get_client",
+        lambda site, config=None: FailingProcessClient(),
+    )
+
+    await _REAL_DO_DOWNLOAD(FakeAdapter(), "qidian", BookConfig(book_id="1"))
+
+    assert rec["calls"]["error"]
+    assert rec["calls"]["export"] == []
+
+
+@pytest.mark.asyncio
+async def test_do_download_does_not_swallow_ctrl_c(
+    monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any]
+) -> None:
+    """The broad handlers must not turn Ctrl+C into a download error."""
+
+    class InterruptClient(FakeClient):
+        async def download_book(self, book: BookConfig, *, ui: Any) -> None:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        interactive.registrar, "get_client", lambda site, config=None: InterruptClient()
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        await _REAL_DO_DOWNLOAD(FakeAdapter(), "qidian", BookConfig(book_id="1"))
+
+
 # --------------------------------------------------------------------------- #
 # _interactive_export
 # --------------------------------------------------------------------------- #
@@ -641,6 +768,44 @@ def test_export_without_any_output_is_reported(
     _REAL_EXPORT(FakeAdapter(), site="qidian", book=BookConfig(book_id="1"))
 
     assert rec["calls"]["error"]
+
+
+def test_export_reports_client_construction_failure(
+    monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any]
+) -> None:
+    """``get_client`` is part of export; its failure must be reported."""
+
+    def _boom(site: str, config: Any = None) -> None:
+        raise ValueError("Unsupported site: nope")
+
+    monkeypatch.setattr(interactive.registrar, "get_client", _boom)
+
+    _REAL_EXPORT(FakeAdapter(), site="nope", book=BookConfig(book_id="1"))
+
+    assert rec["calls"]["error"]
+    assert rec["calls"]["success"] == []
+
+
+def test_export_non_dict_result_is_a_failure(
+    monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any]
+) -> None:
+    """A third-party client returning ``None`` must not be called success."""
+
+    class NoneClient(FakeClient):
+        def export_book(
+            self, book: BookConfig, *, cfg: Any, formats: Any, ui: Any
+        ) -> Any:
+            self.export_calls.append(book)
+            return None
+
+    monkeypatch.setattr(
+        interactive.registrar, "get_client", lambda site, config=None: NoneClient()
+    )
+
+    _REAL_EXPORT(FakeAdapter(), site="qidian", book=BookConfig(book_id="1"))
+
+    assert rec["calls"]["error"]
+    assert rec["calls"]["success"] == []
 
 
 def test_export_passes_the_configured_client_to_get_client(

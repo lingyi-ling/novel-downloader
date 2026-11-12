@@ -66,9 +66,10 @@ def test_save_cookies_writes_aiohttp_format(
     path = save_cookies("fanqienovel", {"sessionid": "abc", "t": "1"})
 
     assert path == tmp_path / "fanqienovel" / COOKIE_FILENAME
-    assert json.loads(path.read_text(encoding="utf-8")) == [
-        {"name": "sessionid", "value": "abc"},
-        {"name": "t", "value": "1"},
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert [(entry["name"], entry["value"]) for entry in saved] == [
+        ("sessionid", "abc"),
+        ("t", "1"),
     ]
 
 
@@ -98,7 +99,9 @@ def test_run_login_saves_cookies_from_window(
     saved = json.loads(
         (tmp_path / "fanqienovel" / COOKIE_FILENAME).read_text(encoding="utf-8")
     )
-    assert saved == [{"name": "sessionid", "value": "secret"}]
+    assert [(entry["name"], entry["value"]) for entry in saved] == [
+        ("sessionid", "secret")
+    ]
 
 
 def test_login_main_lists_sites(capsys: pytest.CaptureFixture[str]) -> None:

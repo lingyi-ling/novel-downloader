@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import socket
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -50,6 +52,24 @@ def _capture_ui(monkeypatch: pytest.MonkeyPatch, module: Any) -> list[str]:
     for name in ("info", "success", "warn", "error"):
         monkeypatch.setattr(module.ui, name, messages.append)
     return messages
+
+
+def _make_dir_link(link: Path, target: Path) -> None:
+    """Create a directory symlink, or a junction on Windows without privileges."""
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).decode(errors="replace")
+            pytest.skip(f"cannot create junction: {detail}")
+        return
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - platform dependent
+        pytest.skip(f"cannot create directory symlink: {exc}")
 
 
 def _result(
@@ -543,9 +563,11 @@ class _FakeManager:
         self,
         script: dict[str, list[Status]] | None = None,
         errors: dict[str, str] | None = None,
+        add_errors: dict[str, str] | None = None,
     ) -> None:
         self.script = script or {}
         self.errors = errors or {}
+        self.add_errors = add_errors or {}
         self.added: list[tuple[str, str]] = []
         self.cancelled: list[str] = []
         self.close_calls = 0
@@ -555,6 +577,8 @@ class _FakeManager:
 
     async def add_task(self, *, title: str, site: str, book_id: str) -> _FakeTask:
         self.added.append((site, book_id))
+        if book_id in self.add_errors:
+            raise RuntimeError(self.add_errors[book_id])
         self._seq += 1
         task = _FakeTask(task_id=f"task-{self._seq}", site=site, book_id=book_id)
         self._tasks.append(task)
@@ -752,6 +776,113 @@ def test_follow_check_wait_no_changes_skips_manager(
     assert manager.added == []
     assert manager.close_calls == 0
     assert any("No new chapters found." in message for message in messages)
+
+
+def test_follow_check_wait_add_task_failure_is_isolated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A manager refusing one book must not skip the remaining downloads."""
+    _two_books_with_updates(monkeypatch, tmp_path)
+    manager = _FakeManager(
+        script={"2": [Status.RUNNING, Status.COMPLETED]},
+        add_errors={"1": "add boom"},
+    )
+    _patch_manager(monkeypatch, manager)
+    monkeypatch.setattr(follow, "_WAIT_POLL_INTERVAL", 0.0)
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check", "--download", "--wait", "--wait-timeout", "10"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    # Both books were attempted; the failure did not short-circuit the sweep.
+    assert manager.added == [("b520", "1"), ("qidian", "2")]
+    assert manager.close_calls == 1
+
+    joined = "\n".join(messages)
+    assert "Download failed for b520/1:" in joined
+    assert "add boom" in joined
+    assert "Download completed: qidian/2" in joined
+    assert "1 completed, 0 cancelled, 1 failed" in joined
+
+
+def test_follow_check_refuses_a_corrupt_watchlist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A corrupt list must be an error, not an empty successful sweep."""
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    watchlist = tmp_path / "watchlist.json"
+    watchlist.write_text("{not json", encoding="utf-8")
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    assert any("Could not read" in message for message in messages)
+    assert not any("No followed books to check." in message for message in messages)
+    # The unreadable file is left exactly as it was.
+    assert watchlist.read_text(encoding="utf-8") == "{not json"
+
+
+def test_follow_check_refuses_entries_missing_their_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An entry without ``book_id`` would be dropped silently on the next write."""
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    watchlist = tmp_path / "watchlist.json"
+    watchlist.write_text(
+        json.dumps({"version": 1, "books": [{"site": "b520", "title": "No id"}]}),
+        encoding="utf-8",
+    )
+    messages = _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    assert any("Could not read" in message for message in messages)
+    assert json.loads(watchlist.read_text(encoding="utf-8"))["books"] == [
+        {"site": "b520", "title": "No id"}
+    ]
+
+
+def test_follow_check_partial_failure_keeps_the_whole_watchlist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failing book must not make the store drop the other entries."""
+    monkeypatch.setenv("NOVEL_HOME", str(tmp_path))
+    store = WatchlistStore()
+    store.add("b520", "1", title="Book A", last_chapter="Chapter 1")
+    store.add("qidian", "2", title="Book B", last_chapter="Chapter 1")
+
+    monkeypatch.setattr(
+        search_module,
+        "search",
+        _fake_search(
+            {"Book A": [_result("b520", "1", "Book A", "Chapter 2")]},
+            errors={"Book B": RuntimeError("site down")},
+        ),
+    )
+    _capture_ui(monkeypatch, follow)
+    parser = _parser(FollowCheckCmd)
+
+    args = parser.parse_args(["check"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    document = json.loads((tmp_path / "watchlist.json").read_text(encoding="utf-8"))
+    entries = {entry["book_id"]: entry for entry in document["books"]}
+    assert set(entries) == {"1", "2"}
+    assert entries["1"]["last_chapter"] == "Chapter 2"
+    assert entries["2"]["last_chapter"] == "Chapter 1"
 
 
 # ---------------------------------------------------------------------------
@@ -1400,14 +1531,14 @@ def test_storage_clean_failure_exits_nonzero_and_keeps_going(
     monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
     messages = _capture_ui(monkeypatch, storage)
     monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
-    real_rmtree = storage.shutil.rmtree
+    real_remove = storage.remove_path_safely
 
-    def rmtree(path: Any, *args: Any, **kwargs: Any) -> None:
+    def remove(path: Path, **kwargs: Any) -> None:
         if Path(path) == paths["cache"]:
             raise OSError("locked")
-        real_rmtree(path, *args, **kwargs)
+        real_remove(path, **kwargs)
 
-    monkeypatch.setattr(storage.shutil, "rmtree", rmtree)
+    monkeypatch.setattr(storage, "remove_path_safely", remove)
     parser = _parser(StorageCmd)
 
     args = parser.parse_args(["storage", "--clean", "--yes"])
@@ -1420,3 +1551,71 @@ def test_storage_clean_failure_exits_nonzero_and_keeps_going(
     assert any(
         "locked" in message and str(paths["cache"]) in message for message in messages
     )
+
+
+def test_storage_clean_removes_bucket_link_not_its_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A configured bucket that is a junction must not delete its target."""
+    paths = _storage_paths(tmp_path)
+    target = tmp_path / "downloads-target"
+    target.mkdir()
+    (target / "book.epub").write_bytes(b"epub")
+    paths["downloads"].parent.mkdir(parents=True, exist_ok=True)
+    _make_dir_link(paths["downloads"], target)
+
+    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    _capture_ui(monkeypatch, storage)
+    monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
+    parser = _parser(StorageCmd)
+
+    args = parser.parse_args(["storage", "--clean", "--yes"])
+    args.func(args)
+
+    assert not os.path.lexists(paths["downloads"])
+    assert (target / "book.epub").is_file()
+
+
+def test_storage_clean_refuses_to_remove_the_working_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = _storage_paths(tmp_path)
+    for key in ("raw", "cache", "logs"):
+        paths[key].mkdir()
+    paths["downloads"] = Path.cwd()  # a misconfigured output_dir
+
+    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    messages = _capture_ui(monkeypatch, storage)
+    monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
+    parser = _parser(StorageCmd)
+
+    args = parser.parse_args(["storage", "--clean", "--yes"])
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 1
+    assert Path.cwd().is_dir()
+    assert any("protected directory" in message for message in messages)
+
+
+def test_storage_clean_does_not_follow_nested_link(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = _storage_paths(tmp_path)
+    paths["cache"].mkdir()
+    (paths["cache"] / "site").mkdir()
+    target = tmp_path / "nested-target"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep", encoding="utf-8")
+    _make_dir_link(paths["cache"] / "site" / "nested", target)
+
+    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    _capture_ui(monkeypatch, storage)
+    monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
+    parser = _parser(StorageCmd)
+
+    args = parser.parse_args(["storage", "--clean", "--yes"])
+    args.func(args)
+
+    assert not paths["cache"].exists()
+    assert (target / "keep.txt").is_file()
