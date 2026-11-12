@@ -27,16 +27,29 @@ fetch_inaccessible = false         # 是否尝试获取未订阅章节
 
 backend = "aiohttp"                # aiohttp / httpx / curl_cffi
 locale_style = "simplified"        # simplified / traditional
+# 自定义 User-Agent 与附加请求头 (可选)
+# user_agent = "Mozilla/5.0 (compatible; novel-downloader)"
+# headers = { "Accept-Language" = "zh-CN,zh;q=0.9" }
+# 代理 (可选); 需要认证时分别填写用户名/密码, 请勿把真实凭据提交到仓库
+# proxy = "http://127.0.0.1:7890"
+# proxy_user = ""
+# proxy_pass = ""
+# 是否读取系统代理等环境变量
+# trust_env = false
+# 是否校验 TLS 证书; 仅在排查代理问题时才考虑关闭
+# verify_ssl = true
 # 更新检查: auto = 命令结束后静默检查并提示 (每天最多一次)
 #           manual = 只在你运行 novel-cli update 时检查
 #           off = 从不检查
 update_check = "auto"
-login_required = false
+login_required = false             # 全局默认; 站点级 login_required 可覆盖
+# 为 true 时, 处理器表里的未知选项会直接报错 (默认仅告警)
+# strict_config = false
 # 需要借助真实浏览器搜索的站点 (其搜索请求由站点自身 JS 签名, 纯 HTTP 拿不到结果);
 # 使用前先 novel-cli login <site> 建立登录会话; 设为 [] 可禁用
 # browser_assisted_sites = ["fanqienovel"]
-# http2 = true
-# impersonate = "chrome"
+# http2 = true                     # 仅对 httpx 生效
+# impersonate = "chrome"           # 仅对 curl_cffi 生效
 
 # 输出文件格式及相关选项
 [general.output]
@@ -49,6 +62,7 @@ append_timestamp = true            # 在文件名中追加时间戳
 render_missing_chapter = true
 filename_template = "{title}_{author}"
 include_picture = true             # 是否附带书籍图片
+split_mode = "book"                # book / volume / chapter
 
 [general.parser]
 # 解析字体加密 / OCR / 图片章节等高级功能需要安装额外依赖
@@ -57,13 +71,20 @@ include_picture = true             # 是否附带书籍图片
 enable_ocr = false                 # 是否尝试本地解析混淆字体 / 图片章节
 batch_size = 32
 
+use_truncation = true              # 是否截断重复/截断的章节内容 (如起点重复段落)
+cut_mode = "none"                  # 章节内容裁剪模式 (站点相关)
 remove_watermark = false           # 图片章节是否尝试去水印
 
 # 以下为 PaddleOCR 文本识别的可选参数
+# 注释掉 model_name 时由 PaddleOCR 选择 PP-OCRv5_server_rec (CPU 上很慢);
+# 自带配置显式使用 mobile 以降低 CPU 开销。
 model_name = "PP-OCRv5_mobile_rec"
 # model_dir = "/path/to/inference"
 # device = "gpu"                    # "cpu" / "gpu"
+# precision = "fp32"
 # cpu_threads = 10
+# enable_hpi = false
+# input_shape = [3, 32, 320]        # (C, H, W)
 
 [general.debug]
 save_html = false                  # 是否将抓取到的原始 HTML 保留到磁盘

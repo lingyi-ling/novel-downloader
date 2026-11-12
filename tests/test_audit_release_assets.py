@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import stat
 import sys
 import time
 import zipfile
@@ -53,9 +54,13 @@ def _load_script() -> Any:
 audit = _load_script()
 
 
-def _write_zip(path: Path, members: list[tuple[str, bytes]]) -> None:
-    """Write a stored (uncompressed) zip so raw-byte markers stay visible."""
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
+def _write_zip(
+    path: Path,
+    members: list[tuple[str, bytes]],
+    compression: int = zipfile.ZIP_STORED,
+) -> None:
+    """Write a zip; stored by default so raw-byte markers stay visible."""
+    with zipfile.ZipFile(path, "w", compression) as archive:
         for name, data in members:
             archive.writestr(name, data)
 
@@ -241,6 +246,74 @@ def test_other_pem_files_are_still_rejected(tmp_path: Path) -> None:
     )
     result = audit.audit_directory(tmp_path)
     assert "forbidden-file" in _kinds(result)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "bundle/_internal/certifi/cacert.pem",
+        "assets/chaquopy/cacert.pem",
+    ],
+)
+def test_private_key_hidden_in_a_cacert_bundle_is_rejected(
+    tmp_path: Path, member: str
+) -> None:
+    """The basename exemption must not become a private-key smuggling hole."""
+    key = b"-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n"
+    # Deflated: the raw-byte scanner cannot see it, only the content check can.
+    _write_zip(
+        tmp_path / CLI,
+        [(member, key), ("bundle/data.bin", b"x" * 4096)],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    result = audit.audit_directory(tmp_path)
+
+    assert any(
+        problem.kind == "forbidden-file" and "cacert.pem" in problem.detail
+        for problem in result.problems
+    ), _kinds(result)
+
+
+def test_oversized_cacert_bundle_is_not_exempted(tmp_path: Path) -> None:
+    """An exemption that cannot be verified is not granted."""
+    _write_zip(
+        tmp_path / CLI,
+        [
+            (
+                "bundle/_internal/certifi/cacert.pem",
+                b"x" * (audit.PEM_SCAN_LIMIT + 1),
+            ),
+            ("bundle/data.bin", b"x" * 4096),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    result = audit.audit_directory(tmp_path)
+
+    assert "forbidden-file" in _kinds(result)
+
+
+def test_symbolic_link_member_is_rejected(tmp_path: Path) -> None:
+    info = zipfile.ZipInfo("bundle/link")
+    info.create_system = 3  # Unix, where the mode bits are meaningful
+    info.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(tmp_path / CLI, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(info, "../outside")
+        archive.writestr("bundle/data.bin", b"x" * 4096)
+
+    result = audit.audit_directory(tmp_path)
+
+    assert "unsafe-member-path" in _kinds(result)
+
+
+def test_secret_marker_detail_does_not_repeat_the_asset_name(tmp_path: Path) -> None:
+    (tmp_path / SETUP).write_bytes(b"\x00" * 2048 + b"ghp_" + b"Z" * 24)
+
+    result = audit.audit_directory(tmp_path)
+
+    marker = next(p for p in result.problems if p.kind == "secret-marker")
+    assert marker.detail == "ghp_"
 
 
 def test_raw_secret_marker_is_reported_without_echoing_it(

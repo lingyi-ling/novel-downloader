@@ -28,7 +28,11 @@ env:
   PYTHON_VERSION: "3.12"
 
 concurrency:
-  group: release-${{ github.ref }}
+  # A constant group serialises every publish.  Scoping it to `github.ref`
+  # let two dispatches from different branches run at once and race on the
+  # same release assets.  Never cancel: stopping mid-upload leaves a
+  # half-populated draft.
+  group: release
   cancel-in-progress: false
 
 jobs:

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import stat
 import sys
 import zipfile
 from collections.abc import Sequence
@@ -94,8 +95,13 @@ FORBIDDEN_FILE_SUFFIXES = (
 
 #: certifi and Chaquopy ship public CA bundles named ``cacert.pem`` inside every
 #: PyInstaller/Android payload; that is public data, not a credential.  Any
-#: other ``*.pem`` file is still rejected.
+#: other ``*.pem`` file is still rejected.  The exemption is verified against
+#: the bundle's bytes: naming a private key ``cacert.pem`` does not hide it.
 SAFE_PEM_BASENAMES = frozenset({"cacert.pem"})
+#: A real CA bundle is a few hundred KiB.  Anything larger cannot be verified
+#: cheaply, so it is not granted the exemption (fail closed).
+PEM_SCAN_LIMIT = 4 * 1024 * 1024
+_PRIVATE_KEY_MARKERS = (b"PRIVATE KEY",)
 
 SECRET_MARKERS = (
     b"BEGIN OPENSSH PRIVATE KEY",
@@ -229,7 +235,9 @@ def _unsafe_member_reason(value: str) -> str | None:
     return None
 
 
-def _forbidden_member_problems(value: str, asset: str) -> list[Problem]:
+def _forbidden_member_problems(
+    value: str, asset: str, *, safe_pem: bool = False
+) -> list[Problem]:
     problems: list[Problem] = []
     reason = _unsafe_member_reason(value)
     if reason is not None:
@@ -255,12 +263,48 @@ def _forbidden_member_problems(value: str, asset: str) -> list[Problem]:
     forbidden = forbidden or basename.startswith(".env.")
     forbidden = forbidden or basename.endswith(FORBIDDEN_FILE_SUFFIXES)
     if forbidden:
-        if basename in SAFE_PEM_BASENAMES:
+        if safe_pem and basename in SAFE_PEM_BASENAMES:
             return problems
         problems.append(
             Problem(asset, KIND_FORBIDDEN_FILE, f"{value!r}: credential/debug file")
         )
     return problems
+
+
+def _pem_contains_private_key(
+    archive: zipfile.ZipFile, member: zipfile.ZipInfo
+) -> bool:
+    """Whether an exempted ``cacert.pem`` actually hides a private key.
+
+    Unreadable or oversized members are treated as unsafe so the exemption
+    can never become a way to smuggle a key past the audit.
+    """
+    if member.file_size > PEM_SCAN_LIMIT:
+        return True
+    tail = b""
+    consumed = 0
+    try:
+        with archive.open(member) as handle:
+            while chunk := handle.read(RAW_CHUNK_SIZE):
+                consumed += len(chunk)
+                if consumed > PEM_SCAN_LIMIT:
+                    # A member whose declared size lies must not stream forever.
+                    return True
+                sample = tail + chunk
+                if any(marker in sample for marker in _PRIVATE_KEY_MARKERS):
+                    return True
+                tail = sample[-RAW_OVERLAP:]
+    except (OSError, RuntimeError, EOFError, ValueError, zipfile.BadZipFile):
+        return True
+    return False
+
+
+def _safe_pem_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> bool:
+    """Whether *member* earns the public-CA-bundle exemption."""
+    basename = PurePosixPath(member.filename).name.lower()
+    if basename not in SAFE_PEM_BASENAMES:
+        return False
+    return not _pem_contains_private_key(archive, member)
 
 
 def _scan_archive(path: Path, asset: str) -> tuple[list[Problem], int]:
@@ -284,7 +328,23 @@ def _scan_archive(path: Path, asset: str) -> tuple[list[Problem], int]:
                     python_files += 1
                 # ``ZipInfo.filename`` normalizes "\\" to "/", which would hide
                 # exactly the unsafe member names this audit must catch.
-                problems.extend(_forbidden_member_problems(member.orig_filename, asset))
+                problems.extend(
+                    _forbidden_member_problems(
+                        member.orig_filename,
+                        asset,
+                        safe_pem=_safe_pem_member(archive, member),
+                    )
+                )
+                if stat.S_ISLNK(member.external_attr >> 16):
+                    # Symlinks in a release archive point somewhere else on
+                    # the installing machine; nothing legitimate needs one.
+                    problems.append(
+                        Problem(
+                            asset,
+                            KIND_UNSAFE_MEMBER,
+                            f"{member.orig_filename!r}: symbolic link member",
+                        )
+                    )
     except (
         OSError,
         RuntimeError,
@@ -318,14 +378,10 @@ def _scan_raw_bytes(path: Path, asset: str) -> list[Problem]:
                     if label in seen or marker not in sample:
                         continue
                     seen.add(label)
-                    problems.append(
-                        Problem(asset, KIND_SECRET_MARKER, f"{asset}: {label}")
-                    )
+                    problems.append(Problem(asset, KIND_SECRET_MARKER, label))
                 if TOKEN_LABEL not in seen and TOKEN_PATTERN.search(sample):
                     seen.add(TOKEN_LABEL)
-                    problems.append(
-                        Problem(asset, KIND_SECRET_MARKER, f"{asset}: {TOKEN_LABEL}")
-                    )
+                    problems.append(Problem(asset, KIND_SECRET_MARKER, TOKEN_LABEL))
                 tail = sample[-RAW_OVERLAP:]
     except OSError as error:
         raise AuditError(f"cannot read {asset}: {error}") from error

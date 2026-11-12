@@ -385,6 +385,8 @@ def validate_sites(
     search_ids: set[str],
     searcher_ids: set[str],
     priorities: dict[str, int],
+    active_adapters: set[str],
+    archived_adapters: set[str],
 ) -> list[str]:
     """Cross-check the TOML catalogue against the source code facts."""
     errors: list[str] = []
@@ -402,6 +404,47 @@ def validate_sites(
             errors.append(
                 f"{name} contains ids missing from TOML: {', '.join(missing)}"
             )
+
+    # A new site package (or a deleted one) must not drift away from the
+    # catalogue: otherwise a registry site silently gets no documentation
+    # page, and ``--check`` would still compare the docs against a stale TOML.
+    for label, adapters in (
+        ("active", active_adapters),
+        ("archived", archived_adapters),
+    ):
+        undocumented = sorted(adapters - site_ids)
+        if undocumented:
+            errors.append(
+                f"{label} site adapters missing from TOML: " + ", ".join(undocumented)
+            )
+    missing_adapters = sorted(site_ids - active_adapters - archived_adapters)
+    if missing_adapters:
+        errors.append(
+            "TOML entries without a plugin directory: " + ", ".join(missing_adapters)
+        )
+    unregistered_active = sorted(active_adapters - download_ids)
+    if unregistered_active:
+        errors.append(
+            "active site adapters missing from DOWNLOAD_SUPPORT_SITES: "
+            + ", ".join(unregistered_active)
+        )
+
+    status_by_id = {site["id"]: site.get("site_status") for site in sites}
+    misplaced_active = sorted(
+        key for key in active_adapters if status_by_id.get(key) == "archived"
+    )
+    if misplaced_active:
+        errors.append(
+            "sites/ adapters marked archived in TOML: " + ", ".join(misplaced_active)
+        )
+    misplaced_archived = sorted(
+        key for key in archived_adapters if status_by_id.get(key) != "archived"
+    )
+    if misplaced_archived:
+        errors.append(
+            "archived/ adapters not marked archived in TOML: "
+            + ", ".join(misplaced_archived)
+        )
 
     missing_searchers = sorted(search_ids - searcher_ids)
     if missing_searchers:
@@ -729,7 +772,15 @@ def main() -> None:
     active_adapters, archived_adapters = load_adapter_ids(args.plugins)
     sites = load_site_configs(args.config)
 
-    errors = validate_sites(sites, set(download), set(search), searcher_ids, priorities)
+    errors = validate_sites(
+        sites,
+        set(download),
+        set(search),
+        searcher_ids,
+        priorities,
+        active_adapters,
+        archived_adapters,
+    )
     if errors:
         for error in errors:
             print(f"[error] {error}")

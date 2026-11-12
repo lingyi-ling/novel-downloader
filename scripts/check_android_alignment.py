@@ -55,9 +55,16 @@ MMAPPED_PREFIX = "lib/"
 _ELF_MAGIC = b"\x7fELF"
 _PT_LOAD = 1
 _ELFCLASS64 = 2
+_ELFDATA2LSB = 1
+_MAX_PHDR_TABLE = 4 * 1024 * 1024
 
 #: 64-bit ABIs that can run on a 16 KB page-size device.
 _64_BIT_ABIS = frozenset({"arm64-v8a", "x86_64"})
+
+#: 32-bit ABIs: their processes always run with 4 KB pages, so neither the
+#: zip offset nor ``p_align`` is held to the 16 KB rule.  ``armeabi`` is the
+#: legacy NDK name and must not fall through to the 64-bit rule.
+_32_BIT_ABIS = frozenset({"armeabi", "armeabi-v7a", "x86"})
 
 
 @dataclass(frozen=True)
@@ -70,6 +77,9 @@ class LibReport:
     zip_offset: int
     zip_aligned: bool
     elf_align: int | None
+    #: Every ``PT_LOAD`` alignment, or ``None`` when the ELF is unreadable.
+    #: Not part of the JSON contract; used to validate segments individually.
+    elf_aligns: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -86,34 +96,111 @@ class AlignmentReport:
         return not self.errors
 
 
-def elf_max_p_align(data: bytes) -> int | None:
-    """
-    Return the largest ``p_align`` of the ``PT_LOAD`` segments in *data*.
-
-    ``None`` means the bytes are not a 64-bit ELF file -- which is not an
-    error on its own (a 32-bit library cannot run on a 16 KB device anyway,
-    but it should be reported rather than silently accepted).
-    """
+def _elf_header_fields(data: bytes) -> tuple[int, int, int] | None:
+    """Return ``(phoff, phentsize, phnum)`` for a usable 64-bit ELF header."""
     if len(data) < 64 or data[:4] != _ELF_MAGIC:
         return None
-    if data[4] != _ELFCLASS64:
+    if data[4] != _ELFCLASS64 or data[5] != _ELFDATA2LSB:
         return None
     (phoff,) = struct.unpack_from("<Q", data, 0x20)
     (phentsize,) = struct.unpack_from("<H", data, 0x36)
     (phnum,) = struct.unpack_from("<H", data, 0x38)
-    if phoff <= 0 or phentsize < 56 or phnum == 0:
+    if phoff < 64 or phentsize < 56 or phnum == 0:
         return None
+    return phoff, phentsize, phnum
+
+
+def _pt_load_alignments(table: bytes, phentsize: int, phnum: int) -> list[int]:
+    """Collect ``p_align`` from every ``PT_LOAD`` entry in a complete table."""
     aligns: list[int] = []
     for index in range(phnum):
-        offset = phoff + index * phentsize
-        if offset + 56 > len(data):
-            break
-        (p_type,) = struct.unpack_from("<I", data, offset)
+        offset = index * phentsize
+        (p_type,) = struct.unpack_from("<I", table, offset)
         if p_type != _PT_LOAD:
             continue
-        (p_align,) = struct.unpack_from("<Q", data, offset + 0x30)
+        (p_align,) = struct.unpack_from("<Q", table, offset + 0x30)
         aligns.append(p_align)
+    return aligns
+
+
+def elf_load_alignments(data: bytes) -> list[int] | None:
+    """
+    Return the ``p_align`` of every ``PT_LOAD`` segment in *data*.
+
+    ``None`` means the bytes are not a readable little-endian 64-bit ELF file
+    (wrong class, truncated program header table, ...).  An empty list means
+    the file is a valid ELF header with no ``PT_LOAD`` segment at all.
+    """
+    fields = _elf_header_fields(data[:64])
+    if fields is None:
+        return None
+    phoff, phentsize, phnum = fields
+    end = phoff + phnum * phentsize
+    if end > len(data):
+        return None
+    return _pt_load_alignments(data[phoff:end], phentsize, phnum)
+
+
+def elf_max_p_align(data: bytes) -> int | None:
+    """
+    Return the largest ``PT_LOAD`` ``p_align``, or ``None`` when unreadable.
+
+    Kept for callers that only want a summary; the gate itself must look at
+    :func:`elf_load_alignments` because the *smallest* segment decides whether
+    the library can be mapped with 16 KB pages.
+    """
+    aligns = elf_load_alignments(data)
     return max(aligns) if aligns else None
+
+
+def elf_min_p_align(data: bytes) -> int | None:
+    """Return the smallest ``PT_LOAD`` ``p_align``, or ``None`` when unreadable."""
+    aligns = elf_load_alignments(data)
+    return min(aligns) if aligns else None
+
+
+def _read_exact(handle: Any, count: int) -> bytes | None:
+    """Read exactly *count* bytes, or return ``None`` at a short read."""
+    chunks: list[bytes] = []
+    remaining = count
+    while remaining > 0:
+        chunk = handle.read(remaining)
+        if not chunk:
+            return None
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _stream_load_alignments(handle: Any, file_size: int) -> list[int] | None:
+    """
+    Parse an ELF from an open member without loading the whole library.
+
+    Only the ELF header and the program header table are read, so a stored
+    zip entry that claims an enormous size cannot exhaust memory.
+    """
+    header = _read_exact(handle, 64)
+    if header is None:
+        return None
+    fields = _elf_header_fields(header)
+    if fields is None:
+        return None
+    phoff, phentsize, phnum = fields
+    table_size = phentsize * phnum
+    if table_size > _MAX_PHDR_TABLE:
+        return None
+    if phoff > file_size or table_size > file_size - phoff:
+        return None
+    remaining = phoff - 64
+    while remaining > 0:
+        chunk = handle.read(min(remaining, 64 * 1024))
+        if not chunk:
+            return None
+        remaining -= len(chunk)
+    table = _read_exact(handle, table_size)
+    if table is None:
+        return None
+    return _pt_load_alignments(table, phentsize, phnum)
 
 
 def _data_offset(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> int:
@@ -122,23 +209,30 @@ def _data_offset(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> int:
 
     ``ZipInfo.extra`` comes from the central directory; the local header
     carries its own (possibly different) extra field, so the payload offset
-    has to be read from the local header itself.
+    has to be read from the local header itself.  A header that is truncated
+    or does not carry the local-file magic means the payload offset cannot be
+    trusted, which makes the archive unreadable rather than silently aligned.
     """
     source = archive.fp
     if source is None:  # pragma: no cover - open archives always expose it
-        return info.header_offset
+        raise zipfile.BadZipFile(f"archive has no file object for {info.filename!r}")
+    source.seek(0, 2)
+    archive_size = int(source.tell())
     source.seek(info.header_offset)
     header = source.read(30)
-    if len(header) < 30:
-        return info.header_offset
+    if len(header) < 30 or header[:4] != b"PK\x03\x04":
+        raise zipfile.BadZipFile(f"bad local file header for {info.filename!r}")
     name_len, extra_len = struct.unpack_from("<HH", header, 26)
-    return int(info.header_offset) + 30 + int(name_len) + int(extra_len)
+    offset = int(info.header_offset) + 30 + int(name_len) + int(extra_len)
+    if offset > archive_size or info.compress_size > archive_size - offset:
+        raise zipfile.BadZipFile(f"truncated payload for {info.filename!r}")
+    return offset
 
 
 def _abi_of(name: str) -> str | None:
     """Extract the ABI component from a library path, if it has one."""
     parts = name.split("/")
-    for candidate in _64_BIT_ABIS | {"armeabi-v7a", "x86"}:
+    for candidate in _64_BIT_ABIS | _32_BIT_ABIS:
         if candidate in parts:
             return candidate
     return None
@@ -148,7 +242,11 @@ def check_apk(path: Path) -> AlignmentReport:
     """
     Check both zip and ELF alignment for every native library in *path*.
 
-    :raises OSError: when the APK cannot be read as a zip archive.
+    :raises OSError: when the APK cannot be read from disk.
+    :raises zipfile.BadZipFile: when the archive or one of its local headers
+        is malformed.
+    :raises RuntimeError: when a member is encrypted or uses an unsupported
+        compression method.
     """
     report = AlignmentReport(apk=path)
     with zipfile.ZipFile(path) as archive:
@@ -163,6 +261,10 @@ def check_apk(path: Path) -> AlignmentReport:
             # offset inside the archive does not matter.
             needs_alignment = mmapped and info.compress_type == zipfile.ZIP_STORED
             zip_aligned = offset % REQUIRED_ALIGNMENT == 0 if needs_alignment else True
+            # ``archive.open(info)`` reads *this* member even when duplicate
+            # names exist; reading by name would resolve to the last one.
+            with archive.open(info) as handle:
+                aligns = _stream_load_alignments(handle, info.file_size)
             report.libs.append(
                 LibReport(
                     name=info.filename,
@@ -170,7 +272,8 @@ def check_apk(path: Path) -> AlignmentReport:
                     mmapped=mmapped,
                     zip_offset=offset,
                     zip_aligned=zip_aligned,
-                    elf_align=elf_max_p_align(archive.read(info.filename)),
+                    elf_align=min(aligns) if aligns else None,
+                    elf_aligns=None if aligns is None else tuple(aligns),
                 )
             )
 
@@ -188,15 +291,22 @@ def check_apk(path: Path) -> AlignmentReport:
         # processes always run with 4 KB pages.
         if lib.abi is not None and lib.abi not in _64_BIT_ABIS:
             continue
-        if lib.elf_align is None:
+        if lib.elf_aligns is None:
             report.errors.append(
-                f"{lib.name}: not a 64-bit ELF library; cannot run on a "
-                "16 KB page-size device"
+                f"{lib.name}: not a readable 64-bit ELF library; cannot run on "
+                "a 16 KB page-size device"
             )
-        elif lib.elf_align < REQUIRED_ALIGNMENT:
+        elif not lib.elf_aligns:
             report.errors.append(
-                f"{lib.name}: PT_LOAD p_align is {lib.elf_align}, needs at "
-                f"least {REQUIRED_ALIGNMENT}; rebuild with "
+                f"{lib.name}: ELF library has no PT_LOAD segment; it cannot be "
+                "mapped by the dynamic linker"
+            )
+        elif min(lib.elf_aligns) < REQUIRED_ALIGNMENT:
+            # Every PT_LOAD segment must be page-size independent; a single
+            # 4 KB segment prevents the whole library from being mmapped.
+            report.errors.append(
+                f"{lib.name}: PT_LOAD p_align is {min(lib.elf_aligns)}, needs "
+                f"at least {REQUIRED_ALIGNMENT}; rebuild with "
                 "'-Wl,-z,max-page-size=16384'"
             )
     return report
@@ -237,7 +347,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         report = check_apk(args.apk)
-    except (OSError, zipfile.BadZipFile) as exc:
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        # RuntimeError covers encrypted members and unsupported compression
+        # methods; the archive must be reported, never traced back at the user.
         print(f"cannot read {args.apk}: {exc}", file=sys.stderr)
         return 2
 

@@ -69,6 +69,17 @@ music = [
     "prettytable",
     "wcwidth",
     "prompt_toolkit",
+    # Direct module-level imports of the vendored adapters that nothing else
+    # pulls in; omitting them makes a whole set of platforms fail on first use:
+    #   beautifulsoup4     -> HTML scraping in 9 clients
+    #   cryptography       -> AES/RSA/HKDF in qq/qobuz/netease/soda
+    #   typing-extensions  -> Unpack annotations evaluated at import
+    #   orjson             -> QQ Music JSON (desktop wheel only; Android gates
+    #                         the QQ platform in musicdl.PLATFORM_DEPS)
+    "beautifulsoup4",
+    "cryptography",
+    "typing-extensions",
+    "orjson",
     # 重型平台的可选依赖：缺一个整站就注册不了。
     #   aigpy      -> TIDAL（vendor 模块 import 时就引用）
     #   ytmusicapi -> YouTube Music（搜索走它，不需要 Node）
@@ -98,6 +109,17 @@ music-desktop = [
     "prettytable",
     "wcwidth",
     "prompt_toolkit",
+    # Direct module-level imports of the vendored adapters that nothing else
+    # pulls in; omitting them makes a whole set of platforms fail on first use:
+    #   beautifulsoup4     -> HTML scraping in 9 clients
+    #   cryptography       -> AES/RSA/HKDF in qq/qobuz/netease/soda
+    #   typing-extensions  -> Unpack annotations evaluated at import
+    #   orjson             -> QQ Music JSON (desktop wheel only; Android gates
+    #                         the QQ platform in musicdl.PLATFORM_DEPS)
+    "beautifulsoup4",
+    "cryptography",
+    "typing-extensions",
+    "orjson",
     # 重型平台的可选依赖：缺一个整站就注册不了。
     #   aigpy      -> TIDAL（vendor 模块 import 时就引用）
     #   ytmusicapi -> YouTube Music（搜索走它，不需要 Node）

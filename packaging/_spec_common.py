@@ -11,8 +11,8 @@ are imported by name at runtime, so PyInstaller's static analysis and even
 ``collect_submodules`` cannot see them.  Walking the source tree is the only
 reliable way to produce the hidden imports.  The same applies to the vendored
 musicdl package, whose submodules are imported lazily by platform key and
-which cannot be fully imported at build time (some optional dependencies such
-as ``m3u8`` are intentionally absent).
+which cannot be fully imported at build time (optional extras such as ``av``
+and ``faster_whisper`` are intentionally absent).
 
 The helper is imported from every spec; PyInstaller executes specs with the
 spec directory available via ``SPECPATH``.
@@ -33,16 +33,19 @@ _VERSION_RE = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']', re.MULTILINE
 VENDOR = "lingyi-ling"
 LICENSE_TEXT = "MIT License"
 
+#: Vendored musicdl tree.  Its platform adapters are imported by module name
+#: (``musicdl.py`` builds the path from the selected platform key), so
+#: PyInstaller's entry-point analysis cannot see them.
+MUSIC_VENDOR_RELATIVE = "apps/music/providers/_vendor/musicdl"
+MUSIC_VENDOR_PACKAGE = f"{PACKAGE}.{MUSIC_VENDOR_RELATIVE.replace('/', '.')}"
+
 #: (source-relative directory, importable package name) pairs whose modules
 #: are selected at runtime rather than by a regular ``import`` statement.
 DYNAMIC_TREES: tuple[tuple[str, str], ...] = (
     ("plugins/sites", f"{PACKAGE}.plugins.sites"),
     ("plugins/processors", f"{PACKAGE}.plugins.processors"),
     ("plugins/rule", f"{PACKAGE}.plugins.rule"),
-    (
-        "apps/music/providers/_vendor/musicdl",
-        f"{PACKAGE}.apps.music.providers._vendor.musicdl",
-    ),
+    (MUSIC_VENDOR_RELATIVE, MUSIC_VENDOR_PACKAGE),
 )
 
 #: The optional ``image-utils`` extra (``numpy``, ``Pillow``, ``fontTools``).
@@ -66,9 +69,46 @@ IMAGE_STACK_HIDDEN_IMPORTS: tuple[str, ...] = (
     "fontTools.ttLib.tables._p_o_s_t",
 )
 
+#: Heavy music backends imported at module-load time by the vendored adapters.
+#:
+#: The music stack is separate from the image stack because its failure mode is
+#: different: the vendors import these packages at *module load* time (TIDAL ->
+#: ``aigpy``, YouTube -> ``ytmusicapi``, Apple/SoundCloud -> ``pywidevine`` ->
+#: ``pymp4``/``construct``).  Because the adapters themselves are hidden
+#: imports, PyInstaller can follow those direct imports -- but only while the
+#: adapter modules are actually in the hidden-import list.  Listing the
+#: packages here keeps the promise explicit, and ``scripts/verify_frozen.py``
+#: asserts every one of them (and every vendor module) reaches the built PYZ.
+#: ``Crypto``/``google.protobuf`` are shared with the core (NetEase) and the
+#: generated Widevine protobuf module, and are required by the DRM adapters.
+#: The submodules are listed explicitly as well: ``pywidevine/__init__`` and
+#: ``aigpy/__init__`` import them eagerly, and a partial PYZ (top-level package
+#: only) would register the platform and then fail on the first search.
+MUSIC_STACK_HIDDEN_IMPORTS: tuple[str, ...] = (
+    "aigpy",
+    "aigpy.downloadHelper",
+    "aigpy.modelHelper",
+    "aigpy.stringHelper",
+    "aigpy.tagHelper",
+    "ytmusicapi",
+    "ytmusicapi.ytmusic",
+    "pywidevine",
+    "pywidevine.cdm",
+    "pywidevine.device",
+    "pywidevine.license_protocol_pb2",
+    "pywidevine.pssh",
+    "pymp4",
+    "pymp4.parser",
+    "construct",
+    "mutagen",
+    "google.protobuf",
+    "Crypto",
+)
+
 #: Modules imported dynamically by string (importlib.resources / lazy imports).
 EXTRA_HIDDEN_IMPORTS: tuple[str, ...] = (
     *IMAGE_STACK_HIDDEN_IMPORTS,
+    *MUSIC_STACK_HIDDEN_IMPORTS,
     # ``importlib.resources.files("novel_downloader.locales")``
     f"{PACKAGE}.locales",
     # ``importlib.resources.files("novel_downloader.resources")``
@@ -92,16 +132,6 @@ EXTRA_HIDDEN_IMPORTS: tuple[str, ...] = (
     "prettytable",
     "wcwidth",
     "prompt_toolkit",
-    # 重型音乐平台（TIDAL / YouTube Music / Apple Music / SoundCloud）
-    # 在 vendor 适配器里惰性导入，PyInstaller 无法从入口点发现。
-    "aigpy",
-    "ytmusicapi",
-    "pywidevine",
-    "pymp4",
-    "Unidecode",
-    "yaml",
-    "google.protobuf",
-    "Crypto",
 )
 
 
@@ -226,6 +256,23 @@ def modules_from_tree(package_dir: Path, package_name: str) -> list[str]:
         parts = [part for part in relative.parts if part != "__init__"]
         modules.add(".".join([package_name, *parts]) if parts else package_name)
     return sorted(modules)
+
+
+def music_vendor_modules(src_dir: Path) -> list[str]:
+    """
+    Return every module in the vendored musicdl tree, platform adapters included.
+
+    The list is the frozen counterpart of the registry's platform table: a
+    missing entry means the platform is advertised but cannot be imported at
+    runtime.  Both the spec and ``scripts/verify_frozen.py`` use this helper so
+    the two can never drift apart.
+
+    :param src_dir: Repository ``src/`` directory.
+    """
+    return modules_from_tree(
+        Path(src_dir) / PACKAGE / MUSIC_VENDOR_RELATIVE,
+        MUSIC_VENDOR_PACKAGE,
+    )
 
 
 def _iter_non_python_files(package_dir: Path) -> Iterator[Path]:

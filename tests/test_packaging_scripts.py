@@ -29,6 +29,7 @@ import importlib.util
 import io
 import json
 import re
+import shutil
 import ssl
 import subprocess
 import sys
@@ -1136,6 +1137,35 @@ class TestInstallerStep:
         assert installer is None
         assert error is not None and "status 1" in error
 
+    def test_iscc_receives_the_version_macro(
+        self, build_desktop: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        root = tmp_path
+        (root / "packaging").mkdir()
+        iss = root / "packaging" / "noveldl_installer.iss"
+        iss.write_text("; stub", encoding="utf-8")
+        out = root / "dist" / "NovelDownloader-setup-9.9.9-x64.exe"
+        out.parent.mkdir()
+        out.write_bytes(b"installer")
+        calls: list[tuple[list[str], dict[str, Any]]] = []
+
+        def fake_run(command: Any, **kwargs: Any) -> Any:
+            calls.append((list(command), kwargs))
+            return subprocess.CompletedProcess(args=command, returncode=0)
+
+        monkeypatch.setattr(build_desktop, "_find_iscc", lambda: "ISCC.exe")
+        monkeypatch.setattr(build_desktop, "_app_version", lambda root: "9.9.9")
+        monkeypatch.setattr(
+            build_desktop, "subprocess", types.SimpleNamespace(run=fake_run)
+        )
+
+        installer, error = build_desktop._maybe_build_installer(root)
+        assert error is None
+        assert installer == out
+        command, kwargs = calls[0]
+        assert command == ["ISCC.exe", "/DAppVersion=9.9.9", str(iss)]
+        assert kwargs["cwd"] == root
+
     def test_successful_iscc_returns_the_installer_path(
         self, build_desktop: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -1327,18 +1357,83 @@ class TestWindowsVersionResource:
 # ---------------------------------------------------------------------------
 
 
+def _iss_text() -> str:
+    """The installer script, decoded as UTF-8 (it contains Chinese text)."""
+    return ISS.read_text(encoding="utf-8")
+
+
+def _iss_section(name: str) -> str:
+    """Return the body of ``[name]`` up to the next section header."""
+    text = _iss_text()
+    match = re.search(rf"^\[{re.escape(name)}\]\s*$", text, re.MULTILINE)
+    assert match is not None, f"[{name}] section is missing"
+    rest = text[match.end() :]
+    following = re.search(r"^\[[^\]]+\]\s*$", rest, re.MULTILINE)
+    return rest[: following.start()] if following else rest
+
+
+def _iss_directives(section: str) -> list[str]:
+    """Non-comment, non-blank lines of an ISS section."""
+    return [
+        line.strip()
+        for line in section.splitlines()
+        if line.strip() and not line.lstrip().startswith(";")
+    ]
+
+
+def _iss_defines() -> dict[str, str]:
+    """The ``#define Name "value"`` macros of the installer script."""
+    return dict(re.findall(r'^#define\s+(\w+)\s+"([^"]*)"', _iss_text(), re.MULTILINE))
+
+
 class TestInstallerUpgradeContract:
     def test_appid_is_a_stable_guid(self) -> None:
-        text = ISS.read_text(encoding="utf-8")
+        text = _iss_text()
         match = re.search(r"^AppId=(\{\{[0-9A-Fa-f-]{36}\})", text, re.MULTILINE)
         assert match is not None, "AppId must be a fixed GUID (Inno {{escaping}})"
         # Inno escapes a literal opening brace by doubling it.
         assert match.group(1).count("{") == 2
 
+    def test_privileges_and_directory_stay_per_user(self) -> None:
+        setup = _iss_section("Setup")
+        # No elevation: the payload and the app home are both under
+        # %LOCALAPPDATA%, so an unprivileged account can install and update.
+        assert "PrivilegesRequired=lowest" in setup
+        assert "PrivilegesRequired=admin" not in setup
+        # An overrides directive would reintroduce an elevated install path.
+        assert "PrivilegesRequiredOverridesAllowed" not in setup
+        assert r"DefaultDirName={localappdata}\Programs\NovelDownloader" in setup
+
+    def test_payload_is_x64_only_without_switching_registry_view(self) -> None:
+        setup = _iss_section("Setup")
+        directives = _iss_directives(setup)
+        # The frozen bundle is x64.  On 32-bit Windows the launcher cannot run
+        # at all, so Setup must refuse up front; both ISPP branches are kept so
+        # Inno Setup 6.0-6.2 still compile.
+        architectures = [
+            line.split("=", 1)[1]
+            for line in directives
+            if line.startswith("ArchitecturesAllowed=")
+        ]
+        assert architectures == ["x64compatible", "x64"]
+        # Never enable 64-bit install mode: this product has always used the
+        # 32-bit registry view, and switching would orphan the old uninstall
+        # entry (duplicate Add/Remove Programs entries on upgrade).
+        assert not any(
+            line.startswith("ArchitecturesInstallIn64BitMode=") for line in directives
+        )
+
     def test_close_applications_and_mutex_match_the_desktop_app(self) -> None:
-        text = ISS.read_text(encoding="utf-8")
-        assert "CloseApplications=yes" in text
-        mutex = re.search(r"^AppMutex=(\S+)", text, re.MULTILINE)
+        setup = _iss_section("Setup")
+        assert "CloseApplications=yes" in setup
+        # The frozen payload is exe/dll/pyd; .pyd is not in Inno's default
+        # filter, so an instance with only an extension module mapped could
+        # otherwise survive the close.
+        assert "CloseApplicationsFilter=*.exe,*.dll,*.pyd,*.chm" in setup
+        # Restarting is the [Run] entry's job; see the relaunch test below.
+        assert "RestartApplications=no" in setup
+
+        mutex = re.search(r"^AppMutex=(\S+)", setup, re.MULTILINE)
         assert mutex is not None
 
         webview = (SRC_PACKAGE / "apps" / "desktop" / "webview_app.py").read_text(
@@ -1351,8 +1446,78 @@ class TestInstallerUpgradeContract:
             "close a running instance"
         )
 
+    def test_silent_update_relaunches_the_new_build(self) -> None:
+        # The desktop app's update button promises "Install and restart" and
+        # runs Setup with /SILENT.  Inno's Restart Manager cannot restart this
+        # app (it never calls RegisterApplicationRestart), so the [Run] entry
+        # is the only relaunch mechanism and must not skip silent installs.
+        run = _iss_section("Run")
+        entries = _iss_directives(run)
+        assert entries, "[Run] must keep the relaunch entry"
+        entry = " ".join(entries)
+        assert "skipifsilent" not in entry
+        assert "nowait" in entry and "postinstall" in entry
+        assert r"{app}\{#MyAppExe}" in entry
+
+        webview = (SRC_PACKAGE / "apps" / "desktop" / "webview_app.py").read_text(
+            encoding="utf-8"
+        )
+        args = re.search(r"_INSTALLER_ARGS\s*=\s*\((.*?)\)", webview, re.DOTALL)
+        assert args is not None, "the updater no longer declares its setup args"
+        assert '"/SILENT"' in args.group(1)
+        assert '"/CLOSEAPPLICATIONS"' in args.group(1)
+
+    def test_version_resource_uses_the_packaged_version(self, spec_common: Any) -> None:
+        setup = _iss_section("Setup")
+        for directive in (
+            "VersionInfoVersion",
+            "VersionInfoTextVersion",
+            "VersionInfoProductVersion",
+            "VersionInfoProductTextVersion",
+        ):
+            assert f"{directive}={{#AppVersion}}" in setup, (
+                f"{directive} must track the AppVersion macro so the setup "
+                "executable and the bundle never disagree"
+            )
+        assert "VersionInfoCompany={#MyAppPublisher}" in setup
+        assert (
+            "VersionInfoOriginalFileName=NovelDownloader-setup-{#AppVersion}-x64.exe"
+            in setup
+        )
+        # Company/copyright match the frozen exe's version resource.
+        defines = _iss_defines()
+        assert defines["MyAppPublisher"] == spec_common.VENDOR
+        assert f"VersionInfoCopyright={spec_common.LICENSE_TEXT}" in setup
+
+    def test_app_executable_name_matches_the_desktop_spec(self) -> None:
+        defines = _iss_defines()
+        spec_text = _DESKTOP_SPEC.read_text(encoding="utf-8")
+        match = re.search(r'^APP_NAME = "([^"]+)"', spec_text, re.MULTILINE)
+        assert match is not None
+        assert defines["MyAppExe"] == f"{match.group(1)}.exe"
+        # The installer, build_desktop and release.py all look for this name.
+        assert "NovelDownloader-setup-{version}-x64.exe" in (
+            SCRIPTS / "build_desktop.py"
+        ).read_text(encoding="utf-8")
+        assert '"NovelDownloader-setup-{version}-x64.exe"' in (
+            _RELEASE_SCRIPT.read_text(encoding="utf-8")
+        )
+
+    def test_reinstall_and_downgrade_are_deterministic(self) -> None:
+        # Same version, upgrade and downgrade all take the same path: wipe the
+        # payload, then copy the new files unconditionally.  Nothing from the
+        # previous build (including removed plugins) can survive, and no user
+        # data is touched.
+        files = " ".join(_iss_directives(_iss_section("Files")))
+        assert files, "[Files] must ship the bundle"
+        assert "ignoreversion" in files
+        assert "recursesubdirs" in files
+        entries = _iss_directives(_iss_section("InstallDelete"))
+        assert len(entries) == 1
+        assert entries[0].startswith("Type: filesandordirs;")
+
     def test_install_delete_cleans_only_the_payload_tree(self) -> None:
-        text = ISS.read_text(encoding="utf-8")
+        text = _iss_text()
         assert "[InstallDelete]" in text
         section_start = re.search(r"^\[InstallDelete\]", text, re.MULTILINE)
         files_start = re.search(r"^\[Files\]", text, re.MULTILINE)
@@ -1360,14 +1525,100 @@ class TestInstallerUpgradeContract:
         # InstallDelete must run before [Files] copies the new payload.
         assert section_start.start() < files_start.start()
 
-        section = text[section_start.end() : files_start.start()]
-        assert r'Name: "{app}\_internal"' in section
-        assert "Type: filesandordirs" in section
-        assert section.count("Type:") == 1
-        # Never the whole install dir, and never user data.
-        assert 'Name: "{app}"' not in section
-        assert r"localappdata}\novel_downloader" not in section
+        entries = _iss_directives(_iss_section("InstallDelete"))
+        assert len(entries) == 1, "InstallDelete must stay a single, audited entry"
+        entry = entries[0]
+        assert entry.startswith("Type: filesandordirs;")
+        assert r'Name: "{app}\_internal"' in entry
+        # Never the whole install dir, and never a user-data path.
+        assert 'Name: "{app}"' not in entry
+        for needle in ("settings.toml", "downloads", "novel_plugins", "localappdata"):
+            assert needle not in entry.lower()
         assert "[UninstallDelete]" not in text
+
+    def test_install_delete_matches_pyinstallers_contents_directory(self) -> None:
+        # The installer hard-codes the payload directory; the spec pins the
+        # same name.  If either side drifts, upgrades silently keep stale
+        # plugins again.
+        spec_text = _DESKTOP_SPEC.read_text(encoding="utf-8")
+        match = re.search(r'contents_directory="([^"]+)"', spec_text)
+        assert match is not None, "novel_desktop.spec must pin contents_directory"
+        contents = match.group(1)
+        assert contents == "_internal"
+
+        section = _iss_section("InstallDelete")
+        entries = _iss_directives(section)
+        assert len(entries) == 1
+        assert ('Name: "{app}\\' + contents + '"') in entries[0]
+
+        desktop_src = (SCRIPTS / "build_desktop.py").read_text(encoding="utf-8")
+        assert f'internal = dist_dir / "{contents}"' in desktop_src
+
+    def test_iss_is_utf8_and_keeps_the_chinese_brand(self) -> None:
+        # Inno Setup 6 is Unicode-only, but a GBK-encoded script would still
+        # corrupt the product name in Add/Remove Programs and shortcuts.
+        raw = ISS.read_bytes()
+        assert raw.decode("utf-8")  # must not raise
+        assert "书音 BookTone" in raw.decode("utf-8")
+
+    def test_setup_icon_exists(self) -> None:
+        match = re.search(r"^SetupIconFile=(.+)$", _iss_text(), re.MULTILINE)
+        assert match is not None, "SetupIconFile is missing"
+        parts = PureWindowsPath(match.group(1).strip()).parts
+        icon = PACKAGING.joinpath(*parts).resolve()
+        assert icon.is_file(), f"SetupIconFile points at a missing asset: {icon}"
+
+
+class TestInstallerCompiles:
+    """Compile the real script when ISCC is available (never install it)."""
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="ISCC is Windows-only")
+    def test_installer_script_compiles(
+        self, build_desktop: Any, tmp_path: Path
+    ) -> None:
+        iscc = build_desktop._find_iscc()
+        if iscc is None:
+            pytest.skip("Inno Setup 6 (ISCC) is not installed")
+
+        # A Chinese directory name exercises the Unicode path handling the
+        # installer must support (usernames with non-ASCII characters land in
+        # %LOCALAPPDATA% the same way).
+        root = tmp_path / "书音 安装 路径"
+        root.mkdir()
+        script_dir = root / "packaging"
+        script_dir.mkdir()
+        shutil.copy2(ISS, script_dir / ISS.name)
+
+        match = re.search(r"^SetupIconFile=(.+)$", _iss_text(), re.MULTILINE)
+        assert match is not None
+        icon_src = PACKAGING.joinpath(
+            *PureWindowsPath(match.group(1).strip()).parts
+        ).resolve()
+        assert icon_src.is_file()
+        icon_dst = root / "src" / "novel_downloader" / "resources" / "icons"
+        icon_dst.mkdir(parents=True)
+        shutil.copy2(icon_src, icon_dst / "app.ico")
+
+        # Tiny stand-in for the PyInstaller onedir bundle: the same shape
+        # (launcher + _internal/) without embedding the real ~500 MB payload.
+        bundle = root / "dist" / "NovelDownloader"
+        (bundle / "_internal" / "novel_downloader").mkdir(parents=True)
+        (bundle / "NovelDownloader.exe").write_bytes(b"MZ stand-in")
+        (bundle / "_internal" / "novel_downloader" / "marker.txt").write_text(
+            "payload", encoding="utf-8"
+        )
+
+        result = subprocess.run(
+            [iscc, "/Q", "/DAppVersion=9.9.9", str(script_dir / ISS.name)],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+        output = root / "dist" / "NovelDownloader-setup-9.9.9-x64.exe"
+        assert output.is_file() and output.stat().st_size > 0
 
 
 # ---------------------------------------------------------------------------
@@ -2537,6 +2788,342 @@ class TestSpecImageStack:
         # Dead submodules may be pruned (see TestSpecSizePruning), but the
         # image-stack packages themselves must never be excluded wholesale.
         assert not {"numpy", "PIL", "fontTools"} & set(spec_common.EXCLUDES)
+
+
+class TestMusicStackPackaging:
+    """Heavy music backends must survive the specs' dynamic-import gap."""
+
+    def test_music_modules_are_hidden_imports(self, spec_common: Any) -> None:
+        for module in spec_common.MUSIC_STACK_HIDDEN_IMPORTS:
+            assert module in spec_common.EXTRA_HIDDEN_IMPORTS
+
+    def test_music_modules_reach_every_spec(self, spec_common: Any) -> None:
+        hidden = set(spec_common.common_hidden_imports(ROOT / "src"))
+        assert set(spec_common.MUSIC_STACK_HIDDEN_IMPORTS) <= hidden
+
+    def test_all_specs_wire_collect_common(self) -> None:
+        # ``common_hidden_imports`` only matters if every Analysis gets it.
+        for spec_path in (_CLI_SPEC, _API_SPEC, _DESKTOP_SPEC):
+            text = spec_path.read_text(encoding="utf-8")
+            assert "collect_common(SRC_DIR)" in text, spec_path.name
+            assert "hiddenimports=hiddenimports" in text, spec_path.name
+            assert "datas=datas" in text, spec_path.name
+
+    def test_critical_submodules_are_declared(self, spec_common: Any) -> None:
+        # A top-level package in the PYZ is not enough: the adapters fail on
+        # the first search when these module-load imports are absent.
+        required = {
+            "aigpy.downloadHelper",
+            "aigpy.modelHelper",
+            "aigpy.stringHelper",
+            "aigpy.tagHelper",
+            "ytmusicapi.ytmusic",
+            "pywidevine.cdm",
+            "pywidevine.device",
+            "pywidevine.license_protocol_pb2",
+            "pywidevine.pssh",
+            "pymp4.parser",
+        }
+        assert required <= set(spec_common.MUSIC_STACK_HIDDEN_IMPORTS)
+
+    def test_vendor_tree_is_a_dynamic_tree(self, spec_common: Any) -> None:
+        assert (
+            spec_common.MUSIC_VENDOR_RELATIVE,
+            spec_common.MUSIC_VENDOR_PACKAGE,
+        ) in spec_common.DYNAMIC_TREES
+        tree = SRC_PACKAGE / spec_common.MUSIC_VENDOR_RELATIVE
+        assert tree.is_dir()
+
+    def test_every_vendor_module_reaches_hidden_imports(self, spec_common: Any) -> None:
+        hidden = set(spec_common.common_hidden_imports(ROOT / "src"))
+        vendor = set(spec_common.music_vendor_modules(ROOT / "src"))
+        # Guards a silently empty tree walk (e.g. a moved vendor directory).
+        assert len(vendor) > 50
+        assert vendor <= hidden
+
+    def test_every_platform_adapter_is_hidden_and_on_disk(
+        self, spec_common: Any, verify_frozen: Any
+    ) -> None:
+        names = verify_frozen._music_platform_names(ROOT)
+        assert set(verify_frozen.HEAVY_MUSIC_PLATFORMS) <= set(names)
+        assert len(names) >= 25
+        hidden = set(spec_common.common_hidden_imports(ROOT / "src"))
+        sources = (
+            SRC_PACKAGE / spec_common.MUSIC_VENDOR_RELATIVE / "modules" / "sources"
+        )
+        for name in names:
+            module = f"{spec_common.MUSIC_VENDOR_PACKAGE}.modules.sources.{name}"
+            assert module in hidden
+            assert (sources / f"{name}.py").is_file()
+
+    def test_music_lists_match_verify_frozen(
+        self, spec_common: Any, verify_frozen: Any
+    ) -> None:
+        assert (
+            spec_common.MUSIC_STACK_HIDDEN_IMPORTS == verify_frozen.MUSIC_STACK_MODULES
+        )
+        assert spec_common.MUSIC_VENDOR_PACKAGE == verify_frozen.MUSIC_VENDOR_PACKAGE
+        assert spec_common.MUSIC_VENDOR_RELATIVE == verify_frozen.MUSIC_VENDOR_RELATIVE
+        assert (
+            verify_frozen._expected_music_modules(ROOT)
+            == spec_common.MUSIC_STACK_HIDDEN_IMPORTS
+        )
+        assert set(verify_frozen._expected_music_vendor_modules(ROOT)) == set(
+            spec_common.music_vendor_modules(ROOT / "src")
+        )
+
+    def test_vendor_data_and_plugin_sources_are_collected(
+        self, spec_common: Any
+    ) -> None:
+        datas = spec_common.project_datas(ROOT / "src")
+        sources = {Path(src).resolve() for src, _dest in datas}
+
+        source_txt = (
+            SRC_PACKAGE / spec_common.MUSIC_VENDOR_RELATIVE / "SOURCE.txt"
+        ).resolve()
+        assert source_txt in sources
+
+        site_sources = [
+            path
+            for path in sources
+            if path.suffix == ".py"
+            and path.parent.parent.name == "sites"
+            and path.parent.parent.parent.name == "plugins"
+        ]
+        assert len(site_sources) > 50
+
+        rules = [
+            path
+            for path in sources
+            if path.suffix == ".json" and path.parent.name == "builtin"
+        ]
+        assert rules
+
+    def test_music_check_reports_missing_runtime_modules(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        internal = tmp_path / "dist" / "novel-cli" / "_internal"
+        source = internal / verify_frozen.MUSIC_VENDOR_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text("source", encoding="utf-8")
+        vendor = set(verify_frozen._expected_music_vendor_modules(ROOT))
+        monkeypatch.setattr(verify_frozen, "_pyz_modules", lambda work: vendor)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_music_payload(
+            report, ROOT, internal.parent, tmp_path / "work"
+        )
+
+        assert not report.ok()
+        joined = " ".join(report.problems)
+        assert "missing music runtime modules" in joined
+        assert "aigpy" in joined
+        assert "missing music vendor modules" not in joined
+
+    def test_music_check_reports_missing_vendor_modules(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        internal = tmp_path / "dist" / "novel-cli" / "_internal"
+        source = internal / verify_frozen.MUSIC_VENDOR_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text("source", encoding="utf-8")
+        partial = set(verify_frozen.MUSIC_STACK_MODULES) | {
+            f"{verify_frozen.MUSIC_VENDOR_PACKAGE}.modules.sources.apple"
+        }
+        monkeypatch.setattr(verify_frozen, "_pyz_modules", lambda work: partial)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_music_payload(
+            report, ROOT, internal.parent, tmp_path / "work"
+        )
+
+        assert not report.ok()
+        joined = " ".join(report.problems)
+        assert "missing music vendor modules" in joined
+        assert "missing music platform adapters" in joined
+
+    def test_music_check_reports_missing_vendor_data(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        modules = set(verify_frozen.MUSIC_STACK_MODULES) | set(
+            verify_frozen._expected_music_vendor_modules(ROOT)
+        )
+        monkeypatch.setattr(verify_frozen, "_pyz_modules", lambda work: modules)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_music_payload(
+            report, ROOT, tmp_path / "dist" / "novel-cli", tmp_path / "work"
+        )
+
+        assert not report.ok()
+        assert "vendored musicdl data" in " ".join(report.problems)
+
+    def test_music_check_reports_an_unreadable_platform_table(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        internal = tmp_path / "dist" / "novel-cli" / "_internal"
+        source = internal / verify_frozen.MUSIC_VENDOR_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text("source", encoding="utf-8")
+        modules = set(verify_frozen.MUSIC_STACK_MODULES) | set(
+            verify_frozen._expected_music_vendor_modules(ROOT)
+        )
+        monkeypatch.setattr(verify_frozen, "_pyz_modules", lambda work: modules)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        # ``tmp_path`` has no src/ tree: the platform table cannot be parsed.
+        verify_frozen._check_music_payload(
+            report, tmp_path, internal.parent, tmp_path / "work"
+        )
+
+        assert not report.ok()
+        assert "cannot read the music platform table" in " ".join(report.problems)
+
+    def test_music_check_accepts_a_complete_bundle(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        internal = tmp_path / "dist" / "novel-cli" / "_internal"
+        source = internal / verify_frozen.MUSIC_VENDOR_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text("source", encoding="utf-8")
+        modules = set(verify_frozen.MUSIC_STACK_MODULES) | set(
+            verify_frozen._expected_music_vendor_modules(ROOT)
+        )
+        monkeypatch.setattr(verify_frozen, "_pyz_modules", lambda work: modules)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_music_payload(
+            report, ROOT, internal.parent, tmp_path / "work"
+        )
+
+        assert report.ok(), report.problems
+        checks = " ".join(report.checks)
+        assert "music runtime modules" in checks
+        assert "music platform adapters" in checks
+
+    def test_plugin_check_reports_missing_payload(
+        self, verify_frozen: Any, tmp_path: Path
+    ) -> None:
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_plugin_payload(report, tmp_path / "dist" / "novel-cli")
+
+        joined = " ".join(report.problems)
+        assert "missing site plugin sources" in joined
+        assert "missing the rule payload" in joined
+
+    def test_plugin_check_reports_empty_directories(
+        self, verify_frozen: Any, tmp_path: Path
+    ) -> None:
+        internal = tmp_path / "dist" / "novel-cli" / "_internal"
+        (internal / verify_frozen.SITE_PLUGIN_ROOT).mkdir(parents=True)
+        (internal / verify_frozen.BUILTIN_RULE_ROOT).mkdir(parents=True)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_plugin_payload(report, internal.parent)
+
+        joined = " ".join(report.problems)
+        assert "site plugin directory is empty" in joined
+        assert "no builtin rule JSON" in joined
+
+    def test_plugin_check_accepts_collected_sources(
+        self, verify_frozen: Any, tmp_path: Path
+    ) -> None:
+        internal = tmp_path / "dist" / "novel-cli" / "_internal"
+        site = internal / verify_frozen.SITE_PLUGIN_ROOT / "example"
+        site.mkdir(parents=True)
+        (site / "fetcher.py").write_text("", encoding="utf-8")
+        rules = internal / verify_frozen.BUILTIN_RULE_ROOT
+        rules.mkdir(parents=True)
+        (rules / "example.json").write_text("{}", encoding="utf-8")
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_plugin_payload(report, internal.parent)
+
+        assert report.ok(), report.problems
+        checks = " ".join(report.checks)
+        assert "site plugin sources" in checks
+        assert "builtin rule JSON" in checks
+
+    def test_music_probe_accepts_registered_platforms(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        payload = json.dumps({key: key for key in verify_frozen.HEAVY_MUSIC_PLATFORMS})
+
+        def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=payload, stderr=""
+            )
+
+        monkeypatch.setattr(verify_frozen, "_run", fake_run)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_music_platform_probe(report, 5.0)
+
+        assert report.ok(), report.problems
+        assert any("music platforms registered" in c for c in report.checks)
+
+    def test_music_probe_reports_missing_heavy_platform(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        payload = json.dumps(
+            {key: key for key in verify_frozen.HEAVY_MUSIC_PLATFORMS if key != "tidal"}
+        )
+
+        def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=payload, stderr=""
+            )
+
+        monkeypatch.setattr(verify_frozen, "_run", fake_run)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_music_platform_probe(report, 5.0)
+
+        assert not report.ok()
+        assert "missing heavy platforms: tidal" in " ".join(report.problems)
+
+    def test_music_probe_reports_a_failed_process(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="missing mutagen"
+            )
+
+        monkeypatch.setattr(verify_frozen, "_run", fake_run)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_music_platform_probe(report, 5.0)
+
+        assert not report.ok()
+        joined = " ".join(report.problems)
+        assert "exited 1" in joined
+        assert "missing mutagen" in joined
 
 
 # ---------------------------------------------------------------------------

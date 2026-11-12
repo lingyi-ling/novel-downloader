@@ -3,11 +3,18 @@
 
 from __future__ import annotations
 
+import logging
+import re
+import tomllib
 from dataclasses import FrozenInstanceError, asdict, fields
+from pathlib import Path
 
 import pytest
 
-from novel_downloader.infra.paths import app_home
+from novel_downloader.infra.config import load_config, validate_config
+from novel_downloader.infra.config.adapter import ConfigAdapter
+from novel_downloader.infra.config.validation import DEFAULT_DOWNLOAD_RETRY_TIMES
+from novel_downloader.infra.paths import DEFAULT_CONFIG_FILE, app_home
 from novel_downloader.schemas import (
     BookConfig,
     ClientConfig,
@@ -322,3 +329,373 @@ def test_flat_config_asdict_round_trip(cls: type) -> None:
 
     assert set(data) == {field.name for field in fields(cls)}
     assert cls(**data) == cfg
+
+
+# ---------------------------------------------------------------------------
+# Cross-file consistency: schema defaults, bundled sample, and reference docs
+# ---------------------------------------------------------------------------
+
+ROOT = Path(__file__).resolve().parents[2]
+DOCS = ROOT / "docs" / "guide"
+REFERENCE_DOCS = ["settings-reference.md", "settings-reference.en.md"]
+SAMPLE_TEXT = DEFAULT_CONFIG_FILE.read_text(encoding="utf-8")
+SAMPLE = tomllib.loads(SAMPLE_TEXT)
+
+#: Sample values that intentionally differ from the schema defaults.  Both are
+#: explicit user-facing choices of the shipped configuration, not accidental
+#: drift: ``config init`` exports two formats, and PaddleOCR's server model is
+#: unusably slow on CPU.
+SAMPLE_VALUE_OVERRIDES = {
+    ("general.output", "formats"),
+    ("general.parser", "model_name"),
+}
+
+GENERAL_ACTIVE_DEFAULTS = {
+    "raw_data_dir": ClientConfig().raw_data_dir,
+    "output_dir": ClientConfig().output_dir,
+    "request_interval": FetcherConfig().request_interval,
+    "workers": ClientConfig().workers,
+    "max_connections": FetcherConfig().max_connections,
+    "max_rps": FetcherConfig().max_rps,
+    "retry_times": FetcherConfig().retry_times,
+    "download_retry_times": DEFAULT_DOWNLOAD_RETRY_TIMES,
+    "backoff_factor": FetcherConfig().backoff_factor,
+    "timeout": FetcherConfig().timeout,
+    "storage_batch_size": ClientConfig().storage_batch_size,
+    "cache_book_info": ClientConfig().cache_book_info,
+    "cache_chapter": ClientConfig().cache_chapter,
+    "fetch_inaccessible": ClientConfig().fetch_inaccessible,
+    "backend": FetcherConfig().backend,
+    "locale_style": FetcherConfig().locale_style,
+    "update_check": "auto",
+    "login_required": False,
+}
+
+OUTPUT_ACTIVE_DEFAULTS = {
+    "append_timestamp": ExporterConfig().append_timestamp,
+    "render_missing_chapter": ExporterConfig().render_missing_chapter,
+    "filename_template": ExporterConfig().filename_template,
+    "include_picture": ExporterConfig().include_picture,
+    "split_mode": ExporterConfig().split_mode,
+}
+
+PARSER_ACTIVE_DEFAULTS = {
+    "enable_ocr": ParserConfig().enable_ocr,
+    "batch_size": ParserConfig().batch_size,
+    "use_truncation": ParserConfig().use_truncation,
+    "cut_mode": ParserConfig().cut_mode,
+    "remove_watermark": ParserConfig().remove_watermark,
+}
+
+DEBUG_ACTIVE_DEFAULTS = {
+    "save_html": ClientConfig().save_html,
+    "log_dir": "./logs",
+    "log_level": "INFO",
+}
+
+PLUGINS_ACTIVE_DEFAULTS = {
+    "enable_local_plugins": False,
+    "override_builtins": False,
+    "local_plugins_path": "./novel_plugins",
+}
+
+#: Every documented/schema-backed key the bundled example is expected to show,
+#: either as an active assignment or as a commented-out line.
+SAMPLE_REQUIRED_KEYS = {
+    # general
+    "raw_data_dir",
+    "output_dir",
+    "cache_dir",
+    "request_interval",
+    "workers",
+    "max_connections",
+    "max_rps",
+    "retry_times",
+    "download_retry_times",
+    "backoff_factor",
+    "timeout",
+    "storage_batch_size",
+    "cache_book_info",
+    "cache_chapter",
+    "fetch_inaccessible",
+    "login_required",
+    "strict_config",
+    "backend",
+    "locale_style",
+    "update_check",
+    "browser_assisted_sites",
+    "http2",
+    "impersonate",
+    "user_agent",
+    "headers",
+    "proxy",
+    "proxy_user",
+    "proxy_pass",
+    "trust_env",
+    "verify_ssl",
+    # output
+    "formats",
+    "render_missing_chapter",
+    "append_timestamp",
+    "filename_template",
+    "include_picture",
+    "split_mode",
+    # parser / OCR
+    "enable_ocr",
+    "batch_size",
+    "remove_watermark",
+    "use_truncation",
+    "cut_mode",
+    "model_name",
+    "model_dir",
+    "input_shape",
+    "device",
+    "precision",
+    "cpu_threads",
+    "enable_hpi",
+    # debug
+    "save_html",
+    "log_level",
+    "log_dir",
+    # plugins
+    "enable_local_plugins",
+    "override_builtins",
+    "local_plugins_path",
+}
+
+DOCUMENTED_DEFAULTS: dict[str, object] = {
+    "raw_data_dir": ClientConfig().raw_data_dir,
+    "output_dir": ClientConfig().output_dir,
+    "request_interval": FetcherConfig().request_interval,
+    "workers": ClientConfig().workers,
+    "max_connections": FetcherConfig().max_connections,
+    "max_rps": FetcherConfig().max_rps,
+    "retry_times": FetcherConfig().retry_times,
+    "backoff_factor": FetcherConfig().backoff_factor,
+    "timeout": FetcherConfig().timeout,
+    "storage_batch_size": ClientConfig().storage_batch_size,
+    "cache_book_info": ClientConfig().cache_book_info,
+    "cache_chapter": ClientConfig().cache_chapter,
+    "fetch_inaccessible": ClientConfig().fetch_inaccessible,
+    "login_required": False,
+    "strict_config": False,
+    "backend": FetcherConfig().backend,
+    "http2": FetcherConfig().http2,
+    "impersonate": FetcherConfig().impersonate,
+    "browser_assisted_sites": ["fanqienovel"],
+    "download_retry_times": DEFAULT_DOWNLOAD_RETRY_TIMES,
+    "proxy": FetcherConfig().proxy,
+    "proxy_user": FetcherConfig().proxy_user,
+    "proxy_pass": FetcherConfig().proxy_pass,
+    "trust_env": FetcherConfig().trust_env,
+    "verify_ssl": FetcherConfig().verify_ssl,
+    "locale_style": FetcherConfig().locale_style,
+    "update_check": "auto",
+    "user_agent": FetcherConfig().user_agent,
+    "headers": FetcherConfig().headers,
+    "enable_ocr": ParserConfig().enable_ocr,
+    "batch_size": ParserConfig().batch_size,
+    "remove_watermark": ParserConfig().remove_watermark,
+    "model_name": OCRConfig().model_name,
+    "model_dir": OCRConfig().model_dir,
+    "input_shape": OCRConfig().input_shape,
+    "device": OCRConfig().device,
+    "precision": OCRConfig().precision,
+    "cpu_threads": OCRConfig().cpu_threads,
+    "enable_hpi": OCRConfig().enable_hpi,
+    "use_truncation": ParserConfig().use_truncation,
+    "cut_mode": ParserConfig().cut_mode,
+    "formats": [],
+    "render_missing_chapter": ExporterConfig().render_missing_chapter,
+    "append_timestamp": ExporterConfig().append_timestamp,
+    "filename_template": ExporterConfig().filename_template,
+    "include_picture": ExporterConfig().include_picture,
+    "split_mode": ExporterConfig().split_mode,
+    "debug.save_html": ClientConfig().save_html,
+    "debug.log_level": "INFO",
+    "debug.log_dir": "./logs",
+    "enable_local_plugins": False,
+    "override_builtins": False,
+    "local_plugins_path": "./novel_plugins",
+}
+
+
+def _doc_value(value: object) -> str:
+    """Render a default the way the reference tables spell it."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "None"
+    if isinstance(value, str):
+        return f'"{value}"'
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(f'"{item}"' for item in value) + "]"
+    return str(value)
+
+
+def _doc_table_defaults(path: Path) -> dict[str, str]:
+    """Extract ``key -> rendered default`` from markdown reference tables."""
+    rows: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not (line.startswith("|") and line.endswith("|")):
+            continue
+        cells = [cell.strip() for cell in line[1:-1].split("|")]
+        if len(cells) < 4:
+            continue
+        key = cells[0].strip("`").strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", key):
+            continue
+        rows.setdefault(key, cells[2].strip("`").strip())
+    return rows
+
+
+def _sample_mentions(key: str) -> bool:
+    return (
+        re.search(
+            rf"^[ \t]*#?[ \t]*{re.escape(key)}[ \t]*=",
+            SAMPLE_TEXT,
+            flags=re.MULTILINE,
+        )
+        is not None
+    )
+
+
+def _reference_example(path: Path) -> dict:
+    """Parse the TOML example under the ``Example configuration`` heading."""
+    text = path.read_text(encoding="utf-8")
+    heading = re.search(r"^#### (?:示例配置|Example configuration)$", text, re.M)
+    assert heading is not None, f"{path.name}: example heading not found"
+    fence = text.index("```toml", heading.end())
+    body_start = text.index("\n", fence) + 1
+    body_end = text.index("```", body_start)
+    return tomllib.loads(text[body_start:body_end])
+
+
+@pytest.mark.parametrize(
+    ("getter", "expected"),
+    [
+        ("get_fetcher_config", FetcherConfig),
+        ("get_parser_config", ParserConfig),
+        ("get_client_config", ClientConfig),
+        ("get_exporter_config", ExporterConfig),
+    ],
+)
+def test_adapter_defaults_match_dataclass_defaults(getter: str, expected: type) -> None:
+    """An empty config must resolve exactly to the dataclass defaults."""
+
+    resolved = getattr(ConfigAdapter({}), getter)("missing")
+    assert resolved == expected()
+
+
+def test_sample_config_loads_without_warnings(tmp_path: Path, caplog) -> None:
+    """The bundled example must be loadable by the real loader with no warning."""
+
+    target = tmp_path / "settings.toml"
+    target.write_text(SAMPLE_TEXT, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        loaded = load_config(str(target))
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ]
+    assert warnings == []
+    assert loaded == SAMPLE
+    assert [p for p in validate_config(loaded) if p.level != "info"] == []
+
+
+@pytest.mark.parametrize("key", sorted(SAMPLE_REQUIRED_KEYS))
+def test_sample_mentions_supported_key(key: str) -> None:
+    """Every documented key appears in the example (active or commented)."""
+
+    assert _sample_mentions(key), f"{key!r} is missing from settings.sample.toml"
+
+
+@pytest.mark.parametrize(
+    ("section", "defaults"),
+    [
+        ("general", GENERAL_ACTIVE_DEFAULTS),
+        ("general.output", OUTPUT_ACTIVE_DEFAULTS),
+        ("general.parser", PARSER_ACTIVE_DEFAULTS),
+        ("general.debug", DEBUG_ACTIVE_DEFAULTS),
+        ("plugins", PLUGINS_ACTIVE_DEFAULTS),
+    ],
+)
+def test_sample_active_values_match_defaults(
+    section: str, defaults: dict[str, object]
+) -> None:
+    """Active sample values must equal the schema/adapter defaults."""
+
+    node: object = SAMPLE
+    for part in section.split("."):
+        assert isinstance(node, dict) and part in node
+        node = node[part]
+    assert isinstance(node, dict)
+
+    mismatches: dict[str, tuple[object, object]] = {}
+    for key, expected in defaults.items():
+        if (section, key) in SAMPLE_VALUE_OVERRIDES:
+            continue
+        if key not in node:
+            mismatches[key] = ("missing", expected)
+        elif node[key] != expected:
+            mismatches[key] = (node[key], expected)
+    assert not mismatches, f"{section} drifted from defaults: {mismatches}"
+
+
+def test_sample_has_no_deprecated_site_keys() -> None:
+    for site_name, site in SAMPLE["sites"].items():
+        assert "cookie" not in site, f"sites.{site_name}.cookie is deprecated"
+        assert "use_truncation" not in site, (
+            f"sites.{site_name}.use_truncation belongs in the parser table"
+        )
+
+
+@pytest.mark.parametrize("doc_name", REFERENCE_DOCS)
+def test_reference_docs_example_uses_defaults(doc_name: str) -> None:
+    """The copy-pasteable example must not silently deviate from defaults."""
+
+    example = _reference_example(DOCS / doc_name)
+    sections = [
+        (("general",), GENERAL_ACTIVE_DEFAULTS),
+        (("general", "output"), OUTPUT_ACTIVE_DEFAULTS),
+        (("general", "parser"), PARSER_ACTIVE_DEFAULTS),
+    ]
+    for section, defaults in sections:
+        node: object = example
+        for part in section:
+            node = node[part]
+        assert isinstance(node, dict)
+        for key, expected in defaults.items():
+            if (".".join(section), key) in SAMPLE_VALUE_OVERRIDES:
+                continue
+            if key in node:
+                assert node[key] == expected, f"{doc_name}: {section}.{key}"
+
+
+@pytest.mark.parametrize("doc_name", REFERENCE_DOCS)
+def test_reference_docs_defaults_match_schema(doc_name: str) -> None:
+    """Each documented default agrees with the schema/adapter default."""
+
+    table = _doc_table_defaults(DOCS / doc_name)
+    mismatches = {
+        key: (table.get(key), _doc_value(value))
+        for key, value in DOCUMENTED_DEFAULTS.items()
+        if table.get(key) != _doc_value(value)
+    }
+    assert not mismatches, f"{doc_name} drifted: {mismatches}"
+
+    # The cache directory is platform-dependent and documented as a
+    # placeholder rather than an absolute path.
+    cache_default = table.get("cache_dir", "")
+    assert "cache" in cache_default
+
+
+@pytest.mark.parametrize("doc_name", REFERENCE_DOCS)
+def test_reference_docs_cache_dir_is_described_as_user_data(doc_name: str) -> None:
+    table = _doc_table_defaults(DOCS / doc_name)
+    cache_default = table.get("cache_dir", "")
+    assert "用户数据目录" in cache_default or "user data dir" in cache_default

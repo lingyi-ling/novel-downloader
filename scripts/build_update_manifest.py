@@ -87,6 +87,13 @@ _OS_TOKENS: tuple[tuple[str, str], ...] = (
 #: ``novel-downloader-<ver>-android-<stem>.apk`` — the ABI/variant suffix.
 _APK_VARIANT_RE = re.compile(r"-android-([A-Za-z0-9][A-Za-z0-9._-]*)")
 
+#: A repository slug as the client's ``manifest_url``/``release_api_url``
+#: accept it: exactly one ``owner/name`` pair.
+_REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+#: A SHA-256 digest in lower-case hex, optionally with GitHub's prefix.
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
 #: Android ABI spellings as they appear in split APK names.
 _APK_ABIS: tuple[tuple[str, str], ...] = (
     ("arm64-v8a", "arm64-v8a"),
@@ -134,7 +141,8 @@ def _asset_digest(item: dict[str, Any]) -> str | None:
     value = value.strip().lower()
     if value.startswith("sha256:"):
         value = value[len("sha256:") :]
-    return value if len(value) == 64 else None
+    # A length check alone would advertise a digest clients must reject.
+    return value if _SHA256_RE.fullmatch(value) else None
 
 
 def _os_of(name: str, shape: str) -> str | None:
@@ -219,6 +227,18 @@ def build_manifest(
         payload is missing its digest (an unverifiable download must never be
         advertised to clients).
     """
+    version_text = str(version or "").strip()
+    tag_text = str(tag or "").strip()
+    repo_text = str(repo or "").strip()
+    if not version_text or not tag_text:
+        raise ManifestError("a version and a tag are required")
+    if tag_text.lstrip("vV").lower() != version_text.lstrip("vV").lower():
+        # Clients compare the tag against the version and refuse a mismatch;
+        # publishing one would silently disable updates for every client.
+        raise ManifestError(f"tag {tag!r} does not match version {version!r}")
+    if not _REPO_RE.fullmatch(repo_text):
+        raise ManifestError(f"not an owner/name repository: {repo!r}")
+
     raw_assets = release.get("assets")
     if not isinstance(raw_assets, list) or not raw_assets:
         raise ManifestError("release payload has no assets")
@@ -230,6 +250,8 @@ def build_manifest(
         name = item.get("name")
         if not isinstance(name, str) or not name:
             continue
+        if any(char in name for char in ("/", "\\", "\x00")):
+            raise ManifestError(f"{name!r}: not a plain asset filename")
         key = _classify(name)
         if key is None:
             continue
@@ -260,10 +282,10 @@ def build_manifest(
 
     document: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
-        "version": version,
-        "tag": tag,
-        "repo": repo,
-        "generated_from": release.get("html_url") or f"https://github.com/{repo}",
+        "version": version_text,
+        "tag": tag_text,
+        "repo": repo_text,
+        "generated_from": release.get("html_url") or f"https://github.com/{repo_text}",
         "platforms": platforms,
     }
     if notes_url:
