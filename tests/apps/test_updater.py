@@ -12,10 +12,14 @@ test in this module performs real I/O over the network.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import importlib.util
 import io
 import json
 import re
+import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +27,19 @@ from typing import Any
 import pytest
 
 from novel_downloader.apps.common import updater
+
+#: The signing producer lives in ``scripts/`` and is loaded the same way
+#: ``release.py`` loads it, so these tests exercise the real build path.
+_BUILD_SCRIPT = (
+    Path(__file__).resolve().parents[2] / "scripts" / "build_update_manifest.py"
+)
+_spec = importlib.util.spec_from_file_location(
+    "build_update_manifest_for_updater_tests", _BUILD_SCRIPT
+)
+assert _spec and _spec.loader
+build_manifest = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = build_manifest
+_spec.loader.exec_module(build_manifest)
 
 
 def _asset(
@@ -1379,3 +1396,310 @@ def test_failed_transfer_removes_the_partial_file(
         )
 
     assert not (tmp_path / "asset.bin.part").exists()
+
+
+# ---------------------------------------------------------------------------
+# signed manifest, end to end: real key file -> producer -> client verifier
+# ---------------------------------------------------------------------------
+
+_E2E_VERSION = "1.5.0"
+_E2E_TAG = f"v{_E2E_VERSION}"
+_E2E_REPO = "owner/name"
+
+
+def _e2e_release_payload() -> dict[str, Any]:
+    """A release payload shaped exactly like the GitHub API's."""
+    assets = (
+        (f"NovelDownloader-setup-{_E2E_VERSION}-x64.exe", "1", 43259516),
+        (f"NovelDownloader-{_E2E_VERSION}-windows-x64.zip", "2", 56364332),
+        (f"novel-downloader-{_E2E_VERSION}-android.apk", "5", 62714163),
+    )
+    return {
+        "html_url": f"https://github.com/{_E2E_REPO}/releases/tag/{_E2E_TAG}",
+        "assets": [
+            {
+                "name": name,
+                "browser_download_url": (
+                    f"https://github.com/{_E2E_REPO}/releases/download/"
+                    f"{_E2E_TAG}/{name}"
+                ),
+                "digest": f"sha256:{token * 64}",
+                "size": size,
+            }
+            for name, token, size in assets
+        ],
+    }
+
+
+def _public_hex(seed_hex: str) -> str:
+    from Crypto.Signature import eddsa
+
+    private = eddsa.import_private_key(bytes.fromhex(seed_hex))
+    return private.public_key().export_key(format="raw").hex()
+
+
+def _build_signed_manifest(tmp_path: Path) -> tuple[dict[str, Any], str]:
+    """Generate a key and sign a manifest through the CLI; return (doc, key)."""
+    release = tmp_path / "release.json"
+    release.write_text(json.dumps(_e2e_release_payload()), encoding="utf-8")
+    key = tmp_path / "update.key"
+    assert build_manifest.main(["--keygen", str(key)]) == 0
+    out = tmp_path / "latest.json"
+    notes_url = f"https://github.com/{_E2E_REPO}/releases/tag/{_E2E_TAG}"
+    assert (
+        build_manifest.main(
+            [
+                "--release-json",
+                str(release),
+                "--version",
+                _E2E_VERSION,
+                "--tag",
+                _E2E_TAG,
+                "--repo",
+                _E2E_REPO,
+                "--notes-url",
+                notes_url,
+                "--sign-key",
+                str(key),
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    return json.loads(out.read_text(encoding="utf-8")), _public_hex(
+        key.read_text(encoding="ascii").strip()
+    )
+
+
+def _set_top(field: str, value: Any) -> Callable[[dict[str, Any]], None]:
+    def mutate(document: dict[str, Any]) -> None:
+        document[field] = value
+
+    return mutate
+
+
+def _set_platform(field: str, value: Any) -> Callable[[dict[str, Any]], None]:
+    def mutate(document: dict[str, Any]) -> None:
+        document["platforms"]["windows-x64-installer"][field] = value
+
+    return mutate
+
+
+def _delete(field: str) -> Callable[[dict[str, Any]], None]:
+    def mutate(document: dict[str, Any]) -> None:
+        del document[field]
+
+    return mutate
+
+
+def _add_platform(document: dict[str, Any]) -> None:
+    document["platforms"]["linux-x64-portable"] = {
+        "name": "evil.zip",
+        "url": "https://evil.example/evil.zip",
+        "sha256": "0" * 64,
+        "size": 1,
+    }
+
+
+class TestSignedManifestEndToEnd:
+    def test_the_whole_chain_verifies_on_the_client(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        document, public = _build_signed_manifest(tmp_path)
+        monkeypatch.setattr(
+            updater, "TRUSTED_UPDATE_KEYS", {document["key_id"]: public}
+        )
+
+        updater.verify_manifest_signature(document)
+        info = updater.parse_update_manifest(
+            document, current="1.0.0", platform_tag="windows-x64"
+        )
+
+        assert info.latest == _E2E_VERSION
+        assert info.available is True
+        assert info.notes_url == (
+            f"https://github.com/{_E2E_REPO}/releases/tag/{_E2E_TAG}"
+        )
+        assert info.asset is not None
+        assert info.asset.name == f"NovelDownloader-setup-{_E2E_VERSION}-x64.exe"
+        assert info.asset.sha256 == "1" * 64
+        assert info.asset.size == 43259516
+
+    def test_producer_and_client_sign_identical_bytes(self, tmp_path: Path) -> None:
+        """The two implementations must agree byte for byte, including UTF-8."""
+        document, _ = _build_signed_manifest(tmp_path)
+        document["notes_url"] = "https://example.invalid/版本说明"
+
+        assert build_manifest._signing_bytes(document) == (
+            updater._manifest_signing_bytes(document)
+        )
+
+    def test_signature_covers_canonical_json_not_file_layout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        document, public = _build_signed_manifest(tmp_path)
+        monkeypatch.setattr(
+            updater, "TRUSTED_UPDATE_KEYS", {document["key_id"]: public}
+        )
+
+        reordered = {key: document[key] for key in reversed(list(document))}
+        reparsed = json.loads(json.dumps(reordered, indent=2, ensure_ascii=False))
+
+        updater.verify_manifest_signature(reparsed)
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            _set_top("version", "9.9.9"),
+            _set_top("tag", "v9.9.9"),
+            _set_top("repo", "evil/repo"),
+            _set_top("schema", 2),
+            _set_top("generated_from", "https://evil.example/release"),
+            _set_top("notes_url", "https://evil.example/notes"),
+            _set_platform("name", "evil.exe"),
+            _set_platform("url", "https://evil.example/evil.exe"),
+            _set_platform("sha256", "0" * 64),
+            _set_platform("size", 1),
+            _delete("notes_url"),
+            _add_platform,
+        ],
+        ids=[
+            "version",
+            "tag",
+            "repo",
+            "schema",
+            "generated_from",
+            "notes_url",
+            "platform-name",
+            "platform-url",
+            "platform-sha256",
+            "platform-size",
+            "drop-notes-url",
+            "add-platform",
+        ],
+    )
+    def test_any_content_change_is_rejected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mutate: Callable[[dict[str, Any]], None],
+    ) -> None:
+        document, public = _build_signed_manifest(tmp_path)
+        monkeypatch.setattr(
+            updater, "TRUSTED_UPDATE_KEYS", {document["key_id"]: public}
+        )
+        mutate(document)
+
+        with pytest.raises(ValueError, match="does not verify"):
+            updater.verify_manifest_signature(document)
+
+    def test_a_forged_signature_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        document, public = _build_signed_manifest(tmp_path)
+        monkeypatch.setattr(
+            updater, "TRUSTED_UPDATE_KEYS", {document["key_id"]: public}
+        )
+        document["signature"] = base64.b64encode(bytes(64)).decode("ascii")
+
+        with pytest.raises(ValueError, match="does not verify"):
+            updater.verify_manifest_signature(document)
+
+    def test_a_signature_by_another_key_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        document, _ = _build_signed_manifest(tmp_path)
+        _, other_public = build_manifest.generate_keypair()
+        monkeypatch.setattr(
+            updater, "TRUSTED_UPDATE_KEYS", {document["key_id"]: other_public}
+        )
+
+        with pytest.raises(ValueError, match="does not verify"):
+            updater.verify_manifest_signature(document)
+
+    def test_an_unknown_key_id_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        document, public = _build_signed_manifest(tmp_path)
+        monkeypatch.setattr(updater, "TRUSTED_UPDATE_KEYS", {"0" * 16: public})
+
+        with pytest.raises(ValueError, match="unknown key"):
+            updater.verify_manifest_signature(document)
+
+    @pytest.mark.parametrize("field", ["signature", "key_id"])
+    def test_a_missing_signature_field_is_rejected_once_a_key_is_configured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+    ) -> None:
+        document, public = _build_signed_manifest(tmp_path)
+        monkeypatch.setattr(
+            updater, "TRUSTED_UPDATE_KEYS", {document["key_id"]: public}
+        )
+        _delete(field)(document)
+
+        with pytest.raises(ValueError, match="not signed"):
+            updater.verify_manifest_signature(document)
+
+    def test_an_unsigned_manifest_is_still_accepted_while_unconfigured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pre-signing behaviour survives until a key is actually trusted."""
+        monkeypatch.setattr(updater, "TRUSTED_UPDATE_KEYS", {})
+        document, _ = _build_signed_manifest(tmp_path)
+        document.pop("signature")
+        document.pop("key_id")
+
+        info = updater.parse_update_manifest(
+            document, current="1.0.0", platform_tag="windows-x64"
+        )
+
+        assert info.available is True
+
+    def test_check_for_update_uses_a_signed_manifest_without_the_api(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        document, public = _build_signed_manifest(tmp_path)
+        monkeypatch.setattr(
+            updater, "TRUSTED_UPDATE_KEYS", {document["key_id"]: public}
+        )
+        api_hits: list[str] = []
+
+        def opener(url: str, timeout: float) -> Any:
+            if url.endswith("latest.json"):
+                return document
+            api_hits.append(url)
+            return {"tag_name": f"v{_E2E_VERSION}", "assets": []}
+
+        result = updater.check_for_update(
+            "1.0.0", platform_tag="windows-x64", opener=opener
+        )
+
+        assert result.source == "manifest"
+        assert result.error is None
+        assert result.available is True
+        assert api_hits == []
+
+    def test_a_tampered_manifest_never_reaches_the_api(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        document, public = _build_signed_manifest(tmp_path)
+        monkeypatch.setattr(
+            updater, "TRUSTED_UPDATE_KEYS", {document["key_id"]: public}
+        )
+        document["platforms"]["windows-x64-installer"]["sha256"] = "0" * 64
+        api_hits: list[str] = []
+
+        def opener(url: str, timeout: float) -> Any:
+            if url.endswith("latest.json"):
+                return document
+            api_hits.append(url)
+            return {"tag_name": f"v{_E2E_VERSION}", "assets": []}
+
+        result = updater.check_for_update(
+            "1.0.0", platform_tag="windows-x64", opener=opener
+        )
+
+        assert result.error is not None
+        assert result.error.startswith("untrusted-manifest")
+        assert result.available is False
+        assert api_hits == []

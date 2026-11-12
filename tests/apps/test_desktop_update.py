@@ -171,16 +171,24 @@ def test_update_state_exposes_the_documented_keys(
         "latest",
         "available",
         "notes_url",
+        # ``url`` is the legacy ``check_update`` spelling of ``notes_url``;
+        # the page accepts either, so both payloads carry it.
+        "url",
         "asset_name",
         "asset_size",
         "platform",
         "checked_at",
         "error",
+        "pending",
+        "downloaded",
+        "auto_check",
+        "auto_install",
     }
     assert expected <= set(state)
     assert state["available"] is False
     assert state["latest"] == ""
     assert state["error"] is None
+    assert state["url"] == state["notes_url"] == wa._RELEASES_PAGE
     assert not calls, "a throttled cache miss must not hit the network"
 
 
@@ -1340,12 +1348,16 @@ def test_a_found_update_is_downloaded_without_a_click(
     bridge._start_update_check()
     _wait_for_check(bridge)
 
+    # ``download_asset`` returns before the worker records the verified file,
+    # so poll the observable state instead of racing the fake write.
     deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and not downloaded:
+    state = bridge.update_state()
+    while time.monotonic() < deadline and not state["downloaded"]:
         time.sleep(0.05)
+        state = bridge.update_state()
 
     assert downloaded, "the background download never ran"
-    assert bridge.update_state()["downloaded"] is True
+    assert state["downloaded"] is True
 
 
 def test_background_download_can_be_disabled(

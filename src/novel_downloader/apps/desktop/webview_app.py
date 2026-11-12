@@ -24,9 +24,11 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -34,6 +36,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from novel_downloader.apps.common.updater import (
@@ -328,8 +331,10 @@ def _playlist_target(out_path: str | None) -> Path:
     Resolve where an exported playlist is written.
 
     An explicit ``.m3u`` / ``.m3u8`` path is used verbatim, any other value is
-    treated as a directory. Without ``out_path`` the music settings' ``out_dir``
-    is used, falling back to the platform default music directory.
+    treated as a directory (a typo such as ``songs.txt`` must not silently
+    produce a playlist with the wrong extension). Without ``out_path`` the
+    music settings' ``out_dir`` is used, falling back to the platform default
+    music directory.
     """
     name = _default_playlist_name()
     if out_path and str(out_path).strip():
@@ -393,7 +398,87 @@ def _i18n_catalog() -> dict[str, str]:
         "Split folders": t("Split folders"),
         "Skip existing": t("Skip existing"),
         "Platform health": t("Platform health"),
-        "Ctrl+1-5 switch pages": t("Ctrl+1-5 switch pages"),
+        "Ctrl+1-6 switch pages": t("Ctrl+1-6 switch pages"),
+        # settings page
+        "Settings": t("Settings"),
+        "Storage, network, updates and appearance": t(
+            "Storage, network, updates and appearance"
+        ),
+        "Save changes": t("Save changes"),
+        "Storage": t("Storage"),
+        "Output folder": t("Output folder"),
+        "Where downloaded books are saved": t("Where downloaded books are saved"),
+        "Output folder path": t("Output folder path"),
+        "Folder exists and is writable": t("Folder exists and is writable"),
+        "Folder does not exist yet; it will be created when you save": t(
+            "Folder does not exist yet; it will be created when you save"
+        ),
+        "Not a folder": t("Not a folder"),
+        "Folder is not writable": t("Folder is not writable"),
+        "Network": t("Network"),
+        "Proxy": t("Proxy"),
+        "Proxy address, e.g. http://127.0.0.1:7890 (blank = direct)": t(
+            "Proxy address, e.g. http://127.0.0.1:7890 (blank = direct)"
+        ),
+        "Proxy username": t("Proxy username"),
+        "Proxy password": t("Proxy password"),
+        "Saved; leave blank to keep": t("Saved; leave blank to keep"),
+        "Optional": t("Optional"),
+        "Clear saved password": t("Clear saved password"),
+        "Updates": t("Updates"),
+        "Check for updates automatically": t("Check for updates automatically"),
+        "Download updates in the background": t("Download updates in the background"),
+        "Install the downloaded update when quitting": t(
+            "Install the downloaded update when quitting"
+        ),
+        "Check now": t("Check now"),
+        "Appearance": t("Appearance"),
+        "Light": t("Light"),
+        "Dark": t("Dark"),
+        "Language": t("Language"),
+        "Application": t("Application"),
+        "Version": t("Version"),
+        "Config file": t("Config file"),
+        "Keyboard shortcuts": t("Keyboard shortcuts"),
+        "Ctrl+F search, Ctrl+D download selected": t(
+            "Ctrl+F search, Ctrl+D download selected"
+        ),
+        "Settings saved": t("Settings saved"),
+        "Some settings were not saved": t("Some settings were not saved"),
+        "Could not save the settings": t("Could not save the settings"),
+        "Could not write the configuration file: {error}": t(
+            "Could not write the configuration file: {error}"
+        ),
+        "The output folder could not be created: {error}": t(
+            "The output folder could not be created: {error}"
+        ),
+        "The output folder isn't writable. Open Settings to choose another folder.": t(
+            "The output folder isn't writable. Open Settings to choose another folder."
+        ),
+        "Enter a folder path": t("Enter a folder path"),
+        "That path is a file, not a folder": t("That path is a file, not a folder"),
+        "A proxy address cannot contain spaces": t(
+            "A proxy address cannot contain spaces"
+        ),
+        "Use a proxy scheme such as http:// or socks5://": t(
+            "Use a proxy scheme such as http:// or socks5://"
+        ),
+        "Include a host and port, e.g. http://127.0.0.1:7890": t(
+            "Include a host and port, e.g. http://127.0.0.1:7890"
+        ),
+        "Include a port, e.g. http://127.0.0.1:7890": t(
+            "Include a port, e.g. http://127.0.0.1:7890"
+        ),
+        "The proxy port must be a number between 1 and 65535": t(
+            "The proxy port must be a number between 1 and 65535"
+        ),
+        "Unknown language": t("Unknown language"),
+        "Unknown theme": t("Unknown theme"),
+        "Expected on/off": t("Expected on/off"),
+        "Expected a settings object": t("Expected a settings object"),
+        "Invalid JSON in {path}": t("Invalid JSON in {path}"),
+        "Invalid TOML in {path}": t("Invalid TOML in {path}"),
+        "Could not update {key} in {path}": t("Could not update {key} in {path}"),
         # shortcuts
         "Create desktop shortcut": t("Create desktop shortcut"),
         "Shortcuts created on the desktop and Start menu": t(
@@ -463,6 +548,7 @@ def _i18n_catalog() -> dict[str, str]:
         ),
         "Author": t("Author"),
         "Best match": t("Best match"),
+        "Show more": t("Show more"),
         "Open in browser": t("Open in browser"),
         "Queued: {title}": t("Queued: {title}"),
         # download page
@@ -477,6 +563,8 @@ def _i18n_catalog() -> dict[str, str]:
         "No tasks yet": t("No tasks yet"),
         "This task has already finished": t("This task has already finished"),
         "Could not retry this task": t("Could not retry this task"),
+        "Copy error": t("Copy error"),
+        "Could not copy the error": t("Could not copy the error"),
         "Could not open {path}": t("Could not open {path}"),
         "Could not open the download folder: {error}": t(
             "Could not open the download folder: {error}"
@@ -535,9 +623,11 @@ def _i18n_catalog() -> dict[str, str]:
         "No track has a local file path yet — download the tracks first": t(
             "No track has a local file path yet — download the tracks first"
         ),
-        "Could not write the playlist: {error}": t(
-            "Could not write the playlist: {error}"
+        "Could not write the playlist to {path}: {error}": t(
+            "Could not write the playlist to {path}: {error}"
         ),
+        "The playlist already exists: {path}": t("The playlist already exists: {path}"),
+        "Click to overwrite": t("Click to overwrite"),
         "Copy": t("Copy"),
         "Copied": t("Copied"),
         "Could not copy; the path is selected": t(
@@ -553,6 +643,10 @@ def _i18n_catalog() -> dict[str, str]:
         "Follow a search result or add a book manually": t(
             "Follow a search result or add a book manually"
         ),
+        "Checking for updates…": t("Checking for updates…"),
+        "Checking {done}/{total}…": t("Checking {done}/{total}…"),
+        "Checked {n} books · {u} updated": t("Checked {n} books · {u} updated"),
+        "Checked {n} books · No new chapters": t("Checked {n} books · No new chapters"),
         "Checked {n} books, {u} updated, {f} failed": t(
             "Checked {n} books, {u} updated, {f} failed"
         ),
@@ -852,20 +946,369 @@ def _load_prefs() -> dict[str, Any]:
         return {}
 
 
-def _save_prefs(values: dict[str, Any]) -> None:
-    """Merge ``values`` into the preference file (best effort)."""
+#: Serialises read-merge-write cycles.  The update check stamps
+#: ``last_update_check`` from a worker thread while the page writes the theme,
+#: so without this the two writes could drop one another or expose a
+#: truncated file to the other reader.
+_PREFS_LOCK = threading.Lock()
+
+#: Boolean switches the front end is allowed to write through ``save_prefs``.
+_PREF_BOOL_KEYS: tuple[str, ...] = (
+    "auto_check_updates",
+    "auto_download_updates",
+    "auto_install_on_exit",
+)
+
+#: Schemes the shared HTTP stack understands for ``general.proxy``.
+_PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks4a", "socks5", "socks5h"})
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    """
+    Replace ``path`` with ``text`` without exposing a half-written file.
+
+    A truncate-in-place write can be observed by a concurrent reader (or by
+    the next launch after a crash) as an empty preference/config file.  The
+    temporary file lives in the same directory so ``os.replace`` stays atomic
+    on every supported filesystem.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            temp.unlink(missing_ok=True)
+
+
+def _save_prefs(values: dict[str, Any]) -> bool:
+    """
+    Merge ``values`` into the preference file (best effort).
+
+    :return: ``True`` when the file was written.  Callers that show feedback
+        (the settings page) must not tell the user their change was saved
+        when the profile directory is read-only.
+    """
     path = _prefs_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        stored = _load_prefs()
-        stored.update(values)
-        path.write_text(
-            json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        with _PREFS_LOCK:
+            stored = _load_prefs()
+            stored.update(values)
+            _write_text_atomic(path, json.dumps(stored, ensure_ascii=False, indent=2))
     except (OSError, TypeError, ValueError):
         # ``TypeError``/``ValueError`` guard against unserialisable stored
         # content; preferences are best effort and never fatal.
         logger.debug("Could not persist desktop prefs", exc_info=True)
+        return False
+    return True
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    """Strict-ish boolean coercion for values arriving over the JS bridge."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off", ""):
+            return False
+    return None
+
+
+def _prefs_theme(prefs: Mapping[str, Any]) -> str:
+    """Only ``light``/``dark`` are valid; anything else falls back to light."""
+    theme = str(prefs.get("theme") or "light")
+    return theme if theme in ("light", "dark") else "light"
+
+
+# ---------------------------------------------------------------------------
+# output directory / configuration file
+# ---------------------------------------------------------------------------
+
+
+def _configured_value(key: str) -> str:
+    """Read a string from ``[general]`` (``""`` when absent or not a string)."""
+    try:
+        from novel_downloader.infra.config import get_config_value
+
+        value = get_config_value(["general", key], "")
+    except Exception:  # noqa: BLE001 - config may be missing on first run
+        return ""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _configured_output_dir() -> str:
+    """The raw ``general.output_dir`` value (``./downloads`` by default)."""
+    text = _configured_value("output_dir")
+    return text or "./downloads"
+
+
+def _expand_output_dir(raw: str) -> Path:
+    """
+    Expand ``~``/environment variables and anchor relative paths.
+
+    The desktop process chdirs to the application home, so a bare
+    ``downloads`` keeps the historical meaning there; expanding it up front
+    is what stops the settings page from saving an unexpanded ``~/books``
+    that the downloader would later resolve differently.
+    """
+    path = Path(os.path.expandvars(str(raw).strip())).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    try:
+        return path.resolve()
+    except OSError:  # pragma: no cover - broken symlink loops, etc.
+        return path
+
+
+def _directory_status(path: Path) -> dict[str, Any]:
+    """
+    Describe a directory without creating it.
+
+    ``state`` is one of ``ready``, ``missing``, ``not_writable``,
+    ``not_a_dir`` or ``error``.  The settings page renders the matching hint
+    and the first-run boot uses it to warn instead of failing a download
+    later.
+    """
+    state = "ready"
+    error: str | None = None
+    try:
+        if not path.exists():
+            state = "missing"
+        elif not path.is_dir():
+            state = "not_a_dir"
+        elif not os.access(path, os.W_OK):
+            state = "not_writable"
+    except OSError as exc:  # pragma: no cover - exotic filesystem failures
+        state = "error"
+        error = format_error(exc)
+    return {"path": str(path), "state": state, "error": error}
+
+
+def _probe_directory(path: Path) -> str | None:
+    """
+    Create ``path`` if needed and prove it accepts a file.
+
+    :return: A human-readable error, or ``None`` when the directory is usable.
+    """
+    try:
+        if path.exists() and not path.is_dir():
+            return t("That path is a file, not a folder")
+        path.mkdir(parents=True, exist_ok=True)
+        handle, temp_name = tempfile.mkstemp(prefix=".noveldl-write-", dir=str(path))
+        os.close(handle)
+        Path(temp_name).unlink(missing_ok=True)
+    except OSError as exc:
+        return format_error(exc)
+    return None
+
+
+def _settings_config_path() -> Path:
+    """The config file to edit, mirroring ``load_config``'s lookup order."""
+    from novel_downloader.infra.paths import app_home
+
+    home = app_home()
+    for base in (Path.cwd(), home):
+        for name in ("settings.toml", "settings.json"):
+            candidate = base / name
+            if candidate.is_file():
+                return candidate
+    return home / "settings.toml"
+
+
+_TOML_HEADER_RE = re.compile(r"^[ \t]*\[([^\[\]]+)\][ \t]*(?:#.*)?\r?\n?$")
+_TOML_KEY_RE = re.compile(r"^[ \t]*(?:[A-Za-z0-9_.-]+|\"[^\"]+\"|'[^']+')\s*=")
+
+
+def _split_toml_comment(line: str) -> tuple[str, str]:
+    """Split ``key = value  # note`` without tripping over ``#`` in a string."""
+    in_basic = False
+    in_literal = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if in_basic:
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                in_basic = False
+        elif in_literal:
+            if char == "'":
+                in_literal = False
+        elif char == '"':
+            in_basic = True
+        elif char == "'":
+            in_literal = True
+        elif char == "#":
+            return line[:index], line[index:]
+    return line, ""
+
+
+def _toml_value(value: Any) -> str:
+    """Render a scalar as a TOML literal (JSON string escapes are compatible)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _patch_toml_text(text: str, section: str, values: Mapping[str, Any]) -> str:
+    """
+    Set ``section``'s keys in ``text`` while preserving comments and layout.
+
+    Only the touched lines change: rewriting the whole document through a
+    serialiser would drop every explanatory comment in the shipped sample.
+    """
+    lines = text.splitlines(keepends=True)
+    start: int | None = None
+    end = len(lines)
+    for index, line in enumerate(lines):
+        match = _TOML_HEADER_RE.match(line)
+        if match is None:
+            continue
+        name = match.group(1).strip()
+        if start is None:
+            if name == section:
+                start = index
+        elif name != section:
+            end = index
+            break
+
+    if start is None:
+        if text and not text.endswith(("\n", "\r")):
+            text += "\n"
+        block = [f"[{section}]\n"]
+        block.extend(f"{key} = {_toml_value(value)}\n" for key, value in values.items())
+        separator = "\n" if text and not text.endswith("\n\n") else ""
+        return text + separator + "".join(block)
+
+    for key, value in values.items():
+        pattern = re.compile(
+            rf"^[ \t]*(?:{re.escape(key)}|\"{re.escape(key)}\"|'{re.escape(key)}')\s*="
+        )
+        found: int | None = None
+        for index in range(start + 1, end):
+            if pattern.match(lines[index]):
+                found = index
+                break
+        if found is not None:
+            line = lines[found]
+            ending = ""
+            for candidate in ("\r\n", "\n"):
+                if line.endswith(candidate):
+                    ending = candidate
+                    break
+            body = line[: len(line) - len(ending)] if ending else line
+            code, comment = _split_toml_comment(body)
+            indent = code[: len(code) - len(code.lstrip())]
+            suffix = f"  {comment}" if comment else ""
+            lines[found] = f"{indent}{key} = {_toml_value(value)}{suffix}{ending}"
+        else:
+            insert_at = start + 1
+            for index in range(start + 1, end):
+                if _TOML_KEY_RE.match(lines[index]):
+                    insert_at = index + 1
+            lines.insert(insert_at, f"{key} = {_toml_value(value)}\n")
+            end += 1
+    return "".join(lines)
+
+
+def _update_config_section(section: str, values: Mapping[str, Any]) -> None:
+    """
+    Persist ``values`` under ``[section]`` in the active config file.
+
+    Raises :class:`OSError`/:class:`ValueError` when the file cannot be read,
+    parsed or written; the caller reports that instead of claiming success.
+    """
+    if not values:
+        return
+    path = _settings_config_path()
+    if path.suffix.lower() == ".json":
+        data: dict[str, Any] = {}
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise ValueError(t("Invalid JSON in {path}").format(path=path))
+            data = loaded
+        node = data.get(section)
+        if not isinstance(node, dict):
+            node = {}
+            data[section] = node
+        node.update(dict(values))
+        _write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
+        return
+
+    if path.is_file():
+        text = path.read_text(encoding="utf-8")
+    else:
+        from novel_downloader.infra.paths import DEFAULT_CONFIG_FILE
+
+        text = DEFAULT_CONFIG_FILE.read_text(encoding="utf-8")
+    updated = _patch_toml_text(text, section, values)
+
+    import tomllib
+
+    parsed = tomllib.loads(updated)
+    node = parsed.get(section)
+    if not isinstance(node, dict):
+        raise ValueError(t("Invalid TOML in {path}").format(path=path))
+    for key, value in values.items():
+        if node.get(key) != value:
+            raise ValueError(
+                t("Could not update {key} in {path}").format(key=key, path=path)
+            )
+    _write_text_atomic(path, updated)
+
+
+def _normalize_proxy(value: Any) -> tuple[str, str | None]:
+    """
+    Validate a proxy address and add ``http://`` when the scheme is omitted.
+
+    :return: ``(normalised_address, error)``; ``error`` is ``None`` on success
+        and empty input means "no proxy".
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return "", None
+    if any(char.isspace() for char in raw):
+        return raw, t("A proxy address cannot contain spaces")
+    candidate = raw if "://" in raw else "http://" + raw
+    try:
+        parts = urlsplit(candidate)
+        port = parts.port
+    except ValueError:
+        return raw, t("The proxy port must be a number between 1 and 65535")
+    if parts.scheme.lower() not in _PROXY_SCHEMES:
+        return raw, t("Use a proxy scheme such as http:// or socks5://")
+    if not parts.hostname:
+        return raw, t("Include a host and port, e.g. http://127.0.0.1:7890")
+    if port is None:
+        return raw, t("Include a port, e.g. http://127.0.0.1:7890")
+    return candidate, None
+
+
+def _active_language() -> str:
+    """The language ``t()`` is currently using (never raises)."""
+    try:
+        from novel_downloader.infra.i18n import get_language
+
+        return get_language()
+    except Exception:  # noqa: BLE001 - a broken catalog must not hide the UI
+        logger.debug("Could not resolve the active language", exc_info=True)
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -920,6 +1363,20 @@ class ApiBridge:
             "path": None,
         }
         self._exit_callback: Callable[[], None] | None = None
+        # follow-list check: the sweep blocks one bridge thread for a while,
+        # so progress and per-book outcomes are published here for the page to
+        # poll while ``check_updates`` is still running.
+        self._follow_guard = threading.Lock()
+        self._follow_check: dict[str, Any] = {
+            "running": False,
+            "total": 0,
+            "done": 0,
+            "updated": 0,
+            "failed": 0,
+            "error": None,
+            "failures": [],
+            "updates": [],
+        }
         # progressive search state, keyed by search id (polled by the page)
         self._searches: dict[str, dict[str, Any]] = {}
         # progressive music searches, keyed by their own search id
@@ -950,19 +1407,33 @@ class ApiBridge:
     def get_initial_state(self) -> dict[str, Any]:
         """One-shot bootstrap payload for the front end."""
         prefs = _load_prefs()
-        # Only the two known themes are handed to the page: a hand-edited
-        # preference file must not inject an arbitrary string into the front
-        # end (the JS side re-normalises, this keeps the stored value sane).
-        theme = str(prefs.get("theme") or "light")
-        if theme not in ("light", "dark"):
-            theme = "light"
+        data_dir = self.get_data_dir()
+        theme = _prefs_theme(prefs)
+        try:
+            from novel_downloader.infra.i18n import SUPPORTED_LANGUAGES
+
+            languages = dict(SUPPORTED_LANGUAGES)
+        except Exception:  # noqa: BLE001 - catalog problems are not fatal here
+            logger.debug("Could not list the supported languages", exc_info=True)
+            languages = {}
         return {
             "version": self._version(),
             "theme": theme,
-            "data_dir": str(Path.cwd()),
+            # Whether ``theme`` came from disk or is just the default.  Without
+            # this the page would overwrite the per-window ``localStorage``
+            # choice with "light" when the profile file was unwritable.
+            "theme_stored": str(prefs.get("theme") or "") in ("light", "dark"),
+            "data_dir": data_dir,
+            # First-run check: the boot script warns when the folder exists but
+            # cannot be written, instead of letting the first download fail.
+            "output_dir": _directory_status(Path(data_dir)),
             "is_frozen": bool(getattr(sys, "frozen", False)),
             "shortcut_exists": self.shortcut_exists(),
             "auto_check_updates": _prefs_flag(prefs, "auto_check_updates", True),
+            "auto_download_updates": _prefs_flag(prefs, "auto_download_updates", True),
+            "auto_install_on_exit": _prefs_flag(prefs, "auto_install_on_exit", True),
+            "language": _active_language(),
+            "languages": languages,
             "sites": {
                 "search": dict(SEARCH_SUPPORT_SITES),
                 "download": dict(DOWNLOAD_SUPPORT_SITES),
@@ -979,13 +1450,325 @@ class ApiBridge:
         return str(__version__)
 
     def get_data_dir(self) -> str:
-        """Current working directory (the application home)."""
-        return str(Path.cwd())
+        """
+        Directory the history page lists exported books from.
 
-    def save_prefs(self, values: dict[str, Any]) -> None:
-        """Persist front-end preferences such as the theme."""
-        if isinstance(values, dict):
-            _save_prefs(values)
+        This is the resolved ``general.output_dir`` (``./downloads`` by
+        default) — the same root :meth:`get_history` scans and
+        :meth:`open_downloads_dir` opens.  It used to answer the process
+        working directory, so the page's "n files in <dir>" sub-line named the
+        application home instead of the folder the files actually sit in.
+        """
+        try:
+            return str(_expand_output_dir(_configured_output_dir()))
+        except OSError:  # pragma: no cover - exotic filesystem failures
+            return _configured_output_dir()
+
+    def save_prefs(self, values: dict[str, Any]) -> dict[str, Any]:
+        """
+        Persist a validated subset of the front-end preferences.
+
+        Only the theme and the three update switches are accepted: the file is
+        also read by the updater, so arbitrary keys would be an unnecessary
+        injection surface.  Unknown keys are ignored rather than stored.
+
+        Never raises.
+
+        :return: ``{"ok", "error", "ignored"}``; ``ok`` is ``False`` when the
+            profile directory refused the write (the page then tells the user
+            instead of silently reverting on the next launch).
+        """
+        if not isinstance(values, dict):
+            return {
+                "ok": False,
+                "error": t("Expected on/off"),
+                "ignored": [],
+            }
+        accepted: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        if "theme" in values:
+            theme = str(values.get("theme") or "").strip().lower()
+            if theme in ("light", "dark"):
+                accepted["theme"] = theme
+            else:
+                errors["theme"] = t("Unknown theme")
+        for key in _PREF_BOOL_KEYS:
+            if key not in values:
+                continue
+            flag = _coerce_bool(values[key])
+            if flag is None:
+                errors[key] = t("Expected on/off")
+            else:
+                accepted[key] = flag
+        ignored = sorted(
+            str(key) for key in values if key not in accepted and key not in errors
+        )
+        if errors:
+            first = next(iter(errors.values()))
+            return {"ok": False, "error": first, "errors": errors, "ignored": ignored}
+        ok = True if not accepted else (_save_prefs(accepted) is not False)
+        return {
+            "ok": ok,
+            "error": None if ok else t("Could not save the settings"),
+            "ignored": ignored,
+        }
+
+    def get_settings(self) -> dict[str, Any]:
+        """
+        Everything the settings page renders (never raises).
+
+        The proxy *password* is deliberately absent: the page only learns
+        whether one is stored, and a new one is written only when the user
+        types it.  ``output_dir.state`` mirrors the boot payload so both
+        screens agree on whether the folder is usable.
+        """
+        try:
+            from novel_downloader.infra.i18n import SUPPORTED_LANGUAGES
+
+            prefs = _load_prefs()
+            data_dir = self.get_data_dir()
+            return {
+                "version": self._version(),
+                "config_path": str(_settings_config_path()),
+                "output_dir": {
+                    **_directory_status(Path(data_dir)),
+                    "configured": _configured_output_dir(),
+                },
+                "proxy": _configured_value("proxy"),
+                "proxy_user": _configured_value("proxy_user"),
+                "proxy_has_password": bool(_configured_value("proxy_pass")),
+                "auto_check_updates": _prefs_flag(prefs, "auto_check_updates", True),
+                "auto_download_updates": _prefs_flag(
+                    prefs, "auto_download_updates", True
+                ),
+                "auto_install_on_exit": _prefs_flag(
+                    prefs, "auto_install_on_exit", True
+                ),
+                "theme": _prefs_theme(prefs),
+                "language": _active_language(),
+                "languages": dict(SUPPORTED_LANGUAGES),
+                "shortcut_supported": self.shortcut_supported(),
+                "shortcut_exists": self.shortcut_exists(),
+                "data_dir": data_dir,
+            }
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Could not build the settings payload", exc_info=True)
+            message = format_error(exc)
+            return {
+                "error": message,
+                "output_dir": {
+                    "path": "",
+                    "state": "error",
+                    "error": message,
+                    "configured": "",
+                },
+                "proxy": "",
+                "proxy_user": "",
+                "proxy_has_password": False,
+                "auto_check_updates": True,
+                "auto_download_updates": True,
+                "auto_install_on_exit": True,
+                "theme": "light",
+                "language": "",
+                "languages": {},
+                "shortcut_supported": False,
+                "shortcut_exists": False,
+                "data_dir": "",
+            }
+
+    def save_settings(self, values: dict[str, Any]) -> dict[str, Any]:
+        """
+        Validate and persist the settings page in one transaction-ish step.
+
+        Every field is validated before anything is written, so an invalid
+        proxy address cannot leave the output folder half-saved.  Never
+        raises.
+
+        :return: ``{"ok", "errors", "saved", "message", "settings"}`` plus a
+            fresh ``i18n`` catalogue when the language changed.
+        """
+        try:
+            return self._save_settings(values)
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.exception("Could not save the desktop settings")
+            return {
+                "ok": False,
+                "errors": {"settings": format_error(exc)},
+                "saved": [],
+                "message": t("Could not save the settings"),
+                "settings": self.get_settings(),
+            }
+
+    def _save_settings(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Implementation of :meth:`save_settings` (may raise on I/O bugs)."""
+        from novel_downloader.infra.i18n import (
+            SUPPORTED_LANGUAGES,
+            get_language,
+            normalize_language,
+            set_language,
+        )
+
+        if not isinstance(values, dict):
+            return {
+                "ok": False,
+                "errors": {"settings": t("Expected a settings object")},
+                "saved": [],
+                "message": t("Some settings were not saved"),
+                "settings": self.get_settings(),
+            }
+
+        errors: dict[str, str] = {}
+        config_updates: dict[str, Any] = {}
+        pref_updates: dict[str, Any] = {}
+        saved: list[str] = []
+
+        if "theme" in values:
+            theme = str(values.get("theme") or "").strip().lower()
+            if theme in ("light", "dark"):
+                pref_updates["theme"] = theme
+            else:
+                errors["theme"] = t("Unknown theme")
+
+        for key in _PREF_BOOL_KEYS:
+            if key not in values:
+                continue
+            flag = _coerce_bool(values[key])
+            if flag is None:
+                errors[key] = t("Expected on/off")
+            else:
+                pref_updates[key] = flag
+
+        language = ""
+        if "language" in values:
+            requested = str(values.get("language") or "").strip()
+            # An empty value means "leave unchanged" (the select can be empty
+            # when the catalogue failed to load); it must not block the save.
+            if requested:
+                code = normalize_language(requested)
+                if code in SUPPORTED_LANGUAGES:
+                    language = code
+                else:
+                    errors["language"] = t("Unknown language")
+
+        if "output_dir" in values:
+            raw_path = str(values.get("output_dir") or "").strip()
+            if not raw_path:
+                errors["output_dir"] = t("Enter a folder path")
+            else:
+                try:
+                    target = _expand_output_dir(raw_path)
+                except (OSError, ValueError) as exc:
+                    errors["output_dir"] = format_error(exc)
+                else:
+                    current = _expand_output_dir(_configured_output_dir())
+                    if target != current:
+                        problem = _probe_directory(target)
+                        if problem is None:
+                            config_updates["output_dir"] = str(target)
+                        elif problem == t("That path is a file, not a folder"):
+                            errors["output_dir"] = problem
+                        else:
+                            errors["output_dir"] = t(
+                                "The output folder could not be created: {error}"
+                            ).format(error=problem)
+
+        proxy_touched = any(
+            key in values
+            for key in (
+                "proxy",
+                "proxy_user",
+                "proxy_password",
+                "clear_proxy_password",
+            )
+        )
+        if proxy_touched:
+            current_proxy = _configured_value("proxy")
+            current_user = _configured_value("proxy_user")
+            current_pass = _configured_value("proxy_pass")
+            raw_proxy = values.get("proxy") if "proxy" in values else current_proxy
+            proxy, proxy_error = _normalize_proxy(raw_proxy)
+            if proxy_error is not None:
+                errors["proxy"] = proxy_error
+            else:
+                user = (
+                    str(values.get("proxy_user") or "").strip()
+                    if "proxy_user" in values
+                    else current_user
+                )
+                password = current_pass
+                if str(values.get("proxy_password") or ""):
+                    password = str(values["proxy_password"])
+                elif _coerce_bool(values.get("clear_proxy_password")) is True:
+                    password = ""
+                if proxy != current_proxy:
+                    config_updates["proxy"] = proxy
+                if user != current_user:
+                    config_updates["proxy_user"] = user
+                if password != current_pass:
+                    config_updates["proxy_pass"] = password
+
+        if errors:
+            return {
+                "ok": False,
+                "errors": errors,
+                "saved": [],
+                "message": t("Some settings were not saved"),
+                "settings": self.get_settings(),
+            }
+
+        if config_updates:
+            try:
+                _update_config_section("general", config_updates)
+            except Exception as exc:  # noqa: BLE001 - report, never crash
+                logger.warning("Could not write the config file: %s", exc)
+                field = "output_dir" if "output_dir" in config_updates else "proxy"
+                return {
+                    "ok": False,
+                    "errors": {
+                        field: t(
+                            "Could not write the configuration file: {error}"
+                        ).format(error=format_error(exc))
+                    },
+                    "saved": [],
+                    "message": t("Some settings were not saved"),
+                    "settings": self.get_settings(),
+                }
+            saved.extend(sorted(config_updates))
+
+        if pref_updates:
+            if _save_prefs(pref_updates) is False:
+                return {
+                    "ok": False,
+                    "errors": {"prefs": t("Could not save the settings")},
+                    "saved": saved,
+                    "message": t("Some settings were not saved"),
+                    "settings": self.get_settings(),
+                }
+            saved.extend(sorted(pref_updates))
+
+        language_changed = False
+        if language:
+            try:
+                if language != get_language():
+                    set_language(language)
+                    language_changed = True
+                saved.append("language")
+            except Exception as exc:  # noqa: BLE001 - keep the other settings
+                logger.warning("Could not switch language: %s", exc)
+                errors["language"] = format_error(exc)
+
+        result: dict[str, Any] = {
+            "ok": not errors,
+            "errors": errors,
+            "saved": saved,
+            "message": t("Settings saved")
+            if not errors
+            else t("Some settings were not saved"),
+            "settings": self.get_settings(),
+        }
+        if language_changed:
+            result["i18n"] = _i18n_catalog()
+        return result
 
     def open_path(self, path: str) -> bool:
         """
@@ -1030,20 +1813,14 @@ class ApiBridge:
 
         :return: ``{"ok", "path", "error"}``.
         """
-        try:
-            from novel_downloader.infra.config import get_config_value
-
-            out_dir = Path(get_config_value(["general", "output_dir"], "./downloads"))
-        except Exception:  # noqa: BLE001 - config may be missing on first run
-            out_dir = Path("./downloads")
-        out_dir = out_dir.expanduser()
+        out_dir = _expand_output_dir(_configured_output_dir())
         try:
             if not out_dir.exists():
                 out_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             logger.warning("Could not create the download folder %s: %s", out_dir, exc)
             return {"ok": False, "path": str(out_dir), "error": format_error(exc)}
-        resolved = str(out_dir.resolve())
+        resolved = str(out_dir)
         if not self.open_path(resolved):
             return {
                 "ok": False,
@@ -1429,6 +2206,10 @@ class ApiBridge:
             "latest": "",
             "available": False,
             "notes_url": _RELEASES_PAGE,
+            # ``url`` mirrors ``notes_url``: the front end accepts either name
+            # (the legacy ``check_update`` payload calls it ``url``), so both
+            # views answer with the same key set.
+            "url": _RELEASES_PAGE,
             "asset_name": None,
             "asset_size": None,
             "platform": "",
@@ -1453,15 +2234,16 @@ class ApiBridge:
             inflight = (
                 self._update_thread is not None and self._update_thread.is_alive()
             )
+        notes_url = (
+            info.notes_url if info is not None and info.notes_url else _RELEASES_PAGE
+        )
         return {
             "current": cache.current if cache is not None else self._version(),
             "latest": info.latest if info is not None else "",
             "available": bool(info is not None and info.available),
-            "notes_url": (
-                info.notes_url
-                if info is not None and info.notes_url
-                else _RELEASES_PAGE
-            ),
+            "notes_url": notes_url,
+            # Alias kept in step with ``notes_url``; see ``_empty_update_payload``.
+            "url": notes_url,
             "asset_name": asset.name if asset is not None else None,
             "asset_size": asset.size if asset is not None else None,
             "platform": (cache.platform if cache is not None else _safe_platform_tag()),
@@ -1971,6 +2753,11 @@ class ApiBridge:
         ).start()
 
     @staticmethod
+    def shortcut_supported() -> bool:
+        """Whether :meth:`create_shortcut` can succeed in this build."""
+        return _shortcut_target() is not None and sys.platform == "win32"
+
+    @staticmethod
     def shortcut_exists() -> bool:
         """Whether both shortcut targets already exist."""
         paths = _shortcut_paths()
@@ -2422,22 +3209,119 @@ class ApiBridge:
             return {"ok": False}
         return {"ok": bool(removed)}
 
+    def get_follow_check_state(self) -> dict[str, Any]:
+        """
+        Snapshot the current (or last) follow-list sweep.
+
+        ``check_updates`` blocks the calling bridge thread until every book has
+        been searched, so the page polls this method while it waits. The
+        snapshot survives completion: it carries the per-book failures and the
+        chapters that changed, which the aggregate counts cannot explain.
+
+        :return: ``running``, ``total``, ``done``, ``updated``, ``failed``,
+            ``error``, ``failures`` and ``updates``. Never raises.
+        """
+        with self._follow_guard:
+            state = dict(self._follow_check)
+            state["failures"] = [
+                dict(item) for item in self._follow_check.get("failures", [])
+            ]
+            state["updates"] = [
+                dict(item) for item in self._follow_check.get("updates", [])
+            ]
+        return state
+
     def check_updates(self) -> dict[str, Any]:
         """Check every followed book for a new chapter (blocking)."""
+        with self._follow_guard:
+            # The page disables its button, but a second caller (a script, a
+            # double click racing the disable) must not start a parallel sweep
+            # that would interleave the progress counters.
+            if self._follow_check["running"]:
+                return {
+                    "checked": 0,
+                    "updated": 0,
+                    "failed": 0,
+                    "error": t("A check is already running"),
+                }
+            self._follow_check.update(
+                running=True,
+                total=0,
+                done=0,
+                updated=0,
+                failed=0,
+                error=None,
+                failures=[],
+                updates=[],
+            )
+
+        def observe(result: Any) -> None:
+            """Advance the live counters; the final pass rebuilds the lists."""
+            with self._follow_guard:
+                self._follow_check["done"] = int(self._follow_check["done"]) + 1
+                if getattr(result, "error", None):
+                    self._follow_check["failed"] = int(self._follow_check["failed"]) + 1
 
         async def run() -> list[Any]:
-            from novel_downloader.apps.core.watchlist import WatchlistStore, check_all
+            from novel_downloader.apps.core.watchlist import (
+                WatchlistStore,
+                check_all,
+            )
 
-            return list(await check_all(WatchlistStore()))
+            store = WatchlistStore()
+            entries = store.entries()
+            with self._follow_guard:
+                self._follow_check["total"] = len(entries)
+            return list(await check_all(store, progress_cb=observe))
 
         try:
             results = self._engine.submit(run()).result(300.0)
         except Exception as exc:  # noqa: BLE001 - reported to the page
             logger.exception("Follow check failed")
-            return {"checked": 0, "updated": 0, "failed": 0, "error": format_error(exc)}
+            message = format_error(exc)
+            with self._follow_guard:
+                self._follow_check.update(running=False, error=message)
+            return {"checked": 0, "updated": 0, "failed": 0, "error": message}
         checked = len(results)
         updated = sum(1 for r in results if getattr(r, "changed", False))
         failed = sum(1 for r in results if getattr(r, "error", None))
+        failures: list[dict[str, str]] = []
+        updates: list[dict[str, str]] = []
+        for result in results:
+            entry = getattr(result, "entry", None)
+            site = str(getattr(entry, "site", "") or "")
+            book_id = str(getattr(entry, "book_id", "") or "")
+            title = str(getattr(entry, "title", "") or "")
+            error = getattr(result, "error", None)
+            if error:
+                failures.append(
+                    {
+                        "site": site,
+                        "book_id": book_id,
+                        "title": title,
+                        "error": str(error),
+                    }
+                )
+            elif getattr(result, "changed", False):
+                updates.append(
+                    {
+                        "site": site,
+                        "book_id": book_id,
+                        "title": title,
+                        "latest": str(getattr(result, "latest", "") or ""),
+                    }
+                )
+        with self._follow_guard:
+            self._follow_check.update(
+                running=False,
+                total=checked,
+                done=checked,
+                updated=updated,
+                failed=failed,
+                error=None,
+                failures=failures,
+                updates=updates,
+            )
         return {"checked": checked, "updated": updated, "failed": failed}
 
     # ------------------------------------------------------------------
@@ -2876,7 +3760,11 @@ class ApiBridge:
         return {"ok": True}
 
     def music_export(
-        self, platform: str, tracks: list[dict[str, Any]], out_path: str | None = None
+        self,
+        platform: str,
+        tracks: list[dict[str, Any]],
+        out_path: str | None = None,
+        overwrite: bool = False,
     ) -> dict[str, Any]:
         """
         Write an M3U8 playlist for tracks that already have a local file.
@@ -2887,6 +3775,11 @@ class ApiBridge:
         `platform` is accepted for parity with the REST contract and may be
         ``"all"`` (aggregate results): the playlist itself only stores file
         locations, so no per-platform filtering happens here.
+
+        ``out_path`` must end in ``.m3u`` / ``.m3u8``; anything else is treated
+        as a directory (see :func:`_playlist_target`). An existing target is
+        only replaced when ``overwrite`` is true: otherwise the answer carries
+        ``needs_overwrite`` so the UI can ask first.
         """
         funcs = _music_funcs()
         if funcs is None:
@@ -2911,17 +3804,31 @@ class ApiBridge:
             }
 
         target = _playlist_target(out_path)
+        if target.exists() and not overwrite:
+            # Never clobber a playlist the user may still want: the caller gets
+            # the path (and ``needs_overwrite``) so it can ask for consent.
+            return {
+                "ok": False,
+                "error": t("The playlist already exists: {path}").replace(
+                    "{path}", str(target)
+                ),
+                "path": str(target),
+                "needs_overwrite": True,
+                "skipped": skipped,
+            }
         try:
             written = funcs["export_m3u"](ready, target)
         except OSError as exc:
             # This is the user's own destination, so the rendering helper (not
-            # a raw traceback) is shown; the full reason goes to the log.
+            # a raw traceback) is shown; the full reason goes to the log. The
+            # path is part of the message because the caller picked it.
             logger.warning("Playlist write failed for %s: %s", target, exc)
             return {
                 "ok": False,
-                "error": t("Could not write the playlist: {error}").replace(
-                    "{error}", format_error(exc)
-                ),
+                "error": t("Could not write the playlist to {path}: {error}")
+                .replace("{path}", str(target))
+                .replace("{error}", format_error(exc)),
+                "path": str(target),
             }
         return {
             "ok": True,
@@ -2961,13 +3868,18 @@ class ApiBridge:
             logger.exception("Failed to save music settings")
 
     def music_health_start(self) -> dict[str, Any]:
-        """Probe every platform once, in parallel, for the health panel."""
+        """Probe every platform once, in parallel, for the health panel.
+
+        :return: ``{"ok", "error"}``; ``error`` explains a refusal (missing
+            music extras) so the page can show it instead of leaving the
+            button looking dead.
+        """
         funcs = _music_funcs()
         if funcs is None:
-            return {"ok": False}
+            return {"ok": False, "error": t("Music extras are not installed")}
         with self._lock:
             if self._health_thread is not None and self._health_thread.is_alive():
-                return {"ok": False}
+                return {"ok": False, "error": ""}
             labels = dict(funcs["available_labels"]())
             self._health_rows = {
                 key: {
