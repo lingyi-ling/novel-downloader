@@ -233,6 +233,9 @@ class MusicdlProvider(MusicProvider):
 
     requires_login = False
     supports_playlists = False
+    #: musicdl has no paging concept: ``search(offset>0)`` answers an empty
+    #: list, so the search response advertises ``supports_offset: false``.
+    supports_offset = False
 
     def __init__(
         self, key, work_dir=None, search_size=15, max_retries=2, timeout=(10, 45)

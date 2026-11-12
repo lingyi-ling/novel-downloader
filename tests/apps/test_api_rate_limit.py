@@ -153,6 +153,7 @@ def _scope(
     client: tuple[str, int] = ("10.0.0.1", 5000),
     path: str = "/api/v1/tasks",
     method: str = "GET",
+    headers: list[tuple[bytes, bytes]] | None = None,
 ) -> Scope:
     return {
         "type": "http",
@@ -164,7 +165,7 @@ def _scope(
         "raw_path": path.encode(),
         "query_string": b"",
         "root_path": "",
-        "headers": [],
+        "headers": list(headers or []),
         "client": client,
         "server": ("testserver", 80),
     }
@@ -365,6 +366,55 @@ async def test_cleanup_drops_stale_ips_and_keeps_fresh_ones(clock: FakeClock) ->
     status, _, _ = await _run(mw, client=("10.0.0.3", 5000))
     assert status == 200
     assert set(mw._hits) == {"10.0.0.3"}
+
+
+@pytest.mark.asyncio
+async def test_tracked_ips_are_capped_even_inside_one_window(
+    clock: FakeClock,
+) -> None:
+    """A flood of distinct source addresses cannot grow the dict without bound."""
+    mw, store = _limited(limit=5, window=60.0, max_keys=3)
+
+    for index in range(10):
+        status, _, _ = await _run(mw, client=(f"10.0.0.{index}", 5000))
+        assert status == 200
+        assert len(mw._hits) <= 3
+
+    assert store["downstream"] == 10
+    assert len(mw._hits) == 3
+
+
+@pytest.mark.asyncio
+async def test_max_keys_evicts_the_least_recently_active_key(
+    clock: FakeClock,
+) -> None:
+    mw, _ = _limited(limit=5, window=60.0, max_keys=2)
+
+    await _run(mw, client=("10.0.0.1", 5000))  # t=1000
+    clock.advance(1)
+    await _run(mw, client=("10.0.0.2", 5000))  # t=1001
+    clock.advance(1)
+    await _run(mw, client=("10.0.0.3", 5000))  # t=1002: evicts 10.0.0.1
+
+    assert set(mw._hits) == {"10.0.0.2", "10.0.0.3"}
+
+
+@pytest.mark.asyncio
+async def test_forwarded_for_header_cannot_evade_the_limit(
+    clock: FakeClock,
+) -> None:
+    """The counter keys on the TCP peer; ``X-Forwarded-For`` is ignored."""
+    mw, store = _limited(limit=1, window=60.0)
+    forged = [(b"x-forwarded-for", b"203.0.113.99")]
+
+    first = await _run(mw, headers=forged)
+    second = await _run(mw, headers=[(b"x-forwarded-for", b"203.0.113.100")])
+
+    assert first[0] == 200
+    assert second[0] == 429
+    # Only the real peer is tracked; the spoofed addresses created no bucket.
+    assert set(mw._hits) == {"10.0.0.1"}
+    assert store["downstream"] == 1
 
 
 @pytest.mark.asyncio
@@ -604,3 +654,34 @@ def test_api_main_forwards_rate_limit_arguments(
     api_main_module.api_main(["--rate-limit", "0"])
     assert captured["rate_limit"] == 0
     assert captured["rate_limit_window"] == 60.0
+
+
+def test_api_main_hides_docs_on_a_public_bind(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_create_app(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return object()
+
+    def fake_run(*args: Any, **kwargs: Any) -> None:
+        captured["uvicorn"] = kwargs
+
+    monkeypatch.setattr(api_main_module, "create_app", fake_create_app)
+    monkeypatch.setattr(api_main_module.uvicorn, "run", fake_run)
+
+    # Local default: docs stay available and the concurrency cap is passed on.
+    api_main_module.api_main([])
+    assert captured["expose_docs"] is True
+    assert (
+        captured["uvicorn"]["limit_concurrency"]
+        == api_main_module.DEFAULT_MAX_CONNECTIONS
+    )
+
+    # A public bind turns the interactive schema off.
+    api_main_module.api_main(["--host", "0.0.0.0", "--token", "secret"])
+    assert captured["expose_docs"] is False
+
+    capsys.readouterr()  # the public-bind warnings are expected noise

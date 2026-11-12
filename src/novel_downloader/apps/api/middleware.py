@@ -12,9 +12,12 @@ Request-hardening helpers shared by the REST API application.
   at the local port (browsers always attach ``Origin`` to cross-origin
   POSTs). Non-browser clients (CLI, SDK, curl) send no ``Origin`` and pass
   unchanged; ``--cors`` removes the gate and lets CORS govern browsers.
-* :class:`BodySizeLimitMiddleware` rejects oversized JSON bodies with ``413``
-  *before* FastAPI parses them, so a huge payload cannot be turned into a
-  memory/CPU burden by the JSON decoder.
+* :class:`BodySizeLimitMiddleware` rejects oversized request bodies with
+  ``413`` *before* FastAPI parses them, so a huge payload cannot be turned
+  into a memory/CPU burden by the JSON decoder. Every state-changing request
+  below ``/api/v1`` is covered (not just the endpoints that happened to exist
+  when the cap was introduced), so a new ``POST`` route cannot silently opt
+  out of the limit.
 * :class:`DownloadsAuthMiddleware` applies the same token check as
   ``/api/v1`` to the ``/downloads`` static mount, which is not covered by the
   router-level dependency.
@@ -23,7 +26,8 @@ Request-hardening helpers shared by the REST API application.
   the limit — e.g. an integration script stuck in an infinite retry loop — is
   answered with ``429`` + ``Retry-After`` instead of being able to hammer the
   local server indefinitely. ``/api/v1/health`` is exempt and stale per-IP
-  entries are dropped periodically so the counter cannot grow without bound.
+  entries are dropped periodically so the counter cannot grow without bound;
+  a hard cap on tracked keys (``max_keys``) bounds it even inside one window.
 * :class:`RequestLoggingMiddleware` emits exactly one access-log line per
   request (``method path status duration``). The query string is never logged
   (it may carry tokens) and response bodies are never read for logging, so
@@ -33,6 +37,10 @@ Request-hardening helpers shared by the REST API application.
   slowly changing reference data, ``no-store`` for live data and for every
   error response, long-lived public caching for exported files. A header set
   by a route (the SSE streams' ``no-cache``) is never overridden.
+* :class:`SecurityHeadersMiddleware` adds ``X-Content-Type-Options: nosniff``
+  and ``Referrer-Policy: no-referrer`` to API and download responses, and a
+  sandboxing ``Content-Security-Policy`` to ``/downloads`` so an exported
+  HTML/SVG file cannot execute script on the API's own origin.
 * :func:`register_error_handlers` guarantees that every error response has the
   same ``{"detail": ...}`` shape and that unexpected exceptions never leak a
   stack trace to the client.
@@ -69,20 +77,14 @@ DEFAULT_MAX_BODY_BYTES = 1024 * 1024
 #: Path prefix whose static files require the API token when one is configured.
 DOWNLOADS_PREFIX = "/downloads"
 
-#: Endpoints whose request bodies are bounded by :class:`BodySizeLimitMiddleware`.
-#: Only bodies that are fully buffered by FastAPI need a cap; the streaming
-#: endpoints (search SSE, ``/downloads``) carry no request body.
-BODY_LIMIT_ENDPOINTS: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("POST", "/api/v1/search"),
-        ("POST", "/api/v1/watchlist"),
-        ("POST", "/api/v1/watchlist/check"),
-        ("POST", "/api/v1/music/search"),
-        ("POST", "/api/v1/music/download"),
-        ("POST", "/api/v1/music/export"),
-        ("POST", "/api/v1/music/jobs"),
-    }
-)
+#: Path prefix whose request bodies are bounded. Everything below it is
+#: covered, so adding a new write endpoint cannot bypass the cap.
+BODY_LIMIT_PREFIX = "/api/v1"
+
+#: Methods whose request bodies are fully buffered by FastAPI and therefore
+#: need a ceiling. ``GET``/``HEAD``/``OPTIONS`` bodies are never parsed by a
+#: route and are left alone.
+BODY_LIMIT_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # ---------------------------------------------------------------------------
 # Rate limiting
@@ -93,6 +95,12 @@ DEFAULT_RATE_LIMIT = 120
 
 #: Default sliding-window length in seconds.
 DEFAULT_RATE_LIMIT_WINDOW = 60.0
+
+#: Upper bound on per-IP counters kept in memory. Periodic cleanup only runs
+#: once per window, so without a hard cap a flood from many source addresses
+#: could grow the dict for the whole window. ``0`` disables the cap (only
+#: useful in tests).
+DEFAULT_RATE_LIMIT_MAX_KEYS = 10_000
 
 #: Paths never rate limited. Uptime monitors and orchestrators must keep
 #: working even while a misbehaving client is locked out.
@@ -132,6 +140,26 @@ CACHE_CONTROL_RULES: tuple[tuple[str, str], ...] = (
 #: Path prefixes the cache policy governs. Requests outside them (``/docs``,
 #: ``/openapi.json``, ...) pass through without any header being added.
 CACHE_POLICY_PREFIXES: tuple[str, ...] = ("/api/v1", DOWNLOADS_PREFIX)
+
+# ---------------------------------------------------------------------------
+# Security response headers
+# ---------------------------------------------------------------------------
+
+#: Headers added to every API and download response. ``nosniff`` stops a
+#: browser from re-interpreting a response as a type the server did not
+#: declare; ``no-referrer`` keeps the (possibly token-bearing) API URL out of
+#: ``Referer`` headers sent to third-party sites linked from a served file.
+SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+)
+
+#: ``Content-Security-Policy`` for exported files. An exported ``.html`` /
+#: ``.svg`` may contain script; because ``/downloads`` shares the API origin,
+#: that script could otherwise call the tokenless local API. The sandbox
+#: directive blocks script execution while still letting the browser display
+#: plain text and images.
+DOWNLOADS_CSP = "sandbox; default-src 'none'"
 
 
 def _content_length(scope: Scope) -> int | None:
@@ -262,8 +290,12 @@ class BodySizeLimitMiddleware:
 
     :param app: The wrapped ASGI application.
     :param max_bytes: Maximum accepted body size in bytes.
-    :param endpoints: ``(method, path)`` pairs to guard; defaults to
-        :data:`BODY_LIMIT_ENDPOINTS`.
+    :param endpoints: Explicit ``(method, path)`` pairs to guard. When omitted
+        every state-changing request under :data:`BODY_LIMIT_PREFIX` is
+        guarded, which is the safe default: a newly added route is covered
+        automatically instead of silently accepting unbounded bodies.
+    :param prefix: Path prefix used when ``endpoints`` is not supplied.
+    :param methods: HTTP methods used when ``endpoints`` is not supplied.
     """
 
     def __init__(
@@ -272,17 +304,28 @@ class BodySizeLimitMiddleware:
         *,
         max_bytes: int = DEFAULT_MAX_BODY_BYTES,
         endpoints: Iterable[tuple[str, str]] | None = None,
+        prefix: str = BODY_LIMIT_PREFIX,
+        methods: Iterable[str] | None = None,
     ) -> None:
         self.app = app
         self.max_bytes = int(max_bytes)
-        self.endpoints = frozenset(
-            BODY_LIMIT_ENDPOINTS if endpoints is None else endpoints
+        # ``None`` means "prefix mode"; an explicit iterable keeps the exact
+        # endpoint-set behaviour used by focused unit tests.
+        self.endpoints = None if endpoints is None else frozenset(endpoints)
+        self.prefix = "/" + prefix.strip("/")
+        self.methods = frozenset(
+            method.upper()
+            for method in (BODY_LIMIT_METHODS if methods is None else methods)
         )
 
     def _applies(self, method: str, path: str) -> bool:
         """Whether this request is guarded by the size limit."""
         cleaned = path.rstrip("/") or "/"
-        return (method.upper(), cleaned) in self.endpoints
+        if self.endpoints is not None:
+            return (method.upper(), cleaned) in self.endpoints
+        if method.upper() not in self.methods:
+            return False
+        return cleaned == self.prefix or cleaned.startswith(self.prefix + "/")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
@@ -425,13 +468,18 @@ class RateLimitMiddleware:
       service.
     * Stale per-IP entries are dropped at most once per window
       (:meth:`_maybe_cleanup`), keeping memory bounded even with many
-      short-lived client IPs.
+      short-lived client IPs. Because that periodic sweep can lag a burst of
+      distinct source addresses, :attr:`max_keys` imposes a hard ceiling:
+      when a new key would exceed it, stale entries are swept immediately and
+      then the least recently active keys are evicted.
 
     :param app: The wrapped ASGI application.
     :param limit: Requests admitted per client IP per window; ``<= 0`` disables.
     :param window: Sliding-window length in seconds.
     :param exempt_paths: Paths never limited; defaults to
         :data:`RATE_LIMIT_EXEMPT_PATHS`.
+    :param max_keys: Maximum number of per-IP counters held in memory;
+        ``<= 0`` disables the cap.
     """
 
     def __init__(
@@ -441,6 +489,7 @@ class RateLimitMiddleware:
         limit: int = DEFAULT_RATE_LIMIT,
         window: float = DEFAULT_RATE_LIMIT_WINDOW,
         exempt_paths: Iterable[str] | None = None,
+        max_keys: int = DEFAULT_RATE_LIMIT_MAX_KEYS,
     ) -> None:
         self.app = app
         self.limit = int(limit)
@@ -448,6 +497,7 @@ class RateLimitMiddleware:
         self.exempt_paths = frozenset(
             RATE_LIMIT_EXEMPT_PATHS if exempt_paths is None else exempt_paths
         )
+        self.max_keys = int(max_keys)
         self._hits: dict[str, deque[float]] = {}
         self._last_cleanup = 0.0
 
@@ -471,6 +521,8 @@ class RateLimitMiddleware:
             recorded), otherwise the ``Retry-After`` seconds until a slot
             frees up.
         """
+        if key not in self._hits:
+            self._make_room(now)
         timestamps = self._hits.setdefault(key, deque())
         cutoff = now - self.window
         while timestamps and timestamps[0] <= cutoff:
@@ -480,6 +532,35 @@ class RateLimitMiddleware:
         timestamps.append(now)
         self._maybe_cleanup(now)
         return None
+
+    def _make_room(self, now: float) -> None:
+        """
+        Keep the counter dict under :attr:`max_keys` before adding a new key.
+
+        Stale entries are swept first (ignoring the periodic-cleanup interval,
+        because the cap is a hard bound). If the dict is still full, the least
+        recently active keys are evicted: they are the closest to expiring and
+        losing their budget only makes an abusive client *more* likely to be
+        limited.
+        """
+        if self.max_keys <= 0 or len(self._hits) < self.max_keys:
+            return
+        cutoff = now - self.window
+        stale = [
+            key
+            for key, timestamps in self._hits.items()
+            if not timestamps or timestamps[-1] <= cutoff
+        ]
+        for key in stale:
+            del self._hits[key]
+        if len(self._hits) < self.max_keys:
+            return
+        # Evict just enough keys to make room for the new one. ``timestamps``
+        # is never empty for a live key, so ``[-1]`` is safe.
+        excess = len(self._hits) - self.max_keys + 1
+        oldest = sorted(self._hits, key=lambda key: self._hits[key][-1])[:excess]
+        for key in oldest:
+            del self._hits[key]
 
     def _maybe_cleanup(self, now: float) -> None:
         """Drop per-IP state that has fully slid out of the window."""
@@ -583,6 +664,53 @@ class CacheControlMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_cache)
+
+
+class SecurityHeadersMiddleware:
+    """
+    Add defence-in-depth response headers to API and download responses.
+
+    Every ``/api/v1`` and ``/downloads`` response receives
+    :data:`SECURITY_HEADERS`; ``/downloads`` additionally receives
+    :data:`DOWNLOADS_CSP`. The sandboxed policy matters because exported files
+    are served from the same origin as the API: without it, a malicious book
+    exported as HTML could run script in the browser and drive the tokenless
+    local API. A header already set by a route is left alone.
+
+    :param app: The wrapped ASGI application.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    @staticmethod
+    def _matches(cleaned: str, prefix: str) -> bool:
+        """Whether ``cleaned`` is ``prefix`` itself or below it."""
+        return cleaned == prefix or cleaned.startswith(prefix + "/")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        cleaned = str(scope.get("path", "")).rstrip("/") or "/"
+        governs_api = self._matches(cleaned, "/api/v1")
+        governs_downloads = self._matches(cleaned, DOWNLOADS_PREFIX)
+        if not (governs_api or governs_downloads):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in SECURITY_HEADERS:
+                    if name.lower() not in headers:
+                        headers[name] = value
+                if governs_downloads and "content-security-policy" not in headers:
+                    headers["Content-Security-Policy"] = DOWNLOADS_CSP
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 class RequestLoggingMiddleware:
@@ -729,7 +857,8 @@ def register_error_handlers(app: FastAPI) -> None:
 
 __all__ = [
     "AUTH_ERROR_DETAIL",
-    "BODY_LIMIT_ENDPOINTS",
+    "BODY_LIMIT_METHODS",
+    "BODY_LIMIT_PREFIX",
     "CACHE_CONTROL_NO_STORE",
     "CACHE_CONTROL_PRIVATE",
     "CACHE_CONTROL_PUBLIC",
@@ -737,10 +866,13 @@ __all__ = [
     "CACHE_POLICY_PREFIXES",
     "DEFAULT_MAX_BODY_BYTES",
     "DEFAULT_RATE_LIMIT",
+    "DEFAULT_RATE_LIMIT_MAX_KEYS",
     "DEFAULT_RATE_LIMIT_WINDOW",
+    "DOWNLOADS_CSP",
     "DOWNLOADS_PREFIX",
     "ORIGIN_ERROR_DETAIL",
     "RATE_LIMIT_EXEMPT_PATHS",
+    "SECURITY_HEADERS",
     "SLOW_REQUEST_SECONDS",
     "BodySizeLimitMiddleware",
     "CacheControlMiddleware",
@@ -748,5 +880,6 @@ __all__ = [
     "OriginCheckMiddleware",
     "RateLimitMiddleware",
     "RequestLoggingMiddleware",
+    "SecurityHeadersMiddleware",
     "register_error_handlers",
 ]

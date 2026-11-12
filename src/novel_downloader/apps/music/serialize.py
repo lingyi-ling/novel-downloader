@@ -16,7 +16,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
-__all__ = ["PUBLIC_TRACK_FIELDS", "strip_url_query", "track_dict"]
+__all__ = [
+    "PUBLIC_TRACK_FIELDS",
+    "REASON_MAX_CHARS",
+    "sanitize_reason",
+    "strip_url_query",
+    "track_dict",
+]
 
 #: 响应里允许出现的曲目字段，顺序与 :class:`Track` 的 dataclass 字段一致。
 #: ``extra`` 故意不在其中（provider 私有数据，见模块文档）。
@@ -141,3 +147,35 @@ def strip_url_query(text: str) -> str:
             return raw
 
     return _URL_RE.sub(_redact, text)
+
+
+#: Maximum length of a per-track failure reason sent to API/embedded clients.
+#: Matches the 200-character ceiling the aggregate searcher applies to
+#: ``platforms[].error`` and the health probe applies to its ``error`` field:
+#: provider exceptions can embed whole HTML bodies or multi-line tracebacks,
+#: and an unbounded blob bloats every job poll for no diagnostic value.
+REASON_MAX_CHARS = 200
+
+
+def sanitize_reason(text: object, *, limit: int = REASON_MAX_CHARS) -> str:
+    """
+    Make a provider failure reason safe and bounded for the wire.
+
+    Three transforms, applied in this order:
+
+    1. drop URL query/fragment parts (they can carry signed tokens);
+    2. collapse every whitespace run (newlines, tabs, repeated spaces) into a
+       single space, so a multi-line provider message becomes one readable
+       line instead of breaking table/row rendering in clients;
+    3. truncate to *limit* characters.
+
+    Stripping happens before truncation on purpose: cutting a URL first could
+    leave most of a token in the prefix.  The same rule is used for
+    ``platforms[].error`` (search) and the health probe's ``error``, so every
+    music error string crossing the wire shares one ceiling.
+    """
+    value = strip_url_query(str(text or ""))
+    value = " ".join(value.split())
+    if limit > 0 and len(value) > limit:
+        value = value[:limit]
+    return value

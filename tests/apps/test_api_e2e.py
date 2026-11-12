@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -158,6 +159,10 @@ class _FakeTrack:
 
 class _FakeMusicProvider:
     """Provider double whose ``search`` returns a canned (tracks, total)."""
+
+    #: Same opt-in attribute the real providers expose: ``search(offset)``
+    #: actually skips hits.  Off by default, like the musicdl backend.
+    supports_offset = False
 
     def __init__(
         self,
@@ -1005,8 +1010,20 @@ async def test_music_download_returns_ordered_results(
         "skip": 1,
         "fail": 0,
         "results": [
-            {"status": "ok", "reason": "", "path": "music/a.mp3", "bytes": 123},
-            {"status": "skip", "reason": "vip", "path": "", "bytes": 0},
+            {
+                "status": "ok",
+                "reason": "",
+                "path": "music/a.mp3",
+                "download_url": "",
+                "bytes": 123,
+            },
+            {
+                "status": "skip",
+                "reason": "vip",
+                "path": "",
+                "download_url": "",
+                "bytes": 0,
+            },
         ],
     }
     assert calls["out_dir"] == str(tmp_path)
@@ -1197,6 +1214,854 @@ async def test_music_health_unknown_platform_returns_400(
         "Unknown music platform: nope. "
         f"Available: {', '.join(key for key, _label in available_labels())}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Music: field-level response contract
+#
+# These pin the wire shape (key set + JSON type of every field) of each music
+# endpoint's success and error response. They intentionally assert *exact*
+# key sets: an accidental extra key (e.g. provider-private data) and a
+# silently missing one are both contract drift, and the Android client decodes
+# these payloads without a schema of its own. The embedded engine serves the
+# same contract; test_embedded_music.py mirrors these assertions.
+# ---------------------------------------------------------------------------
+
+
+#: String-typed fields of a public track payload.
+_TRACK_STR_FIELDS = (
+    "provider",
+    "id",
+    "name",
+    "artists",
+    "album",
+    "cover_url",
+    "ext",
+    "download_url",
+    "path",
+    "lyric",
+)
+#: Integer-typed fields of a public track payload.
+_TRACK_INT_FIELDS = ("duration_s", "track_no")
+
+
+def _assert_public_track(track: dict[str, Any]) -> None:
+    """A search row: exact public field set and JSON types."""
+    from novel_downloader.apps.music.serialize import PUBLIC_TRACK_FIELDS
+
+    assert tuple(track) == PUBLIC_TRACK_FIELDS
+    for name in _TRACK_STR_FIELDS:
+        assert isinstance(track[name], str), (name, track[name])
+    for name in _TRACK_INT_FIELDS:
+        assert type(track[name]) is int, (name, track[name])
+    assert type(track["vip"]) is bool
+    assert isinstance(track["http_headers"], dict)
+    assert all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in track["http_headers"].items()
+    )
+    assert isinstance(track["sources"], list)
+    assert all(isinstance(source, str) for source in track["sources"])
+
+
+def _assert_validation_body(payload: Any) -> None:
+    """A 422 body: readable ``detail`` plus machine-readable ``errors``."""
+    assert isinstance(payload, dict)
+    assert set(payload) == {"detail", "errors"}
+    assert isinstance(payload["detail"], str) and payload["detail"]
+    assert isinstance(payload["errors"], list) and payload["errors"]
+    for error in payload["errors"]:
+        assert set(error) == {"type", "loc", "msg"}
+        assert all(isinstance(part, str) for part in error["loc"])
+
+
+def _assert_error_body(payload: Any) -> None:
+    """A non-422 error body: exactly ``{"detail": str}``."""
+    assert isinstance(payload, dict)
+    assert set(payload) == {"detail"}
+    assert isinstance(payload["detail"], str) and payload["detail"]
+
+
+def test_music_public_track_fields_match_the_request_model() -> None:
+    """``MusicTrack`` may additionally accept ``extra``; responses never echo it."""
+    from novel_downloader.apps.api.schemas import MusicTrack
+    from novel_downloader.apps.music.serialize import PUBLIC_TRACK_FIELDS
+
+    assert tuple(MusicTrack.model_fields) == (*PUBLIC_TRACK_FIELDS, "extra")
+
+
+@pytest.mark.asyncio
+async def test_music_platforms_response_contract(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_routes, "_load_music_components", lambda: _fake_music_components()
+    )
+
+    response = await client.get(f"{API}/music/platforms")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"platforms"}
+    assert isinstance(payload["platforms"], list) and payload["platforms"]
+    for item in payload["platforms"]:
+        assert set(item) == {"key", "label", "note"}
+        assert all(isinstance(item[key], str) for key in ("key", "label", "note"))
+
+
+@pytest.mark.asyncio
+async def test_music_search_single_platform_response_contract(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    track = _FakeTrack(
+        provider="netease",
+        id="1",
+        name="晴天",
+        artists="周杰伦",
+        album="叶惠美",
+        duration_s=269,
+        cover_url="https://img.example/1.jpg",
+        track_no=3,
+        ext="mp3",
+        vip=True,
+        download_url="https://cdn.example/1.mp3",
+        http_headers={"Referer": "https://example/"},
+        path="music/1.mp3",
+        lyric="[00:00]",
+        sources=["netease", "qq"],
+    )
+    provider = _FakeMusicProvider(calls, ([track], 7))
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(create=lambda platform: provider),
+    )
+
+    response = await client.post(
+        f"{API}/music/search",
+        json={"platform": "netease", "keyword": "晴天", "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {
+        "total",
+        "tracks",
+        "search_id",
+        "platform",
+        "offset",
+        "supports_offset",
+    }
+    assert type(payload["total"]) is int and payload["total"] == 7
+    assert isinstance(payload["search_id"], str) and payload["search_id"]
+    assert payload["platform"] == "netease"
+    assert type(payload["offset"]) is int and payload["offset"] == 0
+    assert payload["supports_offset"] is False
+    assert isinstance(payload["tracks"], list) and len(payload["tracks"]) == 1
+    _assert_public_track(payload["tracks"][0])
+
+
+@pytest.mark.asyncio
+async def test_music_search_aggregate_response_contract(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novel_downloader.apps.music.aggregate import (
+        ALL_PLATFORM_KEY,
+        AggregateResult,
+        PlatformOutcome,
+    )
+
+    merged = AggregateResult(
+        tracks=[
+            _FakeTrack(
+                provider="netease",
+                id="1",
+                name="晴天",
+                artists="周杰伦",
+                sources=["netease", "qq"],
+            )
+        ],
+        platforms=[
+            PlatformOutcome("netease", True, count=1),
+            PlatformOutcome("qq", False, error="搜索超时"),
+        ],
+        total=3,
+    )
+    monkeypatch.setattr(
+        api_routes, "_load_music_components", lambda: _fake_music_components()
+    )
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.aggregate.search_all",
+        lambda *args, **kwargs: merged,
+    )
+
+    response = await client.post(
+        f"{API}/music/search", json={"platform": "all", "keyword": "晴天"}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {
+        "total",
+        "tracks",
+        "search_id",
+        "platforms",
+        "platform",
+        "offset",
+        "supports_offset",
+    }
+    assert type(payload["total"]) is int and payload["total"] == 3
+    assert payload["platform"] == ALL_PLATFORM_KEY
+    assert payload["offset"] == 0
+    assert payload["supports_offset"] is False
+    assert isinstance(payload["search_id"], str) and payload["search_id"]
+    assert isinstance(payload["platforms"], list) and len(payload["platforms"]) == 2
+    for item in payload["platforms"]:
+        assert set(item) == {"platform", "ok", "count", "error"}
+        assert isinstance(item["platform"], str)
+        assert type(item["ok"]) is bool
+        assert type(item["count"]) is int
+        assert isinstance(item["error"], str)
+    _assert_public_track(payload["tracks"][0])
+    assert payload["tracks"][0]["sources"] == ["netease", "qq"]
+
+
+@pytest.mark.asyncio
+async def test_music_download_response_contract_and_reason_bounds(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-track results carry a bounded, query-free, single-line reason."""
+    reason = (
+        "provider said no\n"
+        "while fetching https://cdn.example/a.mp3?token=SECRET#frag " + "x" * 400
+    )
+
+    def fake_download(
+        provider: Any,
+        tracks: list[Any],
+        options: Any,
+        *,
+        on_result: Any,
+    ) -> tuple[int, int, int, list[Any], list[Any]]:
+        on_result(
+            0,
+            tracks[0],
+            SimpleNamespace(status="fail", reason=reason, path="", bytes_=0),
+        )
+        on_result(
+            1,
+            tracks[1],
+            SimpleNamespace(status="ok", reason="", path="music/2.mp3", bytes_=321),
+        )
+        return 1, 0, 1, [], []
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(
+            download_mixed=fake_download,
+            load_settings=lambda: {"out_dir": str(tmp_path)},
+        ),
+    )
+
+    response = await client.post(
+        f"{API}/music/download",
+        json={
+            "platform": "netease",
+            "tracks": [{"id": "1"}, {"id": "2"}],
+            "out_dir": str(tmp_path),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"ok", "skip", "fail", "results"}
+    assert all(type(payload[key]) is int for key in ("ok", "skip", "fail"))
+    assert (payload["ok"], payload["skip"], payload["fail"]) == (1, 0, 1)
+    assert isinstance(payload["results"], list) and len(payload["results"]) == 2
+    for item in payload["results"]:
+        assert set(item) == {"status", "reason", "path", "download_url", "bytes"}
+        assert isinstance(item["status"], str)
+        assert isinstance(item["reason"], str)
+        assert isinstance(item["path"], str)
+        # REST writes on the server machine: no loopback download route.
+        assert item["download_url"] == ""
+        assert type(item["bytes"]) is int
+
+    first = payload["results"][0]
+    assert len(first["reason"]) <= 200
+    assert "SECRET" not in first["reason"]
+    assert "#frag" not in first["reason"]
+    assert "\n" not in first["reason"]
+    assert first["reason"].startswith("provider said no while fetching")
+    assert payload["results"][1]["bytes"] == 321
+
+
+@pytest.mark.asyncio
+async def test_music_job_response_contract(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_music_jobs: Any,
+) -> None:
+    def fake_download(
+        provider: Any,
+        tracks: list[Any],
+        options: Any,
+        *,
+        on_result: Any,
+    ) -> tuple[int, int, int, list[Any], list[Any]]:
+        on_result(
+            0,
+            tracks[0],
+            SimpleNamespace(status="ok", reason="", path="music/1.mp3", bytes_=42),
+        )
+        return 1, 0, 0, [], []
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(
+            download_mixed=fake_download,
+            load_settings=lambda: {"out_dir": str(tmp_path)},
+        ),
+    )
+
+    created = await client.post(
+        f"{API}/music/jobs",
+        json={
+            "platform": "netease",
+            "tracks": [{"id": "1"}],
+            "out_dir": str(tmp_path),
+        },
+    )
+
+    assert created.status_code == 202
+    created_body = created.json()
+    assert set(created_body) == {"job_id"}
+    assert isinstance(created_body["job_id"], str) and created_body["job_id"]
+
+    payload = await _wait_for_music_job(client, created_body["job_id"])
+
+    assert set(payload) == {
+        "job_id",
+        "status",
+        "progress",
+        "results",
+        "error",
+        "created_at",
+        "finished_at",
+    }
+    assert payload["job_id"] == created_body["job_id"]
+    assert isinstance(payload["status"], str)
+    assert set(payload["progress"]) == {"done", "total"}
+    assert all(type(payload["progress"][key]) is int for key in ("done", "total"))
+    assert isinstance(payload["results"], list) and len(payload["results"]) == 1
+    assert set(payload["results"][0]) == {
+        "status",
+        "reason",
+        "path",
+        "download_url",
+        "bytes",
+    }
+    assert payload["error"] is None or isinstance(payload["error"], str)
+    assert type(payload["created_at"]) is float
+    assert payload["finished_at"] is None or type(payload["finished_at"]) is float
+
+
+@pytest.mark.asyncio
+async def test_music_export_response_contract(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(
+            load_settings=lambda: {"out_dir": str(tmp_path)}
+        ),
+    )
+
+    response = await client.post(
+        f"{API}/music/export",
+        json={
+            "platform": "netease",
+            "tracks": [
+                {"id": "1", "path": str(tmp_path / "a.mp3")},
+                {"id": "2"},
+            ],
+            "out_path": "favorites.m3u8",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    # Both spellings of the written count are present on both transports.
+    assert set(payload) == {"path", "tracks_written", "skipped", "written"}
+    assert isinstance(payload["path"], str) and payload["path"].endswith(".m3u8")
+    assert type(payload["tracks_written"]) is int
+    assert type(payload["written"]) is int
+    assert type(payload["skipped"]) is int
+    assert payload["tracks_written"] == payload["written"] == 1
+    assert payload["skipped"] == 1
+
+
+@pytest.mark.asyncio
+async def test_music_health_response_contract(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(
+            health_check=lambda platform, *args, **kwargs: {
+                "ok": True,
+                "elapsed_ms": 3,
+                "error": "",
+            }
+        ),
+    )
+
+    response = await client.get(f"{API}/music/health", params={"platform": "netease"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload, list) and len(payload) == 1
+    item = payload[0]
+    assert set(item) == {"platform", "ok", "elapsed_ms", "error"}
+    assert item["platform"] == "netease"
+    assert type(item["ok"]) is bool
+    assert type(item["elapsed_ms"]) is int
+    assert isinstance(item["error"], str)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "body", "expected"),
+    [
+        ("POST", f"{API}/music/search", {"platform": "netease"}, 422),
+        ("POST", f"{API}/music/search", {"platform": None, "keyword": "x"}, 422),
+        ("POST", f"{API}/music/search", {"platform": "", "keyword": "x"}, 422),
+        ("POST", f"{API}/music/search", {"platform": "nope", "keyword": "x"}, 400),
+        (
+            "POST",
+            f"{API}/music/download",
+            {"platform": "nope", "tracks": [{"id": "1"}]},
+            400,
+        ),
+        ("POST", f"{API}/music/download", {"tracks": []}, 422),
+        (
+            "POST",
+            f"{API}/music/download",
+            {"tracks": [{"id": str(index)} for index in range(201)]},
+            422,
+        ),
+        ("POST", f"{API}/music/export", {"tracks": []}, 422),
+        ("POST", f"{API}/music/jobs", {"tracks": []}, 422),
+        ("GET", f"{API}/music/health?platform=nope", None, 400),
+        ("GET", f"{API}/music/health?timeout=0", None, 422),
+        ("GET", f"{API}/music/health?timeout=61", None, 422),
+        ("GET", f"{API}/music/health?timeout=abc", None, 422),
+        ("GET", f"{API}/music/jobs/missing", None, 404),
+    ],
+)
+async def test_music_error_response_contract(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+    body: Any,
+    expected: int,
+) -> None:
+    """Every music error is ``{"detail"}`` (422 adds ``{"errors"}``)."""
+
+    def _create(platform: str) -> Any:
+        # Only the registered key resolves; unknown platforms behave like the
+        # real registry (KeyError → 400), not like an untyped fake object.
+        if platform != "netease":
+            raise KeyError(platform)
+        return object()
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(create=_create),
+    )
+
+    response = await client.request(method, path, json=body)
+
+    assert response.status_code == expected, response.text
+    if expected == 422:
+        _assert_validation_body(response.json())
+    else:
+        _assert_error_body(response.json())
+
+
+# ---------------------------------------------------------------------------
+# Music search bounds and paging contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [1, 20, 100])
+async def test_music_search_accepts_limit_within_bounds(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    limit: int,
+) -> None:
+    """``1..100`` reaches the provider unchanged."""
+    calls: list[dict[str, Any]] = []
+    provider = _FakeMusicProvider(calls, ([], 0))
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(create=lambda platform: provider),
+    )
+
+    response = await client.post(
+        f"{API}/music/search",
+        json={"platform": "netease", "keyword": "晴天", "limit": limit},
+    )
+
+    assert response.status_code == 200, response.text
+    assert calls == [{"keyword": "晴天", "limit": limit, "offset": 0}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, -1, 101, 10_000])
+async def test_music_search_rejects_limit_outside_bounds(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    limit: int,
+) -> None:
+    """An out-of-range limit is a 422 and never reaches a provider."""
+    calls: list[dict[str, Any]] = []
+    provider = _FakeMusicProvider(calls, ([], 0))
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(create=lambda platform: provider),
+    )
+
+    response = await client.post(
+        f"{API}/music/search",
+        json={"platform": "netease", "keyword": "晴天", "limit": limit},
+    )
+
+    assert response.status_code == 422, response.text
+    _assert_validation_body(response.json())
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_music_search_aggregate_caps_per_platform_fanout(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The internal per-platform limit stays 8..15 whatever the client asks."""
+    from novel_downloader.apps.music.aggregate import AggregateResult
+
+    seen: list[int] = []
+
+    def fake_search_all(*args: Any, **kwargs: Any) -> AggregateResult:
+        seen.append(kwargs["per_platform_limit"])
+        return AggregateResult(tracks=[], platforms=[], total=0)
+
+    monkeypatch.setattr(
+        api_routes, "_load_music_components", lambda: _fake_music_components()
+    )
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.aggregate.search_all", fake_search_all
+    )
+
+    for limit, expected in ((1, 8), (8, 8), (20, 15), (100, 15)):
+        response = await client.post(
+            f"{API}/music/search",
+            json={"platform": "all", "keyword": "晴天", "limit": limit},
+        )
+        assert response.status_code == 200, response.text
+        assert seen[-1] == expected, (limit, expected, seen)
+
+
+@pytest.mark.asyncio
+async def test_music_search_reports_paging_support(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``offset`` is echoed and ``supports_offset`` mirrors the provider."""
+    calls: list[dict[str, Any]] = []
+    paged = _FakeMusicProvider(calls, ([], 0))
+    paged.supports_offset = True
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(create=lambda platform: paged),
+    )
+
+    response = await client.post(
+        f"{API}/music/search",
+        json={"platform": "netease", "keyword": "晴天", "limit": 10, "offset": 30},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["offset"] == 30
+    assert payload["supports_offset"] is True
+    assert calls == [{"keyword": "晴天", "limit": 10, "offset": 30}]
+
+    # A musicdl-backed provider answers an empty page for any offset; the
+    # response must say so instead of looking like a normal end-of-list.
+    unpaged = _FakeMusicProvider([], ([], 0))
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(create=lambda platform: unpaged),
+    )
+    response = await client.post(
+        f"{API}/music/search",
+        json={"platform": "qq", "keyword": "晴天", "limit": 10, "offset": 30},
+    )
+    payload = response.json()
+    assert payload["offset"] == 30
+    assert payload["supports_offset"] is False
+
+
+# ---------------------------------------------------------------------------
+# Music id shape
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_music_job_id_shape_is_validated(
+    client: httpx.AsyncClient,
+) -> None:
+    """Malformed job ids are 422; unknown well-formed ids stay 404."""
+
+    malformed = "z" * 65
+    response = await client.get(f"{API}/music/jobs/{malformed}")
+    assert response.status_code == 422, response.text
+    _assert_validation_body(response.json())
+    assert response.json()["errors"][0]["loc"] == ["path", "job_id"]
+
+    # A decoded control character is malformed too (never a log-injection
+    # channel into the 404 detail).
+    newline = await client.get(f"{API}/music/jobs/{'a' * 32}%0A")
+    assert newline.status_code == 422, newline.text
+
+    unknown = await client.get(f"{API}/music/jobs/{'a' * 32}")
+    assert unknown.status_code == 404
+    _assert_error_body(unknown.json())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", [f"{API}/music/download", f"{API}/music/jobs"])
+@pytest.mark.parametrize("search_id", ["x" * 65, "bad/../id", "has space"])
+async def test_music_search_id_shape_is_validated(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    search_id: str,
+) -> None:
+    """A malformed ``search_id`` is a 422 before the cache lookup."""
+    monkeypatch.setattr(
+        api_routes, "_load_music_components", lambda: _fake_music_components()
+    )
+
+    response = await client.post(
+        path,
+        json={
+            "platform": "netease",
+            "tracks": [{"id": "1"}],
+            "search_id": search_id,
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    _assert_validation_body(response.json())
+    assert response.json()["errors"][0]["loc"] == ["body", "search_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", [f"{API}/music/download", f"{API}/music/jobs"])
+@pytest.mark.parametrize("search_id", [None, "", "   "])
+async def test_blank_search_id_still_means_absent(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    search_id: Any,
+) -> None:
+    """Blank is the historical "no id" spelling and keeps working."""
+    monkeypatch.setattr(
+        api_routes, "_load_music_components", lambda: _fake_music_components()
+    )
+
+    response = await client.post(
+        path,
+        json={
+            "platform": "netease",
+            "tracks": [{"id": "1"}],
+            "search_id": search_id,
+        },
+    )
+
+    assert response.status_code in (200, 202), response.text
+
+
+# ---------------------------------------------------------------------------
+# Music export: duplicate / blank metadata
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_music_export_dedupes_files_and_fills_blank_metadata(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One playlist entry per file; blank title/artist get placeholders."""
+    from novel_downloader.apps.music.downloader import export_m3u
+
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(
+            export_m3u=export_m3u,
+            load_settings=lambda: {"out_dir": str(tmp_path)},
+        ),
+    )
+
+    response = await client.post(
+        f"{API}/music/export",
+        json={
+            "tracks": [
+                # Blank metadata on the first copy: filled with placeholders.
+                {"id": "1", "name": "", "artists": "", "path": "songs/a.mp3"},
+                # Same file through a "./" prefix: a duplicate, not a song.
+                {"id": "2", "name": "A", "artists": "B", "path": "./songs/a.mp3"},
+                {"id": "3", "name": "C", "artists": "D", "path": "songs/b.mp3"},
+                {"id": "4", "name": "NoPath"},
+            ],
+            "out_path": "playlist.m3u8",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    # 3 tracks had a path but two pointed at the same file; 1 had none.
+    assert payload["tracks_written"] == 2
+    assert payload["written"] == 2
+    assert payload["skipped"] == 2
+
+    content = (tmp_path / "playlist.m3u8").read_text(encoding="utf-8")
+    lines = content.splitlines()
+    assert lines[0] == "#EXTM3U"
+    assert len(lines) == 5  # header + two (EXTINF, location) pairs
+    assert "未知歌手 - 未知歌曲" in content
+    # The kept KEEP entry is the first occurrence, blank metadata and all.
+    assert any(line.endswith("songs/a.mp3") for line in lines)
+    assert any(line.endswith("songs/b.mp3") for line in lines)
+    assert content.count("a.mp3") == 1
+
+
+@pytest.mark.asyncio
+async def test_music_out_dir_escape_is_a_400_without_echo(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path.parent / "elsewhere"
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(
+            load_settings=lambda: {"out_dir": str(tmp_path)}
+        ),
+    )
+
+    response = await client.post(
+        f"{API}/music/download",
+        json={
+            "platform": "netease",
+            "tracks": [{"id": "1"}],
+            "out_dir": str(outside),
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    _assert_error_body(payload)
+    assert "elsewhere" not in payload["detail"]
+    assert str(tmp_path) not in payload["detail"]
+
+
+@pytest.mark.asyncio
+async def test_music_jobs_busy_is_a_429(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_music_jobs: Any,
+) -> None:
+    monkeypatch.setattr(api_routes, "MAX_ACTIVE_MUSIC_JOBS", 0)
+    monkeypatch.setattr(
+        api_routes,
+        "_load_music_components",
+        lambda: _fake_music_components(
+            load_settings=lambda: {"out_dir": str(tmp_path)}
+        ),
+    )
+
+    response = await client.post(
+        f"{API}/music/jobs",
+        json={
+            "platform": "netease",
+            "tracks": [{"id": "1"}],
+            "out_dir": str(tmp_path),
+        },
+    )
+
+    assert response.status_code == 429
+    _assert_error_body(response.json())
+
+
+@pytest.mark.asyncio
+async def test_music_missing_extras_is_a_503(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All seven music routes answer the same 503 shape when extras are absent."""
+    monkeypatch.setitem(sys.modules, "mutagen", None)
+
+    calls: list[tuple[str, str, Any]] = [
+        ("GET", f"{API}/music/platforms", None),
+        ("POST", f"{API}/music/search", {"platform": "netease", "keyword": "x"}),
+        (
+            "POST",
+            f"{API}/music/download",
+            {"platform": "netease", "tracks": [{"id": "1"}]},
+        ),
+        (
+            "POST",
+            f"{API}/music/jobs",
+            {"platform": "netease", "tracks": [{"id": "1"}]},
+        ),
+        (
+            "POST",
+            f"{API}/music/export",
+            {"platform": "netease", "tracks": [{"id": "1", "path": "a.mp3"}]},
+        ),
+        ("GET", f"{API}/music/health", None),
+    ]
+    for method, path, body in calls:
+        response = await client.request(method, path, json=body)
+        assert response.status_code == 503, (method, path, response.text)
+        _assert_error_body(response.json())
 
 
 # ---------------------------------------------------------------------------

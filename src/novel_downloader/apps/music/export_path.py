@@ -32,6 +32,7 @@ embed the rejected absolute path.
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -44,6 +45,7 @@ __all__ = [
     "OutDirTargetError",
     "PlaylistTargetError",
     "default_playlist_name",
+    "playlist_keep_flags",
     "resolve_output_dir",
     "resolve_playlist_target",
 ]
@@ -80,6 +82,44 @@ def default_playlist_name(suffix: str = ".m3u8") -> str:
     """Return a timestamped playlist file name (UTC, second resolution)."""
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     return f"playlist-{stamp}{suffix}"
+
+
+def playlist_keep_flags(paths: Iterable[object]) -> list[bool]:
+    """
+    Decide, per submitted track, whether it gets a playlist entry.
+
+    A playlist stores file locations, so the same file listed twice would
+    appear twice in every player (the second entry is dead weight, not a
+    second song). Identity is the normalised absolute path
+    (``normcase(abspath(path))``), which folds ``./a.mp3`` into ``a.mp3`` and
+    — on Windows — ``A.MP3`` into ``a.mp3``. The first occurrence is kept.
+
+    A blank/whitespace-only path is never an entry: that is the historical
+    "count it in ``skipped``" rule. ``OutDirTargetError`` is not raised here;
+    this function only looks at the path strings.
+
+    :return: one flag per input, ``True`` where the entry should be written.
+    """
+    seen: set[str] = set()
+    flags: list[bool] = []
+    for value in paths:
+        text = str(value or "").strip()
+        if not text:
+            flags.append(False)
+            continue
+        try:
+            key = os.path.normcase(os.path.abspath(text))
+        except (OSError, ValueError):
+            # A path the OS refuses to absolutise cannot identify a file;
+            # treat it like a blank entry instead of failing the whole export.
+            flags.append(False)
+            continue
+        if key in seen:
+            flags.append(False)
+            continue
+        seen.add(key)
+        flags.append(True)
+    return flags
 
 
 def _resolve(path: Path) -> Path:

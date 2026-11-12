@@ -17,7 +17,9 @@ The optional ``--cors`` flag enables ``Access-Control-Allow-Origin: *`` so
 browser extensions / local tools can call the API from a web page. This is
 dangerous on a non-localhost bind: any website the user visits could then call
 the API with the user's network position. Only enable it for local use and keep
-a token configured when the server is exposed beyond ``127.0.0.1``.
+a token configured when the server is exposed beyond ``127.0.0.1``. Credentials
+are never allowed with the wildcard origin, and only the verbs/headers the API
+actually uses are admitted (see ``CORS_ALLOW_METHODS`` / ``CORS_ALLOW_HEADERS``).
 
 Additional hardening
 --------------------
@@ -28,7 +30,7 @@ Additional hardening
   with cross-origin browser requests. Non-browser clients (CLI, SDK, curl)
   send no ``Origin`` and are unaffected; ``--cors`` removes the gate and lets
   CORS govern browsers.
-* Request bodies of the JSON endpoints are capped (see
+* Request bodies of every write route below ``/api/v1`` are capped (see
   :class:`novel_downloader.apps.api.middleware.BodySizeLimitMiddleware`).
 * Requests are rate limited per client IP with a sliding window (default 120
   per 60 seconds, ``--rate-limit 0`` disables it — see
@@ -36,7 +38,9 @@ Additional hardening
   integration client stuck in a loop gets ``429`` + ``Retry-After`` instead of
   being able to hammer the local server indefinitely. The limit runs *before*
   the token check (throttling brute-force attempts) and *inside* the CORS
-  layer (the ``429`` keeps the CORS headers); ``/api/v1/health`` is exempt.
+  layer (the ``429`` keeps the CORS headers); ``/api/v1/health`` is exempt,
+  the counter keys on the TCP peer (never ``X-Forwarded-For``), and the number
+  of tracked keys is capped.
 * Every request is logged as a single ``method path status duration`` line
   (:class:`novel_downloader.apps.api.middleware.RequestLoggingMiddleware`,
   ``WARNING`` once it exceeds one second); query strings and response bodies
@@ -47,6 +51,13 @@ Additional hardening
   endpoints (``/sites``, ``/history``, ``/music/platforms``), ``no-store``
   for live task data and for every error response, and
   ``public, max-age=3600`` for the write-once exported files.
+* API and download responses carry ``X-Content-Type-Options: nosniff`` and
+  ``Referrer-Policy: no-referrer``; ``/downloads`` additionally gets a
+  sandboxing ``Content-Security-Policy`` so a malicious exported HTML file
+  cannot run script on the API's own origin
+  (:class:`novel_downloader.apps.api.middleware.SecurityHeadersMiddleware`).
+* ``/docs``, ``/redoc`` and ``/openapi.json`` can be switched off
+  (``expose_docs=False``); the CLI does so automatically on a non-local bind.
 * Every error response is shaped as ``{"detail": ...}`` and unexpected
   exceptions are turned into a stack-trace-free ``500``.
 
@@ -78,6 +89,7 @@ from novel_downloader.infra.config import get_config_value
 from .middleware import (
     DEFAULT_MAX_BODY_BYTES,
     DEFAULT_RATE_LIMIT,
+    DEFAULT_RATE_LIMIT_MAX_KEYS,
     DEFAULT_RATE_LIMIT_WINDOW,
     BodySizeLimitMiddleware,
     CacheControlMiddleware,
@@ -85,6 +97,7 @@ from .middleware import (
     OriginCheckMiddleware,
     RateLimitMiddleware,
     RequestLoggingMiddleware,
+    SecurityHeadersMiddleware,
     register_error_handlers,
 )
 from .routes import OPENAPI_TAGS, router, task_to_dict
@@ -98,6 +111,25 @@ logger = logging.getLogger(__name__)
 
 #: Seconds between two webhook watcher snapshots.
 WEBHOOK_POLL_INTERVAL = 1.0
+
+#: Methods a browser client may use through ``--cors``. Only the verbs the
+#: API actually exposes are allowed; ``PUT``/``PATCH`` are not routes, so
+#: allowing them would only widen the preflight surface.
+CORS_ALLOW_METHODS: tuple[str, ...] = ("GET", "POST", "DELETE", "HEAD", "OPTIONS")
+
+#: Request headers a browser client may send through ``--cors``. The API reads
+#: ``Authorization`` / ``X-API-Key`` for auth and the JSON content type; a
+#: wildcard here would let any custom header through for no benefit.
+CORS_ALLOW_HEADERS: tuple[str, ...] = (
+    "Accept",
+    "Authorization",
+    "Content-Type",
+    "X-API-Key",
+)
+
+#: Response headers browser clients may read through ``--cors``. ``Retry-After``
+#: is needed so a rate-limited browser client can back off correctly.
+CORS_EXPOSE_HEADERS: tuple[str, ...] = ("Retry-After",)
 
 
 def _resolve_output_dir(output_dir: str | Path | None) -> Path:
@@ -166,8 +198,10 @@ def create_app(
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     rate_limit: int = DEFAULT_RATE_LIMIT,
     rate_limit_window: float = DEFAULT_RATE_LIMIT_WINDOW,
+    rate_limit_max_keys: int = DEFAULT_RATE_LIMIT_MAX_KEYS,
     timeouts: Mapping[str, float] | None = None,
     webhook_url: str | None = None,
+    expose_docs: bool = True,
 ) -> FastAPI:
     """
     Build the REST API application.
@@ -189,6 +223,9 @@ def create_app(
         entirely. Defaults to 120 per minute; ``/api/v1/health`` is exempt.
     :param rate_limit_window: Length of the rate-limit sliding window in
         seconds. Defaults to 60.
+    :param rate_limit_max_keys: Maximum number of per-IP counters kept in
+        memory before the least recently active ones are evicted. Defaults to
+        10000; ``<= 0`` disables the cap.
     :param timeouts: Per-endpoint wall-clock budgets in seconds, keyed by
         ``search``, ``music_search`` and ``music_download``; unset keys fall
         back to the defaults in
@@ -197,6 +234,10 @@ def create_app(
     :param webhook_url: Optional URL receiving ``task_finished`` events; when
         ``None`` the :data:`NOVEL_API_WEBHOOK` environment variable is used.
         An empty string disables the webhook explicitly.
+    :param expose_docs: Whether to serve ``/docs``, ``/redoc`` and
+        ``/openapi.json``. Defaults to ``True`` for local use; the CLI turns
+        it off automatically on a non-local bind so the schema (including
+        every route and parameter) is not published to the network.
     :return: A configured :class:`fastapi.FastAPI` instance.
     """
     resolved_token = token if token is not None else os.environ.get("NOVEL_API_TOKEN")
@@ -221,6 +262,9 @@ def create_app(
         version=__version__,
         openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
+        docs_url="/docs" if expose_docs else None,
+        redoc_url="/redoc" if expose_docs else None,
+        openapi_url="/openapi.json" if expose_docs else None,
     )
     application.state.api_token = resolved_token or None
     application.state.api_timeouts = dict(timeouts or {})
@@ -263,12 +307,19 @@ def create_app(
             RateLimitMiddleware,
             limit=rate_limit,
             window=rate_limit_window,
+            max_keys=rate_limit_max_keys,
         )
 
     # Cache policy sits *outside* the auth and body-limit layers so their
     # direct 401/413 responses carry the same Cache-Control as every other
     # response on the path; route-set headers (the SSE ``no-cache``) win.
     application.add_middleware(CacheControlMiddleware)
+
+    # Security headers wrap every layer that can answer directly (401/413/429),
+    # so error responses are stamped too. ``nosniff``/``no-referrer`` apply to
+    # the API, and ``/downloads`` additionally gets a sandboxing CSP because it
+    # shares the API's origin.
+    application.add_middleware(SecurityHeadersMiddleware)
 
     # Outermost custom layer: logs one ``method path status duration`` line
     # per request, whether it succeeded, failed or never produced a response.
@@ -278,9 +329,12 @@ def create_app(
         application.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
+            # Never combine ``*`` with credentials: the API authenticates with
+            # explicit headers, not cookies, so browsers must not send them.
             allow_credentials=False,
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_methods=list(CORS_ALLOW_METHODS),
+            allow_headers=list(CORS_ALLOW_HEADERS),
+            expose_headers=list(CORS_EXPOSE_HEADERS),
         )
 
     downloads = _resolve_output_dir(output_dir)

@@ -686,15 +686,18 @@ async def test_body_within_limit_is_accepted(
     assert response.json() == {"total": 0, "results": []}
 
 
-def test_only_json_endpoints_are_body_limited(make_app: Any) -> None:
-    """Only the guarded endpoints are limited; others pass through untouched."""
+def test_every_api_write_route_is_body_limited(make_app: Any) -> None:
+    """The cap covers every write route under the prefix, not a fixed list."""
     app = make_app(max_body_bytes=64)
     guarded = api_middleware.BodySizeLimitMiddleware(app, max_bytes=64)
 
     assert guarded._applies("POST", "/api/v1/search")
     assert guarded._applies("POST", "/api/v1/music/jobs/")
-    assert not guarded._applies("POST", "/api/v1/tasks")
+    assert guarded._applies("POST", "/api/v1/tasks")
+    assert guarded._applies("DELETE", "/api/v1/watchlist/site/1")
     assert not guarded._applies("GET", "/api/v1/search")
+    assert not guarded._applies("POST", "/api/v1x/search")
+    assert not guarded._applies("POST", "/docs")
 
 
 @pytest.mark.asyncio
@@ -1150,6 +1153,12 @@ async def test_music_jobs_reject_beyond_active_limit(
         )
         assert refused.status_code == 429
         assert "limit 4" in refused.json()["detail"]
+        # A load signal, not the request-rate 429: tell the client when to
+        # come back instead of letting it hammer /music/jobs.
+        assert refused.headers["retry-after"] == "5"
+        assert refused.headers["retry-after"] == str(
+            api_routes.MUSIC_JOBS_RETRY_AFTER_SECONDS
+        )
 
         # No running job was evicted to make room for the refused one.
         with api_routes._MUSIC_JOBS_LOCK:
@@ -1509,6 +1518,39 @@ async def test_music_job_error_does_not_leak_exception_text(
     assert "RuntimeError" in payload["error"]
     assert "provider exploded" not in payload["error"]
     assert "secret-token" not in str(payload)
+
+
+# ---------------------------------------------------------------------------
+# Documentation exposure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_docs_can_be_disabled_for_non_local_binds(make_app: Any) -> None:
+    """A public bind must be able to hide the full route schema."""
+    app = make_app(expose_docs=False)
+    async with _client(app) as client:
+        docs = await client.get("/docs")
+        redoc = await client.get("/redoc")
+        schema = await client.get("/openapi.json")
+        health = await client.get("/api/v1/health")
+
+    assert docs.status_code == 404
+    assert redoc.status_code == 404
+    assert schema.status_code == 404
+    # The API itself is unaffected.
+    assert health.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_docs_are_available_on_the_local_default(make_app: Any) -> None:
+    app = make_app()
+    async with _client(app) as client:
+        docs = await client.get("/docs")
+        schema = await client.get("/openapi.json")
+
+    assert docs.status_code == 200
+    assert schema.status_code == 200
 
 
 # ---------------------------------------------------------------------------

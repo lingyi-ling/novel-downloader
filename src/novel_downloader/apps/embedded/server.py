@@ -118,6 +118,21 @@ _DEFAULT_PAGE_LIMIT = 50
 #: ``routes.MAX_PAGE_LIMIT``).
 _MAX_PAGE_LIMIT = 200
 
+#: Maximum ``limit`` for music search (mirrors
+#: ``schemas.MAX_MUSIC_SEARCH_LIMIT``): a larger value is a ``422`` here too,
+#: so the embedded engine never forwards an unbounded page size to a provider.
+_MAX_MUSIC_SEARCH_LIMIT = 100
+
+#: Shape of ``search_id`` / ``job_id`` (mirrors ``schemas.MUSIC_ID_PATTERN``).
+#: The REST API validates the same pattern; ids are short opaque tokens, so
+#: anything else is a ``422`` before a cache/table lookup or a log line.
+_MUSIC_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+_MUSIC_ID_RE = re.compile(_MUSIC_ID_PATTERN)
+
+#: ``Retry-After`` (seconds) on the music-job concurrency 429 (mirrors
+#: ``routes.MUSIC_JOBS_RETRY_AFTER_SECONDS``).
+_MUSIC_JOBS_RETRY_AFTER_SECONDS = 5
+
 #: Task snapshot groups, in the order the REST API concatenates them.
 _TASK_GROUPS = ("pending", "running", "completed")
 
@@ -179,12 +194,18 @@ class _ApiError(Exception):
     """An error carrying the REST API's wire shape: status + ``detail``."""
 
     def __init__(
-        self, status: int, detail: str, errors: list[dict[str, Any]] | None = None
+        self,
+        status: int,
+        detail: str,
+        errors: list[dict[str, Any]] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(detail)
         self.status = status
         self.detail = detail
         self.errors = errors
+        #: Extra response headers (e.g. ``Retry-After`` on the music-job 429).
+        self.headers = dict(headers or {})
 
 
 def _err(name: str, msg: str, type_: str, source: str = "body") -> dict[str, Any]:
@@ -279,6 +300,7 @@ def _int_field(
     default: int | None,
     ge: int | None,
     entries: list[dict[str, Any]],
+    le: int | None = None,
 ) -> int | None:
     if name not in body or body[name] is None:
         return default
@@ -292,6 +314,15 @@ def _int_field(
                 name,
                 f"Input should be greater than or equal to {ge}",
                 "greater_than_equal",
+            )
+        )
+        return default
+    if le is not None and value > le:
+        entries.append(
+            _err(
+                name,
+                f"Input should be less than or equal to {le}",
+                "less_than_equal",
             )
         )
         return default
@@ -1063,6 +1094,108 @@ def _is_all_platforms(platform: Any) -> bool:
     return is_all_platforms(platform)
 
 
+def _music_id_error(value: Any, *, source: str, name: str) -> dict[str, Any] | None:
+    """
+    Validate a ``search_id`` / ``job_id`` the way the REST models do.
+
+    A non-string is a type error; a string must match
+    :data:`_MUSIC_ID_PATTERN` (same Pydantic message/type, so both transports
+    answer the same ``422``). ``search_id`` treats a blank value as absent
+    *before* this check (mirroring ``MusicDownloadRequest``'s validator), so
+    only a genuinely malformed id fails.
+    """
+    if not isinstance(value, str):
+        return _err(name, "Input should be a valid string", "string_type", source)
+    # ``fullmatch`` (not ``match``): ``$`` also matches before a trailing
+    # newline, and Pydantic rejects ``"id\n"``; a decoded ``%0A`` must not slip
+    # through into a lookup or a 404 detail.
+    if _MUSIC_ID_RE.fullmatch(value) is None:
+        return _err(
+            name,
+            f"String should match pattern '{_MUSIC_ID_PATTERN}'",
+            "string_pattern_mismatch",
+            source,
+        )
+    return None
+
+
+def _platform_field(body: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    """
+    Validate ``platform`` the way the REST model does.
+
+    ``MusicSearchRequest.platform`` (and the download/export bodies) are
+    ``str = Field(default="all", min_length=1)``: an absent key uses the
+    default, while an explicit ``null``, a non-string or an empty string is a
+    ``422``. The value is *not* stripped -- REST does not strip either, so
+    ``" netease "`` is an unknown platform on both transports instead of
+    being silently accepted by only one.
+    """
+    if "platform" not in body:
+        return "all", None
+    value = body["platform"]
+    if not isinstance(value, str):
+        return "all", _err("platform", "Input should be a valid string", "string_type")
+    if len(value) < 1:
+        return "all", _err(
+            "platform",
+            "String should have at least 1 character",
+            "string_too_short",
+        )
+    return value, None
+
+
+def _health_timeout(
+    query: dict[str, list[str]], entries: list[dict[str, Any]]
+) -> float:
+    """
+    Parse ``GET /music/health?timeout=`` like the REST ``Query(gt=0, le=60)``.
+
+    The REST endpoint rejects an unparseable, non-positive or over-60 value
+    with ``422``; the embedded engine used to clamp silently, which meant the
+    same request succeeded on one transport and failed on the other.
+    """
+    values = query.get("timeout") or []
+    if not values:
+        return 5.0
+    try:
+        value = float(values[0])
+    except (TypeError, ValueError):
+        entries.append(
+            _err(
+                "timeout",
+                "Input should be a valid number",
+                "float_parsing",
+                "query",
+            )
+        )
+        return 5.0
+    if value != value:
+        # NaN compares false against every bound; pydantic reports the ``le``
+        # violation, so mirror that rather than passing NaN into the probe.
+        entries.append(
+            _err(
+                "timeout",
+                "Input should be less than or equal to 60",
+                "less_than_equal",
+                "query",
+            )
+        )
+    elif value <= 0:
+        entries.append(
+            _err("timeout", "Input should be greater than 0", "greater_than", "query")
+        )
+    elif value > 60:
+        entries.append(
+            _err(
+                "timeout",
+                "Input should be less than or equal to 60",
+                "less_than_equal",
+                "query",
+            )
+        )
+    return value
+
+
 def _music_track(components: Any, data: Any) -> Any:
     """Build the provider track, ignoring fields this server does not know."""
     if not isinstance(data, dict):
@@ -1086,7 +1219,15 @@ def _music_track_payload(track: Any) -> dict[str, Any]:
 
 
 def _music_result_item(result: Any) -> dict[str, Any]:
-    from novel_downloader.apps.music.serialize import strip_url_query
+    """Serialise one per-track download result for the wire.
+
+    Shared rules with the REST API: the failure reason is query-stripped,
+    folded onto one line and capped at ``REASON_MAX_CHARS`` (provider
+    exceptions can quote signed URLs or whole HTML bodies).  ``download_url``
+    is the loopback route the Android client hands to ``DownloadManager``;
+    the REST API emits the same key with an empty value.
+    """
+    from novel_downloader.apps.music.serialize import sanitize_reason
 
     raw_path = str(getattr(result, "path", "") or "")
     download_url = ""
@@ -1099,9 +1240,7 @@ def _music_result_item(result: Any) -> dict[str, Any]:
             download_url = f"/downloads/music/{quote(name, safe='')}"
     return {
         "status": str(getattr(result, "status", "fail")),
-        # Provider reasons can quote signed request URLs; strip the query and
-        # fragment before they cross the loopback boundary.
-        "reason": strip_url_query(str(getattr(result, "reason", "") or "")),
+        "reason": sanitize_reason(getattr(result, "reason", "")),
         "path": raw_path,
         "download_url": download_url,
         "bytes": int(getattr(result, "bytes_", 0) or 0),
@@ -1129,12 +1268,14 @@ def _handle_music_search(
 ) -> dict[str, Any]:
     components = _music_components()
     entries: list[dict[str, Any]] = []
-    platform = str(body.get("platform") or "all").strip() or "all"
+    platform, platform_err = _platform_field(body)
     keyword, keyword_err = _required_str(body, "keyword")
-    limit = _int_field(body, "limit", 20, 1, entries)
-    offset = _int_field(body, "offset", 0, 0, entries)
+    if platform_err is not None:
+        entries.append(platform_err)
     if keyword_err is not None:
         entries.append(keyword_err)
+    limit = _int_field(body, "limit", 20, 1, entries, le=_MAX_MUSIC_SEARCH_LIMIT)
+    offset = _int_field(body, "offset", 0, 0, entries)
     if entries:
         raise _validation_error(entries)
     assert keyword is not None
@@ -1148,9 +1289,7 @@ def _handle_music_search(
             keyword,
             None,
             limit,
-            per_platform_limit=max(
-                aggregate.DEFAULT_PER_PLATFORM_LIMIT, min(limit, 15)
-            ),
+            per_platform_limit=aggregate.per_platform_limit_for(limit),
             timeout=aggregate.DEFAULT_TIMEOUT,
         )
         payload = [_music_track_payload(track) for track in result.tracks]
@@ -1160,6 +1299,9 @@ def _handle_music_search(
             "search_id": CACHE.put(result.tracks),
             "platforms": [item.as_dict() for item in result.platforms],
             "platform": aggregate.ALL_PLATFORM_KEY,
+            # Aggregate search always starts at hit 0 and does not page.
+            "offset": 0,
+            "supports_offset": False,
         }
 
     _require_music_platform(components, platform)
@@ -1171,6 +1313,9 @@ def _handle_music_search(
         "tracks": payload,
         "search_id": CACHE.put(tracks),
         "platform": platform,
+        # Echo the skip the provider saw and whether it actually pages.
+        "offset": offset,
+        "supports_offset": bool(getattr(provider, "supports_offset", False)),
     }
 
 
@@ -1178,6 +1323,14 @@ def _handle_music_health(
     _body: dict[str, Any], _params: dict[str, str], query: dict[str, list[str]]
 ) -> list[dict[str, Any]]:
     components = _music_components()
+    # Query parsing (``gt=0, le=60``) runs before the platform lookup: FastAPI
+    # rejects a bad ``timeout`` with 422 before the handler ever sees 400 for
+    # an unknown platform, so requests with both faults must agree.
+    entries: list[dict[str, Any]] = []
+    timeout = _health_timeout(query, entries)
+    if entries:
+        raise _validation_error(entries)
+
     values = query.get("platform") or []
     platform = values[0] if values else None
     if platform is not None:
@@ -1185,12 +1338,6 @@ def _handle_music_health(
         selected = [platform]
     else:
         selected = _music_keys(components)
-    timeout_values = query.get("timeout") or []
-    try:
-        timeout = float(timeout_values[0]) if timeout_values else 5.0
-    except ValueError:
-        timeout = 5.0
-    timeout = min(max(timeout, 0.1), 60.0)
 
     results: list[dict[str, Any]] = []
     for key in selected:
@@ -1203,7 +1350,9 @@ def _handle_music_health(
 def _music_download_args(
     body: dict[str, Any], components: Any, entries: list[dict[str, Any]]
 ) -> tuple[str, list[Any], Any]:
-    platform = str(body.get("platform") or "all").strip() or "all"
+    platform, platform_err = _platform_field(body)
+    if platform_err is not None:
+        entries.append(platform_err)
     raw_tracks = body.get("tracks")
     tracks: list[Any] = []
     if not isinstance(raw_tracks, list):
@@ -1226,17 +1375,24 @@ def _music_download_args(
         )
     else:
         tracks = [_music_track(components, item) for item in raw_tracks]
+    # Blank means "no search id" on both transports; a malformed one is a 422
+    # before the cache lookup (and before any log line quoting the value).
+    search_id = body.get("search_id")
+    if isinstance(search_id, str) and not search_id.strip():
+        search_id = None
+    if search_id is not None:
+        id_error = _music_id_error(search_id, source="body", name="search_id")
+        if id_error is not None:
+            entries.append(id_error)
     if entries:
         raise _validation_error(entries)
-    assert platform is not None
     if not _is_all_platforms(platform):
         _require_music_platform(components, platform)
 
     from novel_downloader.apps.music.trackcache import CACHE
 
-    search_id = body.get("search_id")
-    if isinstance(search_id, str) and search_id.strip():
-        tracks = CACHE.resolve(search_id.strip(), tracks)
+    if search_id is not None:
+        tracks = CACHE.resolve(search_id, tracks)
 
     raw_out_dir = str(body.get("out_dir") or "").strip()
     out_dir = str(_resolve_music_out_dir(components, raw_out_dir))
@@ -1319,20 +1475,44 @@ def _handle_music_export(
 ) -> dict[str, Any]:
     components = _music_components()
     entries: list[dict[str, Any]] = []
-    platform = str(body.get("platform") or "all").strip() or "all"
+    platform, platform_err = _platform_field(body)
+    if platform_err is not None:
+        entries.append(platform_err)
     raw_tracks = body.get("tracks")
     tracks: list[Any] = []
     if not isinstance(raw_tracks, list):
         entries.append(_err("tracks", "Input should be a valid list", "list_type"))
+    elif not raw_tracks:
+        # ``MusicExportRequest.tracks`` is ``min_length=1``: an empty list is
+        # a 422 on the REST side, not a successful export of zero tracks.
+        entries.append(
+            _err(
+                "tracks",
+                "List should have at least 1 item after validation, not 0",
+                "too_short",
+            )
+        )
+    elif len(raw_tracks) > _MAX_MUSIC_TRACKS:
+        entries.append(
+            _err(
+                "tracks",
+                f"List should have at most {_MAX_MUSIC_TRACKS} items",
+                "too_long",
+            )
+        )
     else:
         tracks = [_music_track(components, item) for item in raw_tracks]
     if entries:
         raise _validation_error(entries)
-    assert platform is not None
     if not _is_all_platforms(platform):
         _require_music_platform(components, platform)
 
-    usable = [track for track in tracks if str(getattr(track, "path", "") or "")]
+    # Same rule as REST: a whitespace-only ``path`` is not a local file, and a
+    # repeated file location is one playlist entry (not two identical rows).
+    from novel_downloader.apps.music.export_path import playlist_keep_flags
+
+    keep = playlist_keep_flags(getattr(track, "path", "") for track in tracks)
+    usable = [track for track, keep_it in zip(tracks, keep, strict=True) if keep_it]
     skipped = len(tracks) - len(usable)
     out_path = str(body.get("out_path") or "").strip()
     target = _resolve_music_export_target(components, out_path)
@@ -1349,12 +1529,15 @@ def _handle_music_export(
         ) from exc
     # ``export_m3u`` returns the playlist path (mirroring the REST handler's
     # ``path`` field), not a count: ``int()`` on it made every real export
-    # answer 500.  ``written`` is the number of tracks with a local file --
-    # the same meaning as REST's ``tracks_written``.
+    # answer 500.  Both ``written`` (the embedded spelling) and
+    # ``tracks_written`` (the REST spelling) carry the number of tracks with a
+    # local file, so the field set is identical on both transports and the
+    # Android client's dual-key decoder keeps working.
     return {
-        "written": len(usable),
-        "skipped": int(skipped),
         "path": str(written_path or target),
+        "tracks_written": len(usable),
+        "skipped": int(skipped),
+        "written": len(usable),
     }
 
 
@@ -1504,6 +1687,7 @@ def _handle_music_jobs_post(
             raise _ApiError(
                 429,
                 _MSG_MUSIC_JOBS_BUSY.format(limit=_MAX_ACTIVE_MUSIC_JOBS),
+                headers={"Retry-After": str(_MUSIC_JOBS_RETRY_AFTER_SECONDS)},
             )
         _MUSIC_JOBS[job_id] = {
             "job_id": job_id,
@@ -1527,6 +1711,11 @@ def _handle_music_job_status(
     _body: dict[str, Any], params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
     job_id = params.get("job_id", "")
+    # Same shape rule as the REST path parameter: a malformed id never reaches
+    # the job table (or a log line), while an unknown well-formed one is 404.
+    id_error = _music_id_error(job_id, source="path", name="job_id")
+    if id_error is not None:
+        raise _validation_error([id_error])
     with _MUSIC_JOBS_LOCK:
         job = _MUSIC_JOBS.get(job_id)
         if job is None:
@@ -1540,6 +1729,12 @@ def _handle_music_job_status(
             "created_at": job["created_at"],
             "finished_at": job["finished_at"],
         }
+
+
+#: Handlers whose REST counterpart answers with a non-200 success status.
+#: ``POST /api/v1/music/jobs`` is ``202 Accepted`` (the job runs in the
+#: background); everything else is a plain ``200``.
+_SUCCESS_STATUS: dict[Handler, int] = {_handle_music_jobs_post: 202}
 
 
 ROUTES: dict[tuple[str, str], Handler] = {
@@ -1649,7 +1844,7 @@ class _Handler(BaseHTTPRequestHandler):
         payload: dict[str, Any] = {"detail": error.detail}
         if error.errors:
             payload["errors"] = error.errors
-        self._send_json(payload, error.status)
+        self._send_json(payload, error.status, error.headers or None)
 
     def _content_length(self) -> int | None:
         """The declared Content-Length, or ``None`` when unusable."""
@@ -1793,7 +1988,10 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._drain_body()
                 body = {}
-            self._send_json(handler(body, params, query))
+            self._send_json(
+                handler(body, params, query),
+                _SUCCESS_STATUS.get(handler, 200),
+            )
             return
 
         # No handler for this method on this path: mirror the REST API's

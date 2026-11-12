@@ -271,7 +271,7 @@ async def test_watchlist_check_isolates_search_failures(
 
     async def fake_search(keyword: str, *, sites: list[str], **kwargs: Any) -> Any:
         if sites == ["broken"]:
-            raise RuntimeError("site exploded")
+            raise RuntimeError("site exploded at /home/victim/.secret-token")
         return [_search_result(site="demo", book_id="2", title="Good", latest="2")]
 
     monkeypatch.setattr(api_routes.search_module, "search", fake_search)
@@ -284,7 +284,10 @@ async def test_watchlist_check_isolates_search_failures(
     assert payload["updated"] == 1
     assert payload["failed"] == 1
     failed = next(item for item in payload["items"] if item["site"] == "broken")
-    assert failed["error"] == "RuntimeError: site exploded"
+    # Only the exception class reaches the client; the message (which may
+    # embed internal paths) stays in the server log.
+    assert failed["error"] == "RuntimeError"
+    assert "secret-token" not in str(payload)
     assert failed["needs_download"] is False
 
 
@@ -388,6 +391,9 @@ async def test_music_export_writes_playlist_and_counts_skipped(
         "path": str(target),
         "tracks_written": 1,
         "skipped": 1,
+        # Compatibility alias for the embedded engine's spelling; both
+        # transports expose the same field set.
+        "written": 1,
     }
     content = target.read_text(encoding="utf-8")
     assert content.startswith("#EXTM3U\n")

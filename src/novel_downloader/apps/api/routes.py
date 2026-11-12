@@ -30,6 +30,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import Path as PathParam
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -68,6 +69,7 @@ from .constants import (
     MSG_UNKNOWN_MUSIC_PLATFORM,
 )
 from .schemas import (
+    MUSIC_ID_PATTERN,
     BrowseRequest,
     LoginSubmitRequest,
     MusicDownloadRequest,
@@ -792,7 +794,15 @@ async def _check_watch_entry(
             sort="quality",
         )
     except Exception as exc:  # noqa: BLE001 - per-book failure, never fatal
-        item["error"] = f"{type(exc).__name__}: {exc}"
+        # Only the exception class reaches the client: the message may embed
+        # internal paths, URLs or provider details and stays in the log.
+        logger.warning(
+            "Watchlist check failed for %s/%s: %s",
+            entry.site,
+            entry.book_id,
+            exc,
+        )
+        item["error"] = type(exc).__name__
         return item
 
     matched = _match_watch_entry(entry, results)
@@ -1240,25 +1250,29 @@ async def music_export(body: MusicExportRequest) -> dict[str, Any]:
     """
     Write an M3U8 playlist for already-downloaded tracks.
 
-    Every track needs a local ``path``; tracks without one are counted in
-    ``skipped`` instead of failing the request. ``out_path`` may be a file
-    (``.m3u`` / ``.m3u8``) or a directory; the default is the music settings'
-    ``out_dir``. No network access or download happens here.
+    Every track needs a local ``path``; tracks without one — and duplicates
+    that resolve to the same file — are counted in ``skipped`` instead of
+    failing the request or producing a repeated playlist entry.
+    ``out_path`` may be a file (``.m3u`` / ``.m3u8``) or a directory; the
+    default is the music settings' ``out_dir``. No network access or download
+    happens here.
     """
+    from novel_downloader.apps.music.export_path import playlist_keep_flags
+
     components = _load_music_components()
     # Playlists only store file locations, so a mixed-platform selection is
     # fine; "all" just means the caller did not pick a single platform.
     if not _is_all_platforms(body.platform):
         _require_music_platform(components, body.platform)
 
+    keep = playlist_keep_flags(track.path for track in body.tracks)
     tracks: list[Any] = []
     skipped = 0
-    for model in body.tracks:
-        data = model.model_dump()
-        if not str(data.get("path") or "").strip():
+    for model, keep_it in zip(body.tracks, keep, strict=True):
+        if not keep_it:
             skipped += 1
             continue
-        tracks.append(components.track_cls(**data))
+        tracks.append(components.track_cls(**model.model_dump()))
 
     target = _resolve_export_target(components, body.out_path)
     try:
@@ -1279,6 +1293,10 @@ async def music_export(body: MusicExportRequest) -> dict[str, Any]:
         "path": str(written),
         "tracks_written": len(tracks),
         "skipped": skipped,
+        # Compatibility alias for the embedded engine's spelling. The Android
+        # client reads both keys; emitting both keeps ``/music/export``'
+        # field set identical on the REST and loopback transports.
+        "written": len(tracks),
     }
 
 
@@ -1321,11 +1339,20 @@ async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, 
     platforms, so each track carries ``sources`` and the response adds
     ``platforms`` with per-platform counts/failures.
 
+    ``limit`` is capped by the request schema (``1..100``); a larger value is
+    a ``422`` and never reaches a provider. ``offset`` means "skip this many
+    hits" and is forwarded only to an explicit-platform search. Not every
+    provider implements paging: the response's ``supports_offset`` says
+    whether this one does, so a "load more" control can stop instead of
+    silently receiving an empty page forever (musicdl-backed platforms return
+    an empty page for any non-zero offset). Aggregate searches always start at
+    the first hit and therefore report ``offset: 0, supports_offset: false``.
+
     Exceeding the configured budget returns ``504``.
     """
     from novel_downloader.apps.music.aggregate import (
         ALL_PLATFORM_KEY,
-        DEFAULT_PER_PLATFORM_LIMIT,
+        per_platform_limit_for,
         search_all,
     )
     from novel_downloader.apps.music.trackcache import CACHE
@@ -1338,7 +1365,7 @@ async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, 
                 body.keyword,
                 None,
                 body.limit,
-                per_platform_limit=max(DEFAULT_PER_PLATFORM_LIMIT, min(body.limit, 15)),
+                per_platform_limit=per_platform_limit_for(body.limit),
                 timeout=_music_search_timeout(request),
             ),
             _blocking_timeout(request, "music_search"),
@@ -1351,6 +1378,9 @@ async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, 
             "search_id": CACHE.put(result.tracks),
             "platforms": [item.as_dict() for item in result.platforms],
             "platform": ALL_PLATFORM_KEY,
+            # Aggregate search has no paging: it always starts at hit 0.
+            "offset": 0,
+            "supports_offset": False,
         }
 
     provider = _create_provider(components, body.platform)
@@ -1370,6 +1400,9 @@ async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, 
         "tracks": [_music_track_payload(track) for track in tracks],
         "search_id": CACHE.put(tracks),
         "platform": body.platform,
+        # Echo the skip the provider saw and whether it actually pages.
+        "offset": body.offset,
+        "supports_offset": bool(getattr(provider, "supports_offset", False)),
     }
 
 
@@ -1440,15 +1473,23 @@ def _music_result_item(result: Any) -> dict[str, Any]:
     """Serialise one per-track download result.
 
     Provider failure reasons frequently quote the failing request URL, whose
-    query string may carry signed tokens.  Those parts are stripped before the
+    query string may carry signed tokens.  Those parts are stripped, the text
+    is folded onto one line and capped at :data:`REASON_MAX_CHARS` before the
     value leaves the process; any logging upstream keeps the original text.
+
+    ``download_url`` is always empty here: the REST server writes files on the
+    server machine and has no loopback ``/downloads/music`` route. The key is
+    still present so the per-track result has exactly the same field set as
+    the embedded engine's (whose value points at its loopback download route);
+    the Android client relies on the blank value to tell the two modes apart.
     """
-    from novel_downloader.apps.music.serialize import strip_url_query
+    from novel_downloader.apps.music.serialize import sanitize_reason
 
     return {
         "status": str(getattr(result, "status", "fail")),
-        "reason": strip_url_query(str(getattr(result, "reason", "") or "")),
+        "reason": sanitize_reason(getattr(result, "reason", "")),
         "path": str(getattr(result, "path", "") or ""),
+        "download_url": "",
         "bytes": int(getattr(result, "bytes_", 0) or 0),
     }
 
@@ -1464,6 +1505,13 @@ MAX_ACTIVE_MUSIC_JOBS = 4
 MSG_MUSIC_JOBS_BUSY = (
     "Too many music jobs are already running (limit {limit}); retry later"
 )
+
+#: ``Retry-After`` (seconds) on that music-job 429.  It is a *load* signal, not
+#: the API's request rate limit: a client should wait roughly one download
+#: slot instead of hammering ``/music/jobs``.  The rate-limit middleware keeps
+#: emitting its own ``Retry-After`` for throttled requests, so the two 429s
+#: stay distinguishable by their ``detail``.
+MUSIC_JOBS_RETRY_AFTER_SECONDS = 5
 
 _TERMINAL_MUSIC_STATUSES = frozenset({"done", "failed"})
 
@@ -1621,6 +1669,9 @@ async def create_music_job(
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=MSG_MUSIC_JOBS_BUSY.format(limit=MAX_ACTIVE_MUSIC_JOBS),
+                headers={
+                    "Retry-After": str(MUSIC_JOBS_RETRY_AFTER_SECONDS),
+                },
             )
         _MUSIC_JOBS[job_id] = {
             "job_id": job_id,
@@ -1648,8 +1699,17 @@ async def create_music_job(
 
 
 @router.get("/music/jobs/{job_id}", tags=["music"])
-async def music_job_status(job_id: str) -> dict[str, Any]:
-    """Return the status of a queued, running or finished music job."""
+async def music_job_status(
+    job_id: Annotated[str, PathParam(pattern=MUSIC_ID_PATTERN)],
+) -> dict[str, Any]:
+    """
+    Return the status of a queued, running or finished music job.
+
+    ``job_id`` must look like an id the server issues
+    (:data:`~novel_downloader.apps.api.schemas.MUSIC_ID_PATTERN`); a malformed
+    value is a ``422`` before any lookup, while an unknown well-formed id stays
+    a ``404``.
+    """
     with _MUSIC_JOBS_LOCK:
         job = _MUSIC_JOBS.get(job_id)
         if job is None:

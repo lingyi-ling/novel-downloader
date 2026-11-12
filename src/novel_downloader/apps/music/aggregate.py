@@ -42,10 +42,12 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ALL_PLATFORM_KEY",
     "AggregateResult",
+    "MAX_PER_PLATFORM_LIMIT",
     "PlatformOutcome",
     "is_all_platforms",
     "merge_tracks",
     "normalize_text",
+    "per_platform_limit_for",
     "clear_failure_cache",
     "failed_platforms",
     "search_all",
@@ -58,6 +60,11 @@ ALL_PLATFORM_KEY = "all"
 #: 聚合搜索默认每平台取多少条。20+ 个平台各取 8 条已经足够挑歌，再多
 #: 只会让合并后的列表变长、也更慢。
 DEFAULT_PER_PLATFORM_LIMIT = 8
+
+#: 聚合搜索时单个平台最多取多少条。对外 ``limit`` 已经封顶，这里再限一次：
+#: 平台越多，「每平台条数」带来的调用量增长越快，而上限对一个聚合列表
+#: 已经足够（去重后通常远超 20 条）。
+MAX_PER_PLATFORM_LIMIT = 15
 
 #: 聚合搜索默认墙钟预算（秒）。超时的平台按失败上报，已回来的结果照常合并。
 DEFAULT_TIMEOUT = 5.0
@@ -260,6 +267,20 @@ def is_all_platforms(platform: object) -> bool:
     """``platform`` 是否表示「全部平台」（空值也算）。"""
     value = str(platform or "").strip().lower()
     return value in {"", ALL_PLATFORM_KEY}
+
+
+def per_platform_limit_for(limit: int) -> int:
+    """把聚合搜索请求的总 ``limit`` 换算成每平台取几条。
+
+    至少要取 :data:`DEFAULT_PER_PLATFORM_LIMIT`（否则合并后可能不够一页），
+    至多 :data:`MAX_PER_PLATFORM_LIMIT`（平台数量会放大这个值）。REST 与
+    内嵌引擎共用这一个换算，避免两边的上限慢慢漂移。
+    """
+    try:
+        wanted = int(limit)
+    except (TypeError, ValueError):
+        wanted = DEFAULT_PER_PLATFORM_LIMIT
+    return max(DEFAULT_PER_PLATFORM_LIMIT, min(wanted, MAX_PER_PLATFORM_LIMIT))
 
 
 def normalize_text(value: object) -> str:
