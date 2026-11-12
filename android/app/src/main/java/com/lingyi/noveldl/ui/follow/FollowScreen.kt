@@ -2,6 +2,8 @@ package com.lingyi.noveldl.ui.follow
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -41,7 +43,7 @@ import com.lingyi.noveldl.data.WatchlistCheckRequest
 import com.lingyi.noveldl.ui.apiErrorMessage
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun FollowScreen(onMessage: (String) -> Unit) {
     val context = LocalContext.current
@@ -165,10 +167,13 @@ fun FollowScreen(onMessage: (String) -> Unit) {
         modifier = Modifier.fillMaxSize(),
     ) {
         Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-            Row(
+            // Three actions share a line on wide layouts but wrap onto a second
+            // one on a narrow portrait screen or at a large font scale instead
+            // of pushing the last button off-screen.
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Button(onClick = { showAddDialog = true }) {
                     Text(stringResource(R.string.follow_add))
@@ -236,6 +241,7 @@ fun FollowScreen(onMessage: (String) -> Unit) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun WatchCard(
     entry: WatchEntry,
@@ -280,10 +286,11 @@ private fun WatchCard(
                     color = MaterialTheme.colorScheme.primary,
                 )
             }
-            Row(
+            // Queue + remove also wrap instead of clipping on a narrow screen.
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (queueable) {
                     // Disabled once submitted (queued) or while the request is

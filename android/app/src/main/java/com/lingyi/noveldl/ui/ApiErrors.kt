@@ -41,6 +41,10 @@ internal fun apiErrorRes(code: ApiErrorCode): Int? = when (code) {
     ApiErrorCode.NOT_CONFIGURED -> R.string.api_error_not_configured
     ApiErrorCode.ENGINE_UNREACHABLE -> R.string.api_error_engine_unreachable
     ApiErrorCode.NETWORK -> R.string.api_error_network
+    ApiErrorCode.TIMEOUT -> R.string.api_error_timeout
+    ApiErrorCode.DNS -> R.string.api_error_dns
+    ApiErrorCode.TLS -> R.string.api_error_tls
+    ApiErrorCode.INSECURE_REDIRECT -> R.string.api_error_insecure_redirect
     ApiErrorCode.BAD_RESPONSE -> R.string.api_error_bad_response
     ApiErrorCode.UNKNOWN -> R.string.api_error_unknown
     ApiErrorCode.HTTP -> null
@@ -49,6 +53,9 @@ internal fun apiErrorRes(code: ApiErrorCode): Int? = when (code) {
 /** Codes whose localized text takes the failure detail as `%1$s`. */
 private val DETAIL_CODES = setOf(
     ApiErrorCode.NETWORK,
+    ApiErrorCode.TIMEOUT,
+    ApiErrorCode.DNS,
+    ApiErrorCode.TLS,
     ApiErrorCode.BAD_RESPONSE,
     ApiErrorCode.UNKNOWN,
 )

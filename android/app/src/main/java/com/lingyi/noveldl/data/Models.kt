@@ -193,6 +193,22 @@ data class MusicSearchResponse(
     val search_id: String = "",
     val platform: String = "",
     val platforms: List<MusicSearchPlatform> = emptyList(),
+    /**
+     * Skip echoed by the server for a single-platform search (0 for the first
+     * page, and always 0 for an aggregate search).
+     */
+    val offset: Int? = null,
+    /**
+     * Whether the searched provider actually implements `offset`. Musicdl
+     * backed platforms always return the first hit, so they answer
+     * `false` (aggregate searches always do, too) and the UI must stop
+     * paging instead of requesting empty pages forever.
+     *
+     * `null` means the server predates this capability flag; the client then
+     * keeps its legacy heuristic (`total`/page-length) rather than assuming
+     * pagination is broken.
+     */
+    val supports_offset: Boolean? = null,
 )
 
 /** One probe of `GET /api/v1/music/health` (per-platform connectivity). */

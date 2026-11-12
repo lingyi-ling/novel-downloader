@@ -164,6 +164,40 @@ class MusicPagingTest {
     }
 
     @Test
+    fun hasMoreStopsWhenTheProviderCannotPage() {
+        // supports_offset = false (musicdl platforms, aggregate searches):
+        // a non-zero offset silently returns the first page or nothing, so a
+        // full, growing page must not unlock the next request.
+        assertFalse(
+            MusicPaging.hasMore(
+                loaded = 20,
+                total = 0,
+                pageReceived = MUSIC_PAGE_SIZE,
+                previousLoaded = 0,
+                supportsOffset = false,
+            ),
+        )
+        assertFalse(
+            MusicPaging.hasMore(
+                loaded = 40,
+                total = 100,
+                pageReceived = MUSIC_PAGE_SIZE,
+                previousLoaded = 20,
+                supportsOffset = false,
+            ),
+        )
+    }
+
+    @Test
+    fun unknownOrTrueOffsetSupportKeepsTheLegacyRule() {
+        // Older servers omit the flag: keep paging exactly as before.
+        assertTrue(MusicPaging.hasMore(40, 0, MUSIC_PAGE_SIZE, 20, supportsOffset = null))
+        assertTrue(MusicPaging.hasMore(40, 0, MUSIC_PAGE_SIZE, 20, supportsOffset = true))
+        // An explicit `true` does not bypass the short-page rule.
+        assertFalse(MusicPaging.hasMore(45, 0, 5, 40, supportsOffset = true))
+    }
+
+    @Test
     fun hasMoreStopsWithUnknownTotalOnlyAtShortOrNonGrowingPage() {
         // total unknown (0): a full, growing page keeps paging…
         assertTrue(

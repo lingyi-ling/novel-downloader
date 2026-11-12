@@ -6,7 +6,10 @@ import android.net.Uri
 import android.os.Environment
 import androidx.documentfile.provider.DocumentFile
 import com.lingyi.noveldl.R
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -33,6 +36,32 @@ object HistoryDownloader {
     /** Subfolder created inside the user-chosen SAF tree. */
     const val SUBDIRECTORY = DOWNLOAD_SUBDIRECTORY
 
+    /**
+     * Shared connection pool for SAF downloads. A new client per download
+     * would allocate a fresh pool/dispatcher every time and keep the previous
+     * one until GC.
+     */
+    private val baseClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
+     * One client for [downloadToDirectory]. The origin policy keeps the API
+     * key on the configured API host: a server-supplied absolute URL or a
+     * redirect to a CDN gets no credentials, and an HTTPS server cannot be
+     * downgraded to plain HTTP by a redirect.
+     */
+    private fun httpClient(): OkHttpClient {
+        val builder = baseClient.newBuilder()
+        apiOriginPolicy(Api.baseUrl, Api.apiKey)?.let { policy ->
+            builder.addNetworkInterceptor(policy.interceptor())
+        }
+        return builder.build()
+    }
+
     /** Starts the DownloadManager download and returns its id, or a failure. */
     fun enqueue(context: Context, file: HistoryFile): Result<Long> = try {
         val url = resolveDownloadUrl(Api.baseUrl, file.download_url)
@@ -53,8 +82,10 @@ object HistoryDownloader {
             .setAllowedOverRoaming(false)
         mimeTypeForExtension(file.ext)?.let(request::setMimeType)
         // No key configured -> empty map -> the download is sent unauthenticated,
-        // which is what an API started without --token expects.
-        downloadRequestHeaders(Api.apiKey).forEach { (name, value) ->
+        // which is what an API started without --token expects. A URL on
+        // another origin gets no key: DownloadManager would forward it across
+        // redirects.
+        downloadRequestHeaders(Api.apiKey, url, Api.baseUrl).forEach { (name, value) ->
             request.addRequestHeader(name, value)
         }
         Result.success(manager.enqueue(request))
@@ -112,14 +143,13 @@ object HistoryDownloader {
                 created = target
 
                 val builder = Request.Builder().url(url)
-                downloadRequestHeaders(Api.apiKey).forEach { (name, value) ->
+                downloadRequestHeaders(Api.apiKey, url, Api.baseUrl).forEach { (name, value) ->
                     builder.header(name, value)
                 }
-                val client = OkHttpClient.Builder()
-                    .connectTimeout(10, TimeUnit.SECONDS)
-                    .readTimeout(60, TimeUnit.SECONDS)
-                    .build()
-                client.newCall(builder.build()).execute().use { response ->
+                // Enqueued so cancellation (navigating away, closing the
+                // screen) cancels the call instead of running to the read
+                // timeout and leaving a half-written document.
+                httpClient().executeCancellable(builder.build()).use { response ->
                     if (!response.isSuccessful) {
                         throw IllegalStateException(
                             context.getString(
@@ -137,11 +167,26 @@ object HistoryDownloader {
                             context.getString(R.string.settings_download_dir_create_failed),
                         )
                     body.byteStream().use { input ->
-                        output.use { input.copyTo(it) }
+                        output.use {
+                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                            while (true) {
+                                // A cancelled coroutine must stop reading; the
+                                // catch below deletes the partial document.
+                                currentCoroutineContext().ensureActive()
+                                val read = input.read(buffer)
+                                if (read <= 0) break
+                                it.write(buffer, 0, read)
+                            }
+                        }
                     }
                 }
                 fileName
             }.let { Result.success(it) }
+        } catch (e: CancellationException) {
+            // Never leave a half-written document behind, and never turn a
+            // cancellation into a failure result.
+            created?.let { runCatching { it.delete() } }
+            throw e
         } catch (e: IOException) {
             // Never leave a half-written document behind.
             created?.let { runCatching { it.delete() } }

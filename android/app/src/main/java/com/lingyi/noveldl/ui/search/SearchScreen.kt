@@ -52,6 +52,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.AddTaskRequest
@@ -88,7 +89,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
     var siteReloadKey by rememberSaveable { mutableIntStateOf(0) }
     var showSiteDialog by rememberSaveable { mutableStateOf(false) }
     var loading by remember { mutableStateOf(false) }
-    var total by remember { mutableStateOf(0) }
+    var total by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     var results by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
     // Keys ("site/book_id") already in the watchlist: seeded from the server
@@ -264,7 +265,16 @@ fun SearchScreen(onMessage: (String) -> Unit) {
         )
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+    // The controls and the results share one LazyColumn so a landscape phone
+    // or a large font scale can still scroll everything; a fixed Column plus a
+    // nested list could leave the results with zero height and no way to
+    // reach them.
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        item(key = "search-header") {
+            Column {
         OutlinedTextField(
             value = keyword,
             onValueChange = { keyword = it },
@@ -339,7 +349,12 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 Text(stringResource(R.string.browse_categories))
             }
             if (categoriesLoading) {
-                CircularProgressIndicator(modifier = Modifier.height(16.dp))
+                val categoriesLoadingLabel = stringResource(R.string.state_loading)
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .height(16.dp)
+                        .semantics { contentDescription = categoriesLoadingLabel },
+                )
             }
         }
         if (showBrowse) {
@@ -404,10 +419,10 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Spacer(Modifier.height(8.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(results) { result ->
-                Card(colors = CardDefaults.cardColors()) {
+            }
+        }
+        items(results) { result ->
+            Card(colors = CardDefaults.cardColors()) {
                     Column(Modifier.padding(12.dp)) {
                         Text(result.title, style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(4.dp))
@@ -438,6 +453,9 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                                 "${result.site} · ID ${result.book_id}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
                             )
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 FollowIconButton(
@@ -455,7 +473,6 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             }
         }
     }
-}
 
 /**
  * The per-row "follow" icon button. Disabled once the book is in the
@@ -536,7 +553,7 @@ private fun SiteSelectionDialog(
                     }
                     labels.isEmpty() -> {
                         Text(
-                            stringResource(R.string.state_empty),
+                            stringResource(R.string.state_no_items),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

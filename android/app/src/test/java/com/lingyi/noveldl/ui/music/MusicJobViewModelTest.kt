@@ -11,6 +11,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -171,6 +175,38 @@ class MusicJobViewModelTest {
         assertNull(retried.failure)
         assertEquals("/a/1.mp3", retried.paths[MusicJobResults.trackKey(chosen.single())])
         assertEquals(3, server.requestCount)
+    }
+
+    @Test
+    fun retryResubmitsOnlyTheCheckedTracks() = runBlocking {
+        server.enqueue(json("""{"detail":"boom"}""", 500))
+        server.enqueue(created("j2"))
+        server.enqueue(done("j2", """[{"status":"ok","path":"/a/2.mp3"}]"""))
+        val model = MusicJobViewModel({ Api.service() }, pollIntervalMs = 0)
+        val unchecked = track("1")
+        val checked = track("2")
+
+        // The screen resolves the checkbox set to tracks before calling start,
+        // so the unchecked row never reaches the ViewModel.
+        assertTrue(model.start("netease", listOf(checked), idsByTrack(checked to "sid")))
+        model.awaitIdle()
+        assertTrue(model.retry())
+        val retried = model.awaitIdle()
+
+        // Both the failed attempt and its retry carry only the checked track.
+        val firstBody = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        val retryBody = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        listOf(firstBody, retryBody).forEach { body ->
+            val sent = body["tracks"]!!.jsonArray
+            assertEquals(1, sent.size)
+            assertEquals(
+                "2",
+                sent.single().jsonObject["id"]!!.jsonPrimitive.content,
+            )
+        }
+        assertEquals(1, retried.total)
+        assertEquals("/a/2.mp3", retried.paths[MusicJobResults.trackKey(checked)])
+        assertNull(retried.paths[MusicJobResults.trackKey(unchecked)])
     }
 
     @Test

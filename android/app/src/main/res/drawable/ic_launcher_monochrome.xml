@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Single-colour silhouette for Android 13+ themed icons. The launcher tints
+     it, so only the book outline is kept (the coloured detail lines would
+     merge into one solid shape anyway). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,32 L62,32 C65.3,32 68,34.7 68,38 L68,70 C68,73.3 65.3,76 62,76 L46,76 C42.7,76 40,73.3 40,70 L40,34 C40,32.9 38.9,32 38,32 Z" />
+</vector>

@@ -117,6 +117,30 @@ class DownloadPlanningTest {
     }
 
     @Test
+    fun downloadHeadersStayOnTheConfiguredApiOrigin() {
+        val base = "http://10.0.2.2:8081/"
+
+        assertEquals(
+            mapOf("X-API-Key" to "k"),
+            downloadRequestHeaders("k", "http://10.0.2.2:8081/downloads/a.txt", base),
+        )
+        // Different port, different host, different scheme: no credentials.
+        assertTrue(
+            downloadRequestHeaders("k", "http://10.0.2.2:9999/a.txt", base).isEmpty(),
+        )
+        assertTrue(
+            downloadRequestHeaders("k", "https://cdn.example.com/a.txt", base).isEmpty(),
+        )
+        assertTrue(
+            downloadRequestHeaders(
+                "k",
+                "http://cdn.example.com/a.txt",
+                "https://cdn.example.com/",
+            ).isEmpty(),
+        )
+    }
+
+    @Test
     fun knownExtensionsMapToMimeTypes() {
         assertEquals("text/plain", mimeTypeForExtension("txt"))
         assertEquals("text/plain", mimeTypeForExtension("TXT"))

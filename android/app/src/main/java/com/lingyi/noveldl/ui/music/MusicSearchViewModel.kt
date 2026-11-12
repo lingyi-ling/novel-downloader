@@ -58,10 +58,21 @@ data class MusicSearchUiState(
     /** No further page is requested, either because the end was reached or
      * the last page was short/empty. */
     val endReached: Boolean = false,
+    /**
+     * `supports_offset` of the last response: `false` means the provider
+     * cannot page (musicdl platforms, aggregate searches) and `endReached` is
+     * set after the first page. `null` means the server predates the flag.
+     */
+    val supportsOffset: Boolean? = null,
     val loadingMore: Boolean = false,
     val loadMoreFailed: Boolean = false,
-    /** Checked track ids, kept across tab switches; cleared by new searches. */
-    val selected: Set<String> = emptySet(),
+    /**
+     * Checked tracks, keyed by [MusicJobResults.trackKey] (`provider\u0000id`),
+     * kept across tab switches; cleared by new searches. The key includes the
+     * provider because two platforms routinely use the same numeric song id —
+     * a bare-id set would check/download both rows together.
+     */
+    val selectedKeys: Set<String> = emptySet(),
     val searching: Boolean = false,
     /**
      * Failure of the request named by [errorSource]; the screen localizes the
@@ -114,9 +125,11 @@ class MusicSearchViewModel @JvmOverloads constructor(
                 savedState?.get<String>(SAVED_PLATFORM)?.takeIf { it.isNotBlank() }
                     ?: initialPlatform,
             ),
-            selected = savedState?.get<ArrayList<String>>(SAVED_SELECTED)
-                ?.toSet()
-                .orEmpty(),
+            selectedKeys = MusicJobResults.sanitizeSelection(
+                // Older builds saved bare ids; sanitizeSelection drops them
+                // instead of letting a numeric id match another provider.
+                savedState?.get<ArrayList<String>>(SAVED_SELECTED),
+            ),
         ),
     )
     val state: StateFlow<MusicSearchUiState> = _state.asStateFlow()
@@ -248,12 +261,14 @@ class MusicSearchViewModel @JvmOverloads constructor(
                             page.search_id,
                         ),
                         totalHits = page.total,
+                        supportsOffset = page.supports_offset,
                         endReached = !MusicPaging.hasMore(
                             loaded.size,
                             page.total,
                             page.tracks.size,
                             0,
                             MUSIC_PAGE_SIZE,
+                            page.supports_offset,
                         ),
                         searching = false,
                     )
@@ -280,6 +295,9 @@ class MusicSearchViewModel @JvmOverloads constructor(
         val current = _state.value
         val query = current.keyword.trim()
         if (query.isEmpty() || current.platform.isEmpty()) return
+        // A provider that cannot page (supports_offset = false) would answer
+        // with the first page or an empty one; never ask it again.
+        if (current.supportsOffset == false) return
         if (current.searching || current.loadingMore || current.endReached) return
         val generation = current.generation
         val platform = current.platform
@@ -316,12 +334,14 @@ class MusicSearchViewModel @JvmOverloads constructor(
                             page.search_id,
                         ),
                         totalHits = page.total,
+                        supportsOffset = page.supports_offset ?: _state.value.supportsOffset,
                         endReached = !MusicPaging.hasMore(
                             merged.size,
                             page.total,
                             page.tracks.size,
                             previous,
                             MUSIC_PAGE_SIZE,
+                            page.supports_offset,
                         ),
                         loadingMore = false,
                     )
@@ -348,13 +368,34 @@ class MusicSearchViewModel @JvmOverloads constructor(
         }
     }
 
-    /** Writes [trackId]'s checkbox state; the selection survives tab switches. */
-    fun setSelected(trackId: String, checked: Boolean) {
-        val selected = _state.value.selected
-        if ((trackId in selected) == checked) return
-        val updated = if (checked) selected + trackId else selected - trackId
+    /**
+     * Writes [track]'s checkbox state; the selection survives tab switches.
+     * The key is `provider + id`, so two rows that share a numeric id on
+     * different platforms toggle independently.
+     */
+    fun setSelected(track: MusicTrack, checked: Boolean) {
+        val key = MusicJobResults.trackKey(track)
+        val selected = _state.value.selectedKeys
+        if ((key in selected) == checked) return
+        val updated = if (checked) selected + key else selected - key
         savedState?.set(SAVED_SELECTED, ArrayList(updated))
-        _state.value = _state.value.copy(selected = updated)
+        _state.value = _state.value.copy(selectedKeys = updated)
+    }
+
+    /**
+     * Checks or unchecks every currently loaded row (the "select all" box).
+     * Keys are per provider + id, so equal numeric ids on two platforms count
+     * as two entries. Rows added by a later page are not checked retroactively.
+     */
+    fun setAllSelected(checked: Boolean) {
+        val tracks = _state.value.tracks
+        if (tracks.isEmpty()) return
+        val keys = tracks.mapTo(LinkedHashSet()) { MusicJobResults.trackKey(it) }
+        val selected = _state.value.selectedKeys
+        val updated = if (checked) selected + keys else selected - keys
+        if (updated == selected) return
+        savedState?.set(SAVED_SELECTED, ArrayList(updated))
+        _state.value = _state.value.copy(selectedKeys = updated)
     }
 
     /**
@@ -377,7 +418,7 @@ class MusicSearchViewModel @JvmOverloads constructor(
      * the bump makes answers of requests started before this point stale.
      */
     private fun resetResults(): Int {
-        if (_state.value.selected.isNotEmpty()) {
+        if (_state.value.selectedKeys.isNotEmpty()) {
             savedState?.set(SAVED_SELECTED, ArrayList<String>())
         }
         val next = _state.value.copy(
@@ -385,9 +426,10 @@ class MusicSearchViewModel @JvmOverloads constructor(
             searchIdsByTrack = emptyMap(),
             totalHits = 0,
             endReached = false,
+            supportsOffset = null,
             loadingMore = false,
             loadMoreFailed = false,
-            selected = emptySet(),
+            selectedKeys = emptySet(),
             generation = _state.value.generation + 1,
         )
         _state.value = next
@@ -397,7 +439,9 @@ class MusicSearchViewModel @JvmOverloads constructor(
     companion object {
         /**
          * Saved-state keys. The selection is stored as an `ArrayList<String>`
-         * because that is what `Bundle` can carry across process death.
+         * of [MusicJobResults.trackKey] values (`provider\u0000id`) because
+         * that is what `Bundle` can carry across process death; bare ids
+         * written by older builds are discarded on restore.
          */
         internal const val SAVED_KEYWORD = "music.keyword"
         internal const val SAVED_PLATFORM = "music.platform"
