@@ -4,7 +4,6 @@ novel_downloader.apps.cli.commands.clean
 ----------------------------------------
 """
 
-import shutil
 import sys
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from pathlib import Path
@@ -14,16 +13,26 @@ from novel_downloader.apps.utils import load_or_init_config
 from novel_downloader.infra.config import ConfigAdapter
 from novel_downloader.infra.i18n import t
 from novel_downloader.infra.paths import PACKAGE_NAME, STATE_PATH
+from novel_downloader.libs.filesystem import (
+    RemovalItem,
+    plan_removal,
+    remove_path_safely,
+)
 from novel_downloader.plugins import registrar
+from novel_downloader.plugins.mixins.cleanup import preview_book_cleanup
 
 from .base import (
     EXIT_FAILURE,
     EXIT_USAGE,
     Command,
+    emit_removal_preview,
     expand_path,
     fail,
+    is_safe_path_component,
     localize_help,
     parse_book_args,
+    require_safe_book_id,
+    require_safe_site,
 )
 
 
@@ -32,30 +41,16 @@ def _validated_site(site: str) -> str:
     Return ``site`` when it is usable as one directory name, else exit 2.
 
     ``--site`` is joined onto the cache/raw-data root and the result is handed
-    to ``shutil.rmtree``. A value such as ``..``, ``../..`` or ``/etc`` would
-    therefore delete a directory *outside* the application's data -- the one
-    place a cleanup command must never reach. Real site keys are plain
+    to the safe removal helper. A value such as ``..``, ``../..`` or ``/etc``
+    would therefore delete a directory *outside* the application's data -- the
+    one place a cleanup command must never reach. Real site keys are plain
     identifiers (``b520``, ``fanqienovel``), so an escaping value is a bad
     argument (usage error), not a runtime failure.
 
     :param site: Raw ``--site`` value (or an interactively entered key).
     :return: The unchanged key when it is safe to join onto a base directory.
     """
-    text = str(site)
-    path = Path(text)
-    unsafe = (
-        not text.strip()
-        or text in {".", ".."}
-        or "/" in text
-        or "\\" in text
-        or ":" in text
-        or path.is_absolute()
-        or path.name != text
-        or any(ord(char) < 32 for char in text)
-    )
-    if unsafe:
-        fail(t("Unsupported site: {site!r}").format(site=text), EXIT_USAGE)
-    return text
+    return require_safe_site(str(site))
 
 
 class CleanCmd(Command):
@@ -225,9 +220,25 @@ class CleanCacheCmd(Command):
         parser.add_argument(
             "-y", "--yes", action="store_true", help=t("Skip confirmation prompt")
         )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help=t("Show what would be removed without deleting anything."),
+        )
+        parser.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help=t("Print a single-line JSON report (requires --dry-run)."),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
+        as_json = bool(getattr(args, "as_json", False))
+        dry_run = bool(getattr(args, "dry_run", False))
+        if as_json and not dry_run:
+            fail(t("--json requires --dry-run."), EXIT_USAGE)
+
         # Validate the site before loading the config: loading may offer to
         # create a default config file, and a bad argument must not cause a
         # side effect (or a prompt) first.
@@ -252,10 +263,40 @@ class CleanCacheCmd(Command):
             target_desc = t("all site caches")
 
         if not target_dir.exists():
+            if dry_run:
+                emit_removal_preview(
+                    command="clean cache",
+                    items=[],
+                    site=site,
+                    as_json=as_json,
+                )
+                return
             ui.info(
                 t("No cache found for {desc} at {path}.").format(
                     desc=target_desc, path=target_dir
                 )
+            )
+            return
+
+        if dry_run:
+            try:
+                # Same root/allow_root arguments as the real removal below.
+                item = plan_removal(
+                    target_dir, root=cache_base, allow_root=site is None
+                )
+            except (OSError, ValueError) as exc:
+                fail(
+                    t("Failed to inspect {desc}: {error}").format(
+                        desc=target_desc, error=exc
+                    ),
+                    EXIT_FAILURE,
+                )
+            items: list[RemovalItem] = [item] if item is not None else []
+            emit_removal_preview(
+                command="clean cache",
+                items=items,
+                site=site,
+                as_json=as_json,
             )
             return
 
@@ -270,7 +311,10 @@ class CleanCacheCmd(Command):
                 return
 
         try:
-            shutil.rmtree(target_dir)
+            # ``allow_root`` covers the explicit "all site caches" request;
+            # a site target must stay strictly inside the cache root.  Links
+            # are removed as links, never followed.
+            remove_path_safely(target_dir, root=cache_base, allow_root=site is None)
             ui.success(t("Successfully removed {desc}.").format(desc=target_desc))
         except Exception as exc:
             fail(
@@ -334,14 +378,185 @@ class CleanBookCmd(Command):
         parser.add_argument(
             "-y", "--yes", action="store_true", help=t("Skip confirmation prompt")
         )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help=t("Show what would be removed without deleting anything."),
+        )
+        parser.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help=t("Print a single-line JSON report (requires --dry-run)."),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
+        as_json = bool(getattr(args, "as_json", False))
+        dry_run = bool(getattr(args, "dry_run", False))
+        if as_json and not dry_run:
+            fail(t("--json requires --dry-run."), EXIT_USAGE)
+
+        if dry_run:
+            if args.all and not args.book_ids:
+                cls._preview_all(args)
+            else:
+                cls._preview_book(args)
+            return
+
         if args.all and not args.book_ids:
             cls._remove_all(args)
             return
 
         cls._remove_book(args)
+
+    @classmethod
+    def _preview_all(cls, args: Namespace) -> None:
+        # Same ordering and checks as ``_remove_all``: reject an escaping site
+        # key before a config load can prompt or create files.
+        site = _validated_site(args.site) if args.site is not None else None
+
+        config_path: Path | None = expand_path(args.config) if args.config else None
+        config_data = load_or_init_config(config_path)
+        if config_data is None:
+            raise SystemExit(EXIT_FAILURE)
+
+        adapter = ConfigAdapter(config=config_data)
+        raw_data_base = adapter.get_raw_data_dir()
+
+        if site is not None:
+            target_dir = raw_data_base / site
+            desc = t("all data for site '{site}'").format(site=site)
+        else:
+            target_dir = raw_data_base
+            desc = t("all raw data for all sites")
+
+        as_json = bool(getattr(args, "as_json", False))
+        if not target_dir.exists():
+            if not as_json:
+                ui.info(
+                    t("No data found for {desc} at {path}.").format(
+                        desc=desc, path=target_dir
+                    )
+                )
+            emit_removal_preview(
+                command="clean book",
+                items=[],
+                site=site,
+                as_json=as_json,
+            )
+            return
+
+        try:
+            # Mirror the real removal: the site directory must stay inside the
+            # raw-data root; removing the root itself is only allowed when no
+            # site was given.
+            item = plan_removal(target_dir, root=raw_data_base, allow_root=site is None)
+        except (OSError, ValueError) as exc:
+            fail(
+                t("Failed to inspect {desc}: {error}").format(desc=desc, error=exc),
+                EXIT_FAILURE,
+            )
+
+        emit_removal_preview(
+            command="clean book",
+            items=[item] if item is not None else [],
+            site=site,
+            as_json=as_json,
+        )
+
+    @classmethod
+    def _preview_book(cls, args: Namespace) -> None:
+        books = parse_book_args(args.book_ids, args.start, args.end)
+
+        if not books:
+            fail(t("No book IDs provided. Exiting."), EXIT_USAGE)
+
+        for book in books:
+            require_safe_book_id(book.book_id)
+
+        stage = args.stage or "raw"
+        if not is_safe_path_component(stage):
+            fail(
+                t("Unsupported stage: {stage!r}").format(stage=stage),
+                EXIT_USAGE,
+            )
+
+        site: str | None = args.site
+        if site is None:
+            if not sys.stdin.isatty():
+                fail(
+                    t(
+                        "Interactive selection requires a terminal; "
+                        "pass the required arguments explicitly."
+                    ),
+                    EXIT_USAGE,
+                )
+            site = ui.prompt(t("Please enter the site key for these book(s):")).strip()
+            if not site:
+                fail(t("No site provided."), EXIT_USAGE)
+
+        site = _validated_site(site)
+
+        config_path: Path | None = expand_path(args.config) if args.config else None
+        config_data = load_or_init_config(config_path)
+        if config_data is None:
+            raise SystemExit(EXIT_FAILURE)
+
+        adapter = ConfigAdapter(config=config_data)
+        raw_site_dir = adapter.get_raw_data_dir() / site
+
+        remove_metadata = args.metadata or False
+        remove_chapters = not args.no_chapters
+        remove_media = args.media or False
+        as_json = bool(getattr(args, "as_json", False))
+
+        if not (remove_chapters or remove_metadata or remove_media):
+            # Same no-op as the real cleanup: nothing selected, no prompt.
+            if not as_json:
+                ui.info(t("Nothing to clean."))
+            emit_removal_preview(
+                command="clean book",
+                items=[],
+                site=site,
+                book_ids=[book.book_id for book in books],
+                as_json=as_json,
+            )
+            return
+
+        items: list[RemovalItem] = []
+        failed = False
+        for book in books:
+            try:
+                items.extend(
+                    preview_book_cleanup(
+                        raw_site_dir,
+                        book,
+                        remove_metadata=remove_metadata,
+                        remove_chapters=remove_chapters,
+                        remove_media=remove_media,
+                        remove_all=args.all,
+                        stage=stage,
+                    )
+                )
+            except (OSError, ValueError) as exc:
+                failed = True
+                ui.error(
+                    t("Failed to inspect book '{id}': {error}").format(
+                        id=book.book_id, error=exc
+                    )
+                )
+
+        if failed:
+            raise SystemExit(EXIT_FAILURE)
+
+        emit_removal_preview(
+            command="clean book",
+            items=items,
+            site=site,
+            book_ids=[book.book_id for book in books],
+            as_json=as_json,
+        )
 
     @classmethod
     def _remove_all(cls, args: Namespace) -> None:
@@ -385,7 +600,7 @@ class CleanBookCmd(Command):
             return
 
         try:
-            shutil.rmtree(target_dir)
+            remove_path_safely(target_dir, root=raw_data_base, allow_root=site is None)
             ui.success(t("Successfully removed {desc}.").format(desc=desc))
         except Exception as exc:
             fail(t("Failed to remove {desc}: {error}").format(desc=desc, error=exc))
@@ -396,6 +611,19 @@ class CleanBookCmd(Command):
 
         if not books:
             fail(t("No book IDs provided. Exiting."), EXIT_USAGE)
+
+        # A book ID becomes one directory name under the raw-data root.  The
+        # mixin also checks this, but rejecting the argument before the config
+        # is loaded keeps a bad value from prompting/creating files first.
+        for book in books:
+            require_safe_book_id(book.book_id)
+
+        stage = args.stage or "raw"
+        if not is_safe_path_component(stage):
+            fail(
+                t("Unsupported stage: {stage!r}").format(stage=stage),
+                EXIT_USAGE,
+            )
 
         # Determine site; ``--site ""`` is bad input, not a request to prompt.
         site: str | None = args.site
@@ -433,7 +661,6 @@ class CleanBookCmd(Command):
         remove_metadata = args.metadata or False
         remove_media = args.media or False
 
-        stage = args.stage or "raw"
         cleanup_failed = False
 
         if remove_all:

@@ -451,3 +451,327 @@ def test_concurrent_add_keeps_every_entry(store: WatchlistStore) -> None:
         thread.join()
 
     assert len(store.entries()) == 10
+
+
+# ---------------------------------------------------------------------------
+# Storage hardening: corruption, schema migration, lossless rewrites
+# ---------------------------------------------------------------------------
+
+
+def _backups(store: WatchlistStore) -> list[Path]:
+    """Return every quarantine copy next to ``store.path``, oldest name first."""
+    return sorted(store.path.parent.glob(f"{store.path.name}.corrupt*"))
+
+
+def test_invalid_utf8_is_treated_as_corrupt_and_preserved(
+    store: WatchlistStore,
+) -> None:
+    """A byte sequence that is not UTF-8 must not crash a read or be lost."""
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    raw = b"\xff\xfe\x00not utf-8"
+    store.path.write_bytes(raw)
+
+    assert store.entries() == []
+    # Reading is side-effect free: the bad file is neither moved nor rewritten.
+    assert store.path.read_bytes() == raw
+    assert _backups(store) == []
+
+    entry, created = store.add("b520", "1")
+    assert created is True
+    assert store.get("b520", "1") == entry
+    # The original bytes survive in a quarantine copy before the rewrite.
+    assert [path.read_bytes() for path in _backups(store)] == [raw]
+    assert _read(store.path)["version"] == watchlist._SCHEMA_VERSION
+
+
+def test_corrupt_json_is_backed_up_before_it_is_replaced(
+    store: WatchlistStore,
+) -> None:
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("{not valid json", encoding="utf-8")
+
+    assert store.entries() == []
+    assert _backups(store) == []
+
+    store.add("b520", "1")
+
+    backups = _backups(store)
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "{not valid json"
+
+
+def test_deeply_nested_json_does_not_crash_a_read(store: WatchlistStore) -> None:
+    """``json.loads`` raises ``RecursionError`` on absurd nesting, not ValueError."""
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("[" * 10_000 + "]" * 10_000, encoding="utf-8")
+
+    assert store.entries() == []
+
+    store.add("b520", "1")
+    assert len(_backups(store)) == 1
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        [{"site": "b520", "book_id": "1"}],
+        {"books": [{"site": "b520", "book_id": "1"}]},
+        {"version": 0, "books": [{"site": "b520", "book_id": "1"}]},
+    ],
+)
+def test_legacy_documents_are_migrated_on_write(
+    store: WatchlistStore, document: Any
+) -> None:
+    """Bare lists and version-less/0 documents are readable and migrate to v1."""
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(json.dumps(document), encoding="utf-8")
+
+    assert [entry.key for entry in store.entries()] == [("b520", "1")]
+
+    store.add("b520", "1", title="Title")
+    written = _read(store.path)
+    assert written["version"] == watchlist._SCHEMA_VERSION
+    assert written["books"] == [
+        {
+            "site": "b520",
+            "book_id": "1",
+            "title": "Title",
+            "last_chapter": "",
+            "updated_at": store.get("b520", "1").updated_at,
+        }
+    ]
+    # A known, older document is migrated in place; no backup is needed.
+    assert _backups(store) == []
+
+
+def test_newer_schema_is_read_but_preserved_before_a_downgrade(
+    store: WatchlistStore,
+) -> None:
+    """A file from a newer version stays readable and is never silently downgraded."""
+    original = {
+        "version": watchlist._SCHEMA_VERSION + 1,
+        "books": [{"site": "b520", "book_id": "1", "title": "From the future"}],
+        "future": {"note": "unknown to this version"},
+    }
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(json.dumps(original), encoding="utf-8")
+
+    entries = store.entries()
+    assert [entry.title for entry in entries] == ["From the future"]
+
+    store.add("b520", "2")
+    backups = _backups(store)
+    assert len(backups) == 1
+    assert json.loads(backups[0].read_text(encoding="utf-8")) == original
+    assert _read(store.path)["version"] == watchlist._SCHEMA_VERSION
+
+
+@pytest.mark.parametrize("version", ["1", 1.0, -1, True, {"v": 1}])
+def test_unusable_schema_version_makes_the_document_unusable(
+    store: WatchlistStore, version: Any
+) -> None:
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps({"version": version, "books": [{"site": "b520", "book_id": "1"}]}),
+        encoding="utf-8",
+    )
+
+    assert store.entries() == []
+
+    store.add("b520", "2")
+    assert len(_backups(store)) == 1
+    assert [entry.book_id for entry in store.entries()] == ["2"]
+
+
+def test_rewrite_preserves_entries_it_cannot_understand(store: WatchlistStore) -> None:
+    """Dropping invalid entries on read must never delete their bytes on write."""
+    original = {
+        "version": 1,
+        "books": [
+            {"site": "b520", "book_id": "1", "title": "Good"},
+            {"site": "b520", "title": "No id"},
+            "not-an-object",
+        ],
+    }
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(json.dumps(original), encoding="utf-8")
+
+    assert [entry.key for entry in store.entries()] == [("b520", "1")]
+
+    store.add("b520", "2")
+    backups = _backups(store)
+    assert len(backups) == 1
+    assert json.loads(backups[0].read_text(encoding="utf-8")) == original
+    assert [entry.book_id for entry in store.entries()] == ["1", "2"]
+
+
+def test_remove_also_preserves_invalid_entries(store: WatchlistStore) -> None:
+    original = {
+        "version": 1,
+        "books": [
+            {"site": "b520", "book_id": "1"},
+            {"site": "b520", "book_id": ""},
+        ],
+    }
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(json.dumps(original), encoding="utf-8")
+
+    assert store.remove("b520", "1") is True
+
+    backups = _backups(store)
+    assert len(backups) == 1
+    assert json.loads(backups[0].read_text(encoding="utf-8")) == original
+    assert store.entries() == []
+
+
+def test_an_existing_backup_is_never_overwritten(store: WatchlistStore) -> None:
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    existing = store.path.with_name(f"{store.path.name}.corrupt")
+    existing.write_bytes(b"older backup")
+    store.path.write_text("{broken", encoding="utf-8")
+
+    store.add("b520", "1")
+
+    assert existing.read_bytes() == b"older backup"
+    backups = _backups(store)
+    assert len(backups) == 2
+    assert any(path.read_bytes() == b"{broken" for path in backups)
+
+
+def test_entry_fields_with_wrong_types_are_repaired_or_dropped(
+    store: WatchlistStore,
+) -> None:
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps(
+            {
+                "books": [
+                    {
+                        "site": "b520",
+                        "book_id": 123,
+                        "title": {"nested": 1},
+                        "last_chapter": ["chapter"],
+                        "updated_at": True,
+                    },
+                    {"site": "b520", "book_id": 2, "title": 42},
+                    {"site": True, "book_id": "3"},
+                    {"site": "b520", "book_id": ["4"]},
+                    {"site": "b520", "book_id": float("nan")},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = store.entries()
+    assert [(entry.site, entry.book_id) for entry in entries] == [
+        ("b520", "123"),
+        ("b520", "2"),
+    ]
+    assert entries[0].title == ""
+    assert entries[0].last_chapter == ""
+    assert entries[0].updated_at == ""
+    assert entries[1].title == "42"
+
+
+def test_unreadable_file_is_treated_as_empty(
+    store: WatchlistStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("[]", encoding="utf-8")
+
+    def deny(*_args: Any, **_kwargs: Any) -> str:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    assert store.entries() == []
+
+
+def test_write_aborts_when_the_existing_file_cannot_be_inspected(
+    store: WatchlistStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never replace bytes that could not be read first (a sharing violation)."""
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("[]", encoding="utf-8")
+
+    def deny(*_args: Any, **_kwargs: Any) -> bytes:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "read_bytes", deny)
+    with pytest.raises(PermissionError, match="denied"):
+        store.add("b520", "1")
+    assert store.path.read_text(encoding="utf-8") == "[]"
+
+
+def test_write_aborts_when_the_original_cannot_be_preserved(
+    store: WatchlistStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("{broken", encoding="utf-8")
+
+    def boom(_data: bytes) -> Path:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(store, "_quarantine", boom)
+    with pytest.raises(OSError, match="read-only"):
+        store.add("b520", "1")
+    assert store.path.read_text(encoding="utf-8") == "{broken"
+
+
+# ---------------------------------------------------------------------------
+# Concurrency across store instances (the desktop builds one per operation)
+# ---------------------------------------------------------------------------
+
+
+def test_all_store_instances_for_one_path_share_a_lock(tmp_path: Path) -> None:
+    path = tmp_path / "watchlist.json"
+    assert WatchlistStore(path)._lock is WatchlistStore(path)._lock
+
+
+def test_concurrent_add_through_separate_instances_keeps_every_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Two ``WatchlistStore`` objects aimed at the same file serialize their
+    read-modify-write cycles; otherwise the later writer overwrites the other.
+    """
+    path = tmp_path / "watchlist.json"
+    slow = WatchlistStore(path)
+    fast = WatchlistStore(path)
+    slow_read = threading.Event()
+    release_slow = threading.Event()
+    fast_done = threading.Event()
+    original_read = WatchlistStore._read
+
+    def phased_read(self: WatchlistStore) -> list[Any]:
+        entries = original_read(self)
+        if threading.current_thread().name == "slow-adder":
+            slow_read.set()
+            assert release_slow.wait(2.0)
+        return entries
+
+    monkeypatch.setattr(WatchlistStore, "_read", phased_read)
+
+    def slow_add() -> None:
+        slow.add("site", "slow")
+
+    def fast_add() -> None:
+        fast.add("site", "fast")
+        fast_done.set()
+
+    slow_thread = threading.Thread(target=slow_add, name="slow-adder")
+    slow_thread.start()
+    assert slow_read.wait(2.0)
+
+    fast_thread = threading.Thread(target=fast_add, name="fast-adder")
+    fast_thread.start()
+    # With a shared lock this times out (the fast writer is blocked); without
+    # one it completes and is later overwritten by the slow writer.
+    fast_done.wait(0.5)
+    release_slow.set()
+    slow_thread.join(5.0)
+    fast_thread.join(5.0)
+
+    assert not slow_thread.is_alive()
+    assert not fast_thread.is_alive()
+    assert {entry.book_id for entry in slow.entries()} == {"slow", "fast"}
