@@ -1,12 +1,40 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 12+ (dataExtractionRules). Same reasoning as backup_rules.xml:
-     keep the API key and the device-bound SAF grant out of cloud backups.
-     Device-to-device transfer keeps them, since the user's own new device
-     restores the same credentials without going through the cloud. -->
+<!-- Android 12+ (dataExtractionRules).
+
+     Same policy as backup_rules.xml, and for the same reason: the private
+     tree contains the API key (DataStore), site cookies and logins
+     (engine_home/settings.toml, cache/), and the music session credentials
+     (session.json with MUSIC_U, platform_creds.json). Enumerating those paths
+     is fragile because the music directory depends on platformdirs'
+     Android-vs-Unix detection, so every app-private domain is excluded from
+     cloud backup instead.
+
+     Device-to-device transfer is deliberately left unrestricted: it goes
+     directly to the user's own new device, so restoring the API key, settings
+     and logins there is expected behaviour rather than a cloud copy.
+
+     The <cloud-backup> exclude list must stay identical to backup_rules.xml
+     (Android 11 and below); AndroidSecurityConfigTest enforces that. -->
 <data-extraction-rules>
     <cloud-backup>
+        <!-- "root" is the app data directory; file/database/sharedpref/external
+             are its sibling domains, so each must be excluded explicitly.
+             "path=." means the domain root (recursive). An <include> anywhere
+             here would re-admit files the excludes removed. -->
+        <exclude
+            domain="root"
+            path="." />
         <exclude
             domain="file"
-            path="datastore/novel_dl_settings.preferences_pb" />
+            path="." />
+        <exclude
+            domain="database"
+            path="." />
+        <exclude
+            domain="sharedpref"
+            path="." />
+        <exclude
+            domain="external"
+            path="." />
     </cloud-backup>
 </data-extraction-rules>

@@ -91,6 +91,27 @@ object MusicJobResults {
     }
 
     /**
+     * Keys of [chosen] whose result is an explicit engine failure.
+     *
+     * Used to drop a track from the persisted path cache: a failed retry must
+     * not keep exporting the file of an earlier, now invalid attempt. Results
+     * are aligned like [pathsByTrack] (one per submitted track, original
+     * order); missing results leave the track alone.
+     */
+    fun failedTrackKeys(
+        chosen: List<MusicTrack>,
+        results: List<MusicJobResult>,
+    ): Set<String> {
+        if (chosen.isEmpty() || results.isEmpty()) return emptySet()
+        val failed = LinkedHashSet<String>()
+        chosen.forEachIndexed { index, track ->
+            val result = results.getOrNull(index) ?: return@forEachIndexed
+            if (result.status == "fail") failed += trackKey(track)
+        }
+        return failed
+    }
+
+    /**
      * Copies [paths] onto the matching rows of [tracks], by [trackKey]; rows
      * without a path keep theirs. Returns [tracks] itself when nothing
      * changes so callers can cheaply detect an unchanged list.

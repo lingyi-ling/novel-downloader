@@ -3,6 +3,7 @@ package com.lingyi.noveldl.ui
 import com.lingyi.noveldl.R
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import java.util.Locale
@@ -33,6 +34,7 @@ class FormattingTest {
         assertEquals(R.string.tasks_status_completed, taskStatusLabelRes("completed"))
         assertEquals(R.string.tasks_status_cancelled, taskStatusLabelRes("cancelled"))
         assertEquals(R.string.tasks_status_failed, taskStatusLabelRes("failed"))
+        assertEquals(R.string.tasks_status_interrupted, taskStatusLabelRes("interrupted"))
     }
 
     @Test
@@ -87,5 +89,38 @@ class FormattingTest {
     fun timestampUsesLocalWallClockFormat() {
         assertEquals("2024-03-09 16:00", formatTimestamp(1710000000.0, Locale.US))
         assertEquals("1970-01-01 00:00", formatTimestamp(0.0, Locale.US))
+    }
+
+    @Test
+    fun listPlaceholderShowsLoadingUntilTheFirstResponse() {
+        assertEquals(
+            R.string.state_loading,
+            listPlaceholderRes(loading = true, hasError = false, emptyRes = R.string.tasks_empty),
+        )
+        assertEquals(
+            R.string.tasks_empty,
+            listPlaceholderRes(loading = false, hasError = false, emptyRes = R.string.tasks_empty),
+        )
+    }
+
+    @Test
+    fun listPlaceholderLeavesTheMessageToTheErrorBanner() {
+        assertNull(
+            listPlaceholderRes(loading = false, hasError = true, emptyRes = R.string.tasks_empty),
+        )
+        assertNull(
+            listPlaceholderRes(loading = true, hasError = true, emptyRes = R.string.tasks_empty),
+        )
+    }
+
+    @Test
+    fun searchPlaceholderStaysSilentUntilAQueryRan() {
+        assertNull(searchPlaceholderRes(hasSearched = false, loading = false, hasError = false))
+        assertNull(searchPlaceholderRes(hasSearched = true, loading = true, hasError = false))
+        assertNull(searchPlaceholderRes(hasSearched = true, loading = false, hasError = true))
+        assertEquals(
+            R.string.search_no_results,
+            searchPlaceholderRes(hasSearched = true, loading = false, hasError = false),
+        )
     }
 }

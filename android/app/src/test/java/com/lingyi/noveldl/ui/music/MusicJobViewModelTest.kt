@@ -3,6 +3,7 @@ package com.lingyi.noveldl.ui.music
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiErrorCode
 import com.lingyi.noveldl.data.ApiFailure
+import com.lingyi.noveldl.data.MusicPathPersistence
 import com.lingyi.noveldl.data.MusicTrack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -79,6 +80,20 @@ class MusicJobViewModelTest {
     )
 
     private fun track(id: String) = MusicTrack(provider = "netease", id = id, name = "song-$id")
+
+    /** In-memory stand-in for the on-disk music path cache. */
+    private class RecordingPaths(initial: Map<String, String> = emptyMap()) :
+        MusicPathPersistence {
+        var stored: Map<String, String> = initial
+        override suspend fun snapshot(): Map<String, String> = stored
+        override suspend fun putAll(paths: Map<String, String>) {
+            stored = stored + paths
+        }
+
+        override suspend fun remove(keys: Collection<String>) {
+            stored = stored - keys.toSet()
+        }
+    }
 
     private fun idsByTrack(vararg pairs: Pair<MusicTrack, String>): Map<String, String> =
         pairs.associate { (track, id) -> MusicJobResults.trackKey(track) to id }
@@ -207,6 +222,42 @@ class MusicJobViewModelTest {
         assertEquals(1, retried.total)
         assertEquals("/a/2.mp3", retried.paths[MusicJobResults.trackKey(checked)])
         assertNull(retried.paths[MusicJobResults.trackKey(unchecked)])
+    }
+
+    @Test
+    fun finishedPathsArePersistedAndFailedTracksAreRemoved() = runBlocking {
+        server.enqueue(created("j1"))
+        server.enqueue(
+            done(
+                "j1",
+                """[
+                    {"status":"ok","path":"/a/1.mp3"},
+                    {"status":"fail","reason":"boom"}
+                ]""",
+            ),
+        )
+        val second = track("2")
+        val persistence = RecordingPaths(
+            mapOf(MusicJobResults.trackKey(second) to "/old/2.mp3"),
+        )
+        val model = MusicJobViewModel(
+            { Api.service() },
+            pollIntervalMs = 0,
+            paths = persistence,
+        )
+        val first = track("1")
+
+        model.start(
+            "netease",
+            listOf(first, second),
+            idsByTrack(first to "sid", second to "sid"),
+        )
+        model.awaitIdle()
+
+        // The successful path is on disk (the export ViewModel reads it after
+        // a restart); the explicit failure drops the track's old entry.
+        assertEquals("/a/1.mp3", persistence.stored[MusicJobResults.trackKey(first)])
+        assertFalse(persistence.stored.containsKey(MusicJobResults.trackKey(second)))
     }
 
     @Test

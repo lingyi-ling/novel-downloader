@@ -1,13 +1,22 @@
 package com.lingyi.noveldl.ui.music
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiErrorCode
 import com.lingyi.noveldl.data.ApiFailure
 import com.lingyi.noveldl.data.ApiService
 import com.lingyi.noveldl.data.MusicExportRequest
+import com.lingyi.noveldl.data.MusicLocalPaths
+import com.lingyi.noveldl.data.MusicPathPersistence
+import com.lingyi.noveldl.data.MusicPathStore
 import com.lingyi.noveldl.data.MusicTrack
+import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -78,6 +87,17 @@ data class MusicExportUiState(
  */
 class MusicExportViewModel @JvmOverloads constructor(
     private val service: () -> ApiService = { Api.service() },
+    /**
+     * Paths remembered from finished downloads, so results restored after a
+     * restart can still be exported without downloading them again.
+     */
+    private val paths: MusicPathPersistence = MusicPathPersistence.None,
+    /**
+     * Device-local roots ([MusicLocalPaths.deviceRoots]); a path inside these
+     * is only exported when [exists] still reports the file.
+     */
+    private val localRoots: List<String> = emptyList(),
+    private val exists: (String) -> Boolean = { File(it).isFile },
 ) : ViewModel() {
 
     private data class Request(val platform: String, val tracks: List<MusicTrack>)
@@ -144,7 +164,18 @@ class MusicExportViewModel @JvmOverloads constructor(
      */
     suspend fun export(platform: String, tracks: List<MusicTrack>): MusicExportOutcome {
         if (tracks.isEmpty()) return MusicExportOutcome.NoResults
-        val plan = MusicExport.plan(tracks) ?: return MusicExportOutcome.NoLocalPaths
+        // A failed read must not turn into a "no local paths" dead end: fall
+        // back to the session paths the screen already has.
+        val persisted = try {
+            paths.snapshot()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            emptyMap()
+        }
+        val plan = MusicExport.plan(tracks, persisted) { path ->
+            MusicExport.isExportablePath(path, localRoots, exists)
+        } ?: return MusicExportOutcome.NoLocalPaths
 
         val result = Api.call {
             service().musicExport(
@@ -183,5 +214,21 @@ class MusicExportViewModel @JvmOverloads constructor(
         if ((error as? ApiFailure)?.code == ApiErrorCode.NOT_CONFIGURED) return true
         val http = error.cause as? HttpException ?: error as? HttpException
         return http?.code() == 503
+    }
+
+    companion object {
+        /** Activity-scoped factory bound to the download job's path cache. */
+        fun factory(context: Context): ViewModelProvider.Factory {
+            val appContext = context.applicationContext
+            val roots = MusicLocalPaths.deviceRoots(appContext)
+            return viewModelFactory {
+                initializer {
+                    MusicExportViewModel(
+                        paths = MusicPathStore(appContext),
+                        localRoots = roots,
+                    )
+                }
+            }
+        }
     }
 }

@@ -82,6 +82,33 @@ class UpdateCheckerTest {
     }
 
     @Test
+    fun aFinalReleaseSupersedesItsOwnReleaseCandidate() {
+        // Both sides parse to the same numeric tuple, so only the pre-release
+        // suffix can decide. Without this an RC build could never update to
+        // the final release of the very same version.
+        assertTrue(VersionCompare.isNewer("1.5.0", "1.5.0-rc2"))
+        assertTrue(VersionCompare.isNewer("v1.5.0", "1.5.0-rc1"))
+
+        // ...and an RC must never be offered as a downgrade of the final.
+        assertFalse(VersionCompare.isNewer("1.5.0-rc2", "1.5.0"))
+        assertFalse(VersionCompare.isNewer("1.5.0-rc2", "1.5.0-rc2"))
+
+        // Two release candidates of the same version are ordered.
+        assertTrue(VersionCompare.isNewer("1.5.0-rc2", "1.5.0-rc1"))
+        assertFalse(VersionCompare.isNewer("1.5.0-rc1", "1.5.0-rc2"))
+
+        // Numeric precedence still wins over the suffix.
+        assertTrue(VersionCompare.isNewer("1.6.0-rc1", "1.5.0"))
+        assertFalse(VersionCompare.isNewer("1.4.9", "1.5.0-rc1"))
+
+        // Build metadata stays irrelevant to ordering.
+        assertFalse(VersionCompare.isNewer("1.5.0+build.9", "1.5.0"))
+        // ...even when it contains a dash (the `+` part is not a pre-release).
+        assertFalse(VersionCompare.isNewer("1.5.0+build-9", "1.5.0"))
+        assertFalse(VersionCompare.isNewer("1.5.0", "1.5.0+build-9"))
+    }
+
+    @Test
     fun buildMetadataIsNotAVersionSegment() {
         // `versionName` may carry `+<versionCode>`; reading its digits as a
         // fourth segment would rank 1.4.0+41 above 1.4.1.
@@ -553,6 +580,22 @@ class UpdateCheckerTest {
         assertTrue(tagged.available)
     }
 
+    @Test
+    fun aReleaseCandidateInstallIsOfferedTheFinalRelease() {
+        // Installed 1.5.0-rc2; the manifest publishes 1.5.0 final. Both parse
+        // to the same numeric tuple, so only pre-release ordering can tell
+        // them apart — without it an RC build would be stuck until 1.5.1.
+        val info = parseManifest(manifest(version = "1.5.0"), "1.5.0-rc2")!!
+        assertTrue("an rc must update to the matching final release", info.available)
+        assertNull(downloadRequestFailure(info))
+
+        // The reverse must not be offered: an rc is older than the final
+        // build, so a manifest still pointing at it is not an update.
+        val rc = parseManifest(manifest(version = "1.5.0-rc2"), "1.5.0")!!
+        assertFalse(rc.available)
+        assertEquals(UpdateFailure.NOT_NEWER, downloadRequestFailure(rc))
+    }
+
     // ------------------------------------------------------------------
     // Checksums
     // ------------------------------------------------------------------
@@ -636,6 +679,34 @@ class UpdateCheckerTest {
         assertEquals(UpdateFailure.NO_ASSET, downloadRequestFailure(info(assetUrl = "  ")))
         // A complete, verifiable https asset passes the pre-flight.
         assertNull(downloadRequestFailure(info()))
+    }
+
+    @Test
+    fun downgradeAndSameVersionReinstallsAreRefusedBeforeDownloading() {
+        // The dialog state can be stale (a check completed, the user updated
+        // from another source, the manifest changed). A candidate that is not
+        // strictly newer must never reach the network or the installer: a
+        // same-version APK would still be fetched and offered, and an older
+        // one is a rollback primitive.
+        assertEquals(
+            UpdateFailure.NOT_NEWER,
+            downloadRequestFailure(info().copy(latest = "1.4.0")),
+        )
+        assertEquals(
+            UpdateFailure.NOT_NEWER,
+            downloadRequestFailure(info().copy(latest = "1.3.9")),
+        )
+        // An RC of the running version is not an upgrade either.
+        assertEquals(
+            UpdateFailure.NOT_NEWER,
+            downloadRequestFailure(info().copy(latest = "1.4.0-rc1")),
+        )
+        // A new release candidate of a newer version still passes.
+        assertNull(downloadRequestFailure(info().copy(latest = "1.4.1-rc1")))
+        // The gate is independent of UpdateInfo.available (it is recomputed).
+        assertNull(
+            downloadRequestFailure(info().copy(latest = "1.4.1", available = true)),
+        )
     }
 
     // ------------------------------------------------------------------
@@ -1018,6 +1089,39 @@ class UpdateCheckerTest {
             assertEquals("/latest.json", request.path)
             assertEquals("application/json", request.getHeader("Accept"))
             assertEquals("novel-downloader-android", request.getHeader("User-Agent"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun checkHonoursThePreferredAbisForAMultiApkManifest() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            // The manifest lists per-ABI APKs only. Without forwarding the
+            // caller's list to parseManifest, the JVM run (no platform ABIs)
+            // silently picks the first key instead of the device's ABI.
+            server.enqueue(
+                MockResponse().setBody(
+                    manifest(
+                        platforms = listOf(abiEntry("arm64-v8a"), abiEntry("x86_64"))
+                            .joinToString(",\n"),
+                    ),
+                ),
+            )
+            // Second response only guards against a hang if the API is hit.
+            server.enqueue(MockResponse().setResponseCode(500))
+
+            val info = UpdateChecker.check(
+                "1.4.0",
+                apiUrl = server.url("/latest").toString(),
+                manifestUrl = server.url("/latest.json").toString(),
+                preferredAbis = listOf("x86_64", "arm64-v8a"),
+            )
+
+            assertEquals("novel-downloader-1.5.0-android-x86_64.apk", info?.assetName)
+            assertEquals(1, server.requestCount)
         } finally {
             server.shutdown()
         }

@@ -29,6 +29,15 @@ object EmbeddedEngine {
         private set
 
     /**
+     * The thread running the bootstrap. Kept so unit tests can wait for it to
+     * finish before resetting the state: a test that resets while the previous
+     * bootstrap is still parked would otherwise see `ready` flip back to true
+     * (or a stale `lastError`) in the next test.
+     */
+    @Volatile
+    private var worker: Thread? = null
+
+    /**
      * Whether the bootstrap was scheduled. This becomes true *before* the
      * interpreter has started and the loopback port is listening, so it only
      * means "will not be scheduled twice" — use [isReady] to decide whether a
@@ -84,7 +93,7 @@ object EmbeddedEngine {
         synchronized(this) {
             if (started) return
             started = true
-            Thread(
+            val thread = Thread(
                 {
                     try {
                         bootstrap()
@@ -94,7 +103,9 @@ object EmbeddedEngine {
                     }
                 },
                 "embedded-engine",
-            ).start()
+            )
+            worker = thread
+            thread.start()
         }
     }
 
@@ -106,5 +117,19 @@ object EmbeddedEngine {
             ready = false
             lastError = null
         }
+    }
+
+    /**
+     * Waits for the scheduled bootstrap to finish; unit tests only.
+     *
+     * Call this before [resetForTest] so a still-running bootstrap cannot
+     * write `ready`/`lastError` after the reset and leak state into the next
+     * test. Returns false if the thread is still alive after [timeoutMs].
+     */
+    @VisibleForTesting
+    internal fun awaitBootstrapForTest(timeoutMs: Long = 5_000): Boolean {
+        val thread = worker ?: return true
+        thread.join(timeoutMs)
+        return !thread.isAlive
     }
 }

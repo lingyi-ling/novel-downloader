@@ -90,7 +90,10 @@ fun NovelApp(store: SettingsStore) {
     )
     // The playlist export is also owned here: leaving the music tab used to
     // cancel it (its scope was the composition) and drop the path it wrote.
-    val musicExport: MusicExportViewModel = viewModel()
+    // Its factory binds the cache that keeps downloaded paths across restarts.
+    val musicExport: MusicExportViewModel = viewModel(
+        factory = MusicExportViewModel.factory(LocalContext.current),
+    )
     val hostLifecycle = LocalLifecycleOwner.current
     DisposableEffect(hostLifecycle, musicJobs) {
         val observer = LifecycleEventObserver { _, event ->

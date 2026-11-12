@@ -5,6 +5,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -49,8 +51,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -68,8 +73,10 @@ import com.lingyi.noveldl.data.selectedSitesParam
 import com.lingyi.noveldl.data.siteSummary
 import com.lingyi.noveldl.data.toggleSiteSelection
 import com.lingyi.noveldl.ui.apiErrorMessage
+import com.lingyi.noveldl.ui.searchPlaceholderRes
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SearchScreen(onMessage: (String) -> Unit) {
     val context = LocalContext.current
@@ -98,6 +105,15 @@ fun SearchScreen(onMessage: (String) -> Unit) {
     var watchedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
     // Follow requests currently in flight, so a row cannot be followed twice.
     var watchingKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // Add-to-queue requests in flight, so a double tap cannot enqueue twice.
+    var addingKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // Whether the visible state is the result of a completed query. An
+    // untouched screen must not claim "no results found".
+    var searched by remember { mutableStateOf(false) }
+    // The action that produced the current error, so Retry repeats it. A
+    // failed rankings or category load cannot be retried by re-running a
+    // keyword search (which no-ops when the keyword field is empty).
+    var retryAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
     // Browse: the site publishes a ranking page and a category tree, so the
     // search page can show content without a keyword.
@@ -137,8 +153,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
         selectionStore.saveSelectedSites(next)
     }
 
-    fun runSearch() {
-        val query = keyword.trim()
+    fun runSearch(query: String) {
         if (query.isEmpty() || loading) return
         loading = true
         error = null
@@ -155,8 +170,13 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 .onSuccess {
                     results = it.results
                     total = it.total
+                    searched = true
+                    retryAction = null
                 }
-                .onFailure { error = apiErrorMessage(context, it) }
+                .onFailure {
+                    error = apiErrorMessage(context, it)
+                    retryAction = { runSearch(query) }
+                }
             loading = false
         }
     }
@@ -170,8 +190,13 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 .onSuccess {
                     results = it.results
                     total = it.total
+                    searched = true
+                    retryAction = null
                 }
-                .onFailure { error = apiErrorMessage(context, it) }
+                .onFailure {
+                    error = apiErrorMessage(context, it)
+                    retryAction = { runRank() }
+                }
             loading = false
         }
     }
@@ -205,13 +230,21 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 .onSuccess {
                     results = it.results
                     total = it.total
+                    searched = true
+                    retryAction = null
                 }
-                .onFailure { error = apiErrorMessage(context, it) }
+                .onFailure {
+                    error = apiErrorMessage(context, it)
+                    retryAction = { runCategory(categoryId) }
+                }
             loading = false
         }
     }
 
     fun addTask(result: SearchResult) {
+        val key = result.watchKey()
+        if (key in addingKeys) return
+        addingKeys = addingKeys + key
         scope.launch {
             Api.call {
                 Api.service().addTask(
@@ -226,6 +259,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             }.onFailure {
                 onMessage(context.getString(R.string.state_error, apiErrorMessage(context, it)))
             }
+            addingKeys = addingKeys - key
         }
     }
 
@@ -284,35 +318,45 @@ fun SearchScreen(onMessage: (String) -> Unit) {
         )
         Spacer(Modifier.height(8.dp))
         Box {
+            // The field is only a display: the overlay below owns the
+            // semantics, so TalkBack gets one control carrying the current
+            // value plus the open action instead of a read-only field and a
+            // second clickable node on top of it.
+            val sitesValue = if (selectedSites.isEmpty()) {
+                stringResource(R.string.search_sites_all)
+            } else {
+                siteSummary(selectedSites, siteLabels)
+            }
             OutlinedTextField(
-                value = if (selectedSites.isEmpty()) {
-                    stringResource(R.string.search_sites_all)
-                } else {
-                    siteSummary(selectedSites, siteLabels)
-                },
+                value = sitesValue,
                 onValueChange = {},
                 readOnly = true,
                 label = { Text(stringResource(R.string.search_sites_hint)) },
                 trailingIcon = {
                     Icon(
                         Icons.Outlined.ArrowDropDown,
-                        contentDescription = stringResource(R.string.search_sites_dialog_title),
+                        contentDescription = null,
                     )
                 },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().clearAndSetSemantics {},
             )
-            // The text field is read-only; a transparent overlay makes the whole
-            // field open the multi-select dialog instead of the keyboard. It
-            // carries the field's description and an action label so screen
-            // readers announce a labeled control instead of a bare clickable.
-            val sitesFieldDescription = stringResource(R.string.search_sites_hint)
+            // The transparent overlay opens the multi-select dialog instead of
+            // the keyboard, and reads as "label: value, open sites".
+            val sitesFieldState = stringResource(
+                R.string.search_sites_field_state,
+                stringResource(R.string.search_sites_hint),
+                sitesValue,
+            )
             val openSitesAction = stringResource(R.string.search_sites_dialog_title)
             Box(
                 Modifier
                     .matchParentSize()
-                    .semantics { contentDescription = sitesFieldDescription }
-                    .clickable(onClickLabel = openSitesAction) { showSiteDialog = true },
+                    .semantics { contentDescription = sitesFieldState }
+                    .clickable(
+                        role = Role.DropdownList,
+                        onClickLabel = openSitesAction,
+                    ) { showSiteDialog = true },
             )
         }
         Spacer(Modifier.height(8.dp))
@@ -321,11 +365,15 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Button(onClick = { runSearch() }, enabled = !loading) {
+            Button(onClick = { runSearch(keyword.trim()) }, enabled = !loading) {
                 Text(stringResource(R.string.search_button))
             }
             if (loading) {
-                CircularProgressIndicator(modifier = Modifier.height(20.dp))
+                // The adjacent text says the same thing; hiding the spinner
+                // keeps TalkBack from announcing the state twice.
+                CircularProgressIndicator(
+                    modifier = Modifier.height(20.dp).clearAndSetSemantics {},
+                )
                 Text(
                     stringResource(R.string.search_searching),
                     style = MaterialTheme.typography.bodySmall,
@@ -363,7 +411,13 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                     stringResource(R.string.browse_failed, it),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
+                // A failed category load has its own retry: re-running the
+                // keyword search would do nothing (the field may be empty).
+                TextButton(onClick = { loadCategories() }, enabled = !categoriesLoading) {
+                    Text(stringResource(R.string.action_retry))
+                }
             }
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -401,9 +455,12 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 stringResource(R.string.state_error, it),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
             )
-            TextButton(onClick = { runSearch() }) {
-                Text(stringResource(R.string.action_retry))
+            retryAction?.let { retry ->
+                TextButton(onClick = retry) {
+                    Text(stringResource(R.string.action_retry))
+                }
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -412,12 +469,18 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 stringResource(R.string.search_results, total),
                 style = MaterialTheme.typography.bodySmall,
             )
-        } else if (!loading && error == null) {
-            Text(
-                stringResource(R.string.search_no_results),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        } else {
+            searchPlaceholderRes(
+                hasSearched = searched,
+                loading = loading,
+                hasError = error != null,
+            )?.let { placeholder ->
+                Text(
+                    stringResource(placeholder),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
             }
         }
@@ -444,28 +507,40 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                             )
                         }
                         Spacer(Modifier.height(4.dp))
-                        Row(
+                        Text(
+                            "${result.site} · ID ${result.book_id}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        // The two actions wrap under the identity line at a
+                        // 2.0 font scale instead of squeezing it to nothing.
+                        FlowRow(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Text(
-                                "${result.site} · ID ${result.book_id}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
+                            FollowIconButton(
+                                followed = result.watchKey() in watchedKeys,
+                                watching = result.watchKey() in watchingKeys,
+                                onFollow = { follow(result) },
                             )
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                FollowIconButton(
-                                    followed = result.watchKey() in watchedKeys,
-                                    watching = result.watchKey() in watchingKeys,
-                                    onFollow = { follow(result) },
-                                )
-                                TextButton(onClick = { addTask(result) }) {
-                                    Text(stringResource(R.string.action_add_to_queue))
-                                }
+                            // The visible label is the same on every row;
+                            // the description names the book so a screen
+                            // reader user knows which result it applies to.
+                            val addTaskLabel = stringResource(
+                                R.string.search_add_task_named,
+                                result.title.ifBlank { result.book_id },
+                            )
+                            TextButton(
+                                onClick = { addTask(result) },
+                                enabled = result.watchKey() !in addingKeys,
+                                modifier = Modifier.semantics {
+                                    contentDescription = addTaskLabel
+                                },
+                            ) {
+                                Text(stringResource(R.string.action_add_to_queue))
                             }
                         }
                     }
@@ -533,7 +608,10 @@ private fun SiteSelectionDialog(
                 when {
                     loading && labels.isEmpty() -> {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.height(20.dp))
+                            // The text below already announces the state.
+                            CircularProgressIndicator(
+                                modifier = Modifier.height(20.dp).clearAndSetSemantics {},
+                            )
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 stringResource(R.string.state_loading),
@@ -595,6 +673,10 @@ private fun SiteCheckboxRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // The checkbox is display-only here (the row owns the toggle);
+            // pin the row to 48 dp so the touch target does not depend on the
+            // checkbox's own minimum-size handling.
+            .heightIn(min = 48.dp)
             .toggleable(
                 value = checked,
                 role = Role.Checkbox,
@@ -603,7 +685,13 @@ private fun SiteCheckboxRow(
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Checkbox(checked = checked, onCheckedChange = null)
+        // Display-only: the row owns the toggle, so the checkbox must not add
+        // a second focusable node with its own state.
+        Checkbox(
+            checked = checked,
+            onCheckedChange = null,
+            modifier = Modifier.clearAndSetSemantics {},
+        )
         Spacer(Modifier.width(8.dp))
         Text(label, style = MaterialTheme.typography.bodyMedium)
     }

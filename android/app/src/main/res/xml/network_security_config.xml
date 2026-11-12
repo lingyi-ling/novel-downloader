@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Transport policy for the app process.
+
+  The base config keeps cleartext enabled: the embedded Python engine listens
+  on http://127.0.0.1 and self-hosted servers are commonly reached over plain
+  HTTP on a LAN, and a static network-security config cannot enumerate
+  arbitrary LAN addresses. The credential and downgrade rules for the API live
+  in the request path instead (data/NetworkHttp.kt): the API key is only sent
+  to the configured origin, and an HTTPS server cannot be redirected to plain
+  HTTP.
+
+  The update channel is the one place the app downloads executable code from,
+  so it is stricter than the base config: cleartext is refused, and only the
+  system trust store is accepted (the default for targetSdk 24+, stated here
+  explicitly so a future edit cannot silently weaken it). Together with the
+  SHA-256 digest published in the manifest and re-checked right before the
+  installer runs, this keeps a local CA / debugging proxy from impersonating
+  GitHub and supplying a forged APK.
+-->
+<network-security-config>
+
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- github.com covers api.github.com and codeload.github.com;
+         *.githubusercontent.com serves the redirected release assets. -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">github.com</domain>
+        <domain includeSubdomains="true">githubusercontent.com</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+
+</network-security-config>

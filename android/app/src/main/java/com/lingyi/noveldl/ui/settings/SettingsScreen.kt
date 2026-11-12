@@ -39,7 +39,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -87,6 +91,12 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
     var sitesSummary by remember { mutableStateOf<SitesSummary?>(null) }
     var sitesLoading by remember { mutableStateOf(false) }
     var sitesError by remember { mutableStateOf<String?>(null) }
+    // True once the first sites response arrived, so the initial frame does
+    // not claim "no sites enabled" before the request has run.
+    var sitesLoaded by remember { mutableStateOf(false) }
+    // Localized fallback for the health line; a hardcoded English "unknown"
+    // would leak into the Chinese UI.
+    val unknownStatus = stringResource(R.string.state_unknown)
     // Re-read on every resume: the user may grant or revoke the permission
     // from system settings while this screen is in the back stack.
     var notificationsAllowed by remember {
@@ -130,7 +140,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             Api.configure(latest.configureTargetUrl(baseUrl), apiKey)
             Api.call { Api.service().health() }
                 .onSuccess {
-                    health = healthSummary(it.status, it.version)
+                    health = healthSummary(it.status, it.version, unknownStatus)
                     onMessage(context.getString(R.string.settings_test_ok, it.status, it.version))
                 }
                 .onFailure {
@@ -151,6 +161,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
                 }
                 .onFailure { sitesError = apiErrorMessage(context, it) }
             sitesLoading = false
+            sitesLoaded = true
         }
     }
 
@@ -341,9 +352,12 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // Display-only: the row is the switch target, so the control
+            // itself must not expose a second focusable node.
             Switch(
                 checked = settings.standalone,
                 onCheckedChange = null,
+                modifier = Modifier.clearAndSetSemantics {},
             )
         }
         if (settings.standalone && EmbeddedEngine.lastError != null) {
@@ -370,12 +384,13 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
                     stringResource(R.string.settings_sites_failed, sitesError.orEmpty()),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
                 TextButton(onClick = { loadSites() }) {
                     Text(stringResource(R.string.action_retry))
                 }
             }
-            sitesLoading -> {
+            sitesLoading || !sitesLoaded -> {
                 Text(
                     stringResource(R.string.settings_sites_loading),
                     style = MaterialTheme.typography.bodySmall,
@@ -535,12 +550,14 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             Switch(
                 checked = settings.autoCheckUpdates,
                 onCheckedChange = null,
+                modifier = Modifier.clearAndSetSemantics {},
             )
         }
         Spacer(Modifier.height(8.dp))
-        Row(
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             val busy = updatePhase is UpdatePhase.Checking ||
                 updatePhase is UpdatePhase.Downloading
@@ -616,6 +633,7 @@ internal fun updateFailureText(failed: UpdatePhase.Failed): String = when (faile
     UpdateFailure.NO_CHECKSUM -> stringResource(R.string.update_failed_no_checksum)
     UpdateFailure.CHECKSUM_MISMATCH -> stringResource(R.string.update_failed_checksum)
     UpdateFailure.INSECURE_URL -> stringResource(R.string.update_failed_insecure)
+    UpdateFailure.NOT_NEWER -> stringResource(R.string.update_failed_not_newer)
     UpdateFailure.INSUFFICIENT_SPACE ->
         stringResource(R.string.update_failed_insufficient_space)
     UpdateFailure.INSTALL_FAILED -> stringResource(R.string.update_failed_install)

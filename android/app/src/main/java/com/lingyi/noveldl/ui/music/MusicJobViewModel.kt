@@ -8,8 +8,11 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiService
+import com.lingyi.noveldl.data.MusicPathPersistence
+import com.lingyi.noveldl.data.MusicPathStore
 import com.lingyi.noveldl.data.MusicTrack
 import com.lingyi.noveldl.ui.MUSIC_JOB_POLL_INTERVAL_MS
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -72,6 +75,12 @@ class MusicJobViewModel @JvmOverloads constructor(
     private val service: () -> ApiService = { Api.service() },
     private val saver: MusicFileSaver = MusicFileSaver.None,
     private val pollIntervalMs: Long = MUSIC_JOB_POLL_INTERVAL_MS,
+    /**
+     * Survives process death: the finished paths are written here so a later
+     * launch can still export a playlist without re-downloading. No-op by
+     * default (unit tests, transports without local files).
+     */
+    private val paths: MusicPathPersistence = MusicPathPersistence.None,
 ) : ViewModel() {
 
     private data class Request(
@@ -141,6 +150,19 @@ class MusicJobViewModel @JvmOverloads constructor(
             ) { done, total ->
                 _state.value = _state.value.copy(running = true, done = done, total = total)
             }
+            // Persist before publishing "not running": a caller that observes
+            // the finished state can rely on the paths already being on disk.
+            try {
+                paths.putAll(run.pathsByTrack)
+                // An explicit failure invalidates the track's earlier file;
+                // do not export it after a restart.
+                paths.remove(run.failedTrackKeys - run.pathsByTrack.keys)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Persistence is best-effort: a disk error must not replace
+                // the job's own result with a failure.
+            }
             _state.value = _state.value.copy(
                 running = false,
                 done = run.total,
@@ -169,7 +191,10 @@ class MusicJobViewModel @JvmOverloads constructor(
             val appContext = context.applicationContext
             return viewModelFactory {
                 initializer {
-                    MusicJobViewModel(saver = DownloadManagerMusicSaver(appContext))
+                    MusicJobViewModel(
+                        saver = DownloadManagerMusicSaver(appContext),
+                        paths = MusicPathStore(appContext),
+                    )
                 }
             }
         }
