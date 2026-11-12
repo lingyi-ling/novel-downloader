@@ -9,6 +9,7 @@ import logging
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import chapter_id_from_href
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -50,6 +51,8 @@ class HaiwaishubaoSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         rows = doc.xpath('//div[contains(@class,"SHsectionThree-middle")]/p')
         results: list[SearchResult] = []
@@ -62,9 +65,9 @@ class HaiwaishubaoSearcher(BaseSearcher):
             if limit is not None and idx >= limit:
                 break
 
-            # "/book/103432/" -> "7631"
-            book_id = href.strip("/").rsplit("/", 1)[-1]
+            # "/book/103432/" -> "103432"
             book_url = self._abs_url(href)
+            book_id = chapter_id_from_href(book_url)
 
             title = self._first_str(row.xpath('.//a[contains(@href,"/book/")]/text()'))
             author = self._first_str(
@@ -85,5 +88,4 @@ class HaiwaishubaoSearcher(BaseSearcher):
                     priority=self.priority + idx,
                 )
             )
-        print(results)
         return results

@@ -14,6 +14,7 @@ import aiohttp
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import chapter_id_from_href
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -140,7 +141,7 @@ class N17kSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        if not html_str:
+        if not html_str.strip():
             return []
 
         doc = html.fromstring(html_str)
@@ -160,8 +161,8 @@ class N17kSearcher(BaseSearcher):
                 continue
 
             # '//www.17k.com/book/753943.html' -> "753943"
-            book_id = href.rstrip(".html").rsplit("/", 1)[-1]
             book_url = self._abs_url(href)
+            book_id = chapter_id_from_href(book_url)
 
             title = self._join_strs(
                 row.xpath('.//div[@class="textmiddle"]//dt/a[1]//text()')

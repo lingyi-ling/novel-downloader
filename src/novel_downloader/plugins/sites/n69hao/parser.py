@@ -15,3 +15,4 @@ class N69haoParser(Biquge3Parser):
     """
 
     site_name: str = "n69hao"
+    BASE_URL = "https://www.69hao.com"

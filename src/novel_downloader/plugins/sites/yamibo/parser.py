@@ -6,10 +6,14 @@ novel_downloader.plugins.sites.yamibo.parser
 """
 
 from typing import Any
-
-from lxml import html
+from urllib.parse import parse_qs, urlparse
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -33,10 +37,13 @@ class YamiboParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         book_name = self._first_str(
             tree.xpath('//h3[contains(@class,"col-md-12")]/text()')
@@ -44,8 +51,12 @@ class YamiboParser(BaseParser):
         author = self._first_str(
             tree.xpath('//h5[contains(@class,"text-warning")]/text()')
         )
-        cover_url = self.BASE_URL + self._first_str(
-            tree.xpath('//img[contains(@class,"img-responsive")]/@src')
+        cover_url = resolve_url(
+            tree,
+            self._first_str(
+                tree.xpath('//img[contains(@class,"img-responsive")]/@src')
+            ),
+            fallback_base=self.BASE_URL,
         )
 
         update_time = self._first_str(
@@ -81,9 +92,12 @@ class YamiboParser(BaseParser):
             ):
                 title = self._first_str([chap.xpath("string()")])
                 url = chap.get("href", "")
-                chapter_id = url.split("id=")[-1]
+                chapter_id = self._chapter_id(url)
+                if not chapter_id:
+                    continue
                 chapters.append({"title": title, "url": url, "chapterId": chapter_id})
-            volumes.append({"volume_name": volume_name, "chapters": chapters})
+            if chapters:
+                volumes.append({"volume_name": volume_name, "chapters": chapters})
 
         # fallback: flat chapter list
         if not volumes:
@@ -93,7 +107,9 @@ class YamiboParser(BaseParser):
             ):
                 title = self._first_str([chap.xpath("string()")])
                 url = chap.get("href", "")
-                chapter_id = url.split("id=")[-1] if "id=" in url else ""
+                chapter_id = self._chapter_id(url)
+                if not chapter_id:
+                    continue
                 chapters.append({"title": title, "url": url, "chapterId": chapter_id})
 
             if not chapters:
@@ -107,11 +123,19 @@ class YamiboParser(BaseParser):
             "cover_url": cover_url,
             "update_time": update_time,
             "serial_status": serial_status,
-            "tags": [book_type],
+            "tags": [book_type] if book_type else [],
             "summary": summary,
             "volumes": volumes,
             "extra": {},
         }
+
+    @staticmethod
+    def _chapter_id(url: str) -> str:
+        """Extract ``id`` from ``view-chapter?id=...`` without query leftovers."""
+        values = parse_qs(urlparse(url).query).get("id")
+        if values:
+            return values[0].strip()
+        return chapter_id_from_href(url)
 
     def parse_chapter_content(
         self,
@@ -119,9 +143,12 @@ class YamiboParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         paragraphs = [
             text

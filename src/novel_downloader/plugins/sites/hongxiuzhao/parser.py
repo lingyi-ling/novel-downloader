@@ -7,10 +7,13 @@ novel_downloader.plugins.sites.hongxiuzhao.parser
 import json
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.infra.paths import HONGXIUZHAO_MAP_PATH
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -44,20 +47,23 @@ class HongxiuzhaoParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         book_name = self._first_str(
             tree.xpath('//div[contains(@class, "m-bookdetail")]//h1/text()')
         )
         author = self._first_str(tree.xpath('//p[contains(@class, "author")]/a/text()'))
-        cover_url = self._first_str(
-            tree.xpath('//a[contains(@class, "cover")]//img/@src')
+        cover_url = resolve_url(
+            tree,
+            self._first_str(tree.xpath('//a[contains(@class, "cover")]//img/@src')),
+            fallback_base=self.BASE_URL,
         )
-        if cover_url and cover_url.startswith("/"):
-            cover_url = self.BASE_URL + cover_url
 
         summary = self._join_strs(
             tree.xpath('//p[contains(@class, "summery")]//text()')
@@ -66,9 +72,9 @@ class HongxiuzhaoParser(BaseParser):
         chapters: list[ChapterInfoDict] = []
         for a in tree.xpath('//section[contains(@class,"yd-chapter")]//ul//a'):
             href = (a.get("href") or "").strip()
-            if not href:
+            if not href or href.lower().startswith(("javascript:", "#")):
                 continue
-            chapter_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
+            chapter_id = chapter_id_from_href(href)
             title = (a.text_content() or "").strip()
             chapters.append(
                 {
@@ -99,6 +105,7 @@ class HongxiuzhaoParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
@@ -106,7 +113,9 @@ class HongxiuzhaoParser(BaseParser):
         paragraphs: list[str] = []
 
         for curr_html in raw_pages:
-            tree = html.fromstring(curr_html)
+            tree = parse_html_tree(curr_html)
+            if tree is None:
+                continue
 
             if not title:
                 title = self._first_str(

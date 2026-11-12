@@ -11,6 +11,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -30,13 +34,14 @@ class FalooParser(BaseParser):
     """
 
     site_name: str = "faloo"
+    BASE_URL: str = "https://b.faloo.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -68,11 +73,12 @@ class FalooParser(BaseParser):
                 tree.xpath("//span[contains(text(),'更新时间')]/span/text()")
             )
 
-        cover_url = self._first_str(tree.xpath("//meta[@property='og:image']/@content"))
-        if not cover_url:
-            cover_url = self._first_str(
+        cover_rel = self._first_str(tree.xpath("//meta[@property='og:image']/@content"))
+        if not cover_rel:
+            cover_rel = self._first_str(
                 tree.xpath("//div[@class='T-L-T-Img']//img/@src")
             )
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
 
         tags: list[str] = []
 
@@ -156,7 +162,7 @@ class FalooParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         html_page = raw_pages[0]
@@ -290,7 +296,7 @@ class FalooParser(BaseParser):
             title = a.get("title") or a.text_content().strip()
 
             # Extract chapter id: "/1482723_53.html" -> "53"
-            chapter_id = href.rsplit("_", 1)[-1].split(".", 1)[0]
+            chapter_id = chapter_id_from_href(href).rsplit("_", 1)[-1]
 
             chapters.append(
                 {

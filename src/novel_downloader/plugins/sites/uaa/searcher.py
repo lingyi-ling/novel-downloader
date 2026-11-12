@@ -5,14 +5,24 @@ novel_downloader.plugins.sites.uaa.searcher
 """
 
 import logging
+from urllib.parse import parse_qs, urlsplit
 
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import chapter_id_from_href
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
 logger = logging.getLogger(__name__)
+
+
+def _id_from_href(href: str) -> str:
+    """Read the ``?id=`` query parameter, falling back to the path tail."""
+    values = parse_qs(urlsplit(href).query).get("id") or []
+    if values and values[0].strip():
+        return values[0].strip()
+    return chapter_id_from_href(href)
 
 
 @registrar.register_searcher()
@@ -30,7 +40,6 @@ class UaaSearcher(BaseSearcher):
         params = {"searchType": "1", "keyword": self._quote(keyword)}
         try:
             url = self._build_url(self.SEARCH_URL, params=params)
-            print(f"url = '{url}'")
             async with self.session.get(url) as resp:
                 resp.raise_for_status()
                 return await self._response_to_str(resp)
@@ -41,6 +50,8 @@ class UaaSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         items = doc.xpath('//li[contains(@class, "novel_li_2")]')
         # '//div[@class="novel_list_box"]//li[contains(@class, "novel_li_2")]'
@@ -54,13 +65,14 @@ class UaaSearcher(BaseSearcher):
             if limit is not None and len(results) >= limit:
                 break
 
-            book_id = href.split("id=")[-1]
+            book_id = _id_from_href(href)
             book_url = self._abs_url(href)
 
             title = self._first_str(item.xpath('.//div[@class="title"]/a/text()'))
-            cover_url = self._first_str(
+            cover_rel = self._first_str(
                 item.xpath('.//img[contains(@class,"cover")]/@src')
             )
+            cover_url = self._abs_url(cover_rel) if cover_rel else ""
             latest_chapter = self._first_str(
                 item.xpath(
                     './/div[contains(@class,"update_state_box")]//span[contains(@class,"update_desc")]/text()'

@@ -6,9 +6,12 @@ novel_downloader.plugins.sites.wenku8.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,17 +29,21 @@ class Wenku8Parser(BaseParser):
     """
 
     site_name: str = "wenku8"
+    BASE_URL = "https://www.wenku8.net"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if len(raw_pages) < 2:
             return None
 
-        info_tree = html.fromstring(raw_pages[0])
-        catalog_tree = html.fromstring(raw_pages[1])
+        info_tree = parse_html_tree(raw_pages[0])
+        catalog_tree = parse_html_tree(raw_pages[1])
+        if info_tree is None or catalog_tree is None:
+            return None
 
         # --- Metadata ---
         book_name = self._first_str(info_tree.xpath("//table//b/text()"))
@@ -44,8 +51,10 @@ class Wenku8Parser(BaseParser):
             info_tree.xpath('//td[contains(text(),"小说作者")]/text()'),
             replaces=[("小说作者：", "")],
         )
-        cover_url = self._first_str(
-            info_tree.xpath('//img[contains(@src,"/image/")]/@src')
+        cover_url = resolve_url(
+            info_tree,
+            self._first_str(info_tree.xpath('//img[contains(@src,"/image/")]/@src')),
+            fallback_base=self.BASE_URL,
         )
 
         serial_status = self._first_str(
@@ -107,10 +116,10 @@ class Wenku8Parser(BaseParser):
 
             for a in elem.xpath('.//td[@class="ccss"]/a'):
                 href = a.get("href", "").strip()
-                if not href:
+                if not href or href.lower().startswith(("javascript:", "#")):
                     continue
                 title = a.text_content().strip()
-                chapter_id = href.split(".")[0]
+                chapter_id = chapter_id_from_href(href)
                 vol_chaps.append(
                     {
                         "title": title,
@@ -143,10 +152,13 @@ class Wenku8Parser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
         title = self._first_str(tree.xpath('//div[@id="title"]/text()'))
 
         paragraphs: list[str] = []
@@ -172,11 +184,10 @@ class Wenku8Parser(BaseParser):
                     src = src.strip()
                     if not src:
                         continue
-                    # normalize URL
-                    if src.startswith("//"):
-                        src = "https:" + src
-                    # elif src.startswith("/"):
-                    #     src = self.BASE_URL + src
+                    # Images are served from the chapter's origin; a bare
+                    # ``../image/x.jpg`` would otherwise stay relative and be
+                    # unusable for the downloader.
+                    src = resolve_url(None, src, fallback_base=self.BASE_URL)
                     resources.append(
                         {
                             "type": "image",

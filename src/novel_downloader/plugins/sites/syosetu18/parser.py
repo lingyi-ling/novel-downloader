@@ -9,6 +9,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -33,7 +37,7 @@ class Syosetu18Parser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -49,9 +53,8 @@ class Syosetu18Parser(BaseParser):
                 tree.xpath('//div[contains(@class,"p-novel__author")]/text()'),
                 replaces=[("作者：", "")],
             )
-        cover_url = self._first_str(tree.xpath('//meta[@property="og:image"]/@content'))
-        if cover_url and not cover_url.startswith("http"):
-            cover_url = "https:" + cover_url
+        cover_rel = self._first_str(tree.xpath('//meta[@property="og:image"]/@content'))
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
 
         summary = self._join_strs(tree.xpath('//div[@id="novel_ex"]//text()'))
 
@@ -78,6 +81,8 @@ class Syosetu18Parser(BaseParser):
             vol_idx += 1
 
         for html_page in raw_pages:
+            if not html_page.strip():
+                continue
             t = html.fromstring(html_page)
 
             for elem in t.xpath('//div[@class="p-eplist"]/*'):
@@ -95,7 +100,7 @@ class Syosetu18Parser(BaseParser):
                     if not href or not title:
                         continue
 
-                    chap_id = href.strip("/").split("/")[-1]
+                    chap_id = chapter_id_from_href(href)
                     vol_chaps.append(
                         {
                             "title": title,
@@ -125,7 +130,7 @@ class Syosetu18Parser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -144,12 +149,11 @@ class Syosetu18Parser(BaseParser):
         ):
             for p in div.xpath("./p"):
                 # --- collect images ---
-                for src in p.xpath(".//img/@src"):
-                    src = src.strip()
-                    if not src:
+                for src_rel in p.xpath(".//img/@src"):
+                    src_rel = src_rel.strip()
+                    if not src_rel:
                         continue
-                    if not src.startswith("http"):
-                        src = "https:" + src
+                    src = resolve_url(p, src_rel, fallback_base=self.BASE_URL)
 
                     resources.append(
                         {

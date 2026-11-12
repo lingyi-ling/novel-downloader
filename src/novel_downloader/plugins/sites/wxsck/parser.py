@@ -6,9 +6,12 @@ novel_downloader.plugins.sites.wxsck.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -32,10 +35,13 @@ class WxsckParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         book_name = self._first_str(
             tree.xpath('//meta[@property="og:novel:book_name"]/@content')
@@ -49,9 +55,11 @@ class WxsckParser(BaseParser):
         update_time = self._first_str(
             tree.xpath('//meta[@property="og:novel:update_time"]/@content')
         )
-        cover_url = self._first_str(tree.xpath('//meta[@property="og:image"]/@content'))
-        if cover_url and not cover_url.startswith("http"):
-            cover_url = self.BASE_URL + cover_url
+        cover_url = resolve_url(
+            tree,
+            self._first_str(tree.xpath('//meta[@property="og:image"]/@content')),
+            fallback_base=self.BASE_URL,
+        )
 
         book_type = self._first_str(
             tree.xpath('//meta[@property="og:novel:category"]/@content')
@@ -64,14 +72,18 @@ class WxsckParser(BaseParser):
                 tree.xpath('//meta[@property="og:description"]/@content')
             )
 
-        chapters: list[ChapterInfoDict] = [
-            {
-                "title": (a.text or "").strip(),
-                "url": (a.get("href") or "").strip(),
-                "chapterId": (a.get("href") or "").rsplit("/", 1)[-1].split(".", 1)[0],
-            }
-            for a in tree.xpath('//div[@id="all-chapter"]//a')
-        ]
+        chapters: list[ChapterInfoDict] = []
+        for a in tree.xpath('//div[@id="all-chapter"]//a'):
+            href = (a.get("href") or "").strip()
+            if not href or href.lower().startswith(("javascript:", "#")):
+                continue
+            chapters.append(
+                {
+                    "title": (a.text_content() or "").strip(),
+                    "url": href,
+                    "chapterId": chapter_id_from_href(href),
+                }
+            )
 
         if not chapters:
             return None
@@ -96,13 +108,16 @@ class WxsckParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
         title = ""
         paragraphs: list[str] = []
         for curr_html in raw_pages:
-            tree = html.fromstring(curr_html)
+            tree = parse_html_tree(curr_html)
+            if tree is None:
+                continue
             if not title:
                 title = self._first_str(tree.xpath('//h1[@class="cont-title"]/text()'))
 

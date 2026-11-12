@@ -9,6 +9,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -32,7 +36,7 @@ class WestnovelParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -43,10 +47,10 @@ class WestnovelParser(BaseParser):
             tree.xpath('//div[@class="btitle"]/em/text()'), [("作者：", "")]
         )
 
-        cover_url = self._first_str(
+        cover_rel = self._first_str(
             tree.xpath('//div[@class="bookinfo"]//img[@class="img-img"]/@src')
         )
-        cover_url = self.BASE_URL + cover_url if cover_url else ""
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
 
         summary_nodes = tree.xpath(
             '//div[@class="intro"]/span[@class="intro-p"]//p//text()'
@@ -62,7 +66,7 @@ class WestnovelParser(BaseParser):
                 continue
 
             # Example href: /wuxia/ynyh/198246.html
-            chapter_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
+            chapter_id = chapter_id_from_href(href)
             chapters.append(
                 {
                     "title": title,
@@ -97,7 +101,7 @@ class WestnovelParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
         tree = html.fromstring(raw_pages[0])
 

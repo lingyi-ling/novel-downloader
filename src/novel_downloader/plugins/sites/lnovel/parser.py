@@ -10,6 +10,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -34,7 +38,7 @@ class LnovelParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -45,9 +49,8 @@ class LnovelParser(BaseParser):
                 '//dt[contains(normalize-space(.), "作者")]/following-sibling::dd[1]//a/text()'  # noqa: E501
             )
         )
-        cover_url = self.BASE_URL + self._first_str(
-            tree.xpath('//meta[@property="og:image"]/@content')
-        )
+        cover_rel = self._first_str(tree.xpath('//meta[@property="og:image"]/@content'))
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
 
         update_time = self._first_str(
             tree.xpath(
@@ -91,7 +94,7 @@ class LnovelParser(BaseParser):
             for a in item.xpath('.//div[contains(@class, "list-group")]//a[@href]'):
                 url = (a.get("href") or "").strip()
                 title = self._first_str(a.xpath(".//text()"))
-                chapter_id = url.rsplit("-", 1)[-1] if "-" in url else url
+                chapter_id = chapter_id_from_href(url).rsplit("-", 1)[-1]
                 chapters.append(
                     {
                         "title": title,
@@ -122,7 +125,7 @@ class LnovelParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -138,7 +141,7 @@ class LnovelParser(BaseParser):
         curr_paragraph_idx = 0
 
         for idx, elem in enumerate(tree.xpath('//*[@id="chaptersShowContent"]/*')):
-            tag = elem.tag.lower()
+            tag = elem.tag.lower() if isinstance(elem.tag, str) else ""
 
             if tag == "p":
                 txt = "".join(elem.xpath(".//text()")).strip()
@@ -149,9 +152,9 @@ class LnovelParser(BaseParser):
                     curr_paragraph_idx += 1
 
             elif tag == "img":
-                src = (elem.get("src") or "").strip()
-                if src.startswith("/"):
-                    src = self.BASE_URL + src
+                src = resolve_url(
+                    elem, (elem.get("src") or "").strip(), fallback_base=self.BASE_URL
+                )
 
                 if src:
                     resources.append(
@@ -163,12 +166,10 @@ class LnovelParser(BaseParser):
                     )
 
         # image gallery right after content block
-        for src in tree.xpath(
+        for src_rel in tree.xpath(
             '//*[@id="chaptersShowContent"]/following-sibling::a[img]//img/@src'
         ):
-            src = (src or "").strip()
-            if src.startswith("/"):
-                src = self.BASE_URL + src
+            src = resolve_url(tree, src_rel, fallback_base=self.BASE_URL)
 
             if src:
                 resources.append(

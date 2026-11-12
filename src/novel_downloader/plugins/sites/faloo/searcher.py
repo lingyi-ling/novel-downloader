@@ -10,6 +10,7 @@ import re
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import chapter_id_from_href
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -55,7 +56,7 @@ class FalooSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        if not html_str:
+        if not html_str.strip():
             return []
 
         doc = html.fromstring(html_str)
@@ -71,8 +72,8 @@ class FalooSearcher(BaseSearcher):
                 continue
 
             # '//b.faloo.com/1440069.html' -> "1440069"
-            book_id = href.rsplit("/", 1)[-1].removesuffix(".html")
             book_url = self._abs_url(href)
+            book_id = chapter_id_from_href(book_url)
 
             title = self._first_str(
                 row.xpath('.//div[@class="TwoBox02_08"]/h1/a/text()')

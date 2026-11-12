@@ -9,6 +9,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -25,13 +29,14 @@ class N101kanshuParser(BaseParser):
     """
 
     site_name: str = "n101kanshu"
+    BASE_URL: str = "https://101kanshu.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if len(raw_pages) < 2:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
         info_tree = html.fromstring(raw_pages[0])
@@ -45,7 +50,8 @@ class N101kanshuParser(BaseParser):
         # --- base info ---
         book_name = meta("og:novel:book_name") or meta("og:title")
         author = meta("og:novel:author")
-        cover_url = meta("og:image")
+        cover_rel = meta("og:image")
+        cover_url = resolve_url(info_tree, cover_rel, fallback_base=self.BASE_URL)
         serial_status = meta("og:novel:status")
         update_time = meta("og:novel:update_time")
         summary = meta("og:description").replace("<br />", "\n")
@@ -61,7 +67,7 @@ class N101kanshuParser(BaseParser):
             title = self._first_str(a.xpath(".//text()"))
             if not url:
                 continue
-            chap_id = url.rsplit("/", 1)[-1].split(".", 1)[0]
+            chap_id = chapter_id_from_href(url)
             chapters.append(
                 {
                     "title": title,
@@ -94,7 +100,7 @@ class N101kanshuParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
 
         tree = html.fromstring(raw_pages[0])

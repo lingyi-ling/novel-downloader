@@ -9,6 +9,10 @@ from typing import Any
 from lxml import html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -25,13 +29,14 @@ class N17kParser(BaseParser):
     """
 
     site_name: str = "n17k"
+    BASE_URL: str = "https://www.17k.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
-        if len(raw_pages) < 2:
+        if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
         info_tree = html.fromstring(raw_pages[0])
@@ -41,7 +46,8 @@ class N17kParser(BaseParser):
             info_tree.xpath('//div[@class="Info Sign"]//h1/a/text()')
         )
         author = self._first_str(catalog_tree.xpath('//div[@class="Author"]/a/text()'))
-        cover_url = self._first_str(info_tree.xpath('//div[@id="bookCover"]//img/@src'))
+        cover_rel = self._first_str(info_tree.xpath('//div[@id="bookCover"]//img/@src'))
+        cover_url = resolve_url(info_tree, cover_rel, fallback_base=self.BASE_URL)
         serial_status = self._first_str(
             info_tree.xpath('//div[@class="label"]//span/text()')
         )
@@ -86,7 +92,7 @@ class N17kParser(BaseParser):
                     span_class = ""
 
                 accessible = "vip" not in span_class
-                chapter_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
+                chapter_id = chapter_id_from_href(href)
 
                 vol_chaps.append(
                     {
@@ -128,7 +134,7 @@ class N17kParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
         if "VIP章节, 余下还有" in raw_pages[0]:
             return None

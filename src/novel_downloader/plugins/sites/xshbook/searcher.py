@@ -17,5 +17,8 @@ class XshbookSearcher(SososhuSearcher):
 
     @staticmethod
     def _url_to_id(url: str) -> str:
-        tail = url.split("xshbook.com", 1)[-1].strip("/")
-        return tail.replace("/", "-")
+        # A result link may carry tracking parameters (``?from=...``); they are
+        # not part of the id and would otherwise end up in the ``95139-95139418``
+        # folder name used to rebuild the chapter URL.
+        path = url.split("xshbook.com", 1)[-1].split("#", 1)[0].split("?", 1)[0]
+        return path.strip("/").replace("/", "-")

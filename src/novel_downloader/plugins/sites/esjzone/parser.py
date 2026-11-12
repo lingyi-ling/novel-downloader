@@ -8,11 +8,15 @@ novel_downloader.plugins.sites.esjzone.parser
 import logging
 import re
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from lxml import etree, html
 
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -32,6 +36,7 @@ class EsjzoneParser(BaseParser):
     """
 
     site_name: str = "esjzone"
+    BASE_URL: str = "https://www.esjzone.cc"
 
     _VALID_TITLE_RE = re.compile(r"[^\W_]", re.UNICODE)
     _FONT_FAMILY_RE = re.compile(r"font-family\s*:\s*'([^']+)'")
@@ -52,7 +57,9 @@ class EsjzoneParser(BaseParser):
         :param raw_pages: Raw HTML of the book info page.
         :return: Parsed metadata and chapter structure as a dictionary.
         """
-        if not raw_pages or self._is_forum_page(raw_pages):
+        if not raw_pages or not raw_pages[0].strip():
+            return None
+        if self._is_forum_page(raw_pages):
             return None
 
         tree = html.fromstring(raw_pages[0])
@@ -62,9 +69,10 @@ class EsjzoneParser(BaseParser):
             tree.xpath('//h2[contains(@class,"text-normal")]/text()')
         )
         author = self._first_str(tree.xpath('//li[strong[text()="作者:"]]/a/text()'))
-        cover_url = self._first_str(
+        cover_rel = self._first_str(
             tree.xpath('//div[contains(@class,"product-gallery")]//img/@src')
         )
+        cover_url = resolve_url(tree, cover_rel, fallback_base=self.BASE_URL)
         update_time = self._first_str(
             tree.xpath('//li[strong[text()="更新日期:"]]/text()')
         )  # noqa: E501
@@ -121,9 +129,13 @@ class EsjzoneParser(BaseParser):
             if not title:
                 return None
             # "https://www.esjzone.cc/forum/12345/543.html" -> "543"
-            cid = (
-                href.split("/")[-1].split(".", 1)[0] if "www.esjzone.cc" in href else ""
-            )
+            # Relative chapter hrefs are resolved against the same site, while
+            # links to other hosts keep an empty id (they are not chapters).
+            parsed = urlsplit(href)
+            if parsed.netloc and "esjzone.cc" not in parsed.netloc:
+                cid = ""
+            else:
+                cid = chapter_id_from_href(href)
             return {"title": title, "url": href, "chapterId": cid}
 
         def walk(node: etree._Element) -> None:
@@ -212,7 +224,7 @@ class EsjzoneParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
-        if not raw_pages:
+        if not raw_pages or not raw_pages[0].strip():
             return None
         if self._is_forum_page(raw_pages):
             logger.warning("esjzone chapter %s :: please login to access", chapter_id)
@@ -422,7 +434,7 @@ class EsjzoneParser(BaseParser):
         }
 
     def _is_forum_page(self, html_str: list[str]) -> bool:
-        if not html_str:
+        if not html_str or not html_str[0].strip():
             return False
 
         tree = html.fromstring(html_str[0])

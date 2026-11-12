@@ -7,9 +7,12 @@ novel_downloader.plugins.sites.guidaye.parser
 
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -26,16 +29,20 @@ class GuidayeParser(BaseParser):
     """
 
     site_name: str = "guidaye"
+    BASE_URL = "https://b.guidaye.com"
 
     def parse_book_info(
         self,
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         # Book metadata
         book_name = self._first_str(
@@ -44,7 +51,11 @@ class GuidayeParser(BaseParser):
         author = self._first_str(
             tree.xpath('//meta[@property="og:novel:author"]/@content')
         )
-        cover_url = self._first_str(tree.xpath('//meta[@property="og:image"]/@content'))
+        cover_url = resolve_url(
+            tree,
+            self._first_str(tree.xpath('//meta[@property="og:image"]/@content')),
+            fallback_base=self.BASE_URL,
+        )
         update_time = self._first_str(
             tree.xpath('//meta[@property="og:novel:update_time"]/@content')
         )
@@ -60,10 +71,10 @@ class GuidayeParser(BaseParser):
         chapters: list[ChapterInfoDict] = []
         for a in tree.xpath('//ol[@id="list-ol"]//a'):
             href = (a.get("href") or "").strip()
-            if not href:
+            if not href or href.lower().startswith(("javascript:", "#")):
                 continue
             title = self._first_str(a.xpath(".//text()"))
-            chapter_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
+            chapter_id = chapter_id_from_href(href)
             chapters.append(
                 ChapterInfoDict(
                     title=title,
@@ -96,9 +107,12 @@ class GuidayeParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
         article = tree.xpath('//article[@class="article-post"]')
         if not article:
             return None
@@ -111,15 +125,23 @@ class GuidayeParser(BaseParser):
             )
         )
 
-        # Extract paragraphs within entry-content
-        paragraphs: list[str] = []
-        if article.text and (text := article.text.strip()):
-            paragraphs.append(text)
-        for node in article.xpath(".//*"):
-            if node.text and (text := node.text.strip()):
-                paragraphs.append(text)
-            if node.tail and (tail := node.tail.strip()):
-                paragraphs.append(tail)
+        # One paragraph per <p>; keep inline markup (e.g. <strong>) in place.
+        paragraphs = [
+            text
+            for p in article.xpath(".//p")
+            if (text := self._norm_space(p.text_content() or ""))
+        ]
+
+        if not paragraphs:
+            # Some pages keep the body as bare text separated by <br>.
+            paragraphs = [
+                text
+                for node in article.xpath(
+                    ".//text()[not(ancestor::script) and not(ancestor::style) "
+                    "and not(ancestor::h1) and not(ancestor::h2)]"
+                )
+                if (text := self._norm_space(node))
+            ]
 
         if not paragraphs:
             return None

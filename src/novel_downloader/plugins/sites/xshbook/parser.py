@@ -8,9 +8,12 @@ novel_downloader.plugins.sites.xshbook.parser
 import re
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -25,7 +28,7 @@ class XshbookParser(BaseParser):
     """Parser for 小说虎 book pages."""
 
     site_name: str = "xshbook"
-    BASE = "http://www.xshbook.com"
+    BASE_URL = "https://www.xshbook.com"
 
     ADS = {
         r"谨记我们的网址",
@@ -43,10 +46,13 @@ class XshbookParser(BaseParser):
         raw_pages: list[str],
         **kwargs: Any,
     ) -> BookInfoDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         book_name = self._first_str(tree.xpath("//div[@id='info']/h1/text()"))
 
@@ -60,22 +66,29 @@ class XshbookParser(BaseParser):
         )
 
         summary = "\n".join(
-            self._first_str(p.xpath("string()").splitlines())
+            line
             for p in tree.xpath("//div[@id='intro']//p")
+            if (line := self._first_str(p.xpath("string()").splitlines()))
         ).strip()
         summary = summary.split("本站提示", 1)[0].strip()
 
-        cover_url = self._first_str(tree.xpath("//div[@id='fmimg']//img/@src"))
+        cover_url = resolve_url(
+            tree,
+            self._first_str(tree.xpath("//div[@id='fmimg']//img/@src")),
+            fallback_base=self.BASE_URL,
+        )
 
         book_type = self._first_str(tree.xpath("//div[@class='con_top']/a[2]/text()"))
         tags: list[str] = [book_type] if book_type else []
 
         chapters: list[ChapterInfoDict] = []
         for a in tree.xpath("//div[@id='list']//dd/a"):
-            href = a.get("href", "")
+            href = (a.get("href") or "").strip()
+            if not href or href.lower().startswith(("javascript:", "#")):
+                continue
             title = self._norm_space(a.text_content())
             # /95071/95071941/389027455.html -> "389027455"
-            chapter_id = href.rsplit("/", 1)[-1].split(".", 1)[0]
+            chapter_id = chapter_id_from_href(href)
             chapters.append({"title": title, "url": href, "chapterId": chapter_id})
 
         if not chapters:
@@ -100,9 +113,12 @@ class XshbookParser(BaseParser):
         chapter_id: str,
         **kwargs: Any,
     ) -> ChapterDict | None:
+        raw_pages = self._usable_pages(raw_pages)
         if not raw_pages:
             return None
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         title = self._first_str(tree.xpath("//div[@class='bookname']/h1/text()"))
         if not title:
@@ -110,16 +126,25 @@ class XshbookParser(BaseParser):
                 tree.xpath("//div[@class='con_top']/text()[last()]")
             )
 
+        def clean(raw: str) -> str:
+            return self._INLINE_AD_PATTERN.sub("", self._norm_space(raw)).strip()
+
         paragraphs = [
             text
             for p in tree.xpath("//div[@id='content']//p")
-            if (
-                text := self._INLINE_AD_PATTERN.sub(
-                    "", self._norm_space(p.text_content() or "")
-                ).strip()
-            )
-            and not self._is_ad_line(text)
+            if (text := clean(p.text_content() or "")) and not self._is_ad_line(text)
         ]
+
+        if not paragraphs:
+            # Some pages keep the body as bare text separated by ``<br>``.
+            paragraphs = [
+                text
+                for node in tree.xpath(
+                    "//div[@id='content']//text()[not(ancestor::script) "
+                    "and not(ancestor::style) and not(ancestor::p)]"
+                )
+                if (text := clean(node)) and not self._is_ad_line(text)
+            ]
 
         if not paragraphs:
             return None

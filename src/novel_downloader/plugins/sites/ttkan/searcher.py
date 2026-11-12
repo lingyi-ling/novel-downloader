@@ -10,6 +10,7 @@ import logging
 from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import chapter_id_from_href
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -36,6 +37,8 @@ class TtkanSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
+        if not html_str.strip():
+            return []
         doc = html.fromstring(html_str)
         items = doc.xpath(
             '//div[contains(@class,"frame_body")]//div[@class="pure-g"]/div[contains(@class,"novel_cell")]'
@@ -53,8 +56,8 @@ class TtkanSearcher(BaseSearcher):
                 break
 
             # link -> /novel/chapters/<book_id>
-            book_id = href.strip("/").split("/")[-1]
             book_url = self._abs_url(href)
+            book_id = chapter_id_from_href(book_url)
 
             cover_rel = self._first_str(item.xpath(".//amp-img/@src"))
             cover_url = self._abs_url(cover_rel) if cover_rel else ""
