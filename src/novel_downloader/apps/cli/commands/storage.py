@@ -264,9 +264,38 @@ def _render(stats: list[DirStat]) -> None:
         )
 
 
+def _effective_targets(stats: list[DirStat]) -> list[DirStat]:
+    """
+    Collapse configured directories into the set that must actually be removed.
+
+    Configurations may overlap (``downloads`` inside ``raw_data``, the same
+    path used for two categories, ...). Removing a parent already deletes its
+    descendants, so attempting the child afterwards fails with "path not
+    found" and turns an otherwise successful ``--clean`` into exit code 1.
+    Duplicates are collapsed and any entry nested under another target is
+    dropped; the surviving targets are returned in category order.
+    """
+    unique: list[DirStat] = []
+    seen: set[Path] = set()
+    for stat in stats:
+        if stat.path in seen:
+            continue
+        seen.add(stat.path)
+        unique.append(stat)
+
+    return [
+        stat
+        for stat in unique
+        if not any(
+            other.path != stat.path and stat.path.is_relative_to(other.path)
+            for other in unique
+        )
+    ]
+
+
 def _clean(stats: list[DirStat], *, assume_yes: bool) -> None:
     """Remove every existing data directory after one confirmation."""
-    existing = [stat for stat in stats if stat.path.exists()]
+    existing = [stat for stat in _effective_targets(stats) if stat.path.exists()]
     if not existing:
         ui.info(t("Nothing to clean."))
         return
@@ -284,6 +313,10 @@ def _clean(stats: list[DirStat], *, assume_yes: bool) -> None:
 
     failed = False
     for stat in existing:
+        # A path may have disappeared with an earlier (parent) removal, or a
+        # concurrent process may have cleaned it; that is not a failure.
+        if not stat.path.exists():
+            continue
         try:
             shutil.rmtree(stat.path)
             ui.success(t("Successfully removed {desc}.").format(desc=stat.path))

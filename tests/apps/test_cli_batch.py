@@ -1094,16 +1094,22 @@ def _install_fake_client(
     fail_download: frozenset[str] = frozenset(),
     fail_process: frozenset[str] = frozenset(),
     fail_export: frozenset[str] = frozenset(),
+    empty_export: frozenset[str] = frozenset(),
     incomplete: dict[str, int] | None = None,
+    skipped: dict[str, int] | None = None,
 ) -> list[tuple[str, str]]:
     """
     Install a fake site client and record every per-book step.
 
     ``incomplete`` maps a book id to the number of failed chapters its
-    ``download_book`` summary reports.
+    ``download_book`` summary reports. ``empty_export`` books return
+    ``{fmt: []}`` (the shape ``CommonClient`` uses for a failed export)
+    instead of raising. ``skipped`` maps a book id to cached chapters that
+    were not refetched; those are part of ``succeeded`` and never a failure.
     """
     events: list[tuple[str, str]] = []
     chapters_missing = incomplete or {}
+    chapters_skipped = skipped or {}
 
     class _Client:
         async def __aenter__(self) -> _Client:
@@ -1118,7 +1124,10 @@ def _install_fake_client(
                 raise RuntimeError(f"download boom {book.book_id}")
             if ui is not None:
                 await ui.on_complete(book)
-            return {"failed": chapters_missing.get(book.book_id, 0)}
+            return {
+                "failed": chapters_missing.get(book.book_id, 0),
+                "skipped": chapters_skipped.get(book.book_id, 0),
+            }
 
         def process_book(
             self, book: Any, processors: Any = None, ui: Any = None
@@ -1129,10 +1138,15 @@ def _install_fake_client(
 
         def export_book(
             self, book: Any, cfg: Any = None, formats: Any = None, ui: Any = None
-        ) -> None:
+        ) -> dict[str, list[Path]]:
             events.append(("export", book.book_id))
             if book.book_id in fail_export:
                 raise RuntimeError(f"export boom {book.book_id}")
+            if book.book_id in empty_export:
+                return {fmt: [] for fmt in (formats or ["txt"])}
+            return {
+                fmt: [Path(f"{book.book_id}.{fmt}")] for fmt in (formats or ["txt"])
+            }
 
     monkeypatch.setattr(batch.registrar, "get_client", lambda _site, _cfg: _Client())
     return events
@@ -1180,6 +1194,26 @@ def test_export_exception_is_isolated_per_book(
     assert any("Process/export failed for book 3" in line for line in messages.error)
 
 
+def test_export_that_writes_nothing_fails_the_site(
+    messages: _Messages,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CommonClient`` reports a failed export as ``{fmt: []}``, not an error.
+
+    The batch must therefore inspect the result: a run that was asked to
+    export and produced no file cannot report success, and the remaining
+    books must still be processed.
+    """
+    events = _install_fake_client(monkeypatch, empty_export=frozenset({"2"}))
+
+    report = batch._download_site(_FakeAdapter(), "s1", ["1", "2", "3"])
+
+    assert report.ok is False
+    assert report.site_failures == 1
+    assert [bid for kind, bid in events if kind == "export"] == ["1", "2", "3"]
+    assert any("Export failed" in line and "2" in line for line in messages.error)
+
+
 def test_incomplete_chapters_are_reported_separately_from_a_failure(
     messages: _Messages,
     monkeypatch: pytest.MonkeyPatch,
@@ -1199,6 +1233,22 @@ def test_incomplete_chapters_are_reported_separately_from_a_failure(
         for line in messages.warn
     )
     assert not any("Download failed for book 2" in line for line in messages.error)
+
+
+def test_cached_chapters_are_not_counted_as_failures(
+    messages: _Messages,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cached (skipped) chapters are complete, so the batch still succeeds."""
+    events = _install_fake_client(monkeypatch, skipped={"2": 6})
+
+    report = batch._download_site(_FakeAdapter(), "s1", ["1", "2", "3"])
+
+    assert report.ok is True
+    assert report.site_failures == 0
+    assert report.incomplete_books == 0
+    assert [bid for kind, bid in events if kind == "export"] == ["1", "2", "3"]
+    assert not any("incomplete chapter" in line for line in messages.warn)
 
 
 def test_incomplete_chapters_make_the_batch_exit_non_zero(
@@ -1453,6 +1503,76 @@ def test_out_expands_environment_variables(
 
     assert seen["out"] == (out / "books").resolve()
     assert any(str(seen["out"]) in message for message in messages.info)
+
+
+def test_config_directories_are_expanded_when_out_is_omitted(
+    tmp_path: Path,
+    offline: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config ``$VAR``/``~`` directory is expanded like ``--out`` is.
+
+    Without this, the client would create a directory whose literal name is
+    ``$VAR`` (Windows expands neither ``~`` nor ``$VAR``), while the same
+    value passed to ``--out`` would land in the real directory.
+    """
+    source = _write(tmp_path / "books.txt", "斗破苍穹 天蚕土豆\n")
+    _install_search(monkeypatch, {"斗破苍穹": [_result()]})
+    out = tmp_path / "configured-out"
+    monkeypatch.setenv("BATCH_CFG_OUT", str(out))
+    ref = "%BATCH_CFG_OUT%" if sys.platform.startswith("win") else "$BATCH_CFG_OUT"
+    config: dict[str, Any] = {
+        "general": {
+            "debug": {"log_dir": str(tmp_path / "logs")},
+            "output_dir": ref,
+            "raw_data_dir": f"{ref}/raw",
+        }
+    }
+    monkeypatch.setattr(batch, "load_or_init_config", lambda _path=None: config)
+    seen: dict[str, Path] = {}
+
+    def _fake_download(
+        adapter: Any, _site: str, _book_ids: Any
+    ) -> batch.DownloadReport:
+        seen["out"] = adapter.get_output_dir()
+        seen["raw"] = adapter.get_raw_data_dir()
+        return batch.DownloadReport()
+
+    monkeypatch.setattr(batch, "_download_site", _fake_download)
+
+    BatchCmd.run(
+        _parse_args(
+            "--file",
+            str(source),
+            "--download",
+            "--not-found",
+            str(tmp_path / "nf"),
+        )
+    )
+
+    assert seen["out"] == out.resolve()
+    assert seen["raw"] == (out / "raw").resolve()
+
+
+@pytest.mark.parametrize("bad_site", ["..", "../evil", "a/b", "a\\b", "C:"])
+def test_unsafe_site_key_is_a_usage_error(
+    bad_site: str,
+    tmp_path: Path,
+    offline: Path,
+    messages: _Messages,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The site key becomes a directory name under the raw-data root."""
+    source = _write(tmp_path / "books.txt", "斗破苍穹 天蚕土豆\n")
+    calls = _install_search(monkeypatch, {"斗破苍穹": [_result()]})
+
+    args = _parse_args("--file", str(source), "--site", bad_site)
+    with pytest.raises(SystemExit) as excinfo:
+        BatchCmd.run(args)
+
+    assert excinfo.value.code == 2
+    assert any("Unsupported site" in line for line in messages.error)
+    assert calls == []
 
 
 def test_input_file_expands_environment_variables(

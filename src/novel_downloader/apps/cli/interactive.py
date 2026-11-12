@@ -15,6 +15,7 @@ import asyncio
 from pathlib import Path
 
 from novel_downloader.apps.cli import prompts, ui
+from novel_downloader.apps.cli.commands.base import expand_config_paths
 from novel_downloader.apps.utils import load_or_init_config
 from novel_downloader.infra.book_url_resolver import resolve_book_url
 from novel_downloader.infra.config import ConfigAdapter
@@ -38,6 +39,10 @@ def start_interactive() -> None:
     config_data = load_or_init_config()
     if config_data is None:
         return
+
+    # Keep interactive mode on the same ``~``/env-expanded directories as the
+    # subcommands (otherwise the export menu reads and writes elsewhere).
+    config_data = expand_config_paths(config_data)
 
     adapter = ConfigAdapter(config=config_data)
     ui.setup_logging(console_level=adapter.get_log_level())
@@ -218,7 +223,10 @@ def _interactive_export(
         book = BookConfig(book_id=book_ids[0])
 
     formats = adapter.get_export_fmt(site)
-    client = registrar.get_client(site)
+    # Same config the ``export`` subcommand uses: the client's output/raw-data
+    # directories must come from settings (``get_client()`` alone would export
+    # to ``./downloads`` and read from ``./raw_data``).
+    client = registrar.get_client(site, config=adapter.get_client_config(site))
     export_ui = CLIExportUI()
 
     ui.info(
@@ -228,12 +236,17 @@ def _interactive_export(
     )
 
     try:
-        client.export_book(
+        results = client.export_book(
             book,
             cfg=adapter.get_exporter_config(site),
             formats=formats,
             ui=export_ui,
         )
+        # ``export_book`` reports a failed format as an empty list instead of
+        # raising, so "no exception" must not be announced as success.
+        if isinstance(results, dict) and not any(results.values()):
+            ui.error(t("Export failed: {err}").format(err=book.book_id))
+            return
         ui.success(t("Export completed successfully."))
     except Exception as e:
         ui.error(t("Export failed: {err}").format(err=e))

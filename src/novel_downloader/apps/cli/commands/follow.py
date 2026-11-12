@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -48,7 +49,15 @@ from novel_downloader.apps.core.watchlist import (
 )
 from novel_downloader.infra.i18n import t
 
-from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail, localize_help
+from .base import (
+    EXIT_FAILURE,
+    EXIT_USAGE,
+    Command,
+    fail,
+    localize_help,
+    require_safe_book_id,
+    require_safe_site,
+)
 
 if TYPE_CHECKING:
     from novel_downloader.apps.core.task_manager import TaskManager
@@ -68,6 +77,64 @@ _TERMINAL_STATUSES: frozenset[Status] = frozenset(
 def _make_store() -> WatchlistStore:
     """Create the store for a command run (patch point for tests)."""
     return WatchlistStore()
+
+
+def _reject_unreadable_watchlist(store: WatchlistStore) -> None:
+    """
+    Refuse to mutate a watchlist file that cannot be decoded.
+
+    :class:`WatchlistStore` deliberately treats a corrupt file as an empty
+    list so read-only commands (and the desktop) keep working. For ``add`` and
+    ``remove`` that tolerance is destructive: the next write replaces the
+    unreadable file with a list containing only the new entry, discarding
+    whatever the old file held. A mutation therefore checks the raw document
+    first and stops with the parse error instead.
+
+    An empty file is accepted: it has no entries to lose, so writing a fresh
+    document is the desired recovery.
+
+    :param store: Store whose backing file is about to be modified.
+    """
+    path = store.path
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        fail(t("Could not read {path}: {err}").format(path=path, err=exc))
+
+    if not text.strip():
+        return
+
+    try:
+        document = json.loads(text)
+    except ValueError as exc:
+        fail(t("Could not read {path}: {err}").format(path=path, err=exc))
+
+    usable = isinstance(document, list) or (
+        isinstance(document, dict) and isinstance(document.get("books"), list)
+    )
+    if not usable:
+        fail(
+            t("Could not read {path}: {err}").format(path=path, err=t("Invalid input."))
+        )
+
+
+def _finite_timeout(value: float, option: str) -> float:
+    """
+    Return ``value`` clamped to a positive duration, or exit 2.
+
+    ``argparse`` accepts ``nan``/``inf`` for ``type=float``; ``inf`` would
+    wait forever and ``nan`` makes every comparison false, so both are bad
+    arguments rather than timeouts.
+
+    :param value: Parsed option value in seconds.
+    :param option: Option spelling used in the diagnostic detail.
+    :raises SystemExit: With :data:`EXIT_USAGE` when the value is not finite.
+    """
+    if not math.isfinite(value):
+        fail(f"{t('Invalid input.')} ({option}={value!r})", EXIT_USAGE)
+    return max(0.1, value)
 
 
 @dataclass
@@ -255,8 +322,19 @@ class FollowAddCmd(Command):
 
     @classmethod
     def run(cls, args: Namespace) -> None:
+        # The same two values end up in the printed ``download`` hint and in
+        # the raw-data layout once the book is downloaded, so reject values
+        # that cannot be used as one path component (``..``, separators, an
+        # empty id) with a usage error instead of producing an unusable entry.
+        site = require_safe_site(str(args.site))
+        book_id = require_safe_book_id(str(args.book_id))
+
         store = _make_store()
-        entry, created = store.add(str(args.site), str(args.book_id), title=args.title)
+        _reject_unreadable_watchlist(store)
+        try:
+            entry, created = store.add(site, book_id, title=args.title)
+        except OSError as exc:
+            fail(t("Could not write {path}: {err}").format(path=store.path, err=exc))
         message = (
             t("Added to the follow list: {site}/{book_id}")
             if created
@@ -283,10 +361,16 @@ class FollowRemoveCmd(Command):
 
     @classmethod
     def run(cls, args: Namespace) -> None:
+        site = require_safe_site(str(args.site))
+        book_id = require_safe_book_id(str(args.book_id))
+
         store = _make_store()
-        site = str(args.site)
-        book_id = str(args.book_id)
-        if store.remove(site, book_id):
+        _reject_unreadable_watchlist(store)
+        try:
+            removed = store.remove(site, book_id)
+        except OSError as exc:
+            fail(t("Could not write {path}: {err}").format(path=store.path, err=exc))
+        if removed:
             ui.success(
                 t("Removed from the follow list: {site}/{book_id}").format(
                     site=site, book_id=book_id
@@ -396,13 +480,21 @@ class FollowCheckCmd(Command):
         if wait and not args.download:
             fail(t("--wait requires --download."), EXIT_USAGE)
 
+        # Validate both durations before touching the watchlist or the
+        # network, so a bad value is a pure usage error.
+        timeout = _finite_timeout(float(args.timeout), "--timeout")
+        wait_timeout = (
+            _finite_timeout(float(args.wait_timeout), "--wait-timeout")
+            if wait
+            else _DEFAULT_WAIT_TIMEOUT
+        )
+
         store = _make_store()
         entries = store.entries()
         if not entries:
             ui.info(t("No followed books to check."))
             return
 
-        timeout = max(0.1, float(args.timeout))
         # check_all searches the books with bounded concurrency, persists every
         # new chapter it finds and returns the results in follow-list order.
         outcomes: list[CheckResult] = asyncio.run(check_all(store, timeout))
@@ -459,7 +551,6 @@ class FollowCheckCmd(Command):
         downloads_ok = True
         if args.download and wait:
             if download_targets:
-                wait_timeout = max(0.1, float(args.wait_timeout))
                 downloads_ok = _wait_and_report(download_targets, wait_timeout)
         elif args.download:
             for hint in hints:
@@ -478,6 +569,12 @@ class FollowCheckCmd(Command):
                 ui.info(t("All followed books are up to date."))
             else:
                 ui.info(t("No new chapters found."))
+
+        if failed:
+            # Per-book errors above say which books failed; the count makes
+            # the overall result (and the non-zero exit) visible in a long
+            # list of followed books.
+            ui.error(t("{count} check(s) failed.").format(count=failed))
 
         if failed or not downloads_ok:
             raise SystemExit(EXIT_FAILURE)

@@ -216,6 +216,32 @@ def test_browse_unknown_category_name_reports_an_error(
     assert any("was not found" in message for message in errors)
 
 
+def test_browse_first_delegates_to_download_and_propagates_its_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``browse --first`` is ``download`` under the hood, exit code included."""
+    from novel_downloader.apps.cli.commands.download import DownloadCmd
+
+    _env(monkeypatch, tmp_path)
+    seen: dict[str, Namespace] = {}
+
+    def _run(_cls: type, args: Namespace) -> None:
+        seen["args"] = args
+        # Stands in for "downloaded but exported nothing".
+        raise SystemExit(1)
+
+    monkeypatch.setattr(DownloadCmd, "run", classmethod(_run))
+
+    args = _parser().parse_args(["browse", "fanqienovel", "--first"])
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    assert excinfo.value.code == 1
+    assert seen["args"].site == "fanqienovel"
+    assert seen["args"].book_ids == [_ROWS[0]["book_id"]]
+    assert seen["args"].no_export is False
+
+
 def test_browse_namespace_exposes_every_option() -> None:
     ns: Namespace = _parser().parse_args(["browse", "fanqienovel"])
     for option in ("categories", "category", "gender", "limit", "as_json", "first"):

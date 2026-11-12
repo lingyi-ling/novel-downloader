@@ -29,9 +29,12 @@ from .base import (
     EXIT_FAILURE,
     EXIT_USAGE,
     Command,
+    expand_config_paths,
     expand_path,
     fail,
     parse_book_args,
+    require_safe_book_id,
+    require_safe_site,
 )
 
 #: Failure lines shown by the default (warning-only) report.
@@ -225,6 +228,11 @@ class DownloadCmd(Command):
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)
 
+        # Config directories go through the same ``~``/env expansion as the CLI
+        # path options, so ``output_dir = "~/books"`` means the home directory
+        # on every platform (and matches ``batch --out``).
+        config_data = expand_config_paths(config_data)
+
         ui.info(t("Using site: {site}").format(site=site))
         adapter = ConfigAdapter(config=config_data)
 
@@ -242,6 +250,13 @@ class DownloadCmd(Command):
             # Documented exit-code contract: no URL/book ID supplied at all
             # is a usage error, not a runtime failure.
             fail(t("No book IDs provided. Exiting."), EXIT_USAGE)
+
+        # ``site`` and ``book_id`` become directory names under the raw-data
+        # root (and the client is built before any download starts), so an
+        # escaping value must be refused as a usage error.
+        require_safe_site(site)
+        for book in books:
+            require_safe_book_id(book.book_id)
 
         ui.setup_logging(
             log_dir=adapter.get_log_dir(),
@@ -274,6 +289,10 @@ class DownloadCmd(Command):
         # from the summary (default mode) or from ``IncompleteDownloadError``
         # (``--strict``).
         incomplete: list[DownloadSummary] = []
+        # Books whose download raised.  Kept separate from ``download_error``
+        # (a site/session-level failure) so one broken book does not abort the
+        # remaining books -- the same isolation ``batch --download`` provides.
+        download_failed_books: list[str] = []
 
         async def download_books() -> None:
             nonlocal download_error, unsupported_error
@@ -306,6 +325,19 @@ class DownloadCmd(Command):
                         except IncompleteDownloadError as exc:
                             incomplete.append(exc.summary)
                             continue
+                        except ValueError:
+                            # Site-level (the parser/fetcher for ``site`` is
+                            # missing): no other book can succeed either, so
+                            # let the outer handler report it once.
+                            raise
+                        except Exception as e:
+                            download_failed_books.append(book.book_id)
+                            ui.error(
+                                t("Download failed for book {book_id}: {err}").format(
+                                    book_id=book.book_id, err=e
+                                )
+                            )
+                            continue
                         _collect_failures(raw_summary, incomplete)
             except ValueError as e:
                 unsupported_error = t(
@@ -329,12 +361,20 @@ class DownloadCmd(Command):
 
         # export
         exported: dict[str, dict[str, list[str]]] = {}
-        export_failed = False
+        failed_books: list[str] = []
         if not args.no_export and download_ui.completed_books:
             process_ui = CLIProcessUI()
             export_ui = CLIExportUI()
 
-            for book in download_ui.completed_books:
+            # ``completed_books`` is a set, so iterating it would export in
+            # hash order (and make the export summary differ between runs).
+            # Walk the requested books instead: downloads happened in this
+            # order, so exports, ``failed_books`` and the JSON report agree.
+            # ``dict.fromkeys`` keeps the previous de-duplication of a book
+            # id passed twice.
+            for book in dict.fromkeys(
+                item for item in books if item in download_ui.completed_books
+            ):
                 if strict and book.book_id in failed_book_ids:
                     continue
                 client.process_book(
@@ -352,8 +392,11 @@ class DownloadCmd(Command):
                     fmt: [str(path) for path in paths] for fmt, paths in results.items()
                 }
                 exported[book.book_id] = paths_by_fmt
+                # ``CommonClient.export_book`` catches per-format errors and
+                # returns an empty list, so "no exception" is not "wrote a
+                # file": an export that produced nothing is a failure.
                 if not any(paths_by_fmt.values()):
-                    export_failed = True
+                    failed_books.append(book.book_id)
         elif args.no_export:
             ui.info(t("Export skipped (--no-export)"))
 
@@ -400,5 +443,12 @@ class DownloadCmd(Command):
             raise SystemExit(EXIT_FAILURE)
         if not download_ui.completed_books:
             raise SystemExit(EXIT_FAILURE)
-        if export_failed:
+        if failed_books:
+            # JSON (if requested) was already emitted above; name the books on
+            # stderr so a human sees *what* failed, not just the exit code.
+            ui.error(t("Export failed: {err}").format(err=", ".join(failed_books)))
+            raise SystemExit(EXIT_FAILURE)
+        if download_failed_books:
+            # Each failed book was reported in the loop above; the remaining
+            # books were still downloaded and exported.
             raise SystemExit(EXIT_FAILURE)

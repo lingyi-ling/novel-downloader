@@ -286,18 +286,42 @@ class SearchCmd(Command):
             process_ui = CLIProcessUI()
             export_ui = CLIExportUI()
 
+            # A book that fails to process/export must not cost the user the
+            # other completed books, and an export that produced no file is a
+            # failure: ``CommonClient.export_book`` reports a rejected write as
+            # an empty list rather than raising, so "no exception" would
+            # otherwise be mistaken for success and exit 0.
+            export_failed: list[str] = []
             for book in download_ui.completed_books:
-                client.process_book(
-                    book,
-                    processors=adapter.get_processor_configs(site),
-                    ui=process_ui,
-                )
-                client.export_book(
-                    book,
-                    cfg=adapter.get_exporter_config(site),
-                    formats=formats or adapter.get_export_fmt(site),
-                    ui=export_ui,
-                )
+                try:
+                    client.process_book(
+                        book,
+                        processors=adapter.get_processor_configs(site),
+                        ui=process_ui,
+                    )
+                    export_result = client.export_book(
+                        book,
+                        cfg=adapter.get_exporter_config(site),
+                        formats=formats or adapter.get_export_fmt(site),
+                        ui=export_ui,
+                    )
+                except Exception as e:
+                    export_failed.append(book.book_id)
+                    ui.error(
+                        t("Process/export failed for book {book_id}: {err}").format(
+                            book_id=book.book_id, err=e
+                        )
+                    )
+                    continue
+
+                # Older/third-party clients may return ``None``, which carries
+                # no verdict; a dict with only empty lists does.
+                if isinstance(export_result, dict) and not any(export_result.values()):
+                    export_failed.append(book.book_id)
+
+            if export_failed:
+                ui.error(t("Export failed: {err}").format(err=", ".join(export_failed)))
+                raise SystemExit(EXIT_FAILURE)
 
         import asyncio
 

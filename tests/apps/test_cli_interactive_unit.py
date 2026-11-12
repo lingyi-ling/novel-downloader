@@ -620,3 +620,45 @@ def test_export_explicit_site_and_book_skips_prompts(
     _REAL_EXPORT(FakeAdapter(), site="qidian", book=BookConfig(book_id="7"))
 
     assert client.export_calls == [BookConfig(book_id="7")]
+
+
+def test_export_without_any_output_is_reported(
+    monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any]
+) -> None:
+    """``export_book`` reports a failed format as an empty list, not an error."""
+
+    class EmptyClient(FakeClient):
+        def export_book(
+            self, book: BookConfig, *, cfg: Any, formats: Any, ui: Any
+        ) -> dict[str, list[Any]]:
+            self.export_calls.append(book)
+            return {"txt": []}
+
+    monkeypatch.setattr(
+        interactive.registrar, "get_client", lambda site, config=None: EmptyClient()
+    )
+
+    _REAL_EXPORT(FakeAdapter(), site="qidian", book=BookConfig(book_id="1"))
+
+    assert rec["calls"]["error"]
+
+
+def test_export_passes_the_configured_client_to_get_client(
+    monkeypatch: pytest.MonkeyPatch, rec: dict[str, Any]
+) -> None:
+    """Exports must use the configured output/raw-data directories."""
+    seen: dict[str, Any] = {}
+    adapter = FakeAdapter()
+    monkeypatch.setattr(
+        adapter, "get_client_config", lambda _site: {"output_dir": "configured"}
+    )
+
+    def _get_client(site: str, config: Any = None) -> FakeClient:
+        seen["config"] = config
+        return FakeClient()
+
+    monkeypatch.setattr(interactive.registrar, "get_client", _get_client)
+
+    _REAL_EXPORT(adapter, site="qidian", book=BookConfig(book_id="1"))
+
+    assert seen["config"] == {"output_dir": "configured"}
