@@ -9,6 +9,7 @@ from __future__ import annotations
 
 __all__ = [
     "GroupedSearchResult",
+    "RankedSearchResult",
     "SearchEvent",
     "search",
     "search_stream",
@@ -20,7 +21,9 @@ import hashlib
 import logging
 from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -31,7 +34,9 @@ from novel_downloader.plugins.grouping import group_results
 from novel_downloader.plugins.ranking import (
     detect_query_intent,
     filter_by_relevance,
+    match_tier_of,
     normalize_text,
+    rank_score,
     sort_results,
 )
 from novel_downloader.plugins.registry import registrar
@@ -60,6 +65,37 @@ class GroupedSearchResult(SearchResult, total=False):
     sources: list[str]
 
 
+class RankedSearchResult(SearchResult, total=False):
+    """
+    A final :func:`search` row with its ranking telemetry attached.
+
+    ``search`` adds two optional keys to every returned row (and to grouped
+    merged rows); :func:`search_stream` deliberately does not, because a
+    streamed chunk is a site's raw preview rather than a ranked final result:
+
+    * ``rank_score`` -- the 0..1 quality score the row received for this call,
+      i.e. :func:`~novel_downloader.plugins.ranking.rank_score` under the
+      intent the call used.  For ``sort="quality"`` this is the score
+      component of the ordering key (the match tier is the outer key);
+    * ``match_tier`` -- the 0..4 kind-of-match tier of the keyword against the
+      intent's primary field, or the better of the two fields under
+      ``"either"`` (see
+      :func:`~novel_downloader.plugins.ranking.match_tier_of`).  Under
+      ``sort="quality"`` with a decided intent it is exactly the outer
+      ordering key, so it explains why a sparse exact hit outranks a
+      metadata-rich collision.
+
+    Both keys are derived data, not part of the cached snapshot: they are
+    attached to copies returned to the caller, and consumers that compare or
+    persist rows can ignore them.  ``rank_score`` carries a small recency
+    signal, so its value can drift slightly between calls; ``match_tier`` is
+    fully deterministic for a given keyword and row.
+    """
+
+    rank_score: float
+    match_tier: int
+
+
 #: Per-host connection ceiling for the aggregate session. aiohttp defaults to
 #: ``limit=100, limit_per_host=0`` (unlimited per host), so a fan-out of many
 #: searchers could burst past a single site's tolerance.
@@ -76,6 +112,12 @@ _DNS_CACHE_SECONDS = 300
 #: score around 0.7 and survive.  See
 #: :func:`~novel_downloader.plugins.ranking.filter_by_relevance`.
 DEFAULT_MIN_RELEVANCE = 0.45
+
+#: Schemes a ``book_url`` may use.  Anything else -- ``javascript:``,
+#: ``file:``, ``data:``, ``vbscript:`` or a scheme-less/relative string -- is
+#: cleared before the row reaches a UI that might open it in a browser or
+#: hand it to a downloader.
+_SAFE_BOOK_URL_SCHEMES = frozenset({"http", "https"})
 
 #: Upper bound (seconds) on how long cancelled site tasks may take to unwind
 #: after the per-site deadline.  Cancellation is only a *request* -- on the
@@ -514,24 +556,110 @@ def _chunks_by_site(results: Sequence[SearchResult]) -> list[list[SearchResult]]
     return list(buckets.values())
 
 
+def _safe_book_url(value: object) -> str:
+    """
+    Return ``value`` when it is an absolute http(s) URL, else ``""``.
+
+    Aggregated rows come from arbitrary site plugins (and, through the rule
+    engine, from arbitrary page markup), so a ``book_url`` is untrusted input
+    for every UI: a ``javascript:`` value handed to a WebView/browser helper
+    would execute in the app's context, and ``file:``/``data:`` would reach
+    local or inline content.  Only ``http``/``https`` URLs with a host are
+    therefore kept; everything else becomes an empty string (the row itself
+    is kept unless it has no other identifier, see :func:`_sanitize_results`).
+
+    The string is stripped but otherwise returned verbatim, so a legitimate
+    URL keeps its exact form (including its query and fragment).
+    """
+    url = str(value if value is not None else "").strip()
+    if not url:
+        return ""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        # ``urlsplit`` raises on malformed IPv6 literals and similar input.
+        return ""
+    if parsed.scheme.lower() not in _SAFE_BOOK_URL_SCHEMES:
+        return ""
+    if not parsed.netloc:
+        return ""
+    return url
+
+
+def _sanitize_results(results: list[SearchResult]) -> list[SearchResult]:
+    """
+    Drop unusable aggregate rows and neutralize unsafe ``book_url`` values.
+
+    This runs first in :func:`_finalize`, before de-duplication, ranking,
+    grouping and slicing, so a dirty row can never consume a ``limit`` slot,
+    win a group's primary position, or influence the relevance floor.
+
+    Rules (deliberately minimal -- anything else is left untouched):
+
+    * a row whose ``site`` is empty/blank is dropped: no downstream consumer
+      can route a download without a site key;
+    * a row with neither a ``book_id`` nor a usable ``book_url`` is dropped:
+      it names no book at all;
+    * a non-http(s) ``book_url`` is cleared.  A row that still has a
+      ``book_id`` is kept -- it is usable for the site-keyed download path --
+      but its URL will not be opened anywhere.
+
+    Rows are not mutated: a row whose URL must be cleared is copied, so a
+    cached snapshot stays pristine.  The input list is returned unchanged
+    when nothing needed cleaning.
+    """
+    cleaned: list[SearchResult] = []
+    changed = False
+    for result in results:
+        site = str(result.get("site") or "").strip()
+        book_id = str(result.get("book_id") or "").strip()
+        raw_url = str(result.get("book_url") or "")
+        book_url = _safe_book_url(raw_url)
+        if not site or (not book_id and not book_url):
+            changed = True
+            continue
+        if book_url != raw_url:
+            result = cast("SearchResult", {**result, "book_url": book_url})
+            changed = True
+        cleaned.append(result)
+
+    if not changed:
+        return results
+    if len(cleaned) != len(results):
+        logger.debug(
+            "search: dropped %d unusable aggregate row(s)",
+            len(results) - len(cleaned),
+        )
+    return cleaned
+
+
 def _dedupe_exact(results: list[SearchResult]) -> list[SearchResult]:
     """
     Fold exact same-book duplicates, keeping the first occurrence.
 
     Two rows are the same book when they come from the same site and either
-    share a non-empty ``book_id``, or -- for rows without an id -- share the
-    same normalized title and author.  Cross-site copies are deliberately
-    *not* folded here: that is what ``group=True`` is for.
+    share a non-empty ``book_id``, share both a normalized title and the same
+    non-empty ``book_url``, or -- for rows without an id -- share the same
+    normalized title and author.  The URL rule folds a site that lists one
+    page twice under different (or missing) ids; it deliberately also requires
+    the same title, so two entries pointing at one omnibus page are not fused.
+    Cross-site copies are deliberately *not* folded here: that is what
+    ``group=True`` is for.
+
+    ``book_url`` is expected to be sanitized already (see
+    :func:`_sanitize_results`): a cleared URL never matches another row's.
 
     The input list is returned unchanged when nothing was duplicated, so a
     fresh cache snapshot is only copied when it actually needs a copy.
     """
     seen_ids: set[tuple[str, str]] = set()
+    seen_urls: set[tuple[str, str, str]] = set()
     seen_titles: set[tuple[str, str, str]] = set()
     kept: list[SearchResult] = []
     for result in results:
         site = str(result.get("site") or "")
         book_id = str(result.get("book_id") or "")
+        book_url = str(result.get("book_url") or "")
         title = normalize_text(result.get("title"))
         author = normalize_text(result.get("author"))
 
@@ -540,7 +668,12 @@ def _dedupe_exact(results: list[SearchResult]) -> list[SearchResult]:
             if key in seen_ids:
                 continue
             seen_ids.add(key)
-        elif title:
+        if book_url:
+            url_key = (site, title, book_url)
+            if url_key in seen_urls:
+                continue
+            seen_urls.add(url_key)
+        if not book_id and title:
             title_key = (site, title, author)
             if title_key in seen_titles:
                 continue
@@ -554,6 +687,69 @@ def _dedupe_exact(results: list[SearchResult]) -> list[SearchResult]:
         len(results) - len(kept),
     )
     return kept
+
+
+def _sanitize_chunk(chunk: list[SearchResult]) -> list[SearchResult]:
+    """
+    Apply the final-result cleaning to one streamed per-site chunk.
+
+    ``search_stream`` yields raw site payloads as soon as a site finishes, but
+    a progressive UI renders those rows immediately -- before ``search`` would
+    ever finalize them.  Running the same first two steps of
+    :func:`_finalize` here keeps the preview honest:
+
+    * :func:`_sanitize_results` drops rows with no site key and rows that name
+      no book at all, and clears non-http(s) ``book_url`` values (so a
+      ``javascript:`` link never reaches a WebView);
+    * :func:`_dedupe_exact` folds same-site duplicates.  Its keys are all
+      site-scoped, so applying it to a single-site chunk drops exactly the
+      rows :func:`_finalize` would drop for that site -- no cross-site
+      grouping happens in the stream.
+
+    Ranking, relevance filtering and ``limit`` are deliberately *not* applied:
+    the chunk contract stays "this site's rows, unranked", except that a chunk
+    left empty by cleaning is not yielded at all.
+
+    Rows are never mutated: a row whose URL must be cleared is copied, so the
+    raw cached snapshot stays pristine.
+    """
+    return _dedupe_exact(_sanitize_results(chunk))
+
+
+def _annotate_ranked(
+    results: list[SearchResult],
+    *,
+    keyword: str,
+    intent: str,
+    now: datetime,
+) -> list[SearchResult]:
+    """
+    Return copies of ``results`` carrying ``rank_score`` and ``match_tier``.
+
+    A fresh dict per row is essential: the input list may be -- or point
+    into -- the cached snapshot, and :class:`SearchCache` copies only the
+    list, not the row dicts.  Writing the fields in place would leak derived
+    data into the cache, where a later call would treat it as if the site had
+    returned it (and grouping could then be handed stale annotations).
+
+    The scores are computed here, after filtering/grouping/slicing, so only
+    rows the caller actually receives are scored, with the same ``now`` the
+    ranking used (all rows of one call are therefore comparable).
+    """
+    annotated: list[SearchResult] = []
+    for result in results:
+        row = cast(
+            "RankedSearchResult",
+            {
+                **result,
+                "rank_score": round(
+                    rank_score(result, keyword, intent=intent, now=now), 6
+                ),
+                "match_tier": match_tier_of(result, keyword, intent=intent),
+            },
+        )
+        annotated.append(row)
+    return annotated
 
 
 def _finalize(
@@ -571,16 +767,24 @@ def _finalize(
 
     The steps run in this order:
 
-    1. exact duplicate rows are folded (see :func:`_dedupe_exact`);
-    2. the list is ranked (grouping and limiting both build on that order);
-    3. with ``group=True`` the rows are grouped, and the relevance floor is
+    1. unusable rows are dropped and unsafe ``book_url`` values are cleared
+       (see :func:`_sanitize_results`); this happens before every other step,
+       so a dirty row can neither consume a ``limit`` slot nor become a
+       group's primary;
+    2. exact duplicate rows are folded (see :func:`_dedupe_exact`);
+    3. the list is ranked (grouping and limiting both build on that order);
+    4. with ``group=True`` the rows are grouped, and the relevance floor is
        applied to each book's primary row (a mirror site's alternate entry
        may look irrelevant on its own while the book is clearly relevant);
        without grouping the floor is applied to the rows themselves
        (``sort="quality"`` only, see
        :func:`~novel_downloader.plugins.ranking.filter_by_relevance`);
-    4. ``limit`` is applied last, so with ``group=True`` it counts books
-       rather than raw rows.
+    5. ``limit`` is applied last, so with ``group=True`` it counts books
+       rather than raw rows;
+    6. every surviving row is annotated with ``rank_score`` and
+       ``match_tier`` (see :class:`RankedSearchResult`) on a *copy*: rows are
+       never mutated, so the cached snapshot and any caller-owned input stay
+       free of derived fields.
 
     Filtering happens per call and never rewrites the cached snapshot: the
     filtered subset is a fresh list, while ranked order is re-applied on every
@@ -596,10 +800,15 @@ def _finalize(
     ``"either"`` — the historical behaviour — whenever the evidence is too
     weak, and other sort keys ignore it entirely.
     """
-    work = _dedupe_exact(results)
+    work = _sanitize_results(results)
+    work = _dedupe_exact(work)
+    current = datetime.now()
     intent = detect_query_intent(keyword, work) if sort == "quality" else "either"
-    sort_results(work, by=sort, order=order, keyword=keyword, intent=intent)
+    sort_results(
+        work, by=sort, order=order, keyword=keyword, intent=intent, now=current
+    )
 
+    final: list[SearchResult]
     if group:
         # Group first, then apply the relevance floor to each book's *primary*
         # row.  Filtering raw rows first would drop alternate sources whose
@@ -607,7 +816,9 @@ def _finalize(
         # the author's books under ``author`` intent, but a mirror site's row
         # may carry an empty author field and would look irrelevant on its
         # own).  The group survives as long as its best row is relevant.
-        groups = group_results(work, keyword=keyword)
+        # ``now`` is forwarded so the primary choice and the annotations below
+        # are scored against one instant.
+        groups = group_results(work, keyword=keyword, now=current)
         if sort == "quality" and min_relevance is not None:
             primaries = filter_by_relevance(
                 [group.primary for group in groups],
@@ -620,17 +831,17 @@ def _finalize(
         merged = _merged_results(work, keyword, groups=groups)
         if limit is not None:
             merged = merged[:limit]
-        return cast("list[SearchResult]", merged)
+        final = cast("list[SearchResult]", merged)
+    else:
+        if sort == "quality" and min_relevance is not None:
+            # Only quality sorting promises relevance; an explicit "words" or
+            # "update" ordering must not silently lose rows.
+            work = filter_by_relevance(
+                work, keyword, intent=intent, min_relevance=min_relevance
+            )
+        final = work[:limit] if limit is not None else work
 
-    if sort == "quality" and min_relevance is not None:
-        # Only quality sorting promises relevance; an explicit "words" or
-        # "update" ordering must not silently lose rows.
-        work = filter_by_relevance(
-            work, keyword, intent=intent, min_relevance=min_relevance
-        )
-    if limit is not None:
-        return work[:limit]
-    return work
+    return _annotate_ranked(final, keyword=keyword, intent=intent, now=current)
 
 
 async def search(
@@ -683,7 +894,11 @@ async def search(
         returned unchanged.  Pass ``None`` to keep every row (e.g. when the
         caller sorts by word count or update date).  Ignored for other sort
         keys.
-    :return: A flat list of `SearchResult` objects.
+    :return: A flat list of `SearchResult` objects.  Every row also carries
+        the ranking telemetry described by :class:`RankedSearchResult`
+        (``rank_score`` 0..1 and ``match_tier`` 0..4); the annotations are
+        added to copies, so the cache and the searchers' payloads stay
+        pristine.  :func:`search_stream` does not add them.
     """
     if sites is not None and not sites:
         # An explicit empty selection searches nothing.  The registry treats
@@ -818,6 +1033,24 @@ async def search_stream(
     requested or skipped) is reported through ``on_event`` and the logger
     instead of a new chunk type.
 
+    Rows are cleaned before they are yielded, exactly like :func:`search`
+    cleans its final list: blank-site rows and rows naming no book are
+    dropped, non-http(s) ``book_url`` values are cleared, and same-site
+    duplicates are folded (see :func:`_sanitize_chunk`).  A chunk emptied by
+    that cleaning is not yielded, and cleaning never fetches extra rows, so
+    ``per_site_limit`` keeps its meaning (a chunk can only shrink, never grow
+    past the site's own limit).  Ranking and relevance filtering stay out of
+    the stream: the chunks remain the sites' raw ordering, minus unusable
+    rows.  The ranking telemetry :func:`search` attaches to final rows
+    (``rank_score`` / ``match_tier``, see :class:`RankedSearchResult`) is
+    deliberately absent too: a chunk is a progressive preview, not a ranked
+    final result.
+
+    The cache stores the *raw* per-site payloads; cleaning happens on every
+    yield, so a cache hit produces the same chunks as a fresh run (see
+    :func:`_chunks_by_site`).  That also means a later :func:`search` can rank
+    rows the stream chose to display cleaned.
+
     :param keyword: Search keyword or term.
     :param sites: Optional list of site keys; if None, use all registered
         sites.  An empty sequence searches no site at all.
@@ -840,9 +1073,14 @@ async def search_stream(
     cached = _CACHE.get(key)
     if cached is not None:
         # Keep the per-site chunk contract on a cache hit: yielding the whole
-        # snapshot as one batch would mix every site into a single chunk.
+        # snapshot as one batch would mix every site into a single chunk.  The
+        # cache holds the raw payloads, so clean each chunk exactly as the
+        # fresh path does -- a warmed stream must not leak rows the fresh run
+        # would have dropped.
         for chunk in _chunks_by_site(cached):
-            yield chunk
+            cleaned = _sanitize_chunk(chunk)
+            if cleaned:
+                yield cleaned
         return
 
     if not classes:
@@ -852,6 +1090,9 @@ async def search_stream(
     site_by_task: dict[asyncio.Task[list[SearchResult]], str] = {}
     cleanup_deadline: float | None = None
     accumulated: list[SearchResult] = []
+    #: Whether any chunk survived cleaning.  An all-dirty stream is not cached:
+    #: it is effectively empty, and pinning it would freeze a bad snapshot.
+    emitted = False
     async with aiohttp.ClientSession(
         connector=_make_connector(),
         timeout=timeout_cfg,
@@ -910,8 +1151,15 @@ async def search_stream(
 
                     _report_completion(site, len(payload), plan.browser_sites, on_event)
                     if payload:
+                        # Cache the raw payload (a later ``search`` may rank
+                        # rows this stream chose to hide), but yield it
+                        # cleaned.  A site whose every row is unusable yields
+                        # no chunk at all, matching the fresh-run contract.
                         accumulated.extend(payload)
-                        yield payload
+                        chunk = _sanitize_chunk(payload)
+                        if chunk:
+                            emitted = True
+                            yield chunk
         finally:
             # Cancel whatever is left and give it a bounded grace to unwind
             # before the session closes; the wait is clipped to
@@ -933,6 +1181,7 @@ async def search_stream(
         await _drain(site_by_task, cleanup_deadline)
 
     # Only reached on normal completion; cancelled/closed streams skip this.
-    # Empty streams are not cached (transient failures must not be pinned).
-    if accumulated:
+    # Empty streams are not cached (transient failures must not be pinned),
+    # and neither is a snapshot every row of which cleaning rejected.
+    if accumulated and emitted:
         _CACHE.put(key, accumulated)

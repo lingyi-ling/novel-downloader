@@ -29,6 +29,13 @@ set as a whole looks title-like or author-like, and
 :func:`sort_results_with_intent` feeds that verdict back into the relevance
 signal (see the intent constants below).
 
+A query may also name *both* fields ("斗破苍穹 天蚕土豆").  When the keyword
+splits on a supported separator into two to four tokens, each token is scored
+against title and author separately and the best title token / best author
+token are combined; the whole-keyword score stays in the comparison, so a
+title that legitimately contains a separator is never scored lower than
+before.  A single-token query keeps the historical whole-string path exactly.
+
 Every helper is a pure function (no I/O); ``now`` can be injected to keep
 the recency signal deterministic in tests.
 """
@@ -54,6 +61,7 @@ __all__ = [
     "default_order",
     "detect_query_intent",
     "filter_by_relevance",
+    "match_tier_of",
     "normalize_text",
     "parse_update_date",
     "parse_word_count",
@@ -150,9 +158,29 @@ _NULL_TOKENS = frozenset({"", "-", "--", "—", "未知", "暂无", "none", "n/a
 
 _NON_WORD_RE = re.compile(r"[\W_]+")
 
+#: Separators that split a "title + author" style query into tokens: any run
+#: of whitespace (``\s`` includes the full-width space U+3000), the middle dot
+#: sites put between a title and a pen name, and half/full-width commas.
+_QUERY_TOKEN_RE = re.compile(r"[\s·,，\-]+")
+
+#: Multi-token matching is enabled only for this token-count window.  Two to
+#: four tokens covers the realistic shapes ("斗破苍穹 天蚕土豆",
+#: "斗破苍穹 · 天蚕土豆"); one token is the historical whole-keyword query, and
+#: five or more is far more likely a pasted sentence than a query.
+_MIN_QUERY_TOKENS = 2
+_MAX_QUERY_TOKENS = 4
+
 #: A word count: number (optionally with thousands separators / a decimal)
 #: followed by an optional single magnitude character.
 _WORD_COUNT_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*([a-zA-Z万亿千百日十])?")
+
+#: Longest normalized word-count label still parsed.  Real labels are short
+#: ("12.3万字", "1,234", "总字数：123万字"); a longer value is a mis-scraped
+#: title, summary or whole paragraph whose first number would otherwise be
+#: read as a count and skew the ``words``/``quality`` ordering.  The limit is
+#: deliberately far above every shape a site serves, so normal values are
+#: unaffected.
+_MAX_WORD_COUNT_LENGTH = 64
 
 #: A relative update date such as "3天前" / "2个月前".
 _REL_AGO_RE = re.compile(
@@ -272,6 +300,33 @@ def normalize_text(value: object) -> str:
     return _normalize_cached(str(value if value is not None else ""))
 
 
+@lru_cache(maxsize=1024)
+def _query_tokens_cached(keyword: str) -> tuple[str, ...]:
+    tokens = tuple(token for token in _QUERY_TOKEN_RE.split(keyword) if token)
+    if _MIN_QUERY_TOKENS <= len(tokens) <= _MAX_QUERY_TOKENS:
+        return tokens
+    return ()
+
+
+def _query_tokens(keyword: str) -> tuple[str, ...]:
+    """
+    Return the tokens to score separately, or ``()`` to use the old path.
+
+    A multi-field query ("斗破苍穹 天蚕土豆") does not literally occur in either
+    the title or the author field, so the historical whole-string containment
+    test scores it far too low.  Splitting it on whitespace (full-width
+    included), ``·``, ``,``, ``，`` and ``-`` yields the field-shaped tokens
+    instead.  Runs of separators count once, and empty fragments are dropped.
+
+    Only two to four non-empty tokens enable multi-token matching; any other
+    count returns ``()`` so the caller keeps the historical whole-keyword
+    behaviour (one token is a normal query, five or more is usually a pasted
+    sentence).  The result is cached because relevance is computed once per
+    result row.
+    """
+    return _query_tokens_cached(keyword)
+
+
 def parse_word_count(value: object) -> float | None:
     """
     Parse a raw word-count string into a number, or ``None`` when unknown.
@@ -285,11 +340,20 @@ def parse_word_count(value: object) -> float | None:
     yield the same numbers as their half-width counterparts instead of being
     truncated at the first full-width separator (``"１．２万字"`` used to parse
     as just ``1.0``).  A value without any digit still returns ``None``.
+
+    A label longer than :data:`_MAX_WORD_COUNT_LENGTH` characters is treated
+    as "unknown" instead of being scraped for its first number: such values
+    are mis-extracted descriptions rather than word counts, and reading e.g.
+    a year or a chapter number out of a paragraph would distort the
+    ``words``/``quality`` ordering.  Every value a bundled site produces is
+    far below the limit.
     """
     text = unicodedata.normalize(
         "NFKC", str(value if value is not None else "")
     ).strip()
     if text.casefold() in _NULL_TOKENS:
+        return None
+    if len(text) > _MAX_WORD_COUNT_LENGTH:
         return None
 
     text = text.replace("，", ",")
@@ -440,9 +504,25 @@ def _match_tier(keyword: str, text: str) -> int:
     return _TIER_NONE
 
 
+def _field_scores(needle: str, title: str, author: str) -> tuple[float, float]:
+    """Return the (title, author) match scores of one normalised ``needle``."""
+    return (
+        _match_score(needle, title, exact=1.0, prefix=0.75, contains=0.7, base=0.55),
+        _match_score(needle, author, exact=0.9, prefix=0.7, contains=0.7, base=0.5),
+    )
+
+
 def _primary_match_tier(keyword: str, result: SearchResult, field: str) -> int:
-    """Return :func:`_match_tier` for ``result``'s primary intent ``field``."""
-    return _match_tier(normalize_text(keyword), normalize_text(result.get(field)))
+    """Return the best :func:`_match_tier` for ``result``'s primary ``field``."""
+    text = normalize_text(result.get(field))
+    # The whole keyword stays in the comparison so a multi-token query never
+    # downgrades a title/author that contains the exact keyword string.
+    tier = _match_tier(normalize_text(keyword), text)
+    for token in _query_tokens(keyword):
+        token_needle = normalize_text(token)
+        if token_needle:
+            tier = max(tier, _match_tier(token_needle, text))
+    return tier
 
 
 @lru_cache(maxsize=8192)
@@ -489,6 +569,31 @@ def _normalize_intent(intent: str) -> str:
     return intent if intent in _VALID_INTENTS else "either"
 
 
+def _intent_verdict(needle: str, results: Sequence[SearchResult]) -> str:
+    """Score one normalised needle against both fields of ``results``."""
+    title_weight, author_weight = INTENT_WEIGHTS[_intent_tier(len(needle))]
+    # ``math.fsum`` is correctly rounded and independent of summation order,
+    # so the verdict cannot flip when the same rows arrive in a different
+    # order (e.g. sites completing concurrently).  A plain ``+=`` loop is
+    # order-sensitive in the last bits, and this verdict feeds a threshold
+    # comparison (:data:`_INTENT_MARGIN`).
+    title_total = math.fsum(
+        _similarity(needle, result.get("title")) for result in results
+    )
+    author_total = math.fsum(
+        _similarity(needle, result.get("author")) for result in results
+    )
+
+    title_score = title_total * title_weight
+    author_score = author_total * author_weight
+    total = title_score + author_score
+    if total <= 0.0:
+        return "either"
+    if abs(title_score - author_score) / total <= _INTENT_MARGIN:
+        return "either"
+    return "title" if title_score > author_score else "author"
+
+
 def detect_query_intent(keyword: str, results: Sequence[SearchResult]) -> str:
     """
     Decide whether ``keyword`` looks like a title, an author, or neither.
@@ -513,6 +618,13 @@ def detect_query_intent(keyword: str, results: Sequence[SearchResult]) -> str:
     which keeps the historical ranking behaviour.  An empty keyword or a
     result set with no overlap at all also yields ``"either"``.
 
+    A two-to-four-token keyword (see :func:`_query_tokens`) is judged token by
+    token with the same accumulation.  This is how a "title + author" query is
+    recognised as mixed: one token points at the title field and another at the
+    author field, so no single field can be declared primary and ``"either"``
+    is returned.  Tokens without any evidence are ignored; if the remaining
+    tokens all agree, their verdict is used.
+
     The function is pure with respect to ``results`` (they are only read) and
     never mutates the input.
     """
@@ -520,21 +632,22 @@ def detect_query_intent(keyword: str, results: Sequence[SearchResult]) -> str:
     if not needle:
         return "either"
 
-    title_weight, author_weight = INTENT_WEIGHTS[_intent_tier(len(needle))]
-    title_total = 0.0
-    author_total = 0.0
-    for result in results:
-        title_total += _similarity(needle, result.get("title"))
-        author_total += _similarity(needle, result.get("author"))
+    tokens = _query_tokens(keyword)
+    if tokens:
+        verdicts: set[str] = set()
+        for token in tokens:
+            token_needle = normalize_text(token)
+            if not token_needle:
+                continue
+            verdict = _intent_verdict(token_needle, results)
+            if verdict != "either":
+                verdicts.add(verdict)
+        if len(verdicts) == 1:
+            return verdicts.pop()
+        # No evidence at all, or one token pointing each way.
+        return "either"
 
-    title_score = title_total * title_weight
-    author_score = author_total * author_weight
-    total = title_score + author_score
-    if total <= 0.0:
-        return "either"
-    if abs(title_score - author_score) / total <= _INTENT_MARGIN:
-        return "either"
-    return "title" if title_score > author_score else "author"
+    return _intent_verdict(needle, results)
 
 
 def _relevance(
@@ -553,18 +666,29 @@ def _relevance(
       :func:`sort_results`, which uses the author match tier as its outer key.
     * ``"title"`` is the mirror image, demoting the author score.
 
+    A two-to-four-token keyword (see :func:`_query_tokens`) is additionally
+    scored token by token: the best title token and the best author token are
+    combined, so ``"斗破苍穹 天蚕土豆"`` matches a row titled 斗破苍穹 by
+    天蚕土豆.  The whole-keyword scores stay in the ``max``, so the multi-token
+    path can only raise relevance -- a title that contains a listed separator
+    itself (``"你好，旧时光"``) scores exactly as it did before.
+
     Unknown intent values fall back to ``"either"``.
     """
     needle = normalize_text(keyword)
     if not needle:
         return 0.5
 
-    title_score = _match_score(
-        needle, normalize_text(title), exact=1.0, prefix=0.75, contains=0.7, base=0.55
-    )
-    author_score = _match_score(
-        needle, normalize_text(author), exact=0.9, prefix=0.7, contains=0.7, base=0.5
-    )
+    norm_title = normalize_text(title)
+    norm_author = normalize_text(author)
+    title_score, author_score = _field_scores(needle, norm_title, norm_author)
+    for token in _query_tokens(keyword):
+        token_needle = normalize_text(token)
+        if not token_needle:
+            continue
+        token_title, token_author = _field_scores(token_needle, norm_title, norm_author)
+        title_score = max(title_score, token_title)
+        author_score = max(author_score, token_author)
 
     resolved = _normalize_intent(intent)
     if resolved == "author":
@@ -591,6 +715,46 @@ def relevance_of(
         str(result.get("title") or ""),
         str(result.get("author") or ""),
         intent=intent,
+    )
+
+
+def match_tier_of(result: SearchResult, keyword: str, *, intent: str = "either") -> int:
+    """
+    Return the match tier of ``keyword`` against ``result``'s primary field.
+
+    The value is the *kind* of match, on a stable 0..4 scale (larger is
+    better):
+
+    =====  =========================================================
+    ``4``  exact equality with the normalized field value
+    ``3``  the field starts with the keyword (prefix match)
+    ``2``  the keyword occurs inside the field (containment match)
+    ``1``  only some characters of the keyword occur in the field
+    ``0``  no character of the keyword occurs in the field
+    =====  =========================================================
+
+    ``intent`` selects which field is primary, mirroring
+    :func:`sort_results`:
+
+    * ``"title"`` / ``"author"`` -- the tier of that single field.  This is
+      exactly the outer sort key used for ``by="quality"`` under a decided
+      intent, so a row's ``match_tier`` explains why it outranked a richer
+      row that only collided on the other field;
+    * anything else (``"either"``, the default) -- the better of the two
+      fields' tiers.
+
+    Multi-token keywords (see :func:`_query_tokens`) are scored token by
+    token as well, so ``"斗破苍穹 天蚕土豆"`` reports the best tier any token
+    achieves.  The function is pure and never mutates ``result``.  An empty
+    keyword yields ``0``.
+    """
+    resolved = _normalize_intent(intent)
+    primary_field = _PRIMARY_FIELD.get(resolved)
+    if primary_field is not None:
+        return _primary_match_tier(keyword, result, primary_field)
+    return max(
+        _primary_match_tier(keyword, result, "title"),
+        _primary_match_tier(keyword, result, "author"),
     )
 
 
@@ -697,6 +861,36 @@ def default_order(by: str) -> str:
     return "desc" if by in {"quality", "words", "update"} else "asc"
 
 
+def _tie_break_key(result: SearchResult) -> tuple[str, ...]:
+    """
+    Return the deterministic pre-sort key used before the primary sort.
+
+    The first three components -- raw ``site``, normalized title, raw
+    ``book_id`` -- are the historical tie-break.  Every component after them
+    only separates rows that key could not distinguish (two rows of one site
+    sharing a title and an empty/equal id), where the old stable sort fell
+    back to arrival order and therefore produced a different final ordering
+    depending on which site or page finished first.  Appending the remaining
+    content fields makes the pre-sort a total order over the row contents.
+
+    Only *content* fields participate: the derived ``rank_score`` /
+    ``match_tier`` annotations are deliberately ignored, so a cached row
+    carrying stale telemetry can never influence ordering.
+    """
+    return (
+        str(result.get("site") or ""),
+        normalize_text(result.get("title")),
+        str(result.get("book_id") or ""),
+        normalize_text(result.get("author")),
+        str(result.get("book_url") or ""),
+        str(result.get("word_count") or ""),
+        str(result.get("update_date") or ""),
+        str(result.get("latest_chapter") or ""),
+        str(result.get("cover_url") or ""),
+        str(result.get("priority") or ""),
+    )
+
+
 def sort_results(
     results: list[SearchResult],
     *,
@@ -716,6 +910,12 @@ def sort_results(
     ``intent`` selects how title and author are weighted
     (:func:`_relevance`); the default ``"either"`` is the historical
     behaviour and leaves existing output unchanged.
+
+    Equal primary keys are resolved by a pre-sort over the row contents
+    (:func:`_tie_break_key`), so the result does not depend on the input
+    order in which the rows arrived.  Only content fields take part: the
+    derived ``rank_score``/``match_tier`` annotations never influence the
+    comparison.
 
     Under ``by="quality"`` with a decided ``intent`` (``"title"``/``"author"``)
     the key is two-level: the match tier of the intent's *primary* field
@@ -752,9 +952,13 @@ def sort_results(
 
     def _priority_key(result: SearchResult) -> float:
         try:
-            return float(result.get("priority", 0))
+            value = float(result.get("priority", 0))
         except (TypeError, ValueError):
             return 0.0
+        # A NaN key makes every comparison false, so the sort's outcome would
+        # depend on arrival order (and is not even guaranteed to be a stable
+        # permutation of the ties).  Treat it like an unknown priority.
+        return 0.0 if math.isnan(value) else value
 
     def _site_key(result: SearchResult) -> str:
         key = str(result.get("site") or "")
@@ -786,14 +990,11 @@ def sort_results(
     key_fn = key_fns.get(by, key_fns["quality"])
 
     # Two stable passes: the first fixes a deterministic tie-break order, the
-    # second applies the primary key (and direction) on top of it.
-    results.sort(
-        key=lambda r: (
-            str(r.get("site") or ""),
-            normalize_text(r.get("title")),
-            str(r.get("book_id") or ""),
-        )
-    )
+    # second applies the primary key (and direction) on top of it.  The first
+    # pass must be a total order over the row contents (see
+    # :func:`_tie_break_key`); otherwise equal primary keys would fall back to
+    # arrival order, which differs between concurrent runs.
+    results.sort(key=_tie_break_key)
     results.sort(key=key_fn, reverse=reverse)
 
 

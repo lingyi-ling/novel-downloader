@@ -6,6 +6,8 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import datetime, timedelta
+from itertools import permutations
+from typing import cast
 
 import pytest
 
@@ -103,6 +105,37 @@ def test_parse_word_count_reads_first_number_anywhere() -> None:
     assert parse_word_count("已更新至第123章") == 123.0
     assert parse_word_count("总字数：12.3万字") == 123000.0
     assert parse_word_count("共 1,234 字") == 1234.0
+
+
+def test_parse_word_count_ignores_obviously_non_count_long_labels() -> None:
+    # A mis-scraped title/description must not donate its first number to the
+    # quality score.  Real labels are far shorter than the guard, so every
+    # normal shape above is unaffected.
+    from novel_downloader.plugins.ranking import _MAX_WORD_COUNT_LENGTH
+
+    long_label = "这是一段被误抓的书页简介，" + "共 1234567 字。" * 8
+    assert len(long_label) > _MAX_WORD_COUNT_LENGTH
+    assert parse_word_count(long_label) is None
+
+    # Boundary: a label at the limit still parses.  "总字数：" is 4 characters
+    # and "123万字" is 5, so the padding brings the whole string to the limit.
+    padding = " " * (_MAX_WORD_COUNT_LENGTH - 4 - 5)
+    at_limit = "总字数：" + padding + "123万字"
+    assert len(at_limit) == _MAX_WORD_COUNT_LENGTH
+    assert parse_word_count(at_limit) == 1_230_000.0
+
+
+def test_rank_score_ignores_a_long_mis_scraped_word_count() -> None:
+    # A paragraph in the word-count field must not add the words signal: it
+    # scores exactly like an unknown count, so it cannot outrank real rows.
+    junk = "这是一段被误抓的书页简介，" + "共 1234567 字。" * 8
+    assert rank_score(_result(word_count=junk), "三体", now=NOW) == pytest.approx(
+        rank_score(_result(word_count=""), "三体", now=NOW)
+    )
+    # Genuine counts still move the score.
+    assert rank_score(_result(word_count="300万字"), "三体", now=NOW) > rank_score(
+        _result(word_count=""), "三体", now=NOW
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -289,6 +322,98 @@ def test_sort_results_breaks_ties_deterministically() -> None:
     ]
     sort_results(results, keyword="", now=NOW)
     assert [r["title"] for r in results] == ["A", "B"]
+
+
+# --------------------------------------------------------------------------- #
+# tie-break completeness (arrival order must not decide anything)
+# --------------------------------------------------------------------------- #
+def _indistinguishable_rows() -> list[SearchResult]:
+    """Rows that every sort key treats as equal; only content tells them apart.
+
+    They share site, title, author, priority and the empty word count / update
+    date, and every ``book_id`` is empty.  The historical pre-sort key
+    ``(site, normalized title, book_id)`` was therefore identical for all of
+    them, so equal primary keys used to fall back to arrival order.
+    """
+    return [
+        _result(
+            book_id="",
+            book_url=f"https://example.com/{tag}",
+            title="三体",
+            author="作者",
+        )
+        for tag in ("c", "a", "b")
+    ]
+
+
+@pytest.mark.parametrize("by", SORT_KEYS)
+def test_sort_results_tie_break_is_total_for_every_key(by: str) -> None:
+    rows = _indistinguishable_rows()
+    orders: set[tuple[str, ...]] = set()
+    for first, second, third in permutations(rows):
+        work = [first, second, third]
+        sort_results(work, by=by, keyword="", now=NOW)
+        orders.add(tuple(str(r["book_url"]) for r in work))
+
+    # Exactly one outcome for every arrival order, and it follows the content
+    # tie-break (URL is the only differing content field).
+    assert orders == {
+        tuple(
+            str(r["book_url"]) for r in sorted(rows, key=lambda r: str(r["book_url"]))
+        )
+    }
+
+
+@pytest.mark.parametrize("by", SORT_KEYS)
+def test_sort_results_tie_break_ignores_ranking_telemetry(by: str) -> None:
+    # The derived fields are returned to callers but are not part of the row
+    # contents; poisoning them must not move a row.
+    reference = _indistinguishable_rows()
+    expected = [
+        r["book_url"] for r in sorted(reference, key=lambda r: str(r["book_url"]))
+    ]
+
+    poisoned = cast(
+        "list[SearchResult]",
+        [
+            {**reference[1], "rank_score": 1.0, "match_tier": 4},
+            {**reference[0], "rank_score": 0.0, "match_tier": 0},
+            {**reference[2], "rank_score": 0.5, "match_tier": 2},
+        ],
+    )
+    sort_results(poisoned, by=by, keyword="", now=NOW)
+
+    assert [r["book_url"] for r in poisoned] == expected
+
+
+def test_sort_results_honours_arrival_order_only_for_identical_rows() -> None:
+    # Two rows that are byte-identical in every content field are
+    # interchangeable: whichever arrives first stays first, and the caller
+    # cannot observe a difference in values.
+    first = _result(book_id="", book_url="https://example.com/same", title="三体")
+    second = dict(first)
+    results = [first, second]
+    sort_results(results, keyword="", now=NOW)
+    assert results[0] is first
+    assert results[1] is second
+
+
+def test_sort_results_treats_nan_priority_as_unknown() -> None:
+    # A NaN sort key makes every comparison false, so Timsort's outcome would
+    # depend on arrival order.  It must behave like a missing priority and let
+    # the content tie-break decide.
+    rows = [
+        _result(book_id="a", priority=float("nan")),
+        _result(book_id="b", priority=10),
+        _result(book_id="c", priority=float("nan")),
+    ]
+    orders: set[tuple[str, ...]] = set()
+    for first, second, third in permutations(rows):
+        work = [first, second, third]
+        sort_results(work, by="priority")
+        orders.add(tuple(str(r["book_id"]) for r in work))
+
+    assert orders == {("a", "c", "b")}
 
 
 def test_sort_results_desc_reverses_primary_key() -> None:
