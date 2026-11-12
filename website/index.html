@@ -9,6 +9,22 @@
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f7f9fc" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
+<script>
+/* Apply the persisted (or OS) theme before the stylesheet paints, so
+   dark-mode visitors and returning readers never see a white flash.
+   main.js re-confirms the same choice and keeps the toggle in sync. */
+(function () {
+  var root = document.documentElement;
+  try {
+    var saved = localStorage.getItem("noveldl-theme");
+    if (saved === "dark" || saved === "light") {
+      root.dataset.theme = saved;
+    } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+      root.dataset.theme = "dark";
+    }
+  } catch (e) { /* storage blocked: keep the light default */ }
+})();
+</script>
 <link rel="canonical" href="http://43.165.170.43/noveldl/">
 <link rel="alternate" hreflang="zh-CN" href="http://43.165.170.43/noveldl/?lang=zh">
 <link rel="alternate" hreflang="en" href="http://43.165.170.43/noveldl/?lang=en">
@@ -32,6 +48,7 @@
 <meta name="twitter:image:alt" content="书音 BookTone — 84 个下载站点 · 59 个搜索源 · 28 个音乐平台 · 四端同源">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
+<script src="main.js" defer></script>
 <noscript>
 <style>
   /* JS off: scroll-reveal must not hide content; show every quick-start
@@ -51,7 +68,7 @@
   "name": "书音 BookTone",
   "url": "http://43.165.170.43/noveldl/",
   "description": "异步、模块化、可扩展的小说下载工具链：84 个下载站点、59 个搜索源、28 个音乐平台，CLI / REST API / Windows 桌面 / Android 四端同源。",
-  "softwareVersion": "1.30.0",
+  "softwareVersion": "1.31.0",
   "operatingSystem": "Windows, Linux, macOS, Android",
   "applicationCategory": "UtilitiesApplication",
   "programmingLanguage": "Python, Kotlin",
@@ -82,7 +99,7 @@
       <span class="brand-name">书音<small>BookTone</small></span>
       <span class="gh-chip" id="gh-stars" hidden>★ <span id="gh-stars-n">–</span></span>
     </a>
-    <nav class="nav-links" id="nav-links">
+    <nav class="nav-links" id="nav-links" aria-label="主导航">
       <a href="#features" data-en="Features">特性</a>
       <a href="#clients" data-en="Clients">四端</a>
       <a href="#start" data-en="Quick start">快速开始</a>
@@ -101,7 +118,7 @@
       </button>
     </div>
   </div>
-  <nav class="mobile-menu" id="mobile-menu" hidden>
+  <nav class="mobile-menu" id="mobile-menu" aria-label="主导航" hidden>
     <a href="#features" data-en="Features">特性</a>
     <a href="#clients" data-en="Clients">四端</a>
     <a href="#start" data-en="Quick start">快速开始</a>
@@ -117,7 +134,7 @@
   <section class="hero" id="top">
     <div class="hero-bg" aria-hidden="true"></div>
     <div class="hero-inner">
-      <p class="hero-eyebrow"><span class="gh-chip inline" id="gh-release" hidden>v<span id="gh-release-n">–</span></span><span data-en="Open source · Python 3.11+ · Apache&#8209;2.0">开源 · Python 3.11+ · Apache&#8209;2.0</span></p>
+      <p class="hero-eyebrow"><span class="gh-chip inline" id="gh-release" hidden>v<span id="gh-release-n">–</span></span><span data-en="Open source · Python 3.11+ · Apache-2.0">开源 · Python 3.11+ · Apache-2.0</span></p>
       <h1><span data-en='Libraries and playlists<br><em>into your devices</em>'>整站小说与歌单<br><em>装进你的设备</em></span></h1>
       <p class="hero-sub" data-en="Async, modular, extensible download toolkit for novels and music: 84 book sites, 59 search sources and 28 music platforms, with aggregate search, resumable queues and multi-format export — CLI, REST API, Windows desktop and Android share one service layer.">异步、模块化、可扩展的书与音乐下载工具链。84 个下载站点、59 个搜索源、28 个音乐平台，一条命令聚合搜索、断点续传、多格式导出——CLI、REST API、Windows 桌面、Android 四端共享同一套服务层。</p>
       <div class="hero-cta">
@@ -145,7 +162,7 @@
         <div class="appwin-titlebar">
           <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
           <span class="appwin-title">书音 BookTone</span>
-          <span class="appwin-pill" id="appwin-ver">v1.30.0</span>
+          <span class="appwin-pill" id="appwin-ver">v1.31.0</span>
         </div>
         <div class="appwin-body">
           <aside class="appwin-side">
@@ -262,11 +279,11 @@
       <div class="tabs reveal">
         <noscript><p class="noscript-note">JavaScript is off, so all quick-start commands are shown below. · 未启用 JavaScript，已展开全部快速开始命令。</p></noscript>
         <div class="tab-bar" role="tablist" id="start-tabs" aria-label="快速开始方式">
-          <button class="tab active" id="tab-cli" role="tab" aria-selected="true" aria-controls="panel-cli" tabindex="0" data-tab="cli">CLI</button>
-          <button class="tab" id="tab-api" role="tab" aria-selected="false" aria-controls="panel-api" tabindex="-1" data-tab="api">REST API</button>
-          <button class="tab" id="tab-desktop" role="tab" aria-selected="false" aria-controls="panel-desktop" tabindex="-1" data-tab="desktop" data-en="Desktop">桌面</button>
-          <button class="tab" id="tab-android" role="tab" aria-selected="false" aria-controls="panel-android" tabindex="-1" data-tab="android">Android</button>
-          <button class="tab" id="tab-engine" role="tab" aria-selected="false" aria-controls="panel-engine" tabindex="-1" data-tab="engine" data-en="Standalone">独立引擎</button>
+          <button type="button" class="tab active" id="tab-cli" role="tab" aria-selected="true" aria-controls="panel-cli" tabindex="0" data-tab="cli">CLI</button>
+          <button type="button" class="tab" id="tab-api" role="tab" aria-selected="false" aria-controls="panel-api" tabindex="-1" data-tab="api">REST API</button>
+          <button type="button" class="tab" id="tab-desktop" role="tab" aria-selected="false" aria-controls="panel-desktop" tabindex="-1" data-tab="desktop" data-en="Desktop">桌面</button>
+          <button type="button" class="tab" id="tab-android" role="tab" aria-selected="false" aria-controls="panel-android" tabindex="-1" data-tab="android">Android</button>
+          <button type="button" class="tab" id="tab-engine" role="tab" aria-selected="false" aria-controls="panel-engine" tabindex="-1" data-tab="engine" data-en="Standalone">独立引擎</button>
         </div>
         <div class="tab-panel active" id="panel-cli" role="tabpanel" aria-labelledby="tab-cli" tabindex="0" data-panel="cli">
           <pre><code><span class="c" data-en="# Windows one-line install (PowerShell, no admin needed)"># Windows 一键安装（PowerShell，无需管理员）</span>
@@ -436,7 +453,7 @@ cd novel-downloader/android
       <span class="brand-mark small"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg></span>
       <span>书音 BookTone</span>
     </div>
-    <nav class="foot-links">
+    <nav class="foot-links" id="foot-links" aria-label="页脚链接">
       <a href="https://github.com/lingyi-ling/novel-downloader" target="_blank" rel="noopener">GitHub</a>
       <a href="https://github.com/lingyi-ling/novel-downloader/tree/main/docs" target="_blank" rel="noopener" data-en="Docs">文档</a>
       <a href="https://github.com/lingyi-ling/novel-downloader/issues" target="_blank" rel="noopener">Issues</a>
@@ -455,6 +472,5 @@ cd novel-downloader/android
   <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
 </button>
 
-<script src="main.js"></script>
 </body>
 </html>
