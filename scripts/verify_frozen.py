@@ -12,11 +12,18 @@ script inspects and (safely) launches the produced executables instead:
   update manifest use);
 * the image stack (``numpy``, ``Pillow`` and ``fontTools``) must be present in
   the PYZ archive, together with Pillow's native ``_imagingft`` module;
+* the music stack must be complete: the heavy backend packages (``aigpy``,
+  ``ytmusicapi``, ``pywidevine`` and their import chain), every vendored
+  platform adapter, and the vendored ``SOURCE.txt`` data file must be in the
+  bundle -- otherwise a platform is listed but fails on its first search;
+* the site-plugin payload (the ``.py`` sources the registry enumerates from
+  disk and the builtin rule JSON) must be present;
 * the size-hygiene contract holds: dev/test modules and hook-collected payload
   that ``packaging/_spec_common.py`` prunes must not reappear, while the emoji
   runtime table the music adapters use must still be frozen;
-* ``novel-cli --version`` must print the package version and
-  ``novel-cli doctor --json`` must emit parseable JSON;
+* ``novel-cli --version`` must print the package version,
+  ``novel-cli doctor --json`` must emit parseable JSON, and
+  ``novel-cli music platforms --json`` must register the heavy platforms;
 * ``novel-api --help`` must exit 0 (it imports the whole ASGI stack).
 
 The desktop executable is windowed (``console=False``); it is never launched
@@ -41,6 +48,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,6 +74,56 @@ IMAGE_STACK_MODULES: tuple[str, ...] = (
     "fontTools.ttLib",
     "fontTools.ttLib.tables._p_o_s_t",
 )
+
+#: Heavy music backends imported at module-load time by the vendored adapters.
+#: ``packaging/_spec_common.py`` declares the same names as hidden imports; the
+#: test suite keeps the two lists identical.  ``pymp4`` and ``construct`` are
+#: part of pywidevine's import chain (Apple Music / SoundCloud DRM).
+MUSIC_STACK_MODULES: tuple[str, ...] = (
+    "aigpy",
+    "aigpy.downloadHelper",
+    "aigpy.modelHelper",
+    "aigpy.stringHelper",
+    "aigpy.tagHelper",
+    "ytmusicapi",
+    "ytmusicapi.ytmusic",
+    "pywidevine",
+    "pywidevine.cdm",
+    "pywidevine.device",
+    "pywidevine.license_protocol_pb2",
+    "pywidevine.pssh",
+    "pymp4",
+    "pymp4.parser",
+    "construct",
+    "mutagen",
+    "google.protobuf",
+    "Crypto",
+)
+
+#: Vendored musicdl tree (platform adapters selected by key at runtime).
+MUSIC_VENDOR_RELATIVE = "apps/music/providers/_vendor/musicdl"
+MUSIC_VENDOR_PACKAGE = "novel_downloader.apps.music.providers._vendor.musicdl"
+MUSIC_VENDOR_SOURCE = f"{MUSIC_VENDOR_PACKAGE.replace('.', '/')}/SOURCE.txt"
+
+#: Platforms that only register when their heavy dependency is importable.
+#: ``music platforms --json`` must list all of them in a frozen bundle;
+#: their absence is the exact "installed but not packaged" failure.
+HEAVY_MUSIC_PLATFORMS: tuple[str, ...] = (
+    "apple",
+    "soundcloud",
+    "youtube",
+    "tidal",
+)
+
+#: ``_BASE + "name"`` entries in ``providers/musicdl.py`` are the platform
+#: adapter module names.  Parsing the table keeps the check in sync when a
+#: platform is added without touching this script.
+_MUSIC_PLATFORM_RE = re.compile(r'_BASE\s*\+\s*"([A-Za-z_][A-Za-z0-9_]*)"')
+
+#: Data payload the plugin registry reads from disk (sources are enumerated
+#: with ``importlib.resources.contents``; the rule engine loads JSON).
+SITE_PLUGIN_ROOT = "novel_downloader/plugins/sites"
+BUILTIN_RULE_ROOT = "novel_downloader/plugins/rule/builtin"
 
 #: Modules every spec deliberately keeps out of the bundles.  A stale spec or
 #: a PyInstaller hook update silently re-adds them (``setuptools`` alone is
@@ -121,24 +179,71 @@ def read_package_version(root: Path) -> str:
     return match.group(1).strip()
 
 
-def _expected_image_modules(root: Path) -> tuple[str, ...]:
-    """Read the image hidden-import list from ``packaging/_spec_common.py``."""
+def _spec_common_module(root: Path) -> Any | None:
+    """Load ``packaging/_spec_common.py`` read-only, or None when unavailable."""
     path = root / "packaging" / "_spec_common.py"
     if not path.is_file():
-        return IMAGE_STACK_MODULES
+        return None
     try:
         spec = importlib.util.spec_from_file_location("_verify_spec_common", path)
         if spec is None or spec.loader is None:
-            return IMAGE_STACK_MODULES
+            return None
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
+    except Exception:  # noqa: BLE001 - callers fall back to local constants
+        return None
+    return module
+
+
+def _expected_image_modules(root: Path) -> tuple[str, ...]:
+    """Read the image hidden-import list from ``packaging/_spec_common.py``."""
+    module = _spec_common_module(root)
+    if module is not None:
         declared = getattr(module, "IMAGE_STACK_HIDDEN_IMPORTS", None)
         if isinstance(declared, tuple):
             return tuple(str(name) for name in declared)
-    except Exception:  # noqa: BLE001 - the local constant is the fallback
-        pass
     return IMAGE_STACK_MODULES
+
+
+def _expected_music_modules(root: Path) -> tuple[str, ...]:
+    """Read the heavy music hidden-import list from ``_spec_common.py``."""
+    module = _spec_common_module(root)
+    if module is not None:
+        declared = getattr(module, "MUSIC_STACK_HIDDEN_IMPORTS", None)
+        if isinstance(declared, tuple):
+            return tuple(str(name) for name in declared)
+    return MUSIC_STACK_MODULES
+
+
+def _expected_music_vendor_modules(root: Path) -> tuple[str, ...]:
+    """Every module of the vendored musicdl tree, from the source tree."""
+    module = _spec_common_module(root)
+    walker = getattr(module, "music_vendor_modules", None) if module else None
+    if callable(walker):
+        try:
+            return tuple(str(name) for name in walker(root / "src"))
+        except Exception:  # noqa: BLE001 - fall back to the tree root only
+            pass
+    return (MUSIC_VENDOR_PACKAGE,)
+
+
+def _music_platform_names(root: Path) -> tuple[str, ...]:
+    """Return the vendor adapter names from ``providers/musicdl.py``."""
+    path = (
+        root
+        / "src"
+        / "novel_downloader"
+        / "apps"
+        / "music"
+        / "providers"
+        / "musicdl.py"
+    )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    return tuple(sorted(set(_MUSIC_PLATFORM_RE.findall(text))))
 
 
 def _run(
@@ -303,6 +408,92 @@ def _check_bundle_hygiene(report: BundleReport, dist_dir: Path, work_dir: Path) 
     )
 
 
+def _check_music_payload(
+    report: BundleReport, root: Path, dist_dir: Path, work_dir: Path
+) -> None:
+    """Fail when a heavy music backend or a platform adapter is not frozen."""
+    modules = _pyz_modules(work_dir)
+    if modules is None:
+        # _check_image_payload already reported the unreadable archive.
+        return
+
+    stack = _expected_music_modules(root)
+    missing = sorted(name for name in stack if name not in modules)
+    if missing:
+        report.problems.append(
+            "PYZ is missing music runtime modules: " + ", ".join(missing)
+        )
+    else:
+        report.checks.append(
+            f"music runtime modules in PYZ ({len(stack)} module names)"
+        )
+
+    vendor = _expected_music_vendor_modules(root)
+    missing = sorted(name for name in vendor if name not in modules)
+    if missing:
+        report.problems.append(
+            "PYZ is missing music vendor modules: " + ", ".join(missing)
+        )
+    else:
+        report.checks.append(
+            f"music vendor modules in PYZ ({len(vendor)} module names)"
+        )
+
+    names = _music_platform_names(root)
+    if not names:
+        report.problems.append(
+            "cannot read the music platform table from "
+            f"{root / 'src' / 'novel_downloader' / 'apps' / 'music'}"
+        )
+    else:
+        adapters = {f"{MUSIC_VENDOR_PACKAGE}.modules.sources.{name}" for name in names}
+        missing = sorted(adapters.difference(modules))
+        if missing:
+            report.problems.append(
+                "PYZ is missing music platform adapters: " + ", ".join(missing)
+            )
+        else:
+            report.checks.append(
+                f"music platform adapters in PYZ ({len(names)} platforms)"
+            )
+
+    source = dist_dir / "_internal" / MUSIC_VENDOR_SOURCE
+    if not source.is_file():
+        report.problems.append(
+            "bundle is missing the vendored musicdl data: " + MUSIC_VENDOR_SOURCE
+        )
+
+
+def _check_plugin_payload(report: BundleReport, dist_dir: Path) -> None:
+    """Fail when the site-plugin sources or builtin rule JSON are absent."""
+    internal = dist_dir / "_internal"
+    sites = internal / SITE_PLUGIN_ROOT
+    if not sites.is_dir():
+        report.problems.append(f"bundle is missing site plugin sources: {sites}")
+    else:
+        directories = [path for path in sites.iterdir() if path.is_dir()]
+        fetchers = sorted(sites.glob("*/fetcher.py"))
+        if not directories:
+            report.problems.append(f"site plugin directory is empty: {sites}")
+        elif not fetchers:
+            report.problems.append(
+                "site plugin sources ship no fetcher.py files: " + str(sites)
+            )
+        else:
+            report.checks.append(
+                f"site plugin sources ({len(fetchers)} fetcher.py, "
+                f"{len(directories)} directories)"
+            )
+
+    builtin = internal / BUILTIN_RULE_ROOT
+    if not builtin.is_dir():
+        report.problems.append(f"bundle is missing the rule payload: {builtin}")
+    elif not any(builtin.glob("*.json")):
+        report.problems.append(f"bundle ships no builtin rule JSON under {builtin}")
+    else:
+        report.checks.append("builtin rule JSON present")
+
+
 def _check_cli_probes(report: BundleReport, expected: str, timeout: float) -> None:
     with tempfile.TemporaryDirectory(prefix="noveldl-verify-") as work:
         cwd = Path(work)
@@ -360,6 +551,48 @@ def _check_cli_probes(report: BundleReport, expected: str, timeout: float) -> No
         )
 
 
+def _check_music_platform_probe(report: BundleReport, timeout: float) -> None:
+    """Run ``music platforms --json`` and require the heavy platforms.
+
+    This exercises the frozen registry end-to-end: ``providers/__init__.py``
+    calls ``importlib.util.find_spec`` at import time, so a package that is in
+    the PYZ but not discoverable from the frozen importer keeps its platform
+    hidden -- exactly the failure a PYZ listing alone cannot see.
+    """
+    with tempfile.TemporaryDirectory(prefix="noveldl-verify-") as work:
+        try:
+            proc = _run(
+                [str(report.exe), "music", "platforms", "--json"],
+                cwd=Path(work),
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            report.problems.append(f"music platforms --json could not run: {exc}")
+            return
+    if proc.returncode != 0:
+        report.problems.append(
+            f"music platforms --json exited {proc.returncode}: {proc.stderr.strip()}"
+        )
+        return
+    try:
+        document = json.loads(proc.stdout)
+    except ValueError as exc:
+        report.problems.append(f"music platforms --json is not JSON: {exc}")
+        return
+    if not isinstance(document, dict):
+        report.problems.append("music platforms --json returned a non-object")
+        return
+    missing = [key for key in HEAVY_MUSIC_PLATFORMS if key not in document]
+    if missing:
+        report.problems.append(
+            "music platforms --json is missing heavy platforms: " + ", ".join(missing)
+        )
+        return
+    report.checks.append(
+        f"music platforms registered ({len(document)} platforms, heavy tier present)"
+    )
+
+
 def _check_api_probe(report: BundleReport, timeout: float) -> None:
     with tempfile.TemporaryDirectory(prefix="noveldl-verify-") as work:
         try:
@@ -394,10 +627,13 @@ def verify_bundle(
     _check_launcher(report)
     _check_version_resource(report, expected_version)
     _check_image_payload(report, root, dist_dir, work_dir)
+    _check_music_payload(report, root, dist_dir, work_dir)
+    _check_plugin_payload(report, dist_dir)
     _check_bundle_hygiene(report, dist_dir, work_dir)
     if key == "cli":
         if report.exe.is_file():
             _check_cli_probes(report, expected_version, timeout)
+            _check_music_platform_probe(report, timeout)
     elif key == "api":
         if report.exe.is_file():
             _check_api_probe(report, timeout)

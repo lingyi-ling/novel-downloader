@@ -7,29 +7,42 @@ Usage::
     .venv/Scripts/python.exe scripts/release.py
     .venv/Scripts/python.exe scripts/release.py --version 1.3.0
     .venv/Scripts/python.exe scripts/release.py --skip-build --skip-android
+    .venv/Scripts/python.exe scripts/release.py --skip-installer
     GITHUB_TOKEN=... python scripts/release.py --repo owner/name
 
 What a full run does, in order:
 
-1. Read the version from ``src/novel_downloader/__init__.py`` (or ``--version``)
-   and extract that version's section from ``CHANGELOG.md`` as the release
-   notes.  The run fails early if the section is missing.
+1. Preflight, before any build: read the version from
+   ``src/novel_downloader/__init__.py`` (or ``--version``); prove that the
+   Android ``versionName``, the derived ``v<version>`` tag and the **top**
+   ``CHANGELOG.md`` section (``## v<version> (<date>)``, non-empty) all agree.
+   That section is the release notes.  Each failure raises with the file to
+   edit, so a forgotten changelog entry costs seconds instead of a full build.
 2. Build the three PyInstaller bundles by invoking
    ``scripts/build_release.py --targets cli,api,desktop`` (same validation,
    zipping and SHA256SUMS handling as a manual build).
 3. Build the Android release APK with ``gradlew assembleRelease``.  When the
    signing material (``android/keystore.properties`` + keystore file) is
    missing, this step warns and is skipped instead of failing the release.
+   For the ``desktop`` target the Inno Setup installer is **required**: the
+   build refuses to start when ISCC cannot be found, and the collected assets
+   must contain ``NovelDownloader-setup-<version>-x64.exe``.  Pass
+   ``--skip-installer`` to publish the portable zip only; ``latest.json`` then
+   advertises no ``windows-x64-installer`` platform, and the portable zip must
+   be present as the fallback.
 4. Merge the checksums of the APK (and the Inno Setup installer, when present)
    into the build's ``SHA256SUMS.txt``.
 5. Create the ``v<version>`` tag locally and push it.  Both steps are skipped
-   when the tag already exists locally / on the remote.  The push uses git's
-   own credential chain, or an explicit token URL when ``GITHUB_TOKEN`` /
-   ``GH_TOKEN`` is set; the REST token comes from ``GITHUB_TOKEN`` /
-   ``GH_TOKEN`` or from ``git credential fill`` (protocol=https,
-   host=github.com).  No credential is ever hardcoded or printed.
-6. Create the GitHub Release via the REST API (or reuse an existing one for
-   the tag, updating its notes when they differ), then upload every asset.
+   when the tag already exists locally / on the remote.  An existing tag that
+   points at another commit is a hard error, never silently reused.  The push
+   uses git's own credential chain, or a per-process ``http.extraheader``
+   built from ``GITHUB_TOKEN`` / ``GH_TOKEN``; the REST token comes from the
+   same variables or from ``git credential fill`` (protocol=https,
+   host=github.com).  No credential is ever hardcoded, printed, or placed in
+   a command line.
+6. Create the GitHub Release as a **draft**, upload every asset, verify the
+   published digests, and only then flip it to published.  A failure at any
+   point leaves a resumable draft rather than a half-populated public release.
    An asset whose remote digest matches the local SHA-256 is skipped; one
    that differs is deleted and re-uploaded.  Re-running a finished release
    therefore does nothing but a GET.
@@ -48,6 +61,7 @@ API error) and for argparse usage errors.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
@@ -69,6 +83,8 @@ REPO_ROOT = SCRIPTS_DIR.parent
 
 PROJECT_NAME = "novel-downloader"
 DEFAULT_TARGETS = ("cli", "api", "desktop")
+#: The desktop target's installed-user payload, built by ``build_desktop.py``.
+INSTALLER_NAME_TEMPLATE = "NovelDownloader-setup-{version}-x64.exe"
 GITHUB_API = "https://api.github.com"
 GITHUB_HOST = "github.com"
 TOKEN_ENV_VARS = ("GITHUB_TOKEN", "GH_TOKEN")
@@ -80,6 +96,9 @@ UPLOAD_TIMEOUT = 900.0
 UPLOAD_ATTEMPTS = 4
 UPLOAD_BACKOFF = (4.0, 8.0, 16.0)
 CREDENTIAL_TIMEOUT = 30.0
+#: ``releases/tags/<tag>`` hides drafts; the list endpoint finds them.
+RELEASE_LIST_PAGE_SIZE = 100
+RELEASE_LIST_PAGES = 10
 #: ``git ls-remote`` / ``git push`` touch github.com (a different service from
 #: api.github.com).  A blocked host can hang them for minutes, so bound both
 #: and fall back to the REST API instead.
@@ -88,14 +107,25 @@ PUSH_TIMEOUT = 300.0
 GRADLE_TIMEOUT = 2700.0
 # PyInstaller builds of three bundles take tens of minutes: no timeout.
 BUILD_TIMEOUT: float | None = None
+#: GitHub rejects release assets larger than 2 GiB.  Checking before the
+#: upload turns a 900-second failing transfer into an immediate error.
+MAX_ASSET_BYTES = 2 * 1024 * 1024 * 1024
 
 _VERSION_RE = re.compile(r'^__version__\s*=\s*"([^"]+)"', re.MULTILINE)
+#: Characters git accepts in a tag name, plus the shape of a version string.
+_VERSION_TAG_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]*")
+#: Any ``## `` heading; ``.`` does not cross the line, so CRLF is split off.
+_CHANGELOG_HEADING_RE = re.compile(r"^##[ \t]+(\S.*?)[ \t]*$", re.MULTILINE)
+#: A release section starts with ``v`` followed by a digit (``v1.2.3``).
+_VERSION_HEADING_RE = re.compile(r"^v[0-9]")
 _SUMS_LINE_RE = re.compile(r"^(?P<sha>[0-9a-fA-F]{64})\s+(?P<name>\S.*)$")
 _REMOTE_SLUG_RE = re.compile(
     r"github\.com[/:](?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)"
     r"(?:\.git)?/?\s*$"
 )
 _TOKEN_IN_URL_RE = re.compile(r"x-access-token:[^@\s]+@")
+#: ``https://user:password@host/...`` (any userinfo) in output or a remote URL.
+_USERINFO_IN_URL_RE = re.compile(r"(?<=://)[^/@\s]+@")
 _APK_GLOB = "app/build/outputs/apk/release/*.apk"
 
 #: Printed when github.com:443 is unreachable.  ``scripts/push_via_api.py``
@@ -174,6 +204,32 @@ def check_android_version(repo_root: Path, version: str) -> None:
         raise ReleaseError(f"invalid versionCode in {gradle}")
 
 
+def check_release_tag(version: str, tag: str) -> None:
+    """
+    Prove the release tag really is ``v<version>`` and is a legal git ref.
+
+    The tag is derived from the version, but ``--version`` accepts raw input:
+    a trailing space or a slash produces a tag git rejects.  Without this
+    check that rejection happens *after* the bundles and the APK are built,
+    wasting the whole run.  Pure string work, so ``--dry-run`` stays offline.
+    """
+    if tag != f"v{version}":
+        raise ReleaseError(
+            f"release tag {tag!r} does not match version {version!r} "
+            f"(expected 'v{version}')"
+        )
+    if (
+        _VERSION_TAG_RE.fullmatch(version) is None
+        or ".." in version
+        or version.endswith((".", ".lock"))
+    ):
+        raise ReleaseError(
+            f"version {version!r} cannot be used as the git tag {tag!r}; use "
+            "letters, digits, dots, dashes, plus signs or underscores "
+            "(e.g. 1.2.3 or 1.2.3-beta.1)"
+        )
+
+
 def require_clean_worktree(repo_root: Path) -> None:
     """Refuse to tag a commit whose working tree has uncommitted changes."""
     proc = _run(
@@ -182,7 +238,13 @@ def require_clean_worktree(repo_root: Path) -> None:
         check=False,
     )
     if proc.returncode != 0:
-        return  # not a git checkout (e.g. an exported tree): nothing to check
+        detail = _redact((proc.stderr or proc.stdout or "").strip(), ())
+        if "not a git repository" in detail.lower():
+            return  # an exported tree has no git state to check
+        raise ReleaseError(
+            "cannot check the working tree: git status exited with "
+            f"{proc.returncode}: {detail or 'no output'}"
+        )
     dirty = [line for line in proc.stdout.splitlines() if line.strip()]
     if dirty:
         preview = "; ".join(dirty[:5])
@@ -230,6 +292,58 @@ def extract_changelog_notes(changelog: Path, version: str) -> str:
     return "\n".join(body)
 
 
+def _version_section_titles(text: str) -> list[str]:
+    """Every ``## v<digit>...`` heading, top to bottom."""
+    return [
+        match.group(1)
+        for match in _CHANGELOG_HEADING_RE.finditer(text)
+        if _VERSION_HEADING_RE.match(match.group(1))
+    ]
+
+
+def check_changelog_entry(changelog: Path, version: str) -> str:
+    """
+    Validate (and return) the CHANGELOG section for *version*.
+
+    The release notes come from the changelog, so this runs before any build:
+    :func:`extract_changelog_notes` alone accepts a bare ``## 1.2.3`` heading
+    and an empty body, and an empty body used to surface as a warning only
+    after a successful build.  This gate is stricter:
+
+    * the heading is the project's documented form ``## v<version> (<date>)``;
+    * it is the **topmost** release section, so releasing an older version
+      cannot silently publish another version's notes;
+    * its body is not blank.
+
+    ``version`` may be a prerelease (``1.2.3-beta.1``); the heading must match
+    it exactly, never the stable base version.
+    """
+    if not changelog.is_file():
+        raise ReleaseError(f"CHANGELOG not found: {changelog}")
+    titles = _version_section_titles(changelog.read_text(encoding="utf-8"))
+    wanted = re.compile(rf"^v{re.escape(version)}[ \t]+\([^)]+\)[ \t]*$")
+    available = ", ".join(titles) or "none"
+    if not any(wanted.match(title) for title in titles):
+        raise ReleaseError(
+            f"CHANGELOG.md has no section `## v{version} (` for this release; "
+            f"add `## v{version} (YYYY-MM-DD)` at the top with the release "
+            f"notes (available version sections: {available})"
+        )
+    if not wanted.match(titles[0]):
+        raise ReleaseError(
+            f"CHANGELOG.md's newest version section is `## {titles[0]}`, but "
+            f"this release is v{version}; move `## v{version} (...)` to the "
+            "top before releasing"
+        )
+    notes = extract_changelog_notes(changelog, version)
+    if not notes.strip():
+        raise ReleaseError(
+            f"CHANGELOG.md section `## {titles[0]}` is empty; add the release "
+            "notes under it before releasing"
+        )
+    return notes
+
+
 def parse_remote_slug(url: str) -> str | None:
     """Return ``owner/repo`` for a github.com remote URL, else ``None``."""
     match = _REMOTE_SLUG_RE.search(url.strip())
@@ -249,8 +363,8 @@ def resolve_slug(repo_root: Path) -> str:
     slug = parse_remote_slug(lines[0])
     if slug is None:
         raise ReleaseError(
-            f"cannot derive OWNER/NAME from origin URL {lines[0]!r}; "
-            "pass --repo OWNER/NAME explicitly"
+            "cannot derive OWNER/NAME from origin URL "
+            f"{_redact(lines[0], ())!r}; pass --repo OWNER/NAME explicitly"
         )
     return slug
 
@@ -260,9 +374,26 @@ def resolve_slug(repo_root: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _display_command(command: list[str] | tuple[str, ...]) -> str:
-    """A printable form of *command* with any embedded token redacted."""
-    return _TOKEN_IN_URL_RE.sub("x-access-token:***@", " ".join(command))
+def _redact(text: str, secrets: tuple[str, ...]) -> str:
+    """
+    Remove credentials from *text* before it is printed or logged.
+
+    Covers both the tokens this script knows about and userinfo embedded in a
+    remote URL (``https://user:pat@github.com/...``), which git may echo.
+    """
+    text = _USERINFO_IN_URL_RE.sub("***@", text)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
+def _display_command(
+    command: list[str] | tuple[str, ...], secrets: tuple[str, ...] = ()
+) -> str:
+    """A printable form of *command* with embedded tokens redacted."""
+    rendered = _TOKEN_IN_URL_RE.sub("x-access-token:***@", " ".join(command))
+    return _redact(rendered, secrets)
 
 
 def _run(
@@ -273,8 +404,14 @@ def _run(
     timeout: float | None = None,
     check: bool = True,
     extra_env: dict[str, str] | None = None,
+    secrets: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
-    """Run *command* capturing UTF-8 output; raise ReleaseError on failure."""
+    """
+    Run *command* capturing UTF-8 output; raise ReleaseError on failure.
+
+    *secrets* are redacted from every message this function builds (including
+    the child's own stderr, which may echo the remote URL or a header value).
+    """
     env: dict[str, str] | None = None
     if extra_env:
         env = {**os.environ, **extra_env}
@@ -293,20 +430,23 @@ def _run(
         )
     except subprocess.TimeoutExpired as exc:
         raise ReleaseError(
-            f"command timed out after {timeout}s: {_display_command(command)}"
+            f"command timed out after {timeout}s: {_display_command(command, secrets)}"
         ) from exc
     if check and proc.returncode != 0:
         # stderr/stdout may be None on CompletedProcess, so guard the strip.
         detail = (proc.stderr or proc.stdout or "no output").strip().splitlines()
         raise ReleaseError(
             f"command failed with exit code {proc.returncode} "
-            f"({_display_command(command)}): " + " | ".join(detail[-8:])
+            f"({_display_command(command, secrets)}): "
+            + _redact(" | ".join(detail[-8:]), secrets)
         )
     return proc
 
 
-def _announce(command: list[str] | tuple[str, ...]) -> None:
-    print(f"==> {_display_command(command)}")
+def _announce(
+    command: list[str] | tuple[str, ...], secrets: tuple[str, ...] = ()
+) -> None:
+    print(f"==> {_display_command(command, secrets)}")
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +510,133 @@ def find_release_dir(repo_root: Path, version: str) -> Path | None:
             "remove the stale one(s) under dist/release/"
         )
     return None
+
+
+def _read_release_manifest(release_dir: Path) -> dict[str, Any] | None:
+    """Parse ``manifest.json`` from a build output directory (``None`` if absent)."""
+    path = release_dir / "manifest.json"
+    if not path.is_file():
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ReleaseError(f"{path}: expected a JSON object")
+    return document
+
+
+def verify_release_dir(release_dir: Path, version: str, targets: list[str]) -> None:
+    """
+    Prove a build output directory is complete before anything is published.
+
+    ``--skip-build`` deliberately reuses an earlier directory, but a directory
+    left behind by a failed or interrupted build can otherwise look usable:
+    the missing bundle simply gets no ``latest.json`` entry, and the release
+    silently ships without it.  ``build_release.py`` records exactly what it
+    built in ``manifest.json`` (targets, artifacts and failures), so that file
+    is the completeness contract:
+
+    * the manifest was written for this version and reports no failures;
+    * every requested target has at least one artifact whose file is present;
+    * no extra file is sitting in the directory (a stale archive from another
+      version would otherwise be uploaded as part of this release).
+    """
+    manifest = _read_release_manifest(release_dir)
+    if manifest is None:
+        raise ReleaseError(
+            f"{release_dir} has no manifest.json; rebuild the release "
+            "without --skip-build so its contents can be verified"
+        )
+    if manifest.get("version") != version:
+        raise ReleaseError(
+            f"{release_dir}/manifest.json is for version "
+            f"{manifest.get('version')!r}, expected {version!r}"
+        )
+    failures = manifest.get("failures")
+    if failures:
+        detail = "; ".join(
+            f"{item.get('target', '?')}: {item.get('message', 'failed')}"
+            for item in failures
+            if isinstance(item, dict)
+        )
+        raise ReleaseError(
+            f"{release_dir}/manifest.json records a failed build"
+            + (f": {detail}" if detail else "")
+        )
+
+    built_targets = manifest.get("targets")
+    if not isinstance(built_targets, list):
+        raise ReleaseError(f"{release_dir}/manifest.json has no targets list")
+    missing_targets = [target for target in targets if target not in built_targets]
+    if missing_targets:
+        raise ReleaseError(
+            f"{release_dir} was not built for target(s): "
+            + ", ".join(missing_targets)
+            + "; rebuild without --skip-build or pass the matching --targets"
+        )
+
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ReleaseError(f"{release_dir}/manifest.json lists no artifacts")
+
+    files: set[str] = set()
+    for item in artifacts:
+        if not isinstance(item, dict):
+            raise ReleaseError(f"{release_dir}/manifest.json has a malformed artifact")
+        name = item.get("file")
+        target = item.get("target")
+        if not isinstance(name, str) or not name or Path(name).name != name:
+            raise ReleaseError(
+                f"{release_dir}/manifest.json has an unsafe artifact name: {name!r}"
+            )
+        path = release_dir / name
+        if path.is_symlink():
+            raise ReleaseError(f"release artifact {name!r} is a symlink")
+        if not path.is_file():
+            raise ReleaseError(
+                f"release artifact {name!r} is missing from {release_dir}"
+            )
+        if path.stat().st_size == 0:
+            raise ReleaseError(f"release artifact {name!r} is empty")
+        size = item.get("size")
+        if isinstance(size, int) and size != path.stat().st_size:
+            raise ReleaseError(
+                f"release artifact {name!r} is {path.stat().st_size} bytes, but "
+                f"manifest.json recorded {size}"
+            )
+        # Artifacts for other targets are left alone: --targets says what must
+        # be present, and a directory built for more targets is still a
+        # complete, consistent build.
+        files.add(name)
+
+    for target in targets:
+        if not any(
+            isinstance(item, dict) and item.get("target") == target
+            for item in artifacts
+        ):
+            raise ReleaseError(
+                f"{release_dir}/manifest.json has no artifact for target {target!r}"
+            )
+
+    metadata = {"SHA256SUMS.txt", "manifest.json", "latest.json"}
+    extras = sorted(
+        path.name
+        for path in release_dir.iterdir()
+        if (path.is_file() or path.is_symlink())
+        and path.name not in metadata
+        and path.name not in files
+    )
+    if extras:
+        raise ReleaseError(
+            f"{release_dir} contains file(s) not in manifest.json: "
+            + ", ".join(extras)
+            + "; remove them or rebuild the release"
+        )
+    print(
+        f"==> Release directory verified: {len(files)} artifact(s) for "
+        f"target(s) {', '.join(targets)}"
+    )
 
 
 def _parse_properties(path: Path) -> dict[str, str]:
@@ -466,8 +733,144 @@ def android_asset_names(version: str, apks: list[Path]) -> list[str]:
     return [f"{PROJECT_NAME}-{version}-android-{apk.stem}.apk" for apk in apks]
 
 
+def _asset_spec(path: Path, name: str) -> AssetSpec:
+    """
+    Describe one file for upload, refusing anything that cannot be published.
+
+    Symlinks are rejected instead of silently followed: a link in the build
+    directory could point at ``~/.ssh`` or a file outside the release.  The
+    2 GiB ceiling is GitHub's own limit; checking it before hashing and
+    uploading avoids a multi-minute transfer that can only fail.
+    """
+    if path.is_symlink():
+        raise ReleaseError(f"refusing to publish symlink {name!r} ({path})")
+    if not path.is_file():
+        raise ReleaseError(f"release asset {name!r} is not a regular file: {path}")
+    size = path.stat().st_size
+    if size > MAX_ASSET_BYTES:
+        raise ReleaseError(
+            f"release asset {name!r} is {_human_size(size)}, above GitHub's "
+            f"{_human_size(MAX_ASSET_BYTES)} per-asset limit"
+        )
+    return AssetSpec(path, name, _sha256_file(path))
+
+
+def _ensure_unique_asset_names(assets: list[AssetSpec]) -> None:
+    """Refuse a release that would upload two different files under one name."""
+    seen: dict[str, Path] = {}
+    for asset in assets:
+        previous = seen.get(asset.name)
+        if previous is not None:
+            raise ReleaseError(
+                f"duplicate release asset name {asset.name!r}: "
+                f"{previous} and {asset.path}"
+            )
+        seen[asset.name] = asset.path
+
+
+def installer_name(version: str) -> str:
+    """Release asset name of the Inno Setup installer for *version*."""
+    return INSTALLER_NAME_TEMPLATE.format(version=version)
+
+
+def installer_path(repo_root: Path, version: str) -> Path:
+    """Where ``build_desktop.py`` leaves the installer (``dist/``, not the zip dir)."""
+    return repo_root / "dist" / installer_name(version)
+
+
+def _desktop_builder() -> Any:
+    """Import ``scripts/build_desktop.py`` once (for its ISCC lookup)."""
+    global _DESKTOP_MODULE
+    if _DESKTOP_MODULE is None:
+        spec = importlib.util.spec_from_file_location(
+            "build_desktop",
+            SCRIPTS_DIR / "build_desktop.py",
+        )
+        if spec is None or spec.loader is None:  # pragma: no cover
+            raise ReleaseError("cannot load scripts/build_desktop.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _DESKTOP_MODULE = module
+    return _DESKTOP_MODULE
+
+
+def find_inno_setup() -> str | None:
+    """
+    Locate the Inno Setup compiler used by ``build_desktop.py``, or ``None``.
+
+    The same private lookup is reused so a release cannot disagree with the
+    builder about whether ISCC is available (``which`` plus the installer's
+    usual per-machine/per-user locations).
+    """
+    found: str | None = _desktop_builder()._find_iscc()
+    return found
+
+
+def _portable_assets(assets: list[AssetSpec]) -> list[AssetSpec]:
+    """Assets the updater classifies as a portable desktop archive."""
+    builder = _manifest_builder()
+    return [
+        asset
+        for asset in assets
+        if (builder.classify_asset(asset.name) or "").endswith("-portable")
+    ]
+
+
+def verify_release_requirements(
+    assets: list[AssetSpec],
+    *,
+    targets: list[str],
+    version: str,
+    skip_installer: bool,
+) -> None:
+    """
+    Enforce the desktop payload contract before ``latest.json`` is written.
+
+    An installed copy updates from ``windows-x64-installer``; when that asset
+    is missing it silently falls back to the portable zip, so the release
+    looks complete while installed users never receive the new build.  For the
+    ``desktop`` target this is therefore a hard error, not a warning:
+
+    * default: the ``NovelDownloader-setup-<version>-x64.exe`` asset must be
+      collected (and ISCC must have been available to build it);
+    * ``--skip-installer``: the installer is deliberately absent and the
+      manifest must not advertise it, so the portable zip is required as the
+      fallback.  With neither asset the release is not publishable.
+
+    :raises ReleaseError: when the configured desktop shape is incomplete.
+    """
+    if "desktop" not in targets:
+        return
+
+    portable = _portable_assets(assets)
+    if skip_installer:
+        if not portable:
+            raise ReleaseError(
+                "--skip-installer publishes no installer, so the desktop "
+                "target still needs the portable zip fallback "
+                f"(NovelDownloader-{version}-*.zip); none was collected"
+            )
+        print(f"==> Installer skipped (--skip-installer); portable: {portable[0].name}")
+        return
+
+    expected = installer_name(version)
+    if not any(asset.name == expected for asset in assets):
+        raise ReleaseError(
+            f"the desktop target requires the Inno Setup installer {expected}; "
+            "install Inno Setup 6 (ISCC) so build_desktop.py can compile it, "
+            "or pass --skip-installer to publish the portable zip only"
+        )
+    print(f"==> Installer required and present: {expected}")
+
+
 def collect_content_assets(
-    repo_root: Path, release_dir: Path, version: str, *, include_apks: bool
+    repo_root: Path,
+    release_dir: Path,
+    version: str,
+    *,
+    include_apks: bool,
+    include_installer: bool = True,
 ) -> list[AssetSpec]:
     """
     The release's "content" assets: bundle zips, (optional) APK, installer.
@@ -475,27 +878,29 @@ def collect_content_assets(
     ``SHA256SUMS.txt`` and ``manifest.json`` are metadata produced alongside
     the content and are added later, after the checksums are merged.  APKs are
     only included when the Android build ran in this release (or, for the
-    dry-run preview, when a signed output is already on disk).
+    dry-run preview, when a signed output is already on disk).  The installer
+    is included only when the desktop target asked for it: ``--skip-installer``
+    must not upload a stale exe that ``latest.json`` will not advertise.
     """
     metadata = {"SHA256SUMS.txt", "manifest.json", "latest.json"}
     files = sorted(
         path
         for path in release_dir.iterdir()
-        if path.is_file() and path.name not in metadata
+        if (path.is_file() or path.is_symlink()) and path.name not in metadata
     )
-    assets = [AssetSpec(path, path.name, _sha256_file(path)) for path in files]
+    assets = [_asset_spec(path, path.name) for path in files]
 
     if include_apks:
         apks = find_release_apks(repo_root)
         names = android_asset_names(version, apks)
         assets.extend(
-            AssetSpec(apk, name, _sha256_file(apk))
-            for apk, name in zip(apks, names, strict=True)
+            _asset_spec(apk, name) for apk, name in zip(apks, names, strict=True)
         )
 
-    installer = repo_root / "dist" / f"NovelDownloader-setup-{version}-x64.exe"
-    if installer.is_file():
-        assets.append(AssetSpec(installer, installer.name, _sha256_file(installer)))
+    installer = installer_path(repo_root, version)
+    if include_installer and (installer.is_file() or installer.is_symlink()):
+        assets.append(_asset_spec(installer, installer.name))
+    _ensure_unique_asset_names(assets)
     return assets
 
 
@@ -691,6 +1096,7 @@ def build_latest_manifest(
 
 
 _MANIFEST_MODULE: Any = None
+_DESKTOP_MODULE: Any = None
 
 
 def _audit_module() -> Any:
@@ -859,8 +1265,8 @@ def github_token(repo_root: Path) -> str | None:
     """
     for variable in TOKEN_ENV_VARS:
         token = os.environ.get(variable)
-        if token:
-            return token
+        if token and token.strip():
+            return token.strip()
     try:
         proc = _run(
             ["git", "credential", "fill"],
@@ -954,6 +1360,14 @@ class GitHubClient:
             message = (
                 payload.get("message") if isinstance(payload, dict) else None
             ) or raw[:200].decode("utf-8", "replace")
+            # GitHub puts the machine-readable reason (e.g. ``already_exists``)
+            # in ``errors``; keeping it lets the upload path tell a lost
+            # response apart from a genuinely invalid asset.
+            if isinstance(payload, dict) and payload.get("errors"):
+                message = (
+                    f"{message} "
+                    + json.dumps(payload["errors"], ensure_ascii=False)[:300]
+                )
             # GitHub reports exhausted primary and secondary rate limits as
             # 403 (not 429); those are worth retrying, like a 5xx.
             rate_limited = (
@@ -982,12 +1396,53 @@ class GitHubClient:
     # -- endpoints ---------------------------------------------------------
 
     def get_release_by_tag(self, tag: str) -> dict[str, Any] | None:
-        """The release published at *tag*, or ``None`` when there is none."""
+        """
+        The **published** release at *tag*, or ``None`` when there is none.
+
+        GitHub's tag lookup deliberately hides drafts, so a draft created by an
+        interrupted run is found with :meth:`find_draft_release` instead.
+        """
         url = f"{self._api}/repos/{self._slug}/releases/tags/{quote(tag)}"
         reply = self._request("GET", url, expected=(200, 404))
         if reply.status == 404:
             return None
         return self._json(reply, f"release lookup for {tag}")
+
+    def get_release_by_id(self, release_id: int) -> dict[str, Any] | None:
+        """One release by numeric id; drafts are visible to a write token."""
+        url = f"{self._api}/repos/{self._slug}/releases/{release_id}"
+        reply = self._request("GET", url, expected=(200, 404))
+        if reply.status == 404:
+            return None
+        return self._json(reply, f"release {release_id}")
+
+    def find_draft_release(self, tag: str) -> dict[str, Any] | None:
+        """
+        The draft release for *tag*, if an earlier run left one behind.
+
+        ``releases/tags/<tag>`` only returns published releases.  The list
+        endpoint does include drafts for a token with push access; it is paged
+        newest-first, so a run that died a few pages back is still found.
+        """
+        for page in range(1, RELEASE_LIST_PAGES + 1):
+            url = (
+                f"{self._api}/repos/{self._slug}/releases"
+                f"?per_page={RELEASE_LIST_PAGE_SIZE}&page={page}"
+            )
+            reply = self._request("GET", url)
+            items = reply.payload
+            if not isinstance(items, list):
+                raise ReleaseError(f"release list page {page}: unexpected API body")
+            for item in items:
+                if (
+                    isinstance(item, dict)
+                    and item.get("draft") is True
+                    and item.get("tag_name") == tag
+                ):
+                    return item
+            if len(items) < RELEASE_LIST_PAGE_SIZE:
+                break
+        return None
 
     def get_tag_ref_sha(self, tag: str) -> str | None:
         """The commit a remote tag ref points at, or ``None`` when absent."""
@@ -1064,10 +1519,43 @@ class GitHubClient:
         reply = self._request("PATCH", url, json_body={"body": body})
         return self._json(reply, f"release {release_id} update")
 
+    def publish_release(self, release_id: int) -> dict[str, Any]:
+        """Flip a draft release to published once every asset has verified."""
+        url = f"{self._api}/repos/{self._slug}/releases/{release_id}"
+        reply = self._request("PATCH", url, json_body={"draft": False})
+        return self._json(reply, f"release {release_id} publish")
+
     def delete_asset(self, asset_id: int) -> None:
         """Delete one release asset by id."""
         url = f"{self._api}/repos/{self._slug}/releases/assets/{asset_id}"
         self._request("DELETE", url, expected=(200, 204))
+
+    def _asset_already_uploaded(self, upload_url: str, asset: AssetSpec) -> bool:
+        """
+        Whether a 422 ``already_exists`` upload actually landed with our bytes.
+
+        A response can be lost after GitHub committed the upload (a write
+        timeout, a dropped connection).  Retrying then fails with 422 even
+        though the release is fine.  Looking the asset up by name and
+        comparing digests distinguishes that from a genuine name conflict.
+        """
+        match = re.search(r"/releases/(\d+)/assets/?$", upload_url)
+        if match is None:
+            return False
+        url = (
+            f"{self._api}/repos/{self._slug}/releases/{match.group(1)}/assets"
+            f"?name={quote(asset.name)}"
+        )
+        try:
+            reply = self._request("GET", url, expected=(200,))
+        except ReleaseError:
+            return False
+        if not isinstance(reply.payload, list):
+            return False
+        for item in reply.payload:
+            if isinstance(item, dict) and item.get("name") == asset.name:
+                return _remote_digest(item) == asset.sha256.lower()
+        return False
 
     def upload_asset(self, upload_url: str, asset: AssetSpec) -> None:
         """
@@ -1076,7 +1564,9 @@ class GitHubClient:
         A 55 MiB upload over a slow link fails regularly with a write timeout;
         aborting the whole release for that wastes the build and leaves the
         release half-populated.  GitHub only registers an asset once the upload
-        completes, so retrying the same name is safe.
+        completes, so retrying the same name is safe — unless the timed-out
+        attempt did complete, in which case GitHub answers ``already_exists``;
+        that is success when the remote digest matches ours.
         """
         base = upload_url.split("{", 1)[0].rstrip("/")
         if not base:
@@ -1105,6 +1595,13 @@ class GitHubClient:
                 )
                 time.sleep(delay)
                 continue
+            except ReleaseError as exc:
+                if "already_exists" in str(
+                    exc
+                ).lower() and self._asset_already_uploaded(base, asset):
+                    print(f"  asset {asset.name}: already present, skipping")
+                    return
+                raise
             print(
                 f"  asset {asset.name}: uploaded "
                 f"({_human_size(asset.path.stat().st_size)})"
@@ -1176,7 +1673,13 @@ def sync_assets(
         )
 
 
-def verify_assets(client: GitHubClient, tag: str, assets: list[AssetSpec]) -> None:
+def verify_assets(
+    client: GitHubClient,
+    tag: str,
+    assets: list[AssetSpec],
+    *,
+    release_id: int | None = None,
+) -> None:
     """
     Re-read the release and assert every intended asset is actually present.
 
@@ -1184,8 +1687,16 @@ def verify_assets(client: GitHubClient, tag: str, assets: list[AssetSpec]) -> No
     published by a concurrent run (or a partially failed upload) left the
     release looking complete while a bundle or the APK was missing.  Checking
     the final state costs one request and turns that into a hard error.
+
+    *release_id* selects the by-id endpoint, which (unlike the tag lookup) also
+    returns draft releases; the normal release flow verifies a draft before it
+    is published.
     """
-    current = client.get_release_by_tag(tag)
+    current = (
+        client.get_release_by_id(release_id)
+        if release_id is not None
+        else client.get_release_by_tag(tag)
+    )
     if current is None:
         raise ReleaseError(f"release {tag} vanished right after publishing")
 
@@ -1235,14 +1746,31 @@ def _remote_digest_by_name(release: dict[str, Any], name: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _git_stdout(
+    repo_root: Path, args: list[str], *, timeout: float | None = None
+) -> str | None:
+    """Run a read-only git command; its stripped stdout, or ``None`` on failure."""
+    proc = _run(["git", *args], cwd=repo_root, timeout=timeout, check=False)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def local_tag_commit(repo_root: Path, tag: str) -> str | None:
+    """The commit a local tag points at, or ``None`` when the tag is absent."""
+    return _git_stdout(
+        repo_root, ["rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"]
+    )
+
+
+def head_commit(repo_root: Path) -> str | None:
+    """The current ``HEAD`` commit, or ``None`` outside a git checkout."""
+    return _git_stdout(repo_root, ["rev-parse", "HEAD"])
+
+
 def tag_exists_local(repo_root: Path, tag: str) -> bool:
     """Whether *tag* already exists in the local repository."""
-    proc = _run(
-        ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"],
-        cwd=repo_root,
-        check=False,
-    )
-    return proc.returncode == 0
+    return local_tag_commit(repo_root, tag) is not None
 
 
 def print_push_api_hint() -> None:
@@ -1259,14 +1787,18 @@ def print_push_api_hint() -> None:
     )
 
 
-def remote_tag_exists(repo_root: Path, tag: str) -> bool:
+def remote_tag_commit(repo_root: Path, tag: str) -> str | None:
     """
-    Whether *tag* is already on the origin remote (one network query).
+    The commit *tag* points at on origin, or ``None`` when it is not there.
 
     ``github.com`` being unreachable must not abort the release: the query is
     bounded by :data:`GIT_REMOTE_TIMEOUT`, and any failure is reported and
     treated as "not there yet".  The subsequent push then fails over to the
     REST API (see :func:`push_tag`), which may still be reachable.
+
+    For an annotated tag ``ls-remote`` lists both the tag object and the
+    peeled ``^{}`` commit; the peeled commit is what the local tag resolves to
+    and is preferred, so the two sides are comparable.
     """
     try:
         proc = _run(
@@ -1282,8 +1814,59 @@ def remote_tag_exists(repo_root: Path, tag: str) -> bool:
             file=sys.stderr,
         )
         print_push_api_hint()
-        return False
-    return bool(proc.stdout.strip())
+        return None
+    if proc.returncode != 0:
+        print(
+            f"warning: could not query origin for tag {tag}; "
+            "assuming it is not pushed yet",
+            file=sys.stderr,
+        )
+        return None
+    plain: str | None = None
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        sha, ref = parts[0], parts[1]
+        if ref == f"refs/tags/{tag}^{{}}":
+            return sha
+        if ref == f"refs/tags/{tag}":
+            plain = sha
+    return plain
+
+
+def remote_tag_exists(repo_root: Path, tag: str) -> bool:
+    """Whether *tag* is already on the origin remote (one network query)."""
+    return remote_tag_commit(repo_root, tag) is not None
+
+
+def verify_tag_target(
+    tag: str,
+    *,
+    local_sha: str | None,
+    head_sha: str | None,
+    remote_sha: str | None,
+) -> None:
+    """
+    Refuse to publish under a tag that points at another commit.
+
+    Assets are built from ``HEAD`` and are served under the tag's commit.
+    A tag left over from an earlier attempt (or pushed by someone else) at a
+    different commit would attach this build to the wrong source; git cannot
+    fix that without rewriting published history, so this is a hard error.
+    """
+    if local_sha is not None and head_sha is not None and local_sha != head_sha:
+        raise ReleaseError(
+            f"tag {tag} already exists locally at {local_sha[:12]}, but HEAD is "
+            f"{head_sha[:12]}; delete or move the tag before releasing"
+        )
+    expected = local_sha or head_sha
+    if remote_sha is not None and expected is not None and remote_sha != expected:
+        raise ReleaseError(
+            f"tag {tag} already exists on origin at {remote_sha[:12]}, but "
+            f"this release needs {expected[:12]}; delete or move the remote tag "
+            "before releasing"
+        )
 
 
 def create_tag(repo_root: Path, tag: str) -> None:
@@ -1293,6 +1876,25 @@ def create_tag(repo_root: Path, tag: str) -> None:
     """
     _announce(["git", "tag", tag])
     _run(["git", "tag", tag], cwd=repo_root)
+
+
+def _git_auth_env(token: str) -> dict[str, str]:
+    """
+    Environment that authenticates one ``git`` process without exposing the token.
+
+    A token in the remote URL would show up in ``argv`` (and therefore in the
+    Windows process list and any wrapper that logs its command line) and in
+    git's own error output.  ``http.<url>.extraheader`` via ``GIT_CONFIG_*``
+    keeps the credential in the child's environment; the parent's command line
+    stays token-free.
+    """
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
+    return {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": f"http.https://{GITHUB_HOST}/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: basic {encoded}",
+    }
 
 
 def push_tag(
@@ -1306,8 +1908,8 @@ def push_tag(
     """
     Push *tag* to origin.
 
-    With an environment token (CI) the push goes to an explicit authenticated
-    URL — the token is redacted wherever the command is printed.  Without
+    With an environment token (CI) the push authenticates through a per-process
+    git config header; the token is never part of the command line.  Without
     one, plain ``git push`` lets git resolve credentials through its own
     credential helper chain (the same store ``git credential fill`` reads).
 
@@ -1317,14 +1919,18 @@ def push_tag(
     ``api_base`` override is honoured so a dry run / GitHub Enterprise setup
     stays consistent with the rest of the release.
     """
-    if token:
-        url = f"https://x-access-token:{token}@{GITHUB_HOST}/{slug}.git"
-        command: list[str] | tuple[str, ...] = ["git", "push", url, tag]
-    else:
-        command = ["git", "push", "origin", tag]
+    command: list[str] = ["git", "push", "origin", tag]
+    secrets: tuple[str, ...] = (token,) if token else ()
+    extra_env = _git_auth_env(token) if token else None
     _announce(command)
     try:
-        _run(command, cwd=repo_root, timeout=PUSH_TIMEOUT)
+        _run(
+            command,
+            cwd=repo_root,
+            timeout=PUSH_TIMEOUT,
+            extra_env=extra_env,
+            secrets=secrets,
+        )
         return
     except ReleaseError as exc:
         print(f"git push failed ({exc})", file=sys.stderr)
@@ -1386,6 +1992,58 @@ def _print_notes_preview(notes: str, version: str) -> None:
     print()
 
 
+def _print_preflight(repo_root: Path, *, version: str, tag: str) -> None:
+    """
+    Show what was validated before any build, and what remains for the real run.
+
+    ``--dry-run`` executes no subprocess and does no network I/O, so the
+    clean-worktree and tag/release-conflict checks cannot run here; they are
+    listed instead of being silently omitted.
+    """
+    gradle = repo_root / "android" / "app" / "build.gradle.kts"
+    print("Preflight (validated before any build):")
+    print(f"  [ok] __version__ == {version}")
+    if gradle.is_file():
+        print(f"  [ok] android versionName == {version}")
+    else:
+        print("  [ok] android versionName: skipped (no android/app/build.gradle.kts)")
+    print(f"  [ok] CHANGELOG.md top section `## v{version} (` is non-empty")
+    print(f"  [ok] tag {tag} matches version {version}")
+    print("  [release] clean working tree (git status --porcelain)")
+    print("  [release] tag/release conflicts (local tag, origin tag, GitHub release)")
+    print()
+
+
+def _print_asset_requirements(
+    *,
+    targets: list[str],
+    version: str,
+    skip_installer: bool,
+    assets: list[AssetSpec] | None,
+) -> None:
+    """Show the desktop payload the configured release requires (dry run)."""
+    if "desktop" not in targets:
+        print("      required: none (desktop target not selected)")
+        return
+    if skip_installer:
+        print(
+            "      required: portable desktop zip "
+            "(installer omitted by --skip-installer)"
+        )
+        if assets is not None and not _portable_assets(assets):
+            print(
+                "      WARNING: no portable desktop zip collected; the real run fails"
+            )
+        return
+    name = installer_name(version)
+    print(f"      required: installer {name} (Inno Setup)")
+    if assets is not None and not any(asset.name == name for asset in assets):
+        print(
+            "      WARNING: installer missing; the real run fails "
+            "(install ISCC or pass --skip-installer)"
+        )
+
+
 def _dry_run(
     args: argparse.Namespace,
     *,
@@ -1407,12 +2065,20 @@ def _dry_run(
     print(f"Targets     : {', '.join(targets)}")
     print(f"Auth        : {TOKEN_ENV_VARS[0]}/GH_TOKEN env, else git credential fill")
     print()
+    _print_preflight(repo_root, version=version, tag=tag)
     _print_notes_preview(notes, version)
 
     print("Plan:")
     if args.skip_build:
         print("  1. Build    : skipped (--skip-build)")
         print(f"              release dir: {release_dir or 'NOT FOUND (build first)'}")
+        if release_dir is not None:
+            try:
+                verify_release_dir(release_dir, version, targets)
+            except ReleaseError as exc:
+                # A dry run still has no side effects; it just refuses to call
+                # an incomplete directory deployable.
+                print(f"              WARNING: {exc}")
     else:
         print(f"  1. Build    : {' '.join(build_cmd)}")
     if args.skip_android:
@@ -1439,15 +2105,28 @@ def _dry_run(
     if args.prerelease:
         flags += ", prerelease"
     print(f"  6. Release  : create {tag} on GitHub with the notes above{flags}")
+    if not args.draft:
+        print("              as a draft, published only after every asset verifies")
     if release_dir is not None:
         # Mirror the real run: an APK is uploaded only when Android actually
         # builds, so a preview must not advertise one that --skip-android (or
         # missing signing material) would leave out.
         include_apks = signing_ok and not args.skip_android
+        include_installer = "desktop" in targets and not args.skip_installer
         assets = collect_content_assets(
-            repo_root, release_dir, version, include_apks=include_apks
+            repo_root,
+            release_dir,
+            version,
+            include_apks=include_apks,
+            include_installer=include_installer,
         )
         print("  7. Assets   :")
+        _print_asset_requirements(
+            targets=targets,
+            version=version,
+            skip_installer=args.skip_installer,
+            assets=assets,
+        )
         for asset in assets:
             print(f"      {asset.name}  ({_human_size(asset.path.stat().st_size)})")
         print("      SHA256SUMS.txt (after the merge)")
@@ -1476,10 +2155,26 @@ def _dry_run(
                 print("                   unsigned (pass --sign-key to sign)")
     else:
         print("  7. Assets   : (produced by step 1; nothing built yet)")
+        _print_asset_requirements(
+            targets=targets,
+            version=version,
+            skip_installer=args.skip_installer,
+            assets=None,
+        )
         print("      latest.json is rebuilt from the produced assets")
     print()
     print("Re-run without --dry-run to execute the plan.")
     return 0
+
+
+def _release_id(release: dict[str, Any]) -> int:
+    """The numeric id of a release payload, or a clear ReleaseError."""
+    try:
+        return int(release["id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReleaseError(
+            f"release payload has no usable id: {release.get('id')!r}"
+        ) from exc
 
 
 def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
@@ -1492,11 +2187,15 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
             "turn the CHANGELOG section into '## v<version>' first"
         )
     tag = f"v{version}"
+    # The tag is whatever goes on the release page; reject an input that git
+    # would refuse before the bundles and the APK are built.
+    check_release_tag(version, tag)
     targets = _parse_targets(args.targets)
-    # Notes first: a missing CHANGELOG section is the most actionable error,
-    # and it also covers the "released a version that was never documented"
-    # case before the version-consistency gate fires.
-    notes = extract_changelog_notes(repo_root / "CHANGELOG.md", version)
+    # Notes first: a missing or empty CHANGELOG section is the most actionable
+    # error, and it also covers the "released a version that was never
+    # documented" case before the version-consistency gate fires.  This also
+    # proves the top section is for *this* version, not a newer or older one.
+    notes = check_changelog_entry(repo_root / "CHANGELOG.md", version)
 
     # A mismatch here is how a release ends up shipping last build's assets
     # under this build's tag: the bundles are built from ``__version__`` while
@@ -1520,8 +2219,6 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
 
     slug = args.repo or resolve_slug(repo_root)
     print(f"==> Releasing {PROJECT_NAME} {version} as {tag} to {slug}")
-    if not notes:
-        print("warning: the CHANGELOG section for this version is empty")
 
     token = github_token(repo_root)
     if not token:
@@ -1541,6 +2238,20 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     if args.skip_build:
         print("==> Build skipped (--skip-build)")
     else:
+        # The installer is a required asset for the desktop target, so a host
+        # without ISCC must be rejected before the (tens of minutes) bundle
+        # build rather than after it, when the missing exe would only surface
+        # as a silent portable-only release.
+        if "desktop" in targets and not args.skip_installer:
+            iscc = find_inno_setup()
+            if iscc is None:
+                raise ReleaseError(
+                    "the desktop target requires the Inno Setup installer, but "
+                    "ISCC was not found; install Inno Setup 6 "
+                    "(https://jrsoftware.org/isinfo.php) or pass "
+                    "--skip-installer to publish the portable zip only"
+                )
+            print(f"==> Inno Setup compiler: {iscc}")
         build_cmd = _build_command(targets)
         _announce(build_cmd)
         proc = _run(build_cmd, cwd=repo_root, timeout=BUILD_TIMEOUT, check=False)
@@ -1548,13 +2259,13 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
             detail = (proc.stderr or proc.stdout or "").strip().splitlines()
             raise ReleaseError(
                 f"build_release.py exited with {proc.returncode}: "
-                + " | ".join(detail[-8:])
+                + _redact(" | ".join(detail[-8:]), (token,))
             )
         # The Inno Setup installer is produced by build_desktop.py, not by
         # build_release.py.  Without this step a "one command" release quietly
         # ships the portable zip only, and the installer has to be built and
         # uploaded by hand afterwards.
-        if "desktop" in targets and sys.platform == "win32":
+        if "desktop" in targets and not args.skip_installer and sys.platform == "win32":
             installer_cmd = [
                 sys.executable,
                 str(SCRIPTS_DIR / "build_desktop.py"),
@@ -1567,7 +2278,7 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
                 detail = (proc.stderr or proc.stdout or "").strip().splitlines()
                 raise ReleaseError(
                     f"build_desktop.py exited with {proc.returncode}: "
-                    + " | ".join(detail[-8:])
+                    + _redact(" | ".join(detail[-8:]), (token,))
                 )
 
     release_dir = find_release_dir(repo_root, version)
@@ -1576,6 +2287,10 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
             f"no dist/release/{PROJECT_NAME}-{version}-* directory; run "
             "without --skip-build first"
         )
+    # A directory left by a failed or partial build is not a release.  This
+    # runs before the Android build and before any tag/API call, so an
+    # incomplete --skip-build directory cannot publish anything.
+    verify_release_dir(release_dir, version, targets)
 
     # 2. Android release APK ------------------------------------------------
     android_built = False
@@ -1616,7 +2331,7 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
                     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
                     raise ReleaseError(
                         f"gradlew assembleRelease exited with {proc.returncode}: "
-                        + " | ".join(detail[-8:])
+                        + _redact(" | ".join(detail[-8:]), (token,))
                     )
             if not apks:
                 raise ReleaseError(
@@ -1633,7 +2348,20 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
 
     # 3. Assets + merged checksums -------------------------------------------
     content = collect_content_assets(
-        repo_root, release_dir, version, include_apks=android_built
+        repo_root,
+        release_dir,
+        version,
+        include_apks=android_built,
+        include_installer=("desktop" in targets and not args.skip_installer),
+    )
+    # --skip-build resumes a directory that may predate the installer, and the
+    # installer build can also have been skipped by hand; both are release
+    # blockers for the desktop target (exit 2, before tag/API calls).
+    verify_release_requirements(
+        content,
+        targets=targets,
+        version=version,
+        skip_installer=args.skip_installer,
     )
     # The updater manifest is rebuilt from the assets that actually exist, so
     # a missing platform shows up as a missing entry instead of a stale URL.
@@ -1650,46 +2378,87 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     # either, so a disagreement between them is a release-blocking bug.
     validate_sums_against_manifest(sums_path, release_dir / "latest.json")
 
-    upload_assets = list(content)
+    upload_assets = [asset for asset in content if asset.name != "latest.json"]
     upload_assets.append(AssetSpec(sums_path, sums_path.name, _sha256_file(sums_path)))
     manifest_path = release_dir / "manifest.json"
     if manifest_path.is_file():
         upload_assets.append(
             AssetSpec(manifest_path, manifest_path.name, _sha256_file(manifest_path))
         )
+    # The update manifest goes last: it is the document clients trust before
+    # downloading anything, so every file it points at must already be there.
+    upload_assets.extend(asset for asset in content if asset.name == "latest.json")
+    _ensure_unique_asset_names(upload_assets)
 
     # 4./5. Tag and push -----------------------------------------------------
-    if tag_exists_local(repo_root, tag):
-        print(f"==> Tag {tag} exists locally, skipping creation")
+    local_sha = local_tag_commit(repo_root, tag)
+    head_sha = head_commit(repo_root)
+    remote_sha = remote_tag_commit(repo_root, tag)
+    verify_tag_target(
+        tag, local_sha=local_sha, head_sha=head_sha, remote_sha=remote_sha
+    )
+    if local_sha is not None:
+        print(f"==> Tag {tag} exists locally at {local_sha[:12]}, skipping creation")
     else:
         create_tag(repo_root, tag)
-    if remote_tag_exists(repo_root, tag):
-        print(f"==> Tag {tag} is already on the remote, skipping push")
+        local_sha = head_sha or local_tag_commit(repo_root, tag)
+        if local_sha is None:
+            raise ReleaseError(
+                f"created tag {tag} but cannot resolve it to a commit; "
+                "refusing to publish"
+            )
+    if remote_sha is not None:
+        print(f"==> Tag {tag} is already on the remote at {remote_sha[:12]}")
     else:
+        # A concurrent run pushing the same tag is handled by git (same commit:
+        # up to date; different commit: rejected) and by the REST fallback,
+        # which refuses to move an existing ref.
         push_tag(repo_root, tag, token, slug, api_base=args.api_base)
 
     # 6. Release + assets ----------------------------------------------------
     client = GitHubClient(slug, token, api_base=args.api_base)
     release = client.get_release_by_tag(tag)
+    publish_after_verify = False
     if release is None:
-        print(f"==> Creating GitHub release {tag}")
+        # A previous attempt may have died after creating the draft.  The tag
+        # lookup cannot see drafts, so ask the list endpoint before creating
+        # a second one.
+        release = client.find_draft_release(tag)
+    if release is None:
+        # Create as a draft: until every asset is uploaded and verified, the
+        # release must not be visible.  A later network failure then leaves a
+        # resumable draft, never a half-populated "published" release.
+        print(
+            f"==> Creating GitHub release {tag} (draft; published after verification)"
+        )
         release = client.create_release(
             tag,
             tag,
             notes,
-            draft=args.draft,
+            draft=True,
             prerelease=args.prerelease,
         )
+        publish_after_verify = not args.draft
     else:
-        release_id = release.get("id")
-        print(f"==> Release for {tag} already exists (id {release_id}), reusing")
+        release_id = _release_id(release)
+        state = "draft" if release.get("draft") else "release"
+        print(f"==> {state.capitalize()} for {tag} already exists (id {release_id})")
         if (release.get("body") or "") != notes and notes:
             print("    notes differ from CHANGELOG.md, updating")
-            release = client.update_release(int(str(release_id)), notes)
+            release = client.update_release(release_id, notes)
+        # A previous run may have died after creating the draft.
+        if release.get("draft") and not args.draft:
+            publish_after_verify = True
 
     print(f"==> Uploading {len(upload_assets)} asset(s)")
     sync_assets(client, release, upload_assets)
-    verify_assets(client, tag, upload_assets)
+    verify_assets(client, tag, upload_assets, release_id=_release_id(release))
+
+    if publish_after_verify:
+        print(f"==> Publishing release {tag}")
+        release = client.publish_release(_release_id(release))
+    elif args.draft:
+        print(f"==> Release {tag} left as a draft (--draft)")
 
     url = release.get("html_url")
     print()
@@ -1751,6 +2520,15 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-android",
         action="store_true",
         help="do not build (or upload) the Android release APK",
+    )
+    parser.add_argument(
+        "--skip-installer",
+        action="store_true",
+        help=(
+            "publish the portable desktop zip instead of the Inno Setup "
+            "installer; latest.json then advertises no windows-x64-installer "
+            "platform (the portable zip must be present)"
+        ),
     )
     parser.add_argument(
         "--draft", action="store_true", help="create the release as a draft"

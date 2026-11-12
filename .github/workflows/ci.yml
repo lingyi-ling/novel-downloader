@@ -152,7 +152,17 @@ jobs:
           python scripts/update_pot.py
           python scripts/update_po.py
       - name: Fail if catalogs are stale
-        run: git diff --exit-code -- src/novel_downloader/locales
+        # `git diff` only reports tracked files, so a newly generated catalog
+        # (a new locale, or a renamed file) would pass silently.  `git status`
+        # covers modified and untracked paths alike.
+        run: |
+          git diff --exit-code -- src/novel_downloader/locales
+          stale="$(git status --porcelain -- src/novel_downloader/locales)"
+          if [ -n "$stale" ]; then
+            printf '%s\n' "$stale"
+            echo "::error::locale catalogs are stale; run scripts/update_pot.py and scripts/update_po.py"
+            exit 1
+          fi
 
   android:
     name: Android unit tests

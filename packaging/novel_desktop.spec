@@ -137,6 +137,10 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # Pinned because packaging/noveldl_installer.iss hard-codes this directory
+    # in [InstallDelete] to remove stale plugins on upgrade.  Changing either
+    # side without the other silently stops cleaning the old payload.
+    contents_directory="_internal",
     icon=str(ICON_PATH) if ICON_PATH.is_file() else None,
     version=str(VERSION_FILE),
 )

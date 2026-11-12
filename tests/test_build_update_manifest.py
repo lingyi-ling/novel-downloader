@@ -134,6 +134,45 @@ class TestBuildManifest:
                 repo=REPO,
             )
 
+    def test_rejects_a_tag_that_disagrees_with_the_version(self) -> None:
+        with pytest.raises(manifest.ManifestError, match="tag"):
+            _build(tag="v1.4.0")
+
+    def test_accepts_a_tag_without_the_v_prefix(self) -> None:
+        document = _build(tag=VERSION)
+
+        assert document["tag"] == VERSION
+        assert document["version"] == VERSION
+
+    def test_rejects_a_malformed_repository_slug(self) -> None:
+        with pytest.raises(manifest.ManifestError, match="repository"):
+            _build(repo="owner")
+
+    @pytest.mark.parametrize(
+        "digest",
+        [
+            "z" * 64,
+            "a" * 63,
+            "a" * 65,
+            "sha256:" + "a" * 63,
+            "",
+        ],
+    )
+    def test_rejects_a_digest_that_is_not_sha256_hex(self, digest: str) -> None:
+        release = _release()
+        release["assets"][0]["digest"] = digest  # type: ignore[index]
+
+        with pytest.raises(manifest.ManifestError, match="digest"):
+            manifest.build_manifest(release, version=VERSION, tag=TAG, repo=REPO)
+
+    def test_uppercase_digest_is_normalised(self) -> None:
+        release = _release()
+        release["assets"][0]["digest"] = "sha256:" + "A" * 64  # type: ignore[index]
+
+        document = manifest.build_manifest(release, version=VERSION, tag=TAG, repo=REPO)
+
+        assert document["platforms"]["windows-x64-installer"]["sha256"] == "a" * 64
+
 
 class TestCanonicalBytes:
     def test_is_reproducible_and_sorted(self) -> None:

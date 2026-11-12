@@ -2328,8 +2328,8 @@ content = """
 
 [sites.b520]
 name = "笔趣阁"
-homepage = "http://www.b520.cc"
-alt_domains = []
+homepage = "https://www.bqg6.xyz/"
+alt_domains = ["https://www.b5200.org/"]
 site_status = "active"
 description = """
 新笔趣阁网站收录了当前最火热的网络小说
@@ -2346,13 +2346,13 @@ search = "yes"
 
 [[sites.b520.url_examples]]
 title = "Book URL"
-url = "http://www.b520.cc/8_8187/"
+url = "https://www.bqg6.xyz/8_8187/"
 book_id = "8_8187"
 hidden = false
 
 [[sites.b520.url_examples]]
 title = "Chapter URL"
-url = "http://www.b520.cc/8_8187/3899831.html"
+url = "https://www.bqg6.xyz/8_8187/3899831.html"
 book_id = "8_8187"
 chapter_id = "3899831"
 hidden = false
