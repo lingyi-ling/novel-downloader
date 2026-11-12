@@ -197,6 +197,109 @@ def test_search_validation_mirrors_the_api(music: SimpleNamespace) -> None:
     assert unknown.value.status == 400
 
 
+def test_search_limit_is_bounded_like_the_rest_model(music: SimpleNamespace) -> None:
+    """``limit`` is ``1..100``: 101 is a 422, not an unbounded provider page."""
+    for bad in (0, -1, 101):
+        with pytest.raises(eserver._ApiError) as err:
+            eserver._handle_music_search(
+                {"platform": "netease", "keyword": "x", "limit": bad}, {}, {}
+            )
+        assert err.value.status == 422, bad
+        assert err.value.errors[0]["loc"] == ["body", "limit"]
+        if bad > 100:
+            assert err.value.errors[0]["type"] == "less_than_equal"
+
+    payload = eserver._handle_music_search(
+        {"platform": "netease", "keyword": "x", "limit": 100}, {}, {}
+    )
+    assert payload["total"] == 1
+
+
+def test_search_reports_offset_and_paging_support(music: SimpleNamespace) -> None:
+    """The response tells a client whether "load more" can work at all."""
+    payload = eserver._handle_music_search(
+        {"platform": "netease", "keyword": "x", "offset": 30}, {}, {}
+    )
+    assert payload["offset"] == 30
+    # FakeProvider (like a musicdl-backed platform) has no ``supports_offset``.
+    assert payload["supports_offset"] is False
+
+    class PagedProvider:
+        supports_offset = True
+
+        def search(self, keyword: str, *, limit: int = 20, offset: int = 0) -> Any:
+            return [], 0
+
+    music.create = lambda key: PagedProvider()
+    payload = eserver._handle_music_search(
+        {"platform": "netease", "keyword": "x", "offset": 30}, {}, {}
+    )
+    assert payload["offset"] == 30
+    assert payload["supports_offset"] is True
+
+
+def test_aggregate_search_caps_the_per_platform_fanout(
+    music: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from novel_downloader.apps.music.aggregate import AggregateResult
+
+    seen: list[int] = []
+
+    def fake_search_all(*args: Any, **kwargs: Any) -> AggregateResult:
+        seen.append(kwargs["per_platform_limit"])
+        return AggregateResult(tracks=[], platforms=[], total=0)
+
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.aggregate.search_all", fake_search_all
+    )
+
+    for limit, expected in ((1, 8), (8, 8), (20, 15), (100, 15)):
+        payload = eserver._handle_music_search(
+            {"platform": "all", "keyword": "x", "limit": limit}, {}, {}
+        )
+        assert seen[-1] == expected, (limit, expected, seen)
+        assert payload["offset"] == 0
+        assert payload["supports_offset"] is False
+
+
+def test_download_rejects_a_malformed_search_id(music: SimpleNamespace) -> None:
+    """Bad shape is a 422 before the cache lookup; blank still means absent."""
+    for handler in (eserver._handle_music_download, eserver._handle_music_jobs_post):
+        for bad in ("x" * 65, "bad/../id", "has space"):
+            with pytest.raises(eserver._ApiError) as err:
+                handler(
+                    {
+                        "platform": "netease",
+                        "tracks": [{"id": "1"}],
+                        "search_id": bad,
+                    },
+                    {},
+                    {},
+                )
+            assert err.value.status == 422, bad
+            assert err.value.errors[0]["loc"] == ["body", "search_id"]
+
+    # Blank keeps the historical "no id" meaning.
+    payload = eserver._handle_music_download(
+        {"platform": "netease", "tracks": [{"id": "1"}], "search_id": "   "}, {}, {}
+    )
+    assert payload["ok"] == 1
+
+
+def test_job_id_shape_is_validated() -> None:
+    for bad in ("z" * 65, "a" * 32 + "\n"):
+        with pytest.raises(eserver._ApiError) as err:
+            eserver._handle_music_job_status({}, {"job_id": bad}, {})
+        assert err.value.status == 422, repr(bad)
+        assert err.value.errors[0]["loc"] == ["path", "job_id"]
+        assert err.value.errors[0]["type"] == "string_pattern_mismatch"
+
+    # Unknown but well-formed stays the shared 404.
+    with pytest.raises(eserver._ApiError) as missing:
+        eserver._handle_music_job_status({}, {"job_id": "a" * 32}, {})
+    assert missing.value.status == 404
+
+
 def test_health_reports_per_platform(music: SimpleNamespace) -> None:
     payload = eserver._handle_music_health({}, {}, {})
 
@@ -351,10 +454,44 @@ def test_export_skips_tracks_without_a_path(
     )
 
     assert payload == {
-        "written": 1,
-        "skipped": 1,
         "path": str(tmp_path / "p.m3u8"),
+        "tracks_written": 1,
+        "skipped": 1,
+        "written": 1,
     }
+
+
+def test_export_dedupes_repeated_file_locations(
+    music: SimpleNamespace, tmp_path: Any
+) -> None:
+    """The same file under two spellings is one entry, counted in ``skipped``."""
+    captured: list[Any] = []
+
+    def fake_export(tracks: Any, target: Any) -> str:
+        captured.extend(tracks)
+        return str(target)
+
+    music.export_m3u = fake_export
+    payload = eserver._handle_music_export(
+        {
+            "platform": "netease",
+            "tracks": [
+                {"id": "1", "name": "A", "path": "songs/a.mp3"},
+                {"id": "2", "name": "A copy", "path": "./songs/a.mp3"},
+                {"id": "3", "name": "B", "path": "songs/b.mp3"},
+                {"id": "4", "name": "No path"},
+            ],
+            "out_path": str(tmp_path / "p.m3u8"),
+        },
+        {},
+        {},
+    )
+
+    assert len(captured) == 2
+    assert [track.id for track in captured] == ["1", "3"]
+    assert payload["tracks_written"] == 2
+    assert payload["written"] == 2
+    assert payload["skipped"] == 2
 
 
 def test_download_rejects_an_empty_track_list(music: SimpleNamespace) -> None:
@@ -571,6 +708,8 @@ def test_job_beyond_active_limit_is_refused(
                 {"platform": "netease", "tracks": [{"id": "2"}]}, {}, {}
             )
         assert err.value.status == 429
+        # Same Retry-After as REST: a load signal for the client's backoff.
+        assert err.value.headers == {"Retry-After": "5"}
         # The running job's record was not evicted.
         assert eserver._handle_music_job_status({}, {"job_id": created["job_id"]}, {})[
             "status"
@@ -600,3 +739,257 @@ def test_prune_keeps_active_jobs(
             assert "running" in eserver._MUSIC_JOBS
     finally:
         eserver._MUSIC_JOBS.clear()
+
+
+# ---------------------------------------------------------------------------
+# Field-level response contract (mirrors tests/apps/test_api_e2e.py)
+#
+# The embedded engine hand-mirrors the REST contract. These tests pin the
+# exact key set and JSON type of every music response field, and compare the
+# two implementations directly where both can be called offline. If a field
+# is added/renamed on one side only, these fail before a client does.
+# ---------------------------------------------------------------------------
+
+
+#: Exact key set of a per-track download/job result, on both transports.
+_RESULT_KEYS = frozenset({"status", "reason", "path", "download_url", "bytes"})
+
+#: Exact key set of ``POST /api/v1/music/export``, on both transports.
+_EXPORT_KEYS = frozenset({"path", "tracks_written", "skipped", "written"})
+
+#: Exact key set of one ``GET /api/v1/music/health`` entry.
+_HEALTH_KEYS = frozenset({"platform", "ok", "elapsed_ms", "error"})
+
+
+def test_result_item_field_set_and_types() -> None:
+    item = eserver._music_result_item(
+        SimpleNamespace(
+            status="fail",
+            reason="boom",
+            path="/tmp/music/a.mp3",
+            bytes_=7,
+        )
+    )
+
+    assert set(item) == _RESULT_KEYS
+    assert isinstance(item["status"], str)
+    assert isinstance(item["reason"], str)
+    assert isinstance(item["path"], str)
+    assert isinstance(item["download_url"], str)
+    assert type(item["bytes"]) is int
+
+
+def test_result_item_shape_matches_the_rest_engine() -> None:
+    """Both engines serialise a result with exactly the same keys."""
+    from novel_downloader.apps.api import routes as api_routes
+
+    result = SimpleNamespace(status="ok", reason="r", path="/m/a.mp3", bytes_=3)
+    embedded = eserver._music_result_item(result)
+    rest = api_routes._music_result_item(result)
+
+    assert tuple(embedded) == tuple(rest)
+    assert set(embedded) == _RESULT_KEYS
+
+
+def test_result_reason_is_bounded_and_single_line() -> None:
+    """Same ceiling as search/health errors: 200 chars, after query stripping."""
+    reason = (
+        "provider failed\nat https://cdn.example/a.mp3?token=SECRET#frag " + "x" * 500
+    )
+    item = eserver._music_result_item(
+        SimpleNamespace(status="fail", reason=reason, path="", bytes_=0)
+    )
+
+    assert len(item["reason"]) <= 200
+    assert "\n" not in item["reason"]
+    assert item["reason"].startswith("provider failed at https://cdn.example/a.mp3")
+    assert "SECRET" not in item["reason"]
+    assert "#frag" not in item["reason"]
+
+
+def test_export_response_field_set(music: SimpleNamespace, tmp_path: Any) -> None:
+    payload = eserver._handle_music_export(
+        {
+            "platform": "netease",
+            "tracks": [{"id": "1", "path": "/m/a.mp3"}],
+            "out_path": str(tmp_path / "p.m3u8"),
+        },
+        {},
+        {},
+    )
+
+    assert set(payload) == _EXPORT_KEYS
+    assert type(payload["path"]) is str
+    assert type(payload["tracks_written"]) is int
+    assert type(payload["written"]) is int
+    assert type(payload["skipped"]) is int
+    assert payload["tracks_written"] == payload["written"] == 1
+    assert payload["skipped"] == 0
+
+
+def test_export_rejects_an_empty_track_list(music: SimpleNamespace) -> None:
+    """``MusicExportRequest.tracks`` is ``min_length=1`` on both sides."""
+    with pytest.raises(eserver._ApiError) as err:
+        eserver._handle_music_export({"platform": "netease", "tracks": []}, {}, {})
+    assert err.value.status == 422
+    assert err.value.errors
+
+
+def test_export_rejects_too_many_tracks(music: SimpleNamespace) -> None:
+    tracks = [{"id": str(index), "path": "/m/a.mp3"} for index in range(201)]
+    with pytest.raises(eserver._ApiError) as err:
+        eserver._handle_music_export({"platform": "netease", "tracks": tracks}, {}, {})
+    assert err.value.status == 422
+    assert err.value.errors
+
+
+@pytest.mark.parametrize(
+    "handler,body",
+    [
+        (
+            eserver._handle_music_search,
+            {"platform": None, "keyword": "x"},
+        ),
+        (eserver._handle_music_search, {"platform": "", "keyword": "x"}),
+        (eserver._handle_music_search, {"platform": 3, "keyword": "x"}),
+        (
+            eserver._handle_music_download,
+            {"platform": None, "tracks": [{"id": "1"}]},
+        ),
+        (
+            eserver._handle_music_download,
+            {"platform": "", "tracks": [{"id": "1"}]},
+        ),
+        (
+            eserver._handle_music_jobs_post,
+            {"platform": 3, "tracks": [{"id": "1"}]},
+        ),
+        (
+            eserver._handle_music_export,
+            {"platform": None, "tracks": [{"id": "1", "path": "/m/a.mp3"}]},
+        ),
+    ],
+)
+def test_platform_validation_matches_the_request_model(
+    music: SimpleNamespace, handler: Any, body: dict[str, Any]
+) -> None:
+    """``platform`` is ``str`` + ``min_length=1`` (explicit null/invalid → 422)."""
+    with pytest.raises(eserver._ApiError) as err:
+        handler(body, {}, {})
+    assert err.value.status == 422
+    assert any(error["loc"][:2] == ["body", "platform"] for error in err.value.errors)
+
+
+def test_platform_value_is_not_stripped(music: SimpleNamespace) -> None:
+    """REST does not strip, so ``" netease "`` is unknown on both transports."""
+    with pytest.raises(eserver._ApiError) as err:
+        eserver._handle_music_search({"platform": " netease ", "keyword": "x"}, {}, {})
+    assert err.value.status == 400
+
+
+def test_health_rejects_invalid_timeout(music: SimpleNamespace) -> None:
+    """REST's ``Query(gt=0, le=60)`` is a 422, not a silent clamp."""
+    for raw in ("0", "-1", "61", "abc", "nan", "inf", "-inf"):
+        with pytest.raises(eserver._ApiError) as err:
+            eserver._handle_music_health({}, {}, {"timeout": [raw]})
+        assert err.value.status == 422, raw
+        assert err.value.errors
+        assert err.value.errors[0]["loc"] == ["query", "timeout"]
+
+
+def test_health_passes_a_valid_timeout_through(
+    music: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[float] = []
+
+    def fake_health(key: str, timeout: float = 5.0) -> dict[str, Any]:
+        calls.append(timeout)
+        return {"ok": True, "elapsed_ms": 1, "error": ""}
+
+    music.health_check = fake_health
+
+    payload = eserver._handle_music_health({}, {}, {"timeout": ["2.5"]})
+
+    assert payload == [
+        {"platform": "netease", "ok": True, "elapsed_ms": 1, "error": ""}
+    ]
+    assert calls == [2.5]
+
+
+def test_health_response_field_set(music: SimpleNamespace) -> None:
+    payload = eserver._handle_music_health({}, {}, {})
+
+    assert isinstance(payload, list) and payload
+    for item in payload:
+        assert set(item) == _HEALTH_KEYS
+        assert isinstance(item["platform"], str)
+        assert type(item["ok"]) is bool
+        assert type(item["elapsed_ms"]) is int
+        assert isinstance(item["error"], str)
+
+
+def test_search_and_job_responses_have_the_rest_key_sets(
+    music: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Single-platform search and a finished job expose the REST field sets."""
+    from novel_downloader.apps.music.aggregate import ALL_PLATFORM_KEY
+    from novel_downloader.apps.music.serialize import PUBLIC_TRACK_FIELDS
+
+    searched = eserver._handle_music_search(
+        {"platform": "netease", "keyword": "晴天"}, {}, {}
+    )
+    # ``offset``/``supports_offset`` make the paging contract explicit: the
+    # FakeProvider has no opt-in attribute, so it reports no paging (same
+    # conservative value a musicdl-backed platform reports).
+    assert set(searched) == {
+        "total",
+        "tracks",
+        "search_id",
+        "platform",
+        "offset",
+        "supports_offset",
+    }
+    assert type(searched["total"]) is int
+    assert isinstance(searched["search_id"], str) and searched["search_id"]
+    assert searched["platform"] == "netease"
+    assert type(searched["offset"]) is int and searched["offset"] == 0
+    assert searched["supports_offset"] is False
+    assert tuple(searched["tracks"][0]) == PUBLIC_TRACK_FIELDS
+    assert isinstance(searched["tracks"][0]["sources"], list)
+
+    created = eserver._handle_music_jobs_post(
+        {"platform": "netease", "tracks": [{"id": "1"}]}, {}, {}
+    )
+    assert set(created) == {"job_id"}
+    assert isinstance(created["job_id"], str)
+
+    deadline = time.time() + 5
+    while True:
+        job = eserver._handle_music_job_status({}, {"job_id": created["job_id"]}, {})
+        if job["status"] in ("done", "failed") or time.time() > deadline:
+            break
+        time.sleep(0.01)
+
+    assert set(job) == {
+        "job_id",
+        "status",
+        "progress",
+        "results",
+        "error",
+        "created_at",
+        "finished_at",
+    }
+    assert set(job["progress"]) == {"done", "total"}
+    assert all(type(value) is int for value in job["progress"].values())
+    assert job["error"] is None or isinstance(job["error"], str)
+    assert type(job["created_at"]) is float
+    assert job["finished_at"] is None or type(job["finished_at"]) is float
+    for item in job["results"]:
+        assert set(item) == _RESULT_KEYS
+    assert ALL_PLATFORM_KEY == "all"
+
+
+def test_job_creation_is_202_on_the_http_layer() -> None:
+    """``POST /music/jobs`` answers 202 on the embedded server too (not 200)."""
+    assert eserver._SUCCESS_STATUS[eserver._handle_music_jobs_post] == 202
+    assert eserver._SUCCESS_STATUS.get(eserver._handle_music_search, 200) == 200

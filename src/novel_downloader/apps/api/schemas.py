@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, field_validator
 
 SearchSortKey = Literal[
     "quality",
@@ -31,6 +31,26 @@ SearchSortKey = Literal[
 #: request. Bounds the work a single (synchronous) call can queue up and keeps
 #: the in-memory job table meaningful.
 MAX_MUSIC_TRACKS = 200
+
+#: Maximum ``limit`` accepted by ``POST /api/v1/music/search``. A provider
+#: search is a fan-out over third-party (and paid) APIs, so an unbounded
+#: ``limit`` would let one request buy an arbitrarily large result page; the
+#: ceiling is far above what the music UIs request (20 per page) while still
+#: being a sane single-request budget. Larger values are rejected with ``422``
+#: instead of being clamped silently, so a client bug is visible.
+MAX_MUSIC_SEARCH_LIMIT = 100
+
+#: Shape of the opaque ids the music endpoints expose: ``search_id`` (echoed
+#: back by download requests) and ``job_id`` (the async job path parameter).
+#: The server generates lowercase hex, but the pattern accepts any short
+#: ``[A-Za-z0-9_-]`` token so a future id format keeps working. The ceiling
+#: keeps meaningless lookups and log-injection payloads out; malformed values
+#: are a ``422`` on both transports.
+MUSIC_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+
+#: A ``search_id`` with the right shape (unknown ids stay a graceful "search
+#: expired" fallback; only malformed values are rejected).
+MusicSearchId = Annotated[str, Field(pattern=MUSIC_ID_PATTERN)]
 
 #: Characters a ``book_id`` may never contain. ``book_id`` is joined onto the
 #: raw-data directory to place the chapter cache and media files
@@ -154,11 +174,19 @@ class MusicSearchRequest(BaseModel):
     ``platform`` may be ``"all"`` (the default) to search every registered
     platform at once: results are merged per song, each row carrying
     ``sources``. Responses then also include ``search_id`` and ``platforms``.
+
+    ``limit`` is capped at :data:`MAX_MUSIC_SEARCH_LIMIT`; a larger value is a
+    ``422`` (never forwarded to a provider). ``offset`` is forwarded to a
+    single-platform provider as the number of hits to skip, but not every
+    provider implements paging — the response's ``supports_offset`` says
+    whether this one does, so a "load more" control can stop instead of asking
+    forever. Aggregate searches always start at the first hit (``offset`` is
+    only honoured for an explicit platform).
     """
 
     platform: str = Field(default="all", min_length=1)
     keyword: str = Field(min_length=1)
-    limit: int = Field(default=20, ge=1)
+    limit: int = Field(default=20, ge=1, le=MAX_MUSIC_SEARCH_LIMIT)
     offset: int = Field(default=0, ge=0)
 
 
@@ -207,9 +235,24 @@ class MusicDownloadRequest(BaseModel):
 
     platform: str = Field(default="all", min_length=1)
     tracks: list[MusicTrack] = Field(min_length=1, max_length=MAX_MUSIC_TRACKS)
-    search_id: str | None = None
+    search_id: MusicSearchId | None = None
     level: str | None = None
     out_dir: str | None = None
+
+    @field_validator("search_id", mode="before")
+    @classmethod
+    def _blank_search_id_is_absent(cls, value: Any) -> Any:
+        """Keep the historical "blank means no id" behaviour, then validate.
+
+        Clients that always send the field use ``""`` (or whitespace) when
+        they have no id; that used to mean "fall back to the submitted
+        dictionaries". Treat those as absent so only a *non-empty* value
+        has to match :data:`MUSIC_ID_PATTERN`; a malformed id is a ``422``
+        instead of a pointless cache lookup.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class MusicExportRequest(BaseModel):

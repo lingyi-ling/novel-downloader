@@ -60,6 +60,10 @@ class MusicProvider:
     display_name = ""  # 界面显示名
     requires_login = False
     supports_playlists = False
+    #: Whether ``search(offset=...)`` actually skips hits. Search responses
+    #: expose this so a "load more" control can stop instead of receiving a
+    #: silently empty page from a provider that only ever returns page one.
+    supports_offset = True
 
     # ---------- 搜索 / 解析 ----------
 

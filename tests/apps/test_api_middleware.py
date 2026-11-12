@@ -412,12 +412,15 @@ async def test_client_disconnect_while_streaming_sends_no_response() -> None:
     [
         ("POST", "/api/v1/search", 413),  # exact endpoint is guarded
         ("POST", "/api/v1/search/", 413),  # trailing slash is normalized away
-        ("POST", "/api/v1/search/extra", 200),  # a longer path is not the endpoint
-        ("GET", "/api/v1/search", 200),  # only POST bodies are bounded
-        ("POST", "/api/v1/tasks", 200),  # not in the guarded endpoint set
+        ("POST", "/api/v1/search/extra", 413),  # everything below the prefix
+        ("POST", "/api/v1/tasks", 413),  # newly added write routes are covered
+        ("DELETE", "/api/v1/watchlist/site/1", 413),  # delete bodies too
+        ("GET", "/api/v1/search", 200),  # only write bodies are bounded
+        ("POST", "/api/v1x/search", 200),  # prefix boundary, not a look-alike
+        ("POST", "/other/search", 200),  # outside the API prefix
     ],
 )
-async def test_guard_matches_method_and_exact_path(
+async def test_guard_matches_write_methods_under_the_api_prefix(
     method: str,
     path: str,
     expected_status: int,
@@ -528,18 +531,26 @@ async def test_search_accepts_body_at_exact_limit(
 
 
 @pytest.mark.asyncio
-async def test_unguarded_endpoint_accepts_large_body(
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/tasks",  # a write route that predates the prefix rule
+        "/api/v1/browse",  # another one
+        "/api/v1/login/requests/abc",  # a path parameter is still under the API
+    ],
+)
+async def test_oversized_body_is_rejected_on_every_write_route(
     limited_client: httpx.AsyncClient,
-    fake_manager: FakeManager,
+    path: str,
 ) -> None:
     response = await limited_client.post(
-        "/api/v1/tasks",
-        json={"title": "x" * 500, "site": "demo", "book_id": "1"},
+        path,
+        content=b"{" + b"x" * 500,
+        headers={"content-type": "application/json"},
     )
 
-    assert response.status_code == 200
-    assert response.json()["title"] == "x" * 500
-    assert len(fake_manager.pending) == 1
+    assert response.status_code == 413
+    assert response.json()["detail"].startswith("Request body too large")
 
 
 # ---------------------------------------------------------------------------
@@ -709,3 +720,117 @@ async def test_downloads_mount_open_when_no_token_configured(
 
     assert response.status_code == 200
     assert response.text == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Security response headers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_api_responses_carry_security_headers(
+    tmp_path: Path,
+    fake_manager: FakeManager,
+) -> None:
+    application = _make_app(tmp_path, fake_manager)
+    transport = httpx.ASGITransport(app=application)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as http_client:
+        ok = await http_client.get("/api/v1/health")
+        missing = await http_client.get("/api/v1/tasks/does-not-exist")
+
+    for response in (ok, missing):
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        # The API JSON is not a document; no sandbox policy is needed there.
+        assert "content-security-policy" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_downloads_are_sandboxed_against_same_origin_script(
+    tmp_path: Path,
+    fake_manager: FakeManager,
+) -> None:
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    (output_dir / "book.html").write_text(
+        "<script>fetch('/api/v1/tasks')</script>", encoding="utf-8"
+    )
+
+    application = _make_app(tmp_path, fake_manager)
+    transport = httpx.ASGITransport(app=application)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as http_client:
+        served = await http_client.get("/downloads/book.html")
+        missing = await http_client.get("/downloads/missing.txt")
+
+    assert served.status_code == 200
+    assert served.headers["x-content-type-options"] == "nosniff"
+    assert served.headers["referrer-policy"] == "no-referrer"
+    # A malicious export must not execute script on the API's own origin.
+    assert "sandbox" in served.headers["content-security-policy"]
+    # The 404 from the static mount is stamped too.
+    assert missing.status_code == 404
+    assert missing.headers["x-content-type-options"] == "nosniff"
+
+
+# ---------------------------------------------------------------------------
+# CORS surface
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cors_preflight_allows_only_api_verbs_and_headers(
+    tmp_path: Path,
+    fake_manager: FakeManager,
+) -> None:
+    application = _make_app(tmp_path, fake_manager, cors=True)
+    transport = httpx.ASGITransport(app=application)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as http_client:
+        allowed = await http_client.options(
+            "/api/v1/search",
+            headers={
+                "Origin": "http://example.invalid",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "authorization,x-api-key",
+            },
+        )
+        disallowed = await http_client.options(
+            "/api/v1/search",
+            headers={
+                "Origin": "http://example.invalid",
+                "Access-Control-Request-Method": "PUT",
+            },
+        )
+
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "*"
+    allow_headers = allowed.headers["access-control-allow-headers"].lower()
+    assert "authorization" in allow_headers
+    assert "x-api-key" in allow_headers
+    assert "access-control-allow-credentials" not in allowed.headers
+
+    # ``PUT`` is not a route, so the preflight is refused outright.
+    assert disallowed.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_cors_exposes_retry_after_to_browser_clients(
+    tmp_path: Path,
+    fake_manager: FakeManager,
+) -> None:
+    application = _make_app(tmp_path, fake_manager, cors=True)
+    transport = httpx.ASGITransport(app=application)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as http_client:
+        response = await http_client.get(
+            "/api/v1/health", headers={"Origin": "http://example.invalid"}
+        )
+
+    assert response.status_code == 200
+    assert "retry-after" in response.headers["access-control-expose-headers"].lower()

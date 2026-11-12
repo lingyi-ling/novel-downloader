@@ -13,7 +13,10 @@ prominent warning to stderr before the server starts.
 
 A per-IP sliding-window rate limit (120 requests per minute by default,
 ``--rate-limit 0`` to disable) protects the server from runaway integration
-clients; ``/api/v1/health`` stays exempt for uptime monitors.
+clients; ``/api/v1/health`` stays exempt for uptime monitors. A fixed
+concurrency cap (100 connections) bounds simultaneous connections. ``/docs``,
+``/redoc`` and ``/openapi.json`` are disabled automatically on a non-local
+bind, so the full route schema is not published to the network.
 """
 
 from __future__ import annotations
@@ -35,6 +38,11 @@ LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
 #: Environment variable read when ``--token`` is not passed.
 TOKEN_ENV_VAR = "NOVEL_API_TOKEN"
+
+#: Default cap on simultaneous connections. SSE streams hold a connection for
+#: as long as the client listens, so this must stay comfortably above the
+#: handful of concurrent UI clients a local machine runs.
+DEFAULT_MAX_CONNECTIONS = 100
 
 
 def is_local_host(host: str) -> bool:
@@ -139,13 +147,23 @@ def api_main(argv: Sequence[str] | None = None) -> None:
         token = token.strip()
     warn_if_insecure_bind(args.host, token, args.cors)
 
+    # The interactive schema is a local convenience: do not publish the full
+    # route list to the network on a non-local bind.
+    expose_docs = is_local_host(args.host)
+
     application = create_app(
         token=token,
         cors=args.cors,
         rate_limit=args.rate_limit,
         rate_limit_window=args.rate_limit_window,
+        expose_docs=expose_docs,
     )
-    uvicorn.run(application, host=args.host, port=args.port)
+    uvicorn.run(
+        application,
+        host=args.host,
+        port=args.port,
+        limit_concurrency=DEFAULT_MAX_CONNECTIONS,
+    )
 
 
 if __name__ in {"__main__", "__mp_main__"}:

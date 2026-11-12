@@ -839,10 +839,19 @@ def export_m3u(tracks, path, *, absolute=False):
     entries = []
     for item in tracks or ():
         track, file_path = _playlist_entry(item)
-        name = _CONTROL.sub(" ", str(_playlist_field(track, "name", "title")))
+        name = _CONTROL.sub(
+            " ", str(_playlist_field(track, "name", "title", default="未知歌曲"))
+        ).strip()
+        if not name:
+            # ``name: ""`` on a submitted track is not a title: use the same
+            # placeholder a freshly built Track gets, so the EXTINF line never
+            # ends as "歌手 - " (some players reject that entry).
+            name = "未知歌曲"
         artists = _CONTROL.sub(
             " ", str(_playlist_field(track, "artists", "artist", default="未知歌手"))
-        )
+        ).strip()
+        if not artists:
+            artists = "未知歌手"
         duration = _playlist_field(track, "duration_s", "duration", default=0)
         try:
             duration = int(float(duration or 0))
@@ -851,9 +860,7 @@ def export_m3u(tracks, path, *, absolute=False):
         if duration <= 0:
             duration = -1  # M3U 用 -1 表示时长未知
         location = _playlist_location(file_path, playlist_dir, absolute)
-        entries.append(
-            f"#EXTINF:{duration},{artists.strip()} - {name.strip()}\n{location}"
-        )
+        entries.append(f"#EXTINF:{duration},{artists} - {name}\n{location}")
 
     if playlist_dir:
         os.makedirs(playlist_dir, exist_ok=True)
