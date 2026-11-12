@@ -3,8 +3,8 @@
    desktop and Android clients use.
 
    Contrast (WCAG 2.x relative-luminance, AA):
-   light: text 14.9 / text-2 7.2 / text-3 4.5 / accent 4.9 (bg), 5.2 (card)
-          on-accent (white) on accent 5.2, on hover 7.3
+   light: text 15.6 / text-2 7.2 / text-3 5.2 (bg) 4.8 (bg-alt) / accent 4.9 (bg),
+          5.2 (card), on-accent (white) on accent 5.2, on hover 7.3
    dark:  text 16.1 / text-2 9.2 / text-3 5.9 / accent 7.0 / on-accent 6.9 */
 :root {
   --bg: #f7f9fc;
@@ -13,7 +13,8 @@
   --border: #e3e8ef;
   --text: #16233a;
   --text-2: #475569;
-  --text-3: #64748b;
+  /* AA on both --bg and --bg-alt (the translucent nav sits over both) */
+  --text-3: #5c6b80;
   --accent: #c2410c;
   --accent-hover: #9a3412;
   --accent-ink: #9a3412;
@@ -76,8 +77,9 @@ svg { display: block; }
 /* ============================================================ nav */
 .nav {
   position: sticky; top: 0; z-index: 50;
-  background: color-mix(in srgb, var(--bg) 82%, transparent);
-  backdrop-filter: blur(12px);
+  /* 92% opaque reads the same as the old 82% + blur(12px) over the hero,
+     without a full-width backdrop re-blur on every scroll frame. */
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
   border-bottom: 1px solid var(--border);
 }
 .nav-inner {
@@ -167,6 +169,8 @@ svg { display: block; }
 .stat span { font-size: 13px; color: var(--text-3); }
 
 /* ============================================================ sections */
+/* the sticky nav is 60px tall: keep in-page jump targets below it */
+#main, .section, #top { scroll-margin-top: 72px; }
 .section { padding: 84px 0; }
 .section-alt { background: var(--bg-alt); }
 .section-inner { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
@@ -297,9 +301,11 @@ svg { display: block; }
   .footer-inner { padding-bottom: 92px; }
 }
 
-/* ============================================================ reveal */
-.reveal { opacity: 0; transform: translateY(18px); transition: opacity .6s ease, transform .6s cubic-bezier(.2,.7,.3,1); }
-.reveal.in { opacity: 1; transform: none; }
+/* ============================================================ reveal
+   Only hide when main.js actually ran (it adds .js on load). A missing or
+   blocked script must never leave the page's cards invisible. */
+.js .reveal { opacity: 0; transform: translateY(18px); transition: opacity .6s ease, transform .6s cubic-bezier(.2,.7,.3,1); }
+.js .reveal.in { opacity: 1; transform: none; }
 
 /* ============================================================ skip link */
 .skip-link {
@@ -324,6 +330,8 @@ svg { display: block; }
   margin-right: 8px; color: var(--accent-ink);
   background: var(--accent-soft); border-color: var(--accent-soft-2);
 }
+/* the author display rules above beat the UA [hidden] rule, so opt back in */
+.gh-chip[hidden] { display: none; }
 
 /* ============================================================ nav actions */
 .nav-actions { display: flex; align-items: center; gap: 8px; margin-left: 4px; }
@@ -420,9 +428,12 @@ svg { display: block; }
 .aw-progress i {
   display: block; height: 100%; border-radius: 99px;
   background: linear-gradient(90deg, var(--accent), #e39a76);
+  opacity: .9;
+  /* opacity is compositor-only; the old filter:brightness() keyframes forced
+     a repaint of the gradient on every frame, forever (even off-screen). */
   animation: awPulse 2.6s ease-in-out infinite alternate;
 }
-@keyframes awPulse { from { filter: brightness(1); } to { filter: brightness(1.15); } }
+@keyframes awPulse { from { opacity: .72; } to { opacity: 1; } }
 .aw-file {
   margin-top: 9px; height: 22px; border-radius: 7px;
   background: var(--accent-soft); opacity: .8;
@@ -464,6 +475,7 @@ svg { display: block; }
   opacity: 0; transform: translateY(8px); pointer-events: none;
   transition: opacity .25s ease, transform .25s ease, color .15s, border-color .15s;
 }
+.to-top[hidden] { display: none; }
 .to-top.show { opacity: 1; transform: none; pointer-events: auto; }
 .to-top:hover { color: var(--accent-ink); border-color: var(--accent); }
 .to-top svg { width: 19px; height: 19px; }
@@ -473,7 +485,7 @@ svg { display: block; }
    transitions declared above. */
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  .reveal { opacity: 1; transform: none; transition: none; }
+  .js .reveal, .reveal { opacity: 1; transform: none; transition: none; }
   .aw-progress i { animation: none; }
-  .card, .client-card, .appwin, .to-top, .btn, .tab, .faq summary::after { transition: none; }
+  .card, .client-card, .appwin, .to-top, .btn, .tab, .faq summary::after, .skip-link { transition: none; }
 }

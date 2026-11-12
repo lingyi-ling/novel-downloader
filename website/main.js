@@ -1,18 +1,32 @@
 /* Novel Downloader website interactions. */
 "use strict";
 
+/* Reveal styles are scoped to .js so a blocked or missing main.js leaves the
+   content visible instead of permanently transparent. */
+document.documentElement.classList.add("js");
+
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
 /* ------------------------------------------------ theme (persisted) */
 const root = document.documentElement;
 const themeColorMetas = $$('meta[name="theme-color"]');
+/* Resolved once: syncThemeBtn() is called on load and on every toggle. */
+const themeBtn = $("#theme-btn");
+if (themeBtn) {
+  themeBtn.addEventListener("click", () => {
+    const next = root.dataset.theme === "dark" ? "light" : "dark";
+    root.dataset.theme = next;
+    try { localStorage.setItem("noveldl-theme", next); } catch { /* private mode */ }
+    syncThemeColor();
+    syncThemeBtn();
+  });
+}
 const reduceMotion = window.matchMedia
   ? window.matchMedia("(prefers-reduced-motion: reduce)")
   : { matches: false };
 function syncThemeBtn() {
-  const btn = $("#theme-btn");
-  if (btn) btn.setAttribute("aria-pressed", String(root.dataset.theme === "dark"));
+  if (themeBtn) themeBtn.setAttribute("aria-pressed", String(root.dataset.theme === "dark"));
 }
 function syncThemeColor() {
   const bg = root.dataset.theme === "dark" ? "#0b1220" : "#f7f9fc";
@@ -33,34 +47,47 @@ if (storedTheme === "dark" || storedTheme === "light") {
   root.dataset.theme = "dark";
 }
 syncThemeBtn();
-$("#theme-btn").addEventListener("click", () => {
-  const next = root.dataset.theme === "dark" ? "light" : "dark";
-  root.dataset.theme = next;
-  try { localStorage.setItem("noveldl-theme", next); } catch { /* private mode */ }
-  syncThemeColor();
-  syncThemeBtn();
-});
 
 /* ------------------------------------------------ i18n (zh source of truth, data-en swap) */
 const langBtn = $("#lang-btn");
+/* Collected on the first language switch, then reused for every toggle. */
+let translated = null;
+const PAGE_TITLE = {
+  zh: "书音 BookTone — 小说与音乐 · 多站点聚合 · 四端同源",
+  en: "BookTone — aggregate search · async downloads · four clients",
+};
 const META_DESC = {
   zh: "异步、模块化、可扩展的小说下载工具链：84 个下载站点、59 个搜索源、28 个音乐平台，CLI / REST API / Windows 桌面 / Android 四端同源。",
   en: "Async, modular, extensible novel-downloading toolkit: 84 download sites, 59 search sources and 28 music platforms — CLI, REST API, Windows desktop and Android share one service layer.",
 };
 function currentLang() {
-  try { return localStorage.getItem("noveldl-lang") || "zh"; } catch { return "zh"; }
+  return localStorageValue("noveldl-lang") === "en" ? "en" : "zh";
+}
+function localStorageValue(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function persistLang(lang) {
+  try { localStorage.setItem("noveldl-lang", lang); } catch { /* private mode */ }
+}
+// An explicit toggle must win over the ?lang= deep link on the next reload.
+function dropLangParam() {
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("lang")) return;
+    url.searchParams.delete("lang");
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  } catch { /* file:// or blocked history API */ }
 }
 function applyLang(lang) {
   const isEn = lang === "en";
   document.documentElement.lang = isEn ? "en" : "zh-CN";
   if (langBtn) langBtn.textContent = isEn ? "中文" : "EN";
-  $$("[data-en]").forEach((el) => {
+  if (!translated) translated = $$("[data-en]");
+  translated.forEach((el) => {
     if (el.dataset.zh === undefined) el.dataset.zh = el.innerHTML;
     el.innerHTML = isEn ? el.dataset.en : el.dataset.zh;
   });
-  document.title = isEn
-    ? "BookTone — aggregate search · async downloads · four clients"
-    : "书音 BookTone — 多站点聚合 · 异步下载 · 四端同源";
+  document.title = isEn ? PAGE_TITLE.en : PAGE_TITLE.zh;
   const metaDesc = document.querySelector('meta[name="description"]');
   if (metaDesc) metaDesc.setAttribute("content", META_DESC[isEn ? "en" : "zh"]);
   // keep control labels in the active language for screen readers
@@ -71,11 +98,23 @@ function applyLang(lang) {
     ["to-top", "回到顶部", "Back to top"],
     ["appwin", "书音 BookTone 桌面客户端预览", "BookTone desktop app preview"],
     ["start-tabs", "快速开始方式", "Quick start options"],
+    ["nav-links", "主导航", "Main navigation"],
+    ["mobile-menu", "主导航", "Main navigation"],
+    ["foot-links", "页脚链接", "Footer links"],
   ];
   labels.forEach(([id, zh, en]) => {
     const el = document.getElementById(id);
     if (el) el.setAttribute("aria-label", isEn ? en : zh);
   });
+  // the menu button label describes the action, which depends on state too
+  const burgerEl = document.getElementById("burger-btn");
+  if (burgerEl) {
+    const open = burgerEl.getAttribute("aria-expanded") === "true";
+    burgerEl.setAttribute(
+      "aria-label",
+      isEn ? (open ? "Close menu" : "Open menu") : (open ? "关闭菜单" : "打开菜单"),
+    );
+  }
   const stars = document.getElementById("gh-stars");
   if (stars && stars.dataset.count) {
     stars.setAttribute("aria-label", starsLabel(stars.dataset.count));
@@ -85,21 +124,22 @@ function applyLang(lang) {
 (() => {
   let q = null;
   try { q = new URLSearchParams(window.location.search).get("lang"); } catch { q = null; }
-  if (q === "en" || q === "zh") {
-    try { localStorage.setItem("noveldl-lang", q); } catch { /* private mode */ }
-  }
+  if (q === "en" || q === "zh") persistLang(q);
 })();
 if (currentLang() === "en") applyLang("en");
 if (langBtn) {
   langBtn.addEventListener("click", () => {
     const next = currentLang() === "en" ? "zh" : "en";
-    try { localStorage.setItem("noveldl-lang", next); } catch { /* private mode */ }
+    persistLang(next);
+    dropLangParam();
     applyLang(next);
   });
 }
 
 /* ------------------------------------------------ tabs (ARIA + keyboard + session memory) */
 const tabs = $$(".tab");
+const tabPanels = $$(".tab-panel");
+const tabBar = $("#start-tabs");
 function activateTab(key, opts) {
   const target = tabs.find((t) => t.dataset.tab === key);
   if (!target) return;
@@ -109,14 +149,20 @@ function activateTab(key, opts) {
     t.setAttribute("aria-selected", String(on));
     t.tabIndex = on ? 0 : -1;
   });
-  $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.dataset.panel === key));
+  tabPanels.forEach((p) => p.classList.toggle("active", p.dataset.panel === key));
   try { sessionStorage.setItem("noveldl-tab", key); } catch { /* private mode */ }
   if (opts && opts.focus) target.focus();
 }
-tabs.forEach((tab) => {
-  tab.addEventListener("click", () => activateTab(tab.dataset.tab));
-  tab.addEventListener("keydown", (e) => {
+/* One delegated pair of listeners instead of two per button. */
+if (tabBar) {
+  tabBar.addEventListener("click", (e) => {
+    const tab = e.target.closest(".tab");
+    if (tab && tabBar.contains(tab)) activateTab(tab.dataset.tab);
+  });
+  tabBar.addEventListener("keydown", (e) => {
     if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(e.key)) return;
+    const tab = e.target.closest(".tab");
+    if (!tab) return;
     e.preventDefault();
     let i = tabs.indexOf(tab);
     if (e.key === "ArrowRight") i = (i + 1) % tabs.length;
@@ -125,7 +171,7 @@ tabs.forEach((tab) => {
     else i = tabs.length - 1;
     activateTab(tabs[i].dataset.tab, { focus: true });
   });
-});
+}
 // restore the tab chosen earlier in this session (survives reload & lang switch)
 (() => {
   let saved = null;
@@ -189,18 +235,28 @@ if ("IntersectionObserver" in window) {
 }
 
 /* ------------------------------------------------ scrollspy */
-const spyLinks = $$(".nav-links a[href^='#']");
-const spyTargets = spyLinks
-  .map((a) => document.querySelector(a.getAttribute("href")))
+const spyLinks = $$(".nav-links a[href^='#'], .mobile-menu a[href^='#']");
+const spyTargets = [
+  ...new Set(
+    spyLinks
+      .map((a) => a.getAttribute("href"))
+      .filter((href) => href && href.length > 1),
+  ),
+]
+  .map((href) => document.querySelector(href))
   .filter(Boolean);
 if ("IntersectionObserver" in window && spyTargets.length) {
   const sio = new IntersectionObserver(
     (entries) => {
       entries.forEach((entry) => {
         if (!entry.isIntersecting) return;
-        spyLinks.forEach((a) =>
-          a.classList.toggle("active", a.getAttribute("href") === "#" + entry.target.id),
-        );
+        const active = "#" + entry.target.id;
+        spyLinks.forEach((a) => {
+          const on = a.getAttribute("href") === active;
+          a.classList.toggle("active", on);
+          if (on) a.setAttribute("aria-current", "true");
+          else a.removeAttribute("aria-current");
+        });
       });
     },
     { rootMargin: "-40% 0px -55% 0px" },
@@ -211,40 +267,53 @@ if ("IntersectionObserver" in window && spyTargets.length) {
 /* ------------------------------------------------ mobile menu */
 const burger = $("#burger-btn");
 const mobileMenu = $("#mobile-menu");
+function setMenu(open, opts) {
+  if (!burger || !mobileMenu) return;
+  mobileMenu.classList.toggle("open", open);
+  mobileMenu.hidden = !open;
+  burger.setAttribute("aria-expanded", String(open));
+  const isEn = document.documentElement.lang === "en";
+  burger.setAttribute(
+    "aria-label",
+    isEn ? (open ? "Close menu" : "Open menu") : (open ? "关闭菜单" : "打开菜单"),
+  );
+  if (open === false && opts && opts.focus) burger.focus();
+}
 if (burger && mobileMenu) {
-  burger.addEventListener("click", () => {
-    const open = mobileMenu.classList.toggle("open");
-    mobileMenu.hidden = !open;
-    burger.setAttribute("aria-expanded", String(open));
-  });
+  burger.addEventListener("click", () => setMenu(mobileMenu.hidden));
   mobileMenu.addEventListener("click", (e) => {
-    if (e.target.closest("a")) {
-      mobileMenu.classList.remove("open");
-      mobileMenu.hidden = true;
-      burger.setAttribute("aria-expanded", "false");
-    }
+    if (e.target.closest("a")) setMenu(false);
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !mobileMenu.hidden) {
-      mobileMenu.classList.remove("open");
-      mobileMenu.hidden = true;
-      burger.setAttribute("aria-expanded", "false");
-      burger.focus();
-    }
+    if (e.key === "Escape" && !mobileMenu.hidden) setMenu(false, { focus: true });
   });
 }
 
 /* ------------------------------------------------ back to top */
 const toTop = $("#to-top");
 if (toTop) {
+  let topTicking = false;
+  let topShown = null;
+  const syncToTop = () => {
+    topTicking = false;
+    const show = window.scrollY > 520;
+    // a scroll frame that does not cross the threshold writes nothing
+    if (show === topShown) return;
+    topShown = show;
+    // keep the button out of the tab order while it is invisible
+    toTop.hidden = !show;
+    toTop.classList.toggle("show", show);
+  };
   window.addEventListener(
     "scroll",
     () => {
-      toTop.hidden = false;
-      toTop.classList.toggle("show", window.scrollY > 520);
+      if (topTicking) return;
+      topTicking = true;
+      requestAnimationFrame(syncToTop);
     },
     { passive: true },
   );
+  syncToTop();
   toTop.addEventListener("click", () =>
     window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" }),
   );
@@ -284,19 +353,31 @@ function formatStars(n) {
 function starsLabel(n) {
   return n + (currentLang() === "en" ? " GitHub stars" : " 个 GitHub 星标");
 }
+/* Decorative GitHub chips are not needed for first paint: start their
+   requests once the browser is idle so they never compete with the CSS/HTML
+   that the visitor is actually waiting for. */
+function whenIdle(fn) {
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(fn, { timeout: 3000 });
+  } else {
+    setTimeout(fn, 1200);
+  }
+}
 const starsEl = $("#gh-stars");
 if (starsEl) {
-  ghJson("/repos/lingyi-ling/novel-downloader", "gh-repo")
-    .then((d) => {
-      const n = document.getElementById("gh-stars-n");
-      if (typeof d.stargazers_count === "number" && n) {
-        n.textContent = formatStars(d.stargazers_count);
-        starsEl.hidden = false;
-        starsEl.dataset.count = String(d.stargazers_count);
-        starsEl.setAttribute("aria-label", starsLabel(d.stargazers_count));
-      }
-    })
-    .catch(() => {});
+  whenIdle(() => {
+    ghJson("/repos/lingyi-ling/novel-downloader", "gh-repo")
+      .then((d) => {
+        const n = document.getElementById("gh-stars-n");
+        if (typeof d.stargazers_count === "number" && n) {
+          n.textContent = formatStars(d.stargazers_count);
+          starsEl.hidden = false;
+          starsEl.dataset.count = String(d.stargazers_count);
+          starsEl.setAttribute("aria-label", starsLabel(d.stargazers_count));
+        }
+      })
+      .catch(() => {});
+  });
 }
 const releaseEl = $("#gh-release");
 if (releaseEl) {
@@ -325,28 +406,30 @@ if (releaseEl) {
     return String(d.tag_name || "").replace(/^v/, "");
   }
 
-  latestVersion()
-    .then((ver) => {
-      if (!ver) return;
-      const n = document.getElementById("gh-release-n");
-      if (n) {
-        n.textContent = ver;
-        releaseEl.hidden = false;
-      }
-      // keep the showcase mock's version pill in sync with the real release
-      const pill = document.getElementById("appwin-ver");
-      if (pill) pill.textContent = "v" + ver;
-      // keep the JSON-LD softwareVersion in sync too
-      const ld = document.getElementById("ld-software");
-      if (ld) {
-        try {
-          const data = JSON.parse(ld.textContent);
-          data.softwareVersion = ver;
-          ld.textContent = JSON.stringify(data);
-        } catch {
-          /* leave the static value */
+  whenIdle(() => {
+    latestVersion()
+      .then((ver) => {
+        if (!ver) return;
+        const n = document.getElementById("gh-release-n");
+        if (n) {
+          n.textContent = ver;
+          releaseEl.hidden = false;
         }
-      }
-    })
-    .catch(() => {});
+        // keep the showcase mock's version pill in sync with the real release
+        const pill = document.getElementById("appwin-ver");
+        if (pill) pill.textContent = "v" + ver;
+        // keep the JSON-LD softwareVersion in sync too
+        const ld = document.getElementById("ld-software");
+        if (ld) {
+          try {
+            const data = JSON.parse(ld.textContent);
+            data.softwareVersion = ver;
+            ld.textContent = JSON.stringify(data);
+          } catch {
+            /* leave the static value */
+          }
+        }
+      })
+      .catch(() => {});
+  });
 }
