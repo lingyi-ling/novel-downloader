@@ -20,7 +20,7 @@ novel-cli config init --force
 
 The command generates:
 
-* `settings.toml`: the main configuration file
+* `settings.toml`: the main configuration file (see the [`settings.toml` reference](./settings-reference.en.md) for every default)
 
 ---
 
@@ -55,6 +55,15 @@ novel-cli download --site linovelib
 > If a book ID is also passed on the command line, for example
 > `novel-cli download --site linovelib 5555`, the **command-line argument
 > overrides `book_ids` from the configuration file**.
+
+#### Export directory (`general.output_dir`)
+
+`general.output_dir` is the default destination for exported files (`export`, and the
+export step after `download`). `novel-cli export --out DIR` overrides the export
+directory for **that run only**; it does not modify the configuration file and does
+not affect `general.raw_data_dir` — raw data is always read from the latter and is
+never written or changed. `--out` supports `~` and environment variables, and a
+missing target directory (including parents) is created automatically.
 
 #### Update check (`general.update_check`)
 
@@ -180,8 +189,8 @@ On each run, the CLI looks for the configuration in the following order (highest
 novel-cli download --config path/to/settings.toml
 ```
 
-(2) **`./settings.toml` in the current directory**
+(2) **`./settings.toml` / `./settings.json` in the current directory**
 
-(3) **`settings.toml` in the application home** (`NOVEL_HOME` or the platform data directory; see [File Saving](./file-saving.md))
+(3) **`settings.toml` / `settings.json` in the application home** (`NOVEL_HOME` or the platform data directory; see [File Saving](./file-saving.md))
 
-If more than one match exists, the higher-priority configuration overrides the lower-priority one.
+Only the highest-priority file is used; files are **not merged**, and missing keys in the selected file are not filled from lower-priority files.

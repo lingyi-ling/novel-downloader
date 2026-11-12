@@ -2,7 +2,7 @@
 
 本页给出可以直接复制执行的常见任务配方。所有命令都假设 `novel-cli` 已在 `PATH` 中；可用 `where novel-cli` (Windows) 或 `which novel-cli` 确认。
 
-配置查找顺序为 `--config` 指定文件 → 当前目录 `settings.toml` → 应用主目录 (`NOVEL_HOME` 或平台数据目录)。**计划任务/脚本一定要先 `cd` 到配置所在目录**，或使用接受 `--config` 的命令，否则会读到另一份配置。
+配置查找顺序为 `--config` 指定文件 → 当前目录 `settings.toml` / `settings.json` → 应用主目录 (`NOVEL_HOME` 或平台数据目录)。**计划任务/脚本一定要先 `cd` 到配置所在目录**，或使用接受 `--config` 的命令，否则会读到另一份配置。
 
 ---
 
@@ -273,13 +273,13 @@ Get-NetIPAddress -AddressFamily IPv4 |
 
 #### 第五步：验证
 
-在电脑本机：
+在电脑本机（带上启动时设置的 token）：
 
 ```bash
-curl http://127.0.0.1:8081/api/v1/health
+curl -H "X-API-Key: change-me" http://127.0.0.1:8081/api/v1/health
 ```
 
-在手机自带浏览器中打开 `http://192.168.1.23:8081/docs`，能看到接口文档即表示连通。
+在手机自带浏览器中打开 `http://192.168.1.23:8081/api/v1/health`。由于绑定的是非回环地址，`/docs` 会被自动关闭；返回 `401`（`Invalid or missing API token...`）就说明端口已连通且鉴权生效。
 
 ---
 

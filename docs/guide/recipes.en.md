@@ -2,7 +2,7 @@
 
 Copy-paste recipes for common tasks. Every command assumes `novel-cli` is on `PATH`; confirm with `where novel-cli` (Windows) or `which novel-cli`.
 
-Configuration lookup order is `--config` file → `settings.toml` in the current directory → application home (`NOVEL_HOME` or the platform data directory). **Scheduled tasks and scripts must `cd` to the directory that holds the configuration first**, or use a command that accepts `--config`; otherwise they may read a different configuration.
+Configuration lookup order is `--config` file → `settings.toml` / `settings.json` in the current directory → application home (`NOVEL_HOME` or the platform data directory). **Scheduled tasks and scripts must `cd` to the directory that holds the configuration first**, or use a command that accepts `--config`; otherwise they may read a different configuration.
 
 ---
 
@@ -273,13 +273,13 @@ If the API was started with a token, enter the same value as the “API key”.
 
 #### Step 5: Verify
 
-On the computer:
+On the computer (with the token used at startup):
 
 ```bash
-curl http://127.0.0.1:8081/api/v1/health
+curl -H "X-API-Key: change-me" http://127.0.0.1:8081/api/v1/health
 ```
 
-On the phone, open `http://192.168.1.23:8081/docs` in its browser. Seeing the API documentation means the connection works.
+On the phone, open `http://192.168.1.23:8081/api/v1/health`. Because the server is bound to a non-loopback address, `/docs` is disabled automatically; a `401` (`Invalid or missing API token...`) means the port is reachable and authentication is enforced.
 
 ---
 

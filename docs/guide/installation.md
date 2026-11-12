@@ -25,6 +25,8 @@ pip install novel-downloader
 * `novel-cli`: 命令行入口
 * `novel-api`: 本地 REST API 入口 (需安装 `api` 可选依赖, 见下文)
 
+安装后如需 bash / zsh / fish / PowerShell 的 Tab 补全, 用 `novel-cli completion --shell <shell>` 生成脚本并加载, 具体写法见 [CLI 用法 § completion](./cli-examples.md#11-completion)。
+
 (2) 安装最新开发版 (GitHub)
 
 ```bash
@@ -49,11 +51,11 @@ pip install .
 
 从 GitHub Releases 下载 `NovelDownloader-setup-<version>-x64.exe` 时，安装行为如下：
 
-* **按当前用户安装**，默认目录为 `%LOCALAPPDATA%\Programs\NovelDownloader`，不需要管理员权限（`PrivilegesRequired=lowest`）。更新器按这个默认路径识别安装版；安装到别处会被当作便携版处理。
-* **升级**直接原地覆盖安装目录；安装器会先删除旧版的 `_internal` 再写入新文件，避免已移除的插件目录残留。应用内更新会以静默参数启动同一个安装器。
+* **按当前用户安装**，默认目录为 `%LOCALAPPDATA%\Programs\NovelDownloader`，不需要管理员权限（`PrivilegesRequired=lowest`）。更新器通过卸载注册表项识别安装版：读取 Inno 写入的 `InstallLocation` / `DisplayIcon`（`{AppId}_is1` 卸载键），因此安装到自定义目录也会按安装版更新；注册表项缺失时回退到安装目录中的 `unins000.exe`，最后才检查默认路径。其余已打包目录视为便携版。
+* **升级**直接原地覆盖安装目录；安装器会先删除旧版的 `_internal` 再写入新文件，避免已移除的插件目录残留。应用内更新会以静默参数启动同一个安装器，静默安装结束后安装器会直接启动新版本（`[Run]` 不带 `skipifsilent`），无需手动打开。
 * **运行中的实例**由命名互斥量 `NovelDownloader-UpdateMutex` 识别，安装器会先关闭旧进程再替换文件。
 * **卸载**只移除安装目录和快捷方式，不会删除 `%LOCALAPPDATA%\novel_downloader` 下的配置、下载记录、缓存和登录态；需要彻底清理时请手动删除该目录（其中包含账号凭据，删除前请确认）。
-* **免安装 (便携) 版**解压到任意目录即可使用，配置、日志、缓存和登录态同样保存在 `%LOCALAPPDATA%\novel_downloader`（可用 `NOVEL_HOME` 覆盖），不会写进程序目录。
+* **免安装 (便携) 版**解压到任意目录即可使用，配置、日志、缓存和登录态同样保存在 `%LOCALAPPDATA%\novel_downloader`（可用 `NOVEL_HOME` 覆盖），不会写进程序目录。便携版更新会先删除程序目录中的 `_internal` 再复制新文件，已移除的插件不会残留；`app_home` 下的设置与下载不受影响（仅当 `NOVEL_HOME` 显式指向 `_internal` 内部时，该子目录会被保留）。
 
 ---
 
@@ -185,7 +187,7 @@ OCR 分为两部分:
 (1) 安装扩展依赖
 
 ```bash
-pip install novel-downloader[image-utils]
+pip install "novel-downloader[image-utils]"
 ```
 
 这将安装:

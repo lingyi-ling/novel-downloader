@@ -398,7 +398,7 @@ Then the processor constructor `__init__(config)` receives:
 }
 ```
 
-> Documentation for the existing built-in processors: see `docs/3-settings-schema.md#processors-配置`
+> Documentation for the existing built-in processors: see [Settings Reference](../guide/settings-reference.en.md) and [Processors Reference](../guide/processors-reference.en.md)
 > This includes `cleaner` (regex/replace), `zh_convert` (OpenCC simplified/traditional conversion), and `corrector` (pycorrector correction; results vary by model).
 
 ---
@@ -410,7 +410,7 @@ Plugins are **registered via decorators**; registration happens automatically wh
 * Site session: `@registrar.register_fetcher()`
 * Site parser: `@registrar.register_parser()`
 * Site searcher: `@registrar.register_searcher()`
-* Site client: `@registrar.get_client()`
+* Site client: `@registrar.register_client()`
 * Text processor: `@registrar.register_processor()`
 
 #### 1. How Key Names Are Determined

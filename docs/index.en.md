@@ -110,7 +110,7 @@ pip install -U novel-downloader
 Install the aggregated runtime extras:
 
 ```bash
-pip install novel-downloader[all]
+pip install "novel-downloader[all]"
 ```
 
 Install optional groups as needed:
@@ -201,6 +201,7 @@ novel-desktop
 | History | browse exported files, open the containing folder |
 | Music | multi-platform search and download, platform health check (requires the `music` extra) |
 | Follow | maintain the follow list, check for new chapters, queue new chapters for download |
+| Settings | edit the output folder, proxy, automatic update check/download/install, theme and language; saved to `settings.toml` |
 
 Search results render `60` rows at a time: the bottom of the list shows
 "Show more" with a `shown/total` counter, and each click appends the next
@@ -263,7 +264,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-For the full API documentation, see: [API Reference](reference/api-examples.md).
+For the full API documentation, see: [API Reference](reference/api-examples.en.md).
 
 ---
 

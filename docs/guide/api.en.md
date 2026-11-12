@@ -54,6 +54,11 @@ Once started:
 - OpenAPI JSON: <http://127.0.0.1:8081/openapi.json>
 - Static export directory: `/downloads/<filename>` (maps to `general.output_dir`)
 
+> When bound to a non-loopback address (such as `0.0.0.0`), `/docs`, `/redoc`
+> and `/openapi.json` are disabled automatically so the full route and
+> parameter schema is not published to the LAN; `novel-api` exposes them only
+> on a loopback listen.
+
 ## Authentication
 
 When no token is configured, requests are not checked; this suits
@@ -73,7 +78,7 @@ X-API-Key: my-secret
 A missing or wrong token returns `401`:
 
 ```json
-{"detail": "Invalid or missing API token"}
+{"detail": "Invalid or missing API token. Send 'Authorization: Bearer <token>' or 'X-API-Key: <token>'."}
 ```
 
 ## Endpoint overview
@@ -119,7 +124,7 @@ Task object fields:
 
 `task_id`, `title`, `site`, `book_id`, `status`, `chapters_done`,
 `chapters_total`, `progress`, `error`, `exported_paths`, `created_at`,
-`finished_at`.
+`finished_at`, `export_stage`.
 
 `status` values: `queued`, `running`, `processing`, `exporting`, `completed`,
 `cancelled`, `failed`.
@@ -136,7 +141,8 @@ Request body:
   "timeout": 5.0,
   "sort": "quality",
   "order": "desc",
-  "limit": 20
+  "limit": 20,
+  "group": false
 }
 ```
 
@@ -149,7 +155,13 @@ Request body:
   search takes roughly this long instead of waiting for the slowest site.
 - `sort` accepts `quality`, `priority`, `site`, `title`, `author`, `words`,
   `update`.
+- `order` accepts `asc` / `desc`; when omitted, the key's natural direction is used.
 - `limit` is the total result cap after merging.
+- `group` defaults to `false`; when `true`, same-book results from different
+  sites are folded into one row. That row is the book's best source and carries
+  an extra `sources` array listing every site that has it (best first). The
+  envelope stays `{total, results}`, so clients that ignore grouping keep the
+  default and see no change.
 - `keyword` supports a two-to-four-token "title + author" style query: spaces
   (including the full-width space), `·`, `,`, `，` and `-` split it into
   tokens, which are compared against the title and author separately (for
@@ -836,15 +848,17 @@ tracks without `path` count toward `skipped`:
 Response:
 
 ```json
-{"path": "D:/Music/playlists/favorites.m3u8", "tracks_written": 1, "skipped": 0}
+{"path": "D:/Music/playlists/favorites.m3u8", "tracks_written": 1, "skipped": 0, "written": 1}
 ```
+
+`written` equals `tracks_written`; it is a compatibility alias read by the embedded engine and the Android client.
 
 ### Platform health check
 
 `GET /api/v1/music/health` runs one bounded search per platform (no direct-link
 resolution and no download). When `platform` is omitted it checks every
 registered platform concurrently; `timeout` is the per-platform budget
-(default `5` seconds, range `1..60`):
+(default `5` seconds; must be greater than `0` and at most `60`):
 
 ```json
 [
@@ -884,7 +898,8 @@ send this payload to that URL:
     "error": null,
     "exported_paths": {"txt": "downloads/示例小说.txt"},
     "created_at": 1710000000.0,
-    "finished_at": 1710000100.0
+    "finished_at": 1710000100.0,
+    "export_stage": "raw"
   }
 }
 ```

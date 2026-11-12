@@ -32,17 +32,16 @@ novel-cli update --yes     # download and verify without asking
 novel-cli update --json    # machine-readable output
 ```
 
-`--yes` downloads into the app data directory (`<app_home>/updates/`) and verifies the file. It **never** runs or installs anything:
+`--yes` downloads into the app data directory (`<app_home>/updates/`) and verifies the file. It **never** runs or installs anything. `novel-cli update` requests `shape="cli"` explicitly and only downloads `novel-cli-<version>-<platform>.zip`; it never downloads or runs a desktop installer, and when the release has no matching CLI asset it stops (`error` is `no-cli-asset` with `--json --yes`) instead of falling back to `NovelDownloader-setup-*.exe`.
 
-- Windows: double-click `NovelDownloader-setup-<version>-x64.exe`
-- Other platforms: extract the archive and replace the installed files
+To install the CLI: close the running CLI, extract that zip, and replace the installed CLI directory with its contents (on Windows standalone installs this is usually `%LOCALAPPDATA%\Programs\novel-downloader\novel-cli\`). The desktop installer/portable packages are handled by the auto-update flow below.
 
 ## Desktop auto-update
 
 The desktop app checks once every 24 hours by default; a newer version is downloaded in the background and the sidebar shows byte-level progress. Transfers use an HTTP `Range` request to reuse the existing `.part` file, so an interrupted download resumes instead of starting over, with up to 3 retries.
 
-- **Installer build**: on quit, the verified Inno Setup installer starts silently and replaces the installation directory in place, then restarts the app.
-- **Portable build**: the downloaded asset is a zip; after the app exits, a PowerShell helper waits for the process to end, expands the zip over the current folder and restarts the app, rather than installing a second copy into `%LOCALAPPDATA%`.
+- **Installer build**: on quit, the verified Inno Setup installer starts silently and replaces the installation directory in place; once the silent install finishes, Setup starts the new build itself, so nothing needs to be opened manually.
+- **Portable build**: the downloaded asset is a zip; after the app exits, a PowerShell helper waits for the process to end, expands the zip to `%TEMP%`, deletes `_internal` in the current folder, then copies the new files over it and restarts the app. That removes plugins dropped from the product, while settings and downloads under `app_home` stay untouched. It does not install a second copy into `%LOCALAPPDATA%`.
 - Leftover `.part` files older than a day and finished packages older than a week are pruned from the update folder.
 
 ## What gets verified
@@ -72,9 +71,17 @@ Entries are per **package shape**:
 | --- | --- |
 | `windows-x64-installer` | `NovelDownloader-setup-<ver>-x64.exe` |
 | `windows-x64-portable` | `NovelDownloader-<ver>-windows-x64.zip` |
+| `windows-x64-cli` | `novel-cli-<ver>-windows-x64.zip` |
+| `windows-x64-api` | `novel-api-<ver>-windows-x64.zip` |
 | `android` | `novel-downloader-<ver>-android.apk` |
 
-A copy installed from the installer only ever updates to the installer, and a portable copy only to the portable archive.
+`novel-cli update` always selects the `cli` entry; when there is no `*-cli` entry
+for the current platform it does not fall back to installer / portable / api. The
+install shape is detected from the uninstall registry (`InstallLocation` /
+`DisplayIcon`, falling back to `unins000.exe`), so an installer copy in a custom
+directory still updates to the installer. A copy installed from the installer
+only ever updates to the installer, and a portable copy only to the portable
+archive.
 
 ## Known limitations
 

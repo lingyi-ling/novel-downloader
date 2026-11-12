@@ -310,7 +310,7 @@ If the command succeeds, Python itself handles the path fine; the problem usuall
    ping -n 4 <computer IP>
    ```
 
-4. Open `http://<computer IP>:8081/docs` in the phone's browser. If the Swagger page loads, the network path works; if not, continue with the firewall checks.
+4. Open `http://<computer IP>:8081/api/v1/health` in the phone's browser. `/docs` is disabled automatically on a non-loopback bind, so use the health endpoint: a `401` (`Invalid or missing API token...`) means the network path works and authentication is enforced; a timeout or refused connection means you should continue with the firewall checks.
 
 5. Allow the port through Windows Firewall (administrator PowerShell):
 
@@ -477,9 +477,9 @@ curl -x http://127.0.0.1:7890 -I https://www.google.com
 
 **How it works**:
 
-* The client first detects the install shape: an executable under `%LOCALAPPDATA%\Programs\NovelDownloader` is an **installer** copy, any other frozen folder is **portable**, and a source checkout is `source`.
-* An **installer** copy downloads `NovelDownloader-setup-<version>-x64.exe` and launches Inno Setup silently after exit, overwriting the install directory in place. Setup removes the old `_internal` before writing the new build and uses the named mutex `NovelDownloader-UpdateMutex` to close a running instance.
-* A **portable** copy downloads a zip. After exit, the PowerShell helper `updates/_apply_portable_update.ps1` waits for the process to end, expands the zip to `%TEMP%`, copies it over the current program folder, and restarts the app. It does not install a second copy into `%LOCALAPPDATA%`.
+* The client first detects the install shape: it prefers the uninstall registry's `InstallLocation` / `DisplayIcon` values (under the `{AppId}_is1` key), then an `unins000.exe` marker next to the executable, and only then the default `%LOCALAPPDATA%\Programs\NovelDownloader` directory. A copy installed into a custom directory is therefore still an **installer** copy; any other frozen folder is **portable**, and a source checkout is `source`.
+* An **installer** copy downloads `NovelDownloader-setup-<version>-x64.exe` and launches Inno Setup silently after exit, overwriting the install directory in place. Setup removes the old `_internal` before writing the new build and uses the named mutex `NovelDownloader-UpdateMutex` to close a running instance; after the silent install it starts the new build itself, so nothing needs to be opened manually.
+* A **portable** copy downloads a zip. After exit, the PowerShell helper `updates/_apply_portable_update.ps1` waits for the process to end, expands the zip to `%TEMP%`, deletes `_internal` in the current program folder, then copies the new files over and restarts the app. Plugins dropped from the product do not linger, and settings and downloads under `app_home` are untouched. It does not install a second copy into `%LOCALAPPDATA%`.
 * Portable updates need `powershell` or `pwsh`. If neither is found, the update aborts and asks you to extract the archive manually.
 
 **Diagnose**:
@@ -487,7 +487,7 @@ curl -x http://127.0.0.1:7890 -I https://www.google.com
 1. Update packages live in `%LOCALAPPDATA%\novel_downloader\updates\`. After a failure the zip/installer is usually still there; for a portable copy you can extract it over the folder containing `NovelDownloader.exe` and start the app manually.
 2. Cleanup rules: unfinished `.part` files are kept for 1 day, complete installers/zips for 7 days, then removed automatically.
 3. If PowerShell is missing: manually extract the zip from `updates\` and copy every file over the current program folder.
-4. If the upgrade seems ineffective or two copies exist: check whether both `%LOCALAPPDATA%\Programs\NovelDownloader` and a portable folder exist, and confirm which one you launched. The `v...` label at the bottom of the sidebar is the running version.
+4. If the upgrade seems ineffective or two copies exist: the installer directory comes from the uninstall registry (`InstallLocation` / `DisplayIcon`) or `unins000.exe`, so it need not be the default `%LOCALAPPDATA%\Programs\NovelDownloader`; confirm which copy you launched. The `v...` label at the bottom of the sidebar is the running version.
 5. Logs are in `%LOCALAPPDATA%\novel_downloader\logs\novel-desktop.log`; search for `Launched the update installer` or `Launched the portable update helper` to confirm that the updater actually started.
 
 See [Installation](./installation.en.md) for how install, upgrade, and uninstall treat user data.
@@ -603,11 +603,17 @@ path):
 **Symptoms**: the desktop app reports
 `Refusing to download an update from an insecure source`; `novel-cli update
 --yes` exits with code `1`; `novel-cli update --json --yes` has `error` set to
-`insecure-url`, `missing-digest`, or `no-asset`; a `.part` file is left in
+`insecure-url`, `missing-digest`, or `no-cli-asset`; a `.part` file is left in
 `updates\` after an interrupted transfer.
 
 **How it works** (the desktop app and CLI share `apps/common/updater.py`):
 
+* `novel-cli update` requests `shape="cli"` explicitly and accepts only
+  `novel-cli-<version>-<platform>.zip`. Even if the manifest/API only returns a
+  desktop package, that fallback is discarded and the command stops; it never
+  downloads or runs `NovelDownloader-setup-*.exe`. Accordingly, the `--json`
+  `asset_shape` is `cli` when a CLI asset was selected, and `null` when there is
+  no CLI asset or the check failed.
 * The asset URL in the release manifest must be `https://`. The CLI refuses a
   plaintext address before prompting or downloading; the desktop client does the
   same.
@@ -630,18 +636,61 @@ path):
 2. `missing-digest`: that release provides no SHA-256 for your platform asset, so
    the client will not download an unverifiable file; download it manually from
    the release page and check the digest.
-3. `no-asset`: no asset matches the current platform (for example, an
-   unsupported architecture).
+3. `no-cli-asset`: the release has no matching CLI asset (`novel-cli-*.zip`) for
+   the current platform (for example, it was not uploaded or the architecture is
+   unsupported). The CLI does not fall back to a desktop installer; use
+   `pip install -U novel-downloader`, or download the matching CLI zip manually
+   from the release page.
 4. Repeated checksum failures: close the app, delete the corresponding `.part`
    under `%LOCALAPPDATA%\novel_downloader\updates\`, and retry. The desktop app
    also removes `.part` files older than 1 day automatically.
 5. For a machine-readable reason, run `novel-cli update --json --yes`: it never
-   prompts and puts the download failure in the `error` field (`--json` alone
-   behaves like `--check` and never attempts a download).
+   prompts and puts the download failure in the `error` field; `asset_shape`
+   reports the selected asset shape (for the CLI it is `cli` or `null`). `--json`
+   alone behaves like `--check` and never attempts a download.
 
 ---
 
-## 14. Still Stuck?
+## 14. Confirm What a Clean or Restore Will Do First
+
+`clean cache`, `clean book`, and `storage --clean` all support `--dry-run`: they
+report the paths and sizes **without deleting anything**, and use the same path
+validation as a real removal (escaping site keys and protected directories still
+raise an error).
+
+```bash
+novel-cli clean cache --site qidian --dry-run
+novel-cli clean book --site qidian 1010868264 --all --dry-run
+novel-cli storage --clean --dry-run
+```
+
+For scripts, add `--json` (it requires `--dry-run`) to get a single-line
+`{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`.
+
+If a chapter database was deleted by mistake, restore it from a backup:
+
+```bash
+# Back up every chapter database first
+novel-cli storage backup --out ~/novel-backups
+
+# Restore from a backup; replacing an existing database requires -y
+novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<timestamp>.sqlite -y
+```
+
+`restore` validates the backup (integrity, schema version, required columns) before
+atomically replacing the target; when an existing database is replaced, the old one
+is preserved as `*.pre-restore-*.bak` in the same directory. The target must be
+inside `raw_data_dir`.
+
+The backup contains only the chapter databases under `raw_data`; it does not include
+cookies/tokens, `settings.toml`, logs, or media files, so sign in again after a restore,
+and treat the plaintext backup as sensitive data. See the
+[full “back up → verify (SHA-256 / `PRAGMA integrity_check`) → restore” workflow](./cli-examples.md#9-storage-subcommand)
+in the CLI usage examples.
+
+---
+
+## 15. Still Stuck?
 
 Include the following information when opening an issue:
 

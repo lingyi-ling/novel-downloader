@@ -20,7 +20,7 @@ novel-cli config init --force
 
 生成内容包括:
 
-* `settings.toml`: 核心配置文件
+* `settings.toml`: 核心配置文件 (各项默认值见 [settings.toml 配置说明](./settings-reference.md))
 
 ---
 
@@ -54,6 +54,13 @@ novel-cli download --site linovelib
 >
 > 若 CLI 同时传入了 Book ID, 例如 `novel-cli download --site linovelib 5555`,
 > 则 **命令行参数会覆盖配置文件中的 `book_ids`**。
+
+#### 导出目录 (`general.output_dir`)
+
+`general.output_dir` 是导出文件的默认落点 (`export` 以及 `download` 完成后的导出都写入这里)。
+`novel-cli export --out DIR` 只覆盖**本次运行**的导出目录, 不会修改配置文件, 也不影响
+`general.raw_data_dir` —— 原始数据始终从后者读取, 不会被写入或改变。`--out` 支持 `~`
+与环境变量, 目标目录 (含父目录) 不存在时会自动创建。
 
 #### 更新检查 (`general.update_check`)
 
@@ -116,7 +123,7 @@ password = "your_password"
 步骤:
 
 1. 先在浏览器登录目标站点
-2. 打开开发者工具 (`F12` / `CTRL + SHITF + I`)
+2. 打开开发者工具 (`F12` / `CTRL + SHIFT + I`)
 3. 从网络请求中复制完整 Cookie 字符串
 4. 写入配置:
 
@@ -178,8 +185,8 @@ CLI 每次运行时会按以下优先级查找配置 (高 -> 低):
 novel-cli download --config path/to/settings.toml
 ```
 
-(2) **当前目录下的 `./settings.toml`**
+(2) **当前目录下的 `./settings.toml` / `./settings.json`**
 
-(3) **应用主目录下的 `settings.toml`** (`NOVEL_HOME` 或平台数据目录，见 [文件保存](./file-saving.md))
+(3) **应用主目录下的 `settings.toml` / `settings.json`** (`NOVEL_HOME` 或平台数据目录，见 [文件保存](./file-saving.md))
 
-若存在多个匹配项, 上级优先级配置会覆盖下级。
+只会使用优先级最高的那个文件, **不会合并**多个文件; 高优先级文件中的缺失项也不会从低优先级文件补齐。

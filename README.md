@@ -132,7 +132,8 @@ novel-api
 novel-desktop
 ```
 
-提供搜索、下载队列、历史导出与音乐下载的图形界面。搜索结果按 60 条一批渲染，
+提供搜索、下载队列、历史导出、音乐下载与设置页的图形界面。设置页可修改输出目录、
+代理、自动更新与外观/语言，并保存到 `settings.toml`。搜索结果按 60 条一批渲染，
 底部「显示更多 (Show more)」追加下一批；歌单导出遇到同名文件会先提示，点击后才覆盖。
 
 ## 规则书源 (无需写代码即可新增站点)
@@ -208,7 +209,7 @@ novel-desktop
 novel-cli sources list --check
 
 # 校验单个规则文件
-novel-cli sources check ./rules/example.json
+novel-cli sources check ./rules/_example-template.json
 
 # 使用规则书源搜索 / 下载
 novel-cli search "斗破苍穹" -s biquge5r

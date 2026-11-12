@@ -93,12 +93,13 @@ novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end E
     * 输入书籍 ID (配合 `--site` 使用)
     * 输入书籍/章节 URL (自动解析站点与书籍 ID)
     * 省略时将从配置文件读取 `book_ids`
-* `--site SITE`: 站点键 (如 `qidian`, `b520`, ...), 若直接传入 URL, 可省略
-* `--start START`: 起始章节**唯一 ID** (仅用于第一个 `book_id`)
-* `--end`: 结束章节**唯一 ID**, **包含** (仅用于第一个 `book_id`)
+    * 首尾空白会被去除, 因此 `" 123 "` 与 `"123"` 指向同一本书、同一个数据目录; 完全相同的请求 (同一 `book_id`, 且 `--start`/`--end` 也相同) 会去重, 只下载一次, 而同一本书带不同范围仍按两个任务执行
+* `--site SITE`: 站点键 (如 `qidian`, `b520`, ...), 若直接传入 URL, 可省略; 首尾空白会被去除, 空白值 (`--site ""`) 属于用法错误 (退出码 `2`)
+* `--start START`: 起始章节**唯一 ID** (仅用于第一个 `book_id`); 首尾空白会被去除, 空白值属于用法错误 (退出码 `2`), 不会被当作 "不限范围"
+* `--end`: 结束章节**唯一 ID**, **包含** (仅用于第一个 `book_id`); 空白处理同 `--start`
 * `--no-export`: 仅下载, 不进行导出。启用后将跳过导出步骤
 * `--format FORMAT [FORMAT ...]`: 导出格式: `txt` / `epub` / `html`, 可指定多个, 默认使用配置文件设定
-* `--json`: 以 JSON 输出到标准输出并退出 (结构见文末表格)
+* `--json`: 以多行缩进 JSON (`indent=2`) 输出到标准输出并退出 (结构见文末表格)
 * `--strict`: 只要有章节下载失败就以非零状态退出; 缺章的书不会导出, 失败清单最多列出 20 条 (默认只警告并列出前 5 条)
 
 > `--start` / `--end` 用于临时下载部分章节, 仅影响**第一个**命令行提供的 `book_id`。
@@ -239,7 +240,7 @@ novel-cli browse fanqienovel --category 1141 --json
 **Synopsis**
 
 ```bash
-novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CONFIG] [--start START] [--end END] [--stage STAGE] [--json] [book_ids ...]
+novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CONFIG] [--start START] [--end END] [--stage STAGE] [--out DIR] [--json] [book_ids ...]
 ```
 
 **Options**
@@ -251,6 +252,7 @@ novel-cli export [-h] [--format FORMAT [FORMAT ...]] [--site SITE] [--config CON
 * `--start START`: 起始章节 ID (仅对第一本书生效)
 * `--end END`: 结束章节 ID (仅对第一本书生效)
 * `--stage STAGE`: 导出阶段 (例如 `raw`、`cleaner`), 默认使用最后阶段
+* `--out DIR`: 覆盖导出目录, 仅影响最终导出文件; 原始数据仍从 `general.raw_data_dir` 读取, 不会被写入或改变。省略时使用配置中的 `general.output_dir`。支持 `~` 与环境变量, 目录不存在时会自动创建 (父目录一并创建)
 * `--json`: 以 JSON 输出到标准输出并退出 (结构见文末表格)
 
 **Examples**
@@ -263,6 +265,9 @@ novel-cli export --format epub
 
 # 指定站点来源并导出多本书
 novel-cli export --site b520 12345 23456
+
+# 把导出文件写到指定目录 (原始数据目录不变, 目录会自动创建)
+novel-cli export --site b520 12345 --out ~/exports
 
 # 省略 site 和 book_ids, 进入交互模式选择站点和书籍
 novel-cli export
@@ -403,7 +408,7 @@ novel-cli clean logs --config ./settings.toml
 **Synopsis**
 
 ```bash
-novel-cli clean cache [-h] [--config CONFIG] [--site SITE] [-y]
+novel-cli clean cache [-h] [--config CONFIG] [--site SITE] [-y] [--dry-run] [--json]
 ```
 
 **Options**
@@ -414,6 +419,8 @@ novel-cli clean cache [-h] [--config CONFIG] [--site SITE] [-y]
   `/etc`、含 `/`、`\`、`:` 或控制字符的值都会以用法错误退出 (`2`),
   不会触碰缓存目录之外的任何文件
 * `-y, --yes`: 跳过确认提示
+* `--dry-run`: 只报告将要删除的路径与各路径的文件数/字节数, **不删除任何文件** (零删除)。与真实删除共用同一套路径校验, `--site` 越界同样以用法错误 (`2`) 退出
+* `--json`: 输出单行 JSON 报告, 必须与 `--dry-run` 同用 (否则以 `2` 退出)。固定含 `dry_run`、`command`、`site`、`book_id`、`book_ids`、`items`、`paths`、`files`、`bytes`; `items[]` 含 `path`、`kind`、`files`、`bytes`
 
 **Examples**
 
@@ -429,6 +436,12 @@ novel-cli clean cache --site b520 -y
 
 # 指定配置文件
 novel-cli clean cache --config ./settings.toml
+
+# 先预览会删什么 (零删除), 确认后再真正清理
+novel-cli clean cache --site qidian --dry-run
+
+# 脚本消费: 单行 JSON 报告
+novel-cli clean cache --site qidian --dry-run --json
 ```
 
 ---
@@ -453,7 +466,7 @@ novel-cli clean book [-h]
     [--start START] [--end END]
     [--stage STAGE]
     [--no-chapters] [--metadata] [--media] [--all]
-    [-y]
+    [-y] [--dry-run] [--json]
     [book_ids ...]
 ```
 
@@ -471,6 +484,8 @@ novel-cli clean book [-h]
 * `--media`: 删除媒体资源目录 (图片等)
 * `--all`: 删除该书**全部原始数据目录** (忽略其他清理选项), 若同时省略 `book_ids`, 则清理指定站点/全部站点的整站 raw_data
 * `-y, --yes`: 跳过确认提示
+* `--dry-run`: 只报告将要删除的路径与各路径的文件数/字节数, **不删除任何文件** (零删除)。与真实删除共用同一套路径校验 (`--site` 越界、非法 `--stage` 同样以 `2` 退出)
+* `--json`: 输出单行 JSON 报告, 必须与 `--dry-run` 同用 (否则以 `2` 退出)。固定含 `dry_run`、`command`、`site`、`book_id` (仅一本书时为其 ID, 否则为 `null`)、`book_ids`、`items`、`paths`、`files`、`bytes`; `items[]` 含 `path`、`kind`、`files`、`bytes`, 其中 `kind` 为 `rows` 表示只清理数据库内的章节行、数据库文件本身保留
 
 **Examples**
 
@@ -498,6 +513,12 @@ novel-cli clean book --all
 
 # 跳过确认提示
 novel-cli clean book --site qidian 1010868264 --all -y
+
+# 预览整本书会删什么 (零删除)
+novel-cli clean book --site qidian 1010868264 --all --dry-run
+
+# 预览指定站点全部 raw_data, 并输出 JSON
+novel-cli clean book --site qidian --all --dry-run --json
 ```
 
 > 提示: `--start/--end` 接收**章节唯一 ID**, 并非 "第几章" 的序号
@@ -556,7 +577,7 @@ pip install "novel-downloader[music]"
 ```bash
 novel-cli music [-h] {platforms,search,download,export-m3u,health} ...
 
-novel-cli music platforms
+novel-cli music platforms [-h] [--json]
 
 novel-cli music search [-h] [--platform KEY] [--limit N] [--json] keyword
 
@@ -568,20 +589,22 @@ novel-cli music download [-h] [--keyword KEYWORD] [--platform KEY] [--limit N]
 novel-cli music export-m3u [-h] --keyword KEYWORD [--platform KEY] [--limit N]
                            [--out FILE]
 
-novel-cli music health [-h] [--platform KEY] [--keyword KEYWORD]
+novel-cli music health [-h] [--platform KEY] [--keyword KEYWORD] [--json]
 ```
 
 **General Options**
 
 * `--platform KEY`: 音乐平台标识。`search` 与 `download` 默认 `all` (聚合搜索全部平台, 同一首歌合并为一行并标注来源), 也可传具体平台 key; `export-m3u` 默认 `netease`。完整列表见 `novel-cli music platforms`
+* 平台名不区分大小写, 并且接受 `music platforms` 打印的显示名 (如 `网易云音乐`、`国内 · 网易云音乐`) 与常见别名 (`163`、`NetEase`、`网易云` 等)。未知平台以用法错误 (`2`) 退出, 并列出可用 key。
 * `--limit N`, `-l N`: 最大结果数, 默认 `20`
 
 **platforms**
 
-列出可用的音乐平台及其说明:
+列出可用的音乐平台及其说明。`--json` 输出一个 `{平台 key: 显示名}` 对象, 便于脚本读取:
 
 ```bash
 novel-cli music platforms
+novel-cli music platforms --json
 ```
 
 **search**
@@ -629,15 +652,20 @@ novel-cli music export-m3u --keyword "关键词" --platform netease --limit 10
 
 逐个平台执行一次受限搜索 (只取 1 条结果), 检查平台是否可正常连通; 用于排查网络或平台故障。搜索成功但结果为空也算连通 (如未配置凭据的鉴权型平台):
 
-* `--platform KEY`: 只检查指定平台, 省略时检查全部平台
+* `--platform KEY`: 只检查指定平台, 省略时检查全部平台; 接受平台 key、显示名与别名 (规则同上)
 * `--keyword KEYWORD`: 连通性探测使用的关键词, 默认 `test`
+* `--json`: 以单行 JSON 输出 `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`, 字段名与 `GET /api/v1/music/health` 一致; 任一平台失败时命令仍以 `1` 退出, JSON 会先完整输出
 
 ```bash
 # 检查全部平台
 novel-cli music health
 
-# 只检查网易云
+# 只检查网易云 (key、显示名或别名均可)
 novel-cli music health --platform netease
+novel-cli music health --platform 网易云音乐
+
+# 脚本消费: 机器可读结果
+novel-cli music health --json
 ```
 
 **Examples**
@@ -771,10 +799,12 @@ novel-cli follow check --download --wait --wait-timeout 3600
 | Downloads | `general.output_dir` |
 | Logs | `general.debug.log_dir` |
 
+不指定子命令时报告各数据目录的磁盘占用; 另提供 `backup` / `restore` 两个子命令备份与恢复章节数据库。
+
 **Synopsis**
 
 ```bash
-novel-cli storage [-h] [--json] [--clean] [-y]
+novel-cli storage [-h] [--json] [--clean] [-y] [--dry-run] [{backup,restore} ...]
 ```
 
 **Options**
@@ -782,7 +812,8 @@ novel-cli storage [-h] [--json] [--clean] [-y]
 * `--json`: 以 JSON 输出统计结果到标准输出并退出。
 * `--clean`: 打印表格后删除上述已存在的数据目录 (等同于批量清理 raw/cache/downloads/logs)。
 * `-y, --yes`: 跳过 `--clean` 的确认提示。
-* `--json` 与 `--clean` 不能同时使用 (退出码 `2`)。
+* `--dry-run`: 只报告 `--clean` 将要删除的目录与占用, **不删除任何文件** (零删除)。与真实清理共用同一套路径校验; 单独使用 (不带 `--clean`) 以用法错误 (`2`) 退出。可与 `--json` 同用, 输出结构见文末表格。
+* `--json` 与 `--clean` 不能同时使用 (退出码 `2`), 除非同时加上 `--dry-run`。
 
 **Examples**
 
@@ -793,6 +824,12 @@ novel-cli storage
 # 机器可读输出
 novel-cli storage --json
 
+# 预览 --clean 会删什么 (零删除)
+novel-cli storage --clean --dry-run
+
+# 预览并输出单行 JSON
+novel-cli storage --clean --dry-run --json
+
 # 清理全部数据目录 (会要求确认)
 novel-cli storage --clean
 
@@ -800,7 +837,95 @@ novel-cli storage --clean
 novel-cli storage --clean -y
 ```
 
-`--json` 的结构为 `{ "raw": {...}, "cache": {...}, "downloads": {...}, "logs": {...}, "total": {...} }`; 每个目录对象包含 `label`、`path`、`files`、`bytes`, `total` 只含 `files` 与 `bytes`。
+`--json` 的结构为 `{ "raw": {...}, "cache": {...}, "downloads": {...}, "logs": {...}, "total": {...} }`; 每个目录对象包含 `label`、`path`、`files`、`bytes`、`free_bytes` 与 `top` (按子目录拆分的 `name`/`files`/`bytes`), `total` 包含 `files`、`bytes`、`reclaimable_bytes` 与 `reclaimable_files`。
+
+##### 9.1 storage backup 子命令
+
+把 `raw_data` 下每个 `chapter.<stage>.sqlite` 做一致性快照 (SQLite online backup, 包含仍在 WAL 中的数据), 并按 `<site>/<book>` 目录结构写入带 UTC 时间戳的副本。
+
+**Synopsis**
+
+```bash
+novel-cli storage backup [-h] --out OUT [--json]
+```
+
+**Options**
+
+* `--out OUT`: 接收备份文件的目录 (必填)。支持 `~` 与环境变量, 不存在时会自动创建; 每本书生成 `<out>/<site>/<book>/chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite`。若目标文件已存在则拒绝覆盖
+* `--json`: 输出单行 JSON 报告, 含 `command`、`ok`、`timestamp`、`out`、`count`、`bytes` 与 `files[]` (`source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`); 没有可备份的数据库时 `count` 为 `0`、`files` 为空数组
+
+备份范围只有 `raw_data` 下的 `chapter.<stage>.sqlite` (章节正文与元数据), **不含** `settings.toml`、Cookie/token 等登录态 (它们在 `cache_dir`)、日志、图片/媒体或导出文件。因此恢复备份不会恢复登录态, 换机后仍需重新登录。备份是**明文** SQLite 文件, 且可能包含付费或私密正文, 请放在受控目录中, 不要提交到 Git 仓库或公开网盘。
+
+**Examples**
+
+```bash
+# 备份所有章节数据库
+novel-cli storage backup --out ~/novel-backups
+
+# 脚本消费
+novel-cli storage backup --out ./backups --json
+```
+
+##### 9.2 storage restore 子命令
+
+从备份文件恢复章节数据库。写入前会校验文件 (SQLite 完整性、schema 版本、必需列), 校验通过后原子替换目标数据库。
+
+**Synopsis**
+
+```bash
+novel-cli storage restore [-h] --from SOURCE [--to TARGET] [-y] [--json]
+```
+
+**Options**
+
+* `--from SOURCE`: 要恢复的备份文件 (必填)
+* `--to TARGET`: 要写入的数据库路径, 必须位于 `raw_data_dir` 内且文件名形如 `chapter.<stage>.sqlite`; 省略时按备份文件的 `<site>/<book>` 路径推断, 无法推断时以用法错误 (`2`) 退出
+* `-y, --yes`: 允许替换已存在的数据库。替换前会先把它保存为同目录的 `chapter.<stage>.sqlite.pre-restore-<时间戳>.bak`; 不加 `--yes` 时拒绝覆盖 (退出码 `2`)
+* `--json`: 输出单行 JSON 报告, 含 `command`、`ok`、`from`、`target`、`replaced_existing`、`pre_restore_backup`、`schema_version`、`chapters`、`bytes`、`sha256`
+
+**Examples**
+
+```bash
+# 按备份内的站点/书籍路径恢复到 raw_data
+novel-cli storage restore --from ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite
+
+# 恢复到显式指定的数据库路径, 并允许替换已有库 (会先备份)
+novel-cli storage restore --from ./backup.sqlite --to ./raw_data/qidian/1010868264/chapter.raw.sqlite -y
+
+# 脚本消费
+novel-cli storage restore --from ./backup.sqlite -y --json
+```
+
+`--to` 的文件名必须形如 `chapter.<stage>.sqlite`, 且 `stage` 要与原库一致 (通常是 `raw` 或 `cleaner`)。写错阶段不会影响其他文件, 但应用随后读写的是另一个阶段的数据库, 看起来像“章节丢了”。
+
+##### 9.3 备份 → 校验 → 恢复完整流程
+
+1. 备份, 并把机器可读报告保存下来 (其中的 `sha256`、`schema_version`、`chapters` 用于下一步核对):
+
+```bash
+mkdir -p ~/novel-backups
+novel-cli storage backup --out ~/novel-backups --json > ~/novel-backups/last-backup.json
+```
+
+2. 恢复前校验副本: 摘要必须与报告一致, SQLite 完整性检查必须返回 `ok`。`restore` 本身会再次执行完整性、schema 版本与必需列校验, 这一步只是为了提前发现复制不完整或磁盘损坏:
+
+```bash
+jq -r '.files[] | "\(.sha256)  \(.target)"' ~/novel-backups/last-backup.json | sha256sum -c -
+sqlite3 ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite 'PRAGMA integrity_check;'
+# 期望输出: ok
+```
+
+以上命令需要 `jq`、`sha256sum` (Git Bash / Linux / macOS) 与 `sqlite3` 命令行工具; 没有 `sqlite3` 时可跳过完整性检查, `restore` 仍会强制执行同样的校验。
+
+3. 恢复并核对结果。目标已存在时必须加 `-y`, 命令会先把旧库保存为同目录的 `chapter.<stage>.sqlite.pre-restore-<时间戳>.bak`:
+
+```bash
+novel-cli storage restore \
+  --from ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite \
+  -y --json
+```
+
+`--json` 中 `replaced_existing` 表示是否覆盖了现有库, `pre_restore_backup` 是旧库的保存路径 (未覆盖时为 `null`), `chapters` 是恢复后的章节行数。若只想确认备份可用而不改动现有库, 去掉 `-y` 即可: 目标已存在时命令会以用法错误 (`2`) 退出, 且不会写入任何文件。
 
 ---
 
@@ -853,12 +978,14 @@ novel-cli doctor --port 9000
 **Synopsis**
 
 ```bash
-novel-cli completion [-h] [--shell {bash,zsh,powershell}]
+novel-cli completion [-h] [--shell {bash,zsh,fish,powershell}]
 ```
 
 **Options**
 
-* `--shell {bash,zsh,powershell}`: 生成补全脚本的目标 shell; 省略时自动检测: `$SHELL` 指向 bash/zsh 时跟随, 否则 Windows 默认 `powershell`, 其它平台默认 `bash`。
+* `--shell {bash,zsh,fish,powershell}`: 生成补全脚本的目标 shell; 省略时自动检测: `$SHELL` 的 basename 为 `bash`、`zsh` 或 `fish` 时跟随该 shell, 否则 Windows 默认 `powershell`, 其它平台默认 `bash`。
+
+生成的脚本统一使用 LF 换行 (在 Windows 上也不会写出 CRLF), 因此可以直接重定向到文件后再 `source`。
 
 **Examples**
 
@@ -871,6 +998,15 @@ source <(novel-cli completion --shell zsh)
 
 # Zsh (持久化): 放入 fpath 中的目录, 文件名必须为 _novel-cli
 novel-cli completion --shell zsh > "${fpath[1]}/_novel-cli"
+```
+
+```fish
+# Fish: 持久化到自动加载目录, 之后每次补全都会读取该脚本 (无需改 config.fish)
+mkdir -p ~/.config/fish/completions
+novel-cli completion --shell fish > ~/.config/fish/completions/novel-cli.fish
+
+# Fish: 只在当前会话生效
+novel-cli completion --shell fish | source
 ```
 
 ```powershell
@@ -940,7 +1076,7 @@ novel-cli batch --file books.txt --download --interval 1.5 --verbose
 
 #### 13. update 子命令
 
-检查更新清单 (`latest.json`) 并可选地下载当前平台的资产。检查与下载是两个独立步骤: `--check` 只检查, 下载必须显式触发。CLI 只负责**下载并校验**, 不会执行、解压或安装任何东西。
+检查更新清单 (`latest.json`) 并可选地下载当前平台的 CLI 资产。检查与下载是两个独立步骤: `--check` 只检查, 下载必须显式触发。CLI 显式请求 `shape="cli"`，只选择 `novel-cli-<version>-<platform>.zip`；即使清单/API 里只有桌面安装包，也**不会回退**去下载 `NovelDownloader-setup-*.exe`。CLI 只负责**下载并校验**, 不会执行、解压或安装任何东西。
 
 **Synopsis**
 
@@ -951,7 +1087,7 @@ novel-cli update [-h] [--check] [--json] [-y] [--no-mirror]
 **Options**
 
 * `--check`: 只检查, 不询问也不下载; 退出码表示*检查*是否成功, 而不表示是否有新版本
-* `--json`: 在 stdout 输出一份机器可读的 JSON 文档并退出; 不带 `--yes` 时等价于 `--check`, `download_path` 为 `null`
+* `--json`: 在 stdout 输出一份机器可读的 JSON 文档并退出; 不带 `--yes` 时等价于 `--check`, `download_path` 为 `null`。文档固定含 `asset_shape` 字段: 选中 CLI 资产时为 `cli`, 没有 CLI 资产或检查失败时为 `null`
 * `-y, --yes`: 非交互下载; 下载并校验 SHA-256 后打印文件路径, 但**不安装**。缺少摘要的资产会被拒绝
 * `--no-mirror`: 忽略 `NOVEL_UPDATE_MIRROR`, 直接从发布地址下载
 
@@ -961,6 +1097,9 @@ novel-cli update [-h] [--check] [--json] [-y] [--no-mirror]
   以退出码 `1` 结束 (`--json --yes` 时 `error` 为 `insecure-url`)。
 * 没有 SHA-256 摘要的资产不会被下载 (`missing-digest`); 下载后先校验摘要,
   再打印文件路径。
+* 只接受 `novel-cli-*.zip`。发布里没有匹配当前平台的 CLI 资产时，CLI 不会回退到
+  桌面安装包；`--json --yes` 的 `error` 为 `no-cli-asset`（旧值 `no-asset` 已不再使用），
+  交互式 `--yes` 同样以退出码 `1` 结束。
 * 单个资产上限 `1 GiB`; 若 HTTPS 请求被重定向到明文 HTTP, 下载会被拒绝。
 * 失败时: 非续传模式在**下一次重试**前删除 `.part`; 启用续传时保留已下载前缀供下次续传;
   摘要不匹配一定删除 `.part`; 所有重试都失败后, 未完成文件可能留在 `updates/`,
@@ -970,7 +1109,7 @@ novel-cli update [-h] [--check] [--json] [-y] [--no-mirror]
 
 * `NOVEL_UPDATE_MIRROR`: 逗号分隔的镜像前缀, 依次探测可用者并优先使用; 全部不可用时回退到原始发布地址, 未设置时不走镜像。
 
-下载文件固定落在 `<应用主目录>/updates/` (不是当前目录)。安装方式: Windows 双击下载到的 `NovelDownloader-setup-<version>-x64.exe`; 其它平台解压后手动替换已安装文件。桌面 / 安卓的自动检查与完整校验规则见 [更新与自动更新](./updates.md)。
+下载文件固定落在 `<应用主目录>/updates/` (不是当前目录)，文件名形如 `novel-cli-<version>-<platform>.zip`。安装方式: 关闭正在运行的 CLI，解压该 zip 并用其中的文件替换已安装的 CLI 目录（Windows 独立版通常为 `%LOCALAPPDATA%\Programs\novel-downloader\novel-cli\`）；CLI 不会下载或运行桌面安装器。桌面 / 安卓的自动检查与完整校验规则见 [更新与自动更新](./updates.md)。
 
 **Examples**
 
@@ -997,8 +1136,8 @@ novel-cli update --json
 | 退出码 | 含义 | 典型场景 |
 | --- | --- | --- |
 | `0` | 成功 | 命令正常完成; 搜索无结果、追更无新章节也属于成功 |
-| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败、`batch` 存在未匹配/格式错误/下载失败、`update` 检查失败 (以及 `--yes` 时无匹配资产、缺少摘要或下载失败) |
-| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`--json` 与 `--first` 同用、`--json` 与 `--clean` 同用、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`batch` 未提供输入文件或 `--interval` 为负、`clean --site` 传入 `..`/路径分隔符等越界值 |
+| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败、`storage backup`/`restore` 备份或恢复失败、`music health` 有平台失败、`batch` 存在未匹配/格式错误/下载失败、`update` 检查失败 (以及 `--yes` 时无匹配资产、缺少摘要或下载失败) |
+| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`download` 的 `--site`/`--start`/`--end` 传入空字符串 (仅含空白也算空)、`--json` 与 `--first` 同用、`storage` 的 `--json` 与 `--clean` 同用 (未加 `--dry-run`)、`clean cache`/`clean book` 的 `--json` 未与 `--dry-run` 同用、`storage --dry-run` 未与 `--clean` 同用、`storage restore` 覆盖已有数据库未加 `--yes` 或目标不在 `raw_data_dir` 内、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`music` 的 `--platform` 传入未知平台、`batch` 未提供输入文件或 `--interval` 为负、`clean --site` 传入 `..`/路径分隔符等越界值 |
 
 `update --check` 的退出码表示**检查**是否成功, 而不是是否有新版本: 发现有更新仍返回 `0`。`sources list --probe` 本身不改变退出码——网络不可达只在 `Latency`/`HTTP` 列显示为 `-`, 只有 `--check` 的结构校验失败才会以 `1` 退出。
 
@@ -1014,14 +1153,22 @@ novel-cli update --json
 
 | 命令 | 选项 | stdout 结构 |
 | --- | --- | --- |
-| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; `failed` 为缺失章节数 (`0` 表示完整); `exported` 为 `{格式: [路径...]}`; 指定 `--no-export` 时为 `null` |
+| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; 输出为多行缩进 JSON (`indent=2`); `failed` 为缺失章节数 (`0` 表示完整); `exported` 为 `{格式: [路径...]}`; 指定 `--no-export` 时为 `null` |
 | `search` | `--json` | 搜索结果数组, 每项含 `site`、`book_id`、`book_url`、`cover_url`、`title`、`author`、`latest_chapter`、`update_date`、`word_count`、`priority`, 以及只读派生字段 `rank_score` (`0..1`) 与 `match_tier` (`0..4`: `4` 精确 / `3` 前缀 / `2` 包含 / `1` 部分 / `0` 无匹配) |
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
 | `sources list` | `--json` | 数组, 每项含 `site_key`、`name`、`search`、`hosts`、`origin`; 加 `--check` 时 `status` 才有值 (否则为 `null`); 加 `--probe` 时额外含 `latency_ms`、`http_status` (探测不到时为 `null`) |
-| `update` | `--json` | 单个对象, 固定含 `current`、`latest`、`available`、`asset_name`、`asset_size`、`sha256`、`download_path`、`error` 八个字段; 无对应值时除 `current`/`available` 外为 `null` (或 `latest` 为空串) |
+| `update` | `--json` | 单个对象, 固定含 `current`、`latest`、`available`、`asset_name`、`asset_shape`、`asset_size`、`sha256`、`download_path`、`error` 九个字段; 无对应值时除 `current`/`available` 外为 `null` (或 `latest` 为空串)。`asset_shape` 在选中 CLI 资产时为 `cli`; `error` 可能为 `insecure-url`、`missing-digest`、`no-cli-asset` |
 | `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}`; `platform=all` (默认) 时 `tracks[].sources` 列出命中平台, 并额外返回 `platforms` 统计 |
+| `music platforms` | `--json` | `{平台 key: 显示名}` 对象 |
+| `music health` | `--json` | `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`; 字段名与 `GET /api/v1/music/health` 一致 |
 | `follow list` | `--json` | 数组, 每项含 `site`、`book_id`、`title`、`last_chapter`、`updated_at` |
-| `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` |
+| `clean cache` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` 为 `clean cache`, `book_id` 为 `null`、`book_ids` 为 `[]`; `items[]` 含 `path`、`kind`、`files`、`bytes` |
+| `clean book` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` 为 `clean book`; `book_id` 仅在只清理一本书时为该 ID, 多本书或整站清理时为 `null`; `items[]` 同上 |
+| `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` (dir 与 total 字段见上文) |
+| `storage --clean` | `--dry-run --json` | 与 `clean cache` 相同的 dry-run 结构, `command` 为 `storage --clean`, `site`/`book_id` 为 `null`, `book_ids` 为 `[]` |
+| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files"}`; `files[]` 含 `source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters` |
+| `storage restore` | `--json` | `{"command", "ok", "from", "target", "replaced_existing", "pre_restore_backup", "schema_version", "chapters", "bytes", "sha256"}` |
+| `doctor` | `--json` | `{"summary": {"total", "failures", "optional_failures", "ok"}, "checks": [{"key", "name", "ok", "fatal", ...}]}` |
 
 ```bash
 # 典型脚本用法: 取第一本书的 ID
@@ -1034,7 +1181,7 @@ novel-cli follow list --json | jq 'length'
 novel-cli storage --json | jq '.total.bytes'
 ```
 
-> `login --list` 也输出纯文本列表, 但不是 JSON; `sources check`、`config`、`clean`、`batch` 目前没有 `--json`。
+> `login --list` 也输出纯文本列表, 但不是 JSON; `sources check`、`config`、`clean logs`、`clean state`、`batch` 目前没有 `--json`。
 >
 > 上面的 `jq` 示例需要另行安装 [jq](https://jqlang.github.io/jq/); 不安装时可直接查看原始 JSON 输出。
 

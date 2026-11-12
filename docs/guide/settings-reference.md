@@ -22,11 +22,13 @@
 | `cache_book_info`    | `bool`  | `true`            | 是否启用 book_info 缓存                      |
 | `cache_chapter`      | `bool`  | `true`            | 是否启用章节缓存                             |
 | `fetch_inaccessible` | `bool`  | `false`           | 是否尝试获取未订阅章节                        |
+| `login_required`     | `bool`  | `false`           | 全局默认是否需要登录; 站点级 `login_required` 可覆盖 |
+| `strict_config`      | `bool`  | `false`           | 为 `true` 时处理器表中的未知选项直接报错, 而不是仅告警 |
 | `backend`            | `str`   | `"aiohttp"`       | 全局 HTTP 请求后端, 可选 `"aiohttp"`, `"httpx"`, `"curl_cffi"` |
 | `http2`              | `bool`  | `true`            | 仅对 `httpx` 生效, 启用 HTTP/2 支持           |
 | `impersonate`        | `str/None` | `None`         | 仅对 `curl_cffi` 生效, 启用浏览器指纹仿真模式  |
 | `browser_assisted_sites` | `list[str]` | `["fanqienovel"]` | 搜索时必须借助真实浏览器的站点键列表; 显式设为 `[]` 可禁用 |
-| `download_retry_times` | `int`  | 2                 | 章节内容层面的额外重试次数; 网络重试已由 `retry_times` 在请求层完成 |
+| `download_retry_times` | `int`  | 2                 | 整本下载任务的额外重试次数 (仅对可重试错误生效); 请求层重试由 `retry_times` 负责 |
 | `proxy`              | `str/None` | `None`         | HTTP/HTTPS 代理地址, 如 `"http://127.0.0.1:7890"` |
 | `proxy_user`         | `str/None` | `None`         | 代理用户名                                    |
 | `proxy_pass`         | `str/None` | `None`         | 代理密码                                      |
@@ -107,7 +109,7 @@ browser_assisted_sites = ["fanqienovel"]
 | `enable_ocr`       | `bool`         | false      | 是否启用本地 OCR, 用于识别混淆字体或图片章节文本                |
 | `batch_size`       | `int`          | 32         | OCR 模型推理时的批处理大小                                    |
 | `remove_watermark` | `bool`         | false      | 是否尝试对图片章节进行去水印 (部分站点支持)                     |
-| `model_name`       | `str/None`     | None       | OCR 模型名称, 如果设置为 `None`, 则使用 `PP-OCRv5_server_rec`  |
+| `model_name`       | `str/None`     | None       | OCR 模型名称; 为 `None` 时由 PaddleOCR 选择 `PP-OCRv5_server_rec`。自带 `settings.toml` 显式设为 `PP-OCRv5_mobile_rec` (CPU 上快得多) |
 | `model_dir`        | `str/None`     | None       | OCR 模型存储路径                                              |
 | `input_shape`      | `tuple/None`   | None       | OCR 模型输入图像尺寸, 格式为 (C, H, W)                         |
 | `device`           | `str/None`     | None       | 用于推理的设备, 例如: "cpu"、"gpu"、"npu"、"gpu:0"、"gpu:0,1"  |
@@ -145,7 +147,7 @@ OCR 功能依赖 `PaddleOCR` 及其模型, 请参考安装指南:
 
 | 参数名                        | 类型         | 默认值                | 说明                                       |
 | ----------------------------- | ----------- | --------------------- | ------------------------------------------ |
-| `formats`                     | `list[str]` | `[]`                  | 输出格式                                    |
+| `formats`                     | `list[str]` | `[]`                  | 输出格式; 未设置时 CLI 按 `epub` 导出         |
 | `render_missing_chapter`      | `bool`      | `true`                | 是否在导出时为缺失章节插入占位内容            |
 | `append_timestamp`            | `bool`      | `true`                | 输出文件名是否追加时间戳                     |
 | `filename_template`           | `str`       | `"{title}_{author}"`  | 文件名模板                                  |
@@ -162,13 +164,15 @@ OCR 功能依赖 `PaddleOCR` 及其模型, 请参考安装指南:
 
 #### 示例配置
 
+以下取值与 `novel-cli config init` 生成的默认配置一致, 可按需修改:
+
 ```toml
 [general]
 retry_times = 3
 backoff_factor = 2.0
 timeout = 10.0
 max_connections = 10
-max_rps = 1.0
+max_rps = 1000.0
 request_interval = 0.5
 raw_data_dir = "./raw_data"
 output_dir = "./downloads"
@@ -177,20 +181,19 @@ output_dir = "./downloads"
 workers = 4
 cache_book_info = true
 cache_chapter = true
-storage_batch_size = 4
+storage_batch_size = 1
 
 [general.output]
 formats = [
     "txt",
     "epub",
-    "html",
 ]
 include_picture = true
 
 [general.parser]
 enable_ocr = false
 batch_size = 32
-remove_watermark = true
+remove_watermark = false
 
 model_name = "PP-OCRv5_mobile_rec"
 ```

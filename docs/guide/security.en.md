@@ -103,7 +103,7 @@ containing path separators, `..`, a drive-letter colon and similar characters
 `--host 0.0.0.0` listens on every interface. If no token is set at startup, the program prints a warning to stderr. More importantly:
 
 - Both `/api/v1/*` and `/downloads/<filename>` are protected by the token;
-- `/docs` and `/openapi.json` do not depend on the token (they only expose API descriptions).
+- `/docs`, `/redoc` and `/openapi.json` are **disabled automatically** on a non-loopback bind, so the full route and parameter schema is not exposed to the LAN; they are served only on a loopback listen, without the token dependency.
 
 So when you truly need cross-device access, open the port with a token configured and restrict source networks with a firewall. Recommendations:
 

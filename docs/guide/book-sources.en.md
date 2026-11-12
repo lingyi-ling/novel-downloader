@@ -42,6 +42,9 @@ novel-cli sources check ./rules/_example-template.json
 # Install into the user directory ($NOVEL_RULES_DIR, or the user config dir when unset); --force overwrites an existing file
 novel-cli sources add ./my-site.json
 
+# You can also install directly from an HTTP(S) URL; --name sets the file name (defaults to the URL's file name)
+novel-cli sources add --url https://example.com/my-site.json --name my-site
+
 # Uninstall a user source (built-in sources are protected and cannot be removed)
 novel-cli sources remove my-site
 
@@ -55,6 +58,8 @@ novel-cli search "斗破苍穹" --first
 ```
 
 `--json` disables interactive prompts and writes machine-readable results to stdout. Diagnostics such as tables and logs always go to stderr, so the output can be piped directly into `jq`. `--json` and `--first` cannot be used together.
+
+`sources add` arguments: either the positional `path` (a local file) or `--url URL`; `--name NAME` sets the installed file name for a remote rule (without `.json`); `--force` overwrites an existing file.
 
 What happens on a validation failure depends on the entry point: during automatic loading (search, download, `sources list`) a file that fails to parse (JSON syntax error, duplicate keys, unknown keys, missing required key, invalid regex, and so on) is skipped and a warning is logged; other sources are unaffected. `sources check` and `sources add` instead fail immediately with an error message and a non-zero exit code, so problems surface before installation. The exact validation rules are covered in the next section.
 

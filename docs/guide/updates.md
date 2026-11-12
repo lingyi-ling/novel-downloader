@@ -32,17 +32,16 @@ novel-cli update --yes     # 直接下载并校验（不会执行或安装）
 novel-cli update --json    # 机器可读输出
 ```
 
-`--yes` 只把文件下载到应用数据目录（`<app_home>/updates/`）并校验，**不会**替你安装。安装方式：
+`--yes` 只把文件下载到应用数据目录（`<app_home>/updates/`）并校验，**不会**替你安装。`novel-cli update` 显式请求 `shape="cli"`，只会下载 `novel-cli-<version>-<platform>.zip`，不会下载或运行桌面安装器；发布里没有匹配的 CLI 资产时直接停止（`--json --yes` 的 `error` 为 `no-cli-asset`），不会回退到 `NovelDownloader-setup-*.exe`。
 
-- Windows：双击下载目录里的 `NovelDownloader-setup-<version>-x64.exe`
-- 其他平台：解压下载的压缩包，替换已安装的文件
+安装 CLI：关闭正在运行的 CLI，解压该 zip 并用其中的文件替换已安装的 CLI 目录（Windows 独立版通常为 `%LOCALAPPDATA%\Programs\novel-downloader\novel-cli\`）。桌面端的安装器/便携包由下面的自动更新流程处理。
 
 ## 桌面端自动更新
 
 桌面端默认每 24 小时检查一次；发现新版本后在后台自动下载，侧栏显示字节级进度。下载使用 HTTP `Range` 复用 `.part` 文件，网络中断后从断点继续，失败最多重试 3 次。
 
-- **安装版**：退出应用时启动已校验的 Inno Setup 安装器（静默、无向导），原地覆盖安装目录并重新启动。
-- **便携版**：下载的是 zip；退出后由 PowerShell 辅助脚本等待进程结束，解压覆盖当前文件夹并重新启动，不会另装一份到 `%LOCALAPPDATA%`。
+- **安装版**：退出应用时启动已校验的 Inno Setup 安装器（静默、无向导），原地覆盖安装目录；静默安装结束后安装器会直接启动新版本，无需手动打开。
+- **便携版**：下载的是 zip；退出后由 PowerShell 辅助脚本等待进程结束，解压到 `%TEMP%`，删除当前文件夹中的 `_internal` 后再覆盖并重新启动，因此已移除的插件不会残留，`app_home` 下的设置与下载不受影响；不会另装一份到 `%LOCALAPPDATA%`。
 - 更新目录中的 `.part` 超过 1 天、完整安装包超过 7 天会被清理。
 
 ## 校验规则
@@ -74,9 +73,15 @@ https://github.com/lingyi-ling/novel-downloader/releases/latest/download/latest.
 | --- | --- |
 | `windows-x64-installer` | `NovelDownloader-setup-<ver>-x64.exe` |
 | `windows-x64-portable` | `NovelDownloader-<ver>-windows-x64.zip` |
+| `windows-x64-cli` | `novel-cli-<ver>-windows-x64.zip` |
+| `windows-x64-api` | `novel-api-<ver>-windows-x64.zip` |
 | `android` | `novel-downloader-<ver>-android.apk` |
 
-从安装器安装的副本只会更新到安装器，从免安装包解压的副本只会更新到免安装包，两者不会互相切换。
+`novel-cli update` 固定选择 `cli` 条目；没有当前平台的 `*-cli` 条目时不会回退到
+installer / portable / api。副本的安装形态由卸载注册表的 `InstallLocation` /
+`DisplayIcon`（回退 `unins000.exe`）识别，所以装到自定义目录的安装版仍会更新到
+installer。从安装器安装的副本只会更新到安装器，从免安装包解压的副本只会更新到
+免安装包，两者不会互相切换。
 
 ## 已知限制
 
