@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import random
 from datetime import datetime
+from itertools import permutations
 
 from novel_downloader.plugins.grouping import ResultGroup, group_results
-from novel_downloader.plugins.ranking import normalize_text, rank_score
+from novel_downloader.plugins.ranking import normalize_text, rank_score, sort_results
 from novel_downloader.schemas import SearchResult
 
 
@@ -483,3 +484,101 @@ def test_optimised_grouping_matches_reference_on_random_input() -> None:
         assert _shape(group_results(results, keyword)) == _reference_shape(
             results, keyword
         )
+
+
+# --------------------------------------------------------------------------- #
+# final-result telemetry (rank_score / match_tier) must stay derived data
+# --------------------------------------------------------------------------- #
+def test_telemetry_keys_never_influence_grouping_or_the_primary() -> None:
+    weak = _result(site="alpha", book_id="weak", word_count="1万字")
+    strong = _result(site="beta", book_id="strong", word_count="300万字")
+    other = _result(site="gamma", book_id="other", title="另一本书", author="某人")
+    baseline = _shape(group_results([weak, strong, other], keyword="三体"))
+    assert baseline == [("strong", ["strong", "weak"]), ("other", ["other"])]
+
+    # Values that would invert the outcome if grouping ever read them.
+    poisoned = [
+        {**weak, "rank_score": 1.0, "match_tier": 4},  # type: ignore[typeddict-item]
+        {**strong, "rank_score": 0.0, "match_tier": 0},  # type: ignore[typeddict-item]
+        {**other, "rank_score": 0.0, "match_tier": 0},  # type: ignore[typeddict-item]
+    ]
+    assert _shape(group_results(poisoned, keyword="三体")) == baseline  # type: ignore[arg-type]
+
+
+def test_group_results_now_injection_controls_recency_ranking() -> None:
+    # Two copies of one book differing only by update date.  Scored at 2024
+    # the recent copy wins; scored in 2030 both are old and tie, so the
+    # earlier input position decides.
+    old = _result(site="alpha", book_id="old", update_date="2024-01-01")
+    new = _result(site="beta", book_id="new", update_date="2024-06-14")
+
+    assert _shape(group_results([old, new], now=datetime(2024, 6, 15, 12))) == [
+        ("new", ["new", "old"])
+    ]
+    assert _shape(group_results([old, new], now=datetime(2030, 1, 1))) == [
+        ("old", ["old", "new"])
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# arrival-order determinism
+# --------------------------------------------------------------------------- #
+_ARRIVAL_NOW = datetime(2024, 6, 15, 12, 0, 0)
+
+
+def _url_shape(groups: list[ResultGroup]) -> list[tuple[str, list[str]]]:
+    """Group layout keyed by URL (the rows below share empty book ids)."""
+    return [
+        (
+            str(group.primary["book_url"]),
+            [str(item["book_url"]) for item in group.sources],
+        )
+        for group in groups
+    ]
+
+
+def test_group_layout_is_deterministic_after_canonical_sort() -> None:
+    # Every row ties on rank_score, so the primary and the source order are
+    # decided purely by position.  The historical canonical key
+    # (site, title, book_id) could not tell rows /a and /b apart (same site,
+    # same title, both without an id), so the winner used to depend on which
+    # row arrived first.  Sorting canonically first (as ``_finalize`` does)
+    # must make the layout identical for every arrival order.
+    rows = [
+        _result(site="alpha", book_id="", book_url="https://example.com/a"),
+        _result(site="alpha", book_id="", book_url="https://example.com/b"),
+        _result(
+            site="alpha",
+            book_id="",
+            book_url="https://example.com/c",
+            title="三体外传",
+            author="乙",
+        ),
+        _result(site="beta", book_id="", book_url="https://example.com/d"),
+        _result(
+            site="beta",
+            book_id="",
+            book_url="https://example.com/e",
+            title="三体",
+            author="乙",
+        ),
+    ]
+
+    def layout(order: tuple[int, ...]) -> list[tuple[str, list[str]]]:
+        work = [rows[index] for index in order]
+        # Mirror _finalize: canonicalize before grouping.
+        sort_results(work, keyword="", now=_ARRIVAL_NOW)
+        return _url_shape(group_results(work, keyword="", now=_ARRIVAL_NOW))
+
+    baseline = layout(tuple(range(len(rows))))
+    assert baseline == [
+        (
+            "https://example.com/a",
+            ["https://example.com/a", "https://example.com/b", "https://example.com/d"],
+        ),
+        ("https://example.com/c", ["https://example.com/c"]),
+        ("https://example.com/e", ["https://example.com/e"]),
+    ]
+
+    for order in permutations(range(len(rows))):
+        assert layout(order) == baseline

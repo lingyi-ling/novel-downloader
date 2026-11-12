@@ -88,6 +88,25 @@ def _stub_result(site: str, book_id: str) -> SearchResult:
     }
 
 
+_DEBUG_KEYS = frozenset({"rank_score", "match_tier"})
+
+
+def _plain(rows: Sequence[SearchResult]) -> list[SearchResult]:
+    """Strip the ranking telemetry ``search`` attaches to final rows.
+
+    ``search`` annotates every returned row with ``rank_score``/``match_tier``
+    (see ``RankedSearchResult``); tests that compare against a raw site row
+    use this to ignore those derived keys.
+    """
+    return [
+        cast(
+            "SearchResult",
+            {key: value for key, value in row.items() if key not in _DEBUG_KEYS},
+        )
+        for row in rows
+    ]
+
+
 class _RecordingSearcher(BaseSearcher):
     """Searcher counting fetches and returning one stub result."""
 
@@ -134,6 +153,66 @@ class _EmptyResultSearcher(_RecordingSearcher):
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
         return []
+
+
+class _DirtyRowsSearcher(BaseSearcher):
+    """Searcher returning rows a progressively rendered UI must not trust."""
+
+    site_name = "dirty"
+    calls = 0
+
+    async def _fetch_html(self, keyword: str) -> str:
+        type(self).calls += 1
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        good = _stub_result(self.site_name, "good")
+        rows: list[SearchResult] = [
+            good,
+            # No site key: no consumer can route a download for it.
+            {**_stub_result("", "orphan"), "site": "   "},
+            # A script URL must never reach a WebView/browser helper.
+            {**_stub_result(self.site_name, "js"), "book_url": "javascript:alert(1)"},
+            # Same site, title and URL as ``good`` but a different id: the
+            # exact-duplicate fold keeps only the first occurrence.
+            {
+                **_stub_result(self.site_name, "good-copy"),
+                "title": good["title"],
+                "book_url": good["book_url"],
+            },
+            # Neither an id nor a URL: names no book at all.
+            {
+                **_stub_result(self.site_name, ""),
+                "book_id": "",
+                "book_url": "",
+            },
+        ]
+        return rows if limit is None else rows[:limit]
+
+
+class _AllDirtySearcher(_RecordingSearcher):
+    """Searcher whose every row is unusable once cleaned."""
+
+    site_name = "alldirty"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [
+            {
+                **_stub_result(self.site_name, ""),
+                "book_id": "",
+                "book_url": "javascript:alert(1)",
+            },
+            {
+                **_stub_result("", ""),
+                "site": "",
+                "book_id": "",
+                "book_url": "",
+            },
+        ]
 
 
 class _MultiResultSearcher(BaseSearcher):
@@ -206,6 +285,7 @@ def _fresh_state() -> Iterator[None]:
 
     search_module._CACHE.clear()
     _RecordingSearcher.calls = 0
+    _DirtyRowsSearcher.calls = 0
     yield
     search_module._CACHE.clear()
 
@@ -253,7 +333,7 @@ async def test_duplicate_site_selection_searches_site_once(
     results = await search("keyword", sites=["recorder", "recorder"])
 
     assert _RecordingSearcher.calls == 1
-    assert results == [_stub_result("recorder", "1")]
+    assert _plain(results) == [_stub_result("recorder", "1")]
 
 
 @pytest.mark.asyncio
@@ -290,7 +370,8 @@ async def test_duplicate_site_selection_shares_cache_with_singleton(
     second = await search("keyword", sites=["recorder"])
 
     assert _RecordingSearcher.calls == 1
-    assert first == second == [_stub_result("recorder", "1")]
+    assert first == second
+    assert _plain(first) == [_stub_result("recorder", "1")]
 
 
 # --------------------------------------------------------------------------- #
@@ -348,7 +429,8 @@ async def test_digit_leading_site_alias_shares_cache(
     second = await search("keyword", sites=["n1recorder"])
 
     assert _RecordingSearcher.calls == 1
-    assert first == second == [_stub_result("recorder", "1")]
+    assert first == second
+    assert _plain(first) == [_stub_result("recorder", "1")]
 
 
 @pytest.mark.asyncio
@@ -366,7 +448,7 @@ async def test_invalid_site_payload_is_isolated_and_reported(
 
     results = await search("keyword", on_event=events.append)
 
-    assert results == [_stub_result("recorder", "1")]
+    assert _plain(results) == [_stub_result("recorder", "1")]
     kinds = {(event.site, event.kind) for event in events}
     assert ("recorder", "completed") in kinds
     assert ("nonepayload", "failed") in kinds
@@ -443,7 +525,7 @@ async def test_broken_constructor_is_isolated_per_site(
 
     results = await search("keyword", on_event=events.append)
 
-    assert results == [_stub_result("recorder", "1")]
+    assert _plain(results) == [_stub_result("recorder", "1")]
     kinds = {(event.site, event.kind) for event in events}
     assert ("broken_init", "failed") in kinds
     assert ("recorder", "completed") in kinds
@@ -462,7 +544,7 @@ async def test_broken_nsfw_property_is_isolated_per_site(
 
     results = await search("keyword", on_event=events.append)
 
-    assert results == [_stub_result("recorder", "1")]
+    assert _plain(results) == [_stub_result("recorder", "1")]
     kinds = {(event.site, event.kind) for event in events}
     assert ("broken_nsfw", "failed") in kinds
     assert ("recorder", "completed") in kinds
@@ -858,6 +940,108 @@ async def test_stream_cache_hit_omits_sites_that_returned_no_rows(
     assert _RecordingSearcher.calls == 1  # served from the cache, no refetch
 
 
+# --------------------------------------------------------------------------- #
+# streamed chunks are cleaned before they reach a progressive UI
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_stream_chunks_are_cleaned_like_final_results(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_DirtyRowsSearcher])
+    )
+
+    chunks = [chunk async for chunk in search_stream("三体", sites=["dirty"])]
+
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    # The per-site chunk contract survives cleaning.
+    assert {item["site"] for item in chunk} == {"dirty"}
+    # Blank-site, identity-less and same-URL duplicate rows are gone; the
+    # unsafe URL is cleared on a copy instead of discarding the usable row.
+    assert [item["book_id"] for item in chunk] == ["good", "js"]
+    assert chunk[0]["book_url"] == "https://example.com/dirty/good"
+    assert chunk[1]["book_url"] == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_cache_hit_chunks_are_cleaned_identically(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    import novel_downloader.plugins.search as search_module
+    from novel_downloader.plugins.search_cache import build_key
+
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_DirtyRowsSearcher])
+    )
+
+    fresh = [chunk async for chunk in search_stream("三体", sites=["dirty"])]
+    cached = [chunk async for chunk in search_stream("三体", sites=["dirty"])]
+
+    # A warmed stream yields byte-identical chunks: cleaning runs on every
+    # output, so the cache cannot leak rows the fresh run would have dropped.
+    assert cached == fresh
+    assert _DirtyRowsSearcher.calls == 1  # the second run came from the cache
+
+    # The cache itself keeps the raw payload: cleaning is an output-time
+    # concern, so a later ``search`` can still rank/filter the raw rows.
+    raw = search_module._CACHE.get(build_key("三体", ["dirty"], 5, False, 5.0))
+    assert raw is not None
+    assert any(row["book_url"] == "javascript:alert(1)" for row in raw)
+
+    # And that raw snapshot is cleaned by ``search``'s own finalize step.
+    final = await search("三体", sites=["dirty"], sort="priority")
+    assert {row["book_id"] for row in final} == {"good", "js"}
+    assert all("javascript:" not in row["book_url"] for row in final)
+
+
+@pytest.mark.asyncio
+async def test_stream_cleaning_shrinks_a_chunk_without_refetching(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # ``per_site_limit`` is applied by the site *before* cleaning, so cleaning
+    # can only remove rows: a chunk never grows past the limit, and it never
+    # triggers a second fetch to backfill the rows that were dropped.
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_DirtyRowsSearcher])
+    )
+
+    chunks = [
+        chunk
+        async for chunk in search_stream("三体", sites=["dirty"], per_site_limit=2)
+    ]
+
+    assert len(chunks) == 1
+    assert [item["book_id"] for item in chunks[0]] == ["good"]
+    assert len(chunks[0]) <= 2
+    assert _DirtyRowsSearcher.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_omits_a_chunk_cleaning_emptied(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    import novel_downloader.plugins.search as search_module
+    from novel_downloader.plugins.search_cache import build_key
+
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_AllDirtySearcher])
+    )
+
+    chunks = [chunk async for chunk in search_stream("keyword", sites=["alldirty"])]
+
+    # A site whose every row is unusable produces no chunk at all (the chunk
+    # contract is "non-empty per-site list"), not an empty list.
+    assert chunks == []
+    # An effectively empty stream is not pinned in the cache.
+    assert (
+        search_module._CACHE.get(build_key("keyword", ["alldirty"], 5, False, 5.0))
+        is None
+    )
+
+
 # ---------------------------------------------------------------------------
 # intent-aware ranking is wired into the search pipeline
 # ---------------------------------------------------------------------------
@@ -870,15 +1054,17 @@ def test_finalize_ranks_an_author_query_by_author() -> None:
     results: list[SearchResult] = [
         {
             "site": "a",
+            "book_id": "1",
+            "book_url": "https://a/1",
             "title": "天蚕土豆",
             "author": "路人甲",
-            "url": "https://a/1",
         },
         {
             "site": "a",
+            "book_id": "2",
+            "book_url": "https://a/2",
             "title": "斗破苍穹",
             "author": "天蚕土豆",
-            "url": "https://a/2",
         },
     ]
 
@@ -900,6 +1086,8 @@ def test_finalize_sparse_author_work_beats_rich_title_collision() -> None:
 
     collision: SearchResult = {
         "site": "a",
+        "book_id": "1",
+        "book_url": "https://a/1",
         "title": "天蚕土豆",
         "author": "路人甲",
         "word_count": "300万字",
@@ -910,6 +1098,8 @@ def test_finalize_sparse_author_work_beats_rich_title_collision() -> None:
     }
     author_book: SearchResult = {
         "site": "b",
+        "book_id": "2",
+        "book_url": "https://b/2",
         "title": "斗破苍穹",
         "author": "天蚕土豆",
     }
@@ -932,8 +1122,20 @@ def test_finalize_non_quality_sorts_ignore_query_intent() -> None:
     from novel_downloader.plugins.search import _finalize
 
     results: list[SearchResult] = [
-        {"site": "a", "title": "短", "author": "x", "url": "https://a/1"},
-        {"site": "a", "title": "长很多的书名", "author": "x", "url": "https://a/2"},
+        {
+            "site": "a",
+            "book_id": "1",
+            "book_url": "https://a/1",
+            "title": "短",
+            "author": "x",
+        },
+        {
+            "site": "a",
+            "book_id": "2",
+            "book_url": "https://a/2",
+            "title": "长很多的书名",
+            "author": "x",
+        },
     ]
 
     _finalize(results, keyword="x", sort="title", order="asc", limit=None, group=False)
@@ -1229,6 +1431,213 @@ async def test_folding_is_scoped_to_one_site(
     results = await search("三体")
 
     assert sorted(item["site"] for item in results) == ["alpha", "beta"]
+
+
+# --------------------------------------------------------------------------- #
+# dirty-data sanitization (runs before dedupe / rank / group / limit)
+# --------------------------------------------------------------------------- #
+
+
+def test_sanitize_results_drops_unusable_rows_and_clears_unsafe_urls() -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    good = _search_result("alpha", "good", "三体")
+    no_site = _search_result("", "x", "三体")
+    blank_site = _search_result("   ", "x", "三体")
+    no_identity = _search_result("alpha", "", "三体", book_url="")
+    blank_identity = _search_result("alpha", "  ", "三体", book_url="  ")
+    javascript = _search_result("alpha", "js", "三体", book_url="javascript:alert(1)")
+    file_url = _search_result("alpha", "file", "三体", book_url="file:///etc/passwd")
+    data_url = _search_result("alpha", "data", "三体", book_url="data:text/html,hi")
+    relative = _search_result("alpha", "rel", "三体", book_url="/books/1")
+    spaced = _search_result(
+        "alpha", "spaced", "三体", book_url="  https://example.com/b/1  "
+    )
+
+    cleaned = _sanitize_results(
+        [
+            good,
+            no_site,
+            blank_site,
+            no_identity,
+            blank_identity,
+            javascript,
+            file_url,
+            data_url,
+            relative,
+            spaced,
+        ]
+    )
+
+    assert [row["book_id"] for row in cleaned] == [
+        "good",
+        "js",
+        "file",
+        "data",
+        "rel",
+        "spaced",
+    ]
+    assert cleaned[0]["book_url"] == good["book_url"]
+    # Non-http(s) URLs are cleared, not passed to a browser/WebView.
+    assert cleaned[1]["book_url"] == ""
+    assert cleaned[2]["book_url"] == ""
+    assert cleaned[3]["book_url"] == ""
+    assert cleaned[4]["book_url"] == ""
+    # A legitimate URL is stripped but otherwise kept verbatim.
+    assert cleaned[5]["book_url"] == "https://example.com/b/1"
+    # Rows are never mutated in place (a cache snapshot shares them).
+    assert javascript["book_url"] == "javascript:alert(1)"
+    assert good["book_url"] == "https://example.com/alpha/good"
+
+
+def test_sanitize_keeps_a_row_without_a_book_id_and_does_not_guess_one() -> None:
+    from novel_downloader.plugins.search import _sanitize_results
+
+    # The URL contains an id, but extracting it would require site-specific
+    # rules the aggregator must not invent: the row is kept verbatim with its
+    # empty ``book_id`` so the download entry can reject it explicitly.
+    row = _search_result("alpha", "", "三体", book_url="https://example.com/novel/42")
+
+    cleaned = _sanitize_results([row])
+
+    assert cleaned == [row]
+    assert cleaned[0]["book_id"] == ""
+    assert cleaned[0]["book_url"] == "https://example.com/novel/42"
+
+
+def test_same_site_title_and_url_is_folded_before_the_limit() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    first = _search_result(
+        "alpha", "a", "三体", book_url="https://example.com/1", priority=100
+    )
+    duplicate = _search_result(
+        "alpha", "b", "三体", book_url="https://example.com/1", priority=200
+    )
+    other = _search_result(
+        "alpha", "c", "球状闪电", book_url="https://example.com/2", priority=300
+    )
+
+    ranked = _finalize(
+        [first, duplicate, other],
+        keyword="三体",
+        sort="priority",
+        order="desc",
+        limit=2,
+        group=False,
+    )
+
+    # Rows sharing site + title + URL fold onto the first occurrence; the
+    # fold happens before ``limit`` so the surviving duplicate cannot consume
+    # a second slot.
+    assert [row["book_id"] for row in ranked] == ["c", "a"]
+
+
+def test_dirty_rows_are_dropped_before_the_limit() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    no_site = _search_result("", "x", "三体")
+    no_identity = _search_result("alpha", "", "三体", book_url="javascript:alert(1)")
+    first = _search_result("alpha", "a", "三体")
+    second = _search_result("alpha", "b", "三体")
+
+    ranked = _finalize(
+        [no_site, no_identity, first, second],
+        keyword="三体",
+        sort="title",
+        order="asc",
+        limit=2,
+        group=False,
+    )
+
+    # Both slots go to real rows; a limit applied first would have been spent
+    # on the two unusable ones.
+    assert [row["book_id"] for row in ranked] == ["a", "b"]
+
+
+def test_dirty_rows_cannot_become_a_group_primary() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    # The dirtiest row would win on word count; if it survived grouping, the
+    # merged entry would carry an empty site and point nowhere.
+    ghost = _search_result("", "ghost", "三体", book_url="", word_count="9999万字")
+    real = _search_result("alpha", "real", "三体", word_count="1万字")
+
+    merged = _finalize(
+        [ghost, real],
+        keyword="三体",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=True,
+        min_relevance=None,
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["site"] == "alpha"
+    assert merged[0]["book_id"] == "real"
+    assert merged[0]["sources"] == ["alpha"]
+
+
+def test_dirty_rows_do_not_feed_the_relevance_floor() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    ghost = _search_result("", "ghost", "斗破苍穹", book_url="")
+    real = _search_result("alpha", "real", "三体", author="刘慈欣")
+
+    ranked = _finalize(
+        [ghost, real],
+        keyword="斗破苍穹",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=False,
+        min_relevance=0.45,
+    )
+
+    # The dirty row is removed before scoring; the lone valid row survives via
+    # the never-empty fallback, instead of the exact-title ghost masking it.
+    assert [row["book_id"] for row in ranked] == ["real"]
+
+
+class _DirtyAggregateSearcher(BaseSearcher):
+    """Searcher returning a mix of valid and dirty aggregate rows."""
+
+    site_name = "dirty"
+
+    async def _fetch_html(self, keyword: str) -> str:
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [
+            _search_result("dirty", "good", "三体"),
+            _search_result("", "ghost", "三体"),
+            _search_result("dirty", "unsafe", "三体", book_url="javascript:alert(1)"),
+            _search_result("dirty", "", "三体", book_url=""),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_sanitization_does_not_rewrite_the_cache_snapshot(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_DirtyAggregateSearcher])
+    )
+
+    results = await search("三体", min_relevance=None)
+
+    assert [row["book_id"] for row in results] == ["good", "unsafe"]
+    assert results[1]["book_url"] == ""
+
+    # The cache keeps the raw snapshot: sanitization is per call, and a later
+    # call (or a stream cache hit) must still see what the site returned.
+    snapshot = _cache_snapshot("三体")
+    assert len(snapshot) == 4
+    unsafe = next(row for row in snapshot if row["book_id"] == "unsafe")
+    assert unsafe["book_url"] == "javascript:alert(1)"
 
 
 # --------------------------------------------------------------------------- #
@@ -1532,3 +1941,455 @@ async def test_group_filter_keeps_sources_without_the_keyword(
     assert len(merged) == 1
     assert merged[0]["title"] == "斗破苍穹"
     assert set(merged[0]["sources"]) == {"authorhit", "authorblank"}
+
+
+# --------------------------------------------------------------------------- #
+# "书名 + 作者" multi-token queries
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keyword", ["斗破苍穹 天蚕土豆", "天蚕土豆 斗破苍穹"])
+async def test_multi_token_query_keeps_the_matching_book(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None, keyword: str
+) -> None:
+    # Neither the spaced title nor the spaced author alone occurs verbatim in
+    # the row fields; only token-aware relevance keeps the book above the
+    # 0.45 floor.  Token order must not matter.
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MixedRelevanceSearcher])
+    )
+
+    results = await search(keyword)
+
+    assert [item["book_id"] for item in results] == ["exact", "deriv"]
+
+
+# --------------------------------------------------------------------------- #
+# ranking telemetry on final results (rank_score / match_tier)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_search_annotates_final_rows_with_ranking_telemetry(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MixedRelevanceSearcher])
+    )
+
+    results = await search("斗破苍穹")
+
+    assert [item["book_id"] for item in results] == ["exact", "deriv"]
+    for item in results:
+        assert set(item) >= _DEBUG_KEYS
+        assert isinstance(item["rank_score"], float)
+        assert 0.0 <= item["rank_score"] <= 1.0
+        assert isinstance(item["match_tier"], int)
+        assert 0 <= item["match_tier"] <= 4
+    # An exact title is tier 4; a title that starts with the keyword is tier 3.
+    assert [item["match_tier"] for item in results] == [4, 3]
+    # Both rows share the same metadata, so the exact title outranks the
+    # derivative and the annotated scores follow the returned order.
+    assert results[0]["rank_score"] > results[1]["rank_score"]
+
+
+@pytest.mark.asyncio
+async def test_ranking_telemetry_never_reaches_the_cache_snapshot(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MixedRelevanceSearcher])
+    )
+
+    first = await search("斗破苍穹")
+    snapshot = _cache_snapshot("斗破苍穹")
+
+    assert len(first) == 2
+    assert len(snapshot) == 3
+    for row in snapshot:
+        assert _DEBUG_KEYS.isdisjoint(row)
+
+    # Returned rows are copies: mutating them cannot reach the snapshot.
+    first[0]["title"] = "tampered"
+    first[0]["rank_score"] = 0.0
+
+    again = await search("斗破苍穹")  # cache hit: re-ranked and re-annotated
+    assert again[0]["title"] == "斗破苍穹"
+    assert again[0]["rank_score"] > 0.0
+    assert set(again[0]) >= _DEBUG_KEYS
+    refreshed = _cache_snapshot("斗破苍穹")
+    assert refreshed[0]["title"] == "斗破苍穹"
+    assert all(_DEBUG_KEYS.isdisjoint(row) for row in refreshed)
+
+
+def test_ranking_telemetry_is_derived_never_an_input() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    strong = _search_result("alpha", "strong", "斗破苍穹", word_count="300万字")
+    weak = _search_result("alpha", "weak", "斗破苍穹外传", word_count="1万字")
+
+    baseline = _finalize(
+        [dict(weak), dict(strong)],
+        keyword="斗破苍穹",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=False,
+    )
+    # Pre-set telemetry that would win if ranking/grouping ever read it.
+    poisoned = _finalize(
+        [
+            {**weak, "rank_score": 1.0, "match_tier": 4},
+            {**strong, "rank_score": 0.0, "match_tier": 0},
+        ],
+        keyword="斗破苍穹",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=False,
+    )
+
+    assert [row["book_id"] for row in baseline] == ["strong", "weak"]
+    assert [row["book_id"] for row in poisoned] == ["strong", "weak"]
+    # The annotations are recomputed from the row, not echoed back.
+    assert poisoned[0]["rank_score"] > poisoned[1]["rank_score"]
+    assert [row["match_tier"] for row in poisoned] == [
+        baseline[0]["match_tier"],
+        baseline[1]["match_tier"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_grouped_rows_carry_telemetry_and_keep_the_snapshot_clean(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    from novel_downloader.plugins.ranking import rank_score
+
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_BookCopySearcher, _StrongCopySearcher]),
+    )
+
+    merged = await search("三体", group=True)
+
+    assert len(merged) == 1
+    entry = merged[0]
+    assert entry["sources"] == ["beta", "alpha"]
+    assert set(entry) >= _DEBUG_KEYS
+    assert entry["match_tier"] == 4  # exact title
+    # The annotated score is the group primary's score under the same keyword.
+    alpha = _search_result(
+        "alpha", "alpha-1", "三体", word_count="10万字", priority=100
+    )
+    beta = _search_result("beta", "beta-1", "三体", word_count="300万字", priority=100)
+    assert entry["rank_score"] == pytest.approx(
+        max(rank_score(alpha, "三体"), rank_score(beta, "三体")), abs=1e-5
+    )
+
+    snapshot = _cache_snapshot("三体")
+    assert all(_DEBUG_KEYS.isdisjoint(row) for row in snapshot)
+    assert all("sources" not in row for row in snapshot)
+
+
+@pytest.mark.asyncio
+async def test_stream_chunks_never_carry_ranking_telemetry(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MixedRelevanceSearcher])
+    )
+
+    fresh = [chunk async for chunk in search_stream("斗破苍穹")]
+    assert fresh
+    assert all(_DEBUG_KEYS.isdisjoint(item) for chunk in fresh for item in chunk)
+
+    await search("斗破苍穹")  # warm the shared cache
+    cached = [chunk async for chunk in search_stream("斗破苍穹")]
+    assert cached
+    assert all(_DEBUG_KEYS.isdisjoint(item) for chunk in cached for item in chunk)
+
+
+# --------------------------------------------------------------------------- #
+# multi-token queries combined with grouping and the relevance floor
+# --------------------------------------------------------------------------- #
+
+
+class _MultiTokenMirrorSearcher(BaseSearcher):
+    """Same book as :class:`_MultiTokenBookSearcher`, with a blank author."""
+
+    site_name = "multimirror"
+
+    async def _fetch_html(self, keyword: str) -> str:
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [_search_result("multimirror", "b1", "斗破苍穹", author="")]
+
+
+class _MultiTokenBookSearcher(BaseSearcher):
+    """The title+author book, found on a site that knows both fields."""
+
+    site_name = "multibook"
+
+    async def _fetch_html(self, keyword: str) -> str:
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [_search_result("multibook", "b1", "斗破苍穹", author="天蚕土豆")]
+
+
+class _MultiTokenNoiseSearcher(BaseSearcher):
+    """An unrelated book that shares no characters with either token."""
+
+    site_name = "multinoise"
+
+    async def _fetch_html(self, keyword: str) -> str:
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [_search_result("multinoise", "n1", "三体", author="刘慈欣")]
+
+
+class _MultiTokenDerivativeSearcher(BaseSearcher):
+    """A genuine derivative: relevant on its own, but below a strict floor."""
+
+    site_name = "multideriv"
+
+    async def _fetch_html(self, keyword: str) -> str:
+        return "html"
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return [_search_result("multideriv", "d1", "斗破苍穹之雷霆震碎", author="别人")]
+
+
+@pytest.mark.asyncio
+async def test_multi_token_group_floor_keeps_the_book_with_a_blank_author_source(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # The mirror row has no author and scores 0 on the whole query, yet it is a
+    # source of the book whose primary clears the floor: grouping first must
+    # keep it, exactly like the single-token author search.
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry(
+            [
+                _MultiTokenBookSearcher,
+                _MultiTokenMirrorSearcher,
+                _MultiTokenNoiseSearcher,
+            ]
+        ),
+    )
+
+    merged = await search("斗破苍穹 天蚕土豆", group=True)
+
+    assert len(merged) == 1
+    assert merged[0]["title"] == "斗破苍穹"
+    assert set(merged[0]["sources"]) == {"multibook", "multimirror"}
+    assert merged[0]["match_tier"] == 4
+    assert merged[0]["rank_score"] > 0.0
+
+
+@pytest.mark.asyncio
+async def test_multi_token_group_floor_falls_back_to_positive_primaries(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    # Nothing clears 0.95: the never-empty fallback keeps the derivative book
+    # (positive relevance) and still drops the unrelated one, per *book*.
+    monkeypatch.setattr(
+        registrar,
+        "get_searcher_classes",
+        _mirror_registry([_MultiTokenDerivativeSearcher, _MultiTokenNoiseSearcher]),
+    )
+
+    merged = await search("斗破苍穹 天蚕土豆", group=True, min_relevance=0.95)
+
+    assert [entry["title"] for entry in merged] == ["斗破苍穹之雷霆震碎"]
+    assert merged[0]["rank_score"] > 0.0
+    assert merged[0]["match_tier"] == 3  # prefix match on the title
+
+
+# --------------------------------------------------------------------------- #
+# arrival-order determinism (shuffled rows, swapped sites, swapped delays)
+# --------------------------------------------------------------------------- #
+class _ArrivalSearcher(BaseSearcher):
+    """Searcher whose rows and completion delay are set per test."""
+
+    site_name = "arrival_a"
+    rows: list[SearchResult] = []
+    delay = 0.0
+
+    async def search(
+        self, keyword: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        # Completion order is what a concurrent aggregate sees; the rows
+        # themselves are returned in the order the class was given.
+        await asyncio.sleep(type(self).delay)
+        rows = list(type(self).rows)
+        return rows if limit is None else rows[:limit]
+
+    async def _fetch_html(self, keyword: str) -> str:
+        return ""
+
+    def _parse_html(
+        self, html_str: str, limit: int | None = None
+    ) -> list[SearchResult]:
+        return []
+
+
+class _ArrivalSearcherB(_ArrivalSearcher):
+    site_name = "arrival_b"
+
+
+def _arrival_rows_a() -> list[SearchResult]:
+    return [
+        _search_result(
+            "arrival_a",
+            "a-strong",
+            "三体",
+            author="刘慈欣",
+            word_count="300万字",
+            update_date="2024-06-14",
+            cover_url="https://example.com/a.jpg",
+            latest_chapter="第300章",
+        ),
+        _search_result(
+            "arrival_a",
+            "a-weak",
+            "三体",
+            author="刘慈欣",
+            word_count="1万字",
+            update_date="2020-01-01",
+        ),
+        _search_result(
+            "arrival_a", "a-jia", "球状闪电", author="甲", word_count="10万字"
+        ),
+        _search_result(
+            "arrival_a", "a-yi", "球状闪电", author="乙", word_count="10万字"
+        ),
+        # Same site + title, no book id, different authors and URLs: the
+        # historical canonical key (site, title, book_id) was identical.
+        _search_result(
+            "arrival_a",
+            "",
+            "三体外传",
+            author="丙",
+            book_url="https://example.com/a-c",
+        ),
+        _search_result(
+            "arrival_a",
+            "",
+            "三体外传",
+            author="丁",
+            book_url="https://example.com/a-d",
+        ),
+    ]
+
+
+def _arrival_rows_b() -> list[SearchResult]:
+    return [
+        _search_result(
+            "arrival_b",
+            "b-strong",
+            "三体",
+            author="刘慈欣",
+            word_count="200万字",
+            update_date="2024-05-01",
+        ),
+        _search_result(
+            "arrival_b", "b-jia", "球状闪电", author="甲", word_count="10万字"
+        ),
+    ]
+
+
+def _arrival_view(rows: Sequence[SearchResult]) -> list[tuple[Any, ...]]:
+    """Observable layout: order, identity, group sources and match tier."""
+    return [
+        (
+            item["site"],
+            item["book_id"],
+            item["title"],
+            item["author"],
+            tuple(item.get("sources", ())),
+            item["match_tier"],
+        )
+        for item in rows
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [None, 1, 2])
+async def test_search_layout_is_independent_of_arrival_order(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None, limit: int | None
+) -> None:
+    import novel_downloader.plugins.search as search_module
+
+    a_rows = _arrival_rows_a()
+    b_rows = _arrival_rows_b()
+
+    async def run(
+        rows_a: list[SearchResult],
+        rows_b: list[SearchResult],
+        *,
+        delay_a: float,
+        delay_b: float,
+        sites: list[str],
+    ) -> list[SearchResult]:
+        # Same rows, different arrival: swap site order, completion delays and
+        # the within-site row order.
+        monkeypatch.setattr(_ArrivalSearcher, "rows", rows_a)
+        monkeypatch.setattr(_ArrivalSearcher, "delay", delay_a)
+        monkeypatch.setattr(_ArrivalSearcherB, "rows", rows_b)
+        monkeypatch.setattr(_ArrivalSearcherB, "delay", delay_b)
+        monkeypatch.setattr(
+            registrar,
+            "get_searcher_classes",
+            _mirror_registry([_ArrivalSearcher, _ArrivalSearcherB]),
+        )
+        # Cache holds the unranked snapshot; each run must build its own.
+        search_module._CACHE.clear()
+        return await search(
+            "三体",
+            sites=sites,
+            per_site_limit=10,
+            group=True,
+            limit=limit,
+            min_relevance=None,
+        )
+
+    first = await run(
+        a_rows,
+        b_rows,
+        delay_a=0.0,
+        delay_b=0.05,
+        sites=["arrival_a", "arrival_b"],
+    )
+    second = await run(
+        list(reversed(a_rows)),
+        list(reversed(b_rows)),
+        delay_a=0.05,
+        delay_b=0.0,
+        sites=["arrival_b", "arrival_a"],
+    )
+
+    assert _arrival_view(second) == _arrival_view(first)
+    assert [item["rank_score"] for item in second] == pytest.approx(
+        [item["rank_score"] for item in first], abs=1e-9
+    )
+    expected_count = 5 if limit is None else limit
+    assert len(first) == expected_count
+
+    # The tie-broken pair is ordered by content, not by which row came first.
+    if limit is None:
+        twin_authors = [item["author"] for item in first if item["title"] == "三体外传"]
+        assert twin_authors == ["丁", "丙"]

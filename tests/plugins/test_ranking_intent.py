@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import random
 from datetime import datetime
 
 import pytest
@@ -13,6 +14,7 @@ from novel_downloader.plugins.ranking import (
     INTENT_WEIGHTS,
     detect_query_intent,
     filter_by_relevance,
+    match_tier_of,
     normalize_text,
     rank_score,
     relevance_of,
@@ -146,6 +148,29 @@ def test_detect_does_not_mutate_results() -> None:
     snapshot = [dict(item) for item in results]
     detect_query_intent("天蚕土豆", results)
     assert [dict(item) for item in results] == snapshot
+
+
+def test_detect_intent_is_independent_of_result_arrival_order() -> None:
+    # The verdict compares two accumulated sums against a threshold.  A plain
+    # float accumulation loop is order-sensitive in its last bits, so the same
+    # rows arriving in a different order (concurrent sites completing at
+    # different times) must still yield the identical verdict.
+    results = [
+        _result(title="斗破苍穹", author="天蚕土豆"),
+        _result(title="武动乾坤", author="天蚕土豆"),
+        _result(title="大主宰", author="天蚕土豆"),
+        _result(title="斗破苍穹外传", author="别人"),
+        _result(title="重生之都市修仙", author="十里剑神"),
+        _result(title="三体", author="刘慈欣"),
+    ]
+    baseline = detect_query_intent("天蚕土豆", results)
+    assert baseline == "author"
+
+    rng = random.Random(20240615)
+    for _ in range(25):
+        shuffled = list(results)
+        rng.shuffle(shuffled)
+        assert detect_query_intent("天蚕土豆", shuffled) == baseline
 
 
 # --------------------------------------------------------------------------- #
@@ -616,3 +641,175 @@ def test_build_key_keeps_distinct_normalized_sites_apart() -> None:
     # Normalization must not collapse genuinely different sites.
     assert build_key("k", ["qidian"]) != build_key("k", ["fanqie"])
     assert build_key("k", ["qidian", "fanqie"]) == build_key("k", ["fanqie", "Qidian"])
+
+
+# --------------------------------------------------------------------------- #
+# multi-token ("书名 + 作者") queries
+#
+# "斗破苍穹 天蚕土豆" does not occur verbatim in either field, so the historical
+# whole-string relevance scored it 0.275 -- below the 0.45 floor -- and the
+# genuinely matching book was dropped.  Two-to-four tokens are now scored
+# separately; every other token count keeps the old path exactly.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("separator", [" ", "\u3000", "·", "-", ",", "，"])
+def test_query_tokens_split_on_every_supported_separator(separator: str) -> None:
+    from novel_downloader.plugins.ranking import _query_tokens
+
+    assert _query_tokens(f"斗破苍穹{separator}天蚕土豆") == ("斗破苍穹", "天蚕土豆")
+
+
+def test_query_tokens_collapse_separator_runs_and_drop_empties() -> None:
+    from novel_downloader.plugins.ranking import _query_tokens
+
+    assert _query_tokens("  斗破苍穹  -，  天蚕土豆  ") == ("斗破苍穹", "天蚕土豆")
+    assert _query_tokens("斗破苍穹 天蚕土豆 外传") == ("斗破苍穹", "天蚕土豆", "外传")
+    assert _query_tokens("斗破苍穹 天蚕土豆 外传 全本") == (
+        "斗破苍穹",
+        "天蚕土豆",
+        "外传",
+        "全本",
+    )
+
+
+def test_query_tokens_disabled_outside_the_two_to_four_window() -> None:
+    from novel_downloader.plugins.ranking import _query_tokens
+
+    # One token (including a punctuated title) and five or more tokens keep
+    # the historical whole-keyword behaviour.
+    assert _query_tokens("") == ()
+    assert _query_tokens("斗破苍穹") == ()
+    assert _query_tokens("  斗破苍穹  ") == ()
+    assert _query_tokens("斗破苍穹（精校版）") == ()
+    assert _query_tokens("斗破苍穹 天蚕土豆 外传 全本 精校") == ()
+
+
+@pytest.mark.parametrize("keyword", ["斗破苍穹 天蚕土豆", "天蚕土豆 斗破苍穹"])
+def test_multi_token_query_matches_title_and_author(keyword: str) -> None:
+    book = _result(title="斗破苍穹", author="天蚕土豆")
+
+    # The old whole-string score for this book was 0.275 (below the floor).
+    assert relevance_of(book, "斗破苍穹天蚕土豆") == pytest.approx(0.275)
+    # Either token order now matches both fields of the book.
+    assert relevance_of(book, keyword) == pytest.approx(1.0)
+
+
+def test_multi_token_query_survives_the_relevance_floor() -> None:
+    book = _result(book_id="book", title="斗破苍穹", author="天蚕土豆")
+    derivative = _result(book_id="deriv", title="斗破苍穹之雷霆震碎", author="别人")
+    unrelated = _result(book_id="none", title="三体", author="刘慈欣")
+
+    kept = filter_by_relevance(
+        [unrelated, derivative, book],
+        "斗破苍穹 天蚕土豆",
+        min_relevance=0.45,
+    )
+
+    # The book and its genuine derivative survive; the unrelated row does not.
+    assert [row["book_id"] for row in kept] == ["deriv", "book"]
+
+
+def test_multi_token_query_does_not_boost_unrelated_books() -> None:
+    keyword = "斗破苍穹 天蚕土豆"
+    for title, author in (
+        ("三体", "刘慈欣"),
+        ("活着", "余华"),
+        ("斗罗大陆", "唐家三少"),
+        ("苍穹榜", "土豆"),
+    ):
+        score = relevance_of(_result(title=title, author=author), keyword)
+        assert score < 0.45, (title, author, score)
+
+
+def test_punctuated_title_query_is_not_weakened_by_token_splitting() -> None:
+    # A real title may itself contain a listed separator.  The whole-keyword
+    # score stays in the comparison, so splitting never lowers relevance.
+    for title in ("Re:Zero-从零开始的异世界生活", "你好，旧时光"):
+        book = _result(title=title, author="某作者")
+        assert relevance_of(book, title) == pytest.approx(1.0)
+
+
+def test_more_than_four_tokens_keeps_the_whole_keyword_behaviour() -> None:
+    keyword = "斗破苍穹 天蚕土豆 外传 全本 精校"
+    whole = "斗破苍穹天蚕土豆外传全本精校"
+    book = _result(title="斗破苍穹", author="天蚕土豆")
+
+    # Five tokens disable multi-token matching: the score equals the
+    # historical whole-string computation, which stays below the floor.
+    assert relevance_of(book, keyword) == relevance_of(book, whole)
+    assert relevance_of(book, keyword) < 0.45
+
+
+def test_detect_mixed_title_and_author_tokens_returns_either() -> None:
+    results = [
+        _result(title="斗破苍穹", author="天蚕土豆"),
+        _result(title="武动乾坤", author="天蚕土豆"),
+    ]
+
+    # One token points at the title, the other at the pen name: mixed.
+    assert detect_query_intent("斗破苍穹 天蚕土豆", results) == "either"
+    assert detect_query_intent("天蚕土豆 斗破苍穹", results) == "either"
+
+
+def test_detect_multi_token_title_only_query_returns_title() -> None:
+    results = [
+        _result(title="斗破苍穹外传", author=""),
+        _result(title="斗破苍穹之雷霆震碎", author=""),
+    ]
+
+    assert detect_query_intent("斗破苍穹 外传", results) == "title"
+
+
+def test_detect_single_token_behaviour_is_unchanged() -> None:
+    results = [
+        _result(title="斗破苍穹", author="天蚕土豆"),
+        _result(title="斗破苍穹外传", author="别人"),
+    ]
+
+    # No tokenisation for a single token: same verdict as before.
+    assert detect_query_intent("斗破苍穹", results) == "title"
+
+
+# --------------------------------------------------------------------------- #
+# match_tier_of: the 0..4 telemetry reported on final search rows
+# --------------------------------------------------------------------------- #
+def test_match_tier_of_reports_the_primary_field_under_an_intent() -> None:
+    author_book = _result(title="斗破苍穹", author="天蚕土豆")
+    title_collision = _result(title="天蚕土豆", author="路人甲")
+
+    # Read as an author query, only the author field can produce the hit.
+    assert match_tier_of(author_book, "天蚕土豆", intent="author") == 4
+    assert match_tier_of(title_collision, "天蚕土豆", intent="author") == 0
+    # Mirror image: the same text read as a title.
+    assert match_tier_of(title_collision, "天蚕土豆", intent="title") == 4
+    assert match_tier_of(author_book, "天蚕土豆", intent="title") == 0
+
+
+def test_match_tier_of_either_uses_the_better_field() -> None:
+    row = _result(title="三体", author="刘慈欣")
+
+    assert match_tier_of(row, "三体") == 4
+    assert match_tier_of(row, "刘慈欣") == 4
+    assert match_tier_of(row, "斗破苍穹") == 0
+
+
+def test_match_tier_of_distinguishes_every_match_kind() -> None:
+    assert match_tier_of(_result(title="斗破苍穹", author=""), "斗破苍穹") == 4
+    assert match_tier_of(_result(title="斗破苍穹外传", author=""), "斗破苍穹") == 3
+    assert match_tier_of(_result(title="重生之斗破苍穹", author=""), "斗破苍穹") == 2
+    # Only some characters overlap: a partial match, not containment.
+    assert match_tier_of(_result(title="斗破", author=""), "斗破苍穹") == 1
+    assert match_tier_of(_result(title="三体", author=""), "斗破苍穹") == 0
+    # An empty keyword matches nothing at all.
+    assert match_tier_of(_result(title="三体", author="刘慈欣"), "") == 0
+
+
+def test_match_tier_of_is_multi_token_aware() -> None:
+    book = _result(title="斗破苍穹", author="天蚕土豆")
+    derivative = _result(title="斗破苍穹之雷霆震碎", author="别人")
+
+    assert match_tier_of(book, "斗破苍穹 天蚕土豆") == 4
+    assert match_tier_of(book, "天蚕土豆 斗破苍穹") == 4
+    assert match_tier_of(derivative, "斗破苍穹 天蚕土豆") == 3
+    # Five tokens keep the historical whole-keyword path: the long string is
+    # not contained, and only its overlapping characters count (partial).
+    assert match_tier_of(book, "斗破苍穹 天蚕土豆 外传 全本 精校") == 1

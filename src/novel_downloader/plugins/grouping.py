@@ -196,6 +196,8 @@ def _norm_author(result: SearchResult) -> str:
 def group_results(
     results: Sequence[SearchResult],
     keyword: str = "",
+    *,
+    now: datetime | None = None,
 ) -> list[ResultGroup]:
     """
     Fold ``results`` into one :class:`ResultGroup` per distinct book.
@@ -224,10 +226,13 @@ def group_results(
         pre-sorted) order.
     :param keyword: the original search keyword, feeding the relevance
         signal of ``rank_score``.
+    :param now: the instant the recency signal is measured against; defaults
+        to :func:`datetime.now`.  Callers that also rank and annotate the same
+        rows can pass one instant so every score of the call is comparable.
     :returns: one :class:`ResultGroup` per book, ordered by the input
         position of each group's ``primary``.
     """
-    current = datetime.now()
+    current = now or datetime.now()
     by_title: dict[str, list[_Cluster]] = {}
     # title -> (normalized author -> cluster); built incrementally so each
     # entry is dispatched in O(1) instead of scanning the title's clusters.
