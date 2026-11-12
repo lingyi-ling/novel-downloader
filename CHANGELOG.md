@@ -1,6 +1,6 @@
 ## v1.31.0 (2026-11-13)
 
-第三批并行加固，覆盖搜索/音乐/桌面/Android/API/CLI/发布工具与数据安全，共修复 100+ 个可复现问题；Python 门禁 **12095 passed / 42 skipped**，Android **425 tests / lint 0 error**。
+第三批并行加固，覆盖搜索/音乐/桌面/Android/API/CLI/发布工具与数据安全，共修复 100+ 个可复现问题；Python 门禁 **12096 passed / 42 skipped**，Android **425 tests / lint 0 error**。
 
 ### Feature
 
@@ -38,7 +38,7 @@
 
 ### Test
 
-- Python **12095 passed / 42 skipped**；`ruff check`、`ruff format --check`（790 files）、`mypy src`（548 files）全绿
+- Python **12096 passed / 42 skipped**；`ruff check`、`ruff format --check`（790 files）、`mypy src`（548 files）全绿
 - Android **425 unit tests**、`lintDebug` **0 error / 22 warning**（已接受的局域网明文配置）
 
 ## v1.30.0 (2026-11-12)
