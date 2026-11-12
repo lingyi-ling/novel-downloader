@@ -739,6 +739,59 @@ def test_more_than_four_tokens_keeps_the_whole_keyword_behaviour() -> None:
     assert relevance_of(book, keyword) < 0.45
 
 
+def test_query_tokens_dedupe_repeated_tokens() -> None:
+    from novel_downloader.plugins.ranking import _query_tokens
+
+    # Duplicates carry no extra information and must not consume the 2-4 token
+    # window: one repeated token is still a single-token query, while a
+    # title+author pair repeated past four raw tokens must stay multi-token.
+    assert _query_tokens("三体 三体") == ()
+    # A punctuation-only fragment survives splitting but carries no
+    # evidence, so it must not count either.
+    assert _query_tokens("斗破苍穹 《》 天蚕土豆") == ("斗破苍穹", "天蚕土豆")
+    assert _query_tokens("斗破苍穹 天蚕土豆 斗破苍穹") == ("斗破苍穹", "天蚕土豆")
+    assert _query_tokens("斗破苍穹 天蚕土豆 天蚕土豆 天蚕土豆 天蚕土豆") == (
+        "斗破苍穹",
+        "天蚕土豆",
+    )
+
+
+def test_repeated_token_query_still_matches_title_and_author() -> None:
+    # Five raw tokens used to disable multi-token matching, dropping this book
+    # from 1.0 relevance to 0.36 -- below the default 0.45 floor.
+    book = _result(title="斗破苍穹", author="天蚕土豆")
+    keyword = "斗破苍穹 天蚕土豆 天蚕土豆 天蚕土豆 天蚕土豆"
+
+    assert relevance_of(book, keyword) == pytest.approx(1.0)
+    assert filter_by_relevance([book], keyword, min_relevance=0.45) == [book]
+
+
+def test_query_tokens_fold_full_width_separators() -> None:
+    from novel_downloader.plugins.ranking import _query_tokens
+
+    # The module folds full-width forms everywhere (titles, authors, dates,
+    # word counts), but tokenisation used to split only the full-width comma,
+    # so a full-width hyphen left "title－author" as one unusable token.
+    assert _query_tokens("斗破苍穹－天蚕土豆") == ("斗破苍穹", "天蚕土豆")
+    assert _query_tokens("ＡＢＣ－ＤＥＦ") == ("ABC", "DEF")
+
+
+@pytest.mark.parametrize("keyword", ["斗破苍穹－天蚕土豆", "天蚕土豆－斗破苍穹"])
+def test_full_width_hyphen_query_matches_title_and_author(keyword: str) -> None:
+    book = _result(title="斗破苍穹", author="天蚕土豆")
+
+    assert relevance_of(book, keyword) == pytest.approx(1.0)
+
+
+def test_relevance_of_unhashable_intent_falls_back_to_either() -> None:
+    # ``intent`` may come straight from a JSON query parameter; an unknown
+    # value must never break a search, and an unhashable one used to raise.
+    item = _result(title="斗破苍穹", author="天蚕土豆")
+    assert relevance_of(item, "斗破苍穹", intent=["author"]) == relevance_of(  # type: ignore[arg-type]
+        item, "斗破苍穹"
+    )
+
+
 def test_detect_mixed_title_and_author_tokens_returns_either() -> None:
     results = [
         _result(title="斗破苍穹", author="天蚕土豆"),

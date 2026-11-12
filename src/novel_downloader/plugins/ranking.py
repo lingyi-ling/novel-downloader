@@ -302,9 +302,28 @@ def normalize_text(value: object) -> str:
 
 @lru_cache(maxsize=1024)
 def _query_tokens_cached(keyword: str) -> tuple[str, ...]:
-    tokens = tuple(token for token in _QUERY_TOKEN_RE.split(keyword) if token)
+    # Fold full-width forms *before* splitting: ``，`` and a full-width hyphen
+    # are both listed/implied separators, and the rest of the module already
+    # folds them so "斗破苍穹－天蚕土豆" matches the same book as its
+    # half-width spelling.  Splitting the raw string used to keep the whole
+    # expression as one unusable token.
+    folded = unicodedata.normalize("NFKC", keyword)
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in _QUERY_TOKEN_RE.split(folded):
+        if not token:
+            continue
+        # Only tokens that survive normalization carry evidence.  Counting a
+        # punctuation-only fragment (or a repeat of a token already seen)
+        # towards the 2-4 window used to *disable* multi-token matching for a
+        # perfectly good title+author query ("斗破苍穹 天蚕土豆 天蚕土豆 ...").
+        identity = normalize_text(token)
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        tokens.append(token)
     if _MIN_QUERY_TOKENS <= len(tokens) <= _MAX_QUERY_TOKENS:
-        return tokens
+        return tuple(tokens)
     return ()
 
 
@@ -316,13 +335,17 @@ def _query_tokens(keyword: str) -> tuple[str, ...]:
     the title or the author field, so the historical whole-string containment
     test scores it far too low.  Splitting it on whitespace (full-width
     included), ``·``, ``,``, ``，`` and ``-`` yields the field-shaped tokens
-    instead.  Runs of separators count once, and empty fragments are dropped.
+    instead.  The keyword is NFKC-folded first, so full-width separators (the
+    full-width hyphen in particular) split exactly like their half-width
+    counterparts.
 
-    Only two to four non-empty tokens enable multi-token matching; any other
-    count returns ``()`` so the caller keeps the historical whole-keyword
-    behaviour (one token is a normal query, five or more is usually a pasted
-    sentence).  The result is cached because relevance is computed once per
-    result row.
+    Only two to four *distinct, non-empty* tokens enable multi-token matching;
+    any other count returns ``()`` so the caller keeps the historical
+    whole-keyword behaviour (one token is a normal query, five or more is
+    usually a pasted sentence).  Separator runs, punctuation-only fragments
+    and repeated tokens are dropped first: they carry no evidence and must not
+    consume the window.  The result is cached because relevance is computed
+    once per result row.
     """
     return _query_tokens_cached(keyword)
 
@@ -564,9 +587,11 @@ def _intent_tier(length: int) -> str:
     return "medium"
 
 
-def _normalize_intent(intent: str) -> str:
-    """Coerce an unknown intent string to ``"either"`` (never raises)."""
-    return intent if intent in _VALID_INTENTS else "either"
+def _normalize_intent(intent: object) -> str:
+    """Coerce an unknown or unhashable intent value to ``"either"``."""
+    if isinstance(intent, str) and intent in _VALID_INTENTS:
+        return intent
+    return "either"
 
 
 def _intent_verdict(needle: str, results: Sequence[SearchResult]) -> str:
@@ -797,6 +822,11 @@ def _site_score(priority: object) -> float:
         value = float(priority)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0.6
+    # NaN is "unknown", not "worst": every ``<=`` comparison against NaN is
+    # false, so without this guard it fell through to the 0.2 bucket.  Mirror
+    # ``_priority_key``, which already treats NaN as a missing priority.
+    if math.isnan(value):
+        return 0.6
     if value <= 10:
         return 1.0
     if value <= 50:
@@ -925,9 +955,11 @@ def sort_results(
     field, no matter how rich that row's metadata is.  Within one tier the
     previous weighted score still decides.  ``"either"`` and every other
     ``by`` keep the single score/explicit key untouched.
+
+    An unrecognised ``by`` falls back to ``"quality"`` *including* its natural
+    direction, so a caller that passes a stale key gets the best rows first
+    rather than the worst.
     """
-    direction = order or default_order(by)
-    reverse = direction == "desc"
     current = now or datetime.now()
     resolved_intent = _normalize_intent(intent)
     primary_field = _PRIMARY_FIELD.get(resolved_intent)
@@ -987,7 +1019,14 @@ def sort_results(
         "words": _words_key,
         "update": _update_key,
     }
-    key_fn = key_fns.get(by, key_fns["quality"])
+    # An unknown key falls back to the quality ranking.  Resolve the key before
+    # the direction: ``default_order`` knows nothing about the substituted key,
+    # so using the unknown key's natural direction ("asc") returned the worst
+    # rows first.
+    resolved_by = by if by in key_fns else "quality"
+    key_fn = key_fns[resolved_by]
+    direction = order or default_order(resolved_by)
+    reverse = direction == "desc"
 
     # Two stable passes: the first fixes a deterministic tie-break order, the
     # second applies the primary key (and direction) on top of it.  The first

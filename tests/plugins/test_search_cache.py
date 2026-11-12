@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+import os
+import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +17,7 @@ from novel_downloader.plugins.base.searcher import BaseSearcher
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.plugins.search import search, search_stream
 from novel_downloader.plugins.search_cache import (
+    DISK_DIR_ENV,
     CacheKey,
     CacheStats,
     SearchCache,
@@ -99,6 +104,15 @@ def test_build_key_keeps_punctuation_only_keywords_apart() -> None:
     assert _key("!!!") != _key("!!")
     # Whitespace around the same punctuation is still the same query.
     assert _key("  !!!  ") == _key("!!!")
+
+
+def test_build_key_folds_full_width_punctuation_only_keywords() -> None:
+    # The raw-keyword fallback must fold full-width forms like every other
+    # keyword identity: "！！！" and "!!!" are the same query, but still
+    # distinct from "？？？".
+    assert _key("！！！") == _key("!!!")
+    assert _key("？？？") == _key("???")
+    assert _key("！！！") != _key("？？？")
 
 
 def test_build_key_text_keywords_still_use_normalized_identity() -> None:
@@ -463,6 +477,354 @@ def test_stats_returns_a_frozen_snapshot() -> None:
     assert cache.stats().hits == 1
     with pytest.raises(dataclasses.FrozenInstanceError):
         snapshot.hits = 10  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# optional disk layer
+# --------------------------------------------------------------------------- #
+def _disk_cache(
+    directory: Path,
+    *,
+    clock: _Clock,
+    ttl: float = 300.0,
+    max_disk_entries: int = 256,
+    max_disk_bytes: int = 2 * 1024 * 1024,
+) -> SearchCache:
+    """Build a cache whose memory and disk layers share one manual clock."""
+    return SearchCache(
+        ttl=ttl,
+        now=clock,
+        wall_clock=clock,
+        disk_dir=directory,
+        max_disk_entries=max_disk_entries,
+        max_disk_bytes=max_disk_bytes,
+    )
+
+
+def _with_bad_priority(payload: dict[str, object]) -> object:
+    rows = payload["results"]
+    assert isinstance(rows, list)
+    row = rows[0]
+    assert isinstance(row, dict)
+    return {**payload, "results": [{**row, "priority": "high"}]}
+
+
+_CORRUPTIONS = [
+    ("wrong-version", lambda payload: {**payload, "version": 999}),
+    ("wrong-key", lambda payload: {**payload, "key": "someone-else"}),
+    ("bad-timestamp", lambda payload: {**payload, "stored_at": "yesterday"}),
+    ("results-not-a-list", lambda payload: {**payload, "results": 7}),
+    ("row-not-a-mapping", lambda payload: {**payload, "results": ["row"]}),
+    ("row-missing-fields", lambda payload: {**payload, "results": [{"site": "a"}]}),
+    ("row-wrong-type", _with_bad_priority),
+    ("payload-not-a-mapping", lambda payload: ["not", "a", "mapping"]),
+]
+
+
+def test_memory_only_cache_never_touches_the_filesystem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(DISK_DIR_ENV, raising=False)
+    cache = SearchCache(now=_Clock())
+    assert cache.disk_dir is None
+
+    def _forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("unexpected file I/O")
+
+    monkeypatch.setattr(Path, "open", _forbidden)
+    monkeypatch.setattr(Path, "mkdir", _forbidden)
+    monkeypatch.setattr(Path, "stat", _forbidden)
+    monkeypatch.setattr(Path, "glob", _forbidden)
+    monkeypatch.setattr(tempfile, "mkstemp", _forbidden)
+
+    key = _key()
+    cache.put(key, [_result("1")])
+    assert cache.get(key) == [_result("1")]
+    assert cache.get(_key("missing")) is None
+    cache.clear()
+    assert cache.stats().hits == 1
+
+
+def test_env_var_enables_disk_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _Clock()
+    target = tmp_path / "search-cache"
+    monkeypatch.setenv(DISK_DIR_ENV, str(target))
+
+    cache = SearchCache(now=clock, wall_clock=clock)
+    assert cache.disk_dir == target
+    key = _key()
+    cache.put(key, [_result("1")])
+    assert list(target.glob("v1-*.json"))
+
+    reader = SearchCache(now=clock, wall_clock=clock)
+    assert reader.get(key) == [_result("1")]
+
+
+def test_empty_or_whitespace_env_disables_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DISK_DIR_ENV, "   ")
+    assert SearchCache().disk_dir is None
+
+    # An explicit empty string also opts out, even when the env var is set.
+    monkeypatch.setenv(DISK_DIR_ENV, str(tmp_path))
+    assert SearchCache(disk_dir="").disk_dir is None
+
+
+def test_explicit_disk_dir_overrides_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DISK_DIR_ENV, str(tmp_path / "from-env"))
+    explicit = tmp_path / "explicit"
+    assert SearchCache(disk_dir=explicit).disk_dir == explicit
+
+
+def test_disk_roundtrip_across_instances(tmp_path: Path) -> None:
+    clock = _Clock()
+    key = _key()
+    results = [_result("1"), _result("2")]
+    _disk_cache(tmp_path, clock=clock).put(key, results)
+
+    reader = _disk_cache(tmp_path, clock=clock)
+    assert reader.get(key) == results
+    assert reader.stats().hits == 1
+
+
+def test_disk_hit_is_promoted_to_memory(tmp_path: Path) -> None:
+    clock = _Clock()
+    key = _key()
+    _disk_cache(tmp_path, clock=clock).put(key, [_result("1")])
+
+    reader = _disk_cache(tmp_path, clock=clock)
+    assert reader.get(key) == [_result("1")]
+    # Once promoted, the memory entry keeps serving even if the file vanishes.
+    reader._disk_path(key).write_bytes(b"{}")
+    assert reader.get(key) == [_result("1")]
+    assert reader.stats().hits == 2
+
+
+def test_disk_promotion_keeps_the_remaining_ttl(tmp_path: Path) -> None:
+    # Loading from disk must not restart the TTL: the promoted memory entry
+    # expires when the persisted one would have.
+    clock = _Clock()
+    key = _key()
+    _disk_cache(tmp_path, clock=clock, ttl=10.0).put(key, [_result("1")])
+
+    clock.advance(9.9)
+    reader = _disk_cache(tmp_path, clock=clock, ttl=10.0)
+    assert reader.get(key) == [_result("1")]  # promoted from disk at age 9.9
+
+    clock.advance(0.1)  # total age == ttl
+    assert reader.get(key) is None
+
+
+def test_disk_entry_expires_at_ttl(tmp_path: Path) -> None:
+    clock = _Clock()
+    key = _key()
+    _disk_cache(tmp_path, clock=clock, ttl=10.0).put(key, [_result("1")])
+
+    clock.advance(9.9)
+    assert _disk_cache(tmp_path, clock=clock, ttl=10.0).get(key) == [_result("1")]
+
+    clock.advance(0.1)  # age == ttl
+    assert _disk_cache(tmp_path, clock=clock, ttl=10.0).get(key) is None
+
+
+def test_disk_key_includes_config_fingerprint(tmp_path: Path) -> None:
+    clock = _Clock()
+    writer = _disk_cache(tmp_path, clock=clock)
+    first = build_key("k", None, config_fingerprint="f1")
+    second = build_key("k", None, config_fingerprint="f2")
+    writer.put(first, [_result("1")])
+
+    assert writer._disk_path(first) != writer._disk_path(second)
+    assert _disk_cache(tmp_path, clock=clock).get(second) is None
+    assert _disk_cache(tmp_path, clock=clock).get(first) == [_result("1")]
+
+
+def test_disk_identity_matches_numeric_key_equality(tmp_path: Path) -> None:
+    # Python compares ``5`` and ``5.0`` as equal cache keys, so the disk
+    # identity must not split them into two files.
+    clock = _Clock()
+    int_timeout = build_key("k", None, 5, False, timeout=5)  # type: ignore[arg-type]
+    float_timeout = build_key("k", None, 5, False, timeout=5.0)
+    assert int_timeout == float_timeout
+    _disk_cache(tmp_path, clock=clock).put(int_timeout, [_result("1")])
+    assert _disk_cache(tmp_path, clock=clock).get(float_timeout) == [_result("1")]
+
+
+def test_disk_payload_is_versioned_whitelisted_and_private(tmp_path: Path) -> None:
+    clock = _Clock()
+    key = _key()
+    cache = _disk_cache(tmp_path, clock=clock)
+    dirty = _result("1")
+    dirty["rank_score"] = 0.93  # type: ignore[typeddict-unknown-key]
+    dirty["match_tier"] = 2  # type: ignore[typeddict-unknown-key]
+    cache.put(key, [dirty])
+
+    path = cache._disk_path(key)
+    payload = json.loads(path.read_bytes())
+    assert payload["version"] == 1
+    assert isinstance(payload["key"], str)
+    assert payload["results"] == [_result("1")]
+    assert set(payload["results"][0]) == {
+        "site",
+        "book_id",
+        "book_url",
+        "cover_url",
+        "title",
+        "author",
+        "latest_chapter",
+        "update_date",
+        "word_count",
+        "priority",
+    }
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_malformed_json_is_ignored_and_rebuilt(tmp_path: Path) -> None:
+    clock = _Clock()
+    key = _key()
+    writer = _disk_cache(tmp_path, clock=clock)
+    writer.put(key, [_result("1")])
+    writer._disk_path(key).write_bytes(b"{ definitely not json")
+
+    reader = _disk_cache(tmp_path, clock=clock)
+    assert reader.get(key) is None
+    reader.put(key, [_result("2")])
+    assert _disk_cache(tmp_path, clock=clock).get(key) == [_result("2")]
+
+
+@pytest.mark.parametrize(
+    "name,corrupt", _CORRUPTIONS, ids=[name for name, _ in _CORRUPTIONS]
+)
+def test_corrupt_disk_payload_is_ignored_and_rebuilt(
+    tmp_path: Path,
+    name: str,
+    corrupt: Callable[[dict[str, object]], object],
+) -> None:
+    clock = _Clock()
+    key = _key()
+    writer = _disk_cache(tmp_path, clock=clock)
+    writer.put(key, [_result("1")])
+    path = writer._disk_path(key)
+    payload = json.loads(path.read_bytes())
+    path.write_bytes(json.dumps(corrupt(payload)).encode("utf-8"))
+
+    reader = _disk_cache(tmp_path, clock=clock)
+    assert reader.get(key) is None
+    reader.put(key, [_result("2")])
+    assert _disk_cache(tmp_path, clock=clock).get(key) == [_result("2")]
+
+
+def test_oversized_snapshot_stays_in_memory(tmp_path: Path) -> None:
+    clock = _Clock()
+    key = _key()
+    cache = _disk_cache(tmp_path, clock=clock, max_disk_bytes=80)
+    cache.put(key, [_result("1")])
+
+    assert not list(tmp_path.glob("v1-*.json"))
+    assert cache.get(key) == [_result("1")]
+    assert _disk_cache(tmp_path, clock=clock, max_disk_bytes=80).get(key) is None
+
+
+def test_oversized_disk_payload_is_ignored(tmp_path: Path) -> None:
+    clock = _Clock()
+    key = _key()
+    writer = _disk_cache(tmp_path, clock=clock)
+    writer.put(key, [_result("1")])
+    path = writer._disk_path(key)
+    valid = path.read_bytes()
+    path.write_bytes(valid + b" " * 200)
+
+    reader = _disk_cache(tmp_path, clock=clock, max_disk_bytes=len(valid) + 100)
+    assert reader.get(key) is None
+
+
+def test_disk_entry_limit_prunes_oldest(tmp_path: Path) -> None:
+    clock = _Clock()
+    cache = _disk_cache(tmp_path, clock=clock, max_disk_entries=2)
+    for index in range(5):
+        cache.put(_key(f"k{index}"), [_result(str(index))])
+
+    assert len(list(tmp_path.glob("v1-*.json"))) <= 2
+    # Pruning never drops the file just written.
+    assert _disk_cache(tmp_path, clock=clock).get(_key("k4")) == [_result("4")]
+
+
+def test_unwritable_disk_dir_is_a_silent_miss(tmp_path: Path) -> None:
+    # A file where the cache directory should be makes every mkdir/write fail.
+    blocker = tmp_path / "blocked"
+    blocker.write_text("not a directory", encoding="utf-8")
+    clock = _Clock()
+    key = _key()
+    cache = _disk_cache(blocker / "cache", clock=clock)
+
+    cache.put(key, [_result("1")])  # memory still works
+    assert cache.get(key) == [_result("1")]
+    assert _disk_cache(blocker / "cache", clock=clock).get(key) is None
+    cache.clear()  # must not raise
+
+
+def test_clear_removes_disk_payloads_but_not_unrelated_files(tmp_path: Path) -> None:
+    clock = _Clock()
+    cache = _disk_cache(tmp_path, clock=clock)
+    key = _key()
+    cache.put(key, [_result("1")])
+    payload_path = cache._disk_path(key)
+    unrelated = tmp_path / "keep.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+
+    cache.clear()
+
+    assert not payload_path.exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+    assert _disk_cache(tmp_path, clock=clock).get(key) is None
+
+
+def test_concurrent_disk_puts_from_several_instances(tmp_path: Path) -> None:
+    # Separate instances model separate processes: each has its own
+    # same-process lock, so the only common ground is the atomic temp+replace
+    # protocol.  Lost updates are allowed; corruption is not.
+    clock = _Clock()
+    key = _key("shared")
+    caches = [_disk_cache(tmp_path, clock=clock) for _ in range(4)]
+    barrier = threading.Barrier(len(caches))
+    failures: list[Exception] = []
+
+    def worker(index: int) -> None:
+        try:
+            barrier.wait(timeout=5.0)
+            for step in range(40):
+                caches[index].put(key, [_result(str(step))])
+                caches[index].get(key)
+        except Exception as exc:  # pragma: no cover - only on a regression
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(index,)) for index in range(len(caches))
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10.0)
+
+    assert failures == []
+    assert all(not thread.is_alive() for thread in threads)
+
+    files = list(tmp_path.glob("v1-*.json"))
+    assert len(files) == 1
+    json.loads(files[0].read_bytes())  # never half-written
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob(".*.tmp"))
+
+    loaded = _disk_cache(tmp_path, clock=clock).get(key)
+    assert loaded is not None
+    assert len(loaded) == 1
+    assert loaded[0]["book_id"] in {str(step) for step in range(40)}
 
 
 # --------------------------------------------------------------------------- #
