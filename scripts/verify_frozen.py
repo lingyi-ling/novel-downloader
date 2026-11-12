@@ -12,6 +12,9 @@ script inspects and (safely) launches the produced executables instead:
   update manifest use);
 * the image stack (``numpy``, ``Pillow`` and ``fontTools``) must be present in
   the PYZ archive, together with Pillow's native ``_imagingft`` module;
+* the size-hygiene contract holds: dev/test modules and hook-collected payload
+  that ``packaging/_spec_common.py`` prunes must not reappear, while the emoji
+  runtime table the music adapters use must still be frozen;
 * ``novel-cli --version`` must print the package version and
   ``novel-cli doctor --json`` must emit parseable JSON;
 * ``novel-api --help`` must exit 0 (it imports the whole ASGI stack).
@@ -63,6 +66,29 @@ IMAGE_STACK_MODULES: tuple[str, ...] = (
     "fontTools.ttLib",
     "fontTools.ttLib.tables._p_o_s_t",
 )
+
+#: Modules every spec deliberately keeps out of the bundles.  A stale spec or
+#: a PyInstaller hook update silently re-adds them (``setuptools`` alone is
+#: ~1.8 MiB of bytecode plus its runtime hook), so the gate checks absence.
+PRUNED_MODULES: tuple[str, ...] = (
+    "setuptools",
+    "_distutils_hack",
+    "numpy.testing",
+    "numpy.f2py",
+    "numpy.random",
+)
+
+#: Hook-collected trees removed by ``packaging/_spec_common.prune_bundle_toc``.
+#: Only the per-language emoji tables go: ``import emoji`` opens the English
+#: base table ``emoji.json`` at load time, so that file must survive.
+#: ``numpy.random`` is excluded outright, extension modules included.
+PRUNED_DATA_GLOBS: tuple[str, ...] = (
+    "emoji/unicode_codes/emoji_*.json",
+    "numpy/random/*.pyd",
+)
+
+#: Data files pruning must never remove (opened by ``import emoji``).
+REQUIRED_DATA_FILES: tuple[str, ...] = ("emoji/unicode_codes/emoji.json",)
 
 _VERSION_RE = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
@@ -239,6 +265,44 @@ def _check_image_payload(
         )
 
 
+def _check_bundle_hygiene(report: BundleReport, dist_dir: Path, work_dir: Path) -> None:
+    """Fail when pruned dev/test payload crept back into the bundle."""
+    internal = dist_dir / "_internal"
+    leftovers = sorted(
+        path.relative_to(internal).as_posix()
+        for pattern in PRUNED_DATA_GLOBS
+        for path in internal.glob(pattern)
+    )
+    if leftovers:
+        shown = ", ".join(leftovers[:5])
+        more = "" if len(leftovers) <= 5 else f" (+{len(leftovers) - 5} more)"
+        report.problems.append(f"bundle still ships pruned payload: {shown}{more}")
+
+    missing = [
+        relative
+        for relative in REQUIRED_DATA_FILES
+        if not (internal / relative).is_file()
+    ]
+    if missing and internal.is_dir():
+        report.problems.append("bundle is missing required data: " + ", ".join(missing))
+
+    modules = _pyz_modules(work_dir)
+    if modules is None:
+        # _check_image_payload already reported the unreadable archive.
+        return
+    present = [name for name in PRUNED_MODULES if name in modules]
+    if present:
+        joined = ", ".join(present)
+        report.problems.append(f"PYZ still contains pruned modules: {joined}")
+        return
+    if "emoji.unicode_codes.data_dict" not in modules:
+        report.problems.append("PYZ is missing emoji.unicode_codes.data_dict")
+        return
+    report.checks.append(
+        "size hygiene: dev/test payload pruned, emoji runtime table present"
+    )
+
+
 def _check_cli_probes(report: BundleReport, expected: str, timeout: float) -> None:
     with tempfile.TemporaryDirectory(prefix="noveldl-verify-") as work:
         cwd = Path(work)
@@ -330,6 +394,7 @@ def verify_bundle(
     _check_launcher(report)
     _check_version_resource(report, expected_version)
     _check_image_payload(report, root, dist_dir, work_dir)
+    _check_bundle_hygiene(report, dist_dir, work_dir)
     if key == "cli":
         if report.exe.is_file():
             _check_cli_probes(report, expected_version, timeout)

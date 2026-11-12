@@ -34,7 +34,10 @@ for extra_path in (SPEC_DIR, SRC_DIR):
 from _spec_common import (  # noqa: E402
     CONSOLE_EXCLUDES,
     EXCLUDES,
+    UNUSED_BINARY_PREFIXES,
+    UNUSED_DATA_PREFIXES,
     collect_common,
+    prune_bundle_toc,
     write_version_resource,
 )
 
@@ -68,6 +71,10 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# Hook payload that no runtime path reads (see ``UNUSED_*_PREFIXES``).
+a.datas = prune_bundle_toc(a.datas, UNUSED_DATA_PREFIXES)
+a.binaries = prune_bundle_toc(a.binaries, UNUSED_BINARY_PREFIXES)
 
 pyz = PYZ(a.pure)
 

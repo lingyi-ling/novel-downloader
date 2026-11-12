@@ -138,6 +138,20 @@ EXCLUDES: tuple[str, ...] = (
     "scipy",
     "IPython",
     "jupyter",
+    # Build-time only.  ``cffi._shimmed_dist_utils`` is the sole runtime
+    # importer and it is reached only from ``ffi.verify()``, which cannot work
+    # in a frozen bundle (no compiler, no package metadata).  Dropping
+    # setuptools also removes PyInstaller's setuptools runtime hook and the
+    # ``_distutils_hack`` shim.
+    "setuptools",
+    "_distutils_hack",
+    # NumPy exposes these through a lazy ``numpy.__getattr__``; ``import
+    # numpy`` never loads them and no module in this repository references
+    # them.  ``numpy.random`` additionally carries ~2 MiB of generator
+    # extension modules (removed from ``binaries`` by prune_bundle_toc).
+    "numpy.testing",
+    "numpy.f2py",
+    "numpy.random",
     # Not reachable from the registry (kept in-tree for reference only)
     f"{PACKAGE}.plugins.archived",
     # Android-only adapter: the embedded loopback server is loaded by name
@@ -151,6 +165,45 @@ EXCLUDES: tuple[str, ...] = (
 #: imports it, and excluding it keeps a future accidental cross-import from
 #: dragging pywebview into the CLI/API bundles.
 CONSOLE_EXCLUDES: tuple[str, ...] = (f"{PACKAGE}.apps.desktop",)
+
+#: Hook-collected payload that no runtime path reads.  PyInstaller hooks and
+#: ``collect_dynamic_libs`` run during analysis, so ``EXCLUDES`` alone cannot
+#: drop these files; every spec prunes them with :func:`prune_bundle_toc`.
+#:
+#: * ``emoji/unicode_codes/emoji_*.json`` -- the bundled ``hook-emoji`` copies
+#:   every per-language table.  ``import emoji`` itself opens the English base
+#:   table ``emoji.json``, which stays; the ``emoji_<lang>.json`` overlays are
+#:   read only by ``emoji.config.load_language()`` / ``demojize(language=...)``,
+#:   which no code path in this repository calls (~3.9 MiB).  The prefix ends
+#:   in ``emoji_`` so the base ``emoji.json`` never matches.
+#: * ``numpy/random/*`` -- ``hook-numpy`` collects every dynamic library below
+#:   the package.  ``numpy.random`` is excluded above, so its generator
+#:   extensions are dead weight (~2.0 MiB).
+UNUSED_DATA_PREFIXES: tuple[str, ...] = ("emoji/unicode_codes/emoji_",)
+UNUSED_BINARY_PREFIXES: tuple[str, ...] = ("numpy/random/",)
+
+
+def prune_bundle_toc(
+    toc: list[tuple[str, str, str]],
+    prefixes: tuple[str, ...],
+) -> list[tuple[str, str, str]]:
+    """
+    Drop TOC entries whose bundle-relative destination starts with *prefixes*.
+
+    PyInstaller writes destinations with the host separator (``\\`` on
+    Windows), so entries are normalised to forward slashes before comparing.
+
+    :param toc: ``Analysis.datas`` or ``Analysis.binaries``.
+    :param prefixes: Forward-slash destination prefixes to remove.
+    :return: The entries to keep, preserving their original order.
+    """
+    kept: list[tuple[str, str, str]] = []
+    for entry in toc:
+        destination = str(entry[0]).replace("\\", "/")
+        if any(destination.startswith(prefix) for prefix in prefixes):
+            continue
+        kept.append(entry)
+    return kept
 
 
 def modules_from_tree(package_dir: Path, package_name: str) -> list[str]:
