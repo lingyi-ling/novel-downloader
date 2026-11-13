@@ -215,6 +215,30 @@ downloads/{book_name}_{author}.epub
 downloads/{book_name}_{volume_name}_{author}.epub
 ```
 
+#### EPUB 可访问性元数据 {#epub-accessibility-metadata}
+
+EPUB 的 OPF (`OEBPS/content.opf`) 会写入一组 EPUB 3 / schema.org 可访问性声明:
+
+| 属性 | 值 | 说明 |
+| --- | --- | --- |
+| `schema:accessMode` | `textual` | 正文为纯文本, 不含音频或视频 |
+| `schema:accessibilityHazard` | `none` | 无已知的闪光、闪烁或动效风险 |
+| `schema:accessibilityFeature` | `structuralNavigation` | 仅当书中至少有一个章节文档时写入; 只有简介、卷首等页面不算目录 |
+| `schema:accessibilitySummary` | 按书籍语言 | 中文书籍写中文简介, 其它语言写英文简介; 有章节时注明含结构化目录 |
+
+规则说明:
+
+* 整书、分卷与单章导出使用同一套规则; 声明值不含时间戳等运行期数据, 同一本书重复导出得到相同的声明。
+* 这些属性以 `<meta property="...">` 写在 OPF 的 `<metadata>` 中, 属于 EPUB 3 的扩展元数据。
+* 只认识 EPUB 2 的阅读器会忽略这些声明, 不会因此报错; 正文和基于 `toc.ncx` 的目录导航不受影响 (能否打开整本 EPUB 3 仍取决于阅读器本身)。
+* 声明描述的是生成时的内容特征, 不是对整本书完成无障碍测试的结论; 本项目也不声称导出文件已通过 EPUBCheck 校验。
+
+**如何查看**
+
+* Calibre: 右键书籍 →「编辑书籍」, 在 `OEBPS/content.opf` 的 `<metadata>` 段查看。
+* 其它工具: 把 `.epub` 当作 zip 解压, 打开其中的 `OEBPS/content.opf`。
+* 部分阅读器或无障碍工具 (如 Thorium Reader) 会在书籍信息中展示这些声明, 具体入口随版本而异。
+
 #### 全书 HTML 导出
 
 HTML 导出包含完整书籍内容、目录页、章节页面以及相关静态资源。

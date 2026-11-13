@@ -140,7 +140,7 @@ Search for novels by keyword
 **Synopsis**
 
 ```bash
-novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] [--group | --no-group] keyword
+novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] [--min-words N] [--max-words N] [--updated-after YYYY-MM-DD] [--group | --no-group] keyword [keyword ...]
 ```
 
 **Options**
@@ -154,7 +154,9 @@ novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit 
 * `--json`: print all search results to stdout as JSON and exit (for scripts)
 * `--first`: download the top-ranked result directly without confirmation (non-interactive)
 * `--sort {quality,priority,site,title,author,words,update}`: result ordering, defaults to `quality`
-* `--group` / `--no-group`: merge the same book across sites into one row, with the `site` column listing every source (`*` marks the best source). Default: no grouping (`--no-group`).
+* `--min-words N` / `--max-words N`: word-count filter (inclusive), `0`–`1000000000`. The site's `word_count` is parsed with the same rules the ranking layer uses (`"30万字"`, `"1,234"`); when set, rows with **no parseable word count** are dropped. Omit both for no filtering.
+* `--updated-after YYYY-MM-DD`: keep only results updated **on or after** that date (inclusive lower bound); the date must be exactly `YYYY-MM-DD`. When set, rows with **no parseable update date** are dropped. Omit it for no filtering.
+* `--group` / `--no-group`: merge the same book across sites into one row, with the `site` column listing every source (`*` marks the best source). Default: no grouping (`--no-group`). Filters run before grouping and the `--limit` cut.
 * A keyword may be a two-to-four-token "title + author" query: spaces (including the full-width space), `·`, `,`, `，` and `-` split it into tokens matched against the title and author separately, while the whole keyword still participates in the score. For example, `"斗破苍穹 天蚕土豆"`. Multi-token matching only affects ranking and does **not** change the cache key.
 
 **Examples**
@@ -179,7 +181,18 @@ novel-cli search -s b520 -s n23qb 三体
 
 # Search title + author together: the two tokens match title and author separately
 novel-cli search "斗破苍穹 天蚕土豆"
+
+# Only works between 300k and 1M words
+novel-cli search 斗破苍穹 --min-words 300000 --max-words 1000000
+
+# Only results updated on or after 2024-01-01
+novel-cli search 斗破苍穹 --updated-after 2024-01-01
+
+# Filter + group + single-line JSON for scripts
+novel-cli search 斗破苍穹 --min-words 300000 --updated-after 2024-01-01 --group --json
 ```
+
+Filters only narrow this run's result set; they do not change ranking or the response fields. Each filter combination is cached as a distinct request, so a filtered query never reuses an unfiltered snapshot. `--json` still prints a JSON array of results. A malformed date or word count exits with a usage error (exit code `2`) instead of silently disabling the filter.
 
 !!! note "Why fanqienovel is excluded from aggregate searches"
     Fanqie signs its search requests client-side, and needs **no login**. Selecting the site explicitly uses the official app API: the first run registers a device identity (cached on disk), after which `x-argus` / `x-gorgon` / `x-ladon` are computed locally — no browser window involved.
@@ -274,6 +287,18 @@ novel-cli export
 ```
 
 > Tip: When `--site` or `book_id` is not specified, you enter interactive mode to choose from sites and books that have already been downloaded.
+
+!!! note "EPUB carries accessibility metadata"
+    Exported EPUBs declare EPUB 3 / schema.org accessibility metadata in the OPF, so readers and accessibility tools can consume it directly:
+
+    * `schema:accessMode = textual` — text-only content
+    * `schema:accessibilityHazard = none` — no known accessibility hazards
+    * `schema:accessibilitySummary` — a short Chinese or English summary chosen from the book's language
+    * `schema:accessibilityFeature = structuralNavigation` — additionally declared when the archive has at least one chapter document (a real table of contents)
+
+    Whole-book, per-volume, and single-chapter exports follow the same rules; the values contain no run-dependent data, so exporting the same book twice produces identical declarations.
+
+    EPUB 2 readers ignore these `<meta property>` declarations, which does not affect the body text or NCX-based navigation (whether a reader can open the EPUB 3 package at all still depends on the reader). To inspect them, unzip the EPUB and open `OEBPS/content.opf`, or use **Edit book** in Calibre. These are content-characteristic declarations, not a claim that the file passed EPUBCheck or completed an accessibility audit.
 
 ---
 
@@ -585,7 +610,7 @@ novel-cli music search [-h] [--platform KEY] [--limit N] [--json] keyword
 
 novel-cli music download [-h] [--keyword KEYWORD] [--platform KEY] [--limit N]
                          [--level {hires,lossless,exhigh,higher,standard}]
-                         [--out DIR] [--pick N[,N|ID]] [--yes]
+                         [--out DIR] [--pick N[,N|ID]] [--yes] [--json]
                          [KEYWORD]
 
 novel-cli music export-m3u [-h] --keyword KEYWORD [--platform KEY] [--limit N]
@@ -636,6 +661,13 @@ Search first, then select and download songs:
 * `--out DIR`: output directory; defaults to the music setting (falling back to the default download directory)
 * `--pick N[,N|ID]`: download the given search result index/indices (1-based) or song ID(s) without prompting
 * `--yes`: download every search result without prompting
+* `--json`: print a **single-line** download report and exit. Selection is unchanged: `--pick` or `--yes` is still required, a non-interactive shell must pass one explicitly, and otherwise the paged selector appears (or the command exits with a usage error). The top level has `platform`, `keyword`, `out_dir`, `level`, `total`, `ok`, `skip`, `fail`, `lyrics_written`, and `results`; `platform=all` also adds a `platforms` summary. Each `results[]` entry carries `id`, `name`, `artists`, `album`, `duration_s`, `vip`, `platform`, and `sources`, plus:
+  * `status`: `ok` / `skip` / `fail`;
+  * `path`: only when there is a usable local audio path and the status is `ok`/`skip`;
+  * `lyric_path`: only when the original lyric `<stem>.lrc` was actually written beside the audio (the `<stem>.zh.lrc` translation is not reported separately);
+  * `reason`: only for a failure where the engine supplied one.
+
+  When some songs fail, the JSON is still printed **in full first** and the command then exits `1`; a search with no results still emits a valid `total=0`, `results=[]` document, so callers never special-case empty stdout. Without `--json`, a written lyric set adds `Lyrics written: N` on stderr.
 
 When neither `--pick` nor `--yes` is given and the terminal is interactive, a paged selector appears (enter numbers, `a` for all, `n` next, `p` previous, Enter to cancel). In a non-interactive environment you must pass `--pick` or `--yes`.
 
@@ -696,6 +728,9 @@ novel-cli music download "keyword" --yes
 
 # Download by a song ID present in the search results
 novel-cli music download "keyword" --pick 123456789
+
+# Machine-readable: count the lyrics written by this run
+novel-cli music download "keyword" --yes --json | jq '.lyrics_written'
 ```
 
 > Progress display, tag embedding, cover and lyric saving, folder splitting, and skip-existing behavior follow the music settings (`embed_tags`, `embed_cover`, `save_lyric`, `split_folder`, `skip_existing`).
@@ -802,12 +837,12 @@ Report the disk usage of the four application data directories, and optionally c
 | Downloads | `general.output_dir` |
 | Logs | `general.debug.log_dir` |
 
-Without a subcommand it reports disk usage; the `backup` / `restore` subcommands back up and restore chapter databases.
+Without a subcommand it reports disk usage; the `backup` / `restore` / `verify` subcommands back up, restore, and verify chapter databases.
 
 **Synopsis**
 
 ```bash
-novel-cli storage [-h] [--json] [--clean] [-y] [--dry-run] [{backup,restore} ...]
+novel-cli storage [-h] [--json] [--clean] [-y] [--dry-run] [{backup,restore,verify} ...]
 ```
 
 **Options**
@@ -849,13 +884,19 @@ Take a consistent snapshot (SQLite online backup, including data still in the WA
 **Synopsis**
 
 ```bash
-novel-cli storage backup [-h] --out OUT [--json]
+novel-cli storage backup [-h] --out OUT [--json] [--keep N] [--dry-run]
 ```
 
 **Options**
 
 * `--out OUT`: directory that receives the backup files (required). Supports `~` and environment variables and is created when missing; each book produces `<out>/<site>/<book>/chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite`. An existing target file is never overwritten
-* `--json`: print a single-line JSON report with `command`, `ok`, `timestamp`, `out`, `count`, `bytes`, and `files[]` (`source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters`); with no databases to back up, `count` is `0` and `files` is an empty array
+* `--json`: print a single-line JSON report with `command`, `ok`, `timestamp`, `out`, `count`, `bytes`, `files[]` (`source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters`), and `retention` (`keep`, `dry_run`, `candidates`, `removed`, `failed`); with no databases to back up, `count` is `0` and `files` is an empty array
+* `--keep N`: after a successful backup publishes the new files, keep only the newest `N` backups **per book database and stage** and delete older ones; `0` (the default) disables pruning. A negative value exits with a usage error (`2`)
+* `--dry-run`: only report which old backups `--keep` would delete, **without deleting anything**; the new backup is still written. It requires `--keep N` with `N > 0`, otherwise it exits with a usage error (`2`)
+
+`--keep` has a hard boundary: it only considers **regular files** directly under `--out` whose names exactly match `chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite`. Directories, symlinks, and every other name (including hand-renamed files or files left by older versions) are never touched. Retention is grouped by "containing book directory + stage", so a book holding both `raw` and `cleaner` databases keeps `N` of each instead of one stage evicting the other; files written by the current run are always protected, so even a clock skew cannot delete a fresh backup. If a directory cannot be read or a delete fails, the command exits `1` and reports it in `retention.failed` / stderr, while the completed backups stay in place.
+
+> Backups are full snapshots, not increments; `--keep` only rotates them and never compresses or merges history. For long-term archiving, move old copies elsewhere rather than setting a very large `N`.
 
 The backup contains only the `chapter.<stage>.sqlite` files under `raw_data` (chapter text and metadata). It does **not** include `settings.toml`, cookies/tokens or other login state (they live in `cache_dir`), logs, images/media, or exported files. Restoring a backup therefore does not restore a login session; sign in again after moving to a new machine. The backup files are **plaintext** SQLite and may contain paid or private text, so keep them in a controlled directory and never commit them to Git or a public cloud drive.
 
@@ -865,11 +906,57 @@ The backup contains only the `chapter.<stage>.sqlite` files under `raw_data` (ch
 # Back up every chapter database
 novel-cli storage backup --out ~/novel-backups
 
+# Keep only the newest 7 backups per book and stage
+novel-cli storage backup --out ~/novel-backups --keep 7
+
+# Preview which old backups --keep 7 would delete (zero deletion; the new backup is still written)
+novel-cli storage backup --out ~/novel-backups --keep 7 --dry-run
+
 # Scripted use
 novel-cli storage backup --out ./backups --json
+
+# Scheduled task: back up + rotate, non-zero on failure
+novel-cli storage backup --out ./backups --keep 14 --json
 ```
 
-##### 9.2 storage restore Subcommand
+##### 9.2 storage verify Subcommand
+
+Verify every `chapter.<stage>.sqlite` under `raw_data` read-only: no file is modified, copied, or renamed.
+
+**Synopsis**
+
+```bash
+novel-cli storage verify [-h] [--json]
+```
+
+**Options**
+
+* `--json`: print a single-line JSON report `{ok, total, healthy, corrupt, errors[]}`, where each error has `path` and `reason`
+
+**What it checks**
+
+* The WAL sidecar's checksum is verified first; a damaged WAL is reported before SQLite can apply a bad log.
+* The database is opened read-only (`mode=ro`) with `PRAGMA query_only = ON`; when a temporary snapshot is needed, only a temporary copy is touched, never the source bytes.
+* It reuses the exact validation `restore` performs: SQLite integrity, schema version, and required columns. Any failure marks the database `corrupt` with a reason.
+* Each database prints one `ok` or `corrupt: <reason>` line; a home-directory prefix is shown as `~`.
+
+**Exit codes and boundaries**
+
+* Exit `0` when every database is healthy (including the case of none at all); exit `1` if any is corrupt.
+* It scans only the **live** databases under `raw_data`, not the directory passed to `storage backup --out`; verify backup copies separately with `sha256sum` / `PRAGMA integrity_check` (see 9.4).
+* Verification is read-only and never "repairs" a corrupt database; after confirming the damage, `restore` it from a backup or delete it so the app downloads it again.
+
+**Examples**
+
+```bash
+# Verify every live chapter database
+novel-cli storage verify
+
+# Scripted use: continue only when ok=true
+novel-cli storage verify --json
+```
+
+##### 9.3 storage restore Subcommand
 
 Restore a chapter database from a backup file. The file is validated first (SQLite integrity, schema version, required columns), then the target database is replaced atomically.
 
@@ -901,7 +988,7 @@ novel-cli storage restore --from ./backup.sqlite -y --json
 
 The `--to` filename must look like `chapter.<stage>.sqlite`, and the stage must match the original database (usually `raw` or `cleaner`). Writing to the wrong stage does not affect other files, but the application then reads and writes a different stage database, which looks like “my chapters disappeared”.
 
-##### 9.3 Full Workflow: Back Up → Verify → Restore
+##### 9.4 Full Workflow: Back Up → Verify → Restore
 
 1. Back up and keep the machine-readable report (its `sha256`, `schema_version`, and `chapters` fields are used in the next step):
 
@@ -919,6 +1006,8 @@ sqlite3 ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite 'P
 ```
 
 These commands need `jq`, `sha256sum` (Git Bash / Linux / macOS), and the `sqlite3` CLI; if `sqlite3` is unavailable, skip the integrity check — `restore` still enforces the same validation.
+
+`novel-cli storage verify` checks the **live** databases under `raw_data` (read-only) and does not read the backup directory; to confirm a backup copy itself is intact, keep using `sha256sum` / `PRAGMA integrity_check` above. They are complementary: one checks current data, the other the archived copy.
 
 3. Restore and check the result. If the target already exists, `-y` is required; the old database is first preserved as `chapter.<stage>.sqlite.pre-restore-<timestamp>.bak` in the same directory:
 
@@ -939,17 +1028,22 @@ Run a set of **offline** self-checks to diagnose environment problems quickly.
 **Synopsis**
 
 ```bash
-novel-cli doctor [-h] [--port N] [--json] [--online]
+novel-cli doctor [-h] [--port N] [--json] [--online] [--fix] [--dry-run] [--fix-age-days N]
 ```
 
 **Checks**
 
 * Python version is >= 3.11
-* Installed package version
+* Package version (the source version printed by `--version`; drift from installed metadata is shown)
 * `settings.toml` / `settings.json` is found
-* The configuration parses as a root table
+* The configuration parses as a root table, including validation errors/warnings
+* Core dependencies and optional `api` dependencies import
 * The output directory can be created and written (the directory is created and a temporary file is written/removed)
+* The log directory can be created and written
+* Free space on the output directory's volume (warns below 512 MiB)
+* Cache directory size and how much `clean cache` could reclaim (informational)
 * Number of registered download sites
+* A sample of site plugins imports (one failure is a warning; only all failures are fatal)
 * Number of loadable searchers
 * Optional music dependencies (`mutagen`, `qrcode`, `websocket`) — missing ones are reported but do not fail the command
 * `127.0.0.1:<port>` can be bound (default 8081)
@@ -957,8 +1051,19 @@ novel-cli doctor [-h] [--port N] [--json] [--online]
 **Options**
 
 * `--port N`: API port to check for availability, default `8081`.
-* `--json`: print the check results (`summary` + `checks`) to stdout as JSON and exit.
+* `--json`: print the check results (`status`, `warnings`, `summary` + `checks`) to stdout as JSON and exit.
 * `--online`: additionally probe network egress (`https://www.baidu.com` and `https://github.com`, 2.5 s timeout each); the probe is advisory and never makes the command exit non-zero.
+* `--fix`: repair only **reversible local state**: create missing output/cache/log directories and delete `.tmp` / `.part` files older than `--fix-age-days` under those three roots. It never changes configuration, exports, login state, or network settings.
+* `--dry-run`: preview the `--fix` actions (implies `--fix`) without creating or deleting anything; directory checks also become read-only, and a missing directory is reported as "`--fix` will create it" rather than a failure.
+* `--fix-age-days N` (`--max-age-days`): only delete temporary files older than `N` days, default `7`; a value below `1` exits with a usage error (`2`).
+
+**Safety boundary of `--fix`**
+
+1. Actions happen only **inside** the configured output, cache, and log directories. The path must be absolute, free of `..`, and neither the path nor any component may traverse a symlink; otherwise the action is recorded as `skipped` and not performed.
+2. Every action is validated **again immediately before it runs**, so a plan cannot escape if the filesystem changes in between.
+3. A deletion target must be a regular file whose mtime is older than the cutoff; directories, symlinks, and freshly written files are skipped.
+4. It does not repair configuration errors, missing dependencies, a busy port, or network problems — those still surface as checks with a suggestion.
+5. `--fix` runs before the checks, so the report reflects the post-fix state; a fix that actually fails makes the command exit `1`, while a safely skipped action does not.
 
 **Examples**
 
@@ -968,9 +1073,20 @@ novel-cli doctor
 
 # Check a custom API port
 novel-cli doctor --port 9000
+
+# Preview which directories would be created and which stale temp files removed (zero changes)
+novel-cli doctor --fix --dry-run
+
+# Apply fixes, only cleaning .tmp/.part files older than 14 days
+novel-cli doctor --fix --fix-age-days 14
+
+# Machine-readable: checks plus this run's fixed/skipped/errors
+novel-cli doctor --fix --json
 ```
 
-> Exit code is `0` when every required check passes and `1` otherwise. Each failing row prints an actionable fix.
+`--fix --json` adds `dry_run`, `max_age_days`, `fixed`, `skipped`, `errors`, and `fix_summary` to the usual document; each fix record's `path` is masked (the home directory becomes `~`, other absolute paths keep only their tail).
+
+> Exit code is `0` when every required check passes and `1` otherwise. Each failing row prints an actionable fix. Optional checks (`optional`) only produce warnings and do not affect the exit code.
 
 ---
 
@@ -1146,7 +1262,7 @@ novel-cli update --json
 | Code | Meaning | Typical cases |
 | --- | --- | --- |
 | `0` | Success | The command completed; no search results or no new chapters is still success |
-| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean`, a failed `storage backup` / `restore`, any failed `music health` platform, unmatched/malformed/download-failed entries in `batch`, a failed `update` check (also no asset for the platform, missing digest, or a failed download with `--yes`) |
+| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean`, a failed `storage backup` / `restore`, any failed `music health` platform, any failed `music download` song, unmatched/malformed/download-failed entries in `batch`, a failed `update` check (also no asset for the platform, missing digest, or a failed download with `--yes`) |
 | `2` | Usage error | Missing/conflicting arguments (including argparse errors), an empty `--site`/`--start`/`--end` for `download` (a whitespace-only value counts as empty), `--json` with `--first`, `storage`'s `--json` with `--clean` (without `--dry-run`), `clean cache`/`clean book` `--json` without `--dry-run`, `storage --dry-run` without `--clean`, `storage restore` replacing an existing database without `--yes` or targeting a path outside `raw_data_dir`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, an unknown `music --platform`, `batch` without an input file or with a negative `--interval`, `clean --site` given a traversal value such as `..` or a path separator |
 
 The `update --check` exit code reports whether the **check** succeeded, not whether an update exists: finding one still returns `0`. `sources list --probe` never changes the exit code by itself — network unreachability only shows as `-` in the `Latency`/`HTTP` columns, and only a failed structural `--check` exits with `1`.
@@ -1158,8 +1274,8 @@ Pressing `Ctrl+C` prints `Aborted.` on stderr and exits with `1`.
 With `--json`:
 
 * Structured output goes **only** to stdout; logs, progress, errors, and hints go to stderr, so the output can be piped safely.
-* The command never enters an interactive selector; required arguments must be supplied explicitly.
-* A JSON summary may still be printed even when the final exit code is non-zero (for example, `download --json` when some books fail).
+* The command never enters an interactive selector; required arguments must be supplied explicitly. (`music download` is the exception: `--json` does not change selection, so a non-interactive shell must still pass `--pick` or `--yes`.)
+* A JSON summary may still be printed even when the final exit code is non-zero (for example, `download --json` when some books fail, or `music download --json` when some songs fail).
 
 | Command | Option | stdout shape |
 | --- | --- | --- |
@@ -1169,6 +1285,7 @@ With `--json`:
 | `sources list` | `--json` | Array with `site_key`, `name`, `search`, `hosts`, `origin`; `status` is populated only with `--check` (otherwise `null`); with `--probe` each item also carries `latency_ms` and `http_status` (`null` when unreachable) |
 | `update` | `--json` | One object with exactly nine keys: `current`, `latest`, `available`, `asset_name`, `asset_shape`, `asset_size`, `sha256`, `download_path`, `error`; absent values are `null` (or an empty string for `latest`). `asset_shape` is `cli` when a CLI asset was selected; `error` may be `insecure-url`, `missing-digest`, or `no-cli-asset` |
 | `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}`; with `platform=all` (the default) each track carries `sources` and the response also includes a `platforms` summary |
+| `music download` | `--json` | Single-line JSON: `{"platform", "keyword", "out_dir", "level", "total", "ok", "skip", "fail", "lyrics_written", "results": [...]}`; each `results[]` entry has `id`, `name`, `artists`, `album`, `duration_s`, `vip`, `platform`, `sources`, plus `status` (`ok`/`skip`/`fail`) and the conditional `path`, `lyric_path`, `reason` |
 | `music platforms` | `--json` | `{platform key: display name}` object |
 | `music health` | `--json` | `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`; field names match `GET /api/v1/music/health` |
 | `follow list` | `--json` | Array with `site`, `book_id`, `title`, `last_chapter`, `updated_at` |

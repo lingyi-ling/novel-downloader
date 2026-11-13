@@ -218,6 +218,30 @@ Each volume produces a separate EPUB, with the volume name in the filename:
 downloads/{book_name}_{volume_name}_{author}.epub
 ```
 
+#### EPUB accessibility metadata {#epub-accessibility-metadata}
+
+The EPUB's OPF (`OEBPS/content.opf`) declares a set of EPUB 3 / schema.org accessibility properties:
+
+| Property | Value | Meaning |
+| --- | --- | --- |
+| `schema:accessMode` | `textual` | The content is text-only, with no audio or video |
+| `schema:accessibilityHazard` | `none` | No known flashing, flickering, or motion hazards |
+| `schema:accessibilityFeature` | `structuralNavigation` | Written only when the book has at least one chapter document; intro or volume pages alone are not a table of contents |
+| `schema:accessibilitySummary` | Book language | Chinese books get a Chinese summary, other languages an English one; the summary mentions structured navigation when present |
+
+Rules:
+
+* Whole-book, per-volume, and single-chapter exports use the same rules; the values contain no timestamps or other run-time data, so re-exporting the same book produces identical declarations.
+* The properties are written as `<meta property="...">` inside the OPF `<metadata>` element, which is EPUB 3 extension metadata.
+* EPUB 2-only readers ignore these declarations and do not fail because of them; the body text and `toc.ncx` navigation are unaffected (whether a reader can open the EPUB 3 package at all still depends on the reader).
+* The declarations describe content characteristics at generation time. They are not the result of a full accessibility audit, and this project does not claim the exported files pass EPUBCheck.
+
+**How to inspect them**
+
+* Calibre: right-click the book → **Edit book**, then look at the `<metadata>` section of `OEBPS/content.opf`.
+* Other tools: treat the `.epub` as a zip archive and open `OEBPS/content.opf`.
+* Some readers and accessibility tools (for example Thorium Reader) surface these declarations in the book information panel; the exact location varies by version.
+
 #### Whole-book HTML export
 
 The HTML export contains the complete book content, an index page, chapter pages, and related static assets.

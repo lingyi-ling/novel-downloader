@@ -314,6 +314,8 @@ client = registrar.get_client(site)
 client.export_book(book, formats=["epub"])
 ```
 
+导出结果同样带有 EPUB 3 / schema.org 可访问性元数据: `schema:accessMode=textual`、`schema:accessibilityHazard=none`、按书籍语言生成的 `schema:accessibilitySummary`, 以及在有章节文档时写入的 `schema:accessibilityFeature=structuralNavigation`。这些声明位于 `OEBPS/content.opf` 的 `<metadata>` 中; EPUB 2 阅读器会忽略它们而不影响正文与 NCX 目录。声明只描述内容特征, 不代表已通过 EPUBCheck 或完成无障碍测试。详见[文件保存](../guide/file-saving.md#epub-accessibility-metadata)。
+
 ### B. 通过搜索后立即下载+导出
 
 ```python

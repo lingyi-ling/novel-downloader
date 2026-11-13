@@ -130,6 +130,7 @@ novel-cli export --site b520 12345 --format epub --stage raw
 * 输出目录为 `general.output_dir`（默认 `./downloads`）。
 * `--start` / `--end` 仍然只作用于第一本书。
 * 如果没有对应的原始数据，命令以退出码 `1` 结束。
+* EPUB 会写入标准可访问性元数据（`schema:accessMode=textual`、`schema:accessibilityHazard=none`、`schema:accessibilitySummary`，有章节时加 `structuralNavigation`），阅读器与无障碍工具可直接识别；整书、分卷、单章导出一致。
 
 省略 `--site` 或 `book_ids` 时会进入交互模式；非交互环境请显式提供两者。
 
@@ -285,6 +286,12 @@ curl -H "X-API-Key: change-me" http://127.0.0.1:8081/api/v1/health
 
 在手机自带浏览器中打开 `http://192.168.1.23:8081/api/v1/health`。由于绑定的是非回环地址，`/docs` 会被自动关闭；返回 `401`（`Invalid or missing API token...`）就说明端口已连通且鉴权生效。
 
+#### 可选：自定义下载目录（SAF）
+
+App 的「设置 → 下载」可以点「选择目录」，通过系统文件选择器（SAF）指定历史页导出文件的保存位置；文件写入所选目录下的 `NovelDL/` 子目录，同名文件按 `name (1).ext` 去重。授权会持久化，重启后仍有效。
+
+如果系统撤销了权限、目录被删除或换了设备，设置页会显示「自定义下载目录不可用」，下载会**自动回退到系统 Downloads** 并提示，不会写到错误位置。重新选择目录或点「恢复默认」即可。排查步骤见 [故障排查 - 自定义下载目录](./troubleshooting.md#51-saf)。
+
 ---
 
 ### 6. 用 API 集成到自己的程序
@@ -393,7 +400,75 @@ curl -s -X POST "$BASE/api/v1/watchlist/check" \
 
 ---
 
-### 7. 常见问题 (FAQ)
+### 7. 定期备份章节数据库并自动轮转
+
+思路：把 `storage backup` 放进计划任务，用 `--keep` 控制保留份数，避免备份目录无限增长。
+
+```bash
+# 先预览 --keep 会删哪些旧备份（零删除，新备份仍会写入）
+novel-cli storage backup --out ~/novel-backups --keep 7 --dry-run
+
+# 备份 + 每本书、每个 stage 只保留最新 7 份
+novel-cli storage backup --out ~/novel-backups --keep 7
+
+# 只读校验当前 raw_data (不修改文件), 有问题时退出 1
+novel-cli storage verify
+
+# 需要机器可读报告时
+novel-cli storage backup --out ~/novel-backups --keep 7 --json
+```
+
+放进 Windows 计划任务（每天 03:00）：
+
+```bat
+schtasks /Create /TN "NovelBackup" /SC DAILY /ST 03:00 /TR "novel-cli storage backup --out C:\novel-backups --keep 7" /F
+```
+
+注意事项：
+
+* `--keep` 只删除 `--out` 下严格匹配 `chapter.<stage>.<UTC 时间戳>.sqlite` 的普通文件；手工改名、旧版本留下的文件、目录和符号链接都不会被删。
+* 本次运行刚写出的备份永远受保护；`--keep 0` 关闭清理。
+* 删除失败时命令以 `1` 退出，但已完成的备份保留，便于计划任务报警。
+* 备份是**明文**完整快照，可能含付费/私密正文；放在受控目录，不要提交 Git 或公开网盘。它不含 Cookie/token、配置、日志或媒体。
+* 先跑一次 `novel-cli doctor --fix --dry-run`（再 `--fix`）可确保输出/缓存/日志目录存在并清掉过期 `.tmp`/`.part`，不影响备份文件。
+
+---
+
+### 8. 用搜索过滤缩小结果
+
+按字数、更新时间筛选搜索结果，适合挑长篇或近期更新的书：
+
+```bash
+# 30 万字以上、100 万字以下
+novel-cli search 斗破苍穹 --min-words 300000 --max-words 1000000
+
+# 2024-01-01 当天及之后更新
+novel-cli search 斗破苍穹 --updated-after 2024-01-01
+
+# 过滤 + 跨站合并 + 单行 JSON，交给脚本处理
+novel-cli search 斗破苍穹 --min-words 300000 --group --json | jq '.[0]'
+```
+
+要点：
+
+* 字数是**按本**的数值，上下界都含边界；站点没返回 `word_count` 或无法解析的行会被丢弃。
+* `--updated-after` 是含当天的下界，必须严格写成 `YYYY-MM-DD`；没有更新日期的行会被丢弃。
+* 过滤在排序之后、`--group` 合并与 `--limit` 截断之前执行，只缩小结果集，不改变排序；不同过滤组合分别缓存，不会复用未过滤的快照。
+* API 侧对应 `min_words` / `max_words` / `updated_after`，流式端点同名查询参数，语义一致。
+
+#### 桌面端记住上次筛选
+
+桌面端会保存最近一次**有效**的筛选条件，不必每次重新填写：
+
+* 每次点击「搜索」且筛选通过校验时，当前的 `min_words` / `max_words` / `updated_after` 会写入桌面偏好文件（`desktop_prefs.json`）的 `search_filters` 键。三项都留空也是一种有效状态：点击搜索会清掉已保存的条件。
+* 下次启动桌面端时，有保存值的字段会填回搜索页的筛选面板，面板也会自动展开，但**不会自动发起搜索**；查询词和搜索时机仍由你决定。
+* 只改输入框而不点「搜索」不会覆盖已保存的值；「清除筛选」会立即清除保存的副本。
+* 设置页「搜索筛选」一栏的「清除已保存的筛选」可单独删除这份记录，不影响当前页面里的输入。
+* 偏好文件被手工修改或由旧版本写入时，非法字段会被**逐个忽略**（例如最低字数大于最高字数时两个字数条件都丢弃，非法日期只丢日期），启动时不会报错。
+
+---
+
+### 9. 常见问题 (FAQ)
 
 **`novel-cli: command not found` / `'novel-cli' 不是内部或外部命令`**
 

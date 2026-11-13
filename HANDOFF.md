@@ -8,7 +8,7 @@
 ## 0. 一句话现状
 
 - **版本 v1.32.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.32.0>
-- 全量测试 **12312 passed / 45 skipped**；`ruff check`、`ruff format --check`（799 files）、`mypy src`（548 files）全绿；Android **434 unit tests**、`lintDebug` 0 error
+- 全量测试 **12520 passed / 46 skipped**；`ruff check`、`ruff format --check`（799 files）、`mypy src`（548 files）全绿；Android **476 unit tests**、`lintDebug` 0 error
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
@@ -123,6 +123,17 @@ ovel_downloader` 不受影响
 - 重点：搜索去重/排序/缓存、站点 ID 规范化、规则引擎限制、CLI 路径穿越、音乐 API 数据泄漏与路径约束、队列恢复/章节存储事务、停止丢章、更新器大小/重定向/续传
 - 若继续循环：保持每槽位目录隔离；每 ~30 个完成停补位，跑一次全量门禁再提交/发版
 
+### v1.32 新增工具（2026-11-13）
+
+- **搜索过滤**：CLI `search --min-words/--max-words/--updated-after`，REST 同名参数，桌面与 Android 搜索页同步；过滤在分组与 `limit` **之前**执行，搜索缓存 key 包含过滤条件（同词不同过滤不会串）。
+- **Android SAF 下载目录**：`android/.../data/DownloadDirectory.kt` + `SettingsStore.kt`；`ACTION_OPEN_DOCUMENT_TREE` 持久授权，授权失效或 Provider 异常回退系统 Downloads，同名文件自动去重。
+- **歌词 `.lrc`**：音乐下载在同目录写同名 UTF-8 歌词（原子写、1 MiB 上限）；已存在音频时补写缺失歌词，歌词失败不影响音频。
+- **`doctor --fix`**：只做可逆修复——创建缺失目录、删除 7 天前（`--fix-age-days`）的 `.tmp/.part`；`--dry-run` 预览，动作限制在配置根目录内。
+- **`storage verify` / `storage backup --keep N`**：`verify` 逐库打开校验原始数据；`--keep` 只清理本工具命名的时间戳备份，按书/stage 分别保留。
+- **EPUB 可访问性**：`plugins/mixins/export_epub.py` 写 `schema:accessMode/accessibilityFeature/accessibilityHazard/accessibilitySummary`。
+- **Secret 扫描**：`scripts/scan_secrets.py`（默认扫 Git 跟踪文件；`--staged`、`--history [--since/--max-commits]`、`--json`）。CI `ci.yml` 阻断 + `security.yml` 工作区/历史两路，`release.py` 构建前预检；只输出规则名与 `path:line`，不回显明文。
+- **桌面冷启动 300ms → 106ms**：task_manager/aiohttp/updater 延迟导入、队列恢复后置；`scripts/profile_desktop_startup.py` 可复测（参考基线 106ms）。
+
 ### 官网
 
 - 目录 `website/`（纯静态），线上 <http://43.165.170.43/noveldl/>，服务器路径 `/var/www/noveldl`
@@ -222,17 +233,18 @@ ovel_downloader` 不受影响
 
 ## 5. 已知缺口（按优先级）
 
-1. **Android 音乐未真机验证**。有设备后：开独立引擎 → 音乐页 → 选平台搜一首 → 任务完成 → 确认公共「下载」目录出现文件；再点「导出歌单」确认 `.m3u8` 落地。
-2. **Android 搜索结果不持久化本地路径**：下载完成后才回填，App 重启后要重新下载才能导出歌单（可考虑服务端搜索返回 `path` 或在客户端缓存）。
-3. **重型平台已打包，但仍受账号/DRM 限制**：`aigpy`（TIDAL）、`ytmusicapi`（YouTube Music）、`pywidevine`（Apple Music / SoundCloud）已进 extras、PyInstaller 与 Chaquopy，平台数 24 → 28
+1. **Android 仍无真机验证**：本机没有 emulator/adb，SAF 自定义下载目录、音乐落盘公共 Downloads、通知点按、后台任务恢复都只有编译/单测保证。有设备后按 §9 逐项复核。
+2. **许可证待定**：`LICENSE` 是 MIT，官网/历史文案出现过 Apache-2.0；统一口径前先问用户。
+3. **API 限流是单进程内存态**：多 worker uvicorn 下每个 worker 各有一份预算（实际约为 N 倍），异步任务与 429 冷却也不跨进程；要严格全局限流需外置存储或网关。
+4. **媒体音频无总大小上限**：单响应/单文件有限制，但没有整批下载的总量预算，异常源可把磁盘打满。
+5. **重型平台已打包，但仍受账号/DRM 限制**：`aigpy`（TIDAL）、`ytmusicapi`（YouTube Music）、`pywidevine`（Apple Music / SoundCloud）已进 extras、PyInstaller 与 Chaquopy，平台数 24 → 28
    - TIDAL 必须先在「平台凭据」配置账号 token，否则搜索会提示「需要先配置账号信息」
    - Apple Music / SoundCloud 的 DRM 解密需要用户自备 CDM（`.wvd`），SoundCloud HLS 还需要外部 `N_m3u8DL-RE`；**只打包依赖不等于能解密**
    - 歌词转写（`faster_whisper`）仍然不打包：模型 + ctranslate2 有数百 MB，且只影响「无歌词时自动转写」，不影响搜索/下载
-4. **SQLite 每章提交仍在事件循环上**（`storage_batch_size=1`）。连接有线程亲和性，改 `to_thread` 要 `check_same_thread=False` + 锁，风险 > 收益，暂缓。
-5. **作者查询会丢掉无作者字段的行**：相关性过滤对 `author=""` 且书名不含关键词的行打 0 分，实测会少 1-2 个来源胶囊；若要补偿，需产品决策。
-6. **许可证文案不一致**：`LICENSE` 是 MIT，但官网页脚写 Apache-2.0。改之前先问用户。
-7. **旧文档/截图**：`docs/assets/images/` 里部分截图来自已删除的 NiceGUI Web UI，可能与现状不符；不要拿它们当验收依据。
-8. **8 个站点在本机被 DNS 污染**（mangg_net / dxmwx / esjzone / kadokado / syosetu / westnovel / westnovel_sub / yodu）：外部网络核实站点存活、解析正确，本机需换网络或代理才能搜到。
+6. **SQLite 每章提交仍在事件循环上**（`storage_batch_size=1`）。连接有线程亲和性，改 `to_thread` 要 `check_same_thread=False` + 锁，风险 > 收益，暂缓。
+7. **作者查询会丢掉无作者字段的行**：相关性过滤对 `author=""` 且书名不含关键词的行打 0 分，实测会少 1-2 个来源胶囊；若要补偿，需产品决策。
+8. **旧文档/截图**：`docs/assets/images/` 里部分截图来自已删除的 NiceGUI Web UI，可能与现状不符；不要拿它们当验收依据。
+9. **8 个站点在本机被 DNS 污染**（mangg_net / dxmwx / esjzone / kadokado / syosetu / westnovel / westnovel_sub / yodu）：外部网络核实站点存活、解析正确，本机需换网络或代理才能搜到。
 
 ---
 
@@ -270,7 +282,7 @@ C:\Users\lingy\AppData\Local\ms-playwright\chromium-1228\chrome-win64\chrome.exe
 - `tests/test_i18n_coverage.py`：`t()` 的每个 msgid 都要有非空、非 fuzzy 的 zh_CN 翻译。
 - `tests/apps/test_desktop_app.py`：断言 HTML 结构、桥接方法名和若干 JS 片段（如 `if (st.error) throw new Error(st.error);`）。改模板先跑这套。
 - 测试必须 hermetic：`NOVEL_HOME` 指到 tmp；不要依赖 cwd 里有某个文件（历史上踩过）。
-- 全量约 3 分钟；prioritise 局部测试再跑全量。
+- 全量本机约 8 分钟（12500+ 用例）；先跑局部测试再跑全量。
 
 ---
 
@@ -314,6 +326,7 @@ curl -s http://43.165.170.43/noveldl/index.html -o /tmp/live.html && cmp /tmp/li
 
 如果用户没有新指示，按 §5 的顺序推进：
 
-1. 桌面音乐页 + Android 音乐页各加一个「导出歌单」，调用已有 `/api/v1/music/export`（桌面走桥接，Android 走 Retrofit）。
-2. 用真机验证 Android 音乐下载到公共 Downloads。
-3. 处理许可证文案不一致（先问用户是 MIT 还是 Apache-2.0）。
+1. 用真机验证 Android：SAF 选目录 → 搜索 → 下载 → 确认落盘；再验证音乐下载、通知与任务恢复。
+2. 处理许可证文案不一致（先问用户是 MIT 还是 Apache-2.0）。
+3. 决定多 worker 限流的部署口径（单 worker 运行或接外置限流）。
+4. 评估媒体音频整批总量上限（按书/按任务/按天，先定产品规则）。

@@ -31,8 +31,9 @@ Common options:
 | `--port` | `8081` | Listen port. |
 | `--token` | env `NOVEL_API_TOKEN` | When set, every `/api/v1/*` and `/downloads/*` request requires authentication. |
 | `--cors` | off | Allow cross-origin calls from any origin (`Access-Control-Allow-Origin: *`). |
-| `--rate-limit` | `120` | Maximum requests per client IP inside the sliding window; `0` disables rate limiting. |
-| `--rate-limit-window` | `60` | Sliding-window length in seconds. |
+| `--rate-limit` | `120` | Maximum requests per client IP inside the sliding window (must be between `1` and `1000000`; anything else is a startup error). |
+| `--no-rate-limit` | off | Disable rate limiting explicitly; only for a trusted local environment. |
+| `--rate-limit-window` | `60` | Sliding-window length in seconds; must be greater than `0` and at most `3600`. |
 
 ```bash
 # start with a token
@@ -142,7 +143,10 @@ Request body:
   "sort": "quality",
   "order": "desc",
   "limit": 20,
-  "group": false
+  "group": false,
+  "min_words": 300000,
+  "max_words": 1000000,
+  "updated_after": "2024-01-01"
 }
 ```
 
@@ -162,6 +166,20 @@ Request body:
   an extra `sources` array listing every site that has it (best first). The
   envelope stays `{total, results}`, so clients that ignore grouping keep the
   default and see no change.
+- `min_words` / `max_words` are optional inclusive word-count bounds in the
+  range `0`–`1000000000`. The server parses `word_count` with the same rules
+  the ranking layer uses (`"30万字"`, `"1,234"`); as soon as either field is
+  set, rows **without a parseable word count** are dropped. Omit both for no
+  filtering.
+- `updated_after` is an optional `YYYY-MM-DD` inclusive lower bound. When set,
+  rows **without a parseable update date** are dropped. A malformed date is a
+  `422`.
+- All three filters run **after ranking and before `group` merging and the
+  `limit` cut**. They only narrow the result set; they do not change ordering
+  or the response fields. Filters are part of the request identity: different
+  filter combinations are cached separately and never reuse an unfiltered
+  snapshot. With all three omitted, behaviour is exactly what it was before
+  these fields existed.
 - `keyword` supports a two-to-four-token "title + author" style query: spaces
   (including the full-width space), `·`, `,`, `，` and `-` split it into
   tokens, which are compared against the title and author separately (for
@@ -207,6 +225,21 @@ can ignore them. The streaming endpoint `/search/stream` emits each site's raw
 preview chunk and **does not** include `rank_score` / `match_tier`; only the
 final `POST /search` results carry them.
 
+A filtered request (300k–1M words, updated since 2024-01-01, cross-site grouping):
+
+```bash
+curl -s -X POST "$BASE/api/v1/search" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"keyword":"斗破苍穹","sites":["qidian","biquge5"],"per_site_limit":10,"group":true,"min_words":300000,"max_words":1000000,"updated_after":"2024-01-01"}'
+```
+
+The filter fields are optional: omitting them is exactly the request this
+feature shipped with. If a site returns no word count or update date, those rows
+are silently dropped while the corresponding filter is active (that is not a
+request error), so "fewer results after filtering" usually means the site is
+missing those fields rather than a failed search.
+
 ## Rankings and category browsing
 
 Sites such as Fanqie publish rankings and categories publicly, so no keyword is
@@ -248,6 +281,10 @@ incremental display. Query parameters mirror the `POST /search` body:
 | `sites` | string | all enabled sites | Comma-separated site list, e.g. `qidian,biquge5`. |
 | `per_site_limit` | int | `5` | Result cap per site. |
 | `timeout` | float | `5` | Wall-clock budget per site (seconds); slow sites are dropped without blocking others. |
+| `min_words` / `max_words` | int | no limit | Inclusive word-count bounds (`0`–`1000000000`); when set, rows without a parseable word count are dropped. |
+| `updated_after` | date | no limit | `YYYY-MM-DD` inclusive lower bound; when set, rows without a parseable update date are dropped. |
+
+Filters apply in place to each site's chunk as it arrives, without reordering rows or changing the event shape; the final `done` event still reports the post-filter total. A malformed date returns `422`.
 
 The response is `text/event-stream` with this event format:
 
@@ -275,6 +312,13 @@ Use `curl -N` to observe the live event stream:
 
 ```bash
 curl -N "http://127.0.0.1:8081/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&sites=qidian,biquge5&per_site_limit=5&timeout=5" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+The stream accepts the same filters, for example to keep only 300k+ word books updated in 2024 or later:
+
+```bash
+curl -N "http://127.0.0.1:8081/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&sites=qidian&min_words=300000&updated_after=2024-01-01" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -964,8 +1008,9 @@ may send at most `--rate-limit` (default `120`) requests within
 a `Retry-After` header. The header is a **whole number of seconds, rounded up**:
 the remaining time until the oldest admitted request slides out of the window
 (minimum `1`, never more than the window length), so waiting for it always
-finds a free slot. `--rate-limit 0` disables rate limiting entirely;
-`GET /api/v1/health` is exempt so availability monitoring keeps working.
+finds a free slot. `--no-rate-limit` disables rate limiting entirely
+(`--rate-limit 0` now fails with a usage error instead of silently disabling
+it); `GET /api/v1/health` is exempt so availability monitoring keeps working.
 Counting happens before authentication, so brute-force token guessing is
 throttled too; rejected requests are not counted, and the window drains
 automatically once the client stops.

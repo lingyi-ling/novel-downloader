@@ -27,6 +27,21 @@ After installation, the following executable commands are provided:
 
 For Tab completion in bash / zsh / fish / PowerShell, generate a script with `novel-cli completion --shell <shell>` and load it; see [CLI Usage § completion](./cli-examples.en.md#11-completion-subcommand).
 
+Run a self-check right after installing:
+
+```bash
+novel-cli doctor
+```
+
+It checks the Python version, dependencies, configuration, output/log directories, cache, site plugins, searchers, and the API port. To repair only "missing directories + stale temporary files", preview first and then apply:
+
+```bash
+novel-cli doctor --fix --dry-run
+novel-cli doctor --fix
+```
+
+`--fix` only creates the configured output/cache/log directories and deletes `.tmp` / `.part` files older than 7 days under those roots (adjust with `--fix-age-days`). It never modifies configuration, exports, or login state, and it never leaves those three roots or follows symlinks. See [CLI Usage § doctor](./cli-examples.en.md#10-doctor-subcommand) for the full rules.
+
 (2) Install the latest development version (GitHub)
 
 ```bash
@@ -46,6 +61,24 @@ Install:
 ```bash
 pip install .
 ```
+
+Before committing, run the repository's offline secret scan (read-only, no network):
+
+```bash
+# Scan every file Git tracks
+python scripts/scan_secrets.py
+
+# Scan only staged changes, suitable for pre-commit
+python scripts/scan_secrets.py --staged
+
+# Read-only scan of lines added by past commits (optionally bounded)
+python scripts/scan_secrets.py --history --since v1.20.0 --max-commits 200
+
+# Machine-readable report
+python scripts/scan_secrets.py --json
+```
+
+The scan reads `git ls-files` (or the matching range for `--staged` / `--history`) and prints only `path:line:rule` for a finding — **the matched value is never echoed**, so a CI log cannot become the leak the check prevents. Exit code `0` means clean; `1` means at least one finding or the scan could not run. The `Secret scan` CI job runs the same command on every pull request, so real credentials are blocked before review or release; a weekly `Security scan` workflow additionally scans the working tree and the **full commit history**, uploading the JSON reports as artifacts. If a finding is real, rotate the credential instead of just deleting the line: a value that was committed must be treated as leaked.
 
 ### Windows Desktop Installer (Inno Setup)
 

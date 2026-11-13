@@ -199,7 +199,7 @@ icacls .\novel_cache
 | 下载地址 | 清单中的资产地址必须是 **HTTPS**; 安卓端同样只接受 HTTPS | `_manifest_asset`、`UpdateChecker.downloadRequestFailure` |
 | 完整性 | 资产必须带 **SHA-256**: 桌面端与安卓端缺失即拒绝下载, CLI 在非交互 (`--yes`) 下同样拒绝 (交互模式会跳过校验); 下载后复算, 失败立即删除半成品 | `download_asset` / `verify_sha256` |
 | 安装前 | 启动安装器**前再复算一次摘要**, 关闭"校验后到安装前被替换"的 TOCTOU 窗口 | `webview_app._install_verified`、`installPrecheck` |
-| 发布侧 | 上传前运行 `scripts/audit_release_assets.py` 做**资产泄漏审计** (允许清单、归档成员路径、原始字节中的私钥/部署口令/令牌), 命中只报标记名, 不回显明文 | `scripts/release.py` 的 `audit_release_content` |
+| 发布侧 | 上传前运行 `scripts/audit_release_assets.py` 做**资产泄漏审计** (允许清单、归档成员路径、用 `scan_secrets` 规则扫描归档内文本成员、原始字节中的私钥/部署口令/令牌), 命中只报标记名, 不回显明文 | `scripts/release.py` 的 `audit_release_content` |
 
 **可选的清单签名**: 更新清单支持 Ed25519 签名。`updater.TRUSTED_UPDATE_KEYS` 默认为空, 即**默认不验签**, 信任锚是 HTTPS 加每个资产的 SHA-256。一旦配置可信公钥, 清单缺失、未签名、签名不符或使用未知 `key_id` 都会被拒绝, 且客户端**不再回退** GitHub API——否则攻击者删掉清单即可绕过验签。
 
@@ -259,6 +259,155 @@ python scripts/security_audit.py --scan-tests
 
 ---
 
+### 仓库凭据扫描
+
+`scripts/security_audit.py` 检查的是本机运行环境；要把**仓库本身**（工作区、暂存区、历史提交）当作凭据泄漏面来检查，使用 `scripts/scan_secrets.py`。它只依赖 Python 标准库和 `git`，完全离线，输出中只有规则名和位置，**不会回显命中的值**，因此终端记录和 CI 日志不会变成新的泄漏源。
+
+```bash
+# 工作区：扫描 Git 跟踪的所有文件
+python scripts/scan_secrets.py
+
+# 暂存区：只扫描已 git add 的改动（新增/复制/修改/重命名）
+python scripts/scan_secrets.py --staged
+
+# 历史：只读扫描每个提交新增的行
+python scripts/scan_secrets.py --history
+
+# 限定版本范围与提交数（只能与 --history 同用）
+python scripts/scan_secrets.py --history --since v1.20.0 --max-commits 200
+
+# 机器可读输出：stdout 只有 JSON
+python scripts/scan_secrets.py --json
+```
+
+输出形如 `path:line: rule`（历史扫描为 `commit:path:line: rule`）。`--json` 输出 `count` 与 `findings`（历史还包含 `commits_scanned`、`skipped_commits`、`truncated`），同样不含明文。
+
+| 规则 | 识别对象 |
+| --- | --- |
+| `private-key` | PEM 私钥头（RSA/EC/OpenSSH/DSA/PGP），只匹配块标记 |
+| `aws-access-key` | `AKIA` / `ASIA` 前缀的 AWS access key id |
+| `github-token` | `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` 与 `github_pat_` 令牌 |
+| `slack-token` | `xoxa-`/`xoxb-`/`xoxp-`/`xoxr-`/`xoxs-` 令牌 |
+| `bearer-token` | 字面 `Bearer` 凭据（排除占位符） |
+| `generic-secret` | `password`、`secret`、`token`、`api_key` 等键的字面赋值（排除环境变量/配置属性引用与占位符） |
+| `sensitive-file` | 被跟踪的 `*.jks`、`*.keystore`、`*.p12`、`*.pfx`、`*.bks`、`keystore.properties`、`id_rsa` 等文件名 |
+
+范围与限制：
+
+- 只读取 Git 已知的文件（`git ls-files`；`--staged` 读取索引中的暂存 blob）。被 `.gitignore` 忽略的构建产物和本地凭据文件不在范围内。
+- 二进制文件、未知扩展名和大于 2 MiB 的文件跳过内容扫描；但 keystore/私钥**文件名**本身就会命中 `sensitive-file`。
+- `--history` 只扫描 `git log -p -U0` 中每个提交新增的行，因此已从工作区删除的凭据仍会被发现。合并提交默认不产生 patch；单个提交的 patch 超过 8 MiB 时整段跳过，累计读取超过 256 MiB 时提前停止（输出会注明），可用 `--max-commits` 缩小范围。扫描全程只读，不 checkout、不改写历史。
+- `--staged` 与 `--history` 互斥；`--since` / `--max-commits` 必须与 `--history` 同用，`--max-commits` 至少为 1。
+
+退出码：
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 没有命中 |
+| `1` | 至少一个命中，或扫描无法运行（参数冲突、`git` 失败等；错误只写 stderr，不含文件内容） |
+
+#### 可选的本地 pre-commit 钩子
+
+如果希望在 `git commit` 之前自动扫描暂存区，可以显式安装仓库级钩子：
+
+```bash
+# 安装/更新 .git/hooks/pre-commit（写入本工具的标记）
+python scripts/install_git_hooks.py
+
+# 已存在其他工具的 pre-commit 时默认拒绝；--force 会先备份为 pre-commit.bak
+python scripts/install_git_hooks.py --force
+
+# 只删除由本工具安装的钩子；其他钩子和其他工具的 pre-commit 不受影响
+python scripts/install_git_hooks.py --uninstall
+```
+
+钩子优先使用仓库内 `.venv` 的 Python，找不到时回退到 `python3`/`python`，然后运行 `scripts/scan_secrets.py --staged`；仓库路径含空格也能正常工作。安装器只写当前仓库的 `.git/hooks/`，**不会**修改全局 Git 配置，也不会默认安装。若设置了 `core.hooksPath`，Git 不会读取 `.git/hooks`，该钩子此时不生效。
+
+这是开发者本机的便利门禁，不是强制安全边界；CI 里的 `secrets` job 与每周历史扫描才是最终门禁，未安装或绕过本地钩子都不会降低 CI 的检查强度。
+
+#### CI 中的两道检查
+
+| 工作流 | 触发 | 行为 |
+| --- | --- | --- |
+| `.github/workflows/ci.yml` 的 `secrets` job | 推送到 `main`、任何 pull request、手动 dispatch | 运行 `python scripts/scan_secrets.py` 扫描工作区；只做 checkout 和 Python 安装，5 分钟超时。命中即 job 失败，PR 在评审/发布前被拦下。 |
+| `.github/workflows/security.yml` | 每周一 **03:17 UTC**（`cron: "17 3 * * 1"`）与手动 dispatch | `fetch-depth: 0` 拉取完整历史；先后运行工作区与 `--history` 两次扫描，任一命中都以非零退出。两份 `--json` 报告写入文件（不打印到日志），作为 artifact `security-scan-reports` 上传，**保留 30 天**。 |
+
+`security.yml` 的两次扫描总会都执行，避免一次失败掩盖另一次；并发组固定为 `security-scan` 且不取消进行中的任务。GitHub 会在仓库 60 天无活动后暂停定时工作流，此时用 `workflow_dispatch` 手动补跑。
+
+#### 发现命中后
+
+1. **定位**：按输出的路径与行号（历史命中还带提交号）查看上下文，例如 `git show --stat <commit>`、`git log -1 <commit>`。不要复制或粘贴命中的值；确认它是否仍是有效凭据、是否被其他文件复用。
+2. **先轮换，再清理**：值一旦进入提交就应视为已泄露。到签发方吊销/轮换（令牌、密码、Access Key），更新环境变量或密钥存储，检查签发方的使用日志；私钥则更换密钥对并从 `authorized_keys` 移除旧公钥。只删掉代码里的那一行并不能撤回已经克隆或缓存的副本。
+3. **清理工作区/暂存区**：删除该值或改为环境变量引用，再运行 `python scripts/scan_secrets.py --staged`，确认干净后提交。
+4. **清理历史（谨慎）**：只有确有必要时才改写历史（`git filter-repo`、BFG 等）。
+
+!!! warning "改写历史不可逆"
+    改写会改变该提交之后的所有 commit ID，需要 force push，并使其他人的克隆、fork、开放的 PR、标签全部失配；GitHub 还可能通过 API 缓存旧提交，必要时需联系支持清除。操作前先做完整镜像备份并通知协作者。轮换凭据永远是第一步——历史改写无法覆盖已经 clone、fork、缓存或出现在 CI 日志里的副本。
+
+#### 误报与白名单
+
+扫描器把明显的占位符当作误报：值里出现 `your`、`example`、`placeholder`、`dummy`、`<...>`、`${...}`，或赋值来自环境变量/配置对象（如 `os.environ`、`settings.`）时不会命中。`tests/` 等测试夹具目录另有按规则的窄白名单（见下文 `ALLOWLIST`）。
+
+仍需例外时，在 `scripts/scan_secrets.py` 的 `ALLOWLIST` 中追加一条 `(路径 glob, 规则集合, 原因)`：
+
+```python
+ALLOWLIST: tuple[tuple[str, frozenset[str], str], ...] = (
+    # ...
+    (
+        "docs/guide/example.md",          # 尽量精确到文件，不要用 *
+        frozenset({"generic-secret"}),    # 只放宽确认误报的规则
+        "documented placeholder example", # 说明为什么安全
+    ),
+)
+```
+
+约束：
+
+- 未列出的规则在该路径下仍然生效；不要用 `*` 关闭全部规则。
+- 只放宽**确认是合成值**的那一条规则，路径尽量精确到文件或最小目录。
+- 优先把示例改成明显的占位符或环境变量引用，而不是加白名单；白名单越宽，真实凭据越容易漏过。
+- 白名单的理由里不要写入真实值，测试夹具也只用合成凭据。
+
+---
+
+### 发布资产内容扫描 {#release-asset-scan}
+
+上传前的最后一道内容是**发布资产内容扫描**：`scripts/release.py` 在构建完成、生成 `latest.json` 之后调用 `scripts/audit_release_assets.py`，把每个 zip / apk，以及实际是 zip 的 `.exe`（PyInstaller 单文件包）里的**文本成员**逐行交给 `scripts/scan_secrets.py` 的规则扫描。它直接复用仓库扫描器的规则、占位符判断和路径白名单，因此两边不会各自演化出一套定义。
+
+命中以 `secret-marker` 标记，形如：
+
+```text
+PROBLEM [secret-marker] <资产名>: <成员路径>:<行号>: <规则名>
+```
+
+只报资产、成员、行号和规则名，**不回显命中的值**。
+
+扫描边界（刻意控制成本，不要理解成“归档里的所有内容都被检查了”）：
+
+- 单个成员超过 **2 MiB** 时整个跳过（与 `scan_secrets` 的单文件上限一致）；单个资产的文本成员扫描合计上限为 **64 MiB**，整次审计上限为 **256 MiB**，超出预算的成员或资产直接跳过。
+- 前 8 KiB 内出现 NUL 的成员按二进制跳过；目录、符号链接和嵌套的 `.zip` / `.exe` / `.apk` 成员不扫描，嵌套归档也**从不解压**。
+- 只把能作为 ZIP 打开的 `.zip` / `.apk`，以及实际是 ZIP 的 `.exe` 当作归档；不是 ZIP 的 `.exe` 不会按归档打开。
+- 读不出的成员会作为 `unreadable-archive` 问题报告，而不是当作干净内容放过；归档成员数超过 200,000 时停止该归档的成员扫描并报 `archive-too-large`。
+- 成员路径同样套用 `scan_secrets` 的路径白名单（例如测试夹具的窄豁免），但这里是归档内路径，不是仓库路径。
+
+它和构建前的工作区扫描是**互补关系**，不是重复：
+
+- 构建前：`release.py` 运行 `scan_release_secrets`，即 `scripts/scan_secrets.py` 的工作区模式，只扫描 **Git 跟踪的文件**；`--skip-secret-scan` 可以关闭这一步（不推荐）。
+- 构建后、上传前：资产内容扫描检查的是**真正要上传的字节**，能发现源码扫描看不到的东西，例如构建时生成、从依赖收集或误打包进归档的文件。它没有对应的跳过开关。
+
+失败退出码：
+
+| 运行方式 | 退出码 | 含义 |
+| --- | --- | --- |
+| `python scripts/audit_release_assets.py --dir <目录>` | `0` | 没有问题 |
+| 同上 | `1` | 至少一个 `secret-marker` 或其他审计问题 |
+| 同上 | `2` | 参数或 I/O 错误，审计无法运行 |
+| `scripts/release.py` | `2` | 资产审计命中会抛出 `ReleaseError`，发布在打 tag 和上传前中止 |
+
+局限：它只覆盖上述文本成员和原始字节检查，不检查二进制成员的内部结构、不解压嵌套归档、不做熵或语义分析，也不能替代对构建机和发布凭据的保护。
+
+---
+
 ### 报告漏洞
 
 如果你发现安全漏洞，请**不要**先创建公开 issue。优先使用 GitHub 仓库的
@@ -289,5 +438,6 @@ python scripts/security_audit.py --scan-tests
 - [ ] 定期删除不再需要的 `*.cookies`、`session.json`、`platform_creds.json`。
 - [ ] 怀疑泄露时立即在站点侧注销会话并重新登录。
 - [ ] 运行 `python scripts/security_audit.py`，确认没有高优先级问题。
+- [ ] 提交前运行 `python scripts/scan_secrets.py --staged`，并保持 CI 的 `Secret scan` 与每周历史扫描为绿色。
 - [ ] 关注依赖安全公告，必要时使用 `pip-audit` 等工具补充 CVE 检查
       （`pip-audit` 对本仓库的 editable 安装需配合 `--skip-editable`）。

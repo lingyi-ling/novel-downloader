@@ -17,6 +17,15 @@ novel-cli doctor --port 8080
 
 Failing checks include suggestions; `✓` means pass and `✗` means failure (optional dependencies are labelled `optional`).
 
+If you suspect local-state problems such as "missing directories / piling-up temporary files", preview the automatic repair first and then apply it:
+
+```bash
+novel-cli doctor --fix --dry-run   # report what would be created/removed, zero changes
+novel-cli doctor --fix             # create missing output/cache/log dirs, clean stale .tmp/.part
+```
+
+`--fix` only acts inside the configured output, cache, and log directories, refuses `..` and symlinks, and never changes configuration, exports, or login state. By default it removes only temporary files older than 7 days (adjust with `--fix-age-days`). It does not repair configuration errors, missing dependencies, or a busy port; follow the suggestions on those check rows instead.
+
 Then collect the version and logs:
 
 ```bash
@@ -330,6 +339,20 @@ If the command succeeds, Python itself handles the path fine; the problem usuall
 
 8. The Android app uses cleartext HTTP. For access across networks, use a VPN (such as Tailscale) or an HTTPS reverse proxy, and always set a token.
 
+### 5.1 The Custom Download Directory (SAF) Is Unavailable
+
+**Symptoms**: a download directory was selected in Settings, but files still land in the system Downloads folder; or Settings shows the red message "The custom download directory is unavailable — pick it again in Settings".
+
+**Cause**: Android grants a directory through SAF (`ACTION_OPEN_DOCUMENT_TREE`) and the app stores a persisted URI permission. The grant stops working when the user revokes it in system settings, the provider app that owns the directory is uninstalled/changed, the directory is deleted or moved, or app data is restored to another device.
+
+**Behaviour and fix**:
+
+* Settings keeps the previously selected directory (so it can be replaced) and clearly marks it as unavailable. History downloads **fall back to the system Downloads directory** and say so ("The custom download directory is unavailable; saving to system Downloads instead"). Files are never written to the wrong place, and the download itself does not fail.
+* Choose the directory again and confirm the system grant to restore it. The picker requests and persists read/write permission; if that fails, the app says "Could not keep write access to that directory — choose another one" and leaves the previous working directory untouched.
+* "Reset" releases the persisted permission and returns to the system Downloads directory.
+* Files are written into a `NovelDL/` subdirectory of the chosen tree. Name clashes become `name (1).ext`, `name (2).ext`, … (case-insensitive), so existing files are never silently overwritten.
+* This setting only affects downloads of exported files from the History tab; music files keep using the music engine's own directories / system download flow.
+
 ---
 
 ## 6. Music Download Missing Dependencies
@@ -376,6 +399,14 @@ python -c "import importlib.util as u; print('mutagen', bool(u.find_spec('mutage
    ```bash
    novel-cli music search "keyword" --platform netease --limit 5
    ```
+
+**No lyrics file (`.lrc` missing)**:
+
+1. Confirm `save_lyric` is not disabled in the music settings (default `true`); it lives in `settings.json` under the music data directory.
+2. The platform may simply have no lyrics, or may return a placeholder value; no file is created and the audio still succeeds.
+3. Lyric files share the audio name: `<title> - <artist>.lrc`, with `.zh.lrc` when a translation exists (a translation alone is written to `.lrc`). If the audio uses the ` [<id>]` deduplication suffix, the lyrics carry it too — look next to the audio file with the same stem.
+4. When the audio already exists and `skip_existing` skips it, lyrics are backfilled only if `.lrc` is missing; existing lyrics are neither overwritten nor re-fetched.
+5. A lyric response larger than 1 MiB is treated as an error page and skipped (a WARNING is logged). Set the log level to `DEBUG` to see the exact reason.
 
 ---
 
@@ -673,6 +704,9 @@ If a chapter database was deleted by mistake, restore it from a backup:
 # Back up every chapter database first
 novel-cli storage backup --out ~/novel-backups
 
+# Read-only check of every live database under raw_data (modifies nothing)
+novel-cli storage verify
+
 # Restore from a backup; replacing an existing database requires -y
 novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<timestamp>.sqlite -y
 ```
@@ -688,9 +722,53 @@ and treat the plaintext backup as sensitive data. See the
 [full “back up → verify (SHA-256 / `PRAGMA integrity_check`) → restore” workflow](./cli-examples.en.md#9-storage-subcommand)
 in the CLI usage examples.
 
+For scheduled backups, `--keep` rotates old copies automatically. Preview first, then apply:
+
+```bash
+# Report which old backups would be deleted; the new backup is still written, zero deletion
+novel-cli storage backup --out ~/novel-backups --keep 7 --dry-run
+
+# Keep only the newest 7 backups per book and per stage
+novel-cli storage backup --out ~/novel-backups --keep 7
+```
+
+`--keep` deletes only files under `--out` whose names strictly match `chapter.<stage>.<UTC timestamp>.sqlite`; directories, symlinks, hand-renamed files, and files left by older versions are never touched, and backups written by the current run are always protected. `--keep 0` disables pruning; a negative value or using `--dry-run` without `--keep` exits with a usage error (`2`). A failed delete exits `1`, but completed backups stay in place.
+
 ---
 
-## 15. Still Stuck?
+## 15. No Results After Search Filtering
+
+**Symptoms**: after adding `--min-words` / `--max-words` / `--updated-after` (or the API's `min_words` / `max_words` / `updated_after`), results drop from many to zero even though the book clearly exists.
+
+**Cause**: filtering keeps only rows where the relevant field can be parsed. With a word filter, rows that have no `word_count` or an unparseable value are dropped; with a date filter, rows without `update_date` are dropped. This is deliberate ("rather nothing than wrong rows"), not a failed request.
+
+**Verify and fix**:
+
+1. Remove the filters and confirm the book is searchable at all:
+
+   ```bash
+   novel-cli search "title" --site <site>
+   ```
+
+2. Add the filters one at a time to find the one that removed the result:
+
+   ```bash
+   # no filters first
+   novel-cli search "title" --site <site>
+
+   # date filter only
+   novel-cli search "title" --site <site> --updated-after 2024-01-01
+
+   # word filter only
+   novel-cli search "title" --site <site> --min-words 300000
+   ```
+
+3. Check units and boundaries: the word count is a per-book number (`"30万字"` parses as 300000), and both bounds are inclusive; `--updated-after` is an **inclusive** lower bound and must use exactly `YYYY-MM-DD`, otherwise the command exits `2` instead of silently ignoring it.
+4. `--group` merging and `--limit` run after filtering, so a smaller final row count is expected.
+
+---
+
+## 16. Still Stuck?
 
 Include the following information when opening an issue:
 

@@ -83,6 +83,18 @@ installer / portable / api。副本的安装形态由卸载注册表的 `Install
 installer。从安装器安装的副本只会更新到安装器，从免安装包解压的副本只会更新到
 免安装包，两者不会互相切换。
 
+## 发布前的资产审计
+
+`scripts/release.py` 在上传前会对 `dist/release/` 里的产物运行 `scripts/audit_release_assets.py`：zip / apk（以及实际是 zip 的 `.exe`）中的文本成员会逐行套用 `scripts/scan_secrets.py` 的凭据规则，命中以 `secret-marker` 标记，只报 `资产: 成员:行号: 规则`，不回显明文。它和构建前对 Git 跟踪文件的工作区扫描互补——工作区扫描看源码，资产审计看真正要上传的字节。
+
+边界与退出码：
+
+- 单个成员超过 2 MiB 跳过；单个资产的文本成员扫描上限 64 MiB；整次审计上限 256 MiB。
+- 二进制成员（前 8 KiB 含 NUL）、嵌套 `.zip` / `.exe` / `.apk`、目录和符号链接不扫描；嵌套归档从不解压，读不出的成员会作为问题报告。
+- 单独运行 `audit_release_assets.py` 时，有问题退出 `1`，参数或 I/O 错误退出 `2`；在 `release.py` 中命中会让发布以 `ReleaseError` 中止（退出码 `2`），发生在打 tag 与上传之前。
+
+更完整的规则和威胁模型见[安全说明](security.md#release-asset-scan)。
+
 ## 已知限制
 
 - **安卓不能静默安装**：那需要系统签名权限，普通应用拿不到。流程是「下载 → 校验 → 拉起系统安装器 → 用户确认」。

@@ -130,6 +130,7 @@ novel-cli export --site b520 12345 --format epub --stage raw
 * The output directory is `general.output_dir` (default `./downloads`).
 * `--start` / `--end` still apply to the first book only.
 * If no raw data exists for the book, the command exits with code `1`.
+* EPUBs carry standard accessibility metadata (`schema:accessMode=textual`, `schema:accessibilityHazard=none`, `schema:accessibilitySummary`, plus `structuralNavigation` when chapters exist), which readers and accessibility tools can consume directly; whole-book, per-volume, and single-chapter exports behave the same.
 
 Omitting `--site` or `book_ids` enters interactive mode; in a non-interactive shell, provide both.
 
@@ -285,6 +286,12 @@ curl -H "X-API-Key: change-me" http://127.0.0.1:8081/api/v1/health
 
 On the phone, open `http://192.168.1.23:8081/api/v1/health`. Because the server is bound to a non-loopback address, `/docs` is disabled automatically; a `401` (`Invalid or missing API token...`) means the port is reachable and authentication is enforced.
 
+#### Optional: custom download directory (SAF)
+
+In the app's Settings → Download section, tap "Choose directory" to pick where exported files from the History tab are saved through the system picker (SAF). Files go into a `NovelDL/` subdirectory of the chosen tree, and name clashes become `name (1).ext`. The grant is persisted and survives reboots.
+
+If the system revokes the grant, the directory is deleted, or app data moves to another device, Settings shows "The custom download directory is unavailable" and downloads **fall back to the system Downloads directory** with a notice instead of writing to the wrong place. Choose the directory again or tap "Reset" to recover. See [Troubleshooting - custom download directory](./troubleshooting.en.md#51-the-custom-download-directory-saf-is-unavailable).
+
 ---
 
 ### 6. Integrate the API into your own program
@@ -393,7 +400,75 @@ curl -s -X POST "$BASE/api/v1/watchlist/check" \
 
 ---
 
-### 7. FAQ
+### 7. Back up chapter databases on a schedule and rotate them
+
+Idea: put `storage backup` in a scheduled task and use `--keep` to bound the backup directory.
+
+```bash
+# Preview which old backups --keep would delete (zero deletion; the new backup is still written)
+novel-cli storage backup --out ~/novel-backups --keep 7 --dry-run
+
+# Back up + keep only the newest 7 per book and per stage
+novel-cli storage backup --out ~/novel-backups --keep 7
+
+# Read-only check of current raw_data (modifies nothing); exits 1 on damage
+novel-cli storage verify
+
+# Machine-readable report when needed
+novel-cli storage backup --out ~/novel-backups --keep 7 --json
+```
+
+As a Windows scheduled task (daily at 03:00):
+
+```bat
+schtasks /Create /TN "NovelBackup" /SC DAILY /ST 03:00 /TR "novel-cli storage backup --out C:\novel-backups --keep 7" /F
+```
+
+Notes:
+
+* `--keep` deletes only regular files under `--out` whose names strictly match `chapter.<stage>.<UTC timestamp>.sqlite`; hand-renamed files, files left by older versions, directories, and symlinks are never touched.
+* Backups written by the current run are always protected; `--keep 0` disables pruning.
+* A failed delete exits `1` while completed backups stay in place, so the scheduled task can alert.
+* Backups are **plaintext** full snapshots and may contain paid or private text; keep them in a controlled directory, never in Git or a public cloud drive. They do not contain cookies/tokens, configuration, logs, or media.
+* Run `novel-cli doctor --fix --dry-run` (then `--fix`) first to ensure the output/cache/log directories exist and stale `.tmp`/`.part` files are gone; it never touches backups.
+
+---
+
+### 8. Narrow search results with filters
+
+Filter by word count or update date to find long or recently updated books:
+
+```bash
+# Between 300k and 1M words
+novel-cli search 斗破苍穹 --min-words 300000 --max-words 1000000
+
+# Updated on or after 2024-01-01
+novel-cli search 斗破苍穹 --updated-after 2024-01-01
+
+# Filter + cross-site grouping + single-line JSON for scripts
+novel-cli search 斗破苍穹 --min-words 300000 --group --json | jq '.[0]'
+```
+
+Key points:
+
+* The word count is a per-book number and both bounds are inclusive; rows without a parseable `word_count` are dropped once a word filter is set.
+* `--updated-after` is an inclusive lower bound and must be exactly `YYYY-MM-DD`; rows without an update date are dropped.
+* Filtering runs after ranking and before `--group` merging and the `--limit` cut, so it only narrows the result set without changing ordering; different filter combinations are cached separately and never reuse an unfiltered snapshot.
+* The API exposes the same semantics as `min_words` / `max_words` / `updated_after`, including on the streaming endpoint.
+
+#### Desktop remembers the last filters
+
+The desktop client saves the last **valid** filter set, so you do not have to re-enter it every time:
+
+* Each time you press "Search" with valid filters, the current `min_words` / `max_words` / `updated_after` values are written to the `search_filters` key of the desktop preferences file (`desktop_prefs.json`). Leaving all three blank is also a valid state: pressing Search then clears the saved copy.
+* On the next launch the saved fields are filled back into the search filter panel, which also opens automatically, but **no search is started** — the query and the timing are still up to you.
+* Editing the inputs without pressing "Search" does not overwrite the saved values; "Clear filters" also removes the saved copy immediately.
+* "Clear saved filters" under "Search filters" in Settings deletes just that record and leaves the current inputs alone.
+* If the preferences file was hand-edited or written by an older build, invalid fields are ignored **one by one** (for example, a minimum greater than the maximum drops both word bounds, and an invalid date drops only the date), so startup never fails.
+
+---
+
+### 9. FAQ
 
 **`novel-cli` is not recognized**
 

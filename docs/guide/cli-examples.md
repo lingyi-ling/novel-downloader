@@ -140,7 +140,7 @@ novel-cli download --site n23qb
 **Synopsis**
 
 ```bash
-novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] [--group | --no-group] keyword
+novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] [--min-words N] [--max-words N] [--updated-after YYYY-MM-DD] [--group | --no-group] keyword [keyword ...]
 ```
 
 **Options**
@@ -154,7 +154,9 @@ novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit 
 * `--json`: 将所有搜索结果以 JSON 输出到标准输出后退出 (便于脚本消费)
 * `--first`: 直接下载排名第一的结果, 无需确认 (非交互模式)
 * `--sort {quality,priority,site,title,author,words,update}`: 结果排序方式, 默认为 `quality` (优选)
-* `--group` / `--no-group`: 合并跨站点的同名书, 每本书只占一行, `site` 列列出全部来源 (`*` 标记最佳来源)。默认不合并 (`--no-group`)。
+* `--min-words N` / `--max-words N`: 字数过滤 (含边界), 取值为 `0`–`1000000000`。站点返回的 `word_count` 会按排名层同一套规则解析 (`"30万字"`、`"1,234"`); 设置后, **没有字数或无法解析**的结果会被丢弃。省略即不过滤。
+* `--updated-after YYYY-MM-DD`: 只保留该日期**当天及之后**更新的结果 (下界, 含当天); 严格使用 `YYYY-MM-DD`。设置后, **没有更新日期或无法解析**的结果会被丢弃。省略即不过滤。
+* `--group` / `--no-group`: 合并跨站点的同名书, 每本书只占一行, `site` 列列出全部来源 (`*` 标记最佳来源)。默认不合并 (`--no-group`)。过滤在分组与 `--limit` 截断之前生效。
 * 关键词支持 2–4 个词的「书名 + 作者」式查询: 空格 (含全角)、`·`、`,`、`，`、`-` 会把它拆成多个词, 分别匹配标题与作者; 整串关键词仍参与评分。例如 `"斗破苍穹 天蚕土豆"`。多词拆分只影响排序评分, **不改变缓存 key**。
 
 **Examples**
@@ -179,7 +181,18 @@ novel-cli search -s b520 -s n23qb 三体
 
 # 书名 + 作者一起搜: 两个词分别匹配标题与作者
 novel-cli search "斗破苍穹 天蚕土豆"
+
+# 只看 30 万字以上、100 万字以下的作品
+novel-cli search 斗破苍穹 --min-words 300000 --max-words 1000000
+
+# 只看 2024-01-01 当天及之后更新的结果
+novel-cli search 斗破苍穹 --updated-after 2024-01-01
+
+# 过滤 + 合并 + 单行 JSON, 便于脚本消费
+novel-cli search 斗破苍穹 --min-words 300000 --updated-after 2024-01-01 --group --json
 ```
+
+过滤参数只缩小本次结果集, 不改变排序评分或响应字段; 不同过滤组合会作为不同请求分别缓存, 不会复用未过滤的快照。`--json` 输出仍是结果数组。日期或字数格式非法时以用法错误 (退出码 `2`) 退出, 不会退化成「无过滤」。
 
 !!! note "番茄为什么不在聚合搜索里"
     番茄的搜索接口要客户端签名, 且**不需要登录**。显式指定站点时会直接走官方 App 接口: 首次使用自动注册一台设备身份 (落盘复用), 之后 `x-argus` / `x-gorgon` / `x-ladon` 全部本地现算, 无需浏览器窗口。
@@ -274,6 +287,18 @@ novel-cli export
 ```
 
 > 提示: 未指定 `--site` 或 `book_id` 时, 将进入交互模式, 从已有下载的站点和书籍中进行选择。
+
+!!! note "EPUB 内置可访问性元数据"
+    导出的 EPUB 会在 OPF 中写入 EPUB 3 / schema.org 可访问性声明, 阅读器与无障碍工具可直接读取:
+
+    * `schema:accessMode = textual` — 纯文本内容
+    * `schema:accessibilityHazard = none` — 无已知无障碍风险
+    * `schema:accessibilitySummary` — 按书籍语言生成的中/英简介
+    * 含至少一个章节文档时额外声明 `schema:accessibilityFeature = structuralNavigation` (结构化目录)
+
+    整书、分卷与单章导出使用同一套规则; 元数据不含时间戳等运行期信息, 因此重复导出同一本书得到相同的声明。
+
+    EPUB 2 阅读器会忽略这些 `<meta property>` 声明, 不影响正文与基于 NCX 的目录导航 (能否打开 EPUB 3 包仍取决于阅读器)。查看方式: 解压 EPUB 后打开 `OEBPS/content.opf`, 或在 Calibre 中使用「编辑书籍」。这些是内容特征声明, 不代表已通过 EPUBCheck 或完成无障碍测试。
 
 ---
 
@@ -583,7 +608,7 @@ novel-cli music search [-h] [--platform KEY] [--limit N] [--json] keyword
 
 novel-cli music download [-h] [--keyword KEYWORD] [--platform KEY] [--limit N]
                          [--level {hires,lossless,exhigh,higher,standard}]
-                         [--out DIR] [--pick N[,N|ID]] [--yes]
+                         [--out DIR] [--pick N[,N|ID]] [--yes] [--json]
                          [KEYWORD]
 
 novel-cli music export-m3u [-h] --keyword KEYWORD [--platform KEY] [--limit N]
@@ -634,6 +659,13 @@ novel-cli music search "关键词" --json
 * `--out DIR`: 输出目录; 省略时取音乐设置 (未配置则使用默认下载目录)
 * `--pick N[,N|ID]`: 无需确认, 按搜索结果序号 (从 1 开始) 或歌曲 ID 下载, 可传入多个值
 * `--yes`: 无需确认, 直接下载全部搜索结果
+* `--json`: 以**单行** JSON 输出下载报告后退出。选择流程不受影响: 仍需 `--pick` 或 `--yes`, 非交互环境必须显式提供, 否则会进入分页选择界面 (或报用法错误)。顶层含 `platform`、`keyword`、`out_dir`、`level`、`total`、`ok`、`skip`、`fail`、`lyrics_written` 与 `results`; `platform=all` 时额外含 `platforms` 统计。`results[]` 逐首记录 `id`、`name`、`artists`、`album`、`duration_s`、`vip`、`platform`、`sources`, 并按结果追加:
+  * `status`: `ok` / `skip` / `fail`;
+  * `path`: 有可用的本地音频路径且状态为 `ok`/`skip` 时才有;
+  * `lyric_path`: 仅当原文歌词 `<stem>.lrc` 真正写在音频旁时才有 (译文 `<stem>.zh.lrc` 不单独报告);
+  * `reason`: 仅失败且引擎给出原因时才有。
+
+  部分歌曲失败时 JSON 仍会**先完整输出**, 随后命令以 `1` 退出; 搜索无结果时也会输出一份 `total=0`、`results=[]` 的合法文档, 调用方无需特判空 stdout。不带 `--json` 时, 有歌词写出会额外在 stderr 打印 `Lyrics written: N`。
 
 未指定 `--pick` 或 `--yes` 且处于交互式终端时, 会进入分页选择界面 (输入编号、`a` 全选、`n` 下一页、`p` 上一页, 回车取消)。非交互式环境下必须显式提供 `--pick` 或 `--yes`。
 
@@ -694,6 +726,9 @@ novel-cli music download "关键词" --yes
 
 # 通过搜索结果中的歌曲 ID 下载
 novel-cli music download "关键词" --pick 123456789
+
+# 机器可读: 统计本次写出的歌词数
+novel-cli music download "关键词" --yes --json | jq '.lyrics_written'
 ```
 
 > 下载进度、标签写入、封面与歌词保存等行为遵循音乐设置 (如 `embed_tags`、`embed_cover`、`save_lyric`、`split_folder`、`skip_existing`)。
@@ -799,12 +834,12 @@ novel-cli follow check --download --wait --wait-timeout 3600
 | Downloads | `general.output_dir` |
 | Logs | `general.debug.log_dir` |
 
-不指定子命令时报告各数据目录的磁盘占用; 另提供 `backup` / `restore` 两个子命令备份与恢复章节数据库。
+不指定子命令时报告各数据目录的磁盘占用; 另提供 `backup` / `restore` / `verify` 三个子命令备份、恢复与校验章节数据库。
 
 **Synopsis**
 
 ```bash
-novel-cli storage [-h] [--json] [--clean] [-y] [--dry-run] [{backup,restore} ...]
+novel-cli storage [-h] [--json] [--clean] [-y] [--dry-run] [{backup,restore,verify} ...]
 ```
 
 **Options**
@@ -846,13 +881,19 @@ novel-cli storage --clean -y
 **Synopsis**
 
 ```bash
-novel-cli storage backup [-h] --out OUT [--json]
+novel-cli storage backup [-h] --out OUT [--json] [--keep N] [--dry-run]
 ```
 
 **Options**
 
 * `--out OUT`: 接收备份文件的目录 (必填)。支持 `~` 与环境变量, 不存在时会自动创建; 每本书生成 `<out>/<site>/<book>/chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite`。若目标文件已存在则拒绝覆盖
-* `--json`: 输出单行 JSON 报告, 含 `command`、`ok`、`timestamp`、`out`、`count`、`bytes` 与 `files[]` (`source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`); 没有可备份的数据库时 `count` 为 `0`、`files` 为空数组
+* `--json`: 输出单行 JSON 报告, 含 `command`、`ok`、`timestamp`、`out`、`count`、`bytes`、`files[]` (`source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`) 与 `retention` (`keep`、`dry_run`、`candidates`、`removed`、`failed`); 没有可备份的数据库时 `count` 为 `0`、`files` 为空数组
+* `--keep N`: 备份成功并发布新文件后, 每本书的**每个 stage** 只保留最新 `N` 份, 更旧的删除; `0` (默认) 关闭清理。`N` 为负数时以用法错误 (`2`) 退出
+* `--dry-run`: 只报告 `--keep` 会删除哪些旧备份, **不删除任何文件**; 新备份仍会正常写入。必须与 `--keep N` (`N > 0`) 同用, 否则以用法错误 (`2`) 退出
+
+`--keep` 的删除范围是硬边界: 只考虑 `--out` 下文件名严格匹配 `chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite` 的**普通文件**, 目录、符号链接和任何其他命名 (包括手工改名或旧版本留下的文件) 一律不碰。分组键是「所在书籍目录 + stage」, 因此同一本书的 `raw` 与 `cleaner` 各自保留 `N` 份, 不会互相挤掉; 本次运行刚写出的文件永远受保护, 即使系统时钟回拨也不会删掉新备份。若某个目录无法读取或删除失败, 命令以 `1` 退出并在 `retention.failed` / stderr 中报告, 但已完成的备份仍保留。
+
+> 备份是完整快照, 不是增量; `--keep` 只做轮转, 不会压缩或合并历史备份。需要长期归档时请把旧副本移到另一位置, 而不是把 `N` 设得很大。
 
 备份范围只有 `raw_data` 下的 `chapter.<stage>.sqlite` (章节正文与元数据), **不含** `settings.toml`、Cookie/token 等登录态 (它们在 `cache_dir`)、日志、图片/媒体或导出文件。因此恢复备份不会恢复登录态, 换机后仍需重新登录。备份是**明文** SQLite 文件, 且可能包含付费或私密正文, 请放在受控目录中, 不要提交到 Git 仓库或公开网盘。
 
@@ -862,11 +903,57 @@ novel-cli storage backup [-h] --out OUT [--json]
 # 备份所有章节数据库
 novel-cli storage backup --out ~/novel-backups
 
+# 备份后每本书、每个 stage 只保留最近 7 份
+novel-cli storage backup --out ~/novel-backups --keep 7
+
+# 先预览 --keep 7 会删掉哪些旧备份 (零删除, 新备份仍会写入)
+novel-cli storage backup --out ~/novel-backups --keep 7 --dry-run
+
 # 脚本消费
 novel-cli storage backup --out ./backups --json
+
+# 定时任务: 备份 + 轮转, 失败时退出非零
+novel-cli storage backup --out ./backups --keep 14 --json
 ```
 
-##### 9.2 storage restore 子命令
+##### 9.2 storage verify 子命令
+
+只读校验 `raw_data` 下所有 `chapter.<stage>.sqlite`, 不修改、不复制、不重命名任何文件:
+
+**Synopsis**
+
+```bash
+novel-cli storage verify [-h] [--json]
+```
+
+**Options**
+
+* `--json`: 输出单行 JSON 报告 `{ok, total, healthy, corrupt, errors[]}`, 每个错误含 `path` 与 `reason`
+
+**检查内容**
+
+* 写前先校验 WAL sidecar 的校验和; WAL 损坏会直接报告, 不会让 SQLite 应用一个坏日志。
+* 以只读连接打开 (`mode=ro`), 并额外设置 `PRAGMA query_only = ON`; 需要临时快照时也只操作临时副本, 源文件字节不变。
+* 复用 `restore` 的同一套校验: SQLite 完整性、schema 版本、必需列。任何一项不通过都记为 `corrupt` 并给出原因。
+* 每个数据库输出一行 `ok` 或 `corrupt: <原因>`; 家目录前缀会显示为 `~`。
+
+**退出码与边界**
+
+* 全部健康 (包括一个数据库都没有) 退出 `0`; 任意一个损坏退出 `1`。
+* 只扫描 `raw_data` 下的**在用**数据库, 不扫描 `storage backup --out` 的备份目录; 备份副本需用 `sha256sum` / `PRAGMA integrity_check` 校验 (见 9.4)。
+* 校验是只读的, 不会「修复」损坏库; 确认损坏后应从备份 `restore`, 或删除该库让应用重新下载。
+
+**Examples**
+
+```bash
+# 校验所有在用章节数据库
+novel-cli storage verify
+
+# 脚本消费: ok=true 才继续
+novel-cli storage verify --json
+```
+
+##### 9.3 storage restore 子命令
 
 从备份文件恢复章节数据库。写入前会校验文件 (SQLite 完整性、schema 版本、必需列), 校验通过后原子替换目标数据库。
 
@@ -898,7 +985,7 @@ novel-cli storage restore --from ./backup.sqlite -y --json
 
 `--to` 的文件名必须形如 `chapter.<stage>.sqlite`, 且 `stage` 要与原库一致 (通常是 `raw` 或 `cleaner`)。写错阶段不会影响其他文件, 但应用随后读写的是另一个阶段的数据库, 看起来像“章节丢了”。
 
-##### 9.3 备份 → 校验 → 恢复完整流程
+##### 9.4 备份 → 校验 → 恢复完整流程
 
 1. 备份, 并把机器可读报告保存下来 (其中的 `sha256`、`schema_version`、`chapters` 用于下一步核对):
 
@@ -916,6 +1003,8 @@ sqlite3 ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite 'P
 ```
 
 以上命令需要 `jq`、`sha256sum` (Git Bash / Linux / macOS) 与 `sqlite3` 命令行工具; 没有 `sqlite3` 时可跳过完整性检查, `restore` 仍会强制执行同样的校验。
+
+`novel-cli storage verify` 校验的是 `raw_data` 里的**在用**数据库 (只读), 不读取备份目录; 若要确认备份副本本身没坏, 仍用上面的 `sha256sum` / `PRAGMA integrity_check`。两者互补: 一个查当前数据, 一个查归档副本。
 
 3. 恢复并核对结果。目标已存在时必须加 `-y`, 命令会先把旧库保存为同目录的 `chapter.<stage>.sqlite.pre-restore-<时间戳>.bak`:
 
@@ -936,17 +1025,22 @@ novel-cli storage restore \
 **Synopsis**
 
 ```bash
-novel-cli doctor [-h] [--port N] [--json] [--online]
+novel-cli doctor [-h] [--port N] [--json] [--online] [--fix] [--dry-run] [--fix-age-days N]
 ```
 
 **检查项**
 
 * Python 版本是否 >= 3.11
-* 已安装包版本
+* 包版本 (`--version` 的源码版本; 与已安装元数据不一致时会同时显示)
 * 是否找到 `settings.toml` / `settings.json`
-* 配置能否解析为根表
+* 配置能否解析为根表, 以及校验错误/警告
+* 核心依赖与可选 `api` 依赖是否可导入
 * 输出目录能否创建并写入 (会创建该目录并写入/删除一个临时文件)
+* 日志目录能否创建并写入
+* 输出目录所在卷的剩余空间 (低于 512 MiB 只警告)
+* 缓存目录大小与可由 `clean cache` 回收的空间 (仅提示)
 * 已注册下载站点数量
+* 抽样站点插件能否导入 (单个失败只警告, 全部失败才判定失败)
 * 可加载的搜索器数量
 * 可选音乐依赖 (`mutagen`、`qrcode`、`websocket`) — 缺失只提示, 不判定失败
 * `127.0.0.1:<port>` 是否可绑定 (默认 8081)
@@ -954,8 +1048,19 @@ novel-cli doctor [-h] [--port N] [--json] [--online]
 **Options**
 
 * `--port N`: 要检查可用性的 API 端口, 默认 `8081`。
-* `--json`: 以 JSON 输出检查结果 (`summary` + `checks`) 到标准输出并退出。
+* `--json`: 以 JSON 输出检查结果 (`status`、`warnings`、`summary` + `checks`) 到标准输出并退出。
 * `--online`: 额外探测网络出口 (请求 `https://www.baidu.com` 与 `https://github.com`, 每个 2.5 秒超时); 该项仅为提示, 失败不会让命令退出非零。
+* `--fix`: 只修复**可逆的本地状态**: 创建缺失的输出/缓存/日志目录, 并删除这三个根目录下超过 `--fix-age-days` 天的 `.tmp` / `.part` 文件。绝不修改配置、导出文件、登录态或网络设置。
+* `--dry-run`: 预览 `--fix` 的动作 (隐含 `--fix`), **不创建、不删除任何文件**; 目录检查也转为只读探测, 缺失目录显示为「`--fix` 将创建」而不是失败。
+* `--fix-age-days N` (`--max-age-days`): 只删除超过 `N` 天的临时文件, 默认 `7`; 小于 `1` 以用法错误 (`2`) 退出。
+
+**`--fix` 的安全边界**
+
+1. 动作只发生在配置解析出的输出、缓存、日志三个目录**内部**; 路径必须是绝对路径、不含 `..`, 且路径与根目录都不能经过符号链接。否则该动作记为 `skipped`, 不执行。
+2. 每个动作在真正执行前会**再次校验**路径, 因此计划生成后目录被替换/软链接化也不会越界。
+3. 删除目标必须是普通文件且 mtime 早于阈值; 目录、符号链接、刚写入的文件都会被跳过。
+4. 不修复配置错误、缺失依赖、端口占用或网络问题 —— 这些仍按检查项给出建议。
+5. `--fix` 在检查之前执行, 因此报告反映的是修复后的状态; 修复本身失败时命令以 `1` 退出, 被安全跳过的动作不会导致失败。
 
 **Examples**
 
@@ -965,9 +1070,20 @@ novel-cli doctor
 
 # 检查自定义 API 端口
 novel-cli doctor --port 9000
+
+# 预览会创建哪些目录、删除哪些过期临时文件 (零改动)
+novel-cli doctor --fix --dry-run
+
+# 实际修复, 只清理 14 天前的 .tmp/.part
+novel-cli doctor --fix --fix-age-days 14
+
+# 机器可读: checks + 本次修复的 fixed/skipped/errors
+novel-cli doctor --fix --json
 ```
 
-> 所有必需检查通过时退出码为 `0`, 任意必需检查失败为 `1`。失败项下方会打印一条可执行的修复建议。
+`--fix --json` 在常规文档之外追加 `dry_run`、`max_age_days`、`fixed`、`skipped`、`errors` 与 `fix_summary`; 每条修复记录的 `path` 已做脱敏 (家目录显示为 `~`, 其他绝对路径只保留尾部)。
+
+> 所有必需检查通过时退出码为 `0`, 任意必需检查失败为 `1`。失败项下方会打印一条可执行的修复建议。可选检查 (`optional`) 只产生警告, 不影响退出码。
 
 ---
 
@@ -1136,7 +1252,7 @@ novel-cli update --json
 | 退出码 | 含义 | 典型场景 |
 | --- | --- | --- |
 | `0` | 成功 | 命令正常完成; 搜索无结果、追更无新章节也属于成功 |
-| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败、`storage backup`/`restore` 备份或恢复失败、`music health` 有平台失败、`batch` 存在未匹配/格式错误/下载失败、`update` 检查失败 (以及 `--yes` 时无匹配资产、缺少摘要或下载失败) |
+| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败、`storage backup`/`restore` 备份或恢复失败、`music health` 有平台失败、`music download` 有歌曲失败、`batch` 存在未匹配/格式错误/下载失败、`update` 检查失败 (以及 `--yes` 时无匹配资产、缺少摘要或下载失败) |
 | `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`download` 的 `--site`/`--start`/`--end` 传入空字符串 (仅含空白也算空)、`--json` 与 `--first` 同用、`storage` 的 `--json` 与 `--clean` 同用 (未加 `--dry-run`)、`clean cache`/`clean book` 的 `--json` 未与 `--dry-run` 同用、`storage --dry-run` 未与 `--clean` 同用、`storage restore` 覆盖已有数据库未加 `--yes` 或目标不在 `raw_data_dir` 内、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`music` 的 `--platform` 传入未知平台、`batch` 未提供输入文件或 `--interval` 为负、`clean --site` 传入 `..`/路径分隔符等越界值 |
 
 `update --check` 的退出码表示**检查**是否成功, 而不是是否有新版本: 发现有更新仍返回 `0`。`sources list --probe` 本身不改变退出码——网络不可达只在 `Latency`/`HTTP` 列显示为 `-`, 只有 `--check` 的结构校验失败才会以 `1` 退出。
@@ -1148,8 +1264,8 @@ novel-cli update --json
 带 `--json` 时:
 
 * 结构化结果**只**写到 stdout; 日志、进度、错误和提示写到 stderr, 便于管道消费。
-* 命令不会进入交互式选择; 需要的参数必须显式提供。
-* 即使最终退出码非 `0`, 也可能已输出一份 JSON 摘要 (例如 `download --json` 在部分书籍失败时)。
+* 命令不会进入交互式选择; 需要的参数必须显式提供。(`music download` 例外: `--json` 本身不改变选择流程, 非交互环境仍必须提供 `--pick` 或 `--yes`。)
+* 即使最终退出码非 `0`, 也可能已输出一份 JSON 摘要 (例如 `download --json` 在部分书籍失败时、`music download --json` 在部分歌曲失败时)。
 
 | 命令 | 选项 | stdout 结构 |
 | --- | --- | --- |
@@ -1159,6 +1275,7 @@ novel-cli update --json
 | `sources list` | `--json` | 数组, 每项含 `site_key`、`name`、`search`、`hosts`、`origin`; 加 `--check` 时 `status` 才有值 (否则为 `null`); 加 `--probe` 时额外含 `latency_ms`、`http_status` (探测不到时为 `null`) |
 | `update` | `--json` | 单个对象, 固定含 `current`、`latest`、`available`、`asset_name`、`asset_shape`、`asset_size`、`sha256`、`download_path`、`error` 九个字段; 无对应值时除 `current`/`available` 外为 `null` (或 `latest` 为空串)。`asset_shape` 在选中 CLI 资产时为 `cli`; `error` 可能为 `insecure-url`、`missing-digest`、`no-cli-asset` |
 | `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}`; `platform=all` (默认) 时 `tracks[].sources` 列出命中平台, 并额外返回 `platforms` 统计 |
+| `music download` | `--json` | 单行 JSON: `{"platform", "keyword", "out_dir", "level", "total", "ok", "skip", "fail", "lyrics_written", "results": [...]}`; `results[]` 含 `id`、`name`、`artists`、`album`、`duration_s`、`vip`、`platform`、`sources`, 并按结果追加 `status` (`ok`/`skip`/`fail`)、`path`、`lyric_path`、`reason` (后三者按条件出现) |
 | `music platforms` | `--json` | `{平台 key: 显示名}` 对象 |
 | `music health` | `--json` | `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`; 字段名与 `GET /api/v1/music/health` 一致 |
 | `follow list` | `--json` | 数组, 每项含 `site`、`book_id`、`title`、`last_chapter`、`updated_at` |

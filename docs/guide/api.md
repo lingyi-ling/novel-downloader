@@ -29,8 +29,9 @@ novel-api
 | `--port` | `8081` | 监听端口。 |
 | `--token` | 环境变量 `NOVEL_API_TOKEN` | 设置后所有 `/api/v1/*` 与 `/downloads/*` 请求都要鉴权。 |
 | `--cors` | 关闭 | 允许任意来源跨域调用（`Access-Control-Allow-Origin: *`）。 |
-| `--rate-limit` | `120` | 每个客户端 IP 在滑动窗口内允许的最大请求数；`0` 关闭限流。 |
-| `--rate-limit-window` | `60` | 限流滑动窗口长度（秒）。 |
+| `--rate-limit` | `120` | 每个客户端 IP 在滑动窗口内允许的最大请求数（须在 `1`–`1000000` 之间，否则启动报错）。 |
+| `--no-rate-limit` | 关闭 | 显式关闭限流；仅限可信的本地环境。 |
+| `--rate-limit-window` | `60` | 限流滑动窗口长度（秒），须大于 `0` 且不超过 `3600`。 |
 
 ```bash
 # 带 token 启动
@@ -135,7 +136,10 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
   "sort": "quality",
   "order": "desc",
   "limit": 20,
-  "group": false
+  "group": false,
+  "min_words": 300000,
+  "max_words": 1000000,
+  "updated_after": "2024-01-01"
 }
 ```
 
@@ -151,6 +155,14 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 - `group` 默认为 `false`；设为 `true` 时把跨站点的同名书合并为一行，每行是
   该书的最佳来源，并额外带一个 `sources` 数组列出所有命中的站点（最佳来源在前）。
   外层结构仍是 `{total, results}`，不关心合并的客户端可保持默认值。
+- `min_words` / `max_words` 为可选的字数上下界（含边界），取值 `0`–`1000000000`。
+  服务端用排名层同一套规则解析 `word_count`（`"30万字"`、`"1,234"`）；只要设置了
+  任一字段，**没有字数或无法解析**的行就会被丢弃。省略即不过滤。
+- `updated_after` 为可选的 `YYYY-MM-DD` 日期下界（**含当天**）；设置后，
+  **没有更新日期或无法解析**的行会被丢弃。格式非法时返回 `422`。
+- 三个过滤字段都在**排名之后、`group` 合并与 `limit` 截断之前**生效，只缩小结果集，
+  不改变排序或响应字段。过滤条件是请求身份的一部分：不同过滤组合分别缓存，
+  不会复用未过滤的快照；全部省略时行为与旧版本完全一致。
 - `keyword` 支持 2–4 个词的「书名 + 作者」式查询：空格（含全角）、`·`、
   `,`、`，`、`-` 会把关键词拆成多个 token，分别与标题、作者比较
   （例如 `"斗破苍穹 天蚕土豆"`）；整串关键词仍参与评分。多词拆分只影响
@@ -192,6 +204,19 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 的原始预览分片，**不包含** `rank_score` / `match_tier`，只有 `POST /search`
 的最终结果才带这两个字段。
 
+带过滤的请求示例（字数 30 万–100 万、2024-01-01 之后更新、跨站合并）：
+
+```bash
+curl -s -X POST "$BASE/api/v1/search" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"keyword":"斗破苍穹","sites":["qidian","biquge5"],"per_site_limit":10,"group":true,"min_words":300000,"max_words":1000000,"updated_after":"2024-01-01"}'
+```
+
+过滤字段是可选的：省略它们与本功能加入前的请求完全等价。若某个站点不返回
+字数或更新日期，这些行在启用对应过滤时会被静默丢弃（不会报错），因此“过滤后
+结果变少”通常是站点字段缺失而非请求失败。
+
 ## 榜单与分类浏览
 
 番茄等站点会公开发布榜单和分类，不需要关键字：
@@ -231,6 +256,10 @@ curl -s -X POST "$BASE/api/v1/browse" \
 | `sites` | string | 全部启用站点 | 逗号分隔的站点列表，如 `qidian,biquge5`。 |
 | `per_site_limit` | int | `5` | 每个站点的结果上限。 |
 | `timeout` | float | `5` | 每个站点的墙钟预算（秒）；超时站点被丢弃，不阻塞其它站点。 |
+| `min_words` / `max_words` | int | 不限制 | 字数上下界（含边界，`0`–`1000000000`）；设置后无字数或无法解析的条目被丢弃。 |
+| `updated_after` | date | 不限制 | `YYYY-MM-DD` 下界（含当天）；设置后无更新日期或无法解析的条目被丢弃。 |
+
+过滤在每个站点的分片到达时就地生效，不重排条目、不改变事件结构，也不影响最终 `done.total` 之外的其他字段。日期格式非法时返回 `422`。
 
 响应为 `text/event-stream`，事件格式：
 
@@ -255,6 +284,13 @@ data: {"total":2}
 
 ```bash
 curl -N "http://127.0.0.1:8081/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&sites=qidian,biquge5&per_site_limit=5&timeout=5" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+流式端点同样接受过滤参数，例如只保留 30 万字以上、2024 年之后更新的条目：
+
+```bash
+curl -N "http://127.0.0.1:8081/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&sites=qidian&min_words=300000&updated_after=2024-01-01" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -866,8 +902,8 @@ API 默认启用按客户端 IP 的滑动窗口限流：每个 IP 在 `--rate-li
 （默认 `60` 秒）内最多 `--rate-limit`（默认 `120`）个请求，超出的请求返回
 `429` 并附带 `Retry-After` 头。该头是**整数秒、向上取整**，表示最早一次被
 接受请求滑出窗口的剩余时间（最小 `1`，不会超过窗口长度），因此按它等待后
-必有空位。`--rate-limit 0` 可完全关闭限流；`GET /api/v1/health` 不受限流
-影响，便于可用性监控。计数发生在鉴权之前，token 暴力枚举同样会被节流；
+必有空位。`--no-rate-limit` 可完全关闭限流（`--rate-limit 0` 会以参数错误
+退出，不再隐式关闭）；`GET /api/v1/health` 不受限流影响，便于可用性监控。计数发生在鉴权之前，token 暴力枚举同样会被节流；
 被拒绝的请求不计数，客户端停止请求后窗口排空即自动恢复。
 
 限流状态只保存在**当前进程内存**中，不跨进程共享、也不持久化：
