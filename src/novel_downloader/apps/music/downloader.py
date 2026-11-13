@@ -346,6 +346,32 @@ def _dest_lock(dest):
                 del _dest_locks[key]
 
 
+def _lyric_missing(audio_path):
+    """音频旁是否还缺歌词（按原文 ``.lrc`` 判断，与 :func:`lyric_paths` 一致）。"""
+    original_path, _ = lyric_paths(audio_path)
+    return not os.path.exists(original_path)
+
+
+def _write_lyrics(provider, track, dest):
+    """获取并落盘歌词；任何失败只记 WARNING，绝不影响音频结果。
+
+    provider 可能返回空白/占位值，归一后再判断是否用 Track 自带字段
+    回退（聚合搜索/序列化往返后常常已经带着 lyric，不必再联网）。
+    """
+    try:
+        lrc, tlrc = provider.lyric(track) or ("", "")
+    except Exception as exc:  # noqa: BLE001 - 歌词获取失败不影响音频
+        logger.warning("music: 歌词获取失败 %s: %s", track.id or dest, exc)
+        lrc, tlrc = "", ""
+    lrc = _coerce_lyric(lrc)
+    tlrc = _coerce_lyric(tlrc)
+    fallback_lrc, fallback_tlrc = track_lyrics(track)
+    try:
+        save_lyric(dest, lrc or fallback_lrc, tlrc or fallback_tlrc)
+    except Exception as exc:  # noqa: BLE001 - 歌词落盘失败不影响音频
+        logger.warning("music: 歌词落盘失败 %s: %s", dest, exc)
+
+
 def download_track(
     provider, track, opts: DownloadOptions, progress=None, stop_flag=None
 ):
@@ -389,6 +415,10 @@ def download_track(
             and os.path.getsize(dest) > 10240
         ):
             _remember_path(track, dest)
+            # 音频已存在就不重新下载，但歌词可能是后加的：缺 .lrc 才补写，
+            # 已有歌词则完全跳过（不联网，也不改 mtime）。
+            if opts.save_lyric and _lyric_missing(dest):
+                _write_lyrics(provider, track, dest)
             return TrackResult(
                 "skip", "已存在", path=dest, bytes_=os.path.getsize(dest)
             )
@@ -436,12 +466,7 @@ def download_track(
             _write_tags(dest, track, cover if opts.embed_cover else None)
 
         if opts.save_lyric:
-            try:
-                lrc, tlrc = provider.lyric(track)
-                save_lyric(dest, lrc, tlrc)
-            except Exception:
-                # 歌词获取/落盘失败同样不影响音频
-                pass
+            _write_lyrics(provider, track, dest)
 
         return TrackResult(
             "ok", path=dest, bytes_=size, level=rr.level, resumed_from=resumed
@@ -765,18 +790,196 @@ def human(size):
 # ---------------------------------------------------------------------------
 
 
+#: 歌词是纯文本。超过这个大小的响应多半是错误页、完整网页或别的
+#: 东西，原样落盘只会把播放器目录撑坏；直接跳过并告警。
+MAX_LYRIC_BYTES = 1024 * 1024
+
+#: Track / provider 私有数据里可能承载歌词的键。
+_LYRIC_KEYS = ("lyric", "lyrics", "lrc", "lyric_text")
+_LYRIC_TRANSLATION_KEYS = (
+    "tlyric",
+    "translated_lyric",
+    "lyric_translation",
+    "translation",
+    "translated",
+)
+#: musicdl 的部分源会把「没有歌词」写成这些占位符，不能当成正文。
+_EMPTY_LYRIC_VALUES = frozenset({"null", "none", "nil"})
+
+
 def lyric_paths(audio_path):
-    """返回某音频对应的 (原文 LRC 路径, 翻译 LRC 路径)。"""
+    """返回某音频对应的 (原文 LRC 路径, 翻译 LRC 路径)。
+
+    两个路径都直接由音频路径换后缀得到，因此与 ``<title> - <artist>.mp3``
+    的落盘名天然一致：``<title> - <artist>.lrc`` / ``.zh.lrc``。
+    """
     stem = os.path.splitext(str(audio_path))[0]
     return stem + ".lrc", stem + ".zh.lrc"
 
 
+def _attr(value, name):
+    """读取属性，属性 getter 抛异常时按不存在处理。"""
+    try:
+        return getattr(value, name, None)
+    except Exception:  # noqa: BLE001 - provider 对象可能带会抛异常的 property
+        return None
+
+
+def _coerce_lyric(value, depth=0):
+    """把各种歌词形态归一成纯文本 / LRC 字符串。
+
+    平台返回值可能是字符串、``{"lrc": {"lyric": ...}}`` 这类嵌套 dict、
+    行列表，或带 ``lyric`` 属性的 provider 对象。只沿已知歌词键向下找，
+    并限制递归深度，避免顺着 provider 的 ``extra`` 无界遍历。
+    """
+    if value is None or depth > 4:
+        return ""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, Mapping):
+        text = ""
+        for key in _LYRIC_KEYS:
+            text = _coerce_lyric(value.get(key), depth + 1)
+            if text:
+                break
+    elif isinstance(value, (list, tuple)):
+        text = "\n".join(
+            item for item in (_coerce_lyric(v, depth + 1) for v in value) if item
+        )
+    else:
+        text = ""
+        for key in _LYRIC_KEYS:
+            text = _coerce_lyric(_attr(value, key), depth + 1)
+            if text:
+                break
+    if not text.strip() or text.strip().lower() in _EMPTY_LYRIC_VALUES:
+        return ""
+    return text
+
+
+def _from_lyric_mapping(payload):
+    """从一个 dict 形态的歌词载荷里取 (原文, 翻译)。"""
+    original = ""
+    for key in _LYRIC_KEYS:
+        original = _coerce_lyric(payload.get(key))
+        if original:
+            break
+    translated = ""
+    for key in _LYRIC_TRANSLATION_KEYS:
+        translated = _coerce_lyric(payload.get(key))
+        if translated:
+            break
+    return original, translated
+
+
+def _lyric_pair(value):
+    """把任意歌词载荷归一成 (原文, 翻译)。"""
+    if isinstance(value, Mapping):
+        return _from_lyric_mapping(value)
+    original = _coerce_lyric(value)
+    translated = ""
+    for key in _LYRIC_TRANSLATION_KEYS:
+        translated = _coerce_lyric(_attr(value, key))
+        if translated:
+            break
+    return original, translated
+
+
+def _lyrics_from_extra(extra):
+    """从 Track.extra 的常见层级里找歌词（不联网，只读已有字段）。
+
+    ``extra`` 里可能是 provider 的原始对象（musicdl ``SongInfo``）或它的
+    dict 形态（搜索/序列化往返后）。已知容器键有 ``info`` / ``raw`` /
+    ``data`` / ``song`` / ``result``；找不到就返回空，绝不猜测。
+    """
+    if not isinstance(extra, Mapping):
+        # 极少数调用方会把 provider 对象直接放进 extra。
+        return _lyric_pair(extra)
+    original, translated = _from_lyric_mapping(extra)
+    if original and translated:
+        return original, translated
+    for key in ("info", "raw", "data", "song", "result"):
+        node = extra.get(key)
+        if node is None:
+            continue
+        node_original, node_translated = _lyric_pair(node)
+        original = original or node_original
+        translated = translated or node_translated
+        if original and translated:
+            break
+    return original, translated
+
+
+def track_lyrics(track):
+    """从 Track 自带字段提取 (原文, 翻译)，没有歌词时返回 ("", "")。
+
+    下载流程优先用 provider.lyric()（可能联网）；本函数只读已在对象上的
+    ``lyric`` / ``lyrics`` / ``extra``，用作回退，避免重复请求。既接受
+    纯文本，也原样保留 LRC 的时间轴标签。
+    """
+    original, translated = _lyric_pair(_attr(track, "lyric"))
+    if not original:
+        lyrics_original, lyrics_translated = _lyric_pair(_attr(track, "lyrics"))
+        original = original or lyrics_original
+        translated = translated or lyrics_translated
+    if not translated:
+        for key in _LYRIC_TRANSLATION_KEYS:
+            translated = _coerce_lyric(_attr(track, key))
+            if translated:
+                break
+    extra_original, extra_translated = _lyrics_from_extra(_attr(track, "extra"))
+    return original or extra_original, translated or extra_translated
+
+
 def _write_text(path, text):
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text.rstrip() + "\n")
+    """原子写入 UTF-8 文本，返回是否真的产生写盘。
+
+    - 目标已存在且字节完全一致：直接跳过，避免重复下载时反复改 mtime
+    - 先写同目录临时文件，``os.replace`` 原子替换；失败时删除临时文件，
+      原有歌词保持完整
+    - 超过 :data:`MAX_LYRIC_BYTES` 的内容不写（抛 ``ValueError``，由
+      :func:`save_lyric` 记日志后忽略）
+    """
+    data = (text.rstrip() + "\n").encode("utf-8")
+    if len(data) > MAX_LYRIC_BYTES:
+        raise ValueError(f"歌词超过 {MAX_LYRIC_BYTES} 字节上限")
+
+    try:
+        with open(path, "rb") as f:
+            if f.read(len(data) + 1) == data:
+                return False
+    except OSError:
+        pass
+
+    directory = os.path.dirname(os.path.abspath(path)) or os.curdir
+    os.makedirs(directory, exist_ok=True)
+    base = os.path.basename(path)
+    # ``mkstemp`` would create the file as 0600 on POSIX; opening with
+    # ``0o666`` lets the umask decide, matching a plain ``open(path, "w")``.
+    fd = -1
+    tmp_path = ""
+    for _ in range(8):
+        tmp_path = os.path.join(directory, f".{base}.{secrets.token_hex(6)}.tmp")
+        try:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            continue
+        break
+    else:  # pragma: no cover - eight random collisions are not realistic
+        raise FileExistsError(
+            errno.EEXIST, "Could not create a temporary lyric file", path
+        )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+    return True
 
 
 def _normalize_lrc(text):
@@ -785,7 +988,7 @@ def _normalize_lrc(text):
 
 
 def save_lyric(audio_path, lyric, translated=""):
-    """把歌词写到音频旁，返回实际写入的文件列表。
+    """把歌词写到音频旁，返回实际产生写盘的文件列表。
 
     落盘策略（固定为独立文件，便于播放器/工具各取所需）：
 
@@ -793,21 +996,28 @@ def save_lyric(audio_path, lyric, translated=""):
     - 只有译文：把译文写进 ``<stem>.lrc``，避免播放器完全看不到歌词
     - 两者都为空：不创建任何文件
 
-    空白文本会被忽略；换行统一为 ``\\n``，文件编码 UTF-8。
+    空白文本会被忽略；换行统一为 ``\\n``，文件编码 UTF-8（无 BOM）。
+    内容与现有文件相同则跳过；不同则原子覆盖。单个文件写入失败只记
+    WARNING 并继续处理另一个文件，绝不把已下载的音频变成失败。
     """
     original_path, translation_path = lyric_paths(audio_path)
     text = _normalize_lrc(lyric)
     translation = _normalize_lrc(translated)
-    written = []
+    pending = []
     if text:
-        _write_text(original_path, text)
-        written.append(original_path)
+        pending.append((original_path, text))
         if translation:
-            _write_text(translation_path, translation)
-            written.append(translation_path)
+            pending.append((translation_path, translation))
     elif translation:
-        _write_text(original_path, translation)
-        written.append(original_path)
+        pending.append((original_path, translation))
+
+    written = []
+    for path, content in pending:
+        try:
+            if _write_text(path, content):
+                written.append(path)
+        except Exception as exc:  # noqa: BLE001 - 歌词失败不影响音频
+            logger.warning("music: 歌词保存失败 %s: %s", path, exc)
     return written
 
 
