@@ -25,7 +25,7 @@ After installation, the following executable commands are provided:
 * `novel-cli`: command-line entry point
 * `novel-api`: local REST API entry point (requires the `api` extra, see below)
 
-For Tab completion in bash / zsh / fish / PowerShell, generate a script with `novel-cli completion --shell <shell>` and load it; see [CLI Usage § completion](./cli-examples.md#11-completion-subcommand).
+For Tab completion in bash / zsh / fish / PowerShell, generate a script with `novel-cli completion --shell <shell>` and load it; see [CLI Usage § completion](./cli-examples.en.md#11-completion-subcommand).
 
 (2) Install the latest development version (GitHub)
 

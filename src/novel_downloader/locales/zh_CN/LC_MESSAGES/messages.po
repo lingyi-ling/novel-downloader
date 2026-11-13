@@ -678,7 +678,7 @@ msgstr "仅显示将被删除的内容, 不实际执行删除"
 #: src/novel_downloader/apps/cli/commands/clean.py:146
 #, python-brace-format
 msgid "Log directory does not exist: {path}"
-msgstr "日志路径不是目录: {path}"
+msgstr "日志目录不存在：{path}"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:150
 #, python-brace-format
@@ -688,7 +688,7 @@ msgstr "日志路径不是目录: {path}"
 #: src/novel_downloader/apps/cli/commands/clean.py:158
 #, python-brace-format
 msgid "No log files to clean in {path}."
-msgstr "在配置文件 {path} 未找到日志路径"
+msgstr "在 {path} 中没有可清理的日志文件。"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:162
 #, python-brace-format
@@ -2339,7 +2339,7 @@ msgstr "无法从 {path} 推断恢复目标；请传入 --to。"
 #: src/novel_downloader/apps/cli/commands/storage.py:820
 #, python-brace-format
 msgid "Restore target must be named like chapter.<stage>.sqlite: {path}"
-msgstr "恢复目标必须命名为 chapter.<stage>.sqlite 形式：{path}"
+msgstr "恢复目标的文件名必须形如 chapter.<stage>.sqlite：{path}"
 
 #: src/novel_downloader/apps/cli/commands/storage.py:832
 #, python-brace-format
@@ -2349,7 +2349,7 @@ msgstr "恢复目标必须位于原始数据目录内：{path}"
 #: src/novel_downloader/apps/cli/commands/storage.py:882
 #, python-brace-format
 msgid "Restore source does not exist: {path}"
-msgstr "恢复源不存在：{path}"
+msgstr "要恢复的源文件不存在：{path}"
 
 #: src/novel_downloader/apps/cli/commands/storage.py:888
 #, python-brace-format
@@ -2381,7 +2381,7 @@ msgstr "备份现有数据库失败；未做任何更改：{error}"
 #: src/novel_downloader/apps/cli/commands/storage.py:929
 #, python-brace-format
 msgid "Preserved the existing database as {path}."
-msgstr "已保留现有数据库为 {path}。"
+msgstr "现有数据库已另存为 {path}。"
 
 #: src/novel_downloader/apps/cli/commands/storage.py:935
 #, python-brace-format
@@ -2399,7 +2399,7 @@ msgstr "将所有章节数据库备份到一个目录。"
 
 #: src/novel_downloader/apps/cli/commands/storage.py:975
 msgid "Directory that receives the timestamped backup files."
-msgstr "接收带时间戳备份文件的目录。"
+msgstr "存放带时间戳备份文件的目录。"
 
 #: src/novel_downloader/apps/cli/commands/storage.py:981
 #: src/novel_downloader/apps/cli/commands/storage.py:1024
@@ -3021,7 +3021,7 @@ msgstr "打开"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:643
 msgid "OK"
-msgstr "成功"
+msgstr "确定"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:644
 msgid "Cancel"
@@ -3893,7 +3893,7 @@ msgstr "尚未下载任何更新"
 msgid ""
 "The downloaded update is for v{have}, but v{want} is now available; "
 "please download it again"
-msgstr "下载的更新是 v{have} 版本，但当前已有 v{want}；请重新下载"
+msgstr "已下载的更新是 v{have}，但现在已有新版 v{want}；请重新下载"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:3390
 msgid ""
@@ -3909,7 +3909,7 @@ msgstr "该更新不是安装包；请手动解压"
 msgid ""
 "This update is an installer, which a portable copy cannot use; download "
 "the portable package instead"
-msgstr "此更新是安装包，便携版无法使用；请改下载便携包"
+msgstr "此更新是安装版，便携版无法使用；请改为下载便携版"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:3420
 msgid "Refusing to run an update from outside the update folder"
@@ -3927,7 +3927,7 @@ msgstr "下载的安装包未通过校验，请重新下载"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:3494
 msgid "This update is for a portable copy; use the installer instead"
-msgstr "这个更新包是给便携版用的；安装版请使用 setup 安装包"
+msgstr "此更新适用于便携版；安装版请改用安装包"
 
 #: src/novel_downloader/apps/desktop/webview_app.py:3500
 msgid ""
@@ -4110,7 +4110,7 @@ msgstr "配置文件过大：{path}（{size} 字节）。"
 msgid ""
 "Configuration file is not valid UTF-8: {path} (byte 0x{byte:02x} at "
 "position {position})."
-msgstr "配置文件不是有效的 UTF-8：{path}（第 {position} 个字节为 0x{byte:02x}）。"
+msgstr "配置文件不是有效的 UTF-8：{path}（偏移 {position} 处的字节为 0x{byte:02x}）。"
 
 #: src/novel_downloader/infra/config/file_io.py:157
 #, python-brace-format

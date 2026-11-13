@@ -34,7 +34,7 @@ novel-cli update --json    # 机器可读输出
 
 `--yes` 只把文件下载到应用数据目录（`<app_home>/updates/`）并校验，**不会**替你安装。`novel-cli update` 显式请求 `shape="cli"`，只会下载 `novel-cli-<version>-<platform>.zip`，不会下载或运行桌面安装器；发布里没有匹配的 CLI 资产时直接停止（`--json --yes` 的 `error` 为 `no-cli-asset`），不会回退到 `NovelDownloader-setup-*.exe`。
 
-安装 CLI：关闭正在运行的 CLI，解压该 zip 并用其中的文件替换已安装的 CLI 目录（Windows 独立版通常为 `%LOCALAPPDATA%\Programs\novel-downloader\novel-cli\`）。桌面端的安装器/便携包由下面的自动更新流程处理。
+安装 CLI：关闭正在运行的 CLI，解压该 zip 并用其中的文件替换已安装的 CLI 目录（Windows 独立版通常为 `%LOCALAPPDATA%\Programs\novel-downloader\novel-cli\`）。桌面端的安装版/便携版由下面的自动更新流程处理。
 
 ## 桌面端自动更新
 

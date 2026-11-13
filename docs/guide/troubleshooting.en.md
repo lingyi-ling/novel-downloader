@@ -685,7 +685,7 @@ inside `raw_data_dir`.
 The backup contains only the chapter databases under `raw_data`; it does not include
 cookies/tokens, `settings.toml`, logs, or media files, so sign in again after a restore,
 and treat the plaintext backup as sensitive data. See the
-[full “back up → verify (SHA-256 / `PRAGMA integrity_check`) → restore” workflow](./cli-examples.md#9-storage-subcommand)
+[full “back up → verify (SHA-256 / `PRAGMA integrity_check`) → restore” workflow](./cli-examples.en.md#9-storage-subcommand)
 in the CLI usage examples.
 
 ---
