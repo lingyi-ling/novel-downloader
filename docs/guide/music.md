@@ -6,6 +6,10 @@
 
 > **平台数量不是固定值**: 注册表在导入时按已安装的可选依赖求值, 缺依赖的平台不会出现在列表里。请以 `novel-cli music platforms` 或 `GET /api/v1/music/platforms` 的实际输出为准。
 
+桌面端音乐页把平台提示、聚合搜索、歌单导出和平台健康检查放在同一页：
+
+![桌面端音乐页](../assets/images/desktop_music.png)
+
 ---
 
 ### 安装与依赖

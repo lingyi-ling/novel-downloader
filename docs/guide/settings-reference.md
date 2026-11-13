@@ -1,5 +1,9 @@
 ## `settings.toml` 配置说明
 
+桌面端的「设置」页覆盖这里的常用项（输出目录、代理、自动更新、主题与语言），保存后写入 `settings.toml`：
+
+![桌面端设置页](../assets/images/desktop_settings.png)
+
 ### general 配置
 
 全局运行时设置, 面向下载 / 并发 / 速率限制 / 目录与存储的通用开关

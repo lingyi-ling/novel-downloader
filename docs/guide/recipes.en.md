@@ -212,9 +212,13 @@ schtasks /Delete /TN "NovelFollowCheck" /F
 
 When a scheduled task is too much setup, use the desktop client (`novel-desktop`) to check for updates by hand. The follow list is shared with `novel-cli follow` through the same `watchlist.json`, so entries added on either side show up in both.
 
+![Desktop search page: select a result to follow or download it from the details column](../assets/images/desktop_search.png)
+
 1. Start `novel-desktop`, select a book on the "Search" tab and press "Follow"; or press "Add" on the "Follow" tab and enter the site and book ID by hand (adding a title is recommended so the update check can search for the book).
 2. Press "Check updates" on the "Follow" tab; the desktop client searches each book for its latest chapter and refreshes the list.
 3. When new chapters are found, select the entries and press "Download selected" to queue them; with nothing selected, every followed book is queued. Progress and exported files show up on the "Download" and "History" tabs.
+
+![Desktop Download tab: running, queued and finished tasks in separate sections](../assets/images/desktop_tasks.png)
 
 > The "Music" tab also offers a "Check platforms" health check that probes every music platform at once.
 
