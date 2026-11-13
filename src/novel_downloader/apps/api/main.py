@@ -17,6 +17,14 @@ clients; ``/api/v1/health`` stays exempt for uptime monitors. A fixed
 concurrency cap (100 connections) bounds simultaneous connections. ``/docs``,
 ``/redoc`` and ``/openapi.json`` are disabled automatically on a non-local
 bind, so the full route schema is not published to the network.
+
+The rate limiter keeps its counters in process memory, and this entry point
+always runs a **single** uvicorn process: the application object is passed to
+``uvicorn.run``, which refuses ``--workers > 1``. ``--rate-limit`` is therefore
+the effective global limit. A hand-rolled
+``uvicorn novel_downloader.apps.api.app:fastapi_app --workers N`` deployment
+gives every worker its own budget (up to ``N × 120`` per client), so the limit
+must be divided by the worker count there; see ``docs/guide/api.md``.
 """
 
 from __future__ import annotations
@@ -158,6 +166,9 @@ def api_main(argv: Sequence[str] | None = None) -> None:
         rate_limit_window=args.rate_limit_window,
         expose_docs=expose_docs,
     )
+    # A single process is intentional: the rate-limit counters (and the task
+    # and music-job registries) are in-memory, and passing the application
+    # object means uvicorn rejects ``--workers > 1`` anyway.
     uvicorn.run(
         application,
         host=args.host,
