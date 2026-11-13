@@ -672,6 +672,101 @@ def test_app_html_detail_is_reachable_below_1180px() -> None:
     assert "@media (prefers-reduced-motion: reduce)" in APP_HTML
 
 
+def _theme_tokens(selector: str) -> dict[str, str]:
+    """Parse the custom properties of one ``selector { ... }`` block."""
+    start = APP_HTML.index(selector)
+    body_start = APP_HTML.index("{", start)
+    body = APP_HTML[body_start + 1 : APP_HTML.index("}", body_start)]
+    return {
+        match.group(1): match.group(2).strip()
+        for match in re.finditer(r"(--[\w-]+)\s*:\s*([^;]+);", body)
+    }
+
+
+def _css_color(value: str) -> tuple[float, float, float, float]:
+    """Parse ``#rrggbb`` or ``rgba(r, g, b, a)`` into 0–255 channels + alpha."""
+    text = value.strip()
+    if text.startswith("#"):
+        digits = text[1:]
+        return (
+            int(digits[0:2], 16),
+            int(digits[2:4], 16),
+            int(digits[4:6], 16),
+            1.0,
+        )
+    match = re.match(r"rgba?\(([^)]+)\)", text)
+    assert match, text
+    channels = match.group(1).replace("/", " ").replace(",", " ").split()
+    parts = [float(value) for value in channels]
+    return (parts[0], parts[1], parts[2], parts[3] if len(parts) > 3 else 1.0)
+
+
+def _composite(
+    fg: tuple[float, float, float, float],
+    bg: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    return (
+        fg[0] * fg[3] + bg[0] * (1 - fg[3]),
+        fg[1] * fg[3] + bg[1] * (1 - fg[3]),
+        fg[2] * fg[3] + bg[2] * (1 - fg[3]),
+        1.0,
+    )
+
+
+def _relative_luminance(color: tuple[float, float, float, float]) -> float:
+    def channel(value: float) -> float:
+        value /= 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    return (
+        0.2126 * channel(color[0])
+        + 0.7152 * channel(color[1])
+        + 0.0722 * channel(color[2])
+    )
+
+
+def _contrast_ratio(
+    fg: tuple[float, float, float, float],
+    bg: tuple[float, float, float, float],
+) -> float:
+    light, dark = _relative_luminance(fg), _relative_luminance(bg)
+    return (max(light, dark) + 0.05) / (min(light, dark) + 0.05)
+
+
+def test_app_html_status_tokens_meet_wcag_contrast() -> None:
+    """Status text is 10.5–13 px, so every tone needs 4.5:1 against its tint.
+
+    The tint is alpha-composited over the card colour instead of being compared
+    with white: ``.pill.completed`` used to measure 3.3:1 this way.
+    """
+    pairs = [
+        ("accent", "accent-soft"),
+        ("green", "green-bg"),
+        ("red", "red-bg"),
+        ("blue", "blue-bg"),
+        ("purple", "purple-bg"),
+        ("yellow", "yellow-bg"),
+        ("gray", "gray-bg"),
+    ]
+    for theme, selector in (
+        ("light", ":root {"),
+        ("dark", ':root[data-theme="dark"] {'),
+    ):
+        tokens = _theme_tokens(selector)
+        card = _css_color(tokens["--card"])
+        for fg_name, bg_name in pairs:
+            background = _composite(_css_color(tokens[f"--{bg_name}"]), card)
+            ratio = _contrast_ratio(_css_color(tokens[f"--{fg_name}"]), background)
+            assert ratio >= 4.5, f"{theme} --{fg_name} is {ratio:.2f}:1"
+
+
+def test_app_html_narrow_search_row_can_shrink() -> None:
+    """A long platform <select> must not push the search button out of the
+    content column at narrow widths (measured at 760 px in headless Chromium)."""
+    assert ".search-row select.picker { min-width: 0; }" in APP_HTML
+    assert ".search-row .field { flex: 1; min-width: 0; }" in APP_HTML
+
+
 def test_app_html_mergetoggle_is_registered_as_i18n_key() -> None:
     """The merge toggle label goes through the catalog like every other label."""
     label = next(
