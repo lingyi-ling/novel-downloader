@@ -23,7 +23,7 @@ import re
 import unicodedata
 from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
@@ -38,6 +38,8 @@ from novel_downloader.plugins.ranking import (
     filter_by_relevance,
     match_tier_of,
     normalize_text,
+    parse_update_date,
+    parse_word_count,
     rank_score,
     sort_results,
 )
@@ -114,6 +116,11 @@ _DNS_CACHE_SECONDS = 300
 #: score around 0.7 and survive.  See
 #: :func:`~novel_downloader.plugins.ranking.filter_by_relevance`.
 DEFAULT_MIN_RELEVANCE = 0.45
+
+#: Upper bound accepted for a word-count filter.  Mirrors the REST schema's
+#: ``MAX_SEARCH_WORDS``; real books are far below it, so a larger value is
+#: either a unit mix-up or an attempt to describe "no limit" explicitly.
+MAX_WORD_FILTER = 1_000_000_000
 
 #: Schemes a ``book_url``/``cover_url`` may use.  Anything else --
 #: ``javascript:``, ``file:``, ``data:``, ``vbscript:`` or a
@@ -293,6 +300,9 @@ def _build_cache_key(
     timeout: float,
     *,
     classes: Sequence[type[BaseSearcher]],
+    min_words: int | None = None,
+    max_words: int | None = None,
+    updated_after: date | None = None,
 ) -> CacheKey:
     """
     Build the cache key shared by :func:`search` and :func:`search_stream`.
@@ -300,7 +310,9 @@ def _build_cache_key(
     Explicit selections keep their historical identity (site set + query
     parameters).  An aggregate selection additionally carries the current
     configuration fingerprint, so a registry/browser-settings change does not
-    keep serving a snapshot gathered from a different set of sites.
+    keep serving a snapshot gathered from a different set of sites.  The
+    optional local filters are part of the identity too: a filtered query is
+    a different request even when the raw site snapshot is the same.
     """
     fingerprint = None
     if sites is None:
@@ -312,6 +324,9 @@ def _build_cache_key(
         nsfw,
         timeout,
         config_fingerprint=fingerprint,
+        min_words=min_words,
+        max_words=max_words,
+        updated_after=updated_after,
     )
 
 
@@ -1050,6 +1065,85 @@ def _annotate_ranked(
     return annotated
 
 
+#: The only accepted spelling of an ``updated_after`` filter.  A date object
+#: (from the REST schema or the CLI) is already unambiguous; a string must be
+#: ``YYYY-MM-DD`` so ``2024/01/01`` and ``20240101`` are rejected by callers
+#: instead of being interpreted differently by different platforms.
+_FILTER_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _coerce_updated_after(value: object) -> date | None:
+    """
+    Normalize an ``updated_after`` filter to a :class:`datetime.date`.
+
+    ``None`` means "no date filter".  A ``date``/``datetime`` is accepted as
+    is (a datetime keeps its calendar date), and a string must be
+    ``YYYY-MM-DD``.  Anything else is a programming error and raises
+    :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not _FILTER_DATE_RE.fullmatch(text):
+        raise ValueError("updated_after must be a YYYY-MM-DD date")
+    try:
+        return date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError("updated_after must be a valid YYYY-MM-DD date") from exc
+
+
+def _filter_results(
+    results: Sequence[SearchResult],
+    *,
+    min_words: int | None = None,
+    max_words: int | None = None,
+    updated_after: date | None = None,
+    now: datetime | None = None,
+) -> list[SearchResult]:
+    """
+    Apply the optional local filters to already cleaned/ranked rows.
+
+    A row survives only when every active filter accepts it:
+
+    * ``min_words`` / ``max_words`` compare the parsed numeric word count
+      (:func:`~novel_downloader.plugins.ranking.parse_word_count`), so
+      ``"30万字"`` and ``"1,234"`` mean the same scale as the ranking uses;
+    * ``updated_after`` keeps rows whose parsed update date is on or after the
+      boundary.  It is a *lower bound*, so a row updated on that same day
+      passes.
+
+    Rows whose field is missing or unparseable are dropped whenever the
+    corresponding filter is active; with no filter the row is untouched.  The
+    input sequence is only read, and the returned list is fresh, so a cached
+    snapshot is never mutated.  ``now`` anchors relative dates such as
+    ``"3天前"``; callers pass one instant for the whole call.
+    """
+    if min_words is None and max_words is None and updated_after is None:
+        return list(results)
+
+    current = now or datetime.now()
+    kept: list[SearchResult] = []
+    for result in results:
+        if min_words is not None or max_words is not None:
+            words = parse_word_count(result.get("word_count"))
+            if words is None:
+                continue
+            if min_words is not None and words < min_words:
+                continue
+            if max_words is not None and words > max_words:
+                continue
+        if updated_after is not None:
+            updated = parse_update_date(result.get("update_date"), now=current)
+            if updated is None or updated.date() < updated_after:
+                continue
+        kept.append(result)
+    return kept
+
+
 def _finalize(
     results: list[SearchResult],
     *,
@@ -1059,6 +1153,9 @@ def _finalize(
     limit: int | None,
     group: bool,
     min_relevance: float | None = None,
+    min_words: int | None = None,
+    max_words: int | None = None,
+    updated_after: date | None = None,
 ) -> list[SearchResult]:
     """
     Rank ``results`` for this caller, then filter, group and/or slice.
@@ -1072,15 +1169,19 @@ def _finalize(
        primary;
     2. exact duplicate rows are folded (see :func:`_dedupe_exact`);
     3. the list is ranked (grouping and limiting both build on that order);
-    4. with ``group=True`` the rows are grouped, and the relevance floor is
+    4. the optional local filters (word count, update date) are applied to the
+       ranked rows, before grouping and before ``limit`` (see
+       :func:`_filter_results`).  Rows missing a field a filter reads are
+       dropped only while that filter is active;
+    5. with ``group=True`` the rows are grouped, and the relevance floor is
        applied to each book's primary row (a mirror site's alternate entry
        may look irrelevant on its own while the book is clearly relevant);
        without grouping the floor is applied to the rows themselves
        (``sort="quality"`` only, see
        :func:`~novel_downloader.plugins.ranking.filter_by_relevance`);
-    5. ``limit`` is applied last, so with ``group=True`` it counts books
+    6. ``limit`` is applied last, so with ``group=True`` it counts books
        rather than raw rows;
-    6. every surviving row is annotated with ``rank_score`` and
+    7. every surviving row is annotated with ``rank_score`` and
        ``match_tier`` (see :class:`RankedSearchResult`) on a *copy*: rows are
        never mutated, so the cached snapshot and any caller-owned input stay
        free of derived fields.
@@ -1105,6 +1206,16 @@ def _finalize(
     intent = detect_query_intent(keyword, work) if sort == "quality" else "either"
     sort_results(
         work, by=sort, order=order, keyword=keyword, intent=intent, now=current
+    )
+    # Local filters run on the ranked rows (order is preserved), before
+    # grouping and ``limit``: a filtered-out row must not consume a book slot
+    # nor a limit slot.
+    work = _filter_results(
+        work,
+        min_words=min_words,
+        max_words=max_words,
+        updated_after=updated_after,
+        now=current,
     )
 
     final: list[SearchResult]
@@ -1159,6 +1270,9 @@ async def search(
     on_event: Callable[[SearchEvent], None] | None = None,
     group: bool = False,
     min_relevance: float | None = DEFAULT_MIN_RELEVANCE,
+    min_words: int | None = None,
+    max_words: int | None = None,
+    updated_after: date | str | None = None,
 ) -> list[SearchResult]:
     """
     Perform a search for the given keyword across one or more registered sites,
@@ -1196,6 +1310,15 @@ async def search(
         returned unchanged.  Pass ``None`` to keep every row (e.g. when the
         caller sorts by word count or update date).  Ignored for other sort
         keys.
+    :param min_words: Optional lower bound on the parsed word count.  Rows
+        without a parseable word count are dropped while this is set.
+    :param max_words: Optional upper bound on the parsed word count.  Rows
+        without a parseable word count are dropped while this is set.
+    :param updated_after: Optional inclusive lower bound on ``update_date``,
+        given as a :class:`datetime.date` or a ``YYYY-MM-DD`` string.  Rows
+        without a parseable update date are dropped while this is set.
+        Filters run after cleaning/ranking and before grouping and ``limit``;
+        when none is set, rows carrying missing fields are kept unchanged.
     :return: A flat list of `SearchResult` objects.  Every row also carries
         the ranking telemetry described by :class:`RankedSearchResult`
         (``rank_score`` 0..1 and ``match_tier`` 0..4); the annotations are
@@ -1211,9 +1334,18 @@ async def search(
     # Resolve the participating classes before the cache lookup: an aggregate
     # key needs their identity (see ``_build_cache_key``), and a hot
     # configuration change must not keep serving an old snapshot.
+    after = _coerce_updated_after(updated_after)
     classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
     key = _build_cache_key(
-        keyword, sites, per_site_limit, nsfw, timeout, classes=classes
+        keyword,
+        sites,
+        per_site_limit,
+        nsfw,
+        timeout,
+        classes=classes,
+        min_words=min_words,
+        max_words=max_words,
+        updated_after=after,
     )
     cached = _CACHE.get(key)
     if cached is not None:
@@ -1228,6 +1360,9 @@ async def search(
             limit=limit,
             group=group,
             min_relevance=min_relevance,
+            min_words=min_words,
+            max_words=max_words,
+            updated_after=after,
         )
 
     if not classes:
@@ -1315,6 +1450,9 @@ async def search(
         limit=limit,
         group=group,
         min_relevance=min_relevance,
+        min_words=min_words,
+        max_words=max_words,
+        updated_after=after,
     )
 
 
@@ -1326,6 +1464,9 @@ async def search_stream(
     nsfw: bool = False,
     *,
     on_event: Callable[[SearchEvent], None] | None = None,
+    min_words: int | None = None,
+    max_words: int | None = None,
+    updated_after: date | str | None = None,
 ) -> AsyncGenerator[list[SearchResult]]:
     """
     Stream search results from registered sites as soon as each site finishes.
@@ -1345,7 +1486,10 @@ async def search_stream(
     ``per_site_limit`` keeps its meaning (a chunk can only shrink, never grow
     past the site's own limit).  Ranking and relevance filtering stay out of
     the stream: the chunks remain the sites' raw ordering, minus unusable
-    rows.  The ranking telemetry :func:`search` attaches to final rows
+    rows.  The optional word-count/update-date filters *do* apply (a chunk is
+    then this site's rows that pass them), because they only narrow the same
+    rows rather than reorder them.  The ranking telemetry :func:`search`
+    attaches to final rows
     (``rank_score`` / ``match_tier``, see :class:`RankedSearchResult`) is
     deliberately absent too: a chunk is a progressive preview, not a ranked
     final result.
@@ -1362,6 +1506,15 @@ async def search_stream(
     :param timeout: Timeout per-site (seconds).
     :param nsfw: Whether to include NSFW searchers.
     :param on_event: Optional observer for per-site search states.
+    :param min_words: Optional lower bound on the parsed word count.  Rows
+        without a parseable word count are dropped while this is set.
+    :param max_words: Optional upper bound on the parsed word count.  Rows
+        without a parseable word count are dropped while this is set.
+    :param updated_after: Optional inclusive lower bound on ``update_date``,
+        given as a :class:`datetime.date` or a ``YYYY-MM-DD`` string.  Rows
+        without a parseable update date are dropped while this is set.
+        Filters are applied to each cleaned chunk (and to cache hits), so a
+        warmed stream yields exactly the same rows as a fresh one.
     :yield: Lists of `SearchResult` objects from each completed site.
     """
     if sites is not None and not sites:
@@ -1370,19 +1523,37 @@ async def search_stream(
 
     # Same ordering as ``search``: resolve classes first so an aggregate key
     # can carry the configuration fingerprint, then consult the shared cache.
+    after = _coerce_updated_after(updated_after)
+    # One instant for the whole stream, so relative dates ("3天前") in every
+    # chunk are evaluated against the same clock.
+    current = datetime.now()
     classes = registrar.get_searcher_classes(sites, load_all_if_none=True)
     key = _build_cache_key(
-        keyword, sites, per_site_limit, nsfw, timeout, classes=classes
+        keyword,
+        sites,
+        per_site_limit,
+        nsfw,
+        timeout,
+        classes=classes,
+        min_words=min_words,
+        max_words=max_words,
+        updated_after=after,
     )
     cached = _CACHE.get(key)
     if cached is not None:
         # Keep the per-site chunk contract on a cache hit: yielding the whole
         # snapshot as one batch would mix every site into a single chunk.  The
-        # cache holds the raw payloads, so clean each chunk exactly as the
-        # fresh path does -- a warmed stream must not leak rows the fresh run
-        # would have dropped.
+        # cache holds the raw payloads, so clean (and filter) each chunk
+        # exactly as the fresh path does -- a warmed stream must not leak rows
+        # the fresh run would have dropped.
         for chunk in _chunks_by_site(cached):
-            cleaned = _sanitize_chunk(chunk)
+            cleaned = _filter_results(
+                _sanitize_chunk(chunk),
+                min_words=min_words,
+                max_words=max_words,
+                updated_after=after,
+                now=current,
+            )
             if cleaned:
                 yield cleaned
         return
@@ -1460,7 +1631,13 @@ async def search_stream(
                         # cleaned.  A site whose every row is unusable yields
                         # no chunk at all, matching the fresh-run contract.
                         accumulated.extend(payload)
-                        chunk = _sanitize_chunk(payload)
+                        chunk = _filter_results(
+                            _sanitize_chunk(payload),
+                            min_words=min_words,
+                            max_words=max_words,
+                            updated_after=after,
+                            now=current,
+                        )
                         if chunk:
                             emitted = True
                             yield chunk

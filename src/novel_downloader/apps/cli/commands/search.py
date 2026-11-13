@@ -8,8 +8,10 @@ novel_downloader.apps.cli.commands.search
 from __future__ import annotations
 
 import json
+import re
 from argparse import ArgumentParser, BooleanOptionalAction, Namespace
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -31,6 +33,13 @@ from .base import EXIT_FAILURE, EXIT_USAGE, Command, expand_path, fail
 
 if TYPE_CHECKING:
     from novel_downloader.plugins.search import SearchEvent
+
+#: Upper bound shared with ``plugins.search.MAX_WORD_FILTER`` and the REST
+#: schema.  Kept local so the CLI does not import the API layer.
+_MAX_WORD_FILTER = 1_000_000_000
+
+#: The only accepted spelling of ``--updated-after``.
+_FILTER_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 class SearchCmd(Command):
@@ -102,6 +111,35 @@ class SearchCmd(Command):
             help=t("Result ordering (default: quality)."),
         )
         parser.add_argument(
+            "--min-words",
+            type=int,
+            default=None,
+            metavar="N",
+            help=t(
+                "Minimum word count (inclusive); results without a word "
+                "count are dropped when set."
+            ),
+        )
+        parser.add_argument(
+            "--max-words",
+            type=int,
+            default=None,
+            metavar="N",
+            help=t(
+                "Maximum word count (inclusive); results without a word "
+                "count are dropped when set."
+            ),
+        )
+        parser.add_argument(
+            "--updated-after",
+            default=None,
+            metavar="YYYY-MM-DD",
+            help=t(
+                "Only keep results updated on or after this date; results "
+                "without an update date are dropped when set."
+            ),
+        )
+        parser.add_argument(
             "--group",
             action=BooleanOptionalAction,
             default=False,
@@ -129,6 +167,37 @@ class SearchCmd(Command):
         keyword = keyword.strip()
         if not keyword:
             fail(t("No keyword entered."), EXIT_USAGE)
+
+        min_words: int | None = args.min_words
+        max_words: int | None = args.max_words
+        for value in (min_words, max_words):
+            if value is not None and not 0 <= value <= _MAX_WORD_FILTER:
+                fail(
+                    t("--min-words/--max-words must be between 0 and {max}.").format(
+                        max=_MAX_WORD_FILTER
+                    ),
+                    EXIT_USAGE,
+                )
+
+        updated_after: date | None = None
+        if args.updated_after is not None:
+            raw_date = str(args.updated_after).strip()
+            if not _FILTER_DATE_RE.fullmatch(raw_date):
+                fail(
+                    t(
+                        "Invalid --updated-after date: {value} (expected YYYY-MM-DD)."
+                    ).format(value=raw_date),
+                    EXIT_USAGE,
+                )
+            try:
+                updated_after = date.fromisoformat(raw_date)
+            except ValueError:
+                fail(
+                    t(
+                        "Invalid --updated-after date: {value} (expected YYYY-MM-DD)."
+                    ).format(value=raw_date),
+                    EXIT_USAGE,
+                )
 
         sites: Sequence[str] | None = args.site or None
         formats: list[str] | None = args.format
@@ -234,6 +303,9 @@ class SearchCmd(Command):
                     sort=result_sort,
                     on_event=_on_event,
                     group=group_results_flag,
+                    min_words=min_words,
+                    max_words=max_words,
+                    updated_after=updated_after,
                 )
                 _print_search_summary()
                 if not results and not _every_site_failed():
@@ -264,6 +336,9 @@ class SearchCmd(Command):
                     sort=result_sort,
                     on_event=_on_event,
                     group=group_results_flag,
+                    min_words=min_words,
+                    max_words=max_words,
+                    updated_after=updated_after,
                 )
             _print_search_summary()
 

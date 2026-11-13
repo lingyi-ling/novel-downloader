@@ -13,6 +13,7 @@ extra translation layer.
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -89,6 +90,12 @@ MAX_SEARCH_LIMIT = 500
 #: wall-clock budget defaults to 120 s, so a longer per-site wait can never be
 #: honoured and would only forward a meaningless value to aiohttp.
 MAX_SEARCH_TIMEOUT = 120.0
+
+#: Upper bound for the optional ``min_words``/``max_words`` search filters.
+#: Real books are far below it, so a larger value is either a unit mix-up or
+#: an attempt to spell "no limit" explicitly; it is rejected with ``422``
+#: rather than clamped silently.
+MAX_SEARCH_WORDS = 1_000_000_000
 
 #: Upper bound for the music paging offset. Providers translate it into a page
 #: number; an absurd offset would ask them for an impossible page.
@@ -429,6 +436,14 @@ class SearchRequest(BaseModel):
     #: it (best first).  Off by default so the response shape stays the flat
     #: one existing clients (Android) expect.
     group: bool = False
+    #: Optional local filters applied to the ranked rows before grouping and
+    #: ``limit``.  A row whose field cannot be parsed is dropped only while
+    #: the corresponding filter is set; omitting all three keeps every row.
+    min_words: int | None = Field(default=None, ge=0, le=MAX_SEARCH_WORDS)
+    max_words: int | None = Field(default=None, ge=0, le=MAX_SEARCH_WORDS)
+    #: Inclusive lower bound on ``update_date`` (``YYYY-MM-DD``); a malformed
+    #: date is a ``422``.
+    updated_after: date | None = None
 
     @field_validator("sites")
     @classmethod

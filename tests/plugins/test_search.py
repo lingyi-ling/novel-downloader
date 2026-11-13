@@ -4,6 +4,7 @@
 import asyncio
 import unicodedata
 from collections.abc import Callable, Iterator, Sequence
+from datetime import date
 from typing import Any, cast
 
 import pytest
@@ -2987,3 +2988,274 @@ async def test_search_output_cleans_urls_and_text_like_the_stream(
     for chunk in chunks:
         for row in chunk:
             _assert_clean_output_row(row)
+
+
+# --------------------------------------------------------------------------- #
+# optional local filters: word count and update date
+# --------------------------------------------------------------------------- #
+
+
+def _dated_row(
+    book_id: str,
+    *,
+    site: str = "alpha",
+    word_count: str = "",
+    update_date: str = "",
+    title: str = "三体",
+    priority: int = 100,
+) -> SearchResult:
+    """A clean row carrying the fields the local filters read."""
+    return {
+        **_stub_result(site, book_id),
+        "title": title,
+        "author": "刘慈欣",
+        "word_count": word_count,
+        "update_date": update_date,
+        "priority": priority,
+    }
+
+
+def test_finalize_min_words_drops_short_and_unknown_rows() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    rows = [
+        _dated_row("short", word_count="5万字"),
+        _dated_row("long", word_count="300万字"),
+        _dated_row("unknown", word_count=""),
+    ]
+
+    kept = _finalize(
+        [dict(row) for row in rows],
+        keyword="三体",
+        sort="priority",
+        order=None,
+        limit=None,
+        group=False,
+        min_words=100_000,
+    )
+
+    assert [row["book_id"] for row in kept] == ["long"]
+
+
+def test_finalize_max_words_drops_long_and_unknown_rows() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    rows = [
+        _dated_row("short", word_count="5万字"),
+        _dated_row("long", word_count="300万字"),
+        _dated_row("unknown", word_count=""),
+    ]
+
+    kept = _finalize(
+        [dict(row) for row in rows],
+        keyword="三体",
+        sort="priority",
+        order=None,
+        limit=None,
+        group=False,
+        max_words=100_000,
+    )
+
+    assert [row["book_id"] for row in kept] == ["short"]
+
+
+def test_finalize_updated_after_is_inclusive_and_drops_unknown_dates() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    rows = [
+        _dated_row("old", update_date="2020-01-01"),
+        _dated_row("boundary", update_date="2024-01-01"),
+        _dated_row("new", update_date="2024-06-14 12:00"),
+        _dated_row("unknown", update_date=""),
+    ]
+
+    kept = _finalize(
+        [dict(row) for row in rows],
+        keyword="三体",
+        sort="priority",
+        order=None,
+        limit=None,
+        group=False,
+        updated_after=date(2024, 1, 1),
+    )
+
+    assert [row["book_id"] for row in kept] == ["boundary", "new"]
+
+
+def test_finalize_keeps_rows_with_unknown_fields_when_no_filter_is_set() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    rows = [
+        _dated_row("a", word_count="", update_date=""),
+        _dated_row("b", word_count="300万字", update_date="2024-01-01"),
+    ]
+
+    kept = _finalize(
+        [dict(row) for row in rows],
+        keyword="三体",
+        sort="priority",
+        order=None,
+        limit=None,
+        group=False,
+    )
+
+    assert {row["book_id"] for row in kept} == {"a", "b"}
+
+
+def test_finalize_applies_the_filter_before_limit() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    rows = [
+        _dated_row("longest", word_count="300万字"),
+        _dated_row("runner-up", word_count="5万字"),
+    ]
+
+    kept = _finalize(
+        [dict(row) for row in rows],
+        keyword="三体",
+        sort="words",
+        order="desc",
+        limit=1,
+        group=False,
+        max_words=100_000,
+    )
+
+    # The top row by word count is filtered out, so ``limit`` counts the
+    # surviving rows rather than deleting the only matching one.
+    assert [row["book_id"] for row in kept] == ["runner-up"]
+
+
+def test_finalize_filters_rows_before_grouping() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    rows = [
+        _dated_row("alpha-1", site="alpha", word_count=""),
+        _dated_row("beta-1", site="beta", word_count="300万字"),
+    ]
+
+    merged = _finalize(
+        [dict(row) for row in rows],
+        keyword="三体",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=True,
+        min_words=100_000,
+    )
+
+    # The row with unknown word count is dropped before grouping, so the book
+    # survives through the source that does carry the field.
+    assert len(merged) == 1
+    assert merged[0]["site"] == "beta"
+    assert merged[0]["sources"] == ["beta"]
+
+
+def test_finalize_local_filters_preserve_ranking_telemetry() -> None:
+    from novel_downloader.plugins.search import _finalize
+
+    rows = [
+        _dated_row("short", word_count="5万字"),
+        _dated_row("long", word_count="300万字"),
+    ]
+
+    unfiltered = _finalize(
+        [dict(row) for row in rows],
+        keyword="三体",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=False,
+    )
+    filtered = _finalize(
+        [dict(row) for row in rows],
+        keyword="三体",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=False,
+        min_words=100_000,
+    )
+
+    before = next(row for row in unfiltered if row["book_id"] == "long")
+    after = next(row for row in filtered if row["book_id"] == "long")
+    assert after["match_tier"] == before["match_tier"]
+    assert after["rank_score"] == before["rank_score"]
+
+
+def test_build_key_includes_local_filters() -> None:
+    from novel_downloader.plugins.search_cache import build_key
+
+    base = build_key("k", None)
+    assert build_key("k", None, min_words=1) != base
+    assert build_key("k", None, max_words=100) != base
+    assert build_key("k", None, updated_after="2024-01-01") != base
+    # The same date is one identity regardless of the accepted spelling.
+    assert build_key("k", None, updated_after="2024-01-01") == build_key(
+        "k", None, updated_after=date(2024, 1, 1)
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_filters_separate_cache_entries(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_RecordingSearcher])
+    )
+
+    # The row has no word count, so both calls return no rows, but each filter
+    # still owns its own snapshot entry (the raw payload is cached before the
+    # filter runs).
+    await search("keyword", min_words=0)
+    await search("keyword", min_words=1)
+    assert _RecordingSearcher.calls == 2
+
+    # Repeating one filter is served from that filter's cache entry.
+    await search("keyword", min_words=1)
+    assert _RecordingSearcher.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_search_applies_local_filters_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MultiResultSearcher])
+    )
+
+    words = await search("keyword", min_words=1_000_000)
+    assert [row["book_id"] for row in words] == ["strong"]
+
+    capped = await search("keyword", max_words=100_000)
+    assert [row["book_id"] for row in capped] == ["weak"]
+
+    dated = await search("keyword", updated_after=date(2021, 1, 1))
+    assert [row["book_id"] for row in dated] == ["strong"]
+
+    unfiltered = await search("keyword")
+    assert {row["book_id"] for row in unfiltered} == {"weak", "strong"}
+
+
+@pytest.mark.asyncio
+async def test_stream_applies_local_filters_and_matches_a_cache_hit(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MultiResultSearcher])
+    )
+
+    fresh = [
+        chunk
+        async for chunk in search_stream(
+            "keyword", sites=["multi"], min_words=1_000_000
+        )
+    ]
+    cached = [
+        chunk
+        async for chunk in search_stream(
+            "keyword", sites=["multi"], min_words=1_000_000
+        )
+    ]
+
+    assert [[row["book_id"] for row in chunk] for chunk in fresh] == [["strong"]]
+    assert cached == fresh
