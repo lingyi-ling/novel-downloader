@@ -12,7 +12,10 @@ therefore treats the file as a shared resource:
 * the schema is versioned with ``PRAGMA user_version`` and migrated in place,
   inside a write transaction, only adding columns (never dropping data);
 * ``PRAGMA integrity_check`` guards ``connect()`` -- a damaged file is copied
-  aside and reported, never silently replaced with an empty database;
+  aside and reported, never silently replaced with an empty database.  A WAL
+  sidecar is checksummed before SQLite opens the file, because a damaged WAL
+  would otherwise be discarded silently (and its committed frames destroyed)
+  while the main file still passes ``integrity_check``;
 * write transactions use ``BEGIN IMMEDIATE`` so two connections queue on the
   write lock instead of deadlocking on commit, and ``WAL`` +
   ``busy_timeout`` keep readers and writers out of each other's way;
@@ -30,6 +33,7 @@ __all__ = [
     "ChapterStorageError",
     "ChapterStorageSchemaError",
     "inspect_chapter_database",
+    "inspect_wal_damage",
 ]
 
 import contextlib
@@ -42,7 +46,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Self
+from typing import Any, BinaryIO, Final, Self
 
 from novel_downloader.schemas import ChapterDict
 
@@ -87,6 +91,13 @@ ON CONFLICT(id) DO UPDATE SET
     extra=excluded.extra
 """
 
+#: Plain insert used for legacy tables whose ``id`` has no unique constraint,
+#: where SQLite rejects the ``ON CONFLICT(id)`` target.
+_INSERT_SQL = """
+INSERT INTO chapters (id, title, content, need_refetch, extra)
+VALUES (?, ?, ?, ?, ?)
+"""
+
 #: Fragments SQLite uses when it cannot read the file as a database at all.
 _CORRUPTION_MARKERS: Final[tuple[str, ...]] = (
     "not a database",
@@ -94,6 +105,16 @@ _CORRUPTION_MARKERS: Final[tuple[str, ...]] = (
     "corrupt",
     "encrypted",
 )
+
+#: The two WAL header magic values (little- and big-endian checksums).
+_WAL_MAGIC: Final[tuple[int, ...]] = (0x377F0682, 0x377F0683)
+
+#: Frames inspected after a bad checksum to tell mid-file damage from a torn
+#: tail (which is normal after a crash and must not be reported as corruption).
+_WAL_LOOKAHEAD: Final[int] = 8
+
+#: SQLite's error when ``ON CONFLICT(id)`` cannot match a unique constraint.
+_NO_CONFLICT_TARGET: Final[str] = "on conflict clause does not match"
 
 
 class ChapterStorageError(RuntimeError):
@@ -198,6 +219,34 @@ def inspect_chapter_database(
     )
 
 
+def inspect_wal_damage(db_path: str | Path) -> str | None:
+    """
+    Report mid-file damage inside a database's ``-wal`` sidecar.
+
+    Read this *before* opening the database: SQLite silently ignores a WAL
+    whose checksum chain breaks and rewrites it on the first write, which
+    destroys every uncheckpointed commit.  A torn tail from a crash is not
+    damage (SQLite discards it safely), so only a bad frame followed by an
+    intact one is reported.  Backup/restore callers use this to refuse a
+    source that would otherwise be copied without its committed rows.
+
+    :param db_path: Path of the main database file.
+    :return: A short description of the damage, or ``None``.
+    """
+    path = Path(db_path)
+    if not path.is_file():
+        return None
+    wal_path = Path(f"{path}-wal")
+    try:
+        size = wal_path.stat().st_size
+        if size <= 32:
+            return None
+        with wal_path.open("rb") as handle:
+            return _damaged_wal_frame(handle, size)
+    except OSError:
+        return None
+
+
 class ChapterStorage:
     """
     Manage storage of chapters in an SQLite database.
@@ -214,6 +263,10 @@ class ChapterStorage:
         self._conn: sqlite3.Connection | None = None
         # Cache: chapter id -> need_refetch flag
         self._refetch_flags: dict[str, bool] = {}
+        # Whether ON CONFLICT(id) can be used on the migrated table.  Legacy
+        # files may lack a unique constraint on ``id`` (and then legally hold
+        # duplicate rows); writes fall back to DELETE + INSERT there.
+        self._upsert_uses_conflict = True
 
     def connect(self) -> None:
         """
@@ -222,6 +275,8 @@ class ChapterStorage:
         The file is checked with ``PRAGMA integrity_check`` before anything is
         written.  A damaged file raises :class:`ChapterStorageCorruptError`
         (after being copied aside) and is never turned into a fresh database.
+        A ``-wal`` sidecar is checked first, while its bytes can still be
+        preserved (see :func:`inspect_wal_damage`).
 
         :raises ChapterStorageCorruptError: if the file is not a valid,
             readable SQLite database.
@@ -232,6 +287,13 @@ class ChapterStorage:
         """
         if self._conn is not None:
             return
+
+        # Check the WAL before SQLite opens the file: an invalid WAL is
+        # discarded (and rewritten) by the first statement, so a later check
+        # would see a healthy main file and lose every uncheckpointed frame.
+        wal_problem = self._wal_corruption_problem()
+        if wal_problem is not None:
+            raise self._corrupt_error(wal_problem)
 
         conn = sqlite3.connect(
             str(self._db_path),
@@ -257,6 +319,7 @@ class ChapterStorage:
                 self._enable_wal(conn)
                 conn.execute("PRAGMA synchronous = NORMAL")
                 self._migrate(conn, version)
+                self._upsert_uses_conflict = self._supports_conflict_target(conn)
                 self._load_existing_keys(conn)
         except ChapterStorageSchemaError:
             self._safe_close(conn)
@@ -326,7 +389,14 @@ class ChapterStorage:
         """
         record = self._encode_chapter(data, need_refetch)
         with self._transaction(self.conn) as conn:
-            conn.execute(_UPSERT_SQL, record)
+            if self._upsert_uses_conflict:
+                conn.execute(_UPSERT_SQL, record)
+            else:
+                # Legacy table without a unique ``id``: replace by hand.  This
+                # also collapses duplicate rows for this id, which such a file
+                # may contain and which ON CONFLICT(id) cannot target.
+                conn.execute("DELETE FROM chapters WHERE id = ?", (record[0],))
+                conn.execute(_INSERT_SQL, record)
         self._refetch_flags[record[0]] = need_refetch
 
     def upsert_chapters(
@@ -350,7 +420,14 @@ class ChapterStorage:
         records = [self._encode_chapter(chapter, need_refetch) for chapter in data]
 
         with self._transaction(self.conn) as conn:
-            conn.executemany(_UPSERT_SQL, records)
+            if self._upsert_uses_conflict:
+                conn.executemany(_UPSERT_SQL, records)
+            else:
+                conn.executemany(
+                    "DELETE FROM chapters WHERE id = ?",
+                    [(record[0],) for record in records],
+                )
+                conn.executemany(_INSERT_SQL, records)
 
         # Publish the flags only after the rows are durably written.
         for record in records:
@@ -552,6 +629,39 @@ class ChapterStorage:
 
             if version != SCHEMA_VERSION:
                 tx.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    @staticmethod
+    def _supports_conflict_target(conn: sqlite3.Connection) -> bool:
+        """
+        Return True when ``ON CONFLICT(id)`` matches the table's constraints.
+
+        A legacy file can predate ``id`` being declared unique.  Its rows may
+        even contain duplicate ids, which a unique index could not accept.
+        SQLite compiles the upsert lazily, so ``EXPLAIN`` reports the missing
+        conflict target without touching any row.
+
+        :param conn: Connection with the already-migrated ``chapters`` table.
+        """
+        try:
+            conn.execute("EXPLAIN " + _UPSERT_SQL, (None,) * 5).fetchall()
+        except sqlite3.OperationalError as exc:
+            if _NO_CONFLICT_TARGET in str(exc).lower():
+                return False
+            raise
+        return True
+
+    def _wal_corruption_problem(self) -> str | None:
+        """
+        Detect on-disk damage inside this store's ``-wal`` sidecar.
+
+        The check must run before ``sqlite3.connect``: opening the file makes
+        SQLite discard an unreadable WAL (and later rewrite it), so a damaged
+        sidecar would vanish while the main file still passes
+        ``integrity_check``.  See :func:`inspect_wal_damage`.
+
+        :return: A short description of the damage, or ``None``.
+        """
+        return inspect_wal_damage(self._db_path)
 
     @staticmethod
     def _enable_wal(conn: sqlite3.Connection) -> None:
@@ -847,3 +957,97 @@ def _is_corruption_error(exc: sqlite3.DatabaseError) -> bool:
     """
     text = str(exc).lower()
     return any(marker in text for marker in _CORRUPTION_MARKERS)
+
+
+def _damaged_wal_frame(handle: BinaryIO, size: int) -> str | None:
+    """
+    Walk a WAL's checksum chain and report mid-file damage.
+
+    Only a frame that fails its checksum *and* is followed by a complete,
+    correctly-checksummed frame is reported: that pattern cannot be produced
+    by a crash mid-append (which leaves a torn tail) and means bytes inside
+    the file changed.  Everything else -- bad header, changed salt, torn
+    tail -- is a state SQLite recovers from safely.
+
+    :param handle: WAL file opened for binary reading.
+    :param size: File size read before opening (bounds the walk).
+    """
+    header = handle.read(32)
+    if len(header) < 32:
+        return None
+    magic = int.from_bytes(header[0:4], "big")
+    if magic not in _WAL_MAGIC:
+        return None
+    page_size = int.from_bytes(header[8:12], "big")
+    if page_size == 1:  # SQLite stores a 64 KiB page size as 1
+        page_size = 65536
+    if page_size < 512 or page_size > 65536 or page_size & (page_size - 1):
+        return None
+
+    big_endian = magic == _WAL_MAGIC[1]
+    previous = _wal_checksum(0, 0, header[:24], big_endian)
+    stored_header = (
+        int.from_bytes(header[24:28], "big"),
+        int.from_bytes(header[28:32], "big"),
+    )
+    if previous != stored_header:
+        return None
+
+    salt = header[16:24]
+    frame_size = 24 + page_size
+    offset = 32
+    while offset + frame_size <= size:
+        frame = handle.read(frame_size)
+        if len(frame) < frame_size or frame[8:16] != salt:
+            return None
+        checksum = _wal_checksum(*previous, frame[:8], big_endian)
+        checksum = _wal_checksum(*checksum, frame[24:], big_endian)
+        stored = (
+            int.from_bytes(frame[16:20], "big"),
+            int.from_bytes(frame[20:24], "big"),
+        )
+        if checksum != stored:
+            if _wal_frame_follows(handle, salt, stored, frame_size, big_endian):
+                return f"WAL frame at offset {offset} fails its checksum"
+            return None
+        previous = stored
+        offset += frame_size
+    return None
+
+
+def _wal_frame_follows(
+    handle: BinaryIO,
+    salt: bytes,
+    seed: tuple[int, int],
+    frame_size: int,
+    big_endian: bool,
+) -> bool:
+    """Return True when a complete, valid frame follows a damaged one."""
+    for _ in range(_WAL_LOOKAHEAD):
+        frame = handle.read(frame_size)
+        if len(frame) < frame_size or frame[8:16] != salt:
+            return False
+        checksum = _wal_checksum(*seed, frame[:8], big_endian)
+        checksum = _wal_checksum(*checksum, frame[24:], big_endian)
+        stored = (
+            int.from_bytes(frame[16:20], "big"),
+            int.from_bytes(frame[20:24], "big"),
+        )
+        if checksum == stored:
+            return True
+        seed = stored
+    return False
+
+
+def _wal_checksum(s0: int, s1: int, data: bytes, big_endian: bool) -> tuple[int, int]:
+    """Extend SQLite's WAL checksum over ``data`` (whole 8-byte words)."""
+    for index in range(0, len(data) - len(data) % 8, 8):
+        if big_endian:
+            x0 = int.from_bytes(data[index : index + 4], "big")
+            x1 = int.from_bytes(data[index + 4 : index + 8], "big")
+        else:
+            x0 = int.from_bytes(data[index : index + 4], "little")
+            x1 = int.from_bytes(data[index + 4 : index + 8], "little")
+        s0 = (s0 + x0 + s1) & 0xFFFFFFFF
+        s1 = (s1 + x1 + s0) & 0xFFFFFFFF
+    return s0, s1
