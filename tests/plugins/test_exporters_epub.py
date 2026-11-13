@@ -7,6 +7,7 @@ import base64
 import logging
 import os
 import posixpath
+import re
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
@@ -1011,6 +1012,130 @@ def test_export_chapter_epub_illegal_title_yields_valid_metadata(
     assert path is not None
     with zipfile.ZipFile(path) as zf:
         assert _opf_title(zf).strip()
+
+
+# ---------------------------------------------------------------------------
+# Accessibility metadata (EPUB 3 / schema.org)
+# ---------------------------------------------------------------------------
+
+_OPF_MODIFIED_RE = re.compile(rb'<meta property="dcterms:modified">[^<]*</meta>')
+
+
+def _opf_meta(zf: zipfile.ZipFile) -> dict[str, list[str]]:
+    """All ``<meta property=...>`` values in the OPF, keyed by property."""
+    root = ET.fromstring(zf.read("OEBPS/content.opf"))
+    values: dict[str, list[str]] = {}
+    for node in root.iter(f"{{{OPF_NS}}}meta"):
+        prop = node.get("property")
+        if prop:
+            values.setdefault(prop, []).append("".join(node.itertext()))
+    return values
+
+
+def _archive_snapshot(path: Path) -> dict[str, bytes]:
+    """Archive entries keyed by name, minus the run timestamp in the OPF."""
+    with zipfile.ZipFile(path) as zf:
+        snapshot = {name: zf.read(name) for name in zf.namelist()}
+    snapshot["OEBPS/content.opf"] = _OPF_MODIFIED_RE.sub(
+        b"", snapshot["OEBPS/content.opf"]
+    )
+    return snapshot
+
+
+def test_export_book_epub_has_accessibility_metadata(scenario: Scenario) -> None:
+    _stage_two_volume_book(scenario)
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+
+    with zipfile.ZipFile(path) as zf:
+        meta = _opf_meta(zf)
+        package = ET.fromstring(zf.read("OEBPS/content.opf"))
+
+    assert meta["schema:accessMode"] == ["textual"]
+    assert meta["schema:accessibilityFeature"] == ["structuralNavigation"]
+    assert meta["schema:accessibilityHazard"] == ["none"]
+    summary = meta["schema:accessibilitySummary"]
+    assert len(summary) == 1
+    assert summary[0].strip()
+    # Default book language is zh-Hans.
+    assert "无障碍" in summary[0]
+    # Prefixed property names need the vocabulary declaration.
+    assert "schema: http://schema.org/" in (package.get("prefix") or "")
+
+
+def test_export_book_epub_without_chapters_omits_structural_navigation(
+    scenario: Scenario,
+) -> None:
+    # A volume title page is not a navigable chapter: without any chapter
+    # document there is no table of contents to advertise.
+    scenario.write_book_info(make_book_info(volumes=[make_volume("空卷", [])]))
+    scenario.write_chapters([])
+
+    path = scenario.export("epub", ExporterConfig(append_timestamp=False))["epub"][0]
+    with zipfile.ZipFile(path) as zf:
+        meta = _opf_meta(zf)
+
+    assert "schema:accessibilityFeature" not in meta
+    assert meta["schema:accessMode"] == ["textual"]
+    assert meta["schema:accessibilityHazard"] == ["none"]
+
+
+def test_export_chapter_epub_has_accessibility_metadata(scenario: Scenario) -> None:
+    scenario.write_book_info(make_book_info())
+    scenario.write_chapters([make_chapter("1", "单章内容", title="第一章")])
+
+    path = scenario.export_chapter("1", "epub", ExporterConfig(append_timestamp=False))[
+        "epub"
+    ]
+    assert path is not None
+    with zipfile.ZipFile(path) as zf:
+        meta = _opf_meta(zf)
+
+    assert meta["schema:accessMode"] == ["textual"]
+    assert meta["schema:accessibilityFeature"] == ["structuralNavigation"]
+    assert meta["schema:accessibilityHazard"] == ["none"]
+
+
+def test_accessibility_summary_follows_book_language() -> None:
+    zh = export_epub_module._accessibility_summary("zh-Hans", has_toc=True)
+    en = export_epub_module._accessibility_summary("en", has_toc=True)
+    en_plain = export_epub_module._accessibility_summary("en", has_toc=False)
+
+    assert "无障碍" in zh
+    assert "structured navigation" in en
+    assert "structured navigation" not in en_plain
+    assert "hazards" in en_plain
+
+
+def test_opf_accessibility_meta_is_xml_escaped() -> None:
+    builder = EpubBuilder(title="T")
+    builder.opf.add_meta("schema:accessibilitySummary", 'A & <B> "C"')
+
+    raw = builder.opf.to_xml()
+    assert "&amp;" in raw
+    assert "&lt;B&gt;" in raw
+
+    root = ET.fromstring(raw)
+    values = [
+        "".join(node.itertext())
+        for node in root.iter(f"{{{OPF_NS}}}meta")
+        if node.get("property") == "schema:accessibilitySummary"
+    ]
+    assert values == ['A & <B> "C"']
+
+
+def test_export_book_epub_accessibility_metadata_is_stable(
+    scenario: Scenario,
+) -> None:
+    _stage_two_volume_book(scenario)
+    cfg = ExporterConfig(append_timestamp=False)
+
+    first = scenario.export("epub", cfg)["epub"][0]
+    before = _archive_snapshot(first)
+    second = scenario.export("epub", cfg)["epub"][0]
+
+    # Every entry must be byte-identical; only the OPF's dcterms:modified
+    # timestamp is allowed to differ between runs.
+    assert _archive_snapshot(second) == before
 
 
 # ---------------------------------------------------------------------------
