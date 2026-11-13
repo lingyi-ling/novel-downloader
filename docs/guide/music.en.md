@@ -6,6 +6,10 @@ This page describes the engine's behaviour and limits. For parameters see [CLI U
 
 > **The platform count is not fixed**: the registry is evaluated at import time against the optional dependencies that are actually installed, so a platform whose dependency is missing does not appear. Treat the output of `novel-cli music platforms` or `GET /api/v1/music/platforms` as authoritative.
 
+The desktop Music tab combines platform notes, aggregated search, playlist export and the platform health check on one page:
+
+![Desktop Music tab](../assets/images/desktop_music.png)
+
 ---
 
 ### Installation and dependencies

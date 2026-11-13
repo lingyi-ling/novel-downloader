@@ -1,5 +1,9 @@
 ## `settings.toml` Configuration Reference
 
+The desktop Settings tab edits the common options below (output folder, proxy, automatic updates, theme and language) and saves them to `settings.toml`:
+
+![Desktop Settings tab](../assets/images/desktop_settings.png)
+
 ### general Settings
 
 Global runtime settings for downloads / concurrency / rate limits / directories and storage.

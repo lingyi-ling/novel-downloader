@@ -961,12 +961,46 @@ app = create_app(timeouts={"search": 30.0, "music_download": 600.0})
 The API enables a per-client-IP sliding-window rate limit by default: each IP
 may send at most `--rate-limit` (default `120`) requests within
 `--rate-limit-window` (default `60`) seconds; excess requests return `429` with
-a `Retry-After` header (seconds until a slot frees up). `--rate-limit 0` disables
-rate limiting entirely; `GET /api/v1/health` is exempt so availability
-monitoring keeps working. Counting happens before authentication, so brute-force
-token guessing is throttled too; rejected requests are not counted, and the
-window drains automatically once the client stops. Rate-limit state lives in
-process memory, so multiple workers count independently.
+a `Retry-After` header. The header is a **whole number of seconds, rounded up**:
+the remaining time until the oldest admitted request slides out of the window
+(minimum `1`, never more than the window length), so waiting for it always
+finds a free slot. `--rate-limit 0` disables rate limiting entirely;
+`GET /api/v1/health` is exempt so availability monitoring keeps working.
+Counting happens before authentication, so brute-force token guessing is
+throttled too; rejected requests are not counted, and the window drains
+automatically once the client stops.
+
+Rate-limit state lives only in **the current process's memory**; it is neither
+shared across processes nor persisted:
+
+- `novel-api` always runs a single uvicorn process (the application object is
+  handed to `uvicorn.run`, which refuses `--workers > 1`), so `--rate-limit`
+  is the effective global limit.
+- If you deploy manually with
+  `uvicorn novel_downloader.apps.api.app:fastapi_app --workers N`, every worker
+  counts independently: one client spread over several workers can reach up to
+  `N ×` the limit in aggregate (a single keep-alive connection stays with one
+  worker and remains bound by one budget). Divide the limit by the worker
+  count when you need a global cap — e.g. for 4 workers and a global
+  120 requests/minute, use your own module with `create_app(rate_limit=30)` as
+  the import target; the module-level `fastapi_app` always uses the default
+  120/60.
+- A **restart** starts with an empty table, so every client immediately
+  regains a full budget. Persisting counters would let a stale lockout survive
+  a restart and add a shared-storage failure mode for no benefit on a
+  localhost service, so it is deliberately not done.
+- The window uses `time.monotonic`, so system clock adjustments (NTP steps,
+  manual changes) can neither unlock a client nor extend a lockout.
+- The number of tracked IPs has a hard ceiling (default `10000`). At the cap,
+  stale entries are swept first and then the least recently active keys are
+  evicted. Eviction is fail-open per key (the evicted client starts a fresh
+  window), but only a request from a *new* key triggers it, so an
+  already-tracked client — including one currently being rejected — cannot
+  reset its own counter by hammering. Counting uses the TCP peer address and
+  does not trust `X-Forwarded-For`, so behind a reverse proxy all clients
+  share the proxy peer's single bucket; limit at the proxy if you need
+  per-client accounting, or let the API listen directly together with a
+  token.
 
 ## Error codes
 
