@@ -115,6 +115,46 @@ def _run(
     return code, out, err
 
 
+def test_local_plugin_searchers_are_enabled_before_search(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``search`` must honour ``[plugins] enable_local_plugins``.
+
+    Without the registry hook a site provided by a local plugin is simply not
+    registered: ``search --site <plugin> --json`` printed ``[]`` and exited 0
+    with "0 site(s) completed", which looks like "no results" rather than the
+    configuration being ignored.  ``download``/``export``/``batch`` already
+    performed this step.
+    """
+    monkeypatch.setattr(
+        search_module,
+        "load_or_init_config",
+        lambda *_a, **_k: {
+            "general": {},
+            "plugins": {
+                "enable_local_plugins": True,
+                "local_plugins_path": "/tmp/local-plugins",
+                "override_builtins": True,
+            },
+        },
+    )
+    enabled: list[tuple[str | None, bool]] = []
+    monkeypatch.setattr(
+        search_module.registrar,
+        "enable_local_plugins",
+        lambda path=None, override=False: enabled.append((path, override)),
+    )
+    _install_search(monkeypatch, [_row()])
+
+    code, out, _err = _run(_args(["--json", "三体"]), capsys)
+
+    assert code == 0
+    assert enabled == [("/tmp/local-plugins", True)]
+    assert json.loads(out)[0]["book_id"] == "beta-1"
+
+
 # ---------------------------------------------------------------------------
 # --json: single line, stable fields, pure stdout
 # ---------------------------------------------------------------------------

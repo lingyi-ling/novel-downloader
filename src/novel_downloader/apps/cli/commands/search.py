@@ -150,6 +150,16 @@ class SearchCmd(Command):
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)
         adapter = ConfigAdapter(config=config_data)
+        # A local plugin can provide searchers that do not exist in the
+        # built-in tree; download/export/batch already enable them.  Without
+        # this, ``search --site <local-plugin>`` searched nothing at all and
+        # reported a successful run with "0 site(s) completed".
+        plugins_cfg = adapter.get_plugins_config()
+        if plugins_cfg.get("enable_local_plugins"):
+            registrar.enable_local_plugins(
+                plugins_cfg.get("local_plugins_path"),
+                override=plugins_cfg.get("override_builtins", False),
+            )
         ui.setup_logging(
             log_dir=adapter.get_log_dir(),
             console_level=adapter.get_log_level(),
