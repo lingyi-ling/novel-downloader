@@ -1,3 +1,30 @@
+## v1.32.0 (2026-11-13)
+
+第四批并行改进，重点是搜索过滤、桌面冷启动、Android 下载目录、歌词与数据维护；Python **12312 passed / 45 skipped**，Android **434 tests**。
+
+### Feature
+
+- **搜索过滤**：CLI `--min-words/--max-words/--updated-after`、REST 同名参数；过滤先于分组与 limit，缓存 key 包含过滤条件
+- **Android SAF 下载目录**：`ACTION_OPEN_DOCUMENT_TREE` 选择并持久授权，失效自动回退系统 Downloads，文件名冲突去重
+- **歌词落盘**：音乐下载保存同名 `.lrc`（UTF-8/原子写/1 MiB 上限），已存在音频时补写缺失歌词
+- **`doctor --fix`**：创建缺失目录、清理陈旧 `.tmp/.part`，`--dry-run` 预览，严格路径校验
+- **备份保留**：`storage backup --keep N`，仅清理本工具命名的时间戳备份，按书/stage 保留
+- **EPUB 可访问性**：`schema:accessMode/accessibilityFeature/accessibilityHazard/accessibilitySummary`
+- **Secret 扫描**：新增 `scripts/scan_secrets.py` 与 CI 阻断 job，只报规则名与位置
+- **桌面冷启动**：300ms → 106ms（延迟 task_manager/aiohttp/updater，队列恢复后置）
+- **官网**：补充 v1.31/v1.32 用户价值、平台数字与双语测试；文档新增 4 张真实桌面截图
+
+### Fix
+
+- 搜索过滤与缓存/流式一致性；API 限流多 worker/重启/Retry-After 语义明确并补边界测试
+- Android SAF 授权丢失/Provider 异常回退；歌词获取失败不影响音频
+- `storage restore` 相对路径、旧库重复 id 迁移、损坏 WAL 检测（本批前置提交）
+
+### Test
+
+- Python **12312 passed / 45 skipped**；ruff/format/mypy 全绿
+- Android **434 unit tests**；SAF/通知/任务恢复覆盖
+
 ## v1.31.0 (2026-11-13)
 
 第三批并行加固，覆盖搜索/音乐/桌面/Android/API/CLI/发布工具与数据安全，共修复 100+ 个可复现问题；Python 门禁 **12096 passed / 42 skipped**，Android **425 tests / lint 0 error**。
