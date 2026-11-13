@@ -25,13 +25,25 @@ from collections.abc import Coroutine
 from concurrent.futures import Future
 from typing import Any, TypeVar
 
-from novel_downloader.apps.core.task_manager import manager
-
 __all__ = ["AsyncEngine"]
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def _task_manager() -> Any:
+    """
+    Import the shared task manager on first use.
+
+    ``task_manager`` pulls in ``aiohttp`` and the plugin registry, which cost
+    more than every other desktop import combined.  None of that is needed to
+    create the window, so the import lives here instead of at module scope and
+    the GUI can paint while the queue restore loads it.
+    """
+    from novel_downloader.apps.core import task_manager
+
+    return task_manager.manager
 
 
 class AsyncEngine:
@@ -108,7 +120,9 @@ class AsyncEngine:
 
         try:
             if not loop.is_closed():
-                asyncio.run_coroutine_threadsafe(manager.close(), loop).result(timeout)
+                asyncio.run_coroutine_threadsafe(_task_manager().close(), loop).result(
+                    timeout
+                )
         except Exception:  # noqa: BLE001 - best effort during shutdown
             logger.exception("Failed to close download tasks cleanly")
         finally:
@@ -127,6 +141,7 @@ class AsyncEngine:
         """Run ``manager.close()`` on a short-lived loop."""
         loop = asyncio.new_event_loop()
         try:
+            manager = _task_manager()
             loop.run_until_complete(asyncio.wait_for(manager.close(), timeout))
         except Exception:  # noqa: BLE001 - best effort during shutdown
             logger.exception("Failed to close download tasks cleanly")
