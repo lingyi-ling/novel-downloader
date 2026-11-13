@@ -17,10 +17,12 @@ Offline tests for the music download helpers:
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +31,7 @@ from novel_downloader.apps.music.downloader import (
     DownloadOptions,
     export_m3u,
     save_lyric,
+    track_lyrics,
 )
 from novel_downloader.apps.music.providers.base import ResolveResult, Track
 
@@ -222,6 +225,129 @@ def test_save_lyric_normalizes_interior_crlf_and_lone_cr(tmp_path: Path) -> None
     )
 
 
+def test_save_lyric_keeps_lrc_timeline_and_writes_utf8_without_bom(
+    tmp_path: Path,
+) -> None:
+    audio = tmp_path / "song.mp3"
+
+    written = save_lyric(
+        str(audio), "[00:12.34]第一行\n[01:02.03]第二行", "[00:12.34]first line"
+    )
+
+    raw = (tmp_path / "song.lrc").read_bytes()
+    assert written == [str(tmp_path / "song.lrc"), str(tmp_path / "song.zh.lrc")]
+    assert raw == "[00:12.34]第一行\n[01:02.03]第二行\n".encode()
+    assert not raw.startswith(b"\xef\xbb\xbf")  # no UTF-8 BOM
+    # The time tags are part of the text and must survive untouched.
+    assert raw.decode("utf-8").startswith("[00:12.34]第一行")
+
+
+def test_lyric_size_cap_is_one_mib() -> None:
+    assert downloader.MAX_LYRIC_BYTES == 1024 * 1024
+
+
+def test_save_lyric_rejects_oversized_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(downloader, "MAX_LYRIC_BYTES", 64)
+
+    with caplog.at_level(logging.WARNING, logger=downloader.__name__):
+        written = save_lyric(str(tmp_path / "song.mp3"), "x" * 200)
+
+    assert written == []
+    assert not (tmp_path / "song.lrc").exists()
+    assert "歌词保存失败" in caplog.text
+
+
+def test_save_lyric_skips_identical_content_and_overwrites_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audio = tmp_path / "song.mp3"
+    target = tmp_path / "song.lrc"
+
+    assert save_lyric(str(audio), "[00:01.00]same") == [str(target)]
+
+    real_replace = os.replace
+    calls: list[tuple[str, str]] = []
+
+    def recording_replace(src: str, dst: str) -> None:
+        calls.append((src, dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(downloader.os, "replace", recording_replace)
+
+    # Byte-identical content is skipped: no write, no mtime churn.
+    assert save_lyric(str(audio), "[00:01.00]same") == []
+    assert calls == []
+
+    # Different content replaces the old sidecar atomically.
+    assert save_lyric(str(audio), "[00:02.00]changed") == [str(target)]
+    assert [dst for _src, dst in calls] == [str(target)]
+    assert target.read_text(encoding="utf-8") == "[00:02.00]changed\n"
+
+
+def test_save_lyric_atomic_write_failure_keeps_old_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    audio = tmp_path / "song.mp3"
+    target = tmp_path / "song.lrc"
+    save_lyric(str(audio), "[00:01.00]old")
+
+    def broken_replace(src: str, dst: str) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(downloader.os, "replace", broken_replace)
+
+    with caplog.at_level(logging.WARNING, logger=downloader.__name__):
+        written = save_lyric(str(audio), "[00:02.00]new")
+
+    assert written == []
+    assert target.read_text(encoding="utf-8") == "[00:01.00]old\n"
+    # No half-written temp file is left behind.
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+    assert "歌词保存失败" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# track_lyrics: extracting lyrics already present on the Track
+# ---------------------------------------------------------------------------
+
+
+def test_track_lyrics_reads_track_lyric_field() -> None:
+    track = Track(lyric="[00:01.00]from track")
+
+    assert track_lyrics(track) == ("[00:01.00]from track", "")
+
+
+def test_track_lyrics_reads_lyrics_mapping_with_translation() -> None:
+    track = Track()
+    track.lyrics = {"lyric": "[00:01.00]A", "tlyric": "[00:01.00]甲"}
+
+    assert track_lyrics(track) == ("[00:01.00]A", "[00:01.00]甲")
+
+
+def test_track_lyrics_reads_extra_provider_object() -> None:
+    track = Track(extra={"info": SimpleNamespace(lyric="[00:02.00]from info")})
+
+    assert track_lyrics(track) == ("[00:02.00]from info", "")
+
+
+def test_track_lyrics_reads_nested_extra_mapping() -> None:
+    track = Track(extra={"raw": {"lrc": {"lyric": "[00:03.00]nested"}}})
+
+    assert track_lyrics(track) == ("[00:03.00]nested", "")
+
+
+def test_track_lyrics_ignores_missing_and_sentinel_values() -> None:
+    assert track_lyrics(Track()) == ("", "")
+    assert track_lyrics(Track(lyric="NULL")) == ("", "")
+    assert track_lyrics(Track(extra={"info": SimpleNamespace(lyric="  ")})) == ("", "")
+
+
 # ---------------------------------------------------------------------------
 # Tag / cover embedding
 # ---------------------------------------------------------------------------
@@ -390,6 +516,130 @@ def test_download_track_lyric_failure_does_not_fail_audio(
     assert not (tmp_path / "Song - Artist.lrc").exists()
 
 
+def test_download_track_falls_back_to_track_lyric(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(downloader, "_download_file", _fake_download)
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+
+    track = Track(
+        provider="fake",
+        id="5",
+        name="Song",
+        artists="Artist",
+        album="Album",
+        lyric="[00:03.00]already on the track",
+    )
+    opts = DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=True,
+        skip_existing=False,
+        retries=0,
+    )
+
+    result = downloader.download_track(_FakeProvider(("", "")), track, opts)
+
+    assert result.status == "ok"
+    assert (tmp_path / "Song - Artist.lrc").read_text(encoding="utf-8") == (
+        "[00:03.00]already on the track\n"
+    )
+
+
+def test_download_track_without_lyrics_creates_no_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(downloader, "_download_file", _fake_download)
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+
+    track = Track(provider="fake", id="6", name="Song", artists="Artist", album="Album")
+    opts = DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=True,
+        skip_existing=False,
+        retries=0,
+    )
+
+    result = downloader.download_track(_FakeProvider(("", "")), track, opts)
+
+    assert result.status == "ok"
+    assert list(tmp_path.glob("*.lrc")) == []
+
+
+def test_download_track_lyric_provider_failure_still_uses_track_lyric(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(downloader, "_download_file", _fake_download)
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+
+    class BrokenLyricProvider(_FakeProvider):
+        def lyric(self, track: Track) -> tuple[str, str]:
+            raise RuntimeError("lyric endpoint down")
+
+    track = Track(
+        provider="fake",
+        id="7",
+        name="Song",
+        artists="Artist",
+        album="Album",
+        lyric="[00:04.00]track fallback",
+    )
+    opts = DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=True,
+        skip_existing=False,
+        retries=0,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=downloader.__name__):
+        result = downloader.download_track(BrokenLyricProvider(), track, opts)
+
+    assert result.status == "ok"
+    assert (tmp_path / "Song - Artist.lrc").read_text(encoding="utf-8") == (
+        "[00:04.00]track fallback\n"
+    )
+    assert "歌词获取失败" in caplog.text
+
+
+def test_lyric_sidecar_shares_the_audio_stem_in_split_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(downloader, "_download_file", _fake_download)
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+
+    track = Track(provider="fake", id="8", name="歌名", artists="歌手", album="专辑")
+    opts = DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=True,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=True,
+        skip_existing=False,
+        retries=0,
+    )
+
+    result = downloader.download_track(_FakeProvider(), track, opts)
+
+    audio = Path(result.path)
+    assert audio.name == "歌名 - 歌手.mp3"
+    assert audio.parent == tmp_path / "歌手" / "专辑"
+    # Same stem as the audio, only the extension differs.
+    assert audio.with_suffix(".lrc").read_text(encoding="utf-8") == (
+        "[00:01.00]Original\n"
+    )
+    assert audio.with_suffix(".zh.lrc").is_file()
+
+
 def test_download_track_cover_request_failure_does_not_fail_audio(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -451,6 +701,131 @@ def test_download_track_skip_remembers_existing_path(
 
     assert result.status == "skip"
     assert track.path == str(existing)
+
+
+def _seed_existing_audio(tmp_path: Path, filename: str = "Song - Artist.mp3") -> Path:
+    """Create a tagged, >10 KiB MP3 that the ``skip_existing`` guard accepts."""
+    pytest.importorskip("mutagen")
+    existing = tmp_path / filename
+    existing.write_bytes(_mp3_bytes() * 10)
+    stem = filename.removesuffix(".mp3")
+    title, _, artist = stem.partition(" - ")
+    downloader._write_tags(
+        str(existing), Track(name=title, artists=artist or "Artist", album="Album")
+    )
+    return existing
+
+
+def _skip_opts(tmp_path: Path, *, save_lyric: bool = True) -> DownloadOptions:
+    return DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=save_lyric,
+        skip_existing=True,
+        retries=0,
+    )
+
+
+def test_skip_existing_backfills_missing_lyrics(tmp_path: Path) -> None:
+    existing = _seed_existing_audio(tmp_path)
+    audio_before = existing.read_bytes()
+    track = Track(provider="fake", id="9", name="Song", artists="Artist", album="Album")
+
+    result = downloader.download_track(_FakeProvider(), track, _skip_opts(tmp_path))
+
+    assert result.status == "skip"
+    assert result.bytes_ == len(audio_before)
+    # The audio itself is untouched: this is a lyric backfill, not a re-download.
+    assert existing.read_bytes() == audio_before
+    assert (tmp_path / "Song - Artist.lrc").read_text(encoding="utf-8") == (
+        "[00:01.00]Original\n"
+    )
+    assert (tmp_path / "Song - Artist.zh.lrc").read_text(encoding="utf-8") == (
+        "[00:01.00]译文\n"
+    )
+
+
+def test_skip_existing_does_not_refetch_existing_lyrics(
+    tmp_path: Path,
+) -> None:
+    _seed_existing_audio(tmp_path)
+    lrc = tmp_path / "Song - Artist.lrc"
+    lrc.write_text("[00:09.00]keep me\n", encoding="utf-8")
+
+    class CountingProvider(_FakeProvider):
+        calls = 0
+
+        def lyric(self, track: Track) -> tuple[str, str]:
+            CountingProvider.calls += 1
+            return super().lyric(track)
+
+    track = Track(
+        provider="fake", id="10", name="Song", artists="Artist", album="Album"
+    )
+
+    result = downloader.download_track(CountingProvider(), track, _skip_opts(tmp_path))
+
+    assert result.status == "skip"
+    assert CountingProvider.calls == 0
+    assert lrc.read_text(encoding="utf-8") == "[00:09.00]keep me\n"
+    assert not (tmp_path / "Song - Artist.zh.lrc").exists()
+
+
+def test_skip_existing_lyric_failure_still_skips_audio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    existing = _seed_existing_audio(tmp_path)
+
+    class BrokenLyricProvider(_FakeProvider):
+        def lyric(self, track: Track) -> tuple[str, str]:
+            raise RuntimeError("lyric endpoint down")
+
+    track = Track(
+        provider="fake", id="11", name="Song", artists="Artist", album="Album"
+    )
+
+    with caplog.at_level(logging.WARNING, logger=downloader.__name__):
+        result = downloader.download_track(
+            BrokenLyricProvider(), track, _skip_opts(tmp_path)
+        )
+
+    assert result.status == "skip"
+    assert result.path == str(existing)
+    assert not (tmp_path / "Song - Artist.lrc").exists()
+    assert "歌词获取失败" in caplog.text
+
+
+def test_skip_existing_lyrics_use_the_id_suffixed_audio_path(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("mutagen")
+    # Same stem but a different tagged title forces the "[id]" destination.
+    base = tmp_path / "Song - Artist.mp3"
+    base.write_bytes(_mp3_bytes())
+    downloader._write_tags(
+        str(base), Track(name="Another", artists="Artist", album="Album")
+    )
+    existing = tmp_path / "Song - Artist [11].mp3"
+    existing.write_bytes(_mp3_bytes() * 10)
+    downloader._write_tags(
+        str(existing), Track(name="Song", artists="Artist", album="Album")
+    )
+
+    track = Track(
+        provider="fake", id="11", name="Song", artists="Artist", album="Album"
+    )
+
+    result = downloader.download_track(_FakeProvider(), track, _skip_opts(tmp_path))
+
+    assert result.status == "skip"
+    assert result.path == str(existing)
+    # The lyric sidecar follows the actual audio path, keeping the same stem.
+    assert (tmp_path / "Song - Artist [11].lrc").is_file()
+    assert not (tmp_path / "Song - Artist.lrc").exists()
 
 
 # ---------------------------------------------------------------------------
