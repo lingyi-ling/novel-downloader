@@ -58,6 +58,50 @@ _MAX_IMAGE_BYTES = 16 * 1024 * 1024
 
 _UTF8_BOM = b"\xef\xbb\xbf"
 
+#: Short ``schema:accessibilitySummary`` values, chosen by book language and
+#: by whether the archive actually carries a navigable table of contents.
+_ACCESSIBILITY_SUMMARIES: dict[str, dict[bool, str]] = {
+    "zh": {
+        True: "纯文本电子书，含结构化目录，无已知无障碍风险。",
+        False: "纯文本电子书，无已知无障碍风险。",
+    },
+    "en": {
+        True: (
+            "Text-only ebook with structured navigation and no known "
+            "accessibility hazards."
+        ),
+        False: "Text-only ebook with no known accessibility hazards.",
+    },
+}
+
+
+def _accessibility_summary(language: str, *, has_toc: bool) -> str:
+    """Return a short accessibility summary matching the book language."""
+    lang = (language or "").strip().lower()
+    return _ACCESSIBILITY_SUMMARIES["zh" if lang.startswith("zh") else "en"][has_toc]
+
+
+def _apply_accessibility_metadata(builder: EpubBuilder) -> None:
+    """
+    Add EPUB 3 schema.org accessibility metadata to ``builder``'s OPF.
+
+    ``structuralNavigation`` is only claimed when the book contains at least
+    one navigable chapter document: intro/volume pages alone are not a table
+    of contents. The values contain no timestamps or other run-dependent
+    data, so repeated exports produce identical metadata.
+    """
+    has_toc = any(isinstance(item, EpubChapter) for item in builder.items)
+    opf = builder.opf
+
+    opf.add_meta("schema:accessMode", "textual")
+    if has_toc:
+        opf.add_meta("schema:accessibilityFeature", "structuralNavigation")
+    opf.add_meta("schema:accessibilityHazard", "none")
+    opf.add_meta(
+        "schema:accessibilitySummary",
+        _accessibility_summary(opf.language, has_toc=has_toc),
+    )
+
 
 def _clean_metadata_text(text: str) -> str:
     """Strip characters that cannot appear in the generated XML."""
@@ -469,6 +513,7 @@ class ExportEpubMixin:
                 )
                 out_path = self._unique_output_path(out_path, used_paths)
 
+                _apply_accessibility_metadata(builder)
                 try:
                     outputs.append(builder.export(out_path))
                     logger.info(
@@ -650,6 +695,7 @@ class ExportEpubMixin:
             _fit_name(raw_name, self._output_dir)
         )
 
+        _apply_accessibility_metadata(builder)
         builder.export(out_path)
         logger.info(
             "Exported EPUB (site=%s, book=%s): %s", self._site, book_id, out_path
@@ -728,6 +774,7 @@ class ExportEpubMixin:
         )
 
         # --- export epub ---
+        _apply_accessibility_metadata(builder)
         builder.export(out_path)
 
         logger.info(

@@ -504,6 +504,9 @@ class OpfDocument(EpubResource):
     # internal state
     manifest_lines: list[str] = field(default_factory=list)
     spine_lines: list[str] = field(default_factory=list)
+    # Free-form <meta property="..."> entries (schema.org accessibility
+    # metadata and similar vocabulary terms have no dedicated dc: element).
+    meta_lines: list[str] = field(default_factory=list)
 
     _cover_item_id: str | None = field(init=False, default=None)
     _toc_item_id: str | None = field(init=False, default=None)
@@ -533,6 +536,18 @@ class OpfDocument(EpubResource):
     ) -> None:
         prop_attr = f' properties="{escape_text(properties)}"' if properties else ""
         self.spine_lines.append(f'<itemref idref="{escape_text(idref)}"{prop_attr}/>')
+
+    def add_meta(self, property: str, value: str) -> None:
+        """
+        Append an EPUB 3 ``<meta property="...">value</meta>`` entry.
+
+        Used for vocabulary terms that have no dedicated ``dc:`` element,
+        such as the schema.org accessibility properties. Both the property
+        name and the value are escaped for markup.
+        """
+        self.meta_lines.append(
+            f'<meta property="{escape_text(property)}">{escape_text(value)}</meta>'
+        )
 
     def to_xml(self) -> str:
         """
@@ -578,6 +593,8 @@ class OpfDocument(EpubResource):
             meta.append(
                 f'<meta name="cover" content="{escape_text(self._cover_item_id)}"/>'
             )
+
+        meta.extend(self.meta_lines)
 
         metadata = "\n".join(meta)
 

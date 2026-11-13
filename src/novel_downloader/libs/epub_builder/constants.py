@@ -246,7 +246,7 @@ NCX_TEMPLATE = f"""\
 
 OPF_TEMPLATE = f"""\
 <?xml version='1.0' encoding='utf-8'?>
-<package xmlns="{OPF_NS}" xmlns:dc="{DC_NS}" xmlns:opf="{OPF_NS}" version="3.0" unique-identifier="id" prefix="rendition: http://www.idpf.org/vocab/rendition/#">
+<package xmlns="{OPF_NS}" xmlns:dc="{DC_NS}" xmlns:opf="{OPF_NS}" version="3.0" unique-identifier="id" prefix="rendition: http://www.idpf.org/vocab/rendition/# schema: http://schema.org/">
   <metadata>
 {{metadata}}
   </metadata>
