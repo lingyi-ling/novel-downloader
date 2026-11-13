@@ -476,7 +476,8 @@ class RateLimitMiddleware:
         429 {"detail": "Rate limit exceeded. Try again in <seconds>s."}
 
     with a ``Retry-After`` header naming how long it takes until the oldest
-    admitted request slides out of the window. Rejected requests are *not*
+    admitted request slides out of the window, rounded up to a whole second
+    (minimum ``1``, never more than ``window``). Rejected requests are *not*
     counted, so a client that stops hammering recovers as soon as its window
     drains.
 
@@ -492,20 +493,43 @@ class RateLimitMiddleware:
       locked out.
     * State is a plain in-memory ``dict`` updated without an ``await`` between
       read and write, i.e. race-free under uvicorn's single event loop and
-      free of locking. It is per-process by design: this is a local API, not a
-      distributed one. The client IP is taken from the ASGI scope (the TCP
-      peer); ``X-Forwarded-For`` is deliberately not honoured on a localhost
-      service.
+      free of locking. It is per-process by design and deliberately neither
+      shared nor persisted:
+
+      - **Multiple workers** each keep their own counters, so one client that
+        reaches ``N`` workers can be admitted up to ``N × limit`` per window
+        (a single keep-alive connection stays with one worker). ``novel-api``
+        always runs one process — it hands the application object to uvicorn,
+        which refuses ``--workers > 1`` — so this only affects a hand-rolled
+        ``uvicorn --workers`` deployment; divide ``limit`` by the worker
+        count there.
+      - **Restarts** start with an empty table: every client immediately
+        regains a full budget. Persisting counters would let a stale lockout
+        survive a restart and add a shared-storage failure mode for no
+        benefit on a localhost service.
+      - **Clock**: the window uses ``time.monotonic``, so NTP steps and manual
+        wall-clock changes can neither unlock a client nor extend a lockout.
+        If the hook were ever non-monotonic, a backwards step fails closed: an
+        already-full window keeps rejecting and ``Retry-After`` stays at
+        least 1.
+
+    * The client IP is taken from the ASGI scope (the TCP peer);
+      ``X-Forwarded-For`` is deliberately not honoured on a localhost
+      service. Behind a reverse proxy every client therefore shares the
+      proxy peer's bucket.
     * Stale per-IP entries are dropped at most once per window
       (:meth:`_maybe_cleanup`), keeping memory bounded even with many
       short-lived client IPs. Because that periodic sweep can lag a burst of
       distinct source addresses, :attr:`max_keys` imposes a hard ceiling:
       when a new key would exceed it, stale entries are swept immediately and
-      then the least recently active keys are evicted. Recency is maintained
-      incrementally in an ``OrderedDict`` (every admitted hit moves its key to
-      the end), so admitting a new key at the cap is O(1) amortised instead of
-      sorting the whole table — the cap must not become a CPU amplifier under
-      an address flood.
+      then the least recently active keys are evicted. Eviction is fail-open
+      per key — the evicted counter is gone, so that client starts a fresh
+      window — and only a request from a *new* key triggers it, so an
+      already-tracked client cannot reset its own budget by hammering.
+      Recency is maintained incrementally in an ``OrderedDict`` (every
+      admitted hit moves its key to the end), so admitting a new key at the
+      cap is O(1) amortised instead of sorting the whole table — the cap must
+      not become a CPU amplifier under an address flood.
 
     :param app: The wrapped ASGI application.
     :param limit: Requests admitted per client IP per window; ``<= 0`` disables.
@@ -582,9 +606,11 @@ class RateLimitMiddleware:
         because the cap is a hard bound). Because the dict is ordered by last
         admitted activity, expired entries form a prefix: popping it costs
         O(expired), not O(tracked). If the dict is still full, the least
-        recently active keys are evicted the same way — they are the closest to
-        expiring and losing their budget only makes an abusive client *more*
-        likely to be limited.
+        recently active keys are evicted the same way. An evicted key loses
+        its history and therefore regains a full budget (fail-open), but it is
+        the key closest to expiry anyway, and only a request from a *new* key
+        can trigger eviction — a client that is already tracked, including one
+        being rejected, cannot reset its own counter this way.
         """
         if self.max_keys <= 0 or len(self._hits) < self.max_keys:
             return

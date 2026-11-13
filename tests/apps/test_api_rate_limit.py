@@ -21,7 +21,9 @@ no test ever sleeps. No server is started and no network access happens.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -481,6 +483,197 @@ def test_defaults_match_the_documented_contract() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Window boundary, Retry-After precision, clock and process lifetime
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_window_boundary_frees_exactly_the_expired_slot(
+    clock: FakeClock,
+) -> None:
+    """At ``oldest + window`` only that one hit leaves the sliding window."""
+    mw, store = _limited(limit=2, window=60.0)
+
+    assert (await _run(mw))[0] == 200  # t=1000
+    clock.advance(30)
+    assert (await _run(mw))[0] == 200  # t=1030
+
+    clock.advance(29.5)  # t=1059.5: both hits are still inside the window
+    status, headers, _ = await _run(mw)
+    assert status == 429
+    assert headers["retry-after"] == "1"  # 0.5s left, rounded up
+
+    clock.advance(0.5)  # t=1060: the t=1000 hit slides out (<= cutoff)
+    assert (await _run(mw))[0] == 200
+
+    # Only one slot was freed: the t=1030 hit is still inside the window.
+    status, headers, _ = await _run(mw)
+    assert status == 429
+    assert headers["retry-after"] == "30"
+    assert store["downstream"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("offset", "expected"),
+    [
+        (0.0, 60),  # rejected immediately after the admitted hit
+        (0.001, 60),
+        (0.5, 60),
+        (1.5, 59),
+        (30.0, 30),
+        (59.999, 1),  # a sliver left still yields the minimum of 1 second
+    ],
+)
+async def test_retry_after_is_the_ceiling_of_the_remaining_window(
+    clock: FakeClock,
+    offset: float,
+    expected: int,
+) -> None:
+    mw, _ = _limited(limit=1, window=60.0)
+    await _run(mw)  # t=1000
+
+    clock.advance(offset)
+    status, headers, body = await _run(mw)
+
+    assert status == 429
+    assert headers["retry-after"] == str(expected)
+    assert f"Try again in {expected}s." in body.decode()
+
+
+@pytest.mark.asyncio
+async def test_waiting_exactly_retry_after_always_admits(clock: FakeClock) -> None:
+    """The advertised wait is honest for every fraction of the window."""
+    for offset in (0.0, 0.1, 0.333, 0.9, 7.5, 59.9):
+        mw, _ = _limited(limit=1, window=60.0)
+        clock.now = 1000.0
+        assert (await _run(mw))[0] == 200
+
+        clock.advance(offset)
+        status, headers, _ = await _run(mw)
+        assert status == 429
+        assert 1 <= int(headers["retry-after"]) <= 60
+
+        clock.advance(int(headers["retry-after"]))
+        assert (await _run(mw))[0] == 200
+
+
+def test_the_limiter_uses_a_monotonic_clock() -> None:
+    """Wall-clock steps (NTP, manual changes) must not move the window."""
+    assert api_middleware._monotonic is time.monotonic
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_rollback_neither_unlocks_nor_overextends(
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mw, _ = _limited(limit=1, window=60.0)
+    assert (await _run(mw))[0] == 200  # t=1000 on the monotonic clock
+
+    # The wall clock jumps back by decades. A wall-clock implementation would
+    # report an enormous ``Retry-After``; the monotonic window must be
+    # unaffected and remains bounded by the window length.
+    monkeypatch.setattr(
+        api_middleware,
+        "time",
+        SimpleNamespace(monotonic=clock, time=lambda: 1.0),
+    )
+    clock.advance(0.5)  # t=1000.5
+    status, headers, _ = await _run(mw)
+    assert status == 429
+    assert headers["retry-after"] == "60"  # ceil(59.5), not ~1.7e9
+
+    clock.advance(59.5)  # t=1060: the hit slides out on the monotonic clock
+    assert (await _run(mw))[0] == 200
+
+
+@pytest.mark.asyncio
+async def test_a_backward_clock_step_fails_closed(clock: FakeClock) -> None:
+    """
+    Defensive: a non-monotonic clock can never unlock a full window.
+
+    ``time.monotonic`` cannot step backwards, but the limiter must not start
+    admitting (or emit a non-positive ``Retry-After``) if that guarantee ever
+    changed.
+    """
+    mw, _ = _limited(limit=1, window=60.0)
+    await _run(mw)  # t=1000
+
+    clock.now = 940.0  # violates monotonicity
+    status, headers, _ = await _run(mw)
+    assert status == 429
+    assert int(headers["retry-after"]) >= 1
+
+    clock.now = 1060.0  # once the clock catches up the slot is free again
+    assert (await _run(mw))[0] == 200
+
+
+@pytest.mark.asyncio
+async def test_worker_processes_do_not_share_counters(clock: FakeClock) -> None:
+    """
+    Two middleware instances model two uvicorn worker processes.
+
+    Counters are per process, so a client that reaches both workers is admitted
+    up to ``2 × limit`` per window. This is the documented multi-worker
+    contract; ``novel-api`` itself always runs a single process.
+    """
+    worker_a, _ = _limited(limit=2, window=60.0)
+    worker_b, _ = _limited(limit=2, window=60.0)
+    assert worker_a._hits is not worker_b._hits
+
+    for _ in range(2):
+        assert (await _run(worker_a))[0] == 200
+        assert (await _run(worker_b))[0] == 200
+
+    assert (await _run(worker_a))[0] == 429
+    assert (await _run(worker_b))[0] == 429
+
+
+@pytest.mark.asyncio
+async def test_a_restart_starts_with_a_fresh_budget(clock: FakeClock) -> None:
+    before, _ = _limited(limit=1, window=60.0)
+    assert (await _run(before))[0] == 200
+    assert (await _run(before))[0] == 429
+
+    restarted, _ = _limited(limit=1, window=60.0)
+    assert (await _run(restarted))[0] == 200
+
+
+@pytest.mark.asyncio
+async def test_evicted_key_regains_a_full_budget(clock: FakeClock) -> None:
+    """Eviction is fail-open per key; only a new key can trigger it."""
+    mw, _ = _limited(limit=1, window=60.0, max_keys=1)
+
+    assert (await _run(mw, client=("10.0.0.1", 5000)))[0] == 200
+    assert (await _run(mw, client=("10.0.0.1", 5000)))[0] == 429
+
+    # A brand-new address at the cap evicts the least recently active key.
+    assert (await _run(mw, client=("10.0.0.2", 5000)))[0] == 200
+    assert set(mw._hits) == {"10.0.0.2"}
+
+    # 10.0.0.1's counter went with it, so it starts a fresh window.
+    assert (await _run(mw, client=("10.0.0.1", 5000)))[0] == 200
+    assert set(mw._hits) == {"10.0.0.1"}
+
+
+@pytest.mark.asyncio
+async def test_rejected_requests_neither_refresh_nor_evict(clock: FakeClock) -> None:
+    mw, _ = _limited(limit=1, window=60.0, max_keys=2)
+
+    await _run(mw, client=("10.0.0.1", 5000))  # t=1000
+    clock.advance(1)
+    await _run(mw, client=("10.0.0.2", 5000))  # t=1001
+    clock.advance(1)
+    assert (await _run(mw, client=("10.0.0.1", 5000)))[0] == 429  # t=1002
+
+    # The rejected hit did not move 10.0.0.1 to the back, so it is still the
+    # least recently active key and the next newcomer evicts it.
+    assert (await _run(mw, client=("10.0.0.3", 5000)))[0] == 200
+    assert set(mw._hits) == {"10.0.0.2", "10.0.0.3"}
+
+
+# ---------------------------------------------------------------------------
 # Rate limiting through the real application stack
 # ---------------------------------------------------------------------------
 
@@ -723,6 +916,34 @@ def test_api_main_does_not_trust_forwarded_headers(
     api_main_module.api_main([])
 
     assert captured["proxy_headers"] is False
+
+
+def test_api_main_does_not_enable_multiple_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``novel-api`` must stay single-process so ``--rate-limit`` is the global cap.
+
+    uvicorn only accepts ``--workers > 1`` for an import string, and this CLI
+    passes the application object instead. Keeping that invariant means the
+    per-process counter is the effective limit for every CLI deployment.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_create_app(**kwargs: Any) -> Any:
+        return object()
+
+    def fake_run(*args: Any, **kwargs: Any) -> None:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(api_main_module, "create_app", fake_create_app)
+    monkeypatch.setattr(api_main_module.uvicorn, "run", fake_run)
+
+    api_main_module.api_main([])
+
+    assert not isinstance(captured["args"][0], str)
+    assert "workers" not in captured["kwargs"]
 
 
 def test_api_main_hides_docs_on_a_public_bind(

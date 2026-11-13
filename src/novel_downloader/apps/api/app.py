@@ -40,7 +40,9 @@ Additional hardening
   the token check (throttling brute-force attempts) and *inside* the CORS
   layer (the ``429`` keeps the CORS headers); ``/api/v1/health`` is exempt,
   the counter keys on the TCP peer (never ``X-Forwarded-For``), and the number
-  of tracked keys is capped.
+  of tracked keys is capped. Counters are in-memory and per process, so a
+  multi-worker uvicorn deployment gives every worker its own budget (``N ×``
+  the configured limit in aggregate); ``novel-api`` itself runs one process.
 * Every request is logged as a single ``method path status duration`` line
   (:class:`novel_downloader.apps.api.middleware.RequestLoggingMiddleware`,
   ``WARNING`` once it exceeds one second); query strings and response bodies
