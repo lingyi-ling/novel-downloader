@@ -314,6 +314,8 @@ client = registrar.get_client(site)
 client.export_book(book, formats=["epub"])
 ```
 
+The export also carries EPUB 3 / schema.org accessibility metadata: `schema:accessMode=textual`, `schema:accessibilityHazard=none`, a `schema:accessibilitySummary` matching the book language, and `schema:accessibilityFeature=structuralNavigation` when chapter documents are present. The declarations live in `<metadata>` of `OEBPS/content.opf`; EPUB 2 readers ignore them without affecting the body text or NCX navigation. They describe content characteristics only and are not a claim that the file passed EPUBCheck or completed an accessibility audit. See [File Saving](../guide/file-saving.md#epub-accessibility-metadata).
+
 ### B. Download + Export Immediately After Searching
 
 ```python

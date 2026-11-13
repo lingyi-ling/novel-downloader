@@ -75,14 +75,85 @@ If the API has a token configured, enter the same value in "API key".
 
 Bottom tabs: **Search / Tasks / History / Music / Follow**.
 
-- **Search**: keyword plus optional site filter (comma-separated; empty means all sites). Results can be added to the download queue with one tap, or followed via the "Follow" action.
+- **Search**: keyword search plus multi-select site selection (leave every site unchecked to search all enabled sites), and an "Advanced filters" panel for word-count range and update date. Results can be added to the download queue with one tap, or followed via the "Follow" action.
 - **Follow**: maintain the follow list (list / add / remove); "Check updates" searches each book for its latest chapter, and entries with new chapters can join the download queue with one tap.
-- **Tasks**: running / queued / completed sections, progress bars and chapter counts, auto-refresh (every 2 seconds), cancellation, and one-tap retry for failed tasks.
+- **Tasks**: running / queued / completed sections, progress bars and chapter counts, auto-refresh (every 2 seconds), cancellation, and one-tap retry for failed, cancelled, and interrupted tasks.
 - **Login credential requests**: when a site requires login and no usable credential is stored, the task parks and a "Login credential requests" card appears at the top of the Tasks page. Tap "Provide credentials" to fill in the fields (password/cookie inputs are masked, required fields validated, prefill values seeded); submitting resumes the task.
-- **History**: exported files; tapping one hands it to the system DownloadManager, which saves it into the public Downloads directory.
+- **History**: exported files; tapping one saves it to the public Downloads directory, or to the custom directory chosen in Settings (see below).
 - **Music**: choose a platform, search songs, select multiple results, create a download job, and view progress.
 
-When a task finishes (completed or failed) the app posts a system notification. On Android 13+ the first launch asks for the "Notifications" permission (`POST_NOTIFICATIONS`); if it was denied, re-enable it from the system settings.
+## Search and Filters
+
+### Site selection
+
+The "Search sites" field opens a multi-select dialog rather than a text box:
+
+- Select one or more sites to search only those sites.
+- **Selecting nothing means every enabled site**; the field then reads "All sites".
+- The selection is stored on the device and reused the next time the app starts.
+
+### Advanced filters
+
+The "Advanced filters" row below the search box expands optional conditions:
+
+| Condition | Rule |
+| --- | --- |
+| Min words / Max words | Either field may be left blank; a value must be a whole number from `0` to `1000000000` |
+| Updated after | Pick a `YYYY-MM-DD` date with the date picker; the selected day is **included**; use the clear icon to remove it |
+
+- **Blank means no filtering**: with all three fields empty, the request is exactly the one sent before these filters existed.
+- Invalid input (not a whole number, negative, above 1,000,000,000, or min words greater than max words) stops the search from being sent and opens the filter panel with the matching error.
+- Filters run in the engine after ranking (the computer API or the standalone engine) and only narrow the result set; ordering is unchanged. With a word-count filter active, rows whose site did not report a word count are dropped; with a date filter active, rows without a parseable update date are dropped. That is not a request failure — "fewer results" usually means exactly this.
+- "Active filters: N" counts the non-blank conditions and offers "Clear filters". The values survive tab switches and a system-initiated process death when the app is restored from Recents.
+
+## Download Directory and File Saving
+
+The History tab lists exported files; tapping one starts saving it. By default the file goes through the system DownloadManager into the public Downloads directory, with progress shown in the notification shade.
+
+### Custom download directory (SAF)
+
+In Settings → Download, tap "Choose directory" and grant a directory through the system picker (SAF, `ACTION_OPEN_DOCUMENT_TREE`):
+
+- Files are written into a `NovelDL/` subfolder of the chosen directory, created when missing.
+- Existing files are never overwritten: clashes become `name (1).ext`, `name (2).ext`, … (case-insensitive).
+- The read/write grant is persisted with `takePersistableUriPermission`, so it survives a reboot.
+- Settings shows the current target: "Download directory: <folder> (NovelDL subfolder)" or "Download directory: system Downloads".
+
+When the grant stops working (revoked in system settings, the provider app was uninstalled or replaced, the directory was deleted or moved, or app data was restored to another device), Settings shows "The custom download directory is unavailable — pick it again in Settings" but keeps the stored choice so it can be replaced. Downloads from History then **fall back to the system Downloads directory** with the notice "The custom download directory is unavailable; saving to system Downloads instead". The grant is checked both before and during the write, so a revoked tree is never written to the wrong place.
+
+"Use system Downloads" releases the persisted grant and returns to the default. If the directory is reachable but a file cannot be created (for example, the provider errors), the save fails with a message instead of silently writing somewhere else.
+
+!!! note "Scope"
+    The custom directory only affects downloads from the History tab. Downloading an exported file from a task's detail panel still goes through the system DownloadManager into system Downloads; music files follow the next section. See [Troubleshooting § custom download directory](./troubleshooting.en.md#51-the-custom-download-directory-saf-is-unavailable).
+
+## Tasks, Notifications, and Recovery
+
+The Tasks tab refreshes every 2 seconds and also supports pull-to-refresh; cards show progress and chapter counts, and expanding one reveals its exported files for download.
+
+### Task snapshot and interrupted tasks
+
+The computer-side API (or the on-device engine in standalone mode) keeps tasks in process memory, so they disappear when that process ends. The app keeps its own task snapshot on the device:
+
+- After the app is killed or restarted, the Tasks tab still lists the previous queue, progress, and finished records instead of starting blank.
+- Tasks that were queued or running at restart cannot still be running, so they are marked "Interrupted" and show "The app restarted and interrupted this task. Tap retry to continue."
+- An in-flight task that the engine answers without listing is also marked "Interrupted" rather than looking active forever.
+- Failed, cancelled, and interrupted tasks offer "Retry": the task is re-queued with its original site, book id, and title, and the app reports "Re-added to the download queue: <title>". Records without a site or book id cannot be retried. Within one session a task is re-queued at most once, so repeated taps cannot enqueue duplicates.
+
+### Notifications and tap-to-locate
+
+Finishing or failing a task posts a system notification; re-posts for the same task update in place instead of stacking.
+
+- On Android 13+ the first launch asks for the "Notifications" permission (`POST_NOTIFICATIONS`). If it was denied, Settings → Notifications shows the state and "Open notification settings" leads to the system toggle; while notifications are off, the Tasks tab explains once why a finished task was silent.
+- **Tapping a notification opens the app on the Tasks tab, expands the matching card, briefly highlights it, and scrolls it into view.** If the local snapshot already contains the task it is located immediately; otherwise the app waits for the first refresh before deciding.
+- If the task is no longer listed after a refresh (for example, it was cleaned up), the app stays on the Tasks tab and reports "That task is no longer in the list". A notification for a malformed record without a usable task id only opens the Tasks tab and locates nothing.
+
+## Music and Lyrics
+
+On the Music tab, choose a platform, search songs, select several results, and create a download job; the page shows progress and the succeeded / skipped / failed counts.
+
+- **Standalone mode**: when a track finishes, the app hands the audio to the system DownloadManager, which copies it into the public Downloads directory.
+- **Remote mode**: files stay on the computer; the app only shows the server-side path and does not pull the audio onto the phone.
+- **Lyrics**: the music engine saves lyrics by default (`save_lyric`) as `<stem>.lrc` next to the audio, plus `<stem>.zh.lrc` when a translation exists. The Android client currently **transfers only the audio file and does not copy the `.lrc` files into system Downloads**: in standalone mode they remain in the app-private engine directory, and in remote mode they remain on the computer. Use the desktop app or `novel-cli music download` when you need the lyric files.
 
 ## Built-in Update Check
 

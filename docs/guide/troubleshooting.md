@@ -17,6 +17,15 @@ novel-cli doctor --port 8080
 
 失败项会给出建议；`✓` 表示通过，`✗` 表示失败（可选依赖会标注 `optional`）。
 
+如果怀疑是「目录缺失 / 临时文件堆积」这类本地状态问题，先预览自动修复，再执行：
+
+```bash
+novel-cli doctor --fix --dry-run   # 只报告会创建/删除什么，零改动
+novel-cli doctor --fix             # 创建缺失的输出/缓存/日志目录，清理过期 .tmp/.part
+```
+
+`--fix` 只在配置的输出、缓存、日志三个目录内动作，拒绝 `..` 与符号链接，不改配置、导出文件或登录态；默认只删除 7 天前的临时文件（`--fix-age-days` 可调）。配置错误、依赖缺失、端口占用等问题它不会代修，仍需按检查项的建议处理。
+
 然后收集版本与日志：
 
 ```bash
@@ -326,6 +335,20 @@ python -c "import sys; from pathlib import Path; p = Path.cwd(); print('filesyst
 
 8. Android App 使用 HTTP 明文访问；跨网络时请使用 VPN（如 Tailscale）或 HTTPS 反向代理，并始终设置 token。
 
+### 5.1 自定义下载目录 (SAF) 不可用
+
+**现象**：设置里选过下载目录，但下载仍落到系统「下载」目录；或设置页出现红色提示「自定义下载目录不可用，请在设置中重新选择」。
+
+**原因**：Android 通过 SAF (`ACTION_OPEN_DOCUMENT_TREE`) 授权目录，应用保存的是持久化 URI 权限。以下情况会让授权失效：用户在系统设置中撤销权限、卸载/更换了提供该目录的应用、目录被删除或移走、备份恢复到另一台设备。
+
+**行为与处理**：
+
+* 设置页会保留原来选的目录（方便直接替换），同时明确提示不可用；历史页下载会**自动回退到系统 Downloads**，并提示「自定义下载目录不可用，已改为保存到系统 Downloads」，不会把文件写到错误位置，也不会让下载直接失败。
+* 重新点「选择目录」并确认系统授权即可恢复；选择时会请求并保存读/写权限，保存失败会提示「无法保留该目录的写入权限，请换一个目录」，此时不会覆盖原来可用的目录。
+* 点「恢复默认」会释放持久化权限并回到系统 Downloads。
+* 文件实际写入所选目录下的 `NovelDL/` 子目录；同名文件按 `name (1).ext`、`name (2).ext` … 去重（大小写不敏感），不会静默覆盖已有文件。
+* 该设置只影响「历史」页导出文件的下载；音乐文件仍按音乐引擎自己的目录/系统下载流程保存。
+
 ---
 
 ## 6. 音乐下载缺少依赖
@@ -372,6 +395,14 @@ python -c "import importlib.util as u; print('mutagen', bool(u.find_spec('mutage
    ```bash
    novel-cli music search "关键词" --platform netease --limit 5
    ```
+
+**歌词没有生成（`.lrc` 缺失）**：
+
+1. 确认音乐设置里的 `save_lyric` 未被关闭（默认 `true`）；它位于音乐数据目录的 `settings.json`。
+2. 平台可能本来就没有歌词，或只返回占位值；此时不会创建文件，也不影响音频成功。
+3. 歌词文件与音频同名：`<歌名> - <歌手>.lrc`，有译文时为 `.zh.lrc`（只有译文时会写进 `.lrc`）。若音频用了 ` [<id>]` 去重后缀，歌词也带同一后缀——到音频所在目录按同名查找。
+4. 音频已存在且被 `skip_existing` 跳过时，只有 `.lrc` 不存在才会补写；已有歌词不会被覆盖，也不会重新联网。
+5. 超过 1 MiB 的歌词响应会被当作错误页跳过（日志里有 WARNING）。把日志级别调到 `DEBUG` 可以看到具体原因。
 
 ---
 
@@ -643,6 +674,9 @@ novel-cli storage --clean --dry-run
 # 先备份所有章节数据库
 novel-cli storage backup --out ~/novel-backups
 
+# 只读校验 raw_data 里所有在用数据库 (不修改任何文件)
+novel-cli storage verify
+
 # 从备份恢复; 覆盖已有数据库需要 -y
 novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<时间戳>.sqlite -y
 ```
@@ -655,9 +689,53 @@ novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<时�
 [「备份 → 校验 (SHA-256 / `PRAGMA integrity_check`) → 恢复」流程](./cli-examples.md#9-storage)
 见 CLI 用法示例。
 
+定时备份时可用 `--keep` 自动轮转。先预览会删哪些旧备份，确认后再真正执行：
+
+```bash
+# 只报告会删除的旧备份，新备份仍会写入，零删除
+novel-cli storage backup --out ~/novel-backups --keep 7 --dry-run
+
+# 每本书、每个 stage 只保留最新 7 份
+novel-cli storage backup --out ~/novel-backups --keep 7
+```
+
+`--keep` 只删除 `--out` 下严格匹配 `chapter.<stage>.<UTC 时间戳>.sqlite` 的文件，目录、符号链接、手工改名或旧版本留下的文件都不会被碰；本次运行刚写出的备份永远受保护。`--keep 0` 关闭清理，负数或以 `--dry-run` 单独使用会以用法错误 (`2`) 退出。清理失败时命令以 `1` 退出，但已完成的备份保留。
+
 ---
 
-## 15. 仍有问题？
+## 15. 搜索过滤后没有结果
+
+**现象**：加了 `--min-words` / `--max-words` / `--updated-after`（或 API 的 `min_words` / `max_words` / `updated_after`）后，结果从很多变成 0，但书名明明存在。
+
+**原因**：过滤只保留**能解析出对应字段**的行。启用字数过滤时，站点没返回 `word_count` 或格式无法解析的行会被丢弃；启用日期过滤时，没有 `update_date` 的行同样被丢弃。这是有意的「宁缺毋滥」，不是请求失败。
+
+**验证与解决**：
+
+1. 先去掉过滤，确认书本身能搜到：
+
+   ```bash
+   novel-cli search "书名" --site <site>
+   ```
+
+2. 逐项加上过滤，定位是哪一项把结果筛掉：
+
+   ```bash
+   # 先不带过滤
+   novel-cli search "书名" --site <site>
+
+   # 只加日期
+   novel-cli search "书名" --site <site> --updated-after 2024-01-01
+
+   # 只加字数
+   novel-cli search "书名" --site <site> --min-words 300000
+   ```
+
+3. 注意单位与边界：字数是**按本**的数值（`"30万字"` 会解析为 300000），上下界都含边界；`--updated-after` 是**含当天**的下界，格式必须严格为 `YYYY-MM-DD`，否则命令以 `2` 退出而不是静默忽略。
+4. 跨站合并 (`--group`) 与 `--limit` 在过滤之后执行，因此过滤会让最终行数变少是预期行为。
+
+---
+
+## 16. 仍有问题？
 
 带上下面的信息提交 Issue：
 

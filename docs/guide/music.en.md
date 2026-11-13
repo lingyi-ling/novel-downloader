@@ -110,7 +110,29 @@ File naming:
 * Same-title tracks with different IDs use `<title> - <artist> [<id>].<ext>` to avoid overwriting each other.
 * `skip_existing` only skips an existing file larger than 10 KiB.
 * Tags, cover and lyrics are best-effort: a failure in any of them skips that step only, and the downloaded audio still counts as successful.
-* Lyrics are written next to the audio as `<stem>.lrc`; a translation is written as `<stem>.zh.lrc`.
+* Lyrics are written next to the audio as `<stem>.lrc`; a translation is written as `<stem>.zh.lrc`, see "Lyric files" below.
+
+#### Lyric files (LRC)
+
+Lyrics share the audio file's stem and directory. `save_lyric` is enabled by default (`"save_lyric": true` in the music settings). They are always written as **separate files** so players and external tools can each use what they need:
+
+| Provider returns | Files written | Content |
+| --- | --- | --- |
+| Original only | `<stem>.lrc` | Original text (usually with `[mm:ss.xx]` timestamps) |
+| Original + translation | `<stem>.lrc` / `<stem>.zh.lrc` | Original / translation |
+| Translation only | `<stem>.lrc` | The translation (so a player never shows no lyrics at all) |
+| Neither | no file | — |
+
+`<stem>` is the audio file name without its extension, including the ` [<id>]` suffix added when two tracks would otherwise collide, so the lyrics always match the audio file next to them. Files are UTF-8 without a BOM, with newlines normalised to `\n` (some providers return CRLF, which many players cannot parse).
+
+Write boundaries:
+
+* If the content is byte-identical to the existing file, nothing is written and its mtime is left alone. Otherwise a temporary file in the same directory is written and atomically replaced; a failed replace never damages the previous lyrics.
+* A response larger than 1 MiB is treated as an error page or full web page, not lyrics; it is skipped with a warning.
+* Fetching or writing lyrics only logs a WARNING. The downloaded audio still counts as successful; lyrics never fail a track.
+* When the audio already exists and `skip_existing` skips it, lyrics are backfilled only if `<stem>.lrc` is **missing**. Existing lyrics are neither re-fetched nor overwritten; when a backfill does run and a translation is available, `.zh.lrc` is written too.
+* If the provider returns no lyrics, the engine falls back to lyric fields already carried by the search result object without another request; placeholders (`null`/`none`/`nil`) are not lyrics.
+* Lyric files are plaintext like the audio and may contain copyrighted text; store them like any other download and do not commit them to a repository.
 
 Batch downloads:
 

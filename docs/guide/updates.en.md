@@ -83,6 +83,18 @@ directory still updates to the installer. A copy installed from the installer
 only ever updates to the installer, and a portable copy only to the portable
 archive.
 
+## Pre-release asset audit
+
+Before uploading, `scripts/release.py` runs `scripts/audit_release_assets.py` over the artifacts in `dist/release/`: text members inside zip / apk files (and inside an `.exe` that really is a zip) are streamed line by line through the credential rules in `scripts/scan_secrets.py`. A hit is tagged `secret-marker` and reports only `asset: member:line: rule`, never the value. This complements the pre-build working-tree scan of Git-tracked files — the workspace scan sees source, the asset audit sees the bytes that will actually be uploaded.
+
+Boundaries and exit codes:
+
+- Members larger than 2 MiB are skipped; text scanning is capped at 64 MiB per asset and 256 MiB per audit run.
+- Binary members (NUL in the first 8 KiB), nested `.zip` / `.exe` / `.apk` members, directories and symlinks are not scanned; nested archives are never extracted, and an unreadable member is reported as a problem.
+- Run on its own, `audit_release_assets.py` exits `1` when there are problems and `2` on bad arguments or I/O errors; inside `release.py` a hit raises `ReleaseError`, aborting the release (exit code `2`) before tagging and uploading.
+
+See the [security guide](security.en.md#release-asset-scan) for the full rule set and threat model.
+
 ## Known limitations
 
 - **Android cannot install silently**: that needs a system signature permission ordinary apps do not have. The flow is download → verify → hand off to the system installer → user confirms.

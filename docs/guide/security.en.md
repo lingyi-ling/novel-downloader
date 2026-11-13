@@ -195,7 +195,7 @@ Automatic updates turn "third-party content" into "an executable program", so th
 | Download URL | Asset URLs in the manifest must be **HTTPS**; the Android client also only accepts HTTPS | `_manifest_asset`, `UpdateChecker.downloadRequestFailure` |
 | Integrity | The asset must carry a **SHA-256**: the desktop and Android clients refuse to download without one, and the CLI does the same in non-interactive (`--yes`) mode (the interactive path skips verification); the digest is recomputed after the download and a mismatch deletes the partial file | `download_asset` / `verify_sha256` |
 | Before install | The digest is **recomputed right before the installer starts**, closing the time-of-check/time-of-use window between verification and installation | `webview_app._install_verified`, `installPrecheck` |
-| Release side | Before upload, `scripts/audit_release_assets.py` performs a **release asset leak audit** (allowlist, archive member paths, private keys / deploy passwords / tokens in raw bytes); matches report only the marker name, never the value | `audit_release_content` in `scripts/release.py` |
+| Release side | Before upload, `scripts/audit_release_assets.py` performs a **release asset leak audit** (allowlist, archive member paths, archive text members scanned with the `scan_secrets` rules, private keys / deploy passwords / tokens in raw bytes); matches report only the marker name, never the value | `audit_release_content` in `scripts/release.py` |
 
 **Optional manifest signing**: update manifests support Ed25519 signatures. `updater.TRUSTED_UPDATE_KEYS` is empty by default, so manifests are **accepted unsigned** and the trust anchor is HTTPS plus each asset's SHA-256. Once a trusted key is configured, a missing manifest, an unsigned manifest, a bad signature or an unknown `key_id` is rejected, and the client **stops falling back** to the GitHub API — otherwise deleting the manifest would bypass signature checking.
 
@@ -254,6 +254,157 @@ Limitations:
 
 ---
 
+### Repository credential scanning
+
+`scripts/security_audit.py` inspects the local runtime environment; to treat the **repository itself** (working tree, index, and commit history) as a credential-leak surface, use `scripts/scan_secrets.py`. It depends only on the Python standard library and `git`, runs fully offline, and reports only rule names and locations — **matched values are never echoed** — so a terminal transcript or CI log cannot become a new leak.
+
+```bash
+# Working tree: every file Git tracks
+python scripts/scan_secrets.py
+
+# Index: only staged additions/copies/modifications/renames
+python scripts/scan_secrets.py --staged
+
+# History: read-only scan of lines each commit added
+python scripts/scan_secrets.py --history
+
+# Bound the history walk by revision range and commit count (with --history only)
+python scripts/scan_secrets.py --history --since v1.20.0 --max-commits 200
+
+# Machine-readable output: stdout is JSON only
+python scripts/scan_secrets.py --json
+```
+
+Output looks like `path:line: rule` (history scans use `commit:path:line: rule`). `--json` emits `count` and `findings` (history also includes `commits_scanned`, `skipped_commits`, and `truncated`), likewise without plaintext.
+
+| Rule | What it recognises |
+| --- | --- |
+| `private-key` | PEM private-key headers (RSA/EC/OpenSSH/DSA/PGP); only the block marker is matched |
+| `aws-access-key` | AWS access key ids prefixed with `AKIA` / `ASIA` |
+| `github-token` | `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and `github_pat_` tokens |
+| `slack-token` | `xoxa-`/`xoxb-`/`xoxp-`/`xoxr-`/`xoxs-` tokens |
+| `bearer-token` | A literal `Bearer` credential (placeholders excluded) |
+| `generic-secret` | A literal assignment to a credential-shaped key such as `password`, `secret`, `token`, or `api_key` (environment/config references and placeholders excluded) |
+| `sensitive-file` | A tracked `*.jks`, `*.keystore`, `*.p12`, `*.pfx`, `*.bks`, `keystore.properties`, `id_rsa`, etc. |
+
+Scope and limits:
+
+- Only files known to Git are read (`git ls-files`; `--staged` reads the staged blobs from the index). Build output and local credential files ignored by `.gitignore` are out of scope.
+- Binary files, unknown extensions, and files larger than 2 MiB are skipped for content scanning; however, a keystore/private-key **file name** is itself a `sensitive-file` finding.
+- `--history` scans only the lines each commit added in `git log -p -U0`, so a credential deleted from the working tree is still found. Merge commits produce no patch by default; a commit whose patch exceeds 8 MiB is skipped as a whole, and the walk stops after 256 MiB of accumulated patch (the output says so). Use `--max-commits` to narrow the range. The scan is read-only: nothing is checked out or rewritten.
+- `--staged` and `--history` are mutually exclusive; `--since` / `--max-commits` require `--history`, and `--max-commits` must be at least 1.
+
+Exit codes:
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | No findings |
+| `1` | At least one finding, or the scan could not run (argument conflict, `git` failure, etc.; the error goes to stderr and never includes file content) |
+
+#### Optional local pre-commit hook
+
+To run the staged scan automatically before every `git commit`, install the repository-level hook explicitly:
+
+```bash
+# Install/update .git/hooks/pre-commit (writes this tool's marker)
+python scripts/install_git_hooks.py
+
+# An existing pre-commit from another tool is refused by default;
+# --force backs it up to pre-commit.bak first
+python scripts/install_git_hooks.py --force
+
+# Remove only a hook installed by this tool; other hooks and another tool's
+# pre-commit are left alone
+python scripts/install_git_hooks.py --uninstall
+```
+
+The hook prefers the repository's `.venv` Python, falls back to `python3`/`python`, and then runs `scripts/scan_secrets.py --staged`; repository paths containing spaces work as well. The installer writes only to the current repository's `.git/hooks/`, **never** changes global Git configuration, and installs nothing by default. If `core.hooksPath` is set, Git does not read `.git/hooks`, so the hook will not run.
+
+This is a local convenience gate for developers, not a security boundary; the CI `secrets` job and the weekly history scan remain the authoritative gates, and skipping or omitting the local hook does not weaken them.
+
+#### The two CI checks
+
+| Workflow | Trigger | Behaviour |
+| --- | --- | --- |
+| The `secrets` job in `.github/workflows/ci.yml` | Pushes to `main`, any pull request, manual dispatch | Runs `python scripts/scan_secrets.py` over the working tree; only checkout and Python setup, with a 5-minute timeout. A finding fails the job, blocking the pull request before review or release. |
+| `.github/workflows/security.yml` | Every Monday at **03:17 UTC** (`cron: "17 3 * * 1"`) and manual dispatch | Checks out the full history with `fetch-depth: 0`; runs the working-tree scan and `--history` one after the other, and either finding exits non-zero. Both `--json` reports are written to files (never echoed to the log) and uploaded as the `security-scan-reports` artifact, **retained for 30 days**. |
+
+Both scans in `security.yml` always run, so one failing report cannot hide the other; the concurrency group is fixed to `security-scan` and never cancels a run in progress. GitHub pauses scheduled workflows after 60 days without repository activity — use `workflow_dispatch` to run one manually.
+
+#### After a finding
+
+1. **Locate it**: use the reported path and line (history findings also carry a commit id) to inspect the context, for example with `git show --stat <commit>` or `git log -1 <commit>`. Do not copy or paste the matched value; determine whether it is still valid and whether other files reuse it.
+2. **Rotate first, clean up second**: a value that entered a commit must be treated as leaked. Revoke or rotate it at the issuer (token, password, access key), update the environment variable or secret store, and review the issuer's usage logs. For a private key, replace the key pair and remove the old public key from `authorized_keys`. Deleting the line alone does not recall clones or caches.
+3. **Clean the working tree/index**: remove the value or replace it with an environment reference, re-run `python scripts/scan_secrets.py --staged`, and commit once it is clean.
+4. **Clean history (with care)**: rewrite history (`git filter-repo`, BFG, …) only when it is genuinely necessary.
+
+!!! warning "Rewriting history is irreversible"
+    A rewrite changes every commit id after the affected commit, requires a force push, and invalidates other people's clones, forks, open pull requests, and tags; GitHub may also cache old commits through its API, in which case support must purge them. Take a full mirror backup and notify collaborators first. Rotating the credential always comes first — a history rewrite cannot reach copies that were already cloned, forked, cached, or written to CI logs.
+
+#### False positives and the allowlist
+
+The scanner treats obvious placeholders as false positives: it does not match when the value contains `your`, `example`, `placeholder`, `dummy`, `<...>`, or `${...}`, or when the assignment comes from an environment variable or configuration object (such as `os.environ` or `settings.`). Test-fixture directories such as `tests/` have a narrow, per-rule allowlist instead (see `ALLOWLIST` below).
+
+When an exception is still needed, add a `(path glob, rule set, reason)` entry to `ALLOWLIST` in `scripts/scan_secrets.py`:
+
+```python
+ALLOWLIST: tuple[tuple[str, frozenset[str], str], ...] = (
+    # ...
+    (
+        "docs/guide/example.md",          # as precise as possible; avoid *
+        frozenset({"generic-secret"}),    # relax only the rule that is a false positive
+        "documented placeholder example", # say why it is safe
+    ),
+)
+```
+
+Rules:
+
+- Rules not listed for that path are still enforced; never use `*` to disable every rule.
+- Relax only the one rule on a value you have **confirmed synthetic**, and keep the path as narrow as possible (a file or the smallest directory).
+- Prefer rewriting the example as an obvious placeholder or environment reference over allowlisting it; a broad allowlist makes a real credential easier to miss.
+- Never put a real value in an allowlist reason, and use synthetic credentials only in test fixtures.
+
+---
+
+### Release asset content scanning {#release-asset-scan}
+
+The last content gate before upload is the **release asset content scan**: after the build finishes and `latest.json` is generated, `scripts/release.py` calls `scripts/audit_release_assets.py`, which streams the **text members** of every zip / apk — and of an `.exe` that really is a ZIP (a PyInstaller one-file bundle) — line by line through `scripts/scan_secrets.py`'s rules. It reuses that scanner's rule set, placeholder heuristics and path allowlist, so the two cannot drift apart.
+
+A hit is tagged `secret-marker` and rendered as:
+
+```text
+PROBLEM [secret-marker] <asset>: <member>:<line>: <rule>
+```
+
+Only the asset, member, line and rule name are reported; the matched value is **never echoed**.
+
+Scan boundaries (deliberately cheap — do not read this as "everything inside the archive is inspected"):
+
+- A member larger than **2 MiB** is skipped as a whole (the same per-file cap as `scan_secrets`); text scanning is capped at **64 MiB** per asset and **256 MiB** per audit run, and anything beyond the budget is skipped.
+- A member with a NUL byte in the first 8 KiB is treated as binary and skipped; directories, symbolic links and nested `.zip` / `.exe` / `.apk` members are not scanned, and nested archives are **never extracted**.
+- Only `.zip` / `.apk` files that open as ZIP, plus `.exe` files that really are ZIP, are opened as archives; an `.exe` that is not a ZIP is simply not opened as one.
+- A member that cannot be read is reported as an `unreadable-archive` problem instead of being treated as clean; an archive with more than 200,000 members has its member scan stopped and reported as `archive-too-large`.
+- The `scan_secrets` path allowlist applies to member paths too (for example the narrow test-fixture exemptions), but those are archive-internal paths, not repository paths.
+
+This complements the pre-build working-tree scan rather than duplicating it:
+
+- Before the build, `release.py` runs `scan_release_secrets` — `scripts/scan_secrets.py` in working-tree mode — over **Git-tracked files only**; `--skip-secret-scan` disables that step (not recommended).
+- After the build and before upload, the asset content scan inspects the **bytes that will actually be uploaded**, so it can catch things a source scan cannot see, such as files generated during the build, pulled in from dependencies, or accidentally bundled into an archive. It has no skip flag.
+
+Failure exit codes:
+
+| Invocation | Exit code | Meaning |
+| --- | --- | --- |
+| `python scripts/audit_release_assets.py --dir <dir>` | `0` | No problems |
+| same | `1` | At least one `secret-marker` or other audit problem |
+| same | `2` | Bad arguments or an I/O error; the audit could not run |
+| `scripts/release.py` | `2` | An asset finding raises `ReleaseError`; the release stops before tagging and uploading |
+
+Limitations: it covers only the text members and raw-byte checks described above; it does not inspect the internals of binary members, does not extract nested archives, and performs no entropy or semantic analysis. It is not a substitute for protecting the build machine and release credentials.
+
+---
+
 ### Reporting vulnerabilities
 
 If you find a security vulnerability, please **do not** open a public issue first. Prefer the
@@ -284,6 +435,7 @@ Once a report is confirmed we will assess the impact and ship a fix as soon as p
 - [ ] Periodically delete `*.cookies`, `session.json`, and `platform_creds.json` you no longer need.
 - [ ] On suspected leakage, sign out all sessions on the site immediately and log in again.
 - [ ] Run `python scripts/security_audit.py` and confirm there are no high-priority findings.
+- [ ] Run `python scripts/scan_secrets.py --staged` before committing, and keep the CI `Secret scan` and the weekly history scan green.
 - [ ] Watch dependency security advisories and supplement CVE checks with tools like
       `pip-audit` when needed (for this repo's editable install, run it with
       `--skip-editable`).

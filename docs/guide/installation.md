@@ -27,6 +27,21 @@ pip install novel-downloader
 
 安装后如需 bash / zsh / fish / PowerShell 的 Tab 补全, 用 `novel-cli completion --shell <shell>` 生成脚本并加载, 具体写法见 [CLI 用法 § completion](./cli-examples.md#11-completion)。
 
+建议装完先跑一次自检:
+
+```bash
+novel-cli doctor
+```
+
+它检查 Python 版本、依赖、配置、输出/日志目录、缓存、站点插件、搜索器与 API 端口。只想修复「缺失目录 + 过期临时文件」时, 先预览再执行:
+
+```bash
+novel-cli doctor --fix --dry-run
+novel-cli doctor --fix
+```
+
+`--fix` 只创建配置中的输出/缓存/日志目录, 并删除这些目录下超过 7 天 (可用 `--fix-age-days` 调整) 的 `.tmp` / `.part` 文件; 不修改配置、导出文件或登录态, 也不会越过这三个根目录或跟随符号链接。完整说明见 [CLI 用法 § doctor](./cli-examples.md#10-doctor)。
+
 (2) 安装最新开发版 (GitHub)
 
 ```bash
@@ -46,6 +61,24 @@ pybabel compile -d src/novel_downloader/locales
 ```bash
 pip install .
 ```
+
+提交代码前请运行仓库自带的离线 secret 扫描 (只读, 不联网):
+
+```bash
+# 扫描所有 Git 跟踪的文件
+python scripts/scan_secrets.py
+
+# 只扫描已暂存的改动, 适合 pre-commit
+python scripts/scan_secrets.py --staged
+
+# 只读扫描历史提交中新增的行 (可按版本范围/提交数限制)
+python scripts/scan_secrets.py --history --since v1.20.0 --max-commits 200
+
+# 机器可读报告
+python scripts/scan_secrets.py --json
+```
+
+扫描基于 `git ls-files` (或 `--staged` / `--history` 的对应范围), 命中只输出 `path:line:rule`, **绝不回显命中的值**, 因此 CI 日志不会变成泄露源。退出码 `0` 表示干净, `1` 表示有命中或扫描无法运行。CI 的 `Secret scan` job 在每次 PR 上运行同一条命令, 真实凭据会在评审/发布前被拦下; 另有每周一次的 `Security scan` 工作流, 对工作树与**完整提交历史**各跑一次, 并把 JSON 报告作为 artifact 上传。发现命中时请轮换凭据, 而不是只删掉那一行——值一旦提交就应视为已泄露。
 
 ### Windows 桌面安装版 (Inno Setup)
 
