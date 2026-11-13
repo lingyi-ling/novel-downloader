@@ -63,12 +63,66 @@ def _make_repo(tmp_path: Path, files: dict[str, str]) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     _git(root, "init", "-q")
+    # Keep blob content byte-identical on Windows so line numbers are exact.
+    _git(root, "config", "core.autocrlf", "false")
     for name, content in files.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     _git(root, "add", "-A")
     return root
+
+
+def _commit(root: Path, message: str) -> str:
+    """Commit the index with an explicit identity; return the new commit hash."""
+    _git(
+        root,
+        "-c",
+        "user.name=Scan Test",
+        "-c",
+        "user.email=scan@example.com",
+        "commit",
+        "-q",
+        "-m",
+        message,
+    )
+    return _git_output(root, "rev-parse", "HEAD").strip()
+
+
+def _git_output(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def _make_history_repo(
+    tmp_path: Path, revisions: list[dict[str, str | None]]
+) -> tuple[Path, list[str]]:
+    """Build a repository with one commit per revision.
+
+    A ``None`` value deletes that path, which lets a test prove the scanner
+    sees a credential whose file no longer exists in the working tree.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "core.autocrlf", "false")
+    commits: list[str] = []
+    for index, files in enumerate(revisions):
+        for name, content in files.items():
+            path = root / name
+            if content is None:
+                path.unlink()
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        _git(root, "add", "-A")
+        commits.append(_commit(root, f"revision {index}"))
+    return root, commits
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +252,221 @@ def test_oversized_files_are_skipped(tmp_path: Path) -> None:
     root = _make_repo(tmp_path, {"big.py": filler + f'value = "{FAKE_GITHUB}"\n'})
 
     assert scanner.scan_repository(root) == []
+
+
+# ---------------------------------------------------------------------------
+# History scan
+# ---------------------------------------------------------------------------
+
+
+def test_history_finds_credential_removed_from_worktree(tmp_path: Path) -> None:
+    root, commits = _make_history_repo(
+        tmp_path,
+        [
+            {"app.py": "print('hello')\n"},
+            {"config.py": "# comment\n" + f'password = "{FAKE_PASSWORD}"\n'},
+            {"config.py": "print('clean')\n"},
+        ],
+    )
+
+    report = scanner.scan_history(root)
+
+    assert report.findings == [
+        scanner.HistoryFinding(commits[1], "config.py", 2, "generic-secret")
+    ]
+    # The current tree is clean, so only the history pass can see this.
+    assert scanner.scan_repository(root) == []
+
+
+def test_history_finds_credential_in_deleted_file(tmp_path: Path) -> None:
+    root, commits = _make_history_repo(
+        tmp_path,
+        [
+            {"app.py": "print('hello')\n"},
+            {"leaked.py": f'value = "{FAKE_GITHUB}"\n'},
+            {"leaked.py": None},
+        ],
+    )
+
+    report = scanner.scan_history(root)
+
+    assert report.findings == [
+        scanner.HistoryFinding(commits[1], "leaked.py", 1, "github-token")
+    ]
+
+
+def test_history_since_excludes_older_commits(tmp_path: Path) -> None:
+    root, commits = _make_history_repo(
+        tmp_path,
+        [
+            {"a.py": f'password = "{FAKE_PASSWORD}"\n'},
+            {"b.py": f'value = "{FAKE_GITHUB}"\n'},
+        ],
+    )
+
+    report = scanner.scan_history(root, since=commits[0])
+
+    assert [item.path for item in report.findings] == ["b.py"]
+    assert report.commits_scanned == 1
+
+
+def test_history_max_commits_bounds_the_walk(tmp_path: Path) -> None:
+    root, commits = _make_history_repo(
+        tmp_path,
+        [
+            {"a.py": f'password = "{FAKE_PASSWORD}"\n'},
+            {"b.py": f'value = "{FAKE_GITHUB}"\n'},
+        ],
+    )
+
+    report = scanner.scan_history(root, max_commits=1)
+
+    assert report.commits_scanned == 1
+    assert report.findings == [
+        scanner.HistoryFinding(commits[1], "b.py", 1, "github-token")
+    ]
+
+
+def test_history_shares_the_path_allowlist(tmp_path: Path) -> None:
+    root, commits = _make_history_repo(
+        tmp_path,
+        [
+            {
+                "tests/fixtures/config.py": (
+                    f'password = "{FAKE_PASSWORD}"\n' + f'key = "{FAKE_AWS}"\n'
+                )
+            }
+        ],
+    )
+
+    report = scanner.scan_history(root)
+
+    # The generic heuristic is relaxed for tests/, provider tokens are not.
+    assert report.findings == [
+        scanner.HistoryFinding(
+            commits[0], "tests/fixtures/config.py", 2, "aws-access-key"
+        )
+    ]
+
+
+def test_history_detects_sensitive_file_names(tmp_path: Path) -> None:
+    # A binary keystore has no ``+++`` header (binary diffs carry no patch), so
+    # the filename in ``diff --git`` is the only signal.
+    root, commits = _make_history_repo(
+        tmp_path,
+        [{"android/release.jks": "\x00binary"}],
+    )
+
+    report = scanner.scan_history(root)
+
+    assert report.findings == [
+        scanner.HistoryFinding(commits[0], "android/release.jks", 0, "sensitive-file")
+    ]
+
+
+def test_history_skips_binary_blobs(tmp_path: Path) -> None:
+    root, _commits = _make_history_repo(
+        tmp_path,
+        [{"assets/logo.png": "\x00" + FAKE_GITHUB}],
+    )
+
+    assert scanner.scan_history(root).findings == []
+
+
+def test_history_skips_oversized_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _commits = _make_history_repo(
+        tmp_path,
+        [
+            {"app.py": "print('hello')\n"},
+            {"config.py": f'password = "{FAKE_PASSWORD}"\n'},
+        ],
+    )
+    monkeypatch.setattr(scanner, "MAX_COMMIT_PATCH_BYTES", 1)
+
+    report = scanner.scan_history(root)
+
+    assert report.findings == []
+    assert report.skipped_commits == report.commits_scanned == 2
+
+
+def test_history_stops_at_total_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _commits = _make_history_repo(
+        tmp_path,
+        [{"config.py": f'password = "{FAKE_PASSWORD}"\n'}],
+    )
+    monkeypatch.setattr(scanner, "MAX_TOTAL_PATCH_BYTES", 1)
+
+    report = scanner.scan_history(root)
+
+    assert report.truncated is True
+    assert report.commits_scanned == 1
+
+
+def test_history_cli_reports_commit_without_leaking_value(
+    tmp_path: Path, capsys: Any
+) -> None:
+    root, commits = _make_history_repo(
+        tmp_path,
+        [{"config.py": f'value = "{FAKE_GITHUB}"\n'}],
+    )
+
+    code = scanner.main(["--root", str(root), "--history", "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 1
+    assert payload["count"] == 1
+    assert payload["commits_scanned"] == 1
+    assert payload["findings"] == [
+        {
+            "commit": commits[0],
+            "path": "config.py",
+            "line": 1,
+            "rule": "github-token",
+        }
+    ]
+    assert FAKE_GITHUB not in captured.out
+    assert FAKE_GITHUB not in captured.err
+
+
+def test_history_cli_text_output_uses_short_hash(tmp_path: Path, capsys: Any) -> None:
+    root, commits = _make_history_repo(
+        tmp_path,
+        [{"config.py": f'password = "{FAKE_PASSWORD}"\n'}],
+    )
+
+    code = scanner.main(["--root", str(root), "--history"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert f"{commits[0][:12]}:config.py:1: generic-secret" in captured.out
+    assert FAKE_PASSWORD not in captured.out
+
+
+def test_history_cli_rejects_conflicting_flags(tmp_path: Path, capsys: Any) -> None:
+    root = _make_repo(tmp_path, {"app.py": "print('hello')\n"})
+
+    staged = scanner.main(["--root", str(root), "--history", "--staged"])
+    since = scanner.main(["--root", str(root), "--since", "HEAD~1"])
+
+    captured = capsys.readouterr()
+    assert staged == 1
+    assert since == 1
+    assert "--history" in captured.err
+
+
+def test_history_cli_requires_at_least_one_commit(tmp_path: Path, capsys: Any) -> None:
+    root = _make_repo(tmp_path, {"app.py": "print('hello')\n"})
+
+    code = scanner.main(["--root", str(root), "--history", "--max-commits", "0"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "--max-commits" in captured.err
 
 
 # ---------------------------------------------------------------------------

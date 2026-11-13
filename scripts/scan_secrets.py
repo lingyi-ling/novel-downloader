@@ -43,11 +43,24 @@ and local credential files are out of scope.  Binary files, files without a
 known text extension and files above :data:`MAX_FILE_BYTES` are skipped;
 keystore file names are still reported because the name alone is the finding.
 
+History
+-------
+``--history`` walks ``git log -p`` and scans only the lines each commit added,
+so a credential that has since been deleted from the working tree is still
+reported.  The same rules and path allowlist apply.  The scan is read-only: it
+never checks anything out and never rewrites history.  A commit whose patch is
+larger than :data:`MAX_COMMIT_PATCH_BYTES` is skipped as a whole, the run stops
+after :data:`MAX_TOTAL_PATCH_BYTES`, and ``--max-commits`` bounds the walk on a
+large repository.  Merges contribute no patch by default and are therefore
+harmless to include.
+
 Usage::
 
     python scripts/scan_secrets.py
     python scripts/scan_secrets.py --json
     python scripts/scan_secrets.py --staged
+    python scripts/scan_secrets.py --history
+    python scripts/scan_secrets.py --history --since v1.20.0 --max-commits 200
 
 Exit codes
 ----------
@@ -66,6 +79,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,6 +94,13 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 
 #: Bytes inspected for a NUL byte before a file is treated as binary.
 BINARY_PROBE_BYTES = 8192
+
+#: Patch size above which a single historical commit is skipped as a whole.
+#: The scan must stay cheap on repositories that once checked in a large blob.
+MAX_COMMIT_PATCH_BYTES = 8 * 1024 * 1024
+
+#: Total patch bytes read before a history scan stops early.
+MAX_TOTAL_PATCH_BYTES = 256 * 1024 * 1024
 
 #: Extensions that are expected to hold text.  The list is explicit rather
 #: than extension-less so a stray ``.apk`` inside the tree is never decoded.
@@ -333,6 +354,34 @@ class Finding:
         return {"path": self.path, "line": self.line, "rule": self.rule}
 
 
+@dataclass(frozen=True)
+class HistoryFinding:
+    """A hit in a historical commit; the commit is part of the location."""
+
+    commit: str
+    path: str
+    line: int
+    rule: str
+
+    def as_dict(self) -> dict[str, str | int]:
+        return {
+            "commit": self.commit,
+            "path": self.path,
+            "line": self.line,
+            "rule": self.rule,
+        }
+
+
+@dataclass
+class HistoryReport:
+    """Findings plus what the walk had to skip."""
+
+    findings: list[HistoryFinding]
+    commits_scanned: int
+    skipped_commits: int
+    truncated: bool
+
+
 def _run_git(root: Path, *args: str) -> bytes:
     result = subprocess.run(
         ["git", "-C", str(root), *args],
@@ -493,6 +542,249 @@ def scan_repository(root: Path, *, staged: bool = False) -> list[Finding]:
     return sorted(findings, key=lambda item: (item.path, item.line, item.rule))
 
 
+_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+#: Format marker: a NUL byte cannot appear in a commit message or a text patch,
+#: so it delimits commit records without buffering the whole log.
+_COMMIT_MARKER = b"\x00"
+
+
+def _decode_git_path(raw: str) -> str | None:
+    """Turn a diff header path into a repository-relative path.
+
+    ``/dev/null`` (a whole-file deletion) maps to ``None``.  Git quotes paths
+    that contain special characters with C escapes; those are decoded back to
+    text, with octal escapes carrying UTF-8 bytes.
+    """
+    raw = raw.strip()
+    if not raw or raw == "/dev/null":
+        return None
+    if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+        inner = raw[1:-1]
+        try:
+            unquoted = inner.encode("ascii").decode("unicode_escape")
+            raw = unquoted.encode("latin-1").decode("utf-8", "replace")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            raw = inner
+    if raw.startswith(("a/", "b/")):
+        return raw[2:]
+    return raw
+
+
+def _diff_b_path(line: str) -> str | None:
+    """Best-effort new-side path from a ``diff --git`` header.
+
+    The header is unambiguous only for paths without spaces; this is used for
+    the filename rule (binary files have no ``+++`` header), so a miss is a
+    missed keystore name, never a wrong line hit.
+    """
+    _, marker, tail = line.rpartition(" b/")
+    if not marker or not tail:
+        return None
+    return _decode_git_path("b/" + tail)
+
+
+class _HistoryScanner:
+    """Incremental parser for ``git log -p`` output.
+
+    Lines are fed one at a time so an oversized commit can be abandoned
+    without buffering its patch.  Only added lines (``+``) are scanned; the
+    diff line numbers come from the hunk header of the new side.
+    """
+
+    def __init__(self) -> None:
+        self.findings: list[HistoryFinding] = []
+        self.commits_scanned = 0
+        self.skipped_commits = 0
+        self.truncated = False
+        self._total_bytes = 0
+        self._commit: str | None = None
+        self._commit_bytes = 0
+        self._skipped = False
+        self._path: str | None = None
+        self._scan_path = False
+        self._line = 0
+        self._in_hunk = False
+        self._sensitive_paths: set[str] = set()
+
+    def feed(self, raw: bytes) -> bool:
+        """Consume one output line; return ``False`` once the total limit hits."""
+        if raw.startswith(_COMMIT_MARKER):
+            self._begin(raw[1:])
+            return True
+        if self._commit is None:
+            return True
+        self._total_bytes += len(raw)
+        if self._total_bytes > MAX_TOTAL_PATCH_BYTES:
+            self.truncated = True
+            return False
+        self._commit_bytes += len(raw)
+        if self._skipped:
+            return True
+        if self._commit_bytes > MAX_COMMIT_PATCH_BYTES:
+            self._skipped = True
+            self.skipped_commits += 1
+            self._path = None
+            self._scan_path = False
+            self._in_hunk = False
+            return True
+        self._feed_line(raw)
+        return True
+
+    def _begin(self, raw: bytes) -> None:
+        commit = raw.decode("ascii", "replace").strip()
+        if not commit:
+            return
+        self.commits_scanned += 1
+        self._commit = commit
+        self._commit_bytes = 0
+        self._skipped = False
+        self._path = None
+        self._scan_path = False
+        self._line = 0
+        self._in_hunk = False
+        self._sensitive_paths = set()
+
+    def _feed_line(self, raw: bytes) -> None:
+        text = raw.decode("utf-8", "replace").rstrip("\r\n")
+        # ``diff --git`` is the only structural line that is never confused
+        # with hunk content, because every content line is prefixed.
+        if text.startswith("diff --git "):
+            self._path = None
+            self._scan_path = False
+            self._in_hunk = False
+            self._note_sensitive_path(_diff_b_path(text))
+            return
+        if self._in_hunk:
+            self._feed_hunk_line(text)
+            return
+        if text.startswith("+++ "):
+            self._path = _decode_git_path(text[4:])
+            self._scan_path = bool(
+                self._path is not None and _is_text_candidate(self._path)
+            )
+            self._note_sensitive_path(self._path)
+            return
+        if text.startswith("@@"):
+            match = _HUNK_HEADER_RE.match(text)
+            if match is not None and self._path is not None:
+                self._line = int(match.group(1))
+                self._in_hunk = True
+
+    def _feed_hunk_line(self, text: str) -> None:
+        if text.startswith("\\"):
+            # "\ No newline at end of file" belongs to neither side.
+            return
+        if text.startswith("-"):
+            return
+        if not text.startswith("+"):
+            # Context line; -U0 normally emits none, but be correct if set.
+            self._line += 1
+            return
+        content = text[1:]
+        path = self._path
+        commit = self._commit
+        if commit is not None and path is not None and self._scan_path:
+            for rule in RULES:
+                if _is_allowlisted(path, rule.name):
+                    continue
+                if _matches(rule, content):
+                    self.findings.append(
+                        HistoryFinding(commit, path, self._line, rule.name)
+                    )
+        self._line += 1
+
+    def _note_sensitive_path(self, path: str | None) -> None:
+        commit = self._commit
+        if commit is None or path is None or path in self._sensitive_paths:
+            return
+        if _filename_findings(path):
+            self._sensitive_paths.add(path)
+            self.findings.append(HistoryFinding(commit, path, 0, "sensitive-file"))
+
+
+def scan_history(
+    root: Path,
+    *,
+    since: str | None = None,
+    max_commits: int | None = None,
+) -> HistoryReport:
+    """Scan the added lines of every commit reachable from ``HEAD``.
+
+    ``since`` restricts the walk to ``REV..HEAD``; ``max_commits`` caps how
+    many of the newest commits are read.  Nothing is checked out or rewritten.
+    """
+    scanner = _HistoryScanner()
+    command = [
+        "git",
+        "-C",
+        str(root),
+        "-c",
+        "core.quotepath=false",
+        "log",
+        "-p",
+        "-U0",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--format=%x00%H",
+    ]
+    if max_commits is not None:
+        command.append(f"--max-count={max_commits}")
+    if since:
+        command.append(f"{since}..HEAD")
+
+    with tempfile.TemporaryFile() as errors:
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=errors,
+        )
+        assert proc.stdout is not None
+        try:
+            for raw in proc.stdout:
+                if not scanner.feed(raw):
+                    break
+        finally:
+            proc.stdout.close()
+            if proc.poll() is None:
+                proc.kill()
+            returncode = proc.wait()
+        errors.seek(0)
+        detail = errors.read().decode("utf-8", "replace").strip()
+
+    if returncode != 0 and not scanner.truncated:
+        raise RuntimeError(detail or f"git log failed with exit code {returncode}")
+
+    return HistoryReport(
+        findings=scanner.findings,
+        commits_scanned=scanner.commits_scanned,
+        skipped_commits=scanner.skipped_commits,
+        truncated=scanner.truncated,
+    )
+
+
+def _render_history(report: HistoryReport) -> str:
+    lines = [
+        f"{item.commit[:12]}:{item.path}:{item.line}: {item.rule}"
+        for item in report.findings
+    ]
+    if report.findings:
+        commits = len({item.commit for item in report.findings})
+        summary = (
+            f"scan-secrets: {len(report.findings)} finding(s) in {commits} commit(s)"
+        )
+    else:
+        summary = "scan-secrets: no findings in history"
+    summary += f" ({report.commits_scanned} commit(s) scanned)"
+    if report.skipped_commits:
+        summary += f", {report.skipped_commits} skipped (patch too large)"
+    if report.truncated:
+        summary += ", stopped at size limit"
+    lines.append(summary)
+    return "\n".join(lines)
+
+
 def _render_text(findings: list[Finding]) -> str:
     lines = [f"{item.path}:{item.line}: {item.rule}" for item in findings]
     if findings:
@@ -521,12 +813,69 @@ def main(argv: list[str] | None = None) -> int:
         help="scan only added/copied/modified/renamed index entries",
     )
     parser.add_argument(
+        "--history",
+        action="store_true",
+        help="read-only scan of lines added by past commits (git log -p)",
+    )
+    parser.add_argument(
+        "--since",
+        metavar="REV",
+        help="with --history: scan only commits after REV (REV..HEAD)",
+    )
+    parser.add_argument(
+        "--max-commits",
+        type=int,
+        metavar="N",
+        help="with --history: scan at most the N newest commits",
+    )
+    parser.add_argument(
         "--root",
         type=Path,
         default=DEFAULT_ROOT,
         help="repository root (defaults to the repository containing this script)",
     )
     args = parser.parse_args(argv)
+
+    if args.staged and args.history:
+        print(
+            "scan-secrets: error: --staged and --history are mutually exclusive",
+            file=sys.stderr,
+        )
+        return EXIT_FINDINGS
+    if not args.history and (args.since is not None or args.max_commits is not None):
+        print(
+            "scan-secrets: error: --since and --max-commits require --history",
+            file=sys.stderr,
+        )
+        return EXIT_FINDINGS
+    if args.max_commits is not None and args.max_commits < 1:
+        print(
+            "scan-secrets: error: --max-commits must be at least 1",
+            file=sys.stderr,
+        )
+        return EXIT_FINDINGS
+
+    if args.history:
+        try:
+            report = scan_history(
+                args.root, since=args.since, max_commits=args.max_commits
+            )
+        except (OSError, RuntimeError) as exc:
+            print(f"scan-secrets: error: {exc}", file=sys.stderr)
+            return EXIT_FINDINGS
+
+        if args.json:
+            payload = {
+                "count": len(report.findings),
+                "findings": [item.as_dict() for item in report.findings],
+                "commits_scanned": report.commits_scanned,
+                "skipped_commits": report.skipped_commits,
+                "truncated": report.truncated,
+            }
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(_render_history(report))
+        return EXIT_FINDINGS if report.findings else EXIT_OK
 
     try:
         findings = scan_repository(args.root, staged=args.staged)
