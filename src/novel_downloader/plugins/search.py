@@ -694,14 +694,31 @@ def _plain_text(value: object) -> str:
     text = str(value)
     if not text:
         return ""
+    # Fast path: ``str.isprintable`` is true exactly when the string contains
+    # no Cc/Cf/Cs (and no other separator than the ASCII space).  Such a
+    # string has no ANSI escape and no character the loop below would drop or
+    # rewrite, so ``strip()`` alone reproduces the slow path.  It also covers
+    # the common case -- CJK titles, authors and dates -- without allocating
+    # the per-character list, which used to dominate this function at scale.
+    if text.isprintable():
+        return text.strip()
     text = _ANSI_ESCAPE_RE.sub("", text)
     chars: list[str] = []
     for char in text:
-        if unicodedata.category(char) in _CONTROL_CATEGORIES:
-            if char in "\t\n\r\f\v":
-                chars.append(" ")
+        # ``isprintable`` is the cheap C-level pre-check; only characters it
+        # rejects need the (much slower) category lookup.  The branches below
+        # are the exact complement of the old ``category in _CONTROL_CATEGORIES``
+        # test: printable characters and non-control separators/private-use
+        # characters are kept, tabs/newlines become one space, and every other
+        # control/format/surrogate character is dropped.
+        if char.isprintable():
+            chars.append(char)
+        elif char in "\t\n\r\f\v":
+            chars.append(" ")
+        elif unicodedata.category(char) in _CONTROL_CATEGORIES:
             continue
-        chars.append(char)
+        else:
+            chars.append(char)
     return "".join(chars).strip()
 
 
