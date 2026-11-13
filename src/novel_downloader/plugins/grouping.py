@@ -332,6 +332,18 @@ def group_results(
 
     groups: list[tuple[int, ResultGroup]] = []
     for cluster in _merge_decorated(by_title):
+        if len(cluster.entries) == 1:
+            # A one-entry group has nothing to compare: its only entry is the
+            # primary and ``sources`` is the same one-element sequence.  Skip
+            # ``_order_key`` here -- it would compute ``rank_score`` and
+            # ``match_tier`` for a value that cannot change.  At large result
+            # counts most titles are unique, so this avoids the bulk of the
+            # scoring work; groups with two or more sources are unchanged.
+            primary_pos, primary = cluster.entries[0]
+            groups.append(
+                (primary_pos, ResultGroup(primary=primary, sources=[primary]))
+            )
+            continue
         # ``_order_key`` keys are unique per entry (the input position is the
         # last component), so a plain sort is fully deterministic.
         scored = sorted(cluster.entries, key=_order_key)

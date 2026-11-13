@@ -478,8 +478,17 @@ def parse_update_date(value: object, *, now: datetime | None = None) -> datetime
 def _coverage(needle: str, haystack: str) -> float:
     if not needle:
         return 0.0
-    haystack_chars = set(haystack)
-    hits = sum(1 for ch in needle if ch in haystack_chars)
+    # Building ``set(haystack)`` allocates a new set on every call, and this
+    # helper runs several times per result row during ranking/grouping/
+    # annotation.  Membership in a short haystack is cheaper without the set;
+    # the result is identical because both forms test "does this character
+    # occur anywhere in haystack".  A short haystack (a pen name) keeps the
+    # set path, where its O(1) membership beats repeated scanning.
+    if len(haystack) <= 8:
+        haystack_chars = set(haystack)
+        hits = sum(1 for ch in needle if ch in haystack_chars)
+    else:
+        hits = sum(1 for ch in needle if ch in haystack)
     return hits / len(needle)
 
 
