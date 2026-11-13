@@ -15,6 +15,17 @@ The audit is offline and read-only.  It checks a staging directory (the
     credentials, source maps or debug symbols.  Python files are allowed (a
     PyInstaller bundle may collect a few) and are only counted for review.
 
+``archive text members``
+    Text members inside every readable ZIP/APK -- and inside an ``.exe`` that
+    is really a ZIP (PyInstaller one-file builds are) -- are streamed line by
+    line through :mod:`scripts.scan_secrets`, so the rules and path allowlist
+    cannot drift from the repository scanner.  A hit is reported as
+    ``asset: member:line: rule`` and never includes the matched value.
+    Binary members (NUL in the first probe), members above
+    :data:`MAX_MEMBER_SCAN_BYTES`, nested archives (never extracted) and
+    everything beyond the per-asset/total byte budgets are skipped.  An
+    ``.exe`` that is not a ZIP is simply not opened as an archive.
+
 ``raw bytes``
     ZIP/EXE/APK payloads are streamed in 1 MiB chunks and scanned for private
     key headers, deploy passwords and token-shaped strings.  Matched values
@@ -34,10 +45,12 @@ Exit codes: ``0`` clean, ``1`` problems found, ``2`` usage/IO error.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import stat
 import sys
+import types
 import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -55,9 +68,46 @@ MAX_ARCHIVE_MEMBERS = 200_000
 RAW_CHUNK_SIZE = 1024 * 1024
 RAW_OVERLAP = 96
 
+#: Member-content scanning is bounded three ways: a single member, one asset
+#: and the whole audit run.  The per-member cap matches ``scan_secrets`` so a
+#: member is treated exactly like a tracked file; the asset and total caps keep
+#: a bundle full of large text files from turning the audit into a slow scan.
+MAX_MEMBER_SCAN_BYTES = 2 * 1024 * 1024
+MAX_ASSET_SCAN_BYTES = 64 * 1024 * 1024
+MAX_TOTAL_SCAN_BYTES = 256 * 1024 * 1024
+
 ALLOWED_SUFFIXES = frozenset({".zip", ".exe", ".apk", ".txt", ".json"})
 ARCHIVE_SUFFIXES = frozenset({".zip", ".apk"})
 RAW_SCAN_SUFFIXES = frozenset({".zip", ".exe", ".apk"})
+#: Nested archives are never extracted: a release asset has no reason to ship
+#: one, and recursing would let a small outer file hide an unbounded payload.
+NESTED_ARCHIVE_SUFFIXES = frozenset({".zip", ".exe", ".apk"})
+
+
+def _load_secret_scanner() -> types.ModuleType:
+    """Load ``scan_secrets.py`` from this script's directory.
+
+    The auditor is itself imported by path (from ``release.py`` and the tests),
+    so a plain ``import scan_secrets`` would depend on the caller's
+    ``sys.path``.  Importing the sibling file explicitly keeps the rule set and
+    the path allowlist in exactly one place.
+    """
+    path = Path(__file__).resolve().with_name("scan_secrets.py")
+    spec = importlib.util.spec_from_file_location("_audit_secret_scanner", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(spec.name, None)
+        raise
+    return module
+
+
+_SECRET_SCANNER = _load_secret_scanner()
+BINARY_PROBE_BYTES = _SECRET_SCANNER.BINARY_PROBE_BYTES
 
 #: ``<version>`` as produced by ``novel_downloader.__version__``.
 _VERSION = r"\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?"
@@ -156,6 +206,35 @@ class AuditResult:
     @property
     def ok(self) -> bool:
         return not self.problems
+
+
+class _ScanBudget:
+    """Byte budget for member-content scanning.
+
+    ``asset_left`` is reset for every asset; ``total_left`` spans the whole
+    audit run.  Both are mutable on purpose: a shared instance threads the
+    total limit through :func:`audit_directory` / :func:`audit_files`.
+    """
+
+    __slots__ = ("asset_left", "total_left")
+
+    def __init__(self) -> None:
+        self.asset_left = MAX_ASSET_SCAN_BYTES
+        self.total_left = MAX_TOTAL_SCAN_BYTES
+
+    def start_asset(self) -> None:
+        self.asset_left = MAX_ASSET_SCAN_BYTES
+
+    def take(self, amount: int) -> int:
+        """Consume up to *amount* bytes; return how many may be inspected."""
+        allowed = min(amount, self.asset_left, self.total_left)
+        self.asset_left -= allowed
+        self.total_left -= allowed
+        return allowed
+
+    @property
+    def exhausted(self) -> bool:
+        return self.asset_left <= 0 or self.total_left <= 0
 
 
 def validate_asset_name(name: str) -> bool:
@@ -307,8 +386,128 @@ def _safe_pem_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> bool:
     return not _pem_contains_private_key(archive, member)
 
 
-def _scan_archive(path: Path, asset: str) -> tuple[list[Problem], int]:
-    """List archive members and check every name; also count ``.py`` files."""
+def _scan_member_line(
+    raw: bytes, member_path: str, asset: str, line_no: int
+) -> list[Problem]:
+    """Scan one member line with the repository scanner's exact rule set."""
+    text = raw.decode("utf-8", "replace").rstrip("\r")
+    # ``scan_text`` applies ``RULES``, the placeholder heuristics and the path
+    # allowlist.  Its own line number is always 1 here because this is one line.
+    return [
+        Problem(asset, KIND_SECRET_MARKER, f"{member_path}:{line_no}: {finding.rule}")
+        for finding in _SECRET_SCANNER.scan_text(member_path, text + "\n")
+    ]
+
+
+def _drain_member_lines(
+    buffer: bytearray,
+    line_no: int,
+    member_path: str,
+    asset: str,
+    problems: list[Problem],
+    *,
+    final: bool,
+) -> int:
+    """Emit every complete line in *buffer*; optionally flush the remainder."""
+    while True:
+        newline = buffer.find(b"\n")
+        if newline < 0:
+            break
+        raw = bytes(buffer[:newline])
+        del buffer[: newline + 1]
+        line_no += 1
+        problems.extend(_scan_member_line(raw, member_path, asset, line_no))
+    if final and buffer:
+        raw = bytes(buffer)
+        buffer.clear()
+        line_no += 1
+        problems.extend(_scan_member_line(raw, member_path, asset, line_no))
+    return line_no
+
+
+def _scan_member_stream(
+    handle: Any,
+    member_path: str,
+    asset: str,
+    budget: _ScanBudget,
+) -> list[Problem]:
+    """Stream a member as text and scan it line by line.
+
+    The first :data:`BINARY_PROBE_BYTES` decide text versus binary, exactly as
+    ``scan_secrets`` does for tracked files.  Reading stays incremental and the
+    shared budget stops a member whose declared size lies.
+    """
+    problems: list[Problem] = []
+    probe = handle.read(BINARY_PROBE_BYTES)
+    if not probe:
+        return problems
+    probe = probe[: budget.take(len(probe))]
+    if b"\x00" in probe:
+        return problems
+
+    buffer = bytearray(probe)
+    line_no = _drain_member_lines(buffer, 0, member_path, asset, problems, final=False)
+    while not budget.exhausted:
+        chunk = handle.read(RAW_CHUNK_SIZE)
+        if not chunk:
+            break
+        allowed = budget.take(len(chunk))
+        buffer.extend(chunk[:allowed])
+        line_no = _drain_member_lines(
+            buffer, line_no, member_path, asset, problems, final=False
+        )
+        if allowed < len(chunk):
+            break
+    _drain_member_lines(buffer, line_no, member_path, asset, problems, final=True)
+    return problems
+
+
+def _scan_member_secrets(
+    archive: zipfile.ZipFile,
+    member: zipfile.ZipInfo,
+    asset: str,
+    budget: _ScanBudget,
+) -> list[Problem]:
+    """Scan one archive member's text content, or skip it with a reason."""
+    member_path = member.orig_filename
+    if member.is_dir() or stat.S_ISLNK(member.external_attr >> 16):
+        return []
+    suffix = PurePosixPath(member_path.replace("\\", "/")).suffix.lower()
+    if suffix in NESTED_ARCHIVE_SUFFIXES:
+        # Never extract a nested archive: one level is the whole contract.
+        return []
+    if member.file_size == 0 or member.file_size > MAX_MEMBER_SCAN_BYTES:
+        return []
+    if budget.exhausted:
+        return []
+    try:
+        with archive.open(member) as handle:
+            return _scan_member_stream(handle, member_path, asset, budget)
+    except (OSError, RuntimeError, EOFError, ValueError, zipfile.BadZipFile) as error:
+        # A member that cannot be read is reported, not silently treated as
+        # clean: otherwise a corrupt entry would hide its content entirely.
+        return [
+            Problem(
+                asset,
+                KIND_UNREADABLE_ARCHIVE,
+                f"{member_path!r}: cannot read member: {type(error).__name__}",
+            )
+        ]
+
+
+def _scan_archive(
+    path: Path,
+    asset: str,
+    budget: _ScanBudget,
+    *,
+    tolerate_not_zip: bool = False,
+) -> tuple[list[Problem], int]:
+    """List archive members, check every name and scan text content.
+
+    ``tolerate_not_zip`` is used for ``.exe``: a PyInstaller one-file build is
+    a ZIP appended to a native stub and opens fine, while an installer that is
+    not a ZIP at all is not an archive error -- it is simply skipped.
+    """
     problems: list[Problem] = []
     python_files = 0
     try:
@@ -345,6 +544,8 @@ def _scan_archive(path: Path, asset: str) -> tuple[list[Problem], int]:
                             f"{member.orig_filename!r}: symbolic link member",
                         )
                     )
+                    continue
+                problems.extend(_scan_member_secrets(archive, member, asset, budget))
     except (
         OSError,
         RuntimeError,
@@ -353,6 +554,8 @@ def _scan_archive(path: Path, asset: str) -> tuple[list[Problem], int]:
         zipfile.BadZipFile,
         zipfile.LargeZipFile,
     ) as error:
+        if tolerate_not_zip and isinstance(error, zipfile.BadZipFile):
+            return problems, python_files
         problems.append(
             Problem(
                 asset,
@@ -388,17 +591,25 @@ def _scan_raw_bytes(path: Path, asset: str) -> list[Problem]:
     return problems
 
 
-def _audit_file(path: Path, asset: str) -> tuple[list[Problem], int]:
+def _audit_file(
+    path: Path, asset: str, budget: _ScanBudget
+) -> tuple[list[Problem], int]:
     problems: list[Problem] = []
     name_problem = _asset_name_problem(asset)
     if name_problem is not None:
         problems.append(name_problem)
     problems.extend(_size_problems(path, asset))
 
+    budget.start_asset()
     python_files = 0
     suffix = path.suffix.lower()
     if suffix in ARCHIVE_SUFFIXES:
-        archive_problems, python_files = _scan_archive(path, asset)
+        archive_problems, python_files = _scan_archive(path, asset, budget)
+        problems.extend(archive_problems)
+    elif suffix == ".exe":
+        archive_problems, python_files = _scan_archive(
+            path, asset, budget, tolerate_not_zip=True
+        )
         problems.extend(archive_problems)
     if suffix in RAW_SCAN_SUFFIXES:
         problems.extend(_scan_raw_bytes(path, asset))
@@ -415,6 +626,7 @@ def audit_directory(root: Path, expected_names: set[str] | None = None) -> Audit
     scanned = 0
     python_files = 0
     actual_names: set[str] = set()
+    budget = _ScanBudget()
 
     for entry in sorted(resolved_root.iterdir(), key=lambda item: item.name):
         resolved = _contained(entry, resolved_root)
@@ -434,7 +646,7 @@ def audit_directory(root: Path, expected_names: set[str] | None = None) -> Audit
             continue
         scanned += 1
         actual_names.add(entry.name)
-        file_problems, file_python = _audit_file(resolved, entry.name)
+        file_problems, file_python = _audit_file(resolved, entry.name, budget)
         problems.extend(file_problems)
         python_files += file_python
 
@@ -472,6 +684,7 @@ def audit_files(assets: Sequence[tuple[str, Path]]) -> AuditResult:
     scanned = 0
     python_files = 0
     seen: set[str] = set()
+    budget = _ScanBudget()
 
     for name, path in assets:
         if name in seen:
@@ -487,7 +700,7 @@ def audit_files(assets: Sequence[tuple[str, Path]]) -> AuditResult:
             )
             continue
         scanned += 1
-        file_problems, file_python = _audit_file(resolved, name)
+        file_problems, file_python = _audit_file(resolved, name, budget)
         problems.extend(file_problems)
         python_files += file_python
 

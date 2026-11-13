@@ -28,7 +28,7 @@ PYPROJECT = ROOT / "pyproject.toml"
 
 # The complete set of workflow entry points.  A new file means a new trigger,
 # a new token scope and possibly new secrets, so it must be audited first.
-EXPECTED_WORKFLOWS = frozenset({"build.yml", "ci.yml", "release.yml"})
+EXPECTED_WORKFLOWS = frozenset({"build.yml", "ci.yml", "release.yml", "security.yml"})
 
 # ``actions/checkout`` steps allowed to keep the workflow token in
 # ``.git/config``.  Intentionally empty: ``release.yml`` publishes through
@@ -1168,6 +1168,223 @@ class TestConcurrencyPolicy:
                     )
                 ]
             )
+
+
+class TestScheduledSecurityScan:
+    """``security.yml`` is read-only and reports findings without leaking them."""
+
+    @staticmethod
+    def path() -> Path:
+        path = WORKFLOW_DIR / "security.yml"
+        assert path.is_file(), f"missing {path.relative_to(ROOT).as_posix()}"
+        return path
+
+    def test_triggers_are_weekly_schedule_and_manual_dispatch(self) -> None:
+        path = self.path()
+        found = top_level_value(path, "on")
+        assert found is not None, (
+            f"{path.relative_to(ROOT).as_posix()}: no top-level `on:` block; "
+            "fix: declare `schedule` and `workflow_dispatch`"
+        )
+        lineno, inline, block = found
+        trigger = "\n".join([inline, *block])
+        violations: list[Violation] = []
+        for forbidden in ("push", "pull_request", "pull_request_target"):
+            if re.search(rf"^\s*{forbidden}\s*:", trigger, re.MULTILINE):
+                violations.append(
+                    Violation(
+                        path,
+                        lineno,
+                        f"the security scan is triggered by `{forbidden}`",
+                        "keep it on `schedule` + `workflow_dispatch` only; a "
+                        "weekly audit does not need to run on every push",
+                    )
+                )
+        if not re.search(r"^\s*workflow_dispatch\s*:", trigger, re.MULTILINE):
+            violations.append(
+                Violation(
+                    path,
+                    lineno,
+                    "no `workflow_dispatch` trigger: the scan cannot be run on demand",
+                    "add `workflow_dispatch:` next to the `schedule:` block",
+                )
+            )
+        crons = [
+            next(value for value in match if value)
+            for match in re.findall(
+                r"^\s*-\s*cron:\s*(?:\"([^\"]*)\"|'([^']*)'|(\S+))",
+                trigger,
+                re.MULTILINE,
+            )
+        ]
+        if len(crons) != 1:
+            violations.append(
+                Violation(
+                    path,
+                    lineno,
+                    f"expected exactly one `cron:` entry, found {crons or 'none'}",
+                    "declare one weekly cron expression, for example "
+                    '`- cron: "17 3 * * 1"`',
+                )
+            )
+        else:
+            fields = crons[0].split()
+            if len(fields) != 5:
+                violations.append(
+                    Violation(
+                        path,
+                        lineno,
+                        f"cron {crons[0]!r} is not a 5-field expression",
+                        "use `minute hour day-of-month month day-of-week`",
+                    )
+                )
+            else:
+                _, _, day_of_month, month, day_of_week = fields
+                if day_of_month != "*" or month != "*" or day_of_week in {"*", "?"}:
+                    violations.append(
+                        Violation(
+                            path,
+                            lineno,
+                            f"cron {crons[0]!r} does not pin a weekday, so it is "
+                            "not a weekly schedule",
+                            'pin the day of week, for example "17 3 * * 1" (Mondays)',
+                        )
+                    )
+        assert_clean(violations)
+
+    def test_declares_read_only_contents_permission(self) -> None:
+        path = self.path()
+        lineno, entries, inline = top_level_permissions(path)
+        violations: list[Violation] = []
+        if inline or entries.get("contents") != "read":
+            violations.append(
+                Violation(
+                    path,
+                    lineno,
+                    "the scan must declare exactly `contents: read`; found "
+                    f"{inline or entries or 'no scope'}",
+                    "replace the top-level `permissions:` with `contents: read`",
+                )
+            )
+        for scope, access in sorted(entries.items()):
+            if access == "write":
+                violations.append(
+                    Violation(
+                        path,
+                        lineno,
+                        f"the scan requests `{scope}: write`",
+                        "a read-only audit needs no write scope; remove it",
+                    )
+                )
+        assert_clean(violations)
+
+    def test_job_is_bounded_to_ten_minutes(self) -> None:
+        path = self.path()
+        job = find_job(path, "scan")
+        match = re.search(
+            r"^\s{4}timeout-minutes:\s*(\d+)\s*$",
+            "\n".join(job.body),
+            re.MULTILINE,
+        )
+        assert match is not None, (
+            f"{path.relative_to(ROOT).as_posix()}: job `scan` has no "
+            "`timeout-minutes`; a stuck history walk would burn runner time"
+        )
+        minutes = int(match.group(1))
+        assert 0 < minutes <= 10, (
+            f"{path.relative_to(ROOT).as_posix()}: job `scan` allows "
+            f"{minutes} minutes; the security scan must stay at or below 10"
+        )
+
+    def test_history_checkout_is_complete(self) -> None:
+        path = self.path()
+        checkouts = iter_checkout_steps(path)
+        assert checkouts, (
+            f"{path.relative_to(ROOT).as_posix()}: no `actions/checkout` step; "
+            "the scan cannot run without the repository"
+        )
+        missing: list[str] = []
+        for lineno, reference, body in checkouts:
+            text = "\n".join(line for _, line in body)
+            if not re.search(r"^\s+fetch-depth:\s*0\s*$", text, re.MULTILINE):
+                missing.append(f"{path.name}:{lineno} ({reference})")
+        assert not missing, (
+            f"{path.relative_to(ROOT).as_posix()}: checkout is shallow in "
+            f"{', '.join(missing)}; `--history` would silently see no commits\n"
+            "    fix: set `fetch-depth: 0` under the step's `with:`"
+        )
+
+    def test_runs_both_scans_and_keeps_json_artifacts(self) -> None:
+        path = self.path()
+        commands = [line for _, line in iter_run_scripts(path)]
+        workspace = [
+            line
+            for line in commands
+            if "scripts/scan_secrets.py" in line and "--history" not in line
+        ]
+        history = [
+            line
+            for line in commands
+            if "scripts/scan_secrets.py" in line and "--history" in line
+        ]
+        assert workspace, (
+            f"{path.relative_to(ROOT).as_posix()}: no working-tree scan; "
+            "fix: run `python scripts/scan_secrets.py --json`"
+        )
+        assert history, (
+            f"{path.relative_to(ROOT).as_posix()}: no history scan; "
+            "fix: run `python scripts/scan_secrets.py --history --json`"
+        )
+        redirected = [
+            line
+            for line in workspace + history
+            if re.search(r"--json\s*>\s*\S+\.json", line)
+        ]
+        assert len(redirected) == len(workspace) + len(history), (
+            f"{path.relative_to(ROOT).as_posix()}: every `--json` report must "
+            "be redirected to a file; a report on stdout ends up in the log"
+        )
+
+        uploads = iter_action_steps(path, "actions/upload-artifact")
+        assert uploads, (
+            f"{path.relative_to(ROOT).as_posix()}: the JSON reports are never "
+            "uploaded; fix: add `actions/upload-artifact`"
+        )
+        body = "\n".join(line for _, _, lines in uploads for _, line in lines)
+        for name in ("security-workspace.json", "security-history.json"):
+            assert name in body, (
+                f"{path.relative_to(ROOT).as_posix()}: artifact does not include {name}"
+            )
+        assert re.search(r"^\s+retention-days:\s*30\s*$", body, re.MULTILINE), (
+            f"{path.relative_to(ROOT).as_posix()}: reports must be retained for 30 days"
+        )
+        assert re.search(r"^\s+if-no-files-found:\s*error\s*$", body, re.MULTILINE), (
+            f"{path.relative_to(ROOT).as_posix()}: a missing report must fail "
+            "the upload, not pass silently"
+        )
+        job = find_job(path, "scan")
+        assert "if: always()" in "\n".join(job.body), (
+            f"{path.relative_to(ROOT).as_posix()}: the upload must run with "
+            "`if: always()`; otherwise a failing scan skips its own report"
+        )
+
+    def test_findings_fail_the_job(self) -> None:
+        path = self.path()
+        job = find_job(path, "scan")
+        job_text = "\n".join(job.body)
+        assert "continue-on-error" not in job_text, (
+            f"{path.relative_to(ROOT).as_posix()}: a scan step sets "
+            "`continue-on-error`, so findings would pass as a green run"
+        )
+        commands = "\n".join(line for _, line in iter_run_scripts(path))
+        assert commands.count("|| status=1") >= 2, (
+            f"{path.relative_to(ROOT).as_posix()}: both scans must record a "
+            "non-zero exit instead of discarding it (`|| status=1`)"
+        )
+        assert 'exit "$status"' in commands, (
+            f"{path.relative_to(ROOT).as_posix()}: the combined run must exit "
+            "with the recorded status, so findings block the job"
+        )
 
 
 class TestTranslationsFreshness:

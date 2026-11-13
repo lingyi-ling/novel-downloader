@@ -8,6 +8,7 @@ of contamination at a time, so each problem kind is asserted independently.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -33,6 +34,12 @@ SUMS = "SHA256SUMS.txt"
 MANIFEST = "manifest.json"
 
 NORMAL_NAMES = (CLI, API, DESKTOP, SETUP, APK, APK_VARIANT, SUMS, MANIFEST)
+
+# Synthetic values are assembled at runtime, so this test file never contains a
+# contiguous credential that ``scan_secrets`` would (correctly) flag.
+FAKE_GITHUB = "gh" + "p_" + "A" * 36
+FAKE_PASSWORD = "Sup3r" + "S3cretValue!"
+FAKE_PEM = "-----BEGIN " + "RSA PRIVATE KEY-----"
 
 
 def _load_script() -> Any:
@@ -398,6 +405,162 @@ def test_every_raw_marker_is_detected(tmp_path: Path, marker: bytes) -> None:
     result = audit.audit_directory(tmp_path)
     markers = [p for p in result.problems if p.kind == "secret-marker"]
     assert any(marker.decode("ascii") in p.detail for p in markers)
+
+
+# ---------------------------------------------------------------------------
+# Secret scanning inside archive text members
+# ---------------------------------------------------------------------------
+
+
+def _secret_details(result: Any) -> list[str]:
+    return [
+        problem.detail for problem in result.problems if problem.kind == "secret-marker"
+    ]
+
+
+def test_archive_text_member_secret_is_reported_without_plaintext(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    line = f'value = "{FAKE_GITHUB}"\n'
+    _write_zip(
+        tmp_path / CLI,
+        [
+            ("bundle/config.py", ("# header\n" + line).encode("ascii")),
+            ("bundle/data.bin", b"x" * 4096),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    code = audit.main(["--dir", str(tmp_path), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 1
+    details = [
+        problem["detail"]
+        for problem in payload["problems"]
+        if problem["kind"] == "secret-marker"
+    ]
+    assert details == ["bundle/config.py:2: github-token"]
+    assert FAKE_GITHUB not in captured.out
+    assert FAKE_GITHUB not in captured.err
+
+
+def test_archive_member_scan_reuses_scan_secrets_allowlist(tmp_path: Path) -> None:
+    password_line = f'password = "{FAKE_PASSWORD}"\n'
+    pem_line = f'key = "{FAKE_PEM}"\n'
+    _write_zip(
+        tmp_path / CLI,
+        [
+            # Generic assignments are relaxed under tests/, exactly as the
+            # repository scanner relaxes them; provider tokens/keys are not.
+            ("tests/fixtures/config.py", password_line.encode("ascii")),
+            ("tests/fixtures/key.py", pem_line.encode("ascii")),
+            ("app.py", password_line.encode("ascii")),
+            ("bundle/data.bin", b"x" * 4096),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    assert _secret_details(audit.audit_directory(tmp_path)) == [
+        "tests/fixtures/key.py:1: private-key",
+        "app.py:1: generic-secret",
+    ]
+
+
+def test_oversized_archive_member_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(audit, "MAX_MEMBER_SCAN_BYTES", 512)
+    body = b"x" * 1024 + f'value = "{FAKE_GITHUB}"\n'.encode("ascii")
+    _write_zip(
+        tmp_path / CLI,
+        [("bundle/big.py", body), ("bundle/data.bin", b"x" * 4096)],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    assert _secret_details(audit.audit_directory(tmp_path)) == []
+
+
+def test_binary_archive_member_is_not_text_scanned(tmp_path: Path) -> None:
+    body = b"\x00\x01\x02" + f'value = "{FAKE_GITHUB}"\n'.encode("ascii")
+    _write_zip(
+        tmp_path / CLI,
+        [("bundle/blob.bin", body), ("bundle/data.bin", b"x" * 4096)],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    assert _secret_details(audit.audit_directory(tmp_path)) == []
+
+
+def test_clean_archive_text_members_have_no_secret_findings(tmp_path: Path) -> None:
+    _write_zip(
+        tmp_path / CLI,
+        [
+            ("bundle/config.py", b"value = 'hello'\npassword = 'changeme'\n"),
+            ("bundle/data.bin", b"x" * 4096),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    assert _secret_details(audit.audit_directory(tmp_path)) == []
+
+
+def test_nested_archive_member_is_not_extracted(tmp_path: Path) -> None:
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("config.py", f'value = "{FAKE_GITHUB}"\n')
+    _write_zip(
+        tmp_path / CLI,
+        [
+            ("bundle/inner.zip", inner.getvalue()),
+            ("bundle/data.bin", b"x" * 4096),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    assert _secret_details(audit.audit_directory(tmp_path)) == []
+
+
+def test_exe_that_is_a_zip_is_scanned_as_an_archive(tmp_path: Path) -> None:
+    _write_zip(
+        tmp_path / SETUP,
+        [
+            ("payload/config.py", f'value = "{FAKE_GITHUB}"\n'.encode("ascii")),
+            ("payload/data.bin", b"x" * 4096),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    assert _secret_details(audit.audit_directory(tmp_path)) == [
+        "payload/config.py:1: github-token"
+    ]
+
+
+def test_non_zip_exe_is_skipped_rather_than_unreadable(tmp_path: Path) -> None:
+    (tmp_path / SETUP).write_bytes(b"MZ" + b"\x00" * 4096)
+
+    result = audit.audit_directory(tmp_path)
+
+    assert result.problems == []
+
+
+def test_asset_scan_budget_limits_member_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(audit, "MAX_ASSET_SCAN_BYTES", 64)
+    monkeypatch.setattr(audit, "MAX_MEMBER_SCAN_BYTES", 1024)
+    _write_zip(
+        tmp_path / CLI,
+        [
+            ("bundle/a.txt", b"x" * 64),
+            ("bundle/b.txt", f'value = "{FAKE_GITHUB}"\n'.encode("ascii")),
+            ("bundle/data.bin", b"x" * 4096),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    assert _secret_details(audit.audit_directory(tmp_path)) == []
 
 
 def test_release_json_missing_and_orphan_classification(

@@ -8,6 +8,7 @@ Usage::
     .venv/Scripts/python.exe scripts/release.py --version 1.3.0
     .venv/Scripts/python.exe scripts/release.py --skip-build --skip-android
     .venv/Scripts/python.exe scripts/release.py --skip-installer
+    .venv/Scripts/python.exe scripts/release.py --skip-secret-scan
     GITHUB_TOKEN=... python scripts/release.py --repo owner/name
 
 What a full run does, in order:
@@ -18,6 +19,13 @@ What a full run does, in order:
    ``CHANGELOG.md`` section (``## v<version> (<date>)``, non-empty) all agree.
    That section is the release notes.  Each failure raises with the file to
    edit, so a forgotten changelog entry costs seconds instead of a full build.
+   The last preflight gate scans every Git-tracked file with
+   ``scripts/scan_secrets.py``: a credential that reached the working tree
+   would otherwise be bundled and published, and would only be noticed after
+   the build.  A finding (or a scan error) aborts with exit 2 and reports only
+   ``path:line: rule``, never the matched text.  ``--skip-secret-scan`` turns
+   that gate off; it exists for a verified false positive and is not
+   recommended, because the build then runs unscanned.
 2. Build the three PyInstaller bundles by invoking
    ``scripts/build_release.py --targets cli,api,desktop`` (same validation,
    zipping and SHA256SUMS handling as a manual build).
@@ -202,6 +210,57 @@ def check_android_version(repo_root: Path, version: str) -> None:
     code = re.search(r"versionCode\s*=\s*(\d+)", text)
     if code is None or int(code.group(1)) <= 0:
         raise ReleaseError(f"invalid versionCode in {gradle}")
+
+
+def _secret_scanner() -> Any:
+    """Import ``scripts/scan_secrets.py`` once (same pattern as the auditor)."""
+    global _SECRET_SCANNER
+    if _SECRET_SCANNER is None:
+        spec = importlib.util.spec_from_file_location(
+            "release_secret_scanner",
+            SCRIPTS_DIR / "scan_secrets.py",
+        )
+        if spec is None or spec.loader is None:  # pragma: no cover
+            raise ReleaseError("cannot load scripts/scan_secrets.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _SECRET_SCANNER = module
+    return _SECRET_SCANNER
+
+
+_SECRET_SCANNER: Any = None
+
+
+def scan_release_secrets(repo_root: Path) -> None:
+    """
+    Refuse to release when a tracked file contains a credential.
+
+    Uses ``scripts/scan_secrets.py``'s repository scan (tracked files, their
+    working-tree contents), which is the input a source bundle is built from.
+    It runs before the token lookup, the worktree guard and the first build so
+    a leaked key costs seconds instead of a finished (and potentially
+    published) release.  The error lists only ``path:line: rule`` -- never the
+    matched value -- so it is safe to paste into an issue.
+
+    :raises ReleaseError: when the scan cannot run or finds anything.
+    """
+    try:
+        findings = _secret_scanner().scan_repository(repo_root)
+    except (OSError, RuntimeError) as exc:
+        raise ReleaseError(f"tracked-file secret scan failed: {exc}") from exc
+    if findings:
+        shown = "; ".join(
+            f"{item.path}:{item.line}: {item.rule}" for item in findings[:10]
+        )
+        extra = f" (+{len(findings) - 10} more)" if len(findings) > 10 else ""
+        raise ReleaseError(
+            f"tracked-file secret scan found {len(findings)} potential "
+            f"credential(s): {shown}{extra}; remove or rotate them before "
+            "releasing (pass --skip-secret-scan only for a verified false "
+            "positive)"
+        )
+    print("==> secret scan clean: no credentials in tracked files")
 
 
 def check_release_tag(version: str, tag: str) -> None:
@@ -1992,13 +2051,16 @@ def _print_notes_preview(notes: str, version: str) -> None:
     print()
 
 
-def _print_preflight(repo_root: Path, *, version: str, tag: str) -> None:
+def _print_preflight(
+    repo_root: Path, *, version: str, tag: str, skip_secret_scan: bool
+) -> None:
     """
     Show what was validated before any build, and what remains for the real run.
 
     ``--dry-run`` executes no subprocess and does no network I/O, so the
     clean-worktree and tag/release-conflict checks cannot run here; they are
-    listed instead of being silently omitted.
+    listed instead of being silently omitted.  The secret scan is listed for
+    the same reason: a dry run must not shell out to ``git``.
     """
     gradle = repo_root / "android" / "app" / "build.gradle.kts"
     print("Preflight (validated before any build):")
@@ -2009,6 +2071,13 @@ def _print_preflight(repo_root: Path, *, version: str, tag: str) -> None:
         print("  [ok] android versionName: skipped (no android/app/build.gradle.kts)")
     print(f"  [ok] CHANGELOG.md top section `## v{version} (` is non-empty")
     print(f"  [ok] tag {tag} matches version {version}")
+    if skip_secret_scan:
+        print("  [skip] tracked-file secret scan (--skip-secret-scan; NOT recommended)")
+    else:
+        print(
+            "  [run] tracked-file secret scan before the build "
+            "(scripts/scan_secrets.py)"
+        )
     print("  [release] clean working tree (git status --porcelain)")
     print("  [release] tag/release conflicts (local tag, origin tag, GitHub release)")
     print()
@@ -2065,7 +2134,12 @@ def _dry_run(
     print(f"Targets     : {', '.join(targets)}")
     print(f"Auth        : {TOKEN_ENV_VARS[0]}/GH_TOKEN env, else git credential fill")
     print()
-    _print_preflight(repo_root, version=version, tag=tag)
+    _print_preflight(
+        repo_root,
+        version=version,
+        tag=tag,
+        skip_secret_scan=args.skip_secret_scan,
+    )
     _print_notes_preview(notes, version)
 
     print("Plan:")
@@ -2216,6 +2290,18 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
             targets=targets,
             notes=notes,
         )
+
+    # Pre-build credential gate: the tracked files are exactly what the source
+    # bundles are built from, so a token here would ship in every artifact.
+    # It runs before the token lookup and the worktree guard, and long before
+    # any PyInstaller/gradle work, so it fails in seconds.
+    if args.skip_secret_scan:
+        print(
+            "warning: tracked-file secret scan skipped (--skip-secret-scan); "
+            "the build is not credential-checked"
+        )
+    else:
+        scan_release_secrets(repo_root)
 
     slug = args.repo or resolve_slug(repo_root)
     print(f"==> Releasing {PROJECT_NAME} {version} as {tag} to {slug}")
@@ -2528,6 +2614,15 @@ def main(argv: list[str] | None = None) -> int:
             "publish the portable desktop zip instead of the Inno Setup "
             "installer; latest.json then advertises no windows-x64-installer "
             "platform (the portable zip must be present)"
+        ),
+    )
+    parser.add_argument(
+        "--skip-secret-scan",
+        action="store_true",
+        help=(
+            "DANGEROUS: skip the tracked-file credential scan "
+            "(scripts/scan_secrets.py) before the build; only for a verified "
+            "false positive, not recommended"
         ),
     )
     parser.add_argument(

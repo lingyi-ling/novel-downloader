@@ -331,6 +331,28 @@ class FakeHTTP:
         raise AssertionError(f"unexpected HTTP request: {method} {url}")
 
 
+class _FakeSecretScanner:
+    """A ``scan_secrets`` module double: scripted findings, recorded roots."""
+
+    def __init__(self) -> None:
+        self.findings: list[Any] = []
+        self.roots: list[Path] = []
+
+    def scan_repository(self, root: Path) -> list[Any]:
+        self.roots.append(root)
+        return list(self.findings)
+
+
+class _Finding:
+    """Only the fields release.py may print; ``value`` must never be echoed."""
+
+    def __init__(self, path: str, line: int, rule: str, value: str = "") -> None:
+        self.path = path
+        self.line = line
+        self.rule = rule
+        self.value = value
+
+
 @pytest.fixture()
 def harness(
     release: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -348,6 +370,10 @@ def harness(
     # a few bytes long and would trip the size heuristic.  The dedicated
     # ``TestAssetAuditGate`` below exercises the real wiring.
     monkeypatch.setattr(release, "audit_release_content", lambda assets: None)
+    # The credential scan shells out to ``git ls-files`` in the fake repo (not
+    # a git repository).  Its own suite covers the rules; here only the gate
+    # wiring matters.
+    monkeypatch.setattr(release, "_SECRET_SCANNER", _FakeSecretScanner())
     return root, sub, http
 
 
@@ -1240,6 +1266,140 @@ class TestPreflightFailures:
         assert "cannot be used as the git tag" in capsys.readouterr().err
         assert sub.calls == []
         assert http.requests == []
+
+
+class TestSecretScanGate:
+    """The tracked-file credential scan runs after the preflight, before builds."""
+
+    def test_findings_abort_before_any_build_or_network(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root, sub, http = harness
+        release._SECRET_SCANNER.findings = [
+            _Finding("src/app.py", 7, "generic-secret", "PLAINTEXT-MARKER")
+        ]
+
+        rc = release.main(
+            ["--skip-build", "--skip-android", "--skip-installer", "--repo", SLUG]
+        )
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "src/app.py:7: generic-secret" in err
+        assert "1 potential credential(s)" in err
+        # The matched value never leaves the scanner.
+        assert "PLAINTEXT-MARKER" not in err
+        assert release._SECRET_SCANNER.roots == [root]
+        assert sub.calls == []
+        assert http.requests == []
+
+    def test_clean_scan_lets_the_release_proceed(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root, sub, _http = harness
+        monkeypatch.setattr(release, "github_token", lambda repo_root: None)
+
+        rc = release.main(["--skip-build", "--repo", SLUG])
+
+        captured = capsys.readouterr()
+        assert "secret scan clean" in captured.out
+        # It got past the gate and failed at the next cheap check, not a build.
+        assert rc == 2
+        assert "no GitHub token" in captured.err
+        assert release._SECRET_SCANNER.roots == [root]
+        assert sub.calls == []
+
+    def test_scan_failure_aborts_before_any_build(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _root, sub, http = harness
+
+        def _boom(repo_root: Path) -> list[Any]:
+            raise RuntimeError("git ls-files failed")
+
+        monkeypatch.setattr(release._SECRET_SCANNER, "scan_repository", _boom)
+
+        rc = release.main(["--skip-build", "--repo", SLUG])
+
+        assert rc == 2
+        assert "secret scan failed" in capsys.readouterr().err
+        assert sub.calls == []
+        assert http.requests == []
+
+    def test_dry_run_announces_the_scan_without_running_it(
+        self,
+        release: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = make_repo(tmp_path)
+        scanner = _FakeSecretScanner()
+        monkeypatch.setattr(release, "_SECRET_SCANNER", scanner)
+        monkeypatch.setattr(release, "REPO_ROOT", root)
+        sub = FakeSubprocess()
+        monkeypatch.setattr(release, "subprocess", sub)
+        monkeypatch.setattr(urllib.request, "urlopen", FakeHTTP())
+
+        assert release.main(["--dry-run"]) == 0
+
+        out = capsys.readouterr().out
+        assert "[run] tracked-file secret scan before the build" in out
+        assert scanner.roots == []
+        assert sub.calls == []
+
+    def test_dry_run_marks_a_skipped_scan(
+        self,
+        release: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = make_repo(tmp_path)
+        scanner = _FakeSecretScanner()
+        monkeypatch.setattr(release, "_SECRET_SCANNER", scanner)
+        monkeypatch.setattr(release, "REPO_ROOT", root)
+        monkeypatch.setattr(release, "subprocess", FakeSubprocess())
+        monkeypatch.setattr(urllib.request, "urlopen", FakeHTTP())
+
+        assert release.main(["--dry-run", "--skip-secret-scan"]) == 0
+
+        out = capsys.readouterr().out
+        assert "[skip] tracked-file secret scan" in out
+        assert "--skip-secret-scan" in out
+        assert scanner.roots == []
+
+    def test_skip_secret_scan_bypasses_the_gate(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _root, sub, _http = harness
+        release._SECRET_SCANNER.findings = [_Finding("src/app.py", 1, "generic-secret")]
+        monkeypatch.setattr(release, "github_token", lambda repo_root: None)
+
+        rc = release.main(["--skip-secret-scan", "--skip-build", "--repo", SLUG])
+
+        captured = capsys.readouterr()
+        assert rc == 2
+        assert "skipped (--skip-secret-scan)" in captured.out
+        assert "no GitHub token" in captured.err
+        # Bypassed: the scanner was never consulted, so the finding did not fire.
+        assert release._SECRET_SCANNER.roots == []
+        assert sub.calls == []
 
 
 # ---------------------------------------------------------------------------
