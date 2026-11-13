@@ -24,6 +24,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, TypeVar, cast
 from urllib.parse import quote
@@ -72,6 +73,7 @@ from .schemas import (
     MAX_PER_SITE_LIMIT,
     MAX_SEARCH_SITES,
     MAX_SEARCH_TIMEOUT,
+    MAX_SEARCH_WORDS,
     MUSIC_ID_PATTERN,
     BookId,
     BrowseRequest,
@@ -331,6 +333,11 @@ async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
     ``{"total", "results"}`` shape in both modes, so clients that ignore
     ``group`` (the default) see no change at all.
 
+    ``min_words``/``max_words``/``updated_after`` optionally filter the ranked
+    rows before grouping and ``limit``.  They only narrow the result set; the
+    response fields are unchanged.  A row without a parseable word count or
+    update date is dropped only while the corresponding filter is set.
+
     The aggregate search is bounded by an overall deadline (in addition to the
     per-site ``timeout``); exceeding it returns ``504``.
     """
@@ -338,6 +345,18 @@ async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
         # An explicit empty selection means "search no site": do not start
         # the aggregate search at all.
         return {"total": 0, "results": []}
+
+    # Only forward filters that were actually requested.  A request without
+    # them keeps the historical ``search`` keyword set, which also keeps the
+    # embedded transport's forwarded-argument contract (and its parity test)
+    # unchanged.
+    filters: dict[str, Any] = {}
+    if body.min_words is not None:
+        filters["min_words"] = body.min_words
+    if body.max_words is not None:
+        filters["max_words"] = body.max_words
+    if body.updated_after is not None:
+        filters["updated_after"] = body.updated_after
 
     timeout = _blocking_timeout(request, "search")
     results = await _with_timeout(
@@ -350,6 +369,7 @@ async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
             sort=body.sort,
             order=body.order,
             group=body.group,
+            **filters,
         ),
         timeout,
         "Search",
@@ -371,6 +391,10 @@ async def _search_event_stream(
     sites: list[str] | None,
     per_site_limit: int,
     timeout: float,
+    *,
+    min_words: int | None = None,
+    max_words: int | None = None,
+    updated_after: date | None = None,
 ) -> AsyncIterator[str]:
     """
     Adapt :func:`search_stream` to SSE frames.
@@ -387,6 +411,16 @@ async def _search_event_stream(
         yield _sse_frame("done", {"total": 0})
         return
 
+    # Only forward filters that were actually requested: a plain stream keeps
+    # calling ``search_stream`` with its historical keyword set.
+    filters: dict[str, Any] = {}
+    if min_words is not None:
+        filters["min_words"] = min_words
+    if max_words is not None:
+        filters["max_words"] = max_words
+    if updated_after is not None:
+        filters["updated_after"] = updated_after
+
     total = 0
     async with aclosing(
         search_stream(
@@ -394,6 +428,7 @@ async def _search_event_stream(
             sites=sites,
             per_site_limit=per_site_limit,
             timeout=timeout,
+            **filters,
         )
     ) as batches:
         async for batch in batches:
@@ -437,6 +472,9 @@ async def stream_search(
     timeout: Annotated[
         float, Query(gt=0, le=MAX_SEARCH_TIMEOUT, allow_inf_nan=False)
     ] = 5.0,
+    min_words: Annotated[int | None, Query(ge=0, le=MAX_SEARCH_WORDS)] = None,
+    max_words: Annotated[int | None, Query(ge=0, le=MAX_SEARCH_WORDS)] = None,
+    updated_after: Annotated[date | None, Query()] = None,
 ) -> StreamingResponse:
     """
     Stream search results as Server-Sent Events.
@@ -446,6 +484,9 @@ async def stream_search(
     omitted ``sites`` parameter searches every enabled site; ``sites=`` (an
     empty value) searches none, matching the JSON endpoint's empty-array
     semantics.
+
+    ``min_words``/``max_words``/``updated_after`` optionally narrow each
+    site's chunk in place; they never reorder rows or change the event shape.
     """
     selected: list[str] | None = None
     if sites is not None:
@@ -458,7 +499,15 @@ async def stream_search(
             ) from exc
 
     return StreamingResponse(
-        _search_event_stream(keyword, selected, per_site_limit, timeout),
+        _search_event_stream(
+            keyword,
+            selected,
+            per_site_limit,
+            timeout,
+            min_words=min_words,
+            max_words=max_words,
+            updated_after=updated_after,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

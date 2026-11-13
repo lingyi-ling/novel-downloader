@@ -46,6 +46,7 @@ import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import cast
 
@@ -102,6 +103,12 @@ class CacheKey:
     #: browser-assisted sites).  Only set for ``sites is None``: an explicit
     #: selection already names every site it depends on.
     config_fingerprint: str | None = None
+    #: Optional local filters.  They are part of the identity so two calls
+    #: with different filters never share a cache entry; ``updated_after`` is
+    #: stored as its ISO ``YYYY-MM-DD`` spelling.
+    min_words: int | None = None
+    max_words: int | None = None
+    updated_after: str | None = None
 
 
 def _keyword_identity(keyword: str) -> str:
@@ -143,6 +150,28 @@ def _normalize_site(site: object) -> str:
     return f"n{key}"
 
 
+def _filter_date_identity(value: date | datetime | str | None) -> str | None:
+    """
+    Return the canonical ``YYYY-MM-DD`` identity of ``updated_after``.
+
+    ``None`` stays ``None``.  A ``date``/``datetime`` is rendered as its
+    calendar date; a string is parsed with :meth:`datetime.date.fromisoformat`
+    so ``"2024-01-01"`` and ``"20240101"`` share one identity.  A malformed
+    value raises :class:`ValueError` rather than silently creating a key that
+    no future call can reproduce.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    try:
+        return date.fromisoformat(str(value).strip()).isoformat()
+    except ValueError as exc:
+        raise ValueError("updated_after must be a valid ISO date") from exc
+
+
 def build_key(
     keyword: str,
     sites: Sequence[str] | None,
@@ -150,6 +179,10 @@ def build_key(
     nsfw: bool = False,
     timeout: float = 5.0,
     config_fingerprint: str | None = None,
+    *,
+    min_words: int | None = None,
+    max_words: int | None = None,
+    updated_after: date | datetime | str | None = None,
 ) -> CacheKey:
     """
     Build a normalized :class:`CacheKey` for a search query.
@@ -178,6 +211,12 @@ def build_key(
     site selection: that key already names every site it depends on, so a
     hot configuration change cannot alter its result set.
 
+    The optional local filters ``min_words``/``max_words``/``updated_after``
+    *are* part of the identity: they change which rows a caller accepts, and
+    keeping them in the key guarantees a filtered request never reuses an
+    entry written under different filter semantics.  ``updated_after`` is
+    normalized to its ISO date so equivalent spellings collapse.
+
     Presentation/selection parameters (``sort``, ``order``, ``limit``,
     ``group`` and ``min_relevance``) are deliberately *not* part of the key:
     the cache stores the raw merged snapshot, and every call ranks, groups,
@@ -196,6 +235,9 @@ def build_key(
         nsfw=nsfw,
         timeout=timeout,
         config_fingerprint=fingerprint,
+        min_words=min_words,
+        max_words=max_words,
+        updated_after=_filter_date_identity(updated_after),
     )
 
 
@@ -221,6 +263,9 @@ def _key_canonical(key: CacheKey) -> str:
             "nsfw": bool(key.nsfw),
             "timeout": float(key.timeout),
             "config_fingerprint": key.config_fingerprint,
+            "min_words": key.min_words,
+            "max_words": key.max_words,
+            "updated_after": key.updated_after,
         },
         ensure_ascii=False,
         sort_keys=True,

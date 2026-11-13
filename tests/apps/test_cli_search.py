@@ -15,10 +15,12 @@ from __future__ import annotations
 import argparse
 import json
 from contextlib import nullcontext
+from datetime import date
 from typing import Any
 
 import pytest
 
+from novel_downloader.apps.cli.commands.base import EXIT_USAGE
 from novel_downloader.apps.cli.commands.search import SearchCmd
 from novel_downloader.plugins.search import SearchEvent
 
@@ -516,3 +518,99 @@ def test_no_results_with_first_exits_zero_without_download(
     assert code == 0
     assert out == ""
     assert "No results found for '三体'." in err
+
+
+# --------------------------------------------------------------------------- #
+# optional local filters
+# --------------------------------------------------------------------------- #
+
+
+def test_local_filters_reach_the_aggregate_search(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, Any] = {}
+    _install_search(monkeypatch, [], captured=captured)
+
+    code, _out, _err = _run(
+        _args(
+            [
+                "--json",
+                "--min-words",
+                "10000",
+                "--max-words",
+                "500000",
+                "--updated-after",
+                "2024-01-01",
+                "三体",
+            ]
+        ),
+        capsys,
+    )
+
+    assert code == 0
+    assert captured["min_words"] == 10000
+    assert captured["max_words"] == 500000
+    assert captured["updated_after"] == date(2024, 1, 1)
+
+
+def test_local_filters_default_to_no_filtering(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, Any] = {}
+    _install_search(monkeypatch, [], captured=captured)
+
+    code, _out, _err = _run(_args(["--json", "三体"]), capsys)
+
+    assert code == 0
+    assert captured["min_words"] is None
+    assert captured["max_words"] is None
+    assert captured["updated_after"] is None
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--min-words", "-1"),
+        ("--min-words", "1000000001"),
+        ("--max-words", "-1"),
+        ("--max-words", "1000000001"),
+    ],
+)
+def test_word_filters_reject_out_of_range_values(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    value: str,
+) -> None:
+    captured: dict[str, Any] = {}
+    _install_search(monkeypatch, [_row()], captured=captured)
+
+    code, out, err = _run(_args(["--json", flag, value, "三体"]), capsys)
+
+    assert code == EXIT_USAGE
+    assert out == ""
+    assert flag in err
+    assert "min_words" not in captured
+
+
+@pytest.mark.parametrize("value", ["2024/01/01", "20240101", "2024-13-01", "soon"])
+def test_updated_after_rejects_non_iso_dates(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    captured: dict[str, Any] = {}
+    _install_search(monkeypatch, [_row()], captured=captured)
+
+    code, out, err = _run(_args(["--json", "--updated-after", value, "三体"]), capsys)
+
+    assert code == EXIT_USAGE
+    assert out == ""
+    assert "--updated-after" in err
+    assert "updated_after" not in captured

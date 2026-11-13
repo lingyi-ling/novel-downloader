@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -37,6 +38,7 @@ from novel_downloader.apps.api.schemas import (
     MAX_PER_SITE_LIMIT,
     MAX_SEARCH_LIMIT,
     MAX_SEARCH_SITES,
+    MAX_SEARCH_WORDS,
     MAX_SITE_KEY_LENGTH,
     BrowseRequest,
     MusicDownloadRequest,
@@ -579,3 +581,113 @@ def test_music_track_serialization_never_emits_non_finite() -> None:
     encoded = json.dumps(payload, allow_nan=False)
     assert json.loads(encoded)["duration_s"] == 0
     assert json.loads(encoded)["track_no"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Optional local search filters
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_forwards_local_filters(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forwarded: dict[str, Any] = {}
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[Any]:
+        forwarded["keyword"] = keyword
+        forwarded.update(kwargs)
+        return []
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search",
+        json={
+            "keyword": "x",
+            "min_words": 10_000,
+            "max_words": 500_000,
+            "updated_after": "2024-01-01",
+        },
+    )
+
+    assert response.status_code == 200
+    # The response envelope is unchanged by the new request fields.
+    assert set(response.json()) == {"total", "results"}
+    assert forwarded["min_words"] == 10_000
+    assert forwarded["max_words"] == 500_000
+    assert forwarded["updated_after"] == date(2024, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_search_accepts_local_filter_boundaries(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_search(_keyword: str, **_kwargs: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search",
+        json={
+            "keyword": "x",
+            "min_words": 0,
+            "max_words": MAX_SEARCH_WORDS,
+            "updated_after": "2024-02-29",
+        },
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("min_words", -1),
+        ("min_words", MAX_SEARCH_WORDS + 1),
+        ("max_words", -1),
+        ("max_words", MAX_SEARCH_WORDS + 1),
+        ("updated_after", "2024/01/01"),
+        ("updated_after", "20240101"),
+        ("updated_after", "2024-13-01"),
+        ("updated_after", "2024-02-30"),
+        ("updated_after", ""),
+        ("updated_after", "soon"),
+    ],
+)
+async def test_search_rejects_invalid_local_filters(
+    client: httpx.AsyncClient, field: str, value: Any
+) -> None:
+    response = await client.post("/api/v1/search", json={"keyword": "x", field: value})
+
+    _assert_422(response)
+
+
+@pytest.mark.asyncio
+async def test_search_stream_forwards_local_filters(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forwarded: dict[str, Any] = {}
+
+    async def fake_search_stream(_keyword: str, **kwargs: Any) -> AsyncIterator[Any]:
+        forwarded.update(kwargs)
+        yield [{"site": "alpha", "book_id": "1"}]
+
+    monkeypatch.setattr(api_routes, "search_stream", fake_search_stream)
+
+    response = await client.get(
+        "/api/v1/search/stream",
+        params={
+            "keyword": "x",
+            "min_words": 10_000,
+            "max_words": 500_000,
+            "updated_after": "2024-01-01",
+        },
+    )
+
+    assert response.status_code == 200
+    assert forwarded["min_words"] == 10_000
+    assert forwarded["max_words"] == 500_000
+    assert forwarded["updated_after"] == date(2024, 1, 1)
