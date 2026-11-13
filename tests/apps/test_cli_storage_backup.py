@@ -15,8 +15,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import stat
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -77,6 +79,65 @@ def _newer_schema_db(path: Path) -> None:
         )
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
         conn.commit()
+    finally:
+        conn.close()
+
+
+#: Present only in the WAL of the legacy fixture.
+_WAL_SENTINEL = "WAL-SENTINEL-7f3a"
+
+_LEGACY_SCHEMA = (
+    "CREATE TABLE chapters ("
+    "id TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL)"
+)
+
+_LEGACY_ROWS = (
+    ("ch0001", "Chapter 1", "Body one"),
+    ("ch0002", "Chapter 2", "Body two"),
+    ("ch0002", "Chapter 2 (stale copy)", ""),
+    ("ch0004", "Chapter 4", f"Body four {_WAL_SENTINEL}"),
+)
+
+
+def _make_legacy_db(path: Path) -> None:
+    """Write a pre-schema-version file whose committed rows stay in the WAL."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix="legacy-cli-", dir=path.parent))
+    staging = staging_dir / path.name
+    conn = sqlite3.connect(str(staging), isolation_level=None)
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA wal_autocheckpoint = 0")
+        conn.execute("PRAGMA user_version = 0")
+        conn.execute(_LEGACY_SCHEMA)
+        conn.executemany("INSERT INTO chapters VALUES (?, ?, ?)", _LEGACY_ROWS)
+        shutil.copy2(staging, path)
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{staging}{suffix}")
+            if sidecar.is_file():
+                shutil.copy2(sidecar, Path(f"{path}{suffix}"))
+    finally:
+        conn.close()
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _raw_rows(path: Path) -> list[tuple[str, str, str]]:
+    """Read a chapter file without opening it through ChapterStorage."""
+    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        return [
+            (str(row[0]), str(row[1]), str(row[2]))
+            for row in conn.execute("SELECT id, title, content FROM chapters")
+        ]
+    finally:
+        conn.close()
+
+
+def _raw_version(path: Path) -> int:
+    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        row = conn.execute("PRAGMA user_version").fetchone()
+        return int(row[0])
     finally:
         conn.close()
 
@@ -415,6 +476,27 @@ def test_restore_rejects_non_database_target_name(
     assert not target.exists()
 
 
+def test_restore_accepts_a_relative_source_path(
+    raw_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--from ./backups/...`` must work like an absolute path.
+
+    The read-only URI used to open the source requires an absolute path;
+    passing the user's relative spelling straight through raised ``ValueError``
+    and escaped as a traceback instead of restoring the database.
+    """
+    db = _book_db(raw_root)
+    _seed(db, "c1", "c2")
+    backup = _make_backup(tmp_path / "backups")
+    db.unlink()
+
+    monkeypatch.chdir(tmp_path)
+    _invoke(["storage", "restore", "--from", str(backup.relative_to(tmp_path))])
+
+    assert db.is_file()
+    assert _ids(db) == {"c1", "c2"}
+
+
 def test_restore_json_is_single_line(
     raw_root: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -443,3 +525,116 @@ def test_restore_json_is_single_line(
     assert payload["target"] == str(db)
     assert payload["replaced_existing"] is True
     assert payload["pre_restore_backup"]
+
+
+# ---------------------------------------------------------------------------
+# legacy (pre-schema-version) databases
+# ---------------------------------------------------------------------------
+
+
+def test_backup_and_restore_roundtrip_of_legacy_wal_database(
+    raw_root: Path, tmp_path: Path
+) -> None:
+    """A pre-v1.31 file keeps its rows, schema and WAL-only data across a trip."""
+    db = _book_db(raw_root)
+    _make_legacy_db(db)
+    wal = Path(f"{db}-wal")
+    assert wal.is_file() and wal.stat().st_size > 32
+
+    original = _raw_rows(db)
+    assert len(original) == 4
+    assert any(content == "" for _, _, content in original)
+    assert any(_WAL_SENTINEL in content for _, _, content in original)
+
+    backup = _make_backup(tmp_path / "backups")
+
+    # The snapshot contains the committed WAL frames and does not silently
+    # upgrade the file: a restore is a faithful copy, migration happens later.
+    assert _raw_rows(backup) == original
+    assert _raw_version(backup) == 0
+    conn = sqlite3.connect(f"{backup.as_uri()}?mode=ro", uri=True)
+    try:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(chapters)")]
+    finally:
+        conn.close()
+    assert columns == ["id", "title", "content"]
+
+    _invoke(["storage", "restore", "--from", str(backup), "--to", str(db), "--yes"])
+
+    assert _raw_rows(db) == original
+    assert _raw_version(db) == 0
+    preserved = list(db.parent.glob("chapter.raw.sqlite.pre-restore-*.bak"))
+    assert len(preserved) == 1
+    assert _raw_rows(preserved[0]) == original
+
+    # The restored legacy file becomes the current schema on first use, with
+    # every row (including duplicate ids and the WAL-only chapter) intact.
+    with ChapterStorage(db.parent, db.name) as store:
+        assert store.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert store.existing_ids() == {"ch0001", "ch0002", "ch0004"}
+        restored = store.get_chapter("ch0004")
+        assert restored is not None
+        assert _WAL_SENTINEL in restored["content"]
+        assert (
+            store.conn.execute(
+                "SELECT COUNT(*) FROM chapters WHERE id = 'ch0002'"
+            ).fetchone()[0]
+            == 2
+        )
+
+        # The migrated file is writable again despite the duplicate ids.
+        store.upsert_chapter(
+            {
+                "id": "ch0002",
+                "title": "Chapter 2",
+                "content": "Body two again",
+                "extra": {},
+            }
+        )
+        assert (
+            store.conn.execute(
+                "SELECT COUNT(*) FROM chapters WHERE id = 'ch0002'"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_backup_refuses_corrupt_legacy_database_without_touching_it(
+    raw_root: Path, tmp_path: Path
+) -> None:
+    db = _book_db(raw_root)
+    db.parent.mkdir(parents=True)
+    original = b"this is not an sqlite database\n" * 64
+    db.write_bytes(original)
+
+    out = tmp_path / "backups"
+    with pytest.raises(SystemExit) as exc_info:
+        _invoke(["storage", "backup", "--out", str(out)])
+    assert exc_info.value.code == 1
+    assert db.read_bytes() == original
+    assert not out.exists() or not list(out.rglob("*.sqlite"))
+
+
+def test_backup_refuses_damaged_wal_instead_of_writing_an_empty_snapshot(
+    raw_root: Path, tmp_path: Path
+) -> None:
+    db = _book_db(raw_root)
+    _make_legacy_db(db)
+    wal = Path(f"{db}-wal")
+    data = bytearray(wal.read_bytes())
+    assert len(data) > 32 + 24 + 300
+    data[32 + 24 + 100 : 32 + 24 + 300] = b"\xff" * 200
+    wal.write_bytes(bytes(data))
+    damaged_wal = wal.read_bytes()
+    main_before = db.read_bytes()
+
+    out = tmp_path / "backups"
+    with pytest.raises(SystemExit) as exc_info:
+        _invoke(["storage", "backup", "--out", str(out)])
+    assert exc_info.value.code == 1
+
+    # The online backup API would see only the main file (schema included in
+    # the WAL) and publish an empty, table-less snapshot.  Nothing may change.
+    assert wal.read_bytes() == damaged_wal
+    assert db.read_bytes() == main_before
+    assert not out.exists() or not list(out.rglob("*.sqlite"))

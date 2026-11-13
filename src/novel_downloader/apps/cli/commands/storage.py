@@ -51,6 +51,7 @@ from novel_downloader.infra.persistence.chapter_storage import (
     ChapterStorageCorruptError,
     ChapterStorageSchemaError,
     inspect_chapter_database,
+    inspect_wal_damage,
 )
 from novel_downloader.libs.filesystem import (
     RemovalItem,
@@ -549,8 +550,20 @@ def _source_connection(path: Path) -> Iterator[sqlite3.Connection]:
     opened this way at all; in that case the main file and any sidecars are
     copied to a private temporary directory and the copy is opened instead.
     The source bytes are still never written to.
+
+    ``path`` may be relative (``storage restore --from ./backups/...``); a
+    file URI requires an absolute path, so resolve it first.  Without this a
+    relative ``--from`` reached ``Path.as_uri()`` and escaped as a traceback.
     """
-    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5.0)
+    resolved = path.expanduser().resolve()
+    problem = inspect_wal_damage(resolved)
+    if problem is not None:
+        raise ChapterStorageCorruptError(
+            f"'{path}' has a damaged write-ahead log ({problem}). Nothing was "
+            "read from or written to it; recover the sidecar before retrying."
+        )
+
+    conn = sqlite3.connect(f"{resolved.as_uri()}?mode=ro", uri=True, timeout=5.0)
     try:
         conn.execute("PRAGMA schema_version").fetchone()
     except sqlite3.OperationalError as exc:
