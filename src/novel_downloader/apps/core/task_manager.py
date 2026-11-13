@@ -23,6 +23,7 @@ import aiohttp
 
 from novel_downloader.infra.config import ConfigAdapter, load_config
 from novel_downloader.infra.i18n import t
+from novel_downloader.infra.paths import is_safe_path_component
 from novel_downloader.plugins import ClientProtocol, registrar
 from novel_downloader.schemas import BookConfig
 
@@ -359,7 +360,16 @@ class TaskManager:
         Raises :class:`RuntimeError` once :meth:`close` has been called: the
         manager is terminal, and accepting the task would either spawn a worker
         after shutdown or silently drop it.
+        :raises ValueError: If ``site`` or ``book_id`` cannot be used as one
+            path component.  Both become directory names under ``raw_data/``,
+            and callers include the desktop bridge (fed by remote search
+            results) and the persisted queue, not only the validated REST/CLI
+            entry points.
         """
+        if not is_safe_path_component(site):
+            raise ValueError(f"Invalid task site: {site!r}")
+        if not is_safe_path_component(book_id):
+            raise ValueError(f"Invalid task book_id: {book_id!r}")
         await self.start()
         async with self._lock:
             if self._closed:
@@ -779,6 +789,12 @@ class TaskManager:
         if not isinstance(site, str) or not site:
             return None
         if not isinstance(book_id, str) or not book_id:
+            return None
+        # The file is user-writable and may have been restored from a backup.
+        # A path-like identity must never reach the client, which joins it
+        # onto ``raw_data/`` before writing chapter caches.
+        if not is_safe_path_component(site) or not is_safe_path_component(book_id):
+            logger.warning("Skipping queued task with an unsafe site or book_id")
             return None
         try:
             status = Status(str(entry.get("status") or "queued"))

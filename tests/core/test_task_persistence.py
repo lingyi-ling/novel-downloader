@@ -170,6 +170,61 @@ async def test_entries_missing_site_or_book_id_are_skipped(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_restore_skips_ids_that_would_escape_the_raw_data_tree(
+    tmp_path: Path,
+) -> None:
+    """A hand-edited/corrupted queue must not become an arbitrary-write path.
+
+    ``site``/``book_id`` become directory names under ``raw_data/`` when the
+    client runs.  The REST/embedded/CLI entry points validate them, but the
+    persisted queue is also read verbatim at startup, so a ``..`` segment or
+    an absolute path there must be dropped just like a bad request.
+    """
+    path = _path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "pending": [
+                    {"site": "demo", "book_id": "../escape"},
+                    {"site": "demo", "book_id": "C:\\escape"},
+                    {"site": "demo", "book_id": "/etc"},
+                    {"site": "..", "book_id": "1"},
+                    {"site": "demo", "book_id": "safe-id"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = TaskManager(state_path=path)
+    await manager.start()
+    pending = manager.snapshot()["pending"]
+    await manager.close()
+
+    assert [task.book_id for task in pending] == ["safe-id"]
+
+
+@pytest.mark.asyncio
+async def test_add_task_rejects_an_escaping_book_id(tmp_path: Path) -> None:
+    """The desktop bridge is not the only caller; the queue itself must check."""
+    path = _path(tmp_path)
+    manager = TaskManager(state_path=path)
+    await manager.start()
+
+    with pytest.raises(ValueError):
+        await manager.add_task(title="Bad", site="demo", book_id="../escape")
+    with pytest.raises(ValueError):
+        await manager.add_task(title="Bad", site="demo", book_id="C:\\escape")
+    with pytest.raises(ValueError):
+        await manager.add_task(title="Bad", site="../demo", book_id="1")
+
+    assert manager.snapshot()["pending"] == []
+    await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_persistence_is_off_without_a_path(tmp_path: Path) -> None:
     manager = TaskManager()
     await manager.start()

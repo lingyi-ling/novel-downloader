@@ -785,3 +785,61 @@ def test_download_many_tick_never_runs_concurrently(
 
     assert (ok, fail) == (2, 0)
     assert violations == []
+
+
+# ---------------------------------------------------------------------------
+# cover download bounds
+# ---------------------------------------------------------------------------
+
+
+class _CoverResponse:
+    """Minimal streaming ``requests.Response`` double."""
+
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        headers: dict[str, str] | None = None,
+        status: int = 200,
+    ) -> None:
+        self._chunks = chunks
+        self.headers = headers or {}
+        self.status_code = status
+        self.closed = False
+
+    def iter_content(self, _size: int):
+        yield from self._chunks
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_fetch_cover_enforces_the_byte_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _CoverResponse([b"x" * 200], headers={})
+    monkeypatch.setattr(downloader.requests, "get", lambda *a, **k: response)
+    monkeypatch.setattr(downloader, "MAX_COVER_BYTES", 100)
+
+    assert downloader._fetch_cover("http://fake.test/cover.jpg") is None
+    # The connection is released even when the body is abandoned.
+    assert response.closed is True
+
+
+def test_fetch_cover_trusts_a_declared_length_only_as_a_shortcut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _CoverResponse([b"x"], headers={"Content-Length": str(10 * 1024 * 1024)})
+    monkeypatch.setattr(downloader.requests, "get", lambda *a, **k: response)
+
+    assert downloader._fetch_cover("http://fake.test/cover.jpg") is None
+    assert response.closed is True
+
+
+def test_fetch_cover_returns_the_body_within_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _CoverResponse([b"abc", b"def"])
+    monkeypatch.setattr(downloader.requests, "get", lambda *a, **k: response)
+
+    assert downloader._fetch_cover("http://fake.test/cover.jpg") == b"abcdef"

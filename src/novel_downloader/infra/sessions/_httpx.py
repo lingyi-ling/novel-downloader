@@ -32,7 +32,7 @@ from .cookie_io import (
     write_cookie_items,
 )
 from .proxy import ALL_PROXY_SCHEMES, no_proxy_patterns
-from .response import BaseResponse
+from .response import BaseResponse, ResponseTooLargeError
 
 
 class HttpxSession(BaseSession):
@@ -159,7 +159,55 @@ class HttpxSession(BaseSession):
             DEFAULT_ALLOW_REDIRECTS if allow_redirects is None else allow_redirects
         )
         options: dict[str, Any] = dict(kwargs)
+        max_bytes = options.pop("max_bytes", None)
         options.setdefault("follow_redirects", redirect)
+
+        if max_bytes is not None:
+            limit = int(max_bytes)
+
+            async def _read_bounded() -> BaseResponse:
+                """Consume the stream, refusing anything above ``limit``."""
+                async with self.session.stream("GET", url, **options) as streamed:
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in streamed.aiter_bytes():
+                        total += len(chunk)
+                        if total > limit:
+                            raise ResponseTooLargeError(limit)
+                        chunks.append(chunk)
+                    return BaseResponse(
+                        content=b"".join(chunks),
+                        headers=streamed.headers,
+                        status=streamed.status_code,
+                        encoding=streamed.charset_encoding or encoding,
+                    )
+
+            try:
+                # The outer deadline covers the whole stream, not just the
+                # response headers.
+                return await asyncio.wait_for(_read_bounded(), self._timeout)
+            except TimeoutError as exc:
+                raise self._timeout_error(exc) from exc
+            except httpx.TimeoutException as exc:
+                raise self._timeout_error(exc) from exc
+            except httpx.TooManyRedirects as exc:
+                raise self._redirect_error(exc) from exc
+            except httpx.ProxyError as exc:
+                if is_proxy_authentication_error(exc):
+                    raise self._non_retryable_transport_error(exc) from exc
+                raise self._transport_error(exc) from exc
+            except httpx.ConnectError as exc:
+                if is_certificate_verification_error(exc):
+                    raise self._non_retryable_transport_error(exc) from exc
+                raise self._transport_error(exc) from exc
+            except (
+                httpx.NetworkError,
+                httpx.RemoteProtocolError,
+                httpx.DecodingError,
+            ) as exc:
+                raise self._transport_error(exc) from exc
+            except httpx.RequestError as exc:
+                raise self._transport_error(exc) from exc
 
         try:
             # ``httpx.Timeout`` applies per operation, so a server that

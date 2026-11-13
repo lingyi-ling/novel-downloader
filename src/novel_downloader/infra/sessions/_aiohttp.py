@@ -26,7 +26,7 @@ from .cookie_io import (
     resolve_cookie_path,
     write_cookie_items,
 )
-from .response import BaseResponse
+from .response import BaseResponse, ResponseTooLargeError
 
 
 class AiohttpSession(BaseSession):
@@ -104,11 +104,19 @@ class AiohttpSession(BaseSession):
         **kwargs: Unpack[GetRequestKwargs],
     ) -> BaseResponse:
         options: dict[str, Any] = dict(kwargs)
+        max_bytes = options.pop("max_bytes", None)
         self._prepare_request(url, options, verify, allow_redirects)
 
         try:
             async with self.session.get(url, **options) as r:
-                content = await r.read()
+                if max_bytes is None:
+                    content = await r.read()
+                else:
+                    # Read at most one byte past the limit: a hostile body must
+                    # never be buffered whole just to be measured.
+                    content = await r.content.read(int(max_bytes) + 1)
+                    if len(content) > int(max_bytes):
+                        raise ResponseTooLargeError(int(max_bytes))
                 return BaseResponse(
                     content=content,
                     headers=r.headers,

@@ -269,6 +269,11 @@ class BaseRequestKwargs(TypedDict, total=False):
 
 class GetRequestKwargs(BaseRequestKwargs, total=False):
     params: dict[str, Any] | list[tuple[str, Any]] | None
+    #: Refuse a body larger than this many bytes *while it is being read*.
+    #: Used by the media path, whose URLs come from untrusted page content:
+    #: checking ``len(content)`` after buffering would already have exhausted
+    #: memory.  ``None`` keeps the unbounded behaviour for page fetches.
+    max_bytes: int | None
 
 
 class PostRequestKwargs(BaseRequestKwargs, total=False):

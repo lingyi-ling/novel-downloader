@@ -32,6 +32,51 @@ _CHUNK = 64 * 1024
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 _CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)")
 
+#: Cover art is a small image.  A hostile CDN (or a broken ``cover_url``) must
+#: not be able to make the process buffer an arbitrary document in memory.
+MAX_COVER_BYTES = 8 * 1024 * 1024
+
+
+def _fetch_cover(url: str) -> bytes | None:
+    """Download cover art with a hard size bound; never raise.
+
+    ``requests.get(...).content`` buffers the whole body before any size check,
+    so a redirect to a huge response could exhaust memory.  The body is read
+    incrementally here and abandoned as soon as it passes
+    :data:`MAX_COVER_BYTES`.  Any failure simply means "no embedded cover";
+    the audio file itself is still usable.
+    """
+    response = None
+    try:
+        response = requests.get(
+            url, headers={"User-Agent": UA}, timeout=20, stream=True
+        )
+        if response.status_code != 200:
+            return None
+        declared = response.headers.get("Content-Length")
+        if declared:
+            try:
+                if int(declared) > MAX_COVER_BYTES:
+                    return None
+            except ValueError:
+                pass
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_content(_CHUNK):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > MAX_COVER_BYTES:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except Exception:
+        return None
+    finally:
+        if response is not None:
+            with contextlib.suppress(Exception):
+                response.close()
+
 
 @dataclass
 class DownloadOptions:
@@ -387,12 +432,7 @@ def download_track(
             if opts.embed_cover:
                 pic = track.cover_url
                 if pic:
-                    try:
-                        cover = requests.get(
-                            pic, headers={"User-Agent": UA}, timeout=20
-                        ).content
-                    except Exception:
-                        cover = None
+                    cover = _fetch_cover(pic)
             _write_tags(dest, track, cover if opts.embed_cover else None)
 
         if opts.save_lyric:

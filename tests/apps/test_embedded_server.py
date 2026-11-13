@@ -257,6 +257,28 @@ def test_sites_shape(running_server: SimpleNamespace) -> None:
     assert "search" in body and "download" in body
 
 
+def test_access_log_never_records_the_query_string(
+    running_server: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mirror the REST access-log policy: query strings may hold credentials.
+
+    The Android embedded engine is the same API contract as the FastAPI app;
+    a debug log line that contains ``?signature=...`` would leak it to logcat
+    or the log file even when the parameter name is not in the redaction list.
+    """
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger=eserver.logger.name)
+    status, _ = _get("/api/v1/health?signature=topsecret&q=hello")
+    assert status == 200
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages, "the request should have produced an access-log record"
+    assert not any("topsecret" in message for message in messages)
+    assert not any("?signature" in message for message in messages)
+
+
 def test_start_server_is_idempotent(running_server: SimpleNamespace) -> None:
     assert eserver.start_server("/ignored-when-running", 9999) == _port
     status, _ = _get("/api/v1/health")
