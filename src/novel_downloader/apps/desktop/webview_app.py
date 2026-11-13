@@ -36,6 +36,7 @@ import time
 import webbrowser
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
@@ -618,6 +619,69 @@ def _music_options_type(**kwargs: Any) -> Any:
     return DownloadOptions(**kwargs)
 
 
+#: Language slots reported for a track's lyric files. These are stable
+#: identifiers, not copy: the page localizes the visible label, so a saved
+#: result keeps its meaning when the interface language changes.
+_LYRIC_LANG_ORIGINAL = "原文"
+_LYRIC_LANG_TRANSLATION = "译文"
+
+
+def _music_lyric_files(audio_path: str) -> tuple[str, str]:
+    """
+    Return the existing ``(original, translation)`` lyric files for an audio path.
+
+    Both paths are derived from *audio_path* by the music engine
+    (``<stem>.lrc`` / ``<stem>.zh.lrc``) and then checked here, so a path from
+    an earlier run can never become a dead button. Missing or unsupported
+    extras yield ``("", "")``.
+    """
+    path = str(audio_path or "").strip()
+    if not path:
+        return "", ""
+    try:
+        from novel_downloader.apps.music.downloader import lyric_paths
+
+        original, translation = lyric_paths(path)  # type: ignore[no-untyped-call]
+    except Exception:  # noqa: BLE001 - optional extras may be absent
+        logger.debug("Could not resolve the lyric path for %s", path, exc_info=True)
+        return "", ""
+    return (
+        original if os.path.exists(original) else "",
+        translation if os.path.exists(translation) else "",
+    )
+
+
+def _music_lyric_path(audio_path: str) -> str:
+    """
+    Return the original ``.lrc`` saved next to *audio_path*, or ``""``.
+
+    Kept for compatibility with the page's legacy ``lyric_path`` field: the
+    batch summary and the old single "Lyrics" button are built around the
+    original file only. Translation-aware callers use
+    :func:`_music_lyric_paths`.
+    """
+    original, _translation = _music_lyric_files(audio_path)
+    return original
+
+
+def _music_lyric_paths(audio_path: str) -> list[dict[str, str]]:
+    """
+    Return the lyric files saved beside *audio_path*, original first.
+
+    Each entry is ``{"lang": "原文"|"译文", "path": ...}``. ``lang`` is the
+    language slot (not translated copy), so the history stays stable if the
+    interface language changes; the page renders the localized label. The list
+    omits missing files and is empty when neither lyric exists.
+    """
+    original, translation = _music_lyric_files(audio_path)
+    entries: list[dict[str, str]] = []
+    if original:
+        entries.append({"lang": _LYRIC_LANG_ORIGINAL, "path": original})
+    if translation:
+        entries.append({"lang": _LYRIC_LANG_TRANSLATION, "path": translation})
+    return entries
+
+
 #: Default suffix for playlists written without an explicit ``out_path``.
 _DEFAULT_PLAYLIST_SUFFIX = ".m3u8"
 
@@ -778,6 +842,15 @@ def _i18n_catalog() -> dict[str, str]:
         "Light": t("Light"),
         "Dark": t("Dark"),
         "Language": t("Language"),
+        "Search filters": t("Search filters"),
+        "The last used filters are restored when the app starts.": t(
+            "The last used filters are restored when the app starts."
+        ),
+        "Clear saved filters": t("Clear saved filters"),
+        "Saved search filters cleared": t("Saved search filters cleared"),
+        "Could not clear the saved search filters": t(
+            "Could not clear the saved search filters"
+        ),
         "Application": t("Application"),
         "Version": t("Version"),
         "Config file": t("Config file"),
@@ -898,6 +971,26 @@ def _i18n_catalog() -> dict[str, str]:
         "Try another keyword or clear the site filter": t(
             "Try another keyword or clear the site filter"
         ),
+        "Filters": t("Filters"),
+        "Min words": t("Min words"),
+        "Max words": t("Max words"),
+        "Updated after": t("Updated after"),
+        "Clear filters": t("Clear filters"),
+        "e.g. 100000": t("e.g. 100000"),
+        "Min words: {n}": t("Min words: {n}"),
+        "Max words: {n}": t("Max words: {n}"),
+        "Updated after {date}": t("Updated after {date}"),
+        "Filters applied: {filters}": t("Filters applied: {filters}"),
+        "Min words must be a whole number between 0 and {max}": t(
+            "Min words must be a whole number between 0 and {max}"
+        ),
+        "Max words must be a whole number between 0 and {max}": t(
+            "Max words must be a whole number between 0 and {max}"
+        ),
+        "Min words cannot be greater than max words": t(
+            "Min words cannot be greater than max words"
+        ),
+        "Use a YYYY-MM-DD date": t("Use a YYYY-MM-DD date"),
         "Author": t("Author"),
         "Best match": t("Best match"),
         "Show more": t("Show more"),
@@ -962,6 +1055,11 @@ def _i18n_catalog() -> dict[str, str]:
         "A download is already running": t("A download is already running"),
         "Music extras are not installed": t("Music extras are not installed"),
         "Downloaded {n} tracks": t("Downloaded {n} tracks"),
+        "{n} with lyrics": t("{n} with lyrics"),
+        "Lyrics": t("Lyrics"),
+        "Original lyrics": t("Original lyrics"),
+        "Translated lyrics": t("Translated lyrics"),
+        "Lyrics for {name}": t("Lyrics for {name}"),
         "Done: {ok} downloaded, {skip} skipped, {fail} failed": t(
             "Done: {ok} downloaded, {skip} skipped, {fail} failed"
         ),
@@ -1059,6 +1157,103 @@ def _result_dict(result: Mapping[str, Any], index: int) -> dict[str, Any]:
     data = dict(result)
     data["best"] = index == 0
     return data
+
+
+#: Upper bound for the desktop word-count filters.  Kept in step with the REST
+#: schema (``MAX_SEARCH_WORDS``) and the CLI so all three fronts reject the
+#: same out-of-range values with the same wording.
+_MAX_SEARCH_WORDS = 1_000_000_000
+#: The only accepted ``updated_after`` spelling.  A browser date input already
+#: yields ``YYYY-MM-DD``; anything else is rejected here instead of being
+#: reinterpreted by each site's date parser.
+_SEARCH_FILTER_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _search_filter_error(field: str, message: str) -> dict[str, Any]:
+    """Build the structured rejection the page maps back to one filter input."""
+    return {
+        "ok": False,
+        "error": message,
+        "error_code": "invalid_search_filter",
+        "error_field": field,
+    }
+
+
+def _word_filter(field: str, value: object) -> tuple[int | None, dict[str, Any] | None]:
+    """Validate one optional word-count bound from the JS bridge.
+
+    ``None`` and blank strings mean "no filter".  Numeric strings, ints and
+    integral floats are accepted so a bridge that serialises a JS number
+    either way keeps working, while booleans, fractions and junk are rejected
+    with a payload naming the offending input.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, bool):
+        number: int | None = None
+    elif isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        number = int(value) if value.is_integer() else None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None, None
+        number = int(text) if text.isdigit() else None
+    else:
+        number = None
+    max_words = _MAX_SEARCH_WORDS
+    if field == "min_words":
+        message = t("Min words must be a whole number between 0 and {max}").format(
+            max=max_words
+        )
+    else:
+        message = t("Max words must be a whole number between 0 and {max}").format(
+            max=max_words
+        )
+    if number is None or not 0 <= number <= max_words:
+        return None, _search_filter_error(field, message)
+    return number, None
+
+
+def _parse_search_filters(
+    min_words: object,
+    max_words: object,
+    updated_after: object,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Normalise the search filter arguments into keyword arguments.
+
+    Returns ``(kwargs, error)``.  ``error`` is the structured payload the page
+    displays and focuses on; ``kwargs`` is empty in that case.  Blank values are
+    omitted from ``kwargs`` so the search layer sees exactly the active filters.
+    """
+    minimum, error = _word_filter("min_words", min_words)
+    if error is not None:
+        return {}, error
+    maximum, error = _word_filter("max_words", max_words)
+    if error is not None:
+        return {}, error
+    if minimum is not None and maximum is not None and minimum > maximum:
+        return {}, _search_filter_error(
+            "max_words", t("Min words cannot be greater than max words")
+        )
+
+    filters: dict[str, Any] = {}
+    if minimum is not None:
+        filters["min_words"] = minimum
+    if maximum is not None:
+        filters["max_words"] = maximum
+    if updated_after is not None:
+        raw_date = str(updated_after).strip()
+        if raw_date:
+            message = t("Use a YYYY-MM-DD date")
+            if not _SEARCH_FILTER_DATE_RE.fullmatch(raw_date):
+                return {}, _search_filter_error("updated_after", message)
+            try:
+                filters["updated_after"] = date.fromisoformat(raw_date)
+            except ValueError:
+                return {}, _search_filter_error("updated_after", message)
+    return filters, None
 
 
 def _music_track_dict(track: object) -> dict[str, Any]:
@@ -1640,6 +1835,37 @@ def _save_prefs(values: dict[str, Any]) -> bool:
     return True
 
 
+def _remove_prefs_keys(*keys: str) -> bool:
+    """
+    Delete ``keys`` from the preference file (best effort).
+
+    The read-modify-write follows the same contract as :func:`_save_prefs`:
+    serialised across processes, atomic, and a corrupt file is preserved as
+    ``<name>.broken`` instead of being discarded.  A missing file (or missing
+    keys) is a success, so clearing twice never fails.
+
+    :return: ``True`` when the file no longer holds the keys.
+    """
+    path = _prefs_path()
+    try:
+        with _cross_process_lock(path):
+            stored = _load_prefs()
+            if _prefs_file_is_corrupt(path):
+                _preserve_corrupt_prefs(path)
+            if not any(key in stored for key in keys):
+                return True
+            for key in keys:
+                stored.pop(key, None)
+            _write_text_atomic(path, json.dumps(stored, ensure_ascii=False, indent=2))
+    except _LockTimeoutError:
+        logger.warning("Timed out waiting for the desktop prefs lock: %s", path)
+        return False
+    except (OSError, TypeError, ValueError):
+        logger.debug("Could not persist desktop prefs", exc_info=True)
+        return False
+    return True
+
+
 def _coerce_bool(value: Any) -> bool | None:
     """Strict-ish boolean coercion for values arriving over the JS bridge."""
     if isinstance(value, bool):
@@ -1659,6 +1885,43 @@ def _prefs_theme(prefs: Mapping[str, Any]) -> str:
     """Only ``light``/``dark`` are valid; anything else falls back to light."""
     theme = str(prefs.get("theme") or "light")
     return theme if theme in ("light", "dark") else "light"
+
+
+def _stored_search_filters(prefs: Mapping[str, Any]) -> dict[str, Any]:
+    """
+    Return the saved search filters, dropping invalid stored values.
+
+    The preference file can be hand-edited or written by an older build, so
+    each field is validated in isolation:
+
+    * an invalid ``min_words``/``max_words`` is ignored on its own;
+    * a pair where the minimum exceeds the maximum is discarded as a whole
+      (the combination was never a valid search);
+    * an invalid or non-``YYYY-MM-DD`` date is ignored.
+
+    The result always uses JSON-friendly types (ints and an ISO date string)
+    so it can be injected into the page unchanged.
+    """
+    value = prefs.get("search_filters")
+    if not isinstance(value, Mapping):
+        return {}
+    minimum, _ = _word_filter("min_words", value.get("min_words"))
+    maximum, _ = _word_filter("max_words", value.get("max_words"))
+    if minimum is not None and maximum is not None and minimum > maximum:
+        minimum = None
+        maximum = None
+    stored: dict[str, Any] = {}
+    if minimum is not None:
+        stored["min_words"] = minimum
+    if maximum is not None:
+        stored["max_words"] = maximum
+    raw_date = value.get("updated_after")
+    if raw_date is not None:
+        text = str(raw_date).strip()
+        if text and _SEARCH_FILTER_DATE_RE.fullmatch(text):
+            with contextlib.suppress(ValueError):
+                stored["updated_after"] = date.fromisoformat(text).isoformat()
+    return stored
 
 
 # ---------------------------------------------------------------------------
@@ -2059,6 +2322,11 @@ class ApiBridge:
         # Local paths of the submitted batch, aligned by index; the front end
         # merges them back onto its search rows for playlist export.
         self._music_paths: list[str] = []
+        # Per-track result payloads, aligned with ``_music_paths`` and the
+        # submitted batch. ``path``, ``lyric_path`` and ``lyric_paths`` are
+        # only present for files that exist, so the page never renders a dead
+        # open button.
+        self._music_results: list[dict[str, Any]] = []
         # Failed rows of the last download batch, ordered by track index; the
         # front end renders them with a "retry failed" button.
         self._music_failed_items: list[dict[str, Any]] = []
@@ -2178,6 +2446,9 @@ class ApiBridge:
             "auto_check_updates": _prefs_flag(prefs, "auto_check_updates", True),
             "auto_download_updates": _prefs_flag(prefs, "auto_download_updates", True),
             "auto_install_on_exit": _prefs_flag(prefs, "auto_install_on_exit", True),
+            # The page fills the filter panel from this and does not start a
+            # search on its own; invalid/old values are already filtered out.
+            "search_filters": _stored_search_filters(prefs),
             "language": _active_language(),
             "languages": languages,
             "sites": {
@@ -2298,6 +2569,7 @@ class ApiBridge:
                 "auto_install_on_exit": _prefs_flag(
                     prefs, "auto_install_on_exit", True
                 ),
+                "search_filters": _stored_search_filters(prefs),
                 "theme": _prefs_theme(prefs),
                 "language": _active_language(),
                 "languages": dict(SUPPORTED_LANGUAGES),
@@ -2322,6 +2594,7 @@ class ApiBridge:
                 "auto_check_updates": True,
                 "auto_download_updates": True,
                 "auto_install_on_exit": True,
+                "search_filters": {},
                 "theme": "light",
                 "language": "",
                 "languages": {},
@@ -3769,12 +4042,62 @@ class ApiBridge:
     # search
     # ------------------------------------------------------------------
 
+    def save_search_filters(
+        self,
+        min_words: int | float | str | None = None,
+        max_words: int | float | str | None = None,
+        updated_after: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Persist the last valid search filters for the next launch.
+
+        The same :func:`_parse_search_filters` contract as the search bridge
+        applies, so an invalid value is rejected with the structured payload
+        the page already knows how to display.  A set with every field blank
+        clears the stored filters instead of writing an empty object.
+
+        :return: ``{"ok", "filters", "error"}`` (plus ``error_code`` and
+            ``error_field`` for a rejected value).  Never raises.
+        """
+        filters, error = _parse_search_filters(min_words, max_words, updated_after)
+        if error is not None:
+            return {**error, "filters": {}}
+        stored = {
+            key: value.isoformat() if isinstance(value, date) else value
+            for key, value in filters.items()
+        }
+        if not stored:
+            ok = _remove_prefs_keys("search_filters") is not False
+        else:
+            ok = _save_prefs({"search_filters": stored}) is not False
+        return {
+            "ok": ok,
+            "filters": stored,
+            "error": None if ok else t("Could not save the settings"),
+        }
+
+    def clear_search_filters(self) -> dict[str, Any]:
+        """
+        Forget the saved search filters (the settings-page action).
+
+        :return: ``{"ok", "filters" (always empty), "error"}``.  Never raises.
+        """
+        ok = _remove_prefs_keys("search_filters") is not False
+        return {
+            "ok": ok,
+            "filters": {},
+            "error": None if ok else t("Could not save the settings"),
+        }
+
     def search(
         self,
         keyword: str,
         sites_csv: str = "",
         group: bool = False,
         per_site_limit: int = 4,
+        min_words: int | float | str | None = None,
+        max_words: int | float | str | None = None,
+        updated_after: str | None = None,
     ) -> dict[str, Any]:
         """
         Run an aggregate search and return ranked results.
@@ -3784,10 +4107,19 @@ class ApiBridge:
         :param group: Merge same-book results into one entry per book, each
             carrying the ``sources`` capsules (best source first).
         :param per_site_limit: Results kept per site before ranking.
+        :param min_words: Optional inclusive lower bound on the parsed word
+            count; blank means no filter.
+        :param max_words: Optional inclusive upper bound on the parsed word
+            count; blank means no filter.
+        :param updated_after: Optional inclusive lower bound on the update
+            date, as ``YYYY-MM-DD``; blank means no filter.
         """
         text = str(keyword or "").strip()
         if not text:
             return {"results": [], "elapsed": 0.0}
+        filters, error = _parse_search_filters(min_words, max_words, updated_after)
+        if error is not None:
+            return {**error, "results": [], "elapsed": 0.0}
         names = [s.strip() for s in str(sites_csv or "").split(",") if s.strip()]
         sites = names or None
 
@@ -3801,6 +4133,7 @@ class ApiBridge:
                 per_site_limit=per_site_limit,
                 timeout=SEARCH_SITE_TIMEOUT,
                 group=bool(group),
+                **filters,
             )
             elapsed = time.perf_counter() - started
             return [_result_dict(r, i) for i, r in enumerate(results)], elapsed
@@ -3819,6 +4152,9 @@ class ApiBridge:
         sites_csv: str = "",
         group: bool = False,
         per_site_limit: int = 4,
+        min_words: int | float | str | None = None,
+        max_words: int | float | str | None = None,
+        updated_after: str | None = None,
     ) -> dict[str, Any]:
         """
         Start a progressive search and return its id.
@@ -3835,10 +4171,25 @@ class ApiBridge:
         :param sites_csv: Optional comma-separated site filter.
         :param group: Merge same-book results into one entry per book.
         :param per_site_limit: Results kept per site before ranking.
+        :param min_words: Optional inclusive lower bound on the parsed word
+            count; blank means no filter.
+        :param max_words: Optional inclusive upper bound on the parsed word
+            count; blank means no filter.
+        :param updated_after: Optional inclusive lower bound on the update
+            date, as ``YYYY-MM-DD``; blank means no filter.
         """
         text = str(keyword or "").strip()
         if not text:
             return {"search_id": "", "results": [], "done": True, "elapsed": 0.0}
+        filters, error = _parse_search_filters(min_words, max_words, updated_after)
+        if error is not None:
+            return {
+                **error,
+                "search_id": "",
+                "results": [],
+                "done": True,
+                "elapsed": 0.0,
+            }
         names = [s.strip() for s in str(sites_csv or "").split(",") if s.strip()]
         sites = names or None
 
@@ -3918,6 +4269,7 @@ class ApiBridge:
                     per_site_limit=per_site_limit,
                     timeout=SEARCH_SITE_TIMEOUT,
                     on_event=on_event,
+                    **filters,
                 )
                 try:
                     async for chunk in stream:
@@ -3965,6 +4317,7 @@ class ApiBridge:
                         per_site_limit=per_site_limit,
                         timeout=SEARCH_SITE_TIMEOUT,
                         group=bool(group),
+                        **filters,
                     )
                     with self._lock:
                         if bool(state["cancelled"]):
@@ -4770,6 +5123,7 @@ class ApiBridge:
             self._music_summary = ""
             self._music_failed = False
             self._music_paths = [""] * len(tracks)
+            self._music_results = [{} for _ in tracks]
             self._music_failed_items = []
             self._music_stop.clear()
 
@@ -4802,6 +5156,9 @@ class ApiBridge:
         # index in the submitted batch -> why it failed; a successful fallback
         # source later clears its entry (``download_mixed`` re-reports it).
         failed: dict[int, dict[str, Any]] = {}
+        # indexes whose audio landed with a ``.lrc`` beside it; drives the
+        # "lyrics saved" part of the batch summary.
+        lyric_indexes: set[int] = set()
         try:
             funcs = _music_funcs()
             if funcs is None:
@@ -4849,6 +5206,27 @@ class ApiBridge:
                 )
                 reason = str(getattr(result, "reason", "") or "")
                 name = str(getattr(_track, "name", "") or "")
+                # Only report files that really exist: the page turns this
+                # into "open lyrics" buttons, and a stale path would make
+                # those buttons a silent no-op.
+                lyric_entries = _music_lyric_paths(path)
+                # ``lyric_path`` stays the original ``.lrc`` for compatibility
+                # (the summary and older pages count only that file).
+                lyric_path = next(
+                    (
+                        entry["path"]
+                        for entry in lyric_entries
+                        if entry["lang"] == _LYRIC_LANG_ORIGINAL
+                    ),
+                    "",
+                )
+                entry: dict[str, Any] = {}
+                if path:
+                    entry["path"] = path
+                if lyric_path:
+                    entry["lyric_path"] = lyric_path
+                if lyric_entries:
+                    entry["lyric_paths"] = lyric_entries
                 with self._lock:
                     counts[key] += 1
                     # Exactly one increment per finished track: the count is
@@ -4856,12 +5234,19 @@ class ApiBridge:
                     self._music_done += 1
                     if 0 <= index < len(self._music_paths) and path:
                         self._music_paths[index] = path
+                    if 0 <= index < len(self._music_results):
+                        self._music_results[index] = entry
                     if key == "fail":
+                        lyric_indexes.discard(index)
                         failed[index] = {"index": index, "name": name, "reason": reason}
                     else:
                         # A fallback source succeeded (or a retry landed):
                         # the row is no longer a failure.
                         failed.pop(index, None)
+                        if lyric_path:
+                            lyric_indexes.add(index)
+                        else:
+                            lyric_indexes.discard(index)
 
             def on_tick(fraction: float, _done: int) -> None:
                 with self._lock:
@@ -4917,6 +5302,13 @@ class ApiBridge:
                             .replace("{skip}", str(counts["skip"]))
                             .replace("{fail}", str(counts["fail"]))
                         )
+                    if lyric_indexes:
+                        # The batch summary is the only place the user learns
+                        # how many tracks got a ``.lrc`` without opening every
+                        # song; keep the zero case out so old runs read the same.
+                        self._music_summary += " · " + t("{n} with lyrics").replace(
+                            "{n}", str(len(lyric_indexes))
+                        )
                 self._music_failed = self._music_failed or counts["fail"] > 0
 
     @staticmethod
@@ -4946,6 +5338,11 @@ class ApiBridge:
                 "summary": self._music_summary,
                 "failed": self._music_failed,
                 "paths": list(self._music_paths),
+                # Aligned with ``paths``: each item may carry ``path``, the
+                # legacy ``lyric_path`` (the original ``.lrc`` the music engine
+                # saved next to the audio, when it exists) and ``lyric_paths``
+                # (every existing lyric file, original first).
+                "results": [dict(item) for item in self._music_results],
                 # Indexes refer to the track list handed to the most recent
                 # ``music_download`` call, in that order.
                 "failed_items": [dict(item) for item in self._music_failed_items],
