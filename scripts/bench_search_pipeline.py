@@ -13,6 +13,9 @@ measures the hot public entry points with ``time.perf_counter``:
 * ``group_results``           -- same-book folding only
 * ``_finalize`` (flat)        -- sanitize + dedupe + intent + rank + annotate
 * ``_finalize`` (grouped)     -- the same plus grouping
+* ``_finalize`` + local filters -- the same flat path with one or all three
+  of ``min_words``/``max_words``/``updated_after`` active, so the filter
+  overhead at 1k/5k/20k rows is reported as a ratio against the no-filter run
 * ``SearchCache.put`` / ``get`` -- memory layer
 * disk ``put`` / ``get``      -- optional persistent layer (tmpdir)
 
@@ -42,7 +45,7 @@ import time
 import tracemalloc
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +67,24 @@ from novel_downloader.plugins.search_cache import (  # noqa: E402
 from novel_downloader.schemas import SearchResult  # noqa: E402
 
 NOW = datetime(2024, 6, 15, 12, 0, 0)
+
+#: Filter combinations measured by the benchmark.  The first entry is the
+#: unfiltered baseline; the others exercise one and all three local filters so
+#: their incremental cost can be reported as a ratio against it.  The values
+#: match the synthetic mix above (``_WORDS``/``_DATES``), so every scenario
+#: keeps a non-trivial share of the rows instead of filtering everything out.
+FILTER_SCENARIOS: tuple[tuple[str, dict[str, Any]], ...] = (
+    ("no-filter", {}),
+    ("min_words", {"min_words": 100_000}),
+    (
+        "three-filters",
+        {
+            "min_words": 100_000,
+            "max_words": 2_000_000,
+            "updated_after": date(2024, 1, 1),
+        },
+    ),
+)
 
 #: Query used for the multi-token path: two tokens exercising the per-token
 #: title/author accumulation in ``detect_query_intent`` / ``_relevance``.
@@ -167,6 +188,8 @@ def reset_caches() -> None:
     ranking_module._normalize_cached.cache_clear()
     ranking_module._similarity_cached.cache_clear()
     ranking_module._query_tokens_cached.cache_clear()
+    ranking_module._word_count_cached.cache_clear()
+    ranking_module._update_date_cached.cache_clear()
     grouping_module._core_title_cached.cache_clear()
 
 
@@ -228,27 +251,29 @@ def measure_all(n: int, *, repeats: int, include_disk: bool) -> dict[str, Any]:
     cache = SearchCache(max_entries=8)
     cache.put(key, rows[: n // 2])
 
-    def _finalize_flat() -> list[SearchResult]:
+    def _finalize_run(*, group: bool, **filters: Any) -> list[SearchResult]:
         return _finalize(
             list(rows),
             keyword=KEYWORD,
             sort="quality",
             order=None,
             limit=None,
-            group=False,
+            group=group,
             min_relevance=None,
+            **filters,
         )
 
+    def _finalize_flat() -> list[SearchResult]:
+        return _finalize_run(group=False)
+
     def _finalize_grouped() -> list[SearchResult]:
-        return _finalize(
-            list(rows),
-            keyword=KEYWORD,
-            sort="quality",
-            order=None,
-            limit=None,
-            group=True,
-            min_relevance=None,
-        )
+        return _finalize_run(group=True)
+
+    def _filtered_flat(filters: dict[str, Any]) -> Callable[[], list[SearchResult]]:
+        def run() -> list[SearchResult]:
+            return _finalize_run(group=False, **filters)
+
+        return run
 
     def _sort_only() -> None:
         work = list(rows)
@@ -263,12 +288,23 @@ def measure_all(n: int, *, repeats: int, include_disk: bool) -> dict[str, Any]:
     def _cache_put() -> None:
         cache.put(key, rows)
 
+    filtered_runs = {
+        label: _filtered_flat(filters) for label, filters in FILTER_SCENARIOS
+    }
+    three_filters = dict(FILTER_SCENARIOS)["three-filters"]
+
     timings: dict[str, Any] = {}
     for name, fn in (
         ("sort_results", _sort_only),
         ("group_results", _group_only),
         ("_finalize_flat", _finalize_flat),
         ("_finalize_grouped", _finalize_grouped),
+        ("_finalize_flat[min_words]", filtered_runs["min_words"]),
+        ("_finalize_flat[three-filters]", filtered_runs["three-filters"]),
+        (
+            "_finalize_grouped[three-filters]",
+            lambda: _finalize_run(group=True, **three_filters),
+        ),
     ):
         timings[name] = median_time(fn, repeats=repeats, reset=reset_caches)
     # The cache layer copies only the list (row dicts are shared) and does no
@@ -280,7 +316,22 @@ def measure_all(n: int, *, repeats: int, include_disk: bool) -> dict[str, Any]:
     memory = {
         "finalize_flat_peak": _measure_peak(_finalize_flat) / (1024 * 1024),
         "finalize_grouped_peak": _measure_peak(_finalize_grouped) / (1024 * 1024),
+        "finalize_flat[min_words]_peak": _measure_peak(filtered_runs["min_words"])
+        / (1024 * 1024),
+        "finalize_flat[three-filters]_peak": _measure_peak(
+            filtered_runs["three-filters"]
+        )
+        / (1024 * 1024),
         "cache_put_peak": _measure_peak(_cache_put) / (1024 * 1024),
+    }
+
+    baseline_ms = timings["_finalize_flat"][0]
+    filter_overhead = {
+        label: {
+            "ratio": timings[f"_finalize_flat[{label}]"][0] / baseline_ms,
+            "extra_ms": timings[f"_finalize_flat[{label}]"][0] - baseline_ms,
+        }
+        for label in ("min_words", "three-filters")
     }
 
     if include_disk:
@@ -316,6 +367,7 @@ def measure_all(n: int, *, repeats: int, include_disk: bool) -> dict[str, Any]:
         "timings_ms": {name: value[0] for name, value in timings.items()},
         "samples_ms": {name: value[1] for name, value in timings.items()},
         "memory_peak_mb": memory,
+        "filter_overhead": filter_overhead,
     }
 
 
@@ -346,27 +398,39 @@ def print_table(
     results: Sequence[dict[str, Any]], cache_scale: Sequence[dict[str, Any]]
 ) -> None:
     """Render a fixed-width table plus the key-scaling check."""
+    width = 32
     names = list(results[0]["timings_ms"])
-    header = f"{'operation':<20}" + "".join(f"{r['n']:>12}" for r in results)
+    header = f"{'operation':<{width}}" + "".join(f"{r['n']:>12}" for r in results)
     print("Median of N repeats (ms) -- lower is better")
     print(header)
     print("-" * len(header))
     for name in names:
-        row = f"{name:<20}" + "".join(
+        row = f"{name:<{width}}" + "".join(
             f"{r['timings_ms'][name]:>12.2f}" for r in results
         )
         print(row)
     print()
     print("Peak traced memory (MB)")
     mem_names = list(results[0]["memory_peak_mb"])
-    header = f"{'operation':<20}" + "".join(f"{r['n']:>12}" for r in results)
+    header = f"{'operation':<{width}}" + "".join(f"{r['n']:>12}" for r in results)
     print(header)
     print("-" * len(header))
     for name in mem_names:
-        row = f"{name:<20}" + "".join(
+        row = f"{name:<{width}}" + "".join(
             f"{r['memory_peak_mb'][name]:>12.2f}" for r in results
         )
         print(row)
+    print()
+    print("Filter overhead vs no filter -- ratio (x) and extra milliseconds")
+    print(f"{'scenario':<{width}}" + "".join(f"{r['n']:>12}" for r in results))
+    print("-" * len(header))
+    for label in ("min_words", "three-filters"):
+        cells = "".join(
+            f"{r['filter_overhead'][label]['ratio']:>7.2f}x"
+            f"{r['filter_overhead'][label]['extra_ms']:>+7.0f}ms"
+            for r in results
+        )
+        print(f"{label:<{width}}{cells}")
     print()
     print("build_key cost vs result count (rows are never part of the key)")
     print(f"{'n':>8}{'rows':>8}{'build_key_ms':>16}")

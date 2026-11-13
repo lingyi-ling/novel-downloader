@@ -39,7 +39,7 @@ import time
 import tracemalloc
 import unicodedata
 import zipfile
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +161,8 @@ def _reset_caches() -> None:
     ranking_module._normalize_cached.cache_clear()
     ranking_module._similarity_cached.cache_clear()
     ranking_module._query_tokens_cached.cache_clear()
+    ranking_module._word_count_cached.cache_clear()
+    ranking_module._update_date_cached.cache_clear()
     grouping_module._core_title_cached.cache_clear()
 
 
@@ -334,6 +336,141 @@ def test_normalize_text_repeated_calls_are_lru_cached() -> None:
 
     after = cached.cache_info().hits
     assert after - before >= 49
+
+
+# --------------------------------------------------------------------------- #
+# parse_word_count / parse_update_date: memoized without changing the result
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "1234",
+        "1,234",
+        "12.3万字",
+        "１．２万字",
+        "1.2M",
+        "3千字",
+        "未知",
+        "-",
+        "总字数：12.3万字",
+    ],
+)
+def test_parse_word_count_cache_matches_the_uncached_parser(value: object) -> None:
+    """The memoized public call must equal one cold parse of the same label."""
+    core = ranking_module._word_count_cached.__wrapped__
+    raw = "" if value is None else str(value)
+    ranking_module._word_count_cached.cache_clear()
+
+    expected = core(raw)
+    assert ranking_module.parse_word_count(value) == expected
+    # A second call is served from the cache and must still agree.
+    assert ranking_module.parse_word_count(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "2024-05-01",
+        "2024.05.01 10:00",
+        "2024年5月1日",
+        "２０２４年５月１日",
+        "3天前",
+        "昨天",
+        "刚刚",
+        "2个月前",
+        "-",
+        "12:30",
+    ],
+)
+def test_parse_update_date_cache_matches_the_uncached_parser(value: object) -> None:
+    """The memoized public call must equal one cold parse against the clock."""
+    core = ranking_module._update_date_cached.__wrapped__
+    raw = "" if value is None else str(value)
+    ranking_module._update_date_cached.cache_clear()
+
+    expected = core(raw, NOW)
+    assert ranking_module.parse_update_date(value, now=NOW) == expected
+    assert ranking_module.parse_update_date(value, now=NOW) == expected
+
+
+def test_parse_update_date_cache_is_keyed_by_the_clock() -> None:
+    """Relative labels must not leak a result parsed against an older clock."""
+    ranking_module._update_date_cached.cache_clear()
+    later = NOW + timedelta(days=30)
+
+    assert ranking_module.parse_update_date("3天前", now=NOW) == NOW - timedelta(days=3)
+    assert ranking_module.parse_update_date("3天前", now=later) == later - timedelta(
+        days=3
+    )
+
+
+def test_parse_update_date_without_a_clock_is_not_frozen() -> None:
+    """``now=None`` must keep reading the current time instead of a cache entry."""
+    ranking_module._update_date_cached.cache_clear()
+    before = datetime.now()
+
+    first = ranking_module.parse_update_date("刚刚")
+    second = ranking_module.parse_update_date("刚刚")
+    after = datetime.now()
+
+    assert first is not None and second is not None
+    assert before <= first <= after
+    assert before <= second <= after
+
+
+def test_finalize_filters_parse_each_distinct_label_once() -> None:
+    """
+    A filtered ``_finalize`` call must not re-parse a label once per row.
+
+    Ranking scores every row, the filter then reads the same two fields, and
+    the annotation scores the surviving rows again.  With memoization each
+    *distinct* raw label is parsed once per call; without it the miss count
+    would grow with the row count.
+    """
+    word_labels = ("1万字", "2万字", "300万字")
+    date_labels = ("2024-01-01", "2024-02-01", "2024-03-01")
+    rows = [
+        SearchResult(
+            site=f"site{i % 3}",
+            book_id=f"f{i}",
+            book_url=f"https://example.com/f/{i}",
+            cover_url="",
+            title=f"独本{i}",
+            author="作者",
+            latest_chapter="",
+            update_date=date_labels[i % len(date_labels)],
+            word_count=word_labels[i % len(word_labels)],
+            priority=10,
+        )
+        for i in range(300)
+    ]
+    ranking_module._word_count_cached.cache_clear()
+    ranking_module._update_date_cached.cache_clear()
+
+    _finalize(
+        [dict(row) for row in rows],
+        keyword="独本",
+        sort="quality",
+        order=None,
+        limit=None,
+        group=False,
+        min_relevance=None,
+        min_words=0,
+        max_words=1_000_000,
+        updated_after=date(2024, 1, 1),
+    )
+
+    words = ranking_module._word_count_cached.cache_info()
+    dates = ranking_module._update_date_cached.cache_info()
+    assert words.misses == len(word_labels)
+    assert dates.misses == len(date_labels)
+    # Every row asked again during the filter/annotation steps.
+    assert words.hits >= len(rows) - len(word_labels)
+    assert dates.hits >= len(rows) - len(date_labels)
 
 
 # --------------------------------------------------------------------------- #
@@ -549,6 +686,58 @@ def test_finalize_at_20k_stays_within_a_generous_budget() -> None:
     assert grouped_ms < 20_000, (
         f"_finalize(group=True) took {grouped_ms:.0f} ms at 20k rows"
     )
+
+
+def test_finalize_filters_at_20k_stay_within_a_generous_budget() -> None:
+    """
+    Filter tripwire: one or three local filters must stay within ~10x the
+    measured no-filter median.
+
+    Measured 2026-11 on the dev machine (Python 3.12, cold module caches):
+    no filter ~1.4-1.9 s, ``min_words`` ~1.8-2.2 s, three filters ~1.1-1.6 s
+    at 20k rows (the three-filter run scores fewer surviving rows during
+    annotation, so it can be *faster* than the unfiltered one).  The budgets
+    below are deliberately loose; a return to per-row re-parsing or a second
+    sort would blow well past them.
+    """
+    rows = _make_scaled_results(20_000)
+
+    def finalize(**filters: Any) -> None:
+        _finalize(
+            list(rows),
+            keyword=KEYWORD,
+            sort="quality",
+            order=None,
+            limit=None,
+            group=False,
+            min_relevance=None,
+            **filters,
+        )
+
+    flat_ms = _median_ms(lambda: finalize(), repeats=2, warmup=False)
+    min_words_ms = _median_ms(
+        lambda: finalize(min_words=100_000), repeats=2, warmup=False
+    )
+    three_ms = _median_ms(
+        lambda: finalize(
+            min_words=100_000,
+            max_words=2_000_000,
+            updated_after=date(2024, 1, 1),
+        ),
+        repeats=2,
+        warmup=False,
+    )
+
+    assert math.isfinite(flat_ms)
+    assert min_words_ms < 25_000, (
+        f"_finalize(min_words) took {min_words_ms:.0f} ms at 20k rows"
+    )
+    assert three_ms < 25_000, (
+        f"_finalize(three filters) took {three_ms:.0f} ms at 20k rows"
+    )
+    # Relative guard: filtering may not add more than one order of magnitude.
+    assert min_words_ms < flat_ms * 10, (flat_ms, min_words_ms)
+    assert three_ms < flat_ms * 10, (flat_ms, three_ms)
 
 
 # --------------------------------------------------------------------------- #
