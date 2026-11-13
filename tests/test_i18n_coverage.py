@@ -261,10 +261,22 @@ _BYPASS_MSGID_SITES: dict[str, str] = {
     ): "src/novel_downloader/apps/api/main.py",
     (
         "Max requests accepted per client IP per sliding window "
-        "(429 + Retry-After above it). 0 disables rate limiting."
+        "(429 + Retry-After above it). Must be between 1 and {max}."
     ): "src/novel_downloader/apps/api/main.py",
     (
-        "Length of the --rate-limit sliding window in seconds."
+        "Disable rate limiting entirely. Only for a trusted local "
+        "environment; not recommended."
+    ): "src/novel_downloader/apps/api/main.py",
+    (
+        "Length of the --rate-limit sliding window in seconds; must be "
+        "greater than 0 and at most {max}."
+    ): "src/novel_downloader/apps/api/main.py",
+    (
+        "must be an integer between 1 and {max}; use --no-rate-limit to "
+        "disable rate limiting"
+    ): "src/novel_downloader/apps/api/main.py",
+    (
+        "must be a number of seconds greater than 0 and at most {max}"
     ): "src/novel_downloader/apps/api/main.py",
     # apps/core/task_manager.py
     "Login failed.": "src/novel_downloader/apps/core/task_manager.py",
