@@ -103,7 +103,7 @@ class AndroidSecurityConfigTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun fileProviderIsPrivateAndLimitedToVerifiedUpdates() {
+    fun fileProviderIsPrivateAndLimitedToVerifiedUpdatesAndLyrics() {
         val provider = application().elements("provider").single()
         assertEquals("androidx.core.content.FileProvider", provider.androidAttr("name"))
         assertEquals("\${applicationId}.fileprovider", provider.androidAttr("authorities"))
@@ -118,12 +118,18 @@ class AndroidSecurityConfigTest {
         val paths = parseXml("src/main/res/xml/file_paths.xml").documentElement
         assertEquals("paths", paths.tagName)
         val entries = paths.elements()
-        assertEquals(1, entries.size)
+        // Exactly two narrow ranges: the verified update APK and the music
+        // engine's output (where `<stem>.lrc` lives). The provider never
+        // exposes an entire domain.
+        assertEquals(2, entries.size)
 
-        val entry = entries.single()
-        assertEquals("cache-path", entry.tagName)
-        assertEquals("updates", entry.getAttribute("name"))
-        assertEquals("updates/", entry.getAttribute("path"))
+        val updates = entries.single { it.getAttribute("name") == "updates" }
+        assertEquals("cache-path", updates.tagName)
+        assertEquals("updates/", updates.getAttribute("path"))
+
+        val music = entries.single { it.getAttribute("name") == "music" }
+        assertEquals("files-path", music.tagName)
+        assertEquals("engine_home/downloads/music/", music.getAttribute("path"))
     }
 
     // ------------------------------------------------------------------

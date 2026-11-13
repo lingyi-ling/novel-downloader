@@ -28,13 +28,14 @@ import com.lingyi.noveldl.ui.tasks.TaskTerminalEvent
  * Each task owns one notification id and one PendingIntent request code
  * ([NotificationIds]): re-posting updates the existing entry silently instead
  * of stacking duplicates, and two tasks can never overwrite each other.
+ *
+ * Tapping the notification opens [MainActivity] with the task id in
+ * [TaskOpen.EXTRA_TASK_ID], so the app can scroll to that task instead of
+ * merely coming to the foreground.
  */
 object TaskNotifier {
 
     const val CHANNEL_ID = "task_events"
-
-    /** Keeps the per-task PendingIntents apart in the system's cache. */
-    private const val ACTION_OPEN_TASKS = "com.lingyi.noveldl.action.OPEN_TASKS"
 
     private val channelLock = Any()
 
@@ -119,8 +120,15 @@ object TaskNotifier {
         val intent = Intent(appContext, MainActivity::class.java).apply {
             // Unique per task: PendingIntent identity includes the action, and
             // a shared action would let a later update retarget an older PI.
-            action = "$ACTION_OPEN_TASKS:$notificationId"
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            action = TaskOpen.openTasksAction(notificationId)
+            // The real task id, never the fallback key above: only a real id
+            // can be located in the task list.
+            putExtra(TaskOpen.EXTRA_TASK_ID, event.task.task_id.trim())
+            // SINGLE_TOP keeps a foreground activity alive, so the tap arrives
+            // through onNewIntent and the 2 s poll/composition state survives.
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         val pendingIntent = PendingIntent.getActivity(
             appContext,

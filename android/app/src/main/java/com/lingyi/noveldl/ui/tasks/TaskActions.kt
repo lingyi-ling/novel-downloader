@@ -9,7 +9,8 @@ import com.lingyi.noveldl.data.encodeDownloadPathSegment
 /**
  * Pure rules behind the task screen interactions: expand/collapse of the
  * detail panel, retrying failed/cancelled tasks via `POST /api/v1/tasks`,
- * and turning `exported_paths` into downloadable files.
+ * turning `exported_paths` into downloadable files, and locating the task a
+ * notification tap asked to reveal.
  *
  * Keeping them out of the composable makes the decisions testable on the JVM
  * (see [TaskActionsTest]).
@@ -107,3 +108,80 @@ fun taskExportFiles(task: Task): List<HistoryFile> =
                 download_url = "/downloads/" + encodeDownloadPathSegment(name),
             )
         }
+
+/**
+ * Flat row index of [taskId] in the tasks list, or `null` when it is not
+ * listed.
+ *
+ * Mirrors the item order of `TasksScreen`'s `LazyColumn`: the optional login
+ * request block (one header plus one card per request), then each section
+ * header followed by its tasks — running, pending, completed. A wrong offset
+ * would scroll to an unrelated card, so the mapping is unit-tested.
+ */
+fun taskRowIndex(
+    loginRequestCount: Int,
+    runningIds: List<String>,
+    pendingIds: List<String>,
+    completedIds: List<String>,
+    taskId: String,
+): Int? {
+    var row = 0
+    if (loginRequestCount > 0) row += 1 + loginRequestCount
+    row += 1
+    runningIds.indexOf(taskId).takeIf { it >= 0 }?.let { return row + it }
+    row += runningIds.size
+    row += 1
+    pendingIds.indexOf(taskId).takeIf { it >= 0 }?.let { return row + it }
+    row += pendingIds.size
+    row += 1
+    completedIds.indexOf(taskId).takeIf { it >= 0 }?.let { return row + it }
+    return null
+}
+
+/** What the tasks screen should do with a notification-originated request. */
+sealed interface TaskFocusDecision {
+
+    /** The list is not authoritative yet (no poll has answered). */
+    data object Wait : TaskFocusDecision
+
+    /** The notification carried no usable task id: open the list only. */
+    data object NoTaskId : TaskFocusDecision
+
+    /** [taskId] is listed at [row]; expand, highlight and scroll to it. */
+    data class Reveal(val taskId: String, val row: Int) : TaskFocusDecision
+
+    /** The server answered and no longer knows [taskId]. */
+    data class Missing(val taskId: String) : TaskFocusDecision
+}
+
+/**
+ * Resolves [taskId] against the currently listed tasks.
+ *
+ * Found beats "not synced": a persisted snapshot restored from disk is good
+ * enough to reveal the card immediately. Only after a poll actually answered
+ * ([synced]) may an absent id be reported as [TaskFocusDecision.Missing] —
+ * otherwise an unreachable server would claim the task never existed.
+ */
+fun taskFocusDecision(
+    taskId: String?,
+    synced: Boolean,
+    loginRequestCount: Int,
+    runningIds: List<String>,
+    pendingIds: List<String>,
+    completedIds: List<String>,
+): TaskFocusDecision {
+    val id = taskId?.trim()?.takeIf { it.isNotEmpty() }
+        ?: return TaskFocusDecision.NoTaskId
+    val row = taskRowIndex(
+        loginRequestCount = loginRequestCount,
+        runningIds = runningIds,
+        pendingIds = pendingIds,
+        completedIds = completedIds,
+        taskId = id,
+    )
+    return when {
+        row != null -> TaskFocusDecision.Reveal(id, row)
+        synced -> TaskFocusDecision.Missing(id)
+        else -> TaskFocusDecision.Wait
+    }
+}

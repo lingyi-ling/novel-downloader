@@ -91,6 +91,30 @@ object MusicJobResults {
     }
 
     /**
+     * Verified lyric paths of [results], keyed like [trackKey].
+     *
+     * Results are aligned with [chosen] exactly like [pathsByTrack]. Both
+     * `ok` and `skip` count: the engine also writes/keeps the `.lrc` when it
+     * skips an already downloaded track, and the user still wants to open it.
+     * A failed row never contributes, even if the engine echoed a path.
+     */
+    fun lyricsByTrack(
+        chosen: List<MusicTrack>,
+        results: List<MusicJobResult>,
+    ): Map<String, String> {
+        if (chosen.isEmpty() || results.isEmpty()) return emptyMap()
+        val lyrics = LinkedHashMap<String, String>()
+        chosen.forEachIndexed { index, track ->
+            val result = results.getOrNull(index) ?: return@forEachIndexed
+            if (result.status != "ok" && result.status != "skip") return@forEachIndexed
+            val lyric = result.lyricPath?.trim().orEmpty()
+            if (lyric.isEmpty()) return@forEachIndexed
+            lyrics[trackKey(track)] = lyric
+        }
+        return lyrics
+    }
+
+    /**
      * Keys of [chosen] whose result is an explicit engine failure.
      *
      * Used to drop a track from the persisted path cache: a failed retry must

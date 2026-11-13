@@ -38,4 +38,13 @@ class NavigationTest {
             assertTrue("missing icon for ${item.route}", item.icon.name.isNotEmpty())
         }
     }
+
+    @Test
+    fun notificationNavigationTargetsTheTasksTab() {
+        // The Tasks tab must be the one notification-driven navigation opens,
+        // otherwise a tap would land on a route the NavHost does not compose.
+        assertTrue(navItems.any { it.route == TASKS_ROUTE })
+        assertEquals("tasks", TASKS_ROUTE)
+        assertEquals(R.string.nav_tasks, navItems.single { it.route == TASKS_ROUTE }.label)
+    }
 }

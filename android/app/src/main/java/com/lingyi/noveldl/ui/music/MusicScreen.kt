@@ -204,13 +204,27 @@ fun MusicScreen(
         jobModel.incoming.collect { event ->
             when (event) {
                 is MusicJobEvent.Finished -> {
+                    // The lyric count belongs in the batch summary: it is the
+                    // only place the user learns how many tracks got a `.lrc`
+                    // without opening every song. The zero case keeps the old
+                    // wording, so runs without lyrics read the same as before.
                     onMessage(
-                        context.getString(
-                            R.string.music_job_done,
-                            event.counts.ok,
-                            event.counts.skipped,
-                            event.counts.failed,
-                        ),
+                        if (event.lyricsSaved > 0) {
+                            context.getString(
+                                R.string.music_job_done_lyrics,
+                                event.counts.ok,
+                                event.counts.skipped,
+                                event.counts.failed,
+                                event.lyricsSaved,
+                            )
+                        } else {
+                            context.getString(
+                                R.string.music_job_done,
+                                event.counts.ok,
+                                event.counts.skipped,
+                                event.counts.failed,
+                            )
+                        },
                     )
                     // Counts alone do not explain a failure; surface the
                     // engine's own reason (e.g. an expired search_id asks the
@@ -504,7 +518,12 @@ fun MusicScreen(
             }
         }
         items(search.tracks) { track ->
-            val checked = MusicJobResults.trackKey(track) in search.selectedKeys
+            val trackKey = MusicJobResults.trackKey(track)
+            val checked = trackKey in search.selectedKeys
+            // Verified by [MusicJobRunner]: absent until a finished download
+            // really wrote `<stem>.lrc` next to the audio inside the app's
+            // private music directory.
+            val lyricPath = jobState.lyricPaths[trackKey]
             Card(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     // The whole card selects the track: a 24 dp checkbox alone
@@ -541,6 +560,35 @@ fun MusicScreen(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
+                            }
+                            // Only present when a lyric was really saved: a
+                            // stale path would make the button a silent no-op.
+                            if (lyricPath != null) {
+                                val openLabel = stringResource(
+                                    R.string.music_lyric_open_named,
+                                    track.name,
+                                )
+                                TextButton(
+                                    onClick = {
+                                        when (MusicLyricOpener.open(context, lyricPath)) {
+                                            MusicLyricOpenResult.Missing -> onMessage(
+                                                context.getString(R.string.music_lyric_missing),
+                                            )
+                                            MusicLyricOpenResult.NoApp -> onMessage(
+                                                context.getString(R.string.music_lyric_no_app),
+                                            )
+                                            MusicLyricOpenResult.Opened -> Unit
+                                        }
+                                    },
+                                    modifier = Modifier.semantics {
+                                        contentDescription = openLabel
+                                    },
+                                ) {
+                                    Text(
+                                        stringResource(R.string.music_lyrics),
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                }
                             }
                         }
                         if (track.vip) {

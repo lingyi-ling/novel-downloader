@@ -10,6 +10,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -40,6 +41,8 @@ import com.lingyi.noveldl.data.UpdatePhase
 import com.lingyi.noveldl.data.UpdateSchedule
 import com.lingyi.noveldl.data.appVersionName
 import com.lingyi.noveldl.notifications.TaskNotifier
+import com.lingyi.noveldl.notifications.TaskOpen
+import com.lingyi.noveldl.notifications.TaskOpenViewModel
 import com.lingyi.noveldl.ui.NovelApp
 import com.lingyi.noveldl.ui.NovelTheme
 import com.lingyi.noveldl.ui.settings.updateFailureText
@@ -47,6 +50,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+
+    /**
+     * Outlives a configuration change: the intent is redelivered on rotation,
+     * and a plain field would replay the notification's scroll request.
+     */
+    private val taskOpen: TaskOpenViewModel by viewModels()
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -56,6 +65,7 @@ class MainActivity : ComponentActivity() {
         TaskNotifier.ensureChannel(this)
         UpdateCenter.init(this)
         requestNotificationPermissionOnce()
+        handleOpenIntent(intent, recreated = savedInstanceState != null)
         val store = SettingsStore(this)
         lifecycleScope.launch {
             val settings = store.settings.first()
@@ -66,7 +76,7 @@ class MainActivity : ComponentActivity() {
             setContent {
                 NovelTheme {
                     Box {
-                        NovelApp(store)
+                        NovelApp(store, taskOpen)
                         StartupUpdatePrompt(store)
                     }
                 }
@@ -81,6 +91,35 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         UpdateCenter.onResume(this)
+    }
+
+    /**
+     * A tap on a task notification while the activity is alive arrives here
+     * (the intent is flagged SINGLE_TOP), not through `onCreate`. Keeping the
+     * instance alive preserves the task list state and the poll loop.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // `getIntent()` must reflect the latest intent, otherwise a later
+        // recreation would be handled as if the old notification was tapped.
+        setIntent(intent)
+        handleOpenIntent(intent)
+    }
+
+    /**
+     * Cold start, foreground delivery and recreation from recents all funnel
+     * through here: only a task-notification intent (unique OPEN_TASKS action)
+     * produces a request; a launcher tap leaves the pending request alone.
+     */
+    private fun handleOpenIntent(intent: Intent?, recreated: Boolean = false) {
+        // A rotation redelivers the same intent; the surviving ViewModel
+        // already consumed that request, so only a fresh lineage (cold start
+        // or process death) may raise it again.
+        if (!TaskOpen.shouldHandleDelivery(recreated, taskOpen.isFresh)) return
+        taskOpen.onIntent(
+            action = intent?.action,
+            rawTaskId = intent?.getStringExtra(TaskOpen.EXTRA_TASK_ID),
+        )
     }
 
     /**

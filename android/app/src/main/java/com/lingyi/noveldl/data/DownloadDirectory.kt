@@ -69,8 +69,23 @@ fun resolveDownloadTarget(
 /**
  * Comparison key for persisted tree URIs. The picker returns the URI without a
  * trailing slash while some providers persist one; whitespace never matters.
+ * The scheme and authority are lowercased because RFC 3986 defines them as
+ * case-insensitive — a URI copied from a log or another device can differ in
+ * case there — while the path (the document id) stays case-sensitive.
  */
-internal fun treeUriKey(raw: String): String = raw.trim().trimEnd('/')
+internal fun treeUriKey(raw: String): String {
+    val trimmed = raw.trim().trimEnd('/')
+    val schemeEnd = trimmed.indexOf("://")
+    if (schemeEnd <= 0) return trimmed
+    val authorityStart = schemeEnd + 3
+    val authorityEnd = trimmed.indexOf('/', authorityStart).let {
+        if (it < 0) trimmed.length else it
+    }
+    return trimmed.substring(0, schemeEnd).lowercase() +
+        "://" +
+        trimmed.substring(authorityStart, authorityEnd).lowercase() +
+        trimmed.substring(authorityEnd)
+}
 
 /**
  * Whether [treeUri] is one of the [persistedWriteUris] the app may write to.
@@ -135,6 +150,69 @@ fun uniqueChildName(desiredName: String, existingNames: Collection<String>): Str
         if (candidate.lowercase() !in taken) return candidate
     }
     return name
+}
+
+/**
+ * The subset of `DocumentFile` that [prepareDownloadDestination] needs.
+ *
+ * Keeping it an interface (instead of referencing the Android class) lets the
+ * whole "tree deleted / subdirectory missing / createFile fails" matrix be
+ * covered by JVM tests without a device, a fake [android.content.ContentResolver]
+ * or any permission grant. The production adapter lives in `HistoryDownloader`.
+ */
+interface SafDocument {
+    /** Provider-supplied display name, or null when it cannot be read. */
+    val name: String?
+
+    val isDirectory: Boolean
+
+    /** `DocumentFile.exists()`: false once the folder/file was deleted or moved. */
+    val exists: Boolean
+
+    fun findDirectory(displayName: String): SafDocument?
+
+    fun createDirectory(displayName: String): SafDocument?
+
+    /** Display names of the direct children, skipping entries without a name. */
+    fun listChildNames(): List<String>
+
+    fun createFile(mimeType: String, displayName: String): SafDocument?
+
+    fun delete(): Boolean
+}
+
+/**
+ * Creates (or reuses) [DOWNLOAD_SUBDIRECTORY] inside [tree] and returns the new
+ * file document for [desiredName].
+ *
+ * A null/non-directory/deleted tree means the persisted grant is no longer
+ * usable, so [DownloadDirectoryUnavailableException] is thrown with
+ * [unavailableMessage]; callers fall back to the system Downloads directory.
+ * A provider that cannot create the folder or the file yields
+ * [IllegalStateException] with [createFailedMessage]. Exceptions thrown by the
+ * provider itself (e.g. `SecurityException` from a revoked grant) propagate so
+ * the caller can report the underlying failure.
+ *
+ * The returned document's [SafDocument.name] is what the provider actually
+ * created and may differ from the requested name.
+ */
+fun prepareDownloadDestination(
+    tree: SafDocument?,
+    desiredName: String,
+    mimeType: String,
+    unavailableMessage: String,
+    createFailedMessage: String,
+): SafDocument {
+    if (tree == null || !tree.isDirectory || !tree.exists) {
+        throw DownloadDirectoryUnavailableException(unavailableMessage)
+    }
+    val directory = tree.findDirectory(DOWNLOAD_SUBDIRECTORY)
+        ?.takeIf { it.isDirectory }
+        ?: tree.createDirectory(DOWNLOAD_SUBDIRECTORY)
+        ?: throw IllegalStateException(createFailedMessage)
+    val fileName = uniqueChildName(desiredName, directory.listChildNames())
+    return directory.createFile(mimeType, fileName)
+        ?: throw IllegalStateException(createFailedMessage)
 }
 
 /** Whether [raw] looks like a persisted SAF tree URI (`content://.../tree/...`). */

@@ -117,6 +117,29 @@ class ApiClientTest {
     }
 
     @Test
+    fun searchForwardsWordAndDateFilters() = runBlocking {
+        server.enqueue(json("""{"total":0,"results":[]}"""))
+        Api.configure(baseUrl(), null)
+
+        val result = Api.call {
+            Api.service().search(
+                SearchRequest(
+                    keyword = "x",
+                    min_words = 100,
+                    max_words = 2_000,
+                    updated_after = "2024-01-01",
+                ),
+            )
+        }
+
+        assertTrue(result.isSuccess)
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue(body, body.contains("\"min_words\":100"))
+        assertTrue(body, body.contains("\"max_words\":2000"))
+        assertTrue(body, body.contains("\"updated_after\":\"2024-01-01\""))
+    }
+
+    @Test
     fun taskAndMusicEndpointsUseExpectedPaths() = runBlocking {
         server.enqueue(json("""{"task_id":"t1"}"""))
         server.enqueue(json("""{"ok":true}"""))

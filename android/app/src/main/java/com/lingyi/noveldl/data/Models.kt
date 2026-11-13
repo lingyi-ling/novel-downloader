@@ -2,6 +2,7 @@ package com.lingyi.noveldl.data
 
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -27,6 +28,16 @@ data class SearchResult(
     val priority: Int = 0,
 )
 
+/**
+ * Body of `POST /api/v1/search`.
+ *
+ * [min_words]/[max_words]/[updated_after] are optional local filters: the
+ * server ranks the rows first and then drops those outside the range (a row
+ * whose count/date cannot be parsed is dropped only while the matching filter
+ * is set). `null` means "no filter" and is omitted from the wire body by the
+ * serializer's `explicitNulls = false`. [updated_after] is an ISO
+ * `YYYY-MM-DD` date and is inclusive.
+ */
 @Serializable
 data class SearchRequest(
     val keyword: String,
@@ -36,6 +47,9 @@ data class SearchRequest(
     val sort: String = "quality",
     val order: String? = null,
     val limit: Int? = null,
+    val min_words: Int? = null,
+    val max_words: Int? = null,
+    val updated_after: String? = null,
 )
 
 @Serializable
@@ -255,6 +269,16 @@ data class MusicJobResult(
     /** Loopback URL handed to DownloadManager so tracks land in public Downloads. */
     val download_url: String = "",
     val bytes: Long = 0,
+    /**
+     * The `<stem>.lrc` the engine saved beside [path], when this client
+     * verified that the file exists in the app's private music directory.
+     *
+     * The embedded engine already writes the lyric next to the audio, so no
+     * extra request is needed; older servers do not send this field and it
+     * stays null. The property name is optional on purpose: the null case is
+     * "no lyric saved", which is distinct from an empty, checked path.
+     */
+    @SerialName("lyric_path") val lyricPath: String? = null,
 )
 
 @Serializable

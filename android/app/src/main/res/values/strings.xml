@@ -16,6 +16,7 @@
     <string name="action_cancel">取消</string>
     <string name="action_close">关闭</string>
     <string name="action_save">保存</string>
+    <string name="action_ok">确定</string>
     <string name="action_download">下载</string>
     <string name="action_copy">复制</string>
     <string name="action_add_to_queue">加入下载队列</string>
@@ -57,6 +58,26 @@
     <string name="search_follow_in_list">已在追更列表中</string>
     <string name="search_follow_added">已加入追更</string>
 
+    <!-- 搜索：高级筛选 -->
+    <string name="search_filters_show">高级筛选</string>
+    <string name="search_filters_hide">收起筛选</string>
+    <string name="search_filters_active_count">生效筛选：%1$d 项</string>
+    <string name="search_filters_min_words">最少字数</string>
+    <string name="search_filters_max_words">最多字数</string>
+    <string name="search_filters_updated_after">更新日期晚于</string>
+    <string name="search_filters_any_date">不限</string>
+    <string name="search_filters_pick_date">选择日期</string>
+    <string name="search_filters_clear_date">清除日期筛选</string>
+    <string name="search_filters_date_state">%1$s：%2$s；%3$s</string>
+    <string name="search_filters_date_dialog_title">选择更新日期</string>
+    <string name="search_filters_clear">清空筛选</string>
+    <string name="search_filters_optional_hint">字数留空表示不限制；日期筛选包含所选当天。</string>
+    <string name="search_filters_words_not_number">请输入 0 到 10 亿之间的整数</string>
+    <string name="search_filters_words_negative">字数不能为负数</string>
+    <string name="search_filters_words_too_large">字数不能超过 10 亿</string>
+    <string name="search_filters_range_invalid">最少字数不能大于最多字数</string>
+    <string name="search_filters_invalid_date">日期格式无效，请重新选择</string>
+
     <string name="browse_rank">排行榜</string>
     <string name="browse_categories">分类</string>
     <string name="browse_male">男生</string>
@@ -80,6 +101,7 @@
     <string name="tasks_status_interrupted">已中断</string>
     <string name="tasks_interrupted_hint">应用重启导致任务中断，可点击重试继续下载</string>
     <string name="tasks_empty">暂无任务，去「搜索」页加入下载队列吧</string>
+    <string name="tasks_open_missing">该任务已不存在，可能已被清理</string>
     <string name="login_section_title">登录凭据请求</string>
     <string name="login_section_hint">以下站点正在等待登录凭据，提交后任务会自动继续</string>
     <string name="login_provide">提供凭据</string>
@@ -154,6 +176,11 @@
     <string name="music_job_fail_reason">失败原因：%1$s</string>
     <string name="music_job_save_failed">有 %1$d 个文件未能保存到本机下载目录：%2$s</string>
     <string name="music_job_server_files">任务完成，文件保存在服务器端：%1$s</string>
+    <string name="music_job_done_lyrics">完成：成功 %1$d，跳过 %2$d，失败 %3$d（%4$d 首已保存歌词）</string>
+    <string name="music_lyrics">歌词</string>
+    <string name="music_lyric_open_named">打开歌词：%1$s</string>
+    <string name="music_lyric_missing">歌词文件不存在或已被删除</string>
+    <string name="music_lyric_no_app">没有可打开歌词的应用</string>
     <string name="music_no_selection">请先选择歌曲</string>
     <string name="music_vip">VIP</string>
     <string name="music_unknown_artist">未知歌手</string>

@@ -19,17 +19,22 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.BookmarkAdded
+import androidx.compose.material.icons.outlined.Clear
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -38,8 +43,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -57,14 +64,15 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.AddTaskRequest
 import com.lingyi.noveldl.data.BrowseCategory
 import com.lingyi.noveldl.data.BrowseRequest
 import com.lingyi.noveldl.data.Api
-import com.lingyi.noveldl.data.SearchRequest
 import com.lingyi.noveldl.data.SearchResult
 import com.lingyi.noveldl.data.SelectionStore
 import com.lingyi.noveldl.data.decodeSelectedSites
@@ -82,6 +90,16 @@ fun SearchScreen(onMessage: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val selectionStore = remember(context) { SelectionStore(context) }
+    // The filter text lives in a ViewModel + SavedStateHandle (not in this
+    // composable) so a tab switch or process death restores the panel instead
+    // of silently running the next search unfiltered.
+    val filterModel: SearchFilterViewModel = viewModel(
+        factory = SearchFilterViewModel.factory(),
+    )
+    val filters by filterModel.state.collectAsState()
+    val filterValidation = filters.validate()
+    var showFilters by rememberSaveable { mutableStateOf(false) }
+    var showDatePicker by remember { mutableStateOf(false) }
     var keyword by rememberSaveable { mutableStateOf("") }
     // Stored as the comma-separated format shared with SelectionStore.
     var selectedSitesEncoded by rememberSaveable {
@@ -155,17 +173,19 @@ fun SearchScreen(onMessage: (String) -> Unit) {
 
     fun runSearch(query: String) {
         if (query.isEmpty() || loading) return
+        // Build the body from the live filter state: a re-search and every
+        // retry therefore carry the current bounds without copying them around.
+        // Invalid input is not sent (the server would answer 422); the panel is
+        // opened so the inline error is visible even when it was collapsed.
+        val request = filters.toSearchRequest(query, selectedSitesParam(selectedSites))
+        if (request == null) {
+            showFilters = true
+            return
+        }
         loading = true
         error = null
         scope.launch {
-            val outcome = Api.call {
-                Api.service().search(
-                    SearchRequest(
-                        keyword = query,
-                        sites = selectedSitesParam(selectedSites),
-                    ),
-                )
-            }
+            val outcome = Api.call { Api.service().search(request) }
             outcome
                 .onSuccess {
                     results = it.results
@@ -283,6 +303,17 @@ fun SearchScreen(onMessage: (String) -> Unit) {
         }
     }
 
+    if (showDatePicker) {
+        SearchDatePickerDialog(
+            initialDate = filters.updatedAfter,
+            onConfirm = { millis ->
+                filterModel.updateUpdatedAfter(formatFilterDate(millis))
+                showDatePicker = false
+            },
+            onDismiss = { showDatePicker = false },
+        )
+    }
+
     if (showSiteDialog) {
         SiteSelectionDialog(
             labels = siteLabels,
@@ -357,6 +388,24 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                         role = Role.DropdownList,
                         onClickLabel = openSitesAction,
                     ) { showSiteDialog = true },
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        SearchFilterToggleRow(
+            filters = filters,
+            expanded = showFilters,
+            onToggle = { showFilters = !showFilters },
+            onClear = filterModel::clear,
+        )
+        if (showFilters) {
+            Spacer(Modifier.height(8.dp))
+            SearchFilterPanel(
+                filters = filters,
+                validation = filterValidation,
+                onMinWordsChange = filterModel::updateMinWords,
+                onMaxWordsChange = filterModel::updateMaxWords,
+                onPickDate = { showDatePicker = true },
+                onClearDate = { filterModel.updateUpdatedAfter("") },
             )
         }
         Spacer(Modifier.height(8.dp))
@@ -548,6 +597,231 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             }
         }
     }
+
+/**
+ * The "advanced filters" disclosure row. The count includes entries that are
+ * not valid yet, so a malformed value is never hidden behind a collapsed panel.
+ */
+@Composable
+private fun SearchFilterToggleRow(
+    filters: SearchFilterState,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onClear: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = onToggle) {
+            Text(
+                stringResource(
+                    if (expanded) R.string.search_filters_hide else R.string.search_filters_show,
+                ),
+            )
+        }
+        if (filters.isActive) {
+            Text(
+                stringResource(R.string.search_filters_active_count, filters.activeFilterCount),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onClear) {
+                Text(stringResource(R.string.search_filters_clear))
+            }
+        }
+    }
+}
+
+/**
+ * The expanded filter panel: numeric word bounds plus an inclusive
+ * "updated after" date chosen from the Material date picker. Every field is
+ * full width so a 2.0 font scale does not squeeze the labels/values.
+ */
+@Composable
+private fun SearchFilterPanel(
+    filters: SearchFilterState,
+    validation: SearchFilterValidation,
+    onMinWordsChange: (String) -> Unit,
+    onMaxWordsChange: (String) -> Unit,
+    onPickDate: () -> Unit,
+    onClearDate: () -> Unit,
+) {
+    val dateLabel = stringResource(R.string.search_filters_updated_after)
+    val dateValue: String = filters.updatedAfter.ifBlank {
+        stringResource(R.string.search_filters_any_date)
+    }
+    val pickDateLabel = stringResource(R.string.search_filters_pick_date)
+    // One description for the whole date control: label, current value and the
+    // action. The visible label/value column below is cleared from semantics so
+    // TalkBack does not announce the same information twice.
+    val dateState = stringResource(
+        R.string.search_filters_date_state,
+        dateLabel,
+        dateValue,
+        pickDateLabel,
+    )
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        WordFilterField(
+            value = filters.minWords,
+            onValueChange = onMinWordsChange,
+            label = stringResource(R.string.search_filters_min_words),
+            error = validation.minWordsError,
+            rangeError = validation.rangeError,
+        )
+        WordFilterField(
+            value = filters.maxWords,
+            onValueChange = onMaxWordsChange,
+            label = stringResource(R.string.search_filters_max_words),
+            error = validation.maxWordsError,
+            rangeError = validation.rangeError,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = 4.dp)
+                    .clearAndSetSemantics {},
+            ) {
+                Text(dateLabel, style = MaterialTheme.typography.labelLarge)
+                Text(
+                    dateValue,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (filters.updatedAfter.isBlank()) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                )
+            }
+            TextButton(
+                onClick = onPickDate,
+                modifier = Modifier.semantics { contentDescription = dateState },
+            ) {
+                Text(pickDateLabel)
+            }
+            if (filters.updatedAfter.isNotBlank()) {
+                IconButton(onClick = onClearDate) {
+                    Icon(
+                        Icons.Outlined.Clear,
+                        contentDescription = stringResource(R.string.search_filters_clear_date),
+                    )
+                }
+            }
+        }
+        if (validation.rangeError) {
+            Text(
+                stringResource(R.string.search_filters_range_invalid),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
+        if (validation.updatedAfterError != null) {
+            Text(
+                stringResource(R.string.search_filters_invalid_date),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
+        Text(
+            stringResource(R.string.search_filters_optional_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun WordFilterField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    error: WordFilterError?,
+    rangeError: Boolean,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        singleLine = true,
+        // The min > max message is shared by both fields, so both turn red;
+        // each field keeps its own entry-specific message when it has one.
+        isError = error != null || rangeError,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        supportingText = if (error == null) {
+            null
+        } else {
+            {
+                Text(
+                    wordFilterErrorText(error),
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+@Composable
+private fun wordFilterErrorText(error: WordFilterError): String = stringResource(
+    when (error) {
+        WordFilterError.NOT_A_NUMBER -> R.string.search_filters_words_not_number
+        WordFilterError.NEGATIVE -> R.string.search_filters_words_negative
+        WordFilterError.TOO_LARGE -> R.string.search_filters_words_too_large
+    },
+)
+
+/**
+ * Material date picker for the inclusive lower bound. The picker works in UTC
+ * millis; [formatFilterDate] converts them back to the API's ISO date with the
+ * same offset, so the chosen calendar day never shifts.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SearchDatePickerDialog(
+    initialDate: String,
+    onConfirm: (Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val pickerState = rememberDatePickerState(
+        initialSelectedDateMillis = filterDateEpochMillis(initialDate),
+    )
+    DatePickerDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(
+                onClick = { pickerState.selectedDateMillis?.let(onConfirm) },
+                enabled = pickerState.selectedDateMillis != null,
+            ) {
+                Text(stringResource(R.string.action_ok))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.action_cancel))
+            }
+        },
+    ) {
+        DatePicker(
+            state = pickerState,
+            title = {
+                Text(
+                    stringResource(R.string.search_filters_date_dialog_title),
+                    modifier = Modifier.padding(start = 24.dp, top = 16.dp, end = 12.dp),
+                )
+            },
+        )
+    }
+}
 
 /**
  * The per-row "follow" icon button. Disabled once the book is in the
