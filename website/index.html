@@ -78,10 +78,14 @@
   "downloadUrl": "https://github.com/lingyi-ling/novel-downloader/releases/latest",
   "featureList": [
     "聚合搜索",
+    "可解释的搜索排序",
     "队列与断点续传",
     "TXT / EPUB / HTML 多格式导出",
     "追更",
     "音乐下载",
+    "存储备份与 dry-run",
+    "桌面无障碍",
+    "任务快照恢复",
     "处理器管线"
   ],
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -205,7 +209,7 @@
         <article class="card reveal">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
           <h3 data-en="Aggregate search">聚合搜索</h3>
-          <p data-en="59 sources queried concurrently, ranked by a five-signal quality score; same-book results merge across sites, each row showing its source capsules, and recent searches are cached. Results stream in as sites answer (first rows in ~0.2s) and slow sites are dropped at their budget instead of stalling the search.">59 个搜索源并发查询，按关键词覆盖度、字数、更新时间、站点权重、完结状态五信号智能排序；同书多源合并，来源站点胶囊一目了然，最近搜索缓存。结果边到边显示（首屏约 0.2 秒），慢站点按预算丢弃，不再拖住整次搜索。</p>
+          <p data-en="59 sources queried concurrently, ranked by a five-signal quality score with an explainable match tier (exact / prefix / contains / partial) and a relevance score; same-book results merge across sites with source capsules and a recent-search cache (optionally on disk, reusable across restarts). Results stream in (first rows in ~0.2s); the desktop app shows per-source progress, failure counts and elapsed time, and a new query cancels the previous one.">59 个搜索源并发查询，按关键词覆盖度、字数、更新时间、站点权重、完结状态五信号排序，并给出可解释的匹配等级（精确 / 前缀 / 包含 / 部分）与相关度分数；同书多源合并、来源胶囊、最近搜索缓存（可选落盘，重启后仍可复用）。结果流式到达（首屏约 0.2 秒），桌面端逐源显示进度、失败数与耗时，新搜索自动取消旧请求。</p>
         </article>
         <article class="card reveal">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg></div>
@@ -225,7 +229,7 @@
         <article class="card reveal">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
           <h3 data-en="Music downloads">音乐下载</h3>
-          <p data-en="One search across 28 platforms: the same song merges into one row with its source sites, five quality tiers up to Hi-Res, tag/cover/lyric embedding, playlist (.m3u8) export and per-platform health checks.">28 个平台一键聚合搜索，同一首歌合并成一行并标出来源；Hi-Res 到标准音质五档可选，标签/封面/歌词嵌入，歌单（.m3u8）导出，平台连通性健康检查。</p>
+          <p data-en="One search across 28 platforms: the same song merges into one row with its source sites, five quality tiers up to Hi-Res, tag/cover/lyric embedding, playlist (.m3u8) export and per-platform health checks. Search, download, account, dependency and CDM capabilities sit in one matrix; when an account is missing, the desktop app links straight to Settings.">28 个平台一键聚合搜索，同一首歌合并成一行并标出来源；Hi-Res 到标准音质五档可选，标签/封面/歌词嵌入，歌单（.m3u8）导出，平台连通性健康检查。搜索、下载、账号、依赖与 CDM 能力一屏可见，缺账号时桌面端直接引导到设置。</p>
         </article>
         <article class="card reveal">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg></div>
@@ -233,9 +237,19 @@
           <p data-en="Ad cleaning, zh conversion, OCR for image chapters, machine translation — plugins between download and export; JSON rule sources add sites without code.">广告净化、简繁转换、OCR 图片章节、机翻润色——以插件形式串在下载与导出之间，JSON 规则书源免代码接入新站点。</p>
         </article>
         <article class="card reveal">
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/><path d="M6 16h.01M10 16h.01"/></svg></div>
+          <h3 data-en="Storage backup &amp; dry-run">存储备份与 dry-run</h3>
+          <p data-en="Online SQLite backup/restore: WAL-consistent, integrity-checked, and an automatic .bak before a restore overwrites anything; clean and storage --clean support --dry-run, so you see file counts and bytes with zero deletions before committing.">SQLite 在线备份/恢复：WAL 一致、完整性校验，恢复覆盖前自动留 .bak；clean 与 storage --clean 支持 --dry-run，先看文件数与字节数，零删除确认后再动手。</p>
+        </article>
+        <article class="card reveal">
+          <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><path d="m19 21-7-4-7 4"/><path d="M12 7v7"/><path d="M9 11h6"/></svg></div>
+          <h3 data-en="Desktop accessibility">桌面无障碍</h3>
+          <p data-en="Skip link, arrow-key tablists, modal focus trap and focus return, polling that never steals focus, toast live-region announcements and progress-bar semantics — keyboard and screen-reader users can go from search to export.">跳过导航、方向键操作的标签页、模态焦点陷阱与焦点归还、轮询不抢焦点、toast 实时播报、进度条语义——用键盘和读屏也能从搜索走到导出。</p>
+        </article>
+        <article class="card reveal">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg></div>
           <h3 data-en="Built-in updates">内置更新</h3>
-          <p data-en="Desktop, CLI and Android each read the update manifest (latest.json) at most once every 24 hours. A discovered update is downloaded in the background and SHA-256 verified; on Windows quitting the app installs it (the portable build replaces its own folder), on Android one tap on the system installer finishes the job.">桌面、CLI 与安卓每 24 小时最多读取一次更新清单（latest.json）；发现新版本后台自动下载并校验 SHA-256，Windows 退出应用即自动安装（便携版替换当前目录），安卓只需在系统安装器上点一次确认。</p>
+          <p data-en="Desktop, CLI and Android read the update manifest (latest.json) at most once every 24 hours. A new version is downloaded in the background and SHA-256 verified; on Windows it installs when you quit (the portable build replaces its own folder), and Android needs one confirmation. The ready state is bound to its version, and the installer restarts the app after a silent update.">桌面、CLI 与安卓每 24 小时最多读取一次更新清单（latest.json）；新版本后台下载并校验 SHA-256，Windows 退出即装（便携版替换当前目录），安卓确认一次即可。更新就绪状态与版本绑定，静默更新后安装器自动重启。</p>
         </article>
       </div>
     </div>
@@ -250,7 +264,7 @@
         <article class="client-card reveal">
           <h3>CLI</h3>
           <p class="client-tag">novel-cli</p>
-          <p data-en="15 subcommands: search, browse, download, batch, follow, export, login, diagnostics; pipe- and script-friendly.">15 个子命令：搜索、浏览榜单分类、下载、批量、追更、导出、登录、诊断，管道与脚本全兼容。</p>
+          <p data-en="15 subcommands: search, browse, download, batch, follow, export, login, diagnostics; export --out picks the destination, single-line JSON and fish completion keep it pipe- and script-friendly.">15 个子命令：搜索、浏览榜单分类、下载、批量、追更、导出、登录、诊断；export --out 指定输出、单行 JSON、fish 补全，管道与脚本全兼容。</p>
         </article>
         <article class="client-card reveal">
           <h3>REST API</h3>
@@ -265,7 +279,7 @@
         <article class="client-card reveal">
           <h3>Android</h3>
           <p class="client-tag">Gradle</p>
-          <p data-en="Kotlin + Compose native client, Material 3, files land via DownloadManager; the optional standalone engine embeds Python 3.12 (Chaquopy) so all 84 sites / 59 sources and the music platforms run on your phone via a loopback API — no PC needed. Toggle off to keep remote-controlling a PC-side novel-api.">Kotlin + Compose 原生客户端，Material 3，DownloadManager 落盘；可选「独立引擎」——Chaquopy 内嵌 Python 3.12，84 站点 / 59 搜索源与音乐平台全部跑在手机本地（环回 API，无需电脑），关闭开关则仍遥控电脑端 novel-api。</p>
+          <p data-en="Kotlin + Compose native client, Material 3, files land via DownloadManager; the optional standalone engine embeds Python 3.12 (Chaquopy) so all 84 sites / 59 sources and the music platforms run on your phone via a loopback API — no PC needed. Task snapshots survive process death and interrupted tasks can be resumed after relaunch; music download paths persist too, so playlists can still be exported after a restart. Toggle off to keep remote-controlling a PC-side novel-api.">Kotlin + Compose 原生客户端，Material 3，DownloadManager 落盘；可选「独立引擎」——Chaquopy 内嵌 Python 3.12，84 站点 / 59 搜索源与音乐平台全部跑在手机本地（环回 API，无需电脑）。任务快照持久化，进程被杀后重启可恢复「已中断」任务；音乐下载路径同样保留，重启后仍可导出歌单。关闭开关则仍遥控电脑端 novel-api。</p>
         </article>
       </div>
     </div>
@@ -334,8 +348,8 @@ pip install -U novel-downloader
 novel-desktop
 
 <span class="c" data-en="# Warm-paper dual theme · live download progress · site health checks
-# Ctrl+1-5 switches the five pages"># 藏青与暖橙双主题 · 实时下载进度 · 平台健康检查
-# Ctrl+1-5 切换五个页面</span></code></pre>
+# Ctrl+1-6 switches the six pages"># 藏青与暖橙双主题 · 实时下载进度 · 平台健康检查
+# Ctrl+1-6 切换六个页面</span></code></pre>
         </div>
         <div class="tab-panel" id="panel-android" role="tabpanel" aria-labelledby="tab-android" tabindex="0" data-panel="android">
           <pre><code><span class="c" data-en="# 1. Download the signed APK from Releases (no build needed)"># 1. 直接下载签名 APK（无需自行打包）</span>
