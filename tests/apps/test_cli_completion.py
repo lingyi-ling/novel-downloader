@@ -21,6 +21,7 @@ No shell is required: the native checks are skipped and the static ones run.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from argparse import ArgumentParser, _SubParsersAction
@@ -37,12 +38,14 @@ from novel_downloader.apps.cli.commands.completion import (
     detect_shell,
     render_completion,
 )
+from novel_downloader.apps.cli.commands.doctor import DoctorCmd
 from novel_downloader.apps.cli.commands.export import ExportCmd
 from novel_downloader.apps.cli.commands.music import MusicCmd
+from novel_downloader.apps.cli.commands.search import SearchCmd
 from novel_downloader.apps.cli.commands.storage import StorageCmd
 
 #: The command families whose options this module is responsible for.
-COMMAND_CLASSES = (CleanCmd, ExportCmd, StorageCmd, MusicCmd)
+COMMAND_CLASSES = (CleanCmd, DoctorCmd, ExportCmd, SearchCmd, StorageCmd, MusicCmd)
 
 #: Paths exercised by the drift test (leading space, as the scripts key them).
 DRIFT_PATHS = (
@@ -51,9 +54,13 @@ DRIFT_PATHS = (
     " clean logs",
     " clean cache",
     " clean book",
+    " doctor",
     " export",
+    " search",
     " storage",
     " storage backup",
+    " storage verify",
+    " music download",
     " music health",
     " music platforms",
 )
@@ -63,15 +70,44 @@ NEW_OPTIONS = (
     (" clean logs", "--dry-run"),
     (" clean cache", "--dry-run"),
     (" clean book", "--dry-run"),
+    (" doctor", "--fix"),
+    (" doctor", "--dry-run"),
+    (" doctor", "--fix-age-days"),
+    (" doctor", "--max-age-days"),
     (" export", "--out"),
     (" export", "--stage"),
+    (" search", "--min-words"),
+    (" search", "--max-words"),
+    (" search", "--updated-after"),
     (" storage", "--dry-run"),
     (" storage", "--clean"),
     (" storage backup", "--out"),
+    (" storage backup", "--keep"),
+    (" storage verify", "--json"),
     (" music health", "--platform"),
     (" music health", "--keyword"),
     (" music health", "--json"),
     (" music platforms", "--json"),
+)
+
+#: New options grouped by the path that must offer them in every shell.
+NEW_SURFACE = {
+    " doctor": ("--fix", "--dry-run", "--fix-age-days", "--max-age-days"),
+    " search": ("--min-words", "--max-words", "--updated-after"),
+    " storage backup": ("--out", "--json", "--keep", "--dry-run"),
+    " storage verify": ("--json",),
+}
+
+#: Subcommand words that must stay completable at their parent path.
+NEW_SUBCOMMANDS = (
+    (" storage", "verify"),
+    (" storage", "backup"),
+    (" music", "download"),
+)
+
+#: Argument metavars that must never leak into the completion word lists.
+VALUE_METAVARS = frozenset(
+    {"N", "M", "DIR", "KEY", "KEYWORD", "SITE", "SECS", "YYYY-MM-DD"}
 )
 
 
@@ -146,7 +182,19 @@ def test_shells_cover_every_documented_shell() -> None:
 def test_scripts_offer_the_new_options(shell: str) -> None:
     script = render_completion(_tree(), shell)
 
-    for option in ("--dry-run", "--out", "--stage", "--platform", "--keyword"):
+    for option in (
+        "--dry-run",
+        "--out",
+        "--stage",
+        "--keep",
+        "--platform",
+        "--keyword",
+        "--min-words",
+        "--max-words",
+        "--updated-after",
+        "--fix",
+        "--fix-age-days",
+    ):
         assert option in script, f"{shell} script lost {option}"
 
 
@@ -183,6 +231,198 @@ def test_exotic_option_strings_are_escaped_per_shell() -> None:
     for script in (bash_script, zsh_script, fish_script, powershell_script):
         assert "--weird" in script
         assert "\r" not in script
+
+
+# ---------------------------------------------------------------------------
+# script entry parsing (assert a flag is offered at the *right* path)
+#
+# A plain substring check cannot tell ``--keep`` offered by ``storage backup``
+# from one offered at the root. These readers recover the ``path -> words``
+# mapping from each generated script, using the same quoting rules the
+# generators apply.
+# ---------------------------------------------------------------------------
+
+_POSIX_QUOTED = re.compile(r"'(?:[^']|'\\'')*'")
+_FISH_QUOTED = re.compile(r"'(?:\\.|[^'])*'")
+_POWERSHELL_QUOTED = re.compile(r"'(?:''|[^'])*'")
+_CASE_LABEL = re.compile(r'^"(.*)"\)$')
+_FISH_BRANCH = re.compile(r'^(?:if|else if) test "\$path" = (\'(?:\\.|[^\'])*\')$')
+_POWERSHELL_BRANCH = re.compile(r"^('(?:''|[^'])*') \{ @\((.*)\) \}$")
+_FISH_PRINTF = "printf '%s\\n'"
+
+
+def _unquote_posix(token: str) -> str:
+    assert token.startswith("'") and token.endswith("'"), token
+    return token[1:-1].replace("'\\''", "'")
+
+
+def _unquote_fish(token: str) -> str:
+    assert token.startswith("'") and token.endswith("'"), token
+    return re.sub(r"\\(.)", r"\1", token[1:-1])
+
+
+def _unquote_powershell(token: str) -> str:
+    assert token.startswith("'") and token.endswith("'"), token
+    return token[1:-1].replace("''", "'")
+
+
+def _split_posix(text: str) -> list[str]:
+    """Split Bash/Zsh words.
+
+    Bash stores the whole word list as one quoted string (``words='a b'``)
+    while Zsh quotes each word; joining then splitting handles both.
+    """
+    quoted = [_unquote_posix(match.group(0)) for match in _POSIX_QUOTED.finditer(text)]
+    return " ".join(quoted).split()
+
+
+def _split_fish(text: str) -> list[str]:
+    return [_unquote_fish(match.group(0)) for match in _FISH_QUOTED.finditer(text)]
+
+
+def _split_powershell(text: str) -> list[str]:
+    return [
+        _unquote_powershell(match.group(0))
+        for match in _POWERSHELL_QUOTED.finditer(text)
+    ]
+
+
+def _entries_bash(script: str) -> dict[str, list[str]]:
+    entries: dict[str, list[str]] = {}
+    path: str | None = None
+    for line in script.splitlines():
+        stripped = line.strip()
+        label = _CASE_LABEL.fullmatch(stripped)
+        if label:
+            path = label.group(1)
+        elif stripped == "*)":
+            path = "*"
+        elif path is not None and stripped.startswith("words="):
+            entries[path] = _split_posix(stripped[len("words=") :])
+            path = None
+    return entries
+
+
+def _entries_zsh(script: str) -> dict[str, list[str]]:
+    entries: dict[str, list[str]] = {}
+    path: str | None = None
+    for line in script.splitlines():
+        stripped = line.strip()
+        label = _CASE_LABEL.fullmatch(stripped)
+        if label:
+            path = label.group(1)
+        elif stripped == "*)":
+            path = "*"
+        elif path is not None and stripped.startswith("choices=("):
+            entries[path] = _split_posix(stripped[len("choices=(") : -1])
+            path = None
+    return entries
+
+
+def _entries_fish(script: str) -> dict[str, list[str]]:
+    entries: dict[str, list[str]] = {}
+    pending: str | None = None
+    for line in script.splitlines():
+        stripped = line.strip()
+        branch = _FISH_BRANCH.fullmatch(stripped)
+        if branch:
+            pending = _unquote_fish(branch.group(1))
+        elif pending is not None and stripped.startswith(_FISH_PRINTF):
+            entries[pending] = _split_fish(stripped[len(_FISH_PRINTF) :])
+            pending = None
+    return entries
+
+
+def _entries_powershell(script: str) -> dict[str, list[str]]:
+    entries: dict[str, list[str]] = {}
+    for line in script.splitlines():
+        stripped = line.strip()
+        if stripped == "default { @() }":
+            entries["*"] = []
+            continue
+        branch = _POWERSHELL_BRANCH.fullmatch(stripped)
+        if branch:
+            path = _unquote_powershell(branch.group(1))
+            entries[path] = _split_powershell(branch.group(2))
+    return entries
+
+
+_ENTRY_READERS = {
+    "bash": _entries_bash,
+    "zsh": _entries_zsh,
+    "fish": _entries_fish,
+    "powershell": _entries_powershell,
+}
+
+
+def _tree_words(node: CompletionNode, prefix: str = "") -> dict[str, list[str]]:
+    """Mirror ``_walk``: every path mapped to the words offered there."""
+    words = {prefix: node.words()}
+    for name, child in node.subcommands.items():
+        words.update(_tree_words(child, f"{prefix} {name}"))
+    return words
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_every_shell_entry_matches_the_tree(shell: str) -> None:
+    """Each branch must offer exactly the words of the node it keys."""
+    entries = _ENTRY_READERS[shell](render_completion(_tree(), shell))
+    expected = _tree_words(_tree())
+
+    rendered = {path: words for path, words in entries.items() if path != "*"}
+    assert set(rendered) == set(expected)
+    for path, words in expected.items():
+        assert set(rendered[path]) == set(words), f"{shell} branch {path!r} drifted"
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize(("path", "words"), tuple(NEW_SURFACE.items()))
+def test_new_surface_is_offered_at_its_path(
+    shell: str, path: str, words: tuple[str, ...]
+) -> None:
+    """New flags must sit on their own subcommand, not just appear anywhere."""
+    entries = _ENTRY_READERS[shell](render_completion(_tree(), shell))
+
+    assert path in entries, f"{shell} has no branch for {path!r}"
+    missing = set(words) - set(entries[path])
+    assert not missing, f"{shell} branch {path!r} lost {sorted(missing)}"
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize(("path", "subcommand"), NEW_SUBCOMMANDS)
+def test_new_subcommands_are_completable(
+    shell: str, path: str, subcommand: str
+) -> None:
+    entries = _ENTRY_READERS[shell](render_completion(_tree(), shell))
+
+    assert subcommand in entries[path], f"{shell} cannot complete {path} {subcommand}"
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_option_values_are_not_completed(shell: str) -> None:
+    """Value positions keep the historical boundary: no candidates at all."""
+    entries = _ENTRY_READERS[shell](render_completion(_tree(), shell))
+
+    offered = {word for words in entries.values() for word in words}
+    assert not offered & VALUE_METAVARS
+
+    value_paths = (
+        " storage backup --out",
+        " storage backup --keep",
+        " storage restore --from",
+        " search --min-words",
+        " search --max-words",
+        " search --updated-after",
+        " doctor --fix-age-days",
+    )
+    for path in value_paths:
+        assert path not in entries, f"{shell} invented a value branch for {path!r}"
+
+    if shell == "fish":
+        # Unknown paths match no branch, so Fish offers nothing.
+        assert "*" not in entries
+    else:
+        assert entries["*"] == []
 
 
 # ---------------------------------------------------------------------------

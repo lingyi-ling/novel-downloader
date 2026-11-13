@@ -89,6 +89,9 @@ class FakeEngine:
         self.created: list[str] = []
         self.download_calls: list[dict[str, Any]] = []
         self.mixed_calls: list[dict[str, Any]] = []
+        #: Per-index ``TrackResult``-like objects the fake reports through
+        #: ``on_result`` (the real engine calls it once per finished track).
+        self.download_records: dict[int, Any] = {}
         self.export_calls: list[tuple[list[Any], str]] = []
         self.health_calls: list[tuple[str, str]] = []
         self.download_options_calls: list[dict[str, Any]] = []
@@ -118,6 +121,14 @@ class FakeEngine:
         self.download_options_calls.append(kwargs)
         return SimpleNamespace(**kwargs)
 
+    def _report_records(self, tracks: list[Any], kwargs: dict[str, Any]) -> None:
+        """Deliver configured per-track results through ``on_result``."""
+        on_result = kwargs.get("on_result")
+        if on_result is None:
+            return
+        for index, result in self.download_records.items():
+            on_result(index, tracks[index], result)
+
     def download_many(
         self, provider: Any, tracks: list[Any], options: Any, **kwargs: Any
     ) -> tuple[Any, ...]:
@@ -126,6 +137,7 @@ class FakeEngine:
         self.download_calls.append(
             {"tracks": list(tracks), "options": options, **kwargs}
         )
+        self._report_records(list(tracks), kwargs)
         return self.download_result
 
     def download_mixed(
@@ -134,6 +146,7 @@ class FakeEngine:
         if self.download_error is not None:
             raise self.download_error
         self.mixed_calls.append({"tracks": list(tracks), "options": options, **kwargs})
+        self._report_records(list(tracks), kwargs)
         return self.download_result
 
     def export_m3u(self, tracks: list[Any], out_path: str) -> str:
@@ -637,6 +650,187 @@ def test_download_missing_keyword_is_a_usage_error(monkeypatch, capsys) -> None:
 
     assert excinfo.value.code == 2
     assert "No keyword" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# download --json / lyric reporting
+# --------------------------------------------------------------------------- #
+
+
+def _audio_file(tmp_path, index: int, *, lyric: bool) -> str:
+    """Create ``<name> - Artist.mp3`` (and optionally its ``.lrc``)."""
+    audio = tmp_path / f"Song {index} - Artist.mp3"
+    audio.write_bytes(b"\x00" * 16)
+    if lyric:
+        audio.with_suffix(".lrc").write_text("[00:00.00]la\n", encoding="utf-8")
+    return str(audio)
+
+
+def test_download_json_reports_lyric_path_and_summary(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    with_lyric = _audio_file(tmp_path, 1, lyric=True)
+    without_lyric = _audio_file(tmp_path, 2, lyric=False)
+    provider = FakeProvider([_track(1, path=with_lyric), _track(2, path=without_lyric)])
+    engine = FakeEngine(
+        provider=provider,
+        settings={"out_dir": str(tmp_path)},
+        download_result=(1, 1, 0, [], []),
+    )
+
+    _run(
+        [
+            "music",
+            "download",
+            "--platform",
+            "netease",
+            "hello",
+            "--pick",
+            "1,2",
+            "--json",
+        ],
+        monkeypatch,
+        engine,
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["total"] == 2
+    assert payload["ok"] == 1
+    assert payload["skip"] == 1
+    assert payload["fail"] == 0
+    assert payload["lyrics_written"] == 1
+
+    first, second = payload["results"]
+    assert first["path"] == with_lyric
+    assert first["lyric_path"] == with_lyric[:-4] + ".lrc"
+    assert second["path"] == without_lyric
+    # No lyric on disk means no field at all (not a misleading empty path).
+    assert "lyric_path" not in second
+
+    # Same one-line contract as ``music search --json``.
+    assert captured.out.count("\n") == 1
+    assert json.loads(captured.out.strip())["keyword"] == "hello"
+
+
+def test_download_json_failure_does_not_report_a_stale_lyric(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """A failed song must not expose an old ``.lrc`` as a written one."""
+    audio = _audio_file(tmp_path, 1, lyric=True)
+    track = _track(1, path=audio)
+    engine = FakeEngine(
+        provider=FakeProvider([track]),
+        settings={"out_dir": str(tmp_path)},
+        download_result=(0, 0, 1, [("Song 1 - Artist", "vip")], [track]),
+    )
+    engine.download_records = {0: SimpleNamespace(status="fail", reason="vip", path="")}
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            [
+                "music",
+                "download",
+                "--platform",
+                "netease",
+                "hello",
+                "--pick",
+                "1",
+                "--json",
+            ],
+            monkeypatch,
+            engine,
+        )
+
+    # Data first, then the documented non-zero exit (like ``search --json``).
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["fail"] == 1
+    assert payload["lyrics_written"] == 0
+    assert "lyric_path" not in payload["results"][0]
+    assert "path" not in payload["results"][0]
+    assert payload["results"][0]["status"] == "fail"
+    assert payload["results"][0]["reason"] == "vip"
+    assert "Failed: Song 1 - Artist (vip)" in captured.err
+
+
+def test_download_json_keeps_warnings_on_stderr(monkeypatch, tmp_path, capsys) -> None:
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1, path=_audio_file(tmp_path, 1, lyric=False))]),
+        labels=[("soda", "Soda")],
+        note="login required",
+        settings={"out_dir": str(tmp_path)},
+        download_result=(1, 0, 0, [], []),
+    )
+
+    _run(
+        ["music", "download", "--platform", "soda", "hello", "--yes", "--json"],
+        monkeypatch,
+        engine,
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["platform"] == "soda"
+    assert "login required" in captured.err
+    assert "login required" not in captured.out
+
+
+def test_download_json_without_results_still_emits_a_document(
+    monkeypatch, capsys
+) -> None:
+    engine = FakeEngine(provider=FakeProvider([]))
+
+    _run(
+        ["music", "download", "--platform", "netease", "nothing", "--yes", "--json"],
+        monkeypatch,
+        engine,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["total"] == 0
+    assert payload["lyrics_written"] == 0
+    assert payload["results"] == []
+
+
+def test_download_human_output_reports_written_lyrics(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    audio = _audio_file(tmp_path, 1, lyric=True)
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1, path=audio)]),
+        settings={"out_dir": str(tmp_path)},
+        download_result=(1, 0, 0, [], []),
+    )
+
+    _run(
+        ["music", "download", "--platform", "netease", "hello", "--pick", "1"],
+        monkeypatch,
+        engine,
+    )
+
+    captured = capsys.readouterr()
+    assert "Lyrics written: 1" in captured.err
+    assert "Done: 1 succeeded" in captured.err
+
+
+def test_download_human_output_omits_lyric_line_without_lyrics(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    audio = _audio_file(tmp_path, 1, lyric=False)
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1, path=audio)]),
+        settings={"out_dir": str(tmp_path)},
+        download_result=(1, 0, 0, [], []),
+    )
+
+    _run(
+        ["music", "download", "--platform", "netease", "hello", "--pick", "1"],
+        monkeypatch,
+        engine,
+    )
+
+    assert "Lyrics written" not in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------- #

@@ -28,6 +28,14 @@ schema version, required columns) before atomically replacing the target
 database; an existing database is preserved in a ``.pre-restore-*.bak``
 sibling first and is never overwritten without ``--yes``. Both subcommands
 accept ``--json`` for a single-line report.
+
+``storage verify`` walks the raw-data directory, opens every
+``chapter.<stage>.sqlite`` read-only and reports whether it is healthy: SQLite's
+integrity check, the schema version (older is fine, newer is not), the required
+columns and a checksum walk of any ``-wal`` sidecar. Damaged files are only
+reported -- unlike the download path, this command never copies, renames or
+repairs them. Paths that live under the user's home directory are shortened to
+``~`` so the report can be shared without leaking the local layout.
 """
 
 from __future__ import annotations
@@ -425,11 +433,11 @@ class StorageCmd(Command):
             dest="subcommand",
             title=t("Subcommands"),
             description=t(
-                "Manage chapter database backups; without a subcommand this "
-                "command reports disk usage."
+                "Manage chapter databases; without a subcommand this command "
+                "reports disk usage."
             ),
         )
-        for subcmd in (StorageBackupCmd, StorageRestoreCmd):
+        for subcmd in (StorageBackupCmd, StorageRestoreCmd, StorageVerifyCmd):
             subcmd.register(sub)
         cls.add_arguments(parser)
         parser.set_defaults(func=cls.run)
@@ -1163,6 +1171,138 @@ def _run_restore(
         ui.success(
             t("Restored {source} to {target}.").format(source=source, target=target)
         )
+
+
+# ---------------------------------------------------------------------------
+# verify
+# ---------------------------------------------------------------------------
+
+
+def _home_dir() -> str:
+    """Return the user's home directory without a trailing separator."""
+    try:
+        home = os.path.expanduser("~")
+    except (KeyError, RuntimeError):  # pragma: no cover - exotic environments
+        return ""
+    if not home or home == "~":
+        return ""
+    return home.rstrip("\\/")
+
+
+def _redact_path(path: Path | str) -> str:
+    """Shorten a path under the user's home directory to ``~/...``."""
+    text = str(path)
+    home = _home_dir()
+    if not home:
+        return text
+    if os.path.normcase(text) == os.path.normcase(home):
+        return "~"
+    prefix = os.path.normcase(home) + os.sep
+    if os.path.normcase(text).startswith(prefix):
+        return "~" + text[len(home) :]
+    return text
+
+
+def _redact_home(text: str) -> str:
+    """Replace the home-directory prefix inside an arbitrary message."""
+    home = _home_dir()
+    return text.replace(home, "~") if home else text
+
+
+def _verify_database(path: Path) -> str | None:
+    """Return ``None`` when ``path`` is a healthy chapter database.
+
+    The file is only ever read: the WAL sidecar is checksummed before SQLite
+    opens the main file, the connection is opened read-only, and a damaged
+    database is neither copied nor renamed. A returned string is the reason the
+    database cannot be used by this build.
+    """
+    wal_problem = inspect_wal_damage(path)
+    if wal_problem is not None:
+        return t("damaged write-ahead log: {problem}").format(problem=wal_problem)
+
+    try:
+        with _source_connection(path) as conn:
+            # ``_source_connection`` may fall back to a temporary snapshot for
+            # a WAL database whose sidecars cannot be locked. Keep even that
+            # connection read-only so verification can never write anything.
+            conn.execute("PRAGMA query_only = ON")
+            inspect_chapter_database(conn, source=_redact_path(path))
+    except ChapterStorageSchemaError as exc:
+        return _redact_home(str(exc))
+    except ChapterStorageCorruptError as exc:
+        return _redact_home(str(exc))
+    except (sqlite3.Error, OSError) as exc:
+        return _redact_home(str(exc) or type(exc).__name__)
+    return None
+
+
+def _run_verify(raw_root: Path, *, as_json: bool) -> None:
+    """Check every chapter database below ``raw_root`` without modifying it."""
+    databases = _find_chapter_databases(raw_root)
+    errors: list[dict[str, str]] = []
+    healthy = 0
+
+    for database in databases:
+        display = _redact_path(database)
+        reason = _verify_database(database)
+        if reason is None:
+            healthy += 1
+            if not as_json:
+                ui.success(t("{path}: ok").format(path=display))
+        else:
+            errors.append({"path": display, "reason": reason})
+            if not as_json:
+                ui.error(
+                    t("{path}: corrupt: {reason}").format(path=display, reason=reason)
+                )
+
+    total = len(databases)
+    corrupt = total - healthy
+    ok = corrupt == 0
+
+    if as_json:
+        _emit_json(
+            {
+                "ok": ok,
+                "total": total,
+                "healthy": healthy,
+                "corrupt": corrupt,
+                "errors": errors,
+            }
+        )
+    elif total == 0:
+        ui.info(t("No chapter databases found to verify."))
+    else:
+        summary = t(
+            "Verified {total} database(s): {healthy} healthy, {corrupt} corrupt."
+        ).format(total=total, healthy=healthy, corrupt=corrupt)
+        if ok:
+            ui.success(summary)
+        else:
+            ui.error(summary)
+
+    if not ok:
+        raise SystemExit(EXIT_FAILURE)
+
+
+class StorageVerifyCmd(Command):
+    name = "verify"
+    help = t("Verify every chapter database without modifying it.")
+
+    @classmethod
+    def add_arguments(cls, parser: ArgumentParser) -> None:
+        parser.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help=t("Print a single-line JSON report on stdout."),
+        )
+
+    @classmethod
+    def run(cls, args: Namespace) -> None:
+        raw_root = _resolve_paths()["raw"]
+        _run_verify(raw_root, as_json=bool(getattr(args, "as_json", False)))
 
 
 class StorageBackupCmd(Command):

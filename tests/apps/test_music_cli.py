@@ -123,7 +123,15 @@ def _track(index: int) -> SimpleNamespace:
         ),
         (
             ["music", "download", "--help"],
-            ["keyword", "--platform", "--limit", "--level", "--out", "--pick"],
+            [
+                "keyword",
+                "--platform",
+                "--limit",
+                "--level",
+                "--out",
+                "--pick",
+                "--json",
+            ],
         ),
     ],
 )

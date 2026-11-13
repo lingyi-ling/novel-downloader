@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from dataclasses import dataclass
 from typing import Any
@@ -387,6 +388,64 @@ def _track_payload(index: int, track: Any) -> dict[str, Any]:
     }
 
 
+def _existing_lyric_path(audio_path: str) -> str:
+    """
+    Return the ``.lrc`` written beside *audio_path*, or ``""`` when absent.
+
+    The engine writes ``<stem>.lrc`` next to the audio file (and a
+    ``.zh.lrc`` translation).  Only the original file is reported -- the same
+    rule the desktop client and the downloader's "is the lyric missing?"
+    check use -- and only after verifying that it exists, so a lyric that
+    failed to land (or a stale path from an earlier run) is never reported as
+    written.
+    """
+    path = str(audio_path or "").strip()
+    if not path:
+        return ""
+    try:
+        from novel_downloader.apps.music.downloader import lyric_paths
+
+        original, _translation = lyric_paths(path)  # type: ignore[no-untyped-call]
+    except Exception:  # noqa: BLE001 - optional music extras may be absent
+        return ""
+    try:
+        return original if os.path.exists(original) else ""
+    except OSError:
+        return ""
+
+
+def _download_payload(
+    platform: str,
+    keyword: str,
+    *,
+    out_dir: str,
+    level: str,
+    total: int,
+    ok: int,
+    skip: int,
+    fail: int,
+    lyrics_written: int,
+    results: list[dict[str, Any]],
+    outcomes: list[Any],
+) -> dict[str, Any]:
+    """Build the ``music download --json`` document."""
+    payload: dict[str, Any] = {
+        "platform": platform or "all",
+        "keyword": keyword,
+        "out_dir": out_dir,
+        "level": level,
+        "total": total,
+        "ok": ok,
+        "skip": skip,
+        "fail": fail,
+        "lyrics_written": lyrics_written,
+        "results": results,
+    }
+    if outcomes:
+        payload["platforms"] = [item.as_dict() for item in outcomes]
+    return payload
+
+
 def _parse_indices(value: str, total: int) -> list[int] | None:
     """Parse ``1,3,5`` into validated 1-based indices."""
     try:
@@ -716,6 +775,12 @@ class MusicDownloadCmd(Command):
             action="store_true",
             help=t("Download every search result without prompting."),
         )
+        parser.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help=t("Print machine-readable JSON on stdout and exit."),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
@@ -725,6 +790,7 @@ class MusicDownloadCmd(Command):
             ui.error(t("No keyword entered."))
             raise SystemExit(EXIT_USAGE)
 
+        as_json = bool(getattr(args, "as_json", False))
         platform = _normalize_platform(engine, args.platform)
         limit = max(1, int(args.limit))
         settings = engine.settings.load_settings()
@@ -738,11 +804,15 @@ class MusicDownloadCmd(Command):
         provider = None
         outcomes: list[Any] = []
         if all_platforms:
-            tracks, _total, outcomes = _search_all(keyword, limit, show_status=True)
+            tracks, _total, outcomes = _search_all(
+                keyword, limit, show_status=not as_json
+            )
         else:
             provider = _create_provider(engine, platform)
             _print_platform_note(engine, platform)
-            tracks, _total = _search(engine, provider, keyword, limit, show_status=True)
+            tracks, _total = _search(
+                engine, provider, keyword, limit, show_status=not as_json
+            )
         if not tracks:
             for outcome in outcomes:
                 if not outcome.ok:
@@ -751,6 +821,28 @@ class MusicDownloadCmd(Command):
                             platform=outcome.platform, error=outcome.error
                         )
                     )
+            if as_json:
+                # An empty batch still has a document to parse; ``--json``
+                # callers must never have to special-case an empty stdout.
+                ui.emit(
+                    json.dumps(
+                        _download_payload(
+                            platform,
+                            keyword,
+                            out_dir=out_dir,
+                            level=level,
+                            total=0,
+                            ok=0,
+                            skip=0,
+                            fail=0,
+                            lyrics_written=0,
+                            results=[],
+                            outcomes=outcomes,
+                        ),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
             if _every_platform_failed(outcomes):
                 raise SystemExit(EXIT_FAILURE)
             ui.warn(t("No results found for '{keyword}'.").format(keyword=keyword))
@@ -804,6 +896,18 @@ class MusicDownloadCmd(Command):
         ui.info(t("Output directory: {path}").format(path=out_dir))
         ui.info(t("Audio quality: {level}").format(level=level))
 
+        # Per-track results, keyed by the index inside ``selected``.  The
+        # engine calls ``on_result`` exactly once per finished song (a
+        # fallback success replaces an earlier deferred failure), which is
+        # what makes the lyric report reflect the final state rather than
+        # whichever provider answered first.
+        records: dict[int, Any] = {}
+        records_lock = threading.Lock()
+
+        def _record_result(index: int, _track: Any, result: Any) -> None:
+            with records_lock:
+                records[index] = result
+
         progress = ui.ProgressUI(prefix=t("Downloading"), unit=t("song"))
         progress.start()
         try:
@@ -814,6 +918,7 @@ class MusicDownloadCmd(Command):
                     options,
                     workers=workers,
                     on_tick=progress.update_sync,
+                    on_result=_record_result,
                 )
             else:
                 ok, skip, fail, failed_pairs, _failed = engine.download_many(
@@ -822,6 +927,7 @@ class MusicDownloadCmd(Command):
                     options,
                     workers=workers,
                     on_tick=progress.update_sync,
+                    on_result=_record_result,
                 )
         except Exception as exc:
             if isinstance(exc, engine.login_expired):
@@ -832,15 +938,67 @@ class MusicDownloadCmd(Command):
         finally:
             progress.stop()
 
+        # Summarise what landed, per song.  ``lyric_path`` is only present
+        # when the ``.lrc`` really exists on disk, and a failed song never
+        # reports one, so a consumer cannot mistake a stale lyric for a
+        # successful download.
+        results_payload: list[dict[str, Any]] = []
+        lyrics_written = 0
+        for position, track in enumerate(selected):
+            record = records.get(position)
+            status = str(getattr(record, "status", "") or "").strip().lower()
+            audio_path = str(getattr(record, "path", "") or "") or _track_path(track)
+            if not status:
+                # An engine that does not report per-track results (or an
+                # older one) still leaves ``track.path`` as evidence that the
+                # audio landed.
+                status = "ok" if audio_path else "fail"
+            lyric_path = (
+                _existing_lyric_path(audio_path) if status in {"ok", "skip"} else ""
+            )
+            entry = _track_payload(position + 1, track)
+            entry["status"] = status
+            if audio_path and status in {"ok", "skip"}:
+                entry["path"] = audio_path
+            if lyric_path:
+                entry["lyric_path"] = lyric_path
+                lyrics_written += 1
+            reason = str(getattr(record, "reason", "") or "")
+            if status == "fail" and reason:
+                entry["reason"] = reason
+            results_payload.append(entry)
+
         for name, reason in failed_pairs:
             ui.warn(t("Failed: {name} ({reason})").format(name=name, reason=reason))
         failed_total = int(fail or 0)
         summary = t("Done: {ok} succeeded, {skip} skipped, {fail} failed").format(
             ok=ok, skip=skip, fail=fail
         )
+
+        if as_json:
+            payload = _download_payload(
+                platform,
+                keyword,
+                out_dir=out_dir,
+                level=level,
+                total=len(selected),
+                ok=int(ok or 0),
+                skip=int(skip or 0),
+                fail=failed_total,
+                lyrics_written=lyrics_written,
+                results=results_payload,
+                outcomes=outcomes,
+            )
+            # One line, like ``music search --json``: a consumer can
+            # ``json.loads`` the whole stdout even through a pipe.
+            ui.emit(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        elif lyrics_written:
+            ui.info(t("Lyrics written: {count}").format(count=lyrics_written))
+
         if failed_total > 0:
             # A batch with failed songs is a failed run: scripts must not see
-            # exit 0 while some downloads were silently missing.
+            # exit 0 while some downloads were silently missing.  The JSON
+            # document above is already on stdout when ``--json`` was used.
             ui.warn(summary)
             raise SystemExit(EXIT_FAILURE)
         ui.success(summary)

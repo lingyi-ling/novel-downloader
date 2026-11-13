@@ -160,8 +160,14 @@ def _payload(
 
 
 def _emit_json(payload: dict[str, object]) -> None:
-    """Write one JSON document to stdout (the only stdout writer here)."""
-    ui.emit(json.dumps(payload, ensure_ascii=False, indent=2))
+    """Write one single-line JSON document to stdout (the only writer here).
+
+    Compact separators keep the whole document on one line, like
+    ``search --json`` and ``storage backup --json``.  A pretty-printed object
+    is still valid JSON, but it breaks line-oriented consumers (``while read
+    line``, ``grep``) and the ``--json`` contract of the other commands.
+    """
+    ui.emit(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
 def _is_cli_asset(asset: ReleaseAsset) -> bool:
