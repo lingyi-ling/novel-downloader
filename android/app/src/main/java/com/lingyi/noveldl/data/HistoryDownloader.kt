@@ -62,6 +62,17 @@ object HistoryDownloader {
         return builder.build()
     }
 
+    /**
+     * Snapshot of the tree URIs the app currently holds a persisted write
+     * grant for. Both the settings warning and the download pre-check use it,
+     * so "looks available" and "actually writable" cannot drift apart.
+     */
+    fun writeGrantedTreeUris(context: Context): Set<String> =
+        context.contentResolver.persistedUriPermissions
+            .asSequence()
+            .filter { it.isWritePermission }
+            .mapTo(mutableSetOf()) { it.uri.toString() }
+
     /** Starts the DownloadManager download and returns its id, or a failure. */
     fun enqueue(context: Context, file: HistoryFile): Result<Long> = try {
         val url = resolveDownloadUrl(Api.baseUrl, file.download_url)
@@ -111,11 +122,8 @@ object HistoryDownloader {
         return try {
             withContext(Dispatchers.IO) {
                 val resolver = context.contentResolver
-                val hasWrite = resolver.persistedUriPermissions.any {
-                    it.uri == treeUri && it.isWritePermission
-                }
-                if (!hasWrite) {
-                    throw IllegalStateException(
+                if (!hasPersistedWriteAccess(treeUri.toString(), writeGrantedTreeUris(context))) {
+                    throw DownloadDirectoryUnavailableException(
                         context.getString(R.string.settings_download_dir_unavailable),
                     )
                 }
@@ -125,22 +133,43 @@ object HistoryDownloader {
                         context.getString(R.string.history_download_invalid_url),
                     )
                 }
-                val tree = DocumentFile.fromTreeUri(context, treeUri)
-                    ?: throw IllegalStateException(
+                // A revoked grant can surface as SecurityException from the
+                // provider query rather than as a null DocumentFile; treat
+                // both as "the tree is gone" so the caller falls back.
+                val tree = runCatching {
+                    DocumentFile.fromTreeUri(context, treeUri)
+                        ?.takeIf { it.isDirectory && it.exists() }
+                }.getOrNull()
+                if (tree == null) {
+                    // The grant survived but the folder was deleted/moved, or
+                    // the provider cannot resolve it any more.
+                    throw DownloadDirectoryUnavailableException(
                         context.getString(R.string.settings_download_dir_unavailable),
                     )
+                }
                 val dir = tree.findFile(SUBDIRECTORY)?.takeIf { it.isDirectory }
                     ?: tree.createDirectory(SUBDIRECTORY)
                     ?: throw IllegalStateException(
                         context.getString(R.string.settings_download_dir_create_failed),
                     )
-                val fileName = downloadFileName(file.name, file.download_url, file.ext)
+                val desiredName = downloadFileName(file.name, file.download_url, file.ext)
+                // Resolve name clashes explicitly instead of relying on the
+                // provider's auto-renaming: some providers overwrite, some
+                // append a suffix, and the success toast should name the file
+                // that actually exists.
+                val fileName = uniqueChildName(
+                    desiredName,
+                    dir.listFiles().mapNotNull { it.name },
+                )
                 val mime = mimeTypeForExtension(file.ext) ?: "application/octet-stream"
                 val target = dir.createFile(mime, fileName)
                     ?: throw IllegalStateException(
                         context.getString(R.string.settings_download_dir_create_failed),
                     )
                 created = target
+                // Providers may still adjust the display name (e.g. enforce an
+                // extension); report what was actually created.
+                val savedName = target.name ?: fileName
 
                 val builder = Request.Builder().url(url)
                 downloadRequestHeaders(Api.apiKey, url, Api.baseUrl).forEach { (name, value) ->
@@ -180,7 +209,7 @@ object HistoryDownloader {
                         }
                     }
                 }
-                fileName
+                savedName
             }.let { Result.success(it) }
         } catch (e: CancellationException) {
             // Never leave a half-written document behind, and never turn a
