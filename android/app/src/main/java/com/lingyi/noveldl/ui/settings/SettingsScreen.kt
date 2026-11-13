@@ -55,6 +55,7 @@ import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiSettings
 import com.lingyi.noveldl.data.DownloadTarget
 import com.lingyi.noveldl.data.EmbeddedEngine
+import com.lingyi.noveldl.data.HistoryDownloader
 import com.lingyi.noveldl.data.SettingsStore
 import com.lingyi.noveldl.data.UpdateCenter
 import com.lingyi.noveldl.data.UpdateFailure
@@ -62,6 +63,7 @@ import com.lingyi.noveldl.data.UpdatePhase
 import com.lingyi.noveldl.data.appVersionName
 import com.lingyi.noveldl.data.configureTargetUrl
 import com.lingyi.noveldl.data.SitesSummary
+import com.lingyi.noveldl.data.customTreeUnavailable
 import com.lingyi.noveldl.data.resolveDownloadTarget
 import com.lingyi.noveldl.data.standaloneTargetUrl
 import com.lingyi.noveldl.data.toSitesSummary
@@ -101,6 +103,13 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
     // from system settings while this screen is in the back stack.
     var notificationsAllowed by remember {
         mutableStateOf(TaskNotifier.canPostNotifications(context))
+    }
+    // Tree URIs the app can currently write to. Re-read on resume: the user
+    // may revoke a SAF grant (or uninstall/clear the provider app) while the
+    // screen is in the back stack, and the warning must appear before the
+    // next download attempt.
+    var persistedWriteUris by remember {
+        mutableStateOf(HistoryDownloader.writeGrantedTreeUris(context))
     }
 
     fun save() {
@@ -172,6 +181,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 notificationsAllowed = TaskNotifier.canPostNotifications(context)
+                persistedWriteUris = HistoryDownloader.writeGrantedTreeUris(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -183,18 +193,27 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            // Persist the grant so the permission survives reboots; if the
-            // provider refuses, the download falls back to a clear error
-            // instead of writing somewhere the user did not choose.
-            runCatching {
+            // Persist the grant so the permission survives reboots. Only
+            // remember the directory when the provider actually granted a
+            // persistable permission: otherwise the next download would fail
+            // while the settings page claimed the folder was in use.
+            val granted = runCatching {
                 context.contentResolver.takePersistableUriPermission(
                     uri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or
                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
                 )
+            }.isSuccess
+            if (granted) {
+                store.saveDownloadDirectory(uri.toString())
+                persistedWriteUris = HistoryDownloader.writeGrantedTreeUris(context)
+                onMessage(context.getString(R.string.settings_download_dir_saved))
+            } else {
+                // Keep the previously selected (working) directory untouched.
+                onMessage(
+                    context.getString(R.string.settings_download_dir_permission_failed),
+                )
             }
-            store.saveDownloadDirectory(uri.toString())
-            onMessage(context.getString(R.string.settings_download_dir_saved))
         }
     }
 
@@ -209,6 +228,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
                 )
             }
+            persistedWriteUris = HistoryDownloader.writeGrantedTreeUris(context)
             onMessage(context.getString(R.string.settings_download_dir_reset))
         }
     }
@@ -431,7 +451,8 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             style = MaterialTheme.typography.titleSmall,
         )
         Spacer(Modifier.height(8.dp))
-        val target = resolveDownloadTarget(settings.downloadTreeUri)
+        val storedTree = settings.downloadTreeUri
+        val target = resolveDownloadTarget(storedTree, persistedWriteUris)
         val targetLabel = when (target) {
             is DownloadTarget.CustomTree -> stringResource(
                 R.string.settings_download_target_custom,
@@ -446,6 +467,16 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (customTreeUnavailable(storedTree, persistedWriteUris)) {
+            // The stored URI is kept (so "choose directory" can replace it)
+            // but downloads fall back to the system Downloads directory.
+            Text(
+                stringResource(R.string.settings_download_dir_unavailable),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
         Spacer(Modifier.height(8.dp))
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
@@ -457,7 +488,9 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             }
             Button(
                 onClick = { resetDownloadDirectory() },
-                enabled = target is DownloadTarget.CustomTree,
+                // Enabled even when the tree is unavailable: the user must be
+                // able to clear a broken selection.
+                enabled = storedTree.isNotBlank(),
             ) {
                 Text(stringResource(R.string.settings_download_reset_directory))
             }

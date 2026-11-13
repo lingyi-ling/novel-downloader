@@ -209,6 +209,8 @@
     <string name="settings_download_dir_reset">Reverted to the system Downloads directory</string>
     <string name="settings_download_dir_unavailable">The custom download directory is unavailable — pick it again in Settings</string>
     <string name="settings_download_dir_create_failed">Could not create a file in the custom download directory</string>
+    <string name="settings_download_dir_permission_failed">Could not keep write access to that directory — choose another one</string>
+    <string name="settings_download_dir_fallback">The custom download directory is unavailable; saving to system Downloads instead</string>
     <string name="settings_download_hint">Once a SAF directory is chosen, exported files are saved into its NovelDL subfolder; otherwise they go to the system Downloads directory.</string>
     <string name="settings_section_notifications">Notifications</string>
     <string name="settings_notifications_enabled">Task completion and failure alerts are shown</string>

@@ -219,6 +219,8 @@
     <string name="settings_download_dir_reset">已恢复默认下载目录</string>
     <string name="settings_download_dir_unavailable">自定义下载目录不可用，请在设置中重新选择</string>
     <string name="settings_download_dir_create_failed">无法在自定义下载目录中创建文件</string>
+    <string name="settings_download_dir_permission_failed">无法保留该目录的写入权限，请换一个目录</string>
+    <string name="settings_download_dir_fallback">自定义下载目录不可用，已改为保存到系统 Downloads</string>
     <string name="settings_download_hint">选择 SAF 目录后，导出文件会保存到该目录的 NovelDL 子文件夹；未选择时保存到系统 Downloads。</string>
     <string name="settings_section_notifications">通知</string>
     <string name="settings_notifications_enabled">任务完成或失败时会显示通知</string>

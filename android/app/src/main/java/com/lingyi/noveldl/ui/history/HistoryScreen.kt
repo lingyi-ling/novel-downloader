@@ -48,6 +48,7 @@ import com.lingyi.noveldl.R
 import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiSettings
+import com.lingyi.noveldl.data.DownloadDirectoryUnavailableException
 import com.lingyi.noveldl.data.DownloadTarget
 import com.lingyi.noveldl.data.HistoryDownloader
 import com.lingyi.noveldl.data.HistoryFile
@@ -58,7 +59,9 @@ import com.lingyi.noveldl.data.resolveDownloadTarget
 import com.lingyi.noveldl.ui.formatTimestamp
 import com.lingyi.noveldl.ui.humanSize
 import com.lingyi.noveldl.ui.listPlaceholderRes
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -151,33 +154,61 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                 reason.ifBlank { context.getString(R.string.history_download_unknown_error) },
             )
         }
-        when (val target = resolveDownloadTarget(settings.downloadTreeUri)) {
-            is DownloadTarget.CustomTree -> scope.launch {
-                // DownloadManager cannot write to SAF tree URIs, so the custom
-                // directory path streams the file itself; the result is known
-                // as soon as the call returns.
-                HistoryDownloader.downloadToDirectory(
+        // Shared by the "no custom directory" case and the runtime fallback
+        // after a revoked/deleted tree. The fallback flag picks a notice that
+        // names the destination change instead of a plain "started" toast.
+        fun enqueueSystemDownloads(fallback: Boolean) {
+            HistoryDownloader.enqueue(context, file)
+                .onSuccess { id ->
+                    pendingDownloads[id] = displayName
+                    onMessage(
+                        if (fallback) {
+                            context.getString(R.string.settings_download_dir_fallback)
+                        } else {
+                            context.getString(R.string.history_download_started, displayName)
+                        },
+                    )
+                }
+                .onFailure { onMessage(failureMessage(it.message.orEmpty())) }
+        }
+
+        scope.launch {
+            // persistedUriPermissions is a binder call; keep it off the main
+            // thread, and resolve against the latest grants so a directory
+            // revoked since the screen opened is not attempted.
+            val writeUris = withContext(Dispatchers.IO) {
+                HistoryDownloader.writeGrantedTreeUris(context)
+            }
+            val storedTree = settings.downloadTreeUri
+            when (val target = resolveDownloadTarget(storedTree, writeUris)) {
+                is DownloadTarget.CustomTree -> HistoryDownloader.downloadToDirectory(
                     context,
                     file,
                     Uri.parse(target.treeUri),
                 )
-                    .onSuccess {
+                    .onSuccess { savedName ->
                         onMessage(
                             context.getString(
                                 R.string.history_download_custom_done,
                                 customDownloadDirLabel(target.treeUri),
-                                displayName,
+                                savedName,
                             ),
                         )
                     }
-                    .onFailure { onMessage(failureMessage(it.message.orEmpty())) }
+                    .onFailure { error ->
+                        if (error is DownloadDirectoryUnavailableException) {
+                            // A tree can disappear between the grant snapshot
+                            // and the actual write (folder deleted, provider
+                            // crashed). Do not fail the download: retry into
+                            // the system Downloads directory and say so.
+                            enqueueSystemDownloads(fallback = true)
+                        } else {
+                            onMessage(failureMessage(error.message.orEmpty()))
+                        }
+                    }
+                DownloadTarget.SystemDownloads ->
+                    enqueueSystemDownloads(fallback = storedTree.isNotBlank())
             }
-            DownloadTarget.SystemDownloads -> HistoryDownloader.enqueue(context, file)
-                .onSuccess { id ->
-                    pendingDownloads[id] = displayName
-                    onMessage(context.getString(R.string.history_download_started, displayName))
-                }
-                .onFailure { onMessage(failureMessage(it.message.orEmpty())) }
         }
     }
 
