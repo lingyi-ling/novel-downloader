@@ -1,3 +1,36 @@
+## v1.33.0 (2026-11-13)
+
+第五批并行改进：搜索过滤贯通桌面/Android、存储校验、通知定位、歌词入口与供应链安全；Python **12578 passed / 46 skipped**，Android **513 tests**。
+
+### Feature
+
+- **桌面搜索筛选**：高级面板（字数/更新日期）、前端+桥接双重校验、最近条件持久化并在启动恢复（不自动搜索）、设置页可清除
+- **Android 搜索筛选**：高级面板、SavedStateHandle 恢复、非法输入不发请求
+- **Android 通知定位**：点击任务通知打开任务页、展开高亮并滚动；任务已清理时提示
+- **Android 歌词**：下载结果显示歌词按钮，经 FileProvider 打开；SAF 下载目录补齐授权/错误路径测试
+- **桌面歌词**：原文/译文 `.lrc` 双入口，轮询后即时出现
+- **`storage verify`**：只读校验全部章节库 integrity/schema/WAL，损坏 exit 1
+- **`doctor --fix`**：创建缺失目录、清理陈旧 `.tmp/.part`，dry-run 预览（前批）
+- **官网下载校验**：SHA256SUMS/latest.json 校验命令，明确签名尚未启用
+
+### Fix
+
+- `music download --json` 新增 `status/path/lyric_path/lyrics_written`，单行输出
+- `update --json` 改为单行紧凑，与其他命令一致
+- API：`--no-rate-limit` 显式禁用，0/负数/NaN 拒绝；SSE OpenAPI 声明 `text/event-stream`；embedded 转发搜索过滤并与 REST 422 对齐
+- 搜索解析增加 LRU，20k 过滤场景约快 15-20%
+
+### Security
+
+- `scan_secrets --history` 流式扫描历史新增行（当前 296 提交 0 命中）
+- 发布资产 zip/apk/exe 文本成员复用规则扫描；v1.32 资产审计 0 命中
+- 发版 preflight 强制工作区扫描；每周安全 workflow；可选 pre-commit 钩子
+
+### Test
+
+- Python **12578 passed / 46 skipped**；ruff/format/mypy 全绿
+- Android **513 tests**；CLI e2e 矩阵 9 例、REST/embedded 669 例契约对拍
+
 ## v1.32.0 (2026-11-13)
 
 第四批并行改进，重点是搜索过滤、桌面冷启动、Android 下载目录、歌词与数据维护；Python **12312 passed / 45 skipped**，Android **434 tests**。
