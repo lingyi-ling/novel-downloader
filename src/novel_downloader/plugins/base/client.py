@@ -14,6 +14,7 @@ import types
 from pathlib import Path
 from typing import Any, Self, cast
 
+from novel_downloader.infra.paths import is_safe_path_component
 from novel_downloader.libs.filesystem import image_filename, write_file
 from novel_downloader.plugins.protocols import FetcherProtocol, ParserProtocol
 from novel_downloader.plugins.protocols.ui import (
@@ -589,6 +590,10 @@ class BaseClient(AbstractClient, abc.ABC):
         meta = self._load_pipeline_meta(book_id)
 
         for stg in reversed(meta["pipeline"]):
+            # Stage names are path segments; a tampered pipeline.json must not
+            # make the default-stage lookup read outside the book directory.
+            if not is_safe_path_component(stg):
+                continue
             db_file = base / f"chapter.{stg}.sqlite"
             info_file = base / f"book_info.{stg}.json"
             if db_file.is_file() and info_file.is_file():

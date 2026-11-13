@@ -83,11 +83,16 @@ async def target_server(aiohttp_server: Any) -> Any:
     async def handler_loop(request: aiohttp.web.Request) -> aiohttp.web.Response:
         raise aiohttp.web.HTTPFound("/loop")
 
+    async def handler_large(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        # 1 KiB: larger than the test limit, small enough to stay trivial.
+        return aiohttp.web.Response(body=b"x" * 1024, status=200)
+
     app = aiohttp.web.Application()
     app.router.add_get("/ok", handler_ok)
     app.router.add_get("/slow", handler_slow)
     app.router.add_get("/503", handler_503)
     app.router.add_get("/loop", handler_loop)
+    app.router.add_get("/large", handler_large)
     server = await aiohttp_server(app)
     server.state = state  # type: ignore[attr-defined]
     return server
@@ -647,3 +652,47 @@ async def test_proxy_password_never_reaches_the_exception(
     message = str(excinfo.value)
     assert "topsecret" not in message
     assert "***" in message
+
+
+# --------------------------------------------------------------------------- #
+# Response size caps
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_max_bytes_rejects_an_oversized_body(
+    backend: str, target_server: Any
+) -> None:
+    """The cap must be enforced while reading, not after buffering the body.
+
+    Media downloads are attacker-influenced (URLs come from site HTML); a
+    response far above the 64 MiB limit must be refused without first holding
+    it in memory.
+    """
+    from novel_downloader.infra.sessions.response import ResponseTooLargeError
+
+    session = create_session(backend, make_cfg())
+    await session.init()
+    try:
+        url = str(target_server.make_url("/large"))
+        with pytest.raises(ResponseTooLargeError):
+            await session.get(url, max_bytes=16)
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_max_bytes_allows_a_body_within_the_limit(
+    backend: str, target_server: Any
+) -> None:
+    session = create_session(backend, make_cfg())
+    await session.init()
+    try:
+        url = str(target_server.make_url("/large"))
+        response = await session.get(url, max_bytes=2048)
+    finally:
+        await session.close()
+
+    assert response.content == b"x" * 1024

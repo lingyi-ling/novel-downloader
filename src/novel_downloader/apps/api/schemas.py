@@ -18,6 +18,8 @@ from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, BaseModel, Field, field_validator
 
+from novel_downloader.infra.paths import is_safe_path_component
+
 SearchSortKey = Literal[
     "quality",
     "priority",
@@ -211,6 +213,11 @@ def validate_book_id(value: str) -> str:
         )
     if cleaned in {".", ".."} or cleaned.endswith("."):
         raise ValueError("book_id must be a usable directory name")
+    # Keep the request validator and the queue/client boundary in agreement:
+    # Windows device names (``CON``, ``NUL`` …) pass the character checks but
+    # do not name a file, and the queue now refuses them as well.
+    if not is_safe_path_component(cleaned):
+        raise ValueError("book_id must be a usable directory name")
     return cleaned
 
 
@@ -229,6 +236,10 @@ def validate_site_key(value: str) -> str:
     """
     cleaned = _clean_text(value, "site", MAX_SITE_KEY_LENGTH)
     if not _SITE_KEY_CHARS.fullmatch(cleaned):
+        raise ValueError("site must contain only letters, digits, '_', '-' and '.'")
+    # Windows strips trailing dots/spaces and treats device names specially;
+    # the queue uses the same check before creating ``raw_data/<site>``.
+    if not is_safe_path_component(cleaned):
         raise ValueError("site must contain only letters, digits, '_', '-' and '.'")
     return cleaned
 

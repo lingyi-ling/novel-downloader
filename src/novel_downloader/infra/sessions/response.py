@@ -153,6 +153,19 @@ class ResponseJSONError(ValueError):
         self.body_preview = body_preview
 
 
+class ResponseTooLargeError(ValueError):
+    """Raised when a bounded response exceeds the caller's byte limit.
+
+    Subclasses :class:`ValueError` so existing "invalid response" handlers keep
+    working; callers that distinguish a size refusal can catch this type.  The
+    message names the limit and never includes the body, which may be hostile.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"response body exceeds the {limit}-byte limit")
+        self.limit = limit
+
+
 class BaseResponse:
     """Lightweight internal HTTP-like response used in fetcher."""
 

@@ -18,6 +18,7 @@ replaced with local fakes.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -367,6 +368,25 @@ async def test_task_rejects_malformed_sites(
 ) -> None:
     response = await client.post(
         "/api/v1/tasks", content=_json_bytes({"site": site, "book_id": "1"})
+    )
+
+    _assert_422(response)
+    assert fake_manager.pending == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows device-name semantics")
+@pytest.mark.parametrize("book_id", ["CON", "NUL", "aux", "LPT1", "CON.txt"])
+async def test_task_rejects_windows_device_names(
+    client: httpx.AsyncClient, fake_manager: _FakeManager, book_id: str
+) -> None:
+    """A name that addresses a device is not a directory name.
+
+    The queue refuses it too; validating here keeps the response a ``422``
+    instead of a ``500`` raised by the shared path check.
+    """
+    response = await client.post(
+        "/api/v1/tasks", content=_json_bytes({"site": "demo", "book_id": book_id})
     )
 
     _assert_422(response)

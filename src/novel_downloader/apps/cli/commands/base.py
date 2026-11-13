@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from novel_downloader.infra.i18n import t
+from novel_downloader.infra.paths import is_safe_path_component as _is_safe_component
 from novel_downloader.libs.filesystem import KIND_ROWS, RemovalItem
 from novel_downloader.schemas import BookConfig
 
@@ -255,18 +256,7 @@ def _is_path_component(value: str) -> bool:
     turns ``".. "`` or ``"..."`` into a parent reference.  Such names cannot
     be created through the normal API either, so they are rejected here.
     """
-    text = str(value)
-    path = Path(text)
-    return not (
-        not text.strip(" .")
-        or text != text.rstrip(" .")
-        or "/" in text
-        or "\\" in text
-        or ":" in text
-        or path.is_absolute()
-        or path.name != text
-        or any(ord(char) < 32 for char in text)
-    )
+    return _is_safe_component(value)
 
 
 def is_safe_path_component(value: str) -> bool:

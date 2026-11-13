@@ -14,6 +14,61 @@ from platformdirs import user_data_path
 
 PACKAGE_NAME = "novel_downloader"  # Python package name
 
+#: Windows device names that cannot be used as ordinary file/directory names.
+#: Opening them addresses a device instead of a file in the current directory.
+_WIN_RESERVED_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+)
+
+
+def is_safe_path_component(value: object) -> bool:
+    """
+    Return whether ``value`` can be joined onto a directory as one component.
+
+    Site keys, book IDs, pipeline stages and similar identifiers are used as
+    directory/file name segments under a configured root (``raw_data/<site>/
+    <book_id>/...``).  A value containing a separator, a drive/stream colon,
+    a ``.``/``..`` segment, control characters or a Windows device name would
+    make that join address a different path, so it must be rejected *before*
+    any read or write.  The check is intentionally the same on every platform:
+    data written on POSIX may later be read on Windows (and vice versa), so a
+    name that is only safe on one of them is not accepted.
+
+    Trailing spaces/dots are rejected as well because Windows strips them,
+    which turns ``".. "`` into a parent reference.
+
+    :param value: Candidate identifier (converted with ``str()``).
+    :return: ``True`` when the value is a single, non-escaping name.
+    """
+    text = str(value)
+    path = Path(text)
+    if (
+        not text.strip(" .")
+        or text != text.rstrip(" .")
+        or "/" in text
+        or "\\" in text
+        or ":" in text
+        or path.is_absolute()
+        or path.name != text
+    ):
+        return False
+    if any(ord(char) < 32 or ord(char) == 0x7F for char in text):
+        return False
+    # Lone surrogates cannot be encoded into a path on any platform.
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in text):
+        return False
+    return not (
+        os.name == "nt"
+        and text.split(".", 1)[0].strip(" .").upper() in _WIN_RESERVED_NAMES
+    )
+
 
 def app_home() -> Path:
     """

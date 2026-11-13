@@ -6,6 +6,7 @@ novel_downloader.infra.sessions._curl_cffi
 
 # mypy: disable-error-code=unused-ignore
 
+import contextlib
 from http.cookiejar import Cookie
 from http.cookies import CookieError
 from pathlib import Path
@@ -62,7 +63,7 @@ from .cookie_io import (
     write_cookie_items,
 )
 from .proxy import ALL_PROXY_SCHEMES
-from .response import BaseResponse
+from .response import BaseResponse, ResponseTooLargeError
 
 
 class CurlCffiSession(BaseSession):
@@ -140,10 +141,29 @@ class CurlCffiSession(BaseSession):
         **kwargs: Unpack[GetRequestKwargs],
     ) -> BaseResponse:
         options: dict[str, Any] = dict(kwargs)
+        max_bytes = options.pop("max_bytes", None)
         self._prepare_request(url, options, verify, allow_redirects)
 
         try:
-            r = await self.session.get(url, **options)
+            if max_bytes is None:
+                r = await self.session.get(url, **options)
+                content = r.content
+            else:
+                limit = int(max_bytes)
+                options["stream"] = True
+                r = await self.session.get(url, **options)
+                chunks: list[bytes] = []
+                total = 0
+                try:
+                    async for chunk in r.aiter_content():
+                        total += len(chunk)
+                        if total > limit:
+                            raise ResponseTooLargeError(limit)
+                        chunks.append(chunk)
+                finally:
+                    with contextlib.suppress(Exception):
+                        await r.aclose()
+                content = b"".join(chunks)
         except CurlTimeout as exc:
             # Must precede the connection clause: ConnectTimeout inherits
             # from both ConnectionError and Timeout, and the timeout
@@ -181,7 +201,7 @@ class CurlCffiSession(BaseSession):
                 raise
             raise self._transport_error(exc) from exc
         return BaseResponse(
-            content=r.content,
+            content=content,
             headers=r.headers,
             status=r.status_code,
             encoding=r.charset_encoding or encoding,

@@ -27,7 +27,10 @@ from novel_downloader.infra.sessions.base import (
     NonRetryableConnectionError,
     TooManyRedirectsError,
 )
-from novel_downloader.infra.sessions.response import BaseResponse
+from novel_downloader.infra.sessions.response import (
+    BaseResponse,
+    ResponseTooLargeError,
+)
 from novel_downloader.libs.filesystem import (
     font_filename,
     image_filename,
@@ -345,6 +348,16 @@ class BaseFetcher(abc.ABC):
                 # and every retry would fail the same way.
                 logger.warning(
                     "Request failed (site=%s) %s: %s (not retrying)",
+                    self.site_name,
+                    url,
+                    exc,
+                )
+                return None
+            except ResponseTooLargeError as exc:
+                # Refused by the backend before the body was buffered; the
+                # limit is implementation detail, not a URL problem.
+                logger.warning(
+                    "Media response too large (site=%s) %s: %s",
                     self.site_name,
                     url,
                     exc,
@@ -960,7 +973,14 @@ class BaseFetcher(abc.ABC):
         corrupt image on disk.
         """
         request_url = self._resolve_media_url(url)
-        response = await self._fetch_data_response(request_url, headers=headers)
+        # The session enforces the cap while streaming; checking the finished
+        # body against MAX_MEDIA_BYTES could only happen after a hostile CDN
+        # had already made us buffer it in memory.
+        response = await self._fetch_data_response(
+            request_url,
+            headers=headers,
+            max_bytes=self.MAX_MEDIA_BYTES,
+        )
         if response is None:
             return None
 

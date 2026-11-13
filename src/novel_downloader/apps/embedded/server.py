@@ -490,6 +490,71 @@ def _book_id_field(body: dict[str, Any]) -> tuple[str | None, dict[str, Any] | N
     return _book_id_value(book_id)
 
 
+#: Error wording for the lax numeric coercions below (pydantic's own text).
+_INT_ERRORS = {
+    "int_type": "Input should be a valid integer",
+    "int_parsing": (
+        "Input should be a valid integer, unable to parse string as an integer"
+    ),
+    "int_from_float": (
+        "Input should be a valid integer, got a number with a fractional part"
+    ),
+    "finite_number": "Input should be a finite number",
+}
+
+_FLOAT_ERRORS = {
+    "float_type": "Input should be a valid number",
+    "float_parsing": (
+        "Input should be a valid number, unable to parse string as a number"
+    ),
+}
+
+#: Pydantic's lax int parser accepts a zero fraction (``"5.0"``) but not a
+#: non-zero one (``"5.5"`` is ``int_parsing``, not a rounded 5).
+_INT_STRING_WITH_ZERO_FRACTION = re.compile(r"[+-]?\d+\.0+\Z")
+
+
+def _coerce_lax_int(value: Any) -> tuple[int | None, str | None]:
+    """Coerce like pydantic's lax ``int``, returning ``(value, error_type)``."""
+    if isinstance(value, bool):
+        return int(value), None
+    if isinstance(value, int):
+        return value, None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None, "finite_number"
+        if not value.is_integer():
+            return None, "int_from_float"
+        return int(value), None
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return int(text), None
+        except ValueError:
+            pass
+        if _INT_STRING_WITH_ZERO_FRACTION.fullmatch(text):
+            return int(text.split(".", 1)[0]), None
+        return None, "int_parsing"
+    return None, "int_type"
+
+
+def _coerce_lax_float(value: Any) -> tuple[float | None, str | None]:
+    """Coerce like pydantic's lax ``float``, returning ``(value, error_type)``."""
+    if isinstance(value, bool):
+        return float(value), None
+    if isinstance(value, (int, float)):
+        try:
+            return float(value), None
+        except OverflowError:
+            return None, "float_type"
+    if isinstance(value, str):
+        try:
+            return float(value.strip()), None
+        except ValueError:
+            return None, "float_parsing"
+    return None, "float_type"
+
+
 def _int_field(
     body: dict[str, Any],
     name: str,
@@ -497,14 +562,27 @@ def _int_field(
     ge: int | None,
     entries: list[dict[str, Any]],
     le: int | None = None,
+    *,
+    nullable: bool = False,
 ) -> int | None:
-    if name not in body or body[name] is None:
+    if name not in body:
         return default
     value = body[name]
-    if isinstance(value, bool) or not isinstance(value, int):
-        entries.append(_err(name, "Input should be a valid integer", "int_type"))
+    if value is None:
+        # A field declared ``int``/``int | None`` differs on explicit JSON
+        # ``null``: pydantic reports ``int_type`` for the former and accepts
+        # ``None`` for the latter. Treating both as "absent" silently accepted
+        # a payload REST rejects.
+        if nullable:
+            return default
+        entries.append(_err(name, _INT_ERRORS["int_type"], "int_type"))
         return default
-    if ge is not None and value < ge:
+    number, error = _coerce_lax_int(value)
+    if error is not None or number is None:
+        kind = error or "int_type"
+        entries.append(_err(name, _INT_ERRORS[kind], kind))
+        return default
+    if ge is not None and number < ge:
         entries.append(
             _err(
                 name,
@@ -513,7 +591,7 @@ def _int_field(
             )
         )
         return default
-    if le is not None and value > le:
+    if le is not None and number > le:
         entries.append(
             _err(
                 name,
@@ -522,7 +600,7 @@ def _int_field(
             )
         )
         return default
-    return value
+    return number
 
 
 def _float_field(
@@ -535,13 +613,18 @@ def _float_field(
     *,
     finite: bool = False,
 ) -> float:
-    if name not in body or body[name] is None:
+    if name not in body:
         return default
     value = body[name]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        entries.append(_err(name, "Input should be a valid number", "float_type"))
+    if value is None:
+        # See ``_int_field``: only an optional float may receive ``null``.
+        entries.append(_err(name, _FLOAT_ERRORS["float_type"], "float_type"))
         return default
-    result = float(value)
+    result, error = _coerce_lax_float(value)
+    if error is not None or result is None:
+        kind = error or "float_type"
+        entries.append(_err(name, _FLOAT_ERRORS[kind], kind))
+        return default
     # ``json`` loads bare NaN/Infinity, which Pydantic rejects when
     # ``allow_inf_nan=False`` (REST's timeout fields all set it).
     if finite and not math.isfinite(result):
@@ -564,31 +647,51 @@ def _float_field(
     return result
 
 
+def _literal_message(choices: tuple[str, ...]) -> str:
+    quoted = ", ".join(f"'{choice}'" for choice in choices[:-1])
+    quoted += f" or '{choices[-1]}'"
+    return f"Input should be {quoted}"
+
+
 def _literal_field(
     body: dict[str, Any],
     name: str,
     default: str | None,
     choices: tuple[str, ...],
     entries: list[dict[str, Any]],
+    *,
+    nullable: bool = False,
 ) -> str | None:
-    if name not in body or body[name] is None:
+    if name not in body:
         return default
     value = body[name]
+    if value is None:
+        # Only ``Literal[...] | None`` accepts an explicit null; a plain
+        # ``Literal`` rejects it exactly like pydantic's ``literal_error``.
+        if nullable:
+            return default
+        entries.append(_err(name, _literal_message(choices), "literal_error"))
+        return default
     if not isinstance(value, str):
         entries.append(_err(name, "Input should be a valid string", "string_type"))
         return default
     if value not in choices:
-        quoted = ", ".join(f"'{choice}'" for choice in choices[:-1])
-        quoted += f" or '{choices[-1]}'"
-        entries.append(_err(name, f"Input should be {quoted}", "literal_error"))
+        entries.append(_err(name, _literal_message(choices), "literal_error"))
         return default
     return value
 
 
-def _parse_paging(query: dict[str, list[str]]) -> tuple[int | None, int | None]:
-    """Parse ``offset`` / ``limit`` with the REST API's query validation."""
+def _parse_paging(
+    query: dict[str, list[str]], entries: list[dict[str, Any]] | None = None
+) -> tuple[int | None, int | None]:
+    """Parse ``offset`` / ``limit`` with the REST API's query validation.
+
+    ``entries`` collects every fault without raising (the task list validates
+    its filters alongside the paging); when omitted, errors raise immediately
+    like the dedicated history handler.
+    """
     parsed: dict[str, int] = {}
-    entries: list[dict[str, Any]] = []
+    found: list[dict[str, Any]] = []
     for name, ge, le in (("offset", 0, None), ("limit", 1, _MAX_PAGE_LIMIT)):
         values = query.get(name)
         if not values:
@@ -596,7 +699,7 @@ def _parse_paging(query: dict[str, list[str]]) -> tuple[int | None, int | None]:
         try:
             value = int(values[-1])
         except ValueError:
-            entries.append(
+            found.append(
                 _err(
                     name,
                     "Input should be a valid integer, unable to parse string "
@@ -607,7 +710,7 @@ def _parse_paging(query: dict[str, list[str]]) -> tuple[int | None, int | None]:
             )
             continue
         if value < ge:
-            entries.append(
+            found.append(
                 _err(
                     name,
                     f"Input should be greater than or equal to {ge}",
@@ -616,7 +719,7 @@ def _parse_paging(query: dict[str, list[str]]) -> tuple[int | None, int | None]:
                 )
             )
         elif le is not None and value > le:
-            entries.append(
+            found.append(
                 _err(
                     name,
                     f"Input should be less than or equal to {le}",
@@ -626,9 +729,54 @@ def _parse_paging(query: dict[str, list[str]]) -> tuple[int | None, int | None]:
             )
         else:
             parsed[name] = value
-    if entries:
-        raise _validation_error(entries)
+    if entries is not None:
+        entries.extend(found)
+    elif found:
+        raise _validation_error(found)
     return parsed.get("offset"), parsed.get("limit")
+
+
+#: ``GET /tasks?status=`` mirrors FastAPI's enum query parameter.
+_TASK_STATUS_VALUES = (
+    "queued",
+    "running",
+    "processing",
+    "exporting",
+    "completed",
+    "cancelled",
+    "failed",
+)
+
+
+def _task_filters(
+    query: dict[str, list[str]], entries: list[dict[str, Any]]
+) -> tuple[str | None, str | None]:
+    """Parse ``status`` / ``site`` exactly like the REST task list route.
+
+    Both are optional; an empty or unknown ``status`` and a malformed ``site``
+    are a ``422``. Repeated parameters use the last value, as FastAPI does for
+    scalar query fields.
+    """
+    status_filter: str | None = None
+    status_values = query.get("status") or []
+    if status_values:
+        raw = status_values[-1]
+        if raw not in _TASK_STATUS_VALUES:
+            entries.append(
+                _err("status", _literal_message(_TASK_STATUS_VALUES), "enum", "query")
+            )
+        else:
+            status_filter = raw
+
+    site_filter: str | None = None
+    site_values = query.get("site") or []
+    if site_values:
+        site, error = _site_value(site_values[-1], source="query")
+        if error is not None:
+            entries.append(error)
+        else:
+            site_filter = site
+    return status_filter, site_filter
 
 
 #: Truthy/falsy string literals pydantic's lax bool mode accepts verbatim
@@ -784,23 +932,57 @@ def _page_bounds(
     return start, start + applied, applied
 
 
+def _task_order_key(indexed_task: tuple[int, Any]) -> tuple[float, int, str]:
+    """Mirror ``routes._task_order_key``: newest first, then group, then id."""
+    group_rank, task = indexed_task
+    return (
+        -float(getattr(task, "created_at", 0.0) or 0.0),
+        group_rank,
+        str(getattr(task, "task_id", "") or ""),
+    )
+
+
+def _select_tasks(
+    snapshot: dict[str, list[Any]],
+    *,
+    status_filter: str | None,
+    site_filter: str | None,
+) -> list[tuple[int, Any]]:
+    """Mirror ``routes._select_tasks`` (filter before the single sort)."""
+    wanted_site = site_filter.casefold() if site_filter is not None else None
+    selected: list[tuple[int, Any]] = []
+    for group_rank, name in enumerate(_TASK_GROUPS):
+        for task in snapshot.get(name, []):
+            if status_filter is not None and _status_value(task) != status_filter:
+                continue
+            if (
+                wanted_site is not None
+                and str(getattr(task, "site", "") or "").casefold() != wanted_site
+            ):
+                continue
+            selected.append((group_rank, task))
+    selected.sort(key=_task_order_key)
+    return selected
+
+
 def _paginate_tasks(
-    snapshot: dict[str, list[Any]], offset: int | None, limit: int | None
+    snapshot: dict[str, list[Any]],
+    offset: int | None,
+    limit: int | None,
+    *,
+    status_filter: str | None = None,
+    site_filter: str | None = None,
 ) -> tuple[dict[str, list[Any]], int, int, int]:
-    """Mirror ``routes._paginate_tasks``."""
-    total = sum(len(snapshot.get(name, [])) for name in _TASK_GROUPS)
+    """Mirror ``routes._paginate_tasks`` (filter, sort once, then slice)."""
+    selected = _select_tasks(
+        snapshot, status_filter=status_filter, site_filter=site_filter
+    )
+    total = len(selected)
     start, stop, applied = _page_bounds(total, offset, limit)
 
     groups: dict[str, list[Any]] = {name: [] for name in _TASK_GROUPS}
-    cursor = 0
-    for name in _TASK_GROUPS:
-        items = snapshot.get(name, [])
-        end = cursor + len(items)
-        low = max(start, cursor)
-        high = min(stop, end)
-        if low < high:
-            groups[name] = items[low - cursor : high - cursor]
-        cursor = end
+    for group_rank, task in selected[start:stop]:
+        groups[_TASK_GROUPS[group_rank]].append(task)
     return groups, total, start, applied
 
 
@@ -934,8 +1116,10 @@ def _handle_search(
         body, "timeout", 5.0, 0.0, entries, le=_MAX_SEARCH_TIMEOUT, finite=True
     )
     sort = _literal_field(body, "sort", "quality", _SEARCH_SORT_KEYS, entries)
-    order = _literal_field(body, "order", None, ("asc", "desc"), entries)
-    limit = _int_field(body, "limit", None, 1, entries, le=_MAX_SEARCH_LIMIT)
+    order = _literal_field(body, "order", None, ("asc", "desc"), entries, nullable=True)
+    limit = _int_field(
+        body, "limit", None, 1, entries, le=_MAX_SEARCH_LIMIT, nullable=True
+    )
     if entries:
         raise _validation_error(entries)
     # ``group`` mirrors ``SearchRequest.group`` (validated last, like the
@@ -1002,11 +1186,13 @@ def _handle_browse_categories(
     _body: dict[str, Any], _params: dict[str, str], query: dict[str, list[str]]
 ) -> dict[str, Any]:
     values = query.get("site") or []
-    raw_site = values[0] if values else ""
-    if not raw_site:
+    if not values:
         raise _validation_error(
             [_err("site", "Field required", "missing", source="query")]
         )
+    # Scalar query parameters use the last value, like FastAPI; an explicit
+    # empty value is the field validator's ``value_error`` (not "missing").
+    raw_site = values[-1]
     site, site_err = _site_value(raw_site, source="query")
     if site_err is not None:
         raise _validation_error([site_err])
@@ -1074,8 +1260,18 @@ def _handle_tasks_get(
 ) -> dict[str, Any]:
     from novel_downloader.apps.core.task_manager import manager
 
-    offset, limit = _parse_paging(query)
-    groups, total, start, applied = _paginate_tasks(manager.snapshot(), offset, limit)
+    entries: list[dict[str, Any]] = []
+    offset, limit = _parse_paging(query, entries)
+    status_filter, site_filter = _task_filters(query, entries)
+    if entries:
+        raise _validation_error(entries)
+    groups, total, start, applied = _paginate_tasks(
+        manager.snapshot(),
+        offset,
+        limit,
+        status_filter=status_filter,
+        site_filter=site_filter,
+    )
     payload: dict[str, Any] = {
         name: [_task_dict(task) for task in groups[name]] for name in _TASK_GROUPS
     }
@@ -1574,8 +1770,9 @@ def _health_timeout(
     values = query.get("timeout") or []
     if not values:
         return 5.0
+    # Scalar query fields use the last repeated value (FastAPI's behaviour).
     try:
-        value = float(values[0])
+        value = float(values[-1])
     except (TypeError, ValueError):
         entries.append(
             _err(
@@ -1613,19 +1810,9 @@ _MUSIC_TRACK_TEXT_FIELDS = ("provider", "id", "name", "artists", "album", "ext")
 
 
 def _lax_int(value: Any) -> int | None:
-    """Coerce like Pydantic's lax ``int`` mode (``"3"``/``3.0`` → 3)."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return None
-    return None
+    """Coerce like pydantic's lax ``int`` mode (``"3.0"``/``3.0``/``true``)."""
+    number, _error = _coerce_lax_int(value)
+    return number
 
 
 def _lax_bool(value: Any) -> bool | None:
@@ -1677,7 +1864,15 @@ def _media_url_error(
     if _CONTROL_CHARS.search(url):
         entries.append(_value_error(loc, "URL must not contain control characters"))
         return None
-    scheme = urlsplit(url).scheme.lower()
+    try:
+        scheme = urlsplit(url).scheme.lower()
+    except ValueError as exc:
+        # ``urlsplit`` raises on malformed IPv6 literals (``http://[``).
+        # ``schemas.validate_media_url`` runs inside a pydantic validator, so
+        # the same ValueError is reported there as ``value_error`` (422); here
+        # it used to escape the handler and become a 500.
+        entries.append(_value_error(loc, str(exc)))
+        return None
     if scheme and scheme not in {"http", "https"}:
         entries.append(_value_error(loc, "URL scheme must be http or https"))
         return None
@@ -2107,7 +2302,7 @@ def _handle_music_health(
         raise _validation_error(entries)
 
     values = query.get("platform") or []
-    platform = values[0] if values else None
+    platform = values[-1] if values else None
     if platform is not None:
         _require_music_platform(components, platform)
         selected = [platform]
@@ -2546,6 +2741,11 @@ def _pattern_matches(pattern: str, path: str) -> bool:
 
 def _match_route(method: str, path: str) -> tuple[Handler | None, dict[str, str]]:
     """Match ``path`` against the route table; return (handler, params)."""
+    # Starlette matches on the still-encoded path, so ``%2F`` never satisfies a
+    # single ``{param}`` segment (the request is a route-miss 404). Unquoting
+    # it here would turn that 404 into a 422 from the field validator.
+    if any("%2f" in segment.lower() for segment in path.split("/")):
+        return None, {}
     for (route_method, pattern), handler in ROUTES.items():
         if route_method != method or not _pattern_matches(pattern, path):
             continue
@@ -2576,6 +2776,10 @@ def _allowed_methods(path: str) -> list[str]:
     """Methods the REST API would allow on ``path`` (for 405 responses)."""
     if path == "/downloads" or path.startswith("/downloads/"):
         return ["GET", "HEAD"]
+    # Match ``_match_route``: an encoded slash is a route miss, so no verb is
+    # allowed on it (404, not a 405 whose ``Allow`` would claim otherwise).
+    if any("%2f" in segment.lower() for segment in path.split("/")):
+        return []
     allowed: list[str] = []
     for route_method, pattern in ROUTES:
         if route_method not in allowed and _pattern_matches(pattern, path):
@@ -2599,6 +2803,32 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
         logger.debug("%s %s", self.address_string(), fmt % args)
 
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        """Log the request path without its query string.
+
+        ``BaseHTTPRequestHandler`` logs the raw request line, which includes
+        the query.  The REST API's access log deliberately drops it because
+        signed URLs and API keys routinely travel there, and the embedded
+        engine speaks the same contract (on Android this line would reach
+        logcat).  Method, path and status are enough to diagnose a request.
+        """
+        try:
+            path = urlsplit(self.path).path or "/"
+        except ValueError:  # pragma: no cover - urlsplit is effectively total
+            path = "<unparseable>"
+        # A hand-written request target must not inject line breaks or an
+        # unbounded line into the log.
+        path = "".join(
+            char if 0x20 <= ord(char) < 0x7F else "?" for char in path[:2048]
+        )
+        logger.debug(
+            "%s %s %s %s",
+            self.address_string(),
+            self.command or "-",
+            path,
+            code,
+        )
+
     # -- helpers ----------------------------------------------------------
 
     def _send_json(
@@ -2620,7 +2850,16 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_api_error(self, error: _ApiError) -> None:
         payload: dict[str, Any] = {"detail": error.detail}
         if error.errors:
-            payload["errors"] = error.errors
+            # The REST wire encodes every loc part as a string (see
+            # ``middleware._validation_errors``), including list indices.
+            payload["errors"] = [
+                {
+                    "type": str(entry.get("type", "")),
+                    "loc": [str(part) for part in entry.get("loc", ())],
+                    "msg": str(entry.get("msg", "")),
+                }
+                for entry in error.errors
+            ]
         self._send_json(payload, error.status, error.headers or None)
 
     def _content_length(self) -> int | None:
@@ -2807,7 +3046,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method: str) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        query = parse_qs(parsed.query)
+        # Blank values must survive: ``?limit=``, ``?site=`` and ``?status=``
+        # are validation failures in FastAPI (``int_parsing`` / ``value_error``
+        # / ``enum``), not "parameter absent". Dropping them made the embedded
+        # engine silently accept requests REST rejects with 422.
+        query = parse_qs(parsed.query, keep_blank_values=True)
         try:
             if not _request_slots.acquire(blocking=False):
                 self.close_connection = True

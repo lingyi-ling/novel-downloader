@@ -2284,6 +2284,68 @@ def test_export_checks_the_stage_the_exporter_will_use(
     assert client.calls == [("123", ("txt",), None)]
 
 
+def test_export_rejects_a_stage_that_cannot_be_a_file_component(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``--stage`` is joined into ``chapter.<stage>.sqlite``; refuse escapes.
+
+    ``clean`` already validates its stage for the same reason.  Export must
+    agree, otherwise one command accepts an identifier the other rejects.
+    """
+    client = _FakeExportClient({"txt": [tmp_path / "book.txt"]})
+    _export_env(monkeypatch, tmp_path, client)
+    messages = _capture_ui(monkeypatch, export)
+
+    args = _parser(ExportCmd).parse_args(
+        [
+            "export",
+            "--site",
+            "b520",
+            "123",
+            "--stage",
+            "../../escape",
+            "--format",
+            "txt",
+        ]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        args.func(args)
+
+    assert excinfo.value.code == 2
+    assert client.calls == []
+    assert any("Unsupported stage" in line for line in messages.error)
+
+
+def test_export_ignores_unsafe_stages_recorded_in_pipeline_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A tampered ``pipeline.json`` must not steer the preflight outside the book."""
+    client = _FakeExportClient({"txt": [tmp_path / "book.txt"]})
+    _export_env(monkeypatch, tmp_path, client, books=())
+    book_dir = _write_export_book(tmp_path / "raw_data", book_id="123")
+    (book_dir / "pipeline.json").write_text(
+        json.dumps(
+            {
+                "pipeline": ["raw", "../../escape", "C:\\escape"],
+                "executed": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _capture_ui(monkeypatch, export)
+
+    args = _parser(ExportCmd).parse_args(
+        ["export", "--site", "b520", "123", "--format", "txt"]
+    )
+    args.func(args)
+
+    # The unsafe entries are skipped, so the exporter gets no explicit stage
+    # and the preflight falls back to the real "raw" metadata.
+    assert client.calls == [("123", ("txt",), None)]
+
+
 def test_export_missing_book_between_successes_is_a_partial_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

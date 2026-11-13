@@ -18,6 +18,7 @@ from novel_downloader.apps.constants import DOWNLOAD_SUPPORT_SITES
 from novel_downloader.apps.utils import load_or_init_config
 from novel_downloader.infra.config import ConfigAdapter
 from novel_downloader.infra.i18n import t
+from novel_downloader.infra.paths import is_safe_path_component
 from novel_downloader.plugins import registrar
 
 from ..ui_adapters import CLIExportUI
@@ -76,7 +77,15 @@ def _detect_stage(book_dir: Path) -> str:
         if isinstance(meta, dict):
             recorded = meta.get("pipeline")
             if isinstance(recorded, list):
-                pipeline = [item for item in recorded if isinstance(item, str) and item]
+                # Stage names become ``chapter.<stage>.sqlite`` path segments.
+                # ``pipeline.json`` lives next to the book and may have been
+                # restored from a backup, so an unsafe entry is ignored rather
+                # than joined onto the book directory.
+                pipeline = [
+                    item
+                    for item in recorded
+                    if isinstance(item, str) and item and is_safe_path_component(item)
+                ]
 
     for candidate in reversed(pipeline):
         if (book_dir / f"chapter.{candidate}.sqlite").is_file() and (
@@ -253,6 +262,17 @@ class ExportCmd(Command):
         site: str | None = args.site
         stage: str | None = args.stage
         book_ids: list[str] = list(args.book_ids or [])
+
+        # ``--stage`` is joined into ``book_info.<stage>.json`` and
+        # ``chapter.<stage>.sqlite``; ``clean`` rejects the same values for the
+        # same reason. An empty value means "detect the latest stage".
+        if stage is not None:
+            stage = stage.strip() or None
+            if stage is not None and not is_safe_path_component(stage):
+                fail(
+                    t("Unsupported stage: {stage!r}").format(stage=args.stage),
+                    EXIT_USAGE,
+                )
         config_path: Path | None = expand_path(args.config) if args.config else None
         formats: list[str] | None = args.format
 
