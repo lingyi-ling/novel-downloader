@@ -19,11 +19,15 @@ confirmation; it is the bulk equivalent of ``clean book --all``,
 ``storage backup --out DIR`` takes a consistent SQLite online backup of every
 ``chapter.<stage>.sqlite`` file under the raw-data directory, including data
 still sitting in a WAL, and writes one timestamped copy per database while
-mirroring the ``<site>/<book>`` layout. ``storage restore --from FILE``
-validates the file (integrity check, schema version, required columns) before
-atomically replacing the target database; an existing database is preserved
-in a ``.pre-restore-*.bak`` sibling first and is never overwritten without
-``--yes``. Both subcommands accept ``--json`` for a single-line report.
+mirroring the ``<site>/<book>`` layout. ``--keep N`` prunes older backups of
+each book database down to the newest ``N`` after the new set has been
+published; only files this command itself names (``chapter.<stage>.<UTC>.sqlite``)
+are ever considered, and the files written by the current run are never
+removed. ``storage restore --from FILE`` validates the file (integrity check,
+schema version, required columns) before atomically replacing the target
+database; an existing database is preserved in a ``.pre-restore-*.bak``
+sibling first and is never overwritten without ``--yes``. Both subcommands
+accept ``--json`` for a single-line report.
 """
 
 from __future__ import annotations
@@ -675,7 +679,164 @@ def _emit_json(payload: dict[str, object]) -> None:
     ui.emit(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
-def _run_backup(raw_root: Path, out_dir: Path, *, as_json: bool) -> None:
+@dataclass
+class RetentionReport:
+    """Outcome of one ``--keep`` pruning pass.
+
+    ``candidates`` are the backups selected for removal, ``removed`` the ones
+    that actually disappeared and ``failed`` the ``(path, error)`` pairs whose
+    deletion raised. ``keep == 0`` means pruning is disabled.
+    """
+
+    keep: int
+    dry_run: bool
+    candidates: list[Path] = field(default_factory=list)
+    removed: list[Path] = field(default_factory=list)
+    failed: list[tuple[Path, str]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "keep": self.keep,
+            "dry_run": self.dry_run,
+            "candidates": [str(path) for path in self.candidates],
+            "removed": [str(path) for path in self.removed],
+            "failed": [
+                {"path": str(path), "error": error} for path, error in self.failed
+            ],
+        }
+
+    @property
+    def ok(self) -> bool:
+        return not self.failed
+
+
+def _plan_retention(
+    out_dir: Path,
+    keep: int,
+    *,
+    protect: set[Path],
+    failures: list[tuple[Path, str]],
+) -> list[Path]:
+    """Return the backups ``keep`` allows to be removed, oldest first.
+
+    Only regular files named ``chapter.<stage>.<UTC>.sqlite`` directly by this
+    command are considered; directories, symlinks and every other file are
+    ignored. Backups are grouped by their containing book directory *and*
+    stage, so a book holding both ``raw`` and ``cleaner`` databases keeps ``N``
+    copies of each instead of one stage evicting the other. ``protect`` holds
+    the resolved paths written by the current run: they are still counted for
+    ordering but are never selected for removal (a skewed clock can therefore
+    leave one extra file behind, never delete a fresh backup).
+
+    Unreadable directories are appended to ``failures`` instead of aborting the
+    scan, so one bad subtree cannot make pruning look successful.
+    """
+
+    groups: dict[tuple[Path, str], list[tuple[str, Path, Path]]] = {}
+
+    def _onerror(exc: OSError) -> None:
+        failing = Path(exc.filename) if exc.filename else out_dir
+        failures.append((failing, str(exc)))
+
+    for root, dirs, names in os.walk(out_dir, onerror=_onerror):
+        # ``os.walk`` does not descend into directory symlinks by default; keep
+        # that guarantee explicit even if the platform default ever changes.
+        dirs[:] = [
+            name for name in dirs if not os.path.islink(os.path.join(root, name))
+        ]
+        parent = Path(root)
+        for name in names:
+            match = _BACKUP_NAME_RE.match(name)
+            if match is None:
+                continue
+            candidate = parent / name
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                resolved = candidate.resolve()
+            except OSError as exc:
+                failures.append((candidate, str(exc)))
+                continue
+            groups.setdefault((parent, match.group("stage")), []).append(
+                (match.group("stamp"), candidate, resolved)
+            )
+
+    doomed: list[Path] = []
+    for entries in groups.values():
+        # Newest first; the stamp sorts lexicographically because it is fixed
+        # width UTC. The path breaks ties deterministically (same-second runs
+        # are refused by the backup writer, but a hand-made file may exist).
+        entries.sort(key=lambda entry: (entry[0], str(entry[1])), reverse=True)
+        doomed.extend(
+            path for _stamp, path, resolved in entries[keep:] if resolved not in protect
+        )
+    return sorted(doomed, key=str)
+
+
+def _prune_old_backups(
+    out_dir: Path,
+    *,
+    keep: int,
+    dry_run: bool,
+    protect: set[Path],
+    as_json: bool,
+) -> RetentionReport:
+    """Apply the ``--keep`` policy and report what was (or would be) removed."""
+    report = RetentionReport(keep=keep, dry_run=dry_run)
+    if keep <= 0:
+        return report
+
+    report.candidates = _plan_retention(
+        out_dir, keep, protect=protect, failures=report.failed
+    )
+
+    for path in report.candidates:
+        if dry_run:
+            if not as_json:
+                ui.info(t("Would remove old backup {path}.").format(path=path))
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            report.failed.append((path, str(exc)))
+            ui.error(
+                t("Failed to remove old backup {path}: {error}").format(
+                    path=path, error=exc
+                )
+            )
+        else:
+            report.removed.append(path)
+            if not as_json:
+                ui.info(t("Removed old backup {path}.").format(path=path))
+
+    if as_json:
+        return report
+
+    if dry_run and report.candidates:
+        ui.info(
+            t(
+                "Retention: {count} old backup(s) would be removed, keeping the "
+                "newest {keep} per book and stage."
+            ).format(count=len(report.candidates), keep=keep)
+        )
+    elif report.removed:
+        ui.success(
+            t(
+                "Retention: removed {count} old backup(s), keeping the newest "
+                "{keep} per book and stage."
+            ).format(count=len(report.removed), keep=keep)
+        )
+    return report
+
+
+def _run_backup(
+    raw_root: Path,
+    out_dir: Path,
+    *,
+    as_json: bool,
+    keep: int = 0,
+    dry_run: bool = False,
+) -> None:
     """Back up every chapter database below ``raw_root`` into ``out_dir``."""
     out_dir = out_dir.resolve()
     if out_dir.exists() and not out_dir.is_dir():
@@ -711,6 +872,8 @@ def _run_backup(raw_root: Path, out_dir: Path, *, as_json: bool) -> None:
         plan.append((source, target))
 
     if not plan:
+        # Nothing was published, so there is no fresh backup to protect and no
+        # successful backup run to follow: leave existing backups untouched.
         if as_json:
             _emit_json(
                 {
@@ -721,6 +884,7 @@ def _run_backup(raw_root: Path, out_dir: Path, *, as_json: bool) -> None:
                     "count": 0,
                     "bytes": 0,
                     "files": [],
+                    "retention": RetentionReport(keep=keep, dry_run=dry_run).to_dict(),
                 }
             )
         else:
@@ -760,16 +924,29 @@ def _run_backup(raw_root: Path, out_dir: Path, *, as_json: bool) -> None:
             _remove_database_files(path)
         fail(t("Failed to back up {source}: {error}").format(source=source, error=exc))
 
+    protected: set[Path] = set()
+    for path in created:
+        with contextlib.suppress(OSError):
+            protected.add(path.resolve())
+
     if as_json:
+        retention = _prune_old_backups(
+            out_dir,
+            keep=keep,
+            dry_run=dry_run,
+            protect=protected,
+            as_json=True,
+        )
         _emit_json(
             {
                 "command": "storage backup",
-                "ok": True,
+                "ok": retention.ok,
                 "timestamp": stamp,
                 "out": str(out_dir),
                 "count": len(entries),
                 "bytes": total_bytes,
                 "files": entries,
+                "retention": retention.to_dict(),
             }
         )
     else:
@@ -778,6 +955,18 @@ def _run_backup(raw_root: Path, out_dir: Path, *, as_json: bool) -> None:
                 count=len(entries), path=out_dir
             )
         )
+        retention = _prune_old_backups(
+            out_dir,
+            keep=keep,
+            dry_run=dry_run,
+            protect=protected,
+            as_json=False,
+        )
+
+    # A backup that cannot prune is still a good backup; the files are kept and
+    # the run reports failure so cron/scripts notice the growing directory.
+    if not retention.ok:
+        raise SystemExit(EXIT_FAILURE)
 
 
 def _derive_restore_target(source: Path, raw_root: Path) -> Path:
@@ -993,14 +1182,43 @@ class StorageBackupCmd(Command):
             action="store_true",
             help=t("Print a single-line JSON report on stdout."),
         )
+        parser.add_argument(
+            "--keep",
+            type=int,
+            default=0,
+            metavar="N",
+            help=t(
+                "After a successful backup, delete all but the newest N backups "
+                "of each book database (0 disables cleanup)."
+            ),
+        )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help=t(
+                "Report which old backups --keep would delete without deleting "
+                "them; the new backup itself is still written."
+            ),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
+        keep = int(getattr(args, "keep", 0) or 0)
+        dry_run = bool(getattr(args, "dry_run", False))
+        if keep < 0:
+            fail(
+                t("--keep must be 0 (disabled) or a positive integer."),
+                EXIT_USAGE,
+            )
+        if dry_run and keep <= 0:
+            fail(t("--dry-run requires --keep."), EXIT_USAGE)
         raw_root = _resolve_paths()["raw"]
         _run_backup(
             raw_root,
             expand_path(args.out),
             as_json=bool(getattr(args, "as_json", False)),
+            keep=keep,
+            dry_run=dry_run,
         )
 
 

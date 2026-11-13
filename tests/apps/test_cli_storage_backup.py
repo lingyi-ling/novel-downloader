@@ -169,6 +169,25 @@ def _make_backup(out: Path) -> Path:
     return files[0]
 
 
+def _fake_backup(
+    out: Path,
+    stamp: str,
+    *,
+    site: str = "site",
+    book: str = "book",
+    stage: str = "raw",
+) -> Path:
+    """Create a file with the exact name (and layout) ``storage backup`` uses."""
+    path = out / site / book / f"chapter.{stage}.{stamp}.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"older backup")
+    return path
+
+
+def _names(directory: Path) -> list[str]:
+    return sorted(path.name for path in directory.iterdir() if path.is_file())
+
+
 # ---------------------------------------------------------------------------
 # backup
 # ---------------------------------------------------------------------------
@@ -279,6 +298,292 @@ def test_backup_with_no_databases_is_a_noop(
     payload = json.loads(capsys.readouterr().out)
     assert payload["count"] == 0
     assert payload["files"] == []
+    assert not out.exists()
+
+
+# ---------------------------------------------------------------------------
+# backup retention (--keep)
+# ---------------------------------------------------------------------------
+
+
+def test_keep_prunes_all_but_the_newest_n(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    oldest = _fake_backup(out, "20250101T000000Z")
+    second = _fake_backup(out, "20250101T000001Z")
+    third = _fake_backup(out, "20250101T000002Z")
+
+    _invoke(["storage", "backup", "--out", str(out), "--keep", "2", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["retention"]["keep"] == 2
+    assert payload["retention"]["dry_run"] is False
+    assert sorted(payload["retention"]["removed"]) == sorted([str(oldest), str(second)])
+    assert payload["retention"]["failed"] == []
+
+    # The fresh backup and the second-newest old one survive.
+    assert _names(out / "site" / "book") == [
+        "chapter.raw.20250101T000002Z.sqlite",
+        f"chapter.raw.{_STAMP}.sqlite",
+    ]
+    assert not oldest.exists()
+    assert not second.exists()
+    assert third.exists()
+    assert _ids(out / "site" / "book" / f"chapter.raw.{_STAMP}.sqlite") == {"c1"}
+
+
+def test_keep_is_applied_per_book(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A global newest-N rule would evict one book entirely; per book must not."""
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root, site="site", book="book-a"), "a1")
+    _seed(_book_db(raw_root, site="site", book="book-b"), "b1")
+
+    out = tmp_path / "backups"
+    a_old = [
+        _fake_backup(out, "20240101T000000Z", book="book-a"),
+        _fake_backup(out, "20240101T000001Z", book="book-a"),
+    ]
+    b_old = [
+        _fake_backup(out, "20241201T000000Z", book="book-b"),
+        _fake_backup(out, "20241201T000001Z", book="book-b"),
+    ]
+
+    _invoke(["storage", "backup", "--out", str(out), "--keep", "1", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert sorted(payload["retention"]["removed"]) == sorted(
+        str(path) for path in [*a_old, *b_old]
+    )
+    for book in ("book-a", "book-b"):
+        assert _names(out / "site" / book) == [f"chapter.raw.{_STAMP}.sqlite"]
+    assert _ids(out / "site" / "book-a" / f"chapter.raw.{_STAMP}.sqlite") == {"a1"}
+    assert _ids(out / "site" / "book-b" / f"chapter.raw.{_STAMP}.sqlite") == {"b1"}
+
+
+def test_keep_counts_each_stage_separately(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A book's ``raw`` backups must not evict its ``cleaner`` backups."""
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    for stamp in ("20250101T000000Z", "20250101T000001Z"):
+        _fake_backup(out, stamp, stage="raw")
+    cleaner_oldest = _fake_backup(out, "20230101T000000Z", stage="cleaner")
+    cleaner_newest = _fake_backup(out, "20230101T000001Z", stage="cleaner")
+
+    _invoke(["storage", "backup", "--out", str(out), "--keep", "1"])
+
+    assert _names(out / "site" / "book") == [
+        "chapter.cleaner.20230101T000001Z.sqlite",
+        f"chapter.raw.{_STAMP}.sqlite",
+    ]
+    assert not cleaner_oldest.exists()
+    assert cleaner_newest.exists()
+
+
+def test_keep_leaves_non_backup_entries_alone(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    book_dir = out / "site" / "book"
+    old = _fake_backup(out, "20250101T000000Z")
+
+    foreign = [
+        book_dir / "notes.txt",
+        book_dir / "chapter.raw.sqlite",
+        book_dir / "chapter.raw.20250101T000000Z.sqlite.partial",
+        book_dir / "chapter.raw.notatimestamp.sqlite",
+        book_dir / "chapter.other.20250101T000000Z.sqlite.bak",
+    ]
+    for path in foreign:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not a backup")
+
+    # A directory whose name matches the pattern is still not a backup file.
+    matching_dir = book_dir / "chapter.cleaner.20250101T000000Z.sqlite"
+    matching_dir.mkdir()
+    (matching_dir / "inside.txt").write_bytes(b"keep")
+
+    # A symlink is never followed or removed, even with a matching name.
+    link = book_dir / "chapter.cleaner.20240101T000000Z.sqlite"
+    link_target = book_dir / "link-target.txt"
+    link_target.write_bytes(b"keep")
+    try:
+        link.symlink_to(link_target)
+    except (OSError, NotImplementedError):
+        link = None  # type: ignore[assignment]
+
+    _invoke(["storage", "backup", "--out", str(out), "--keep", "1"])
+
+    assert not old.exists()
+    for path in foreign:
+        assert path.exists(), f"{path} should not be touched"
+    assert matching_dir.is_dir()
+    assert (matching_dir / "inside.txt").exists()
+    if link is not None:
+        assert link.is_symlink()
+        assert link_target.exists()
+
+
+def test_keep_dry_run_reports_without_deleting(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    old = [
+        _fake_backup(out, stamp) for stamp in ("20250101T000000Z", "20250101T000001Z")
+    ]
+
+    _invoke(
+        ["storage", "backup", "--out", str(out), "--keep", "1", "--dry-run", "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    retention = payload["retention"]
+    assert payload["ok"] is True
+    assert retention["dry_run"] is True
+    assert retention["removed"] == []
+    assert sorted(retention["candidates"]) == sorted(str(path) for path in old)
+    for path in old:
+        assert path.exists()
+    assert (out / "site" / "book" / f"chapter.raw.{_STAMP}.sqlite").exists()
+
+
+def test_keep_deletion_failure_continues_and_exits_1(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    failing = _fake_backup(out, "20250101T000000Z")
+    removable = _fake_backup(out, "20250101T000001Z")
+
+    real_unlink = Path.unlink
+
+    def flaky_unlink(self: Path, *args: object, **kwargs: object) -> None:
+        if self.name == failing.name:
+            raise OSError("simulated unlink failure")
+        real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _invoke(["storage", "backup", "--out", str(out), "--keep", "1"])
+    assert exc_info.value.code == 1
+
+    # The failure did not abort the pass, and the fresh backup is intact.
+    assert failing.exists()
+    assert not removable.exists()
+    assert _names(out / "site" / "book") == [
+        failing.name,
+        f"chapter.raw.{_STAMP}.sqlite",
+    ]
+
+
+def test_keep_never_deletes_the_fresh_backup(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A future-dated file must not push the just-written backup out."""
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    future = _fake_backup(out, "99991231T235959Z")
+    old = _fake_backup(out, "20250101T000000Z")
+
+    _invoke(["storage", "backup", "--out", str(out), "--keep", "1", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    fresh = out / "site" / "book" / f"chapter.raw.{_STAMP}.sqlite"
+    assert payload["retention"]["removed"] == [str(old)]
+    assert fresh.exists()
+    assert future.exists()
+    assert not old.exists()
+    assert _ids(fresh) == {"c1"}
+
+
+@pytest.mark.parametrize("keep_args", [[], ["--keep", "0"]])
+def test_keep_zero_disables_cleanup(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    keep_args: list[str],
+) -> None:
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    olds = [
+        _fake_backup(out, stamp) for stamp in ("20250101T000000Z", "20250101T000001Z")
+    ]
+
+    _invoke(["storage", "backup", "--out", str(out), *keep_args, "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["retention"] == {
+        "keep": 0,
+        "dry_run": False,
+        "candidates": [],
+        "removed": [],
+        "failed": [],
+    }
+    for path in olds:
+        assert path.exists()
+    assert (out / "site" / "book" / f"chapter.raw.{_STAMP}.sqlite").exists()
+
+
+def test_negative_keep_is_a_usage_error(raw_root: Path, tmp_path: Path) -> None:
+    _seed(_book_db(raw_root), "c1")
+
+    with pytest.raises(SystemExit) as exc_info:
+        _invoke(
+            ["storage", "backup", "--out", str(tmp_path / "backups"), "--keep", "-1"]
+        )
+    assert exc_info.value.code == 2
+
+
+def test_dry_run_without_keep_is_a_usage_error(raw_root: Path, tmp_path: Path) -> None:
+    """``--dry-run`` must not silently turn into an ordinary backup run."""
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    with pytest.raises(SystemExit) as exc_info:
+        _invoke(["storage", "backup", "--out", str(out), "--dry-run"])
+    assert exc_info.value.code == 2
     assert not out.exists()
 
 
