@@ -151,6 +151,49 @@ _PARITY_CASES: list[tuple[type[BaseModel], eserver.Handler, dict[str, Any]]] = [
         {"keyword": "x", "timeout": float("inf")},
     ),
     (rest.SearchRequest, eserver._handle_search, {"keyword": "x", "sort": "bogus"}),
+    # local search filters: same bounds/format as ``SearchRequest``
+    (rest.SearchRequest, eserver._handle_search, {"keyword": "x", "min_words": -1}),
+    (
+        rest.SearchRequest,
+        eserver._handle_search,
+        {"keyword": "x", "min_words": 1_000_000_001},
+    ),
+    (rest.SearchRequest, eserver._handle_search, {"keyword": "x", "max_words": -1}),
+    (
+        rest.SearchRequest,
+        eserver._handle_search,
+        {"keyword": "x", "max_words": 1_000_000_001},
+    ),
+    (
+        rest.SearchRequest,
+        eserver._handle_search,
+        {"keyword": "x", "updated_after": "2024/01/01"},
+    ),
+    (
+        rest.SearchRequest,
+        eserver._handle_search,
+        {"keyword": "x", "updated_after": "20240101"},
+    ),
+    (
+        rest.SearchRequest,
+        eserver._handle_search,
+        {"keyword": "x", "updated_after": "2024-13-01"},
+    ),
+    (
+        rest.SearchRequest,
+        eserver._handle_search,
+        {"keyword": "x", "updated_after": "2024-02-30"},
+    ),
+    (
+        rest.SearchRequest,
+        eserver._handle_search,
+        {"keyword": "x", "updated_after": ""},
+    ),
+    (
+        rest.SearchRequest,
+        eserver._handle_search,
+        {"keyword": "x", "updated_after": "soon"},
+    ),
     # POST /browse
     (rest.BrowseRequest, eserver._handle_browse, {"site": ""}),
     (rest.BrowseRequest, eserver._handle_browse, {"site": "bad site"}),

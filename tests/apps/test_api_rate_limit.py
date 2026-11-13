@@ -35,6 +35,7 @@ from starlette.types import Message, Receive, Scope, Send
 from novel_downloader.apps.api import create_app
 from novel_downloader.apps.api import main as api_main_module
 from novel_downloader.apps.api import middleware as api_middleware
+from novel_downloader.apps.api.app import MAX_RATE_LIMIT, MAX_RATE_LIMIT_WINDOW
 from novel_downloader.apps.api.auth import AUTH_ERROR_DETAIL
 from novel_downloader.apps.api.main import _build_parser
 from novel_downloader.apps.api.middleware import (
@@ -674,6 +675,80 @@ async def test_rejected_requests_neither_refresh_nor_evict(clock: FakeClock) -> 
 
 
 # ---------------------------------------------------------------------------
+# create_app: validation and the explicit disable switch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rate_limit", [0, 0.0, -1, MAX_RATE_LIMIT + 1, True])
+def test_create_app_rejects_invalid_rate_limit(
+    tmp_path: Path,
+    rate_limit: int,
+) -> None:
+    with pytest.raises(ValueError, match="rate_limit"):
+        create_app(output_dir=tmp_path / "downloads", rate_limit=rate_limit)
+
+
+@pytest.mark.parametrize(
+    "window",
+    [0, -1, MAX_RATE_LIMIT_WINDOW + 0.5, float("nan"), float("inf"), "60"],
+)
+def test_create_app_rejects_invalid_rate_limit_window(
+    tmp_path: Path,
+    window: float,
+) -> None:
+    with pytest.raises(ValueError, match="rate_limit_window"):
+        create_app(output_dir=tmp_path / "downloads", rate_limit_window=window)
+
+
+def test_create_app_validates_the_window_even_when_disabled(tmp_path: Path) -> None:
+    """Disabling the limiter does not excuse an invalid window value."""
+    with pytest.raises(ValueError, match="rate_limit_window"):
+        create_app(
+            output_dir=tmp_path / "downloads",
+            rate_limit=None,
+            rate_limit_window=0,
+        )
+
+
+def test_create_app_accepts_the_documented_bounds(tmp_path: Path) -> None:
+    application = create_app(
+        output_dir=tmp_path / "downloads",
+        rate_limit=MAX_RATE_LIMIT,
+        rate_limit_window=MAX_RATE_LIMIT_WINDOW,
+    )
+    assert RateLimitMiddleware in [
+        middleware.cls for middleware in application.user_middleware
+    ]
+
+
+def test_create_app_installs_the_limiter_by_default(tmp_path: Path) -> None:
+    application = create_app(output_dir=tmp_path / "downloads")
+    assert RateLimitMiddleware in [
+        middleware.cls for middleware in application.user_middleware
+    ]
+
+
+def test_create_app_allows_explicitly_disabling_the_limiter(tmp_path: Path) -> None:
+    application = create_app(output_dir=tmp_path / "downloads", rate_limit=None)
+    assert RateLimitMiddleware not in [
+        middleware.cls for middleware in application.user_middleware
+    ]
+
+
+def test_validation_error_does_not_leak_other_configuration(tmp_path: Path) -> None:
+    token = "super-secret-token"
+    output_dir = tmp_path / "private-downloads"
+
+    with pytest.raises(ValueError) as excinfo:
+        create_app(token=token, output_dir=output_dir, rate_limit=0)
+
+    message = str(excinfo.value)
+    assert "rate_limit" in message
+    assert token not in message
+    assert str(output_dir) not in message
+
+
+# ---------------------------------------------------------------------------
 # Rate limiting through the real application stack
 # ---------------------------------------------------------------------------
 
@@ -714,13 +789,13 @@ async def test_stack_within_limit_then_429(
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_zero_disables_end_to_end(
+async def test_rate_limit_none_disables_end_to_end(
     tmp_path: Path,
     fake_manager: FakeManager,
     clock: FakeClock,
 ) -> None:
     transport = httpx.ASGITransport(
-        app=_make_app(tmp_path, fake_manager, rate_limit=0),
+        app=_make_app(tmp_path, fake_manager, rate_limit=None),
         client=("203.0.113.7", 1234),
     )
     async with httpx.AsyncClient(
@@ -864,6 +939,74 @@ def test_parser_defaults() -> None:
     args = vars(_build_parser().parse_args([]))
     assert args["rate_limit"] == 120
     assert args["rate_limit_window"] == 60.0
+    assert args["no_rate_limit"] is False
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1000001", "abc", "1.5"])
+def test_parser_rejects_invalid_rate_limit(value: str) -> None:
+    """``--rate-limit <= 0`` must fail at startup instead of disabling the limiter."""
+    with pytest.raises(SystemExit) as excinfo:
+        _build_parser().parse_args(["--rate-limit", value])
+    assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "3600.5", "nan", "inf", "-inf", "abc"])
+def test_parser_rejects_invalid_rate_limit_window(value: str) -> None:
+    """A non-positive/non-finite window would clear the counter on every request."""
+    with pytest.raises(SystemExit) as excinfo:
+        _build_parser().parse_args(["--rate-limit-window", value])
+    assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("limit", "window"),
+    [(1, 0.001), (MAX_RATE_LIMIT, MAX_RATE_LIMIT_WINDOW)],
+)
+def test_parser_accepts_boundary_values(limit: int, window: float) -> None:
+    args = _build_parser().parse_args(
+        ["--rate-limit", str(limit), "--rate-limit-window", str(window)]
+    )
+    assert args.rate_limit == limit
+    assert args.rate_limit_window == window
+
+
+def test_no_rate_limit_conflicts_with_an_explicit_limit() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _build_parser().parse_args(["--no-rate-limit", "--rate-limit", "5"])
+    assert excinfo.value.code == 2
+
+
+def test_parser_error_does_not_echo_unrelated_configuration(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _build_parser().parse_args(
+            ["--token", "super-secret-token", "--rate-limit", "0"]
+        )
+    assert excinfo.value.code == 2
+    error = capsys.readouterr().err
+    assert "--rate-limit" in error
+    assert "between 1 and" in error
+    assert "super-secret-token" not in error
+
+
+def test_api_main_exits_two_before_starting_with_an_invalid_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = False
+
+    def fake_create_app(**kwargs: Any) -> Any:
+        nonlocal started
+        started = True
+        return object()
+
+    monkeypatch.setattr(api_main_module, "create_app", fake_create_app)
+
+    with pytest.raises(SystemExit) as excinfo:
+        api_main_module.api_main(["--rate-limit", "0"])
+
+    assert excinfo.value.code == 2
+    assert started is False
 
 
 def test_api_main_forwards_rate_limit_arguments(
@@ -885,8 +1028,8 @@ def test_api_main_forwards_rate_limit_arguments(
     assert captured["rate_limit"] == 30
     assert captured["rate_limit_window"] == 10.0
 
-    api_main_module.api_main(["--rate-limit", "0"])
-    assert captured["rate_limit"] == 0
+    api_main_module.api_main(["--no-rate-limit"])
+    assert captured["rate_limit"] is None
     assert captured["rate_limit_window"] == 60.0
 
 

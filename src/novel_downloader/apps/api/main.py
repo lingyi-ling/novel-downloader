@@ -12,8 +12,12 @@ binding to a non-local address (or enabling ``--cors`` there) prints a
 prominent warning to stderr before the server starts.
 
 A per-IP sliding-window rate limit (120 requests per minute by default,
-``--rate-limit 0`` to disable) protects the server from runaway integration
-clients; ``/api/v1/health`` stays exempt for uptime monitors. A fixed
+``--no-rate-limit`` to disable) protects the server from runaway integration
+clients; ``/api/v1/health`` stays exempt for uptime monitors. The limit must
+be a positive integer and the window a finite number of seconds in a sane
+range: ``--rate-limit 0`` (or a non-positive/oversized window) is rejected at
+startup with the usual argparse usage error (exit code 2) instead of silently
+turning the limiter into a pass-through. A fixed
 concurrency cap (100 connections) bounds simultaneous connections. ``/docs``,
 ``/redoc`` and ``/openapi.json`` are disabled automatically on a non-local
 bind, so the full route schema is not published to the network.
@@ -38,7 +42,13 @@ import uvicorn
 
 from novel_downloader.infra.i18n import t
 
-from .app import create_app
+from .app import (
+    MAX_RATE_LIMIT,
+    MAX_RATE_LIMIT_WINDOW,
+    create_app,
+    validate_rate_limit,
+    validate_rate_limit_window,
+)
 from .middleware import DEFAULT_RATE_LIMIT, DEFAULT_RATE_LIMIT_WINDOW
 
 #: Bind addresses that count as "loopback only".
@@ -92,6 +102,43 @@ def warn_if_insecure_bind(host: str, token: str | None, cors: bool) -> list[str]
     return warnings
 
 
+def _rate_limit_type(raw: str) -> int:
+    """
+    argparse type for ``--rate-limit``: a positive integer in range.
+
+    ``argparse`` turns the raised :class:`argparse.ArgumentTypeError` into the
+    standard usage error on stderr and exit code 2, so an invalid value stops
+    the process before uvicorn (or even the application factory) runs.
+    """
+    message = t(
+        "must be an integer between 1 and {max}; use --no-rate-limit to "
+        "disable rate limiting"
+    ).format(max=MAX_RATE_LIMIT)
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(message) from None
+    try:
+        return validate_rate_limit(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(message) from None
+
+
+def _rate_limit_window_type(raw: str) -> float:
+    """argparse type for ``--rate-limit-window``: a finite positive window."""
+    message = t("must be a number of seconds greater than 0 and at most {max}").format(
+        max=f"{MAX_RATE_LIMIT_WINDOW:g}"
+    )
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(message) from None
+    try:
+        return validate_rate_limit_window(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(message) from None
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=t("Novel Downloader local REST API."),
@@ -124,20 +171,32 @@ def _build_parser() -> argparse.ArgumentParser:
             "Only for local use; do not combine with a public bind."
         ),
     )
-    parser.add_argument(
+    rate_limit_group = parser.add_mutually_exclusive_group()
+    rate_limit_group.add_argument(
         "--rate-limit",
-        type=int,
+        type=_rate_limit_type,
         default=DEFAULT_RATE_LIMIT,
         help=t(
             "Max requests accepted per client IP per sliding window "
-            "(429 + Retry-After above it). 0 disables rate limiting."
+            "(429 + Retry-After above it). Must be between 1 and {max}."
+        ).format(max=MAX_RATE_LIMIT),
+    )
+    rate_limit_group.add_argument(
+        "--no-rate-limit",
+        action="store_true",
+        help=t(
+            "Disable rate limiting entirely. Only for a trusted local "
+            "environment; not recommended."
         ),
     )
     parser.add_argument(
         "--rate-limit-window",
-        type=float,
+        type=_rate_limit_window_type,
         default=DEFAULT_RATE_LIMIT_WINDOW,
-        help=t("Length of the --rate-limit sliding window in seconds."),
+        help=t(
+            "Length of the --rate-limit sliding window in seconds; must be "
+            "greater than 0 and at most {max}."
+        ).format(max=f"{MAX_RATE_LIMIT_WINDOW:g}"),
     )
     return parser
 
@@ -162,7 +221,9 @@ def api_main(argv: Sequence[str] | None = None) -> None:
     application = create_app(
         token=token,
         cors=args.cors,
-        rate_limit=args.rate_limit,
+        # ``None`` is the explicit "disabled" value; argparse already rejected
+        # every non-positive ``--rate-limit``, so this cannot fail open.
+        rate_limit=None if args.no_rate_limit else args.rate_limit,
         rate_limit_window=args.rate_limit_window,
         expose_docs=expose_docs,
     )

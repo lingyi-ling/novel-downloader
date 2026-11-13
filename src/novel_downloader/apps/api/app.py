@@ -33,7 +33,7 @@ Additional hardening
 * Request bodies of every write route below ``/api/v1`` are capped (see
   :class:`novel_downloader.apps.api.middleware.BodySizeLimitMiddleware`).
 * Requests are rate limited per client IP with a sliding window (default 120
-  per 60 seconds, ``--rate-limit 0`` disables it — see
+  per 60 seconds, ``--no-rate-limit`` disables it — see
   :class:`novel_downloader.apps.api.middleware.RateLimitMiddleware`): a buggy
   integration client stuck in a loop gets ``429`` + ``Retry-After`` instead of
   being able to hammer the local server indefinitely. The limit runs *before*
@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
@@ -134,6 +135,70 @@ CORS_ALLOW_HEADERS: tuple[str, ...] = (
 #: Response headers browser clients may read through ``--cors``. ``Retry-After``
 #: is needed so a rate-limited browser client can back off correctly.
 CORS_EXPOSE_HEADERS: tuple[str, ...] = ("Retry-After",)
+
+#: Upper bound accepted for ``rate_limit``. A larger value would not protect a
+#: local service anyway and is almost certainly a configuration mistake.
+MAX_RATE_LIMIT = 1_000_000
+
+#: Upper bound accepted for ``rate_limit_window`` in seconds (one hour).
+MAX_RATE_LIMIT_WINDOW = 3600.0
+
+
+def validate_rate_limit(limit: int) -> int:
+    """
+    Validate a request limit and return it unchanged.
+
+    ``limit`` must be an integer in ``1..MAX_RATE_LIMIT``. Everything else —
+    including ``0`` and negative values, which would otherwise silently turn
+    the limiter into a pass-through — raises :class:`ValueError`. Disabling
+    rate limiting is an explicit decision: pass ``None`` to
+    :func:`create_app` or use ``--no-rate-limit``.
+
+    :param limit: Requests admitted per client IP per sliding window.
+    :return: ``limit`` unchanged.
+    :raises ValueError: If ``limit`` is not an integer in range. The message
+        names the field, the accepted range and the offending value only.
+    """
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= MAX_RATE_LIMIT
+    ):
+        raise ValueError(
+            f"rate_limit must be an integer between 1 and {MAX_RATE_LIMIT} "
+            f"(got {limit!r}); pass None to disable rate limiting"
+        )
+    return limit
+
+
+def validate_rate_limit_window(window: float) -> float:
+    """
+    Validate a sliding-window length and return it as ``float``.
+
+    The window must be a finite number of seconds in
+    ``(0, MAX_RATE_LIMIT_WINDOW]``. ``0``, negative values, ``nan`` and
+    ``inf`` would all make the counter clear itself before it can reject
+    anything (or never expire), so they raise :class:`ValueError` instead of
+    failing open.
+
+    :param window: Sliding-window length in seconds.
+    :return: ``window`` as a ``float``.
+    :raises ValueError: If ``window`` is not a finite number in range. The
+        message names the field, the accepted range and the offending value
+        only.
+    """
+    if (
+        isinstance(window, bool)
+        or not isinstance(window, (int, float))
+        or not math.isfinite(window)
+        or not 0 < window <= MAX_RATE_LIMIT_WINDOW
+    ):
+        raise ValueError(
+            "rate_limit_window must be a finite number of seconds greater "
+            f"than 0 and at most {MAX_RATE_LIMIT_WINDOW:g} (got {window!r})"
+        )
+    return float(window)
+
 
 #: Body schema of the shared ``{"detail": ...}`` error responses.
 _ERROR_DETAIL_SCHEMA: dict[str, Any] = {
@@ -288,7 +353,7 @@ def create_app(
     cors: bool = False,
     output_dir: str | Path | None = None,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
-    rate_limit: int = DEFAULT_RATE_LIMIT,
+    rate_limit: int | None = DEFAULT_RATE_LIMIT,
     rate_limit_window: float = DEFAULT_RATE_LIMIT_WINDOW,
     rate_limit_max_keys: int = DEFAULT_RATE_LIMIT_MAX_KEYS,
     timeouts: Mapping[str, float] | None = None,
@@ -311,10 +376,13 @@ def create_app(
     :param max_body_bytes: Request-body ceiling for the JSON endpoints
         (``413`` above it). Defaults to 1 MiB.
     :param rate_limit: Requests admitted per client IP per sliding window
-        (``429`` + ``Retry-After`` above it). ``0`` disables rate limiting
-        entirely. Defaults to 120 per minute; ``/api/v1/health`` is exempt.
+        (``429`` + ``Retry-After`` above it). Must be an integer in
+        ``1..MAX_RATE_LIMIT``; ``None`` disables rate limiting entirely and
+        is the only supported way to opt out. Defaults to 120 per minute;
+        ``/api/v1/health`` is exempt.
     :param rate_limit_window: Length of the rate-limit sliding window in
-        seconds. Defaults to 60.
+        seconds; must be a finite number in ``(0, MAX_RATE_LIMIT_WINDOW]``.
+        Defaults to 60.
     :param rate_limit_max_keys: Maximum number of per-IP counters kept in
         memory before the least recently active ones are evicted. Defaults to
         10000; ``<= 0`` disables the cap.
@@ -331,7 +399,16 @@ def create_app(
         it off automatically on a non-local bind so the schema (including
         every route and parameter) is not published to the network.
     :return: A configured :class:`fastapi.FastAPI` instance.
+    :raises ValueError: If ``rate_limit`` is neither ``None`` nor an integer
+        in ``1..MAX_RATE_LIMIT``, or ``rate_limit_window`` is not a finite
+        number in ``(0, MAX_RATE_LIMIT_WINDOW]``. Rejecting the value at
+        construction keeps a typo such as ``rate_limit=0`` from silently
+        disabling the limiter.
     """
+    if rate_limit is not None:
+        validate_rate_limit(rate_limit)
+    rate_limit_window = validate_rate_limit_window(rate_limit_window)
+
     resolved_token = token if token is not None else os.environ.get("NOVEL_API_TOKEN")
     if resolved_token is not None:
         # The provided token is stripped on every request, so a configured
@@ -349,7 +426,9 @@ def create_app(
             "Local REST API for the Novel Downloader toolkit: aggregated book "
             "search (including a Server-Sent Events stream), download task "
             "management, watchlist checks, exported-file history and the "
-            "optional music engine."
+            "optional music engine. Rate limiting is configured when the "
+            "server starts (``--no-rate-limit`` disables it); it is not a "
+            "request parameter or body field."
         ),
         version=__version__,
         openapi_tags=OPENAPI_TAGS,
@@ -396,8 +475,9 @@ def create_app(
     # token brute-force is throttled before it can reach the token check. It
     # stays *inside* the CORS layer (its 429 keeps the CORS headers) and
     # inside the cache/logging layers (the 429 is stamped ``no-store`` and
-    # logged like every other response). ``rate_limit <= 0`` adds nothing.
-    if rate_limit > 0:
+    # logged like every other response). ``rate_limit is None`` adds nothing;
+    # every other value was validated above and is positive.
+    if rate_limit is not None:
         application.add_middleware(
             RateLimitMiddleware,
             limit=rate_limit,

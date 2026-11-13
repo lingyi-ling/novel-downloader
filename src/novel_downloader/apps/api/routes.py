@@ -111,6 +111,18 @@ DEFAULT_PAGE_LIMIT = 50
 #: Hard upper bound for ``limit`` on the paginated list endpoints.
 MAX_PAGE_LIMIT = 200
 
+#: OpenAPI declaration shared by the SSE endpoints. They return a
+#: :class:`StreamingResponse` (and set ``charset``/headers themselves), but
+#: FastAPI documents the default ``JSONResponse`` unless the response class and
+#: content type are declared explicitly. ``response_class=StreamingResponse``
+#: also suppresses the bogus ``application/json`` content entry.
+SSE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "description": "Server-Sent Events stream (``text/event-stream``).",
+        "content": {"text/event-stream": {"schema": {"type": "string"}}},
+    }
+}
+
 #: Seconds between two ``snapshot`` events on ``GET /tasks/stream``.
 TASK_STREAM_INTERVAL = 1.0
 
@@ -464,7 +476,12 @@ def _parse_sites_query(raw: str) -> list[str]:
     return selected
 
 
-@router.get("/search/stream", tags=["search"])
+@router.get(
+    "/search/stream",
+    tags=["search"],
+    response_class=StreamingResponse,
+    responses=SSE_RESPONSES,
+)
 async def stream_search(
     keyword: Annotated[Keyword, Query()],
     sites: Annotated[str | None, Query(max_length=4096)] = None,
@@ -679,7 +696,12 @@ async def _task_event_stream(
         await asyncio.sleep(interval)
 
 
-@router.get("/tasks/stream", tags=["tasks"])
+@router.get(
+    "/tasks/stream",
+    tags=["tasks"],
+    response_class=StreamingResponse,
+    responses=SSE_RESPONSES,
+)
 async def stream_tasks(
     mgr: Annotated[TaskManager, Depends(get_manager)],
 ) -> StreamingResponse:
@@ -813,7 +835,12 @@ async def _login_request_event_stream(interval: float) -> AsyncIterator[str]:
         await asyncio.sleep(interval)
 
 
-@router.get("/login/requests/stream", tags=["login"])
+@router.get(
+    "/login/requests/stream",
+    tags=["login"],
+    response_class=StreamingResponse,
+    responses=SSE_RESPONSES,
+)
 async def stream_login_requests() -> StreamingResponse:
     """
     Stream pending login credential requests as Server-Sent Events.

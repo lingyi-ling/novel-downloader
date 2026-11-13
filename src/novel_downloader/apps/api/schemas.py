@@ -439,11 +439,35 @@ class SearchRequest(BaseModel):
     #: Optional local filters applied to the ranked rows before grouping and
     #: ``limit``.  A row whose field cannot be parsed is dropped only while
     #: the corresponding filter is set; omitting all three keeps every row.
-    min_words: int | None = Field(default=None, ge=0, le=MAX_SEARCH_WORDS)
-    max_words: int | None = Field(default=None, ge=0, le=MAX_SEARCH_WORDS)
+    min_words: int | None = Field(
+        default=None,
+        ge=0,
+        le=MAX_SEARCH_WORDS,
+        description=(
+            "Drop ranked rows whose word count is below this value. Rows "
+            "with an unparseable word count are dropped only while this "
+            "filter is set."
+        ),
+    )
+    max_words: int | None = Field(
+        default=None,
+        ge=0,
+        le=MAX_SEARCH_WORDS,
+        description=(
+            "Drop ranked rows whose word count is above this value. Rows "
+            "with an unparseable word count are dropped only while this "
+            "filter is set."
+        ),
+    )
     #: Inclusive lower bound on ``update_date`` (``YYYY-MM-DD``); a malformed
     #: date is a ``422``.
-    updated_after: date | None = None
+    updated_after: date | None = Field(
+        default=None,
+        description=(
+            "Inclusive lower bound on ``update_date`` (``YYYY-MM-DD``). A "
+            "malformed date is rejected with ``422``."
+        ),
+    )
 
     @field_validator("sites")
     @classmethod

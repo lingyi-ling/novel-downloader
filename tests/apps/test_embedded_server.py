@@ -25,6 +25,7 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from datetime import date
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -308,6 +309,75 @@ def test_search_defaults_mirror_api(running_server: SimpleNamespace) -> None:
     assert kwargs["order"] is None
     assert kwargs["limit"] is None
     assert kwargs["sites"] is None
+    # No filter was requested: the engine keeps its historical call shape.
+    assert "min_words" not in kwargs
+    assert "max_words" not in kwargs
+    assert "updated_after" not in kwargs
+
+
+def test_search_forwards_local_filters(running_server: SimpleNamespace) -> None:
+    status, body = _post(
+        "/api/v1/search",
+        {
+            "keyword": "x",
+            "min_words": 10_000,
+            "max_words": 500_000,
+            "updated_after": "2024-01-01",
+        },
+    )
+
+    assert status == 200
+    # The response envelope is unchanged by the new request fields.
+    assert set(body) == {"total", "results"}
+    kwargs = running_server.calls["search"][-1]
+    assert kwargs["min_words"] == 10_000
+    assert kwargs["max_words"] == 500_000
+    assert kwargs["updated_after"] == date(2024, 1, 1)
+
+
+def test_search_accepts_local_filter_boundaries(
+    running_server: SimpleNamespace,
+) -> None:
+    status, _ = _post(
+        "/api/v1/search",
+        {
+            "keyword": "x",
+            "min_words": 0,
+            "max_words": 1_000_000_000,
+            "updated_after": "2024-02-29",
+        },
+    )
+
+    assert status == 200
+    kwargs = running_server.calls["search"][-1]
+    assert kwargs["min_words"] == 0
+    assert kwargs["max_words"] == 1_000_000_000
+    assert kwargs["updated_after"] == date(2024, 2, 29)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("min_words", -1),
+        ("min_words", 1_000_000_001),
+        ("max_words", -1),
+        ("max_words", 1_000_000_001),
+        ("updated_after", "2024/01/01"),
+        ("updated_after", "20240101"),
+        ("updated_after", "2024-13-01"),
+        ("updated_after", "2024-02-30"),
+        ("updated_after", ""),
+        ("updated_after", "soon"),
+    ],
+)
+def test_search_rejects_invalid_local_filters(
+    running_server: SimpleNamespace, field: str, value: Any
+) -> None:
+    status, body = _post("/api/v1/search", {"keyword": "x", field: value})
+
+    assert status == 422
+    assert body["detail"].startswith("Request validation failed")
+    assert body["errors"][0]["loc"] == ["body", field]
 
 
 def test_search_empty_sites_list_searches_none(running_server: SimpleNamespace) -> None:

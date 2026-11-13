@@ -66,6 +66,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -135,6 +136,9 @@ _MAX_SEARCH_SITES = 100
 _MAX_PER_SITE_LIMIT = 100
 _MAX_SEARCH_LIMIT = 500
 _MAX_SEARCH_TIMEOUT = 120.0
+#: Upper bound for the optional ``min_words``/``max_words`` search filters
+#: (mirrors ``schemas.MAX_SEARCH_WORDS``).
+_MAX_SEARCH_WORDS = 1_000_000_000
 _MAX_MUSIC_OFFSET = 10_000
 _MAX_PLATFORM_LENGTH = 64
 _MAX_LEVEL_LENGTH = 64
@@ -156,6 +160,19 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1F\x7F]")
 
 #: Shape of a site key (mirrors ``schemas._SITE_KEY_CHARS``).
 _SITE_KEY_CHARS = re.compile(r"[A-Za-z0-9_.-]+")
+
+#: Accepted date spellings for ``updated_after`` (mirrors pydantic's ``date``):
+#: ``YYYY-MM-DD`` optionally followed by a datetime with a ``T``/``t``/``_``/
+#: space separator.  The compact ``YYYYMMDD`` form is *not* accepted, exactly
+#: like the REST model.
+_DATE_PREFIX = re.compile(r"(\d{4}-\d{2}-\d{2})(?:[Tt_ ](.+))?\Z")
+
+#: Pydantic's date error wording, mirrored for the ``errors`` payload.
+_DATE_PARSE_MSG = "Input should be a valid date or datetime"
+_DATE_INEXACT_MSG = (
+    "Datetimes provided to dates should have zero time - e.g. be exact dates"
+)
+_MIDNIGHT = datetime.min.time()
 
 #: Header-name shape accepted for client-supplied per-track headers.
 _HEADER_NAME_CHARS = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
@@ -681,6 +698,79 @@ def _literal_field(
     return value
 
 
+def _date_field(
+    body: dict[str, Any],
+    name: str,
+    entries: list[dict[str, Any]],
+    *,
+    nullable: bool = True,
+) -> date | None:
+    """Validate an optional ``date`` field like the REST model.
+
+    Accepts the same JSON spellings pydantic's ``date`` does: ``YYYY-MM-DD``,
+    an ISO datetime at exact midnight, a :class:`date`/:class:`datetime`
+    instance (direct handler calls) and a Unix timestamp at exact midnight.
+    The compact ``YYYYMMDD`` form and any non-midnight datetime are rejected,
+    matching ``SearchRequest.updated_after``.  Invalid input appends a ``422``
+    entry instead of forwarding a malformed value to the search layer.
+    """
+    if name not in body:
+        return None
+    value = body[name]
+    if value is None:
+        # ``date | None`` accepts an explicit JSON null.
+        if nullable:
+            return None
+        entries.append(_err(name, "Input should be a valid date", "date_type"))
+        return None
+    if isinstance(value, datetime):
+        if value.time() != _MIDNIGHT:
+            entries.append(_err(name, _DATE_INEXACT_MSG, "date_from_datetime_inexact"))
+            return None
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, bool):
+        entries.append(_err(name, "Input should be a valid date", "date_type"))
+        return None
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            entries.append(_err(name, _DATE_PARSE_MSG, "date_from_datetime_parsing"))
+            return None
+        try:
+            # Epoch arithmetic instead of ``datetime.fromtimestamp``: the
+            # latter rejects pre-1970 values on Windows, while pydantic (and
+            # therefore the REST API) accepts them.
+            moment = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(seconds=value)
+        except (OverflowError, ValueError):
+            entries.append(_err(name, _DATE_PARSE_MSG, "date_from_datetime_parsing"))
+            return None
+        if moment.time() != _MIDNIGHT:
+            entries.append(_err(name, _DATE_INEXACT_MSG, "date_from_datetime_inexact"))
+            return None
+        return moment.date()
+    if not isinstance(value, str):
+        entries.append(_err(name, "Input should be a valid date", "date_type"))
+        return None
+    match = _DATE_PREFIX.fullmatch(value)
+    if match is None:
+        entries.append(_err(name, _DATE_PARSE_MSG, "date_from_datetime_parsing"))
+        return None
+    try:
+        parsed = date.fromisoformat(match.group(1))
+        if match.group(2) is not None:
+            moment = datetime.fromisoformat(value)
+            if moment.time() != _MIDNIGHT:
+                entries.append(
+                    _err(name, _DATE_INEXACT_MSG, "date_from_datetime_inexact")
+                )
+                return None
+    except ValueError:
+        entries.append(_err(name, _DATE_PARSE_MSG, "date_from_datetime_parsing"))
+        return None
+    return parsed
+
+
 def _parse_paging(
     query: dict[str, list[str]], entries: list[dict[str, Any]] | None = None
 ) -> tuple[int | None, int | None]:
@@ -1120,6 +1210,15 @@ def _handle_search(
     limit = _int_field(
         body, "limit", None, 1, entries, le=_MAX_SEARCH_LIMIT, nullable=True
     )
+    # Local filters mirror ``SearchRequest``: an absent/null value keeps the
+    # historical call shape, so the search layer only sees them when asked.
+    min_words = _int_field(
+        body, "min_words", None, 0, entries, le=_MAX_SEARCH_WORDS, nullable=True
+    )
+    max_words = _int_field(
+        body, "max_words", None, 0, entries, le=_MAX_SEARCH_WORDS, nullable=True
+    )
+    updated_after = _date_field(body, "updated_after", entries)
     if entries:
         raise _validation_error(entries)
     # ``group`` mirrors ``SearchRequest.group`` (validated last, like the
@@ -1137,6 +1236,16 @@ def _handle_search(
         # returns the same empty envelope without starting a search.
         return {"total": 0, "results": []}
 
+    # Only forward filters that were actually requested: a request without
+    # them keeps calling ``search`` with its historical keyword set.
+    filters: dict[str, Any] = {}
+    if min_words is not None:
+        filters["min_words"] = min_words
+    if max_words is not None:
+        filters["max_words"] = max_words
+    if updated_after is not None:
+        filters["updated_after"] = updated_after
+
     results = _run(
         search(
             keyword,
@@ -1147,6 +1256,7 @@ def _handle_search(
             sort=sort,
             order=order,
             group=group,
+            **filters,
         ),
         timeout=_SEARCH_TIMEOUT,
         label="Search",

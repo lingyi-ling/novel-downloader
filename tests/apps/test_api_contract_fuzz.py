@@ -230,7 +230,7 @@ def engines(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     app: FastAPI = create_app(
         token="",
         output_dir=str(tmp_path / "downloads"),
-        rate_limit=0,
+        rate_limit=None,
     )
     app.dependency_overrides[get_manager] = lambda: fake_manager
     app.dependency_overrides[get_watchlist_store] = lambda: store
