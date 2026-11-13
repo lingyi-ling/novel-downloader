@@ -40,17 +40,20 @@ APP_HTML = r"""<!DOCTYPE html>
   --primary: #c2410c;
   --primary-hover: #9a3412;
   --on-primary: #ffffff;
-  --accent: #c2410c;
-  --accent-hover: #9a3412;
+  /* Status text is 10.5–13 px, i.e. "normal" for WCAG, so the tone tokens
+     must clear 4.5:1 against their own tinted background (not just white).
+     The previous lighter shades measured 3.3–4.5:1. */
+  --accent: #9a3412;
+  --accent-hover: #7c2d12;
   --accent-soft: rgba(194, 65, 12, .10);
   --accent-soft-2: rgba(194, 65, 12, .20);
   --on-accent: #ffffff;
-  --green: #059669; --green-bg: rgba(5, 150, 105, .10);
-  --red: #dc2626;   --red-bg: rgba(220, 38, 38, .08);
+  --green: #047857; --green-bg: rgba(5, 150, 105, .10);
+  --red: #b91c1c;   --red-bg: rgba(220, 38, 38, .08);
   --blue: #2563eb;  --blue-bg: rgba(37, 99, 235, .08);
   --purple: #7c3aed;--purple-bg: rgba(124, 58, 237, .08);
-  --yellow: #b45309;--yellow-bg: rgba(180, 83, 9, .09);
-  --gray: #64748b;  --gray-bg: rgba(100, 116, 139, .10);
+  --yellow: #92400e;--yellow-bg: rgba(180, 83, 9, .09);
+  --gray: #475569;  --gray-bg: rgba(100, 116, 139, .10);
   --shadow-1: 0 1px 2px rgba(15, 23, 42, .05);
   --shadow-2: 0 8px 24px -12px rgba(15, 23, 42, .18);
   --shadow-3: 0 24px 60px -20px rgba(15, 23, 42, .28);
@@ -390,7 +393,11 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 /* ============================================================ search page */
 .search-zone { margin: 2px 0 0; width: 100%; }
 .search-row { display: flex; gap: 8px; }
-.search-row .field { flex: 1; }
+/* The platform <select> keeps the width of its longest option by default.
+   Below ~820 px that pushed the search button past the content column, so the
+   picker and the text field are both allowed to shrink (the button is not). */
+.search-row select.picker { min-width: 0; }
+.search-row .field { flex: 1; min-width: 0; }
 .filters { display: flex; gap: 8px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
 .filters .field { height: 34px; border-radius: var(--radius-md); flex: 1; min-width: 240px; }
 .filters .merge-toggle { margin-left: auto; }
