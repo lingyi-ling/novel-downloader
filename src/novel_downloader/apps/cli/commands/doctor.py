@@ -20,7 +20,18 @@ machine is not a broken installation.
 table (diagnostics keep going to stderr, so the document can be piped). Each
 entry carries a stable ``key`` plus optional structured ``data``.
 
-Exit codes: ``0`` when every required check passes, ``1`` otherwise.
+``--fix`` (opt-in) repairs only reversible local state: it creates the
+configured output/cache/log directories when they are missing and removes
+stale ``.tmp``/``.part`` files older than ``--fix-age-days`` (default 7).
+``--fix --dry-run`` reports the same plan without touching the filesystem.
+Every action is re-validated immediately before it runs: the path must stay
+inside one of those three configured roots, no component may be a symlink, and
+anything else is skipped. User configuration, exports and network state are
+never touched.
+
+Exit codes: ``0`` when every required check passes, ``1`` otherwise. With
+``--fix``, an applied fix that fails also exits ``1``; a refused (skipped)
+action does not.
 """
 
 from __future__ import annotations
@@ -32,12 +43,13 @@ import os
 import platform
 import re
 import socket
+import stat
 import sys
 import tempfile
 import time
 from argparse import ArgumentParser, Namespace
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as dist_version
 from pathlib import Path
@@ -106,6 +118,19 @@ MAX_DETAIL_ITEMS = 3
 #: Volume free space (on the output directory's volume) below which the
 #: disk-space check warns, in bytes (512 MiB).
 LOW_DISK_FREE_BYTES = 512 * 1024 * 1024
+
+#: Default age (in days) after which ``--fix`` removes ``.tmp``/``.part`` files.
+DEFAULT_FIX_MAX_AGE_DAYS = 7
+
+#: File suffixes considered unfinished temporary artifacts by ``--fix``.
+FIX_TEMP_SUFFIXES: tuple[str, ...] = (".tmp", ".part")
+
+#: Fix action names (stable identifiers in the ``--json`` report).
+FIX_CREATE_DIR = "create_dir"
+FIX_REMOVE_FILE = "remove_file"
+
+#: Reasons recorded for a fix that was intentionally not applied.
+FIX_DRY_RUN = "dry_run"
 
 #: Maximum length of one import failure detail.
 _MAX_FAILURE_TEXT = 120
@@ -539,8 +564,22 @@ def _log_dir() -> Path:
     return ConfigAdapter(data).get_log_dir()
 
 
-def _dir_writable(path: Path) -> tuple[bool, str]:
-    """Create ``path`` when needed and probe it with a temporary file."""
+def _dir_writable(path: Path, *, create: bool = True) -> tuple[bool, str]:
+    """Probe ``path`` for writability.
+
+    With ``create`` (the default) a missing directory is created and a
+    temporary file is written and removed, which is what the normal doctor
+    run has always done.  ``create=False`` is used by ``--fix --dry-run`` so
+    the preview produces zero filesystem changes: it only inspects the path.
+    """
+    if not create:
+        if path.is_symlink():
+            return False, t("path is a symlink")
+        if not path.exists():
+            return False, t("missing")
+        if not path.is_dir():
+            return False, t("not a directory")
+        return True, ""
     try:
         path.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=".doctor-", dir=str(path))
@@ -551,37 +590,458 @@ def _dir_writable(path: Path) -> tuple[bool, str]:
     return True, ""
 
 
-def _check_output_dir() -> Check:
-    """Verify the output directory can be created and written to."""
-    path = _output_dir()
-    writable, error = _dir_writable(path)
+def _check_directory(
+    path: Path,
+    name: str,
+    key: str,
+    suggestion: str,
+    *,
+    create: bool = True,
+) -> Check:
+    """Shared implementation of the output/log directory checks."""
+    writable, error = _dir_writable(path, create=create)
     if writable:
-        return Check(t("Output directory"), True, str(path), key="output_dir")
-    return Check(
+        return Check(name, True, str(path), key=key)
+    if not create and not path.exists():
+        # In a dry run the directory is absent, but ``--fix`` is exactly what
+        # would create it; reporting that as a failure would make the preview
+        # exit 1 for a problem it is about to resolve.
+        detail = t("{path} (missing; --fix will create it)").format(path=path)
+        return Check(name, True, detail, key=key)
+    return Check(name, False, f"{path}: {error}", suggestion, key=key)
+
+
+def _check_output_dir(*, create: bool = True) -> Check:
+    """Verify the output directory can be created and written to."""
+    return _check_directory(
+        _output_dir(),
         t("Output directory"),
-        False,
-        f"{path}: {error}",
+        "output_dir",
         t("Check the permissions of the output directory or change output_dir."),
-        key="output_dir",
+        create=create,
     )
 
 
-def _check_log_dir() -> Check:
+def _check_log_dir(*, create: bool = True) -> Check:
     """Verify the log directory can be created and written to.
 
     Every run appends to a log file under this directory, so an unwritable
     log directory otherwise fails later with a much more confusing error.
     """
-    path = _log_dir()
-    writable, error = _dir_writable(path)
-    if writable:
-        return Check(t("Log directory"), True, str(path), key="log_dir")
-    return Check(
+    return _check_directory(
+        _log_dir(),
         t("Log directory"),
-        False,
-        f"{path}: {error}",
+        "log_dir",
         t("Check the permissions of the log directory or change log_dir."),
-        key="log_dir",
+        create=create,
+    )
+
+
+# ---------------------------------------------------------------------------
+# --fix: reversible local repairs
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FixItem:
+    """One planned fix action."""
+
+    action: str
+    path: Path
+    root: Path
+    #: Only files older than this epoch timestamp are removable.
+    cutoff: float = 0.0
+    #: Size in bytes (recorded at plan time, for the report).
+    size: int = 0
+
+
+@dataclass
+class FixPlan:
+    """Planned actions plus candidates that were refused during planning."""
+
+    actions: list[FixItem] = field(default_factory=list)
+    skipped: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class FixReport:
+    """Outcome of applying a :class:`FixPlan`."""
+
+    fixed: list[dict[str, Any]]
+    skipped: list[dict[str, Any]]
+    errors: list[dict[str, Any]]
+    dry_run: bool
+    max_age_days: int
+
+    @property
+    def ok(self) -> bool:
+        """Return whether no fix failed."""
+        return not self.errors
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stable JSON view used by ``--fix --json``."""
+        return {
+            "dry_run": self.dry_run,
+            "max_age_days": self.max_age_days,
+            "fixed": self.fixed,
+            "skipped": self.skipped,
+            "errors": self.errors,
+            "fix_summary": {
+                "fixed": len(self.fixed),
+                "skipped": len(self.skipped),
+                "errors": len(self.errors),
+            },
+        }
+
+
+def _fix_roots() -> list[Path]:
+    """Return the configured roots ``--fix`` may act inside.
+
+    The roots are exactly the output, cache and log directories resolved by
+    the same adapters the checks use.  They are normalised with ``abspath``
+    (not ``resolve``) so a symlinked component is visible to the per-action
+    validation instead of being silently followed.
+    """
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for getter in (_output_dir, _cache_dir, _log_dir):
+        try:
+            root = Path(os.path.abspath(os.fspath(getter())))
+        except Exception:
+            continue
+        key = os.path.normcase(str(root))
+        if key not in seen:
+            seen.add(key)
+            roots.append(root)
+    return roots
+
+
+def _symlink_component(path: Path) -> str:
+    """Return the first symlinked component of *path*, or an empty string."""
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return str(current)
+        except OSError:  # pragma: no cover - permission-dependent
+            continue
+    return ""
+
+
+def _validate_fix_path(path: Path, root: Path) -> str:
+    """Return a refusal reason when *path* must not be touched, else ``""``.
+
+    The path has to be absolute, lexically inside *root*, free of ``..``
+    segments, and neither the path nor any of its components may be a
+    symlink.  This is called again immediately before every action, so a plan
+    computed earlier cannot be used to escape after a filesystem change.
+    """
+    if not path.is_absolute() or not root.is_absolute():
+        return "path is not absolute"
+    if ".." in path.parts or ".." in root.parts:
+        return "path contains a parent reference"
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return "outside the allowed root"
+    if _symlink_component(root):
+        return "allowed root is a symlink"
+    if _symlink_component(path):
+        return "path traverses a symlink"
+    return ""
+
+
+def _unsafe_root_reason(root: Path) -> str:
+    """Reject roots where a recursive cleanup is never safe."""
+    if not root.is_absolute():
+        return "path is not absolute"
+    if root == Path(root.anchor):
+        return "filesystem root"
+    home = _home_dir()
+    if home and os.path.normcase(str(root)) == os.path.normcase(home):
+        return "home directory"
+    if root.is_symlink():
+        return "allowed root is a symlink"
+    return ""
+
+
+def _iter_temp_files(root: Path) -> list[Path]:
+    """List candidate temporary files under *root* without following links.
+
+    Symlinked directories are pruned (``followlinks=False`` plus an explicit
+    check), and the output is sorted so a plan is deterministic.  Symlinked
+    files are returned as candidates on purpose: the per-action validation
+    then refuses them and records the reason, which is more useful than
+    silently dropping them.
+    """
+    candidates: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(dirpath)
+        dirnames[:] = sorted(
+            name for name in dirnames if not (base / name).is_symlink()
+        )
+        for name in sorted(filenames):
+            if not name.lower().endswith(FIX_TEMP_SUFFIXES):
+                continue
+            candidates.append(base / name)
+    return candidates
+
+
+def _fix_record(
+    item: FixItem,
+    *,
+    reason: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    """Build one JSON-friendly report entry (paths are masked like checks)."""
+    record: dict[str, Any] = {
+        "action": item.action,
+        "path": _mask_path_text(str(item.path)),
+    }
+    if item.action == FIX_REMOVE_FILE:
+        record["bytes"] = item.size
+    if reason:
+        record["reason"] = reason
+    if error:
+        record["error"] = _redact_text(error)
+    return record
+
+
+def plan_fixes(
+    *,
+    roots: Sequence[Path] | None = None,
+    max_age_days: int = DEFAULT_FIX_MAX_AGE_DAYS,
+    now: float | None = None,
+) -> FixPlan:
+    """Build the fix plan without changing anything.
+
+    Missing allowed roots become ``create_dir`` actions.  Existing roots are
+    scanned for regular ``.tmp``/``.part`` files whose mtime is older than
+    ``max_age_days``; those become ``remove_file`` actions.  Candidates that
+    fall outside a root, traverse a symlink, or are not regular files are
+    recorded as skipped.
+    """
+    plan = FixPlan()
+    cutoff = (time.time() if now is None else now) - max_age_days * 86400
+    seen_actions: set[tuple[str, str]] = set()
+    seen_files: set[str] = set()
+
+    def _add(item: FixItem) -> None:
+        key = (item.action, os.path.normcase(str(item.path)))
+        if key in seen_actions:
+            return
+        seen_actions.add(key)
+        plan.actions.append(item)
+
+    for root in roots if roots is not None else _fix_roots():
+        root = Path(os.path.abspath(os.fspath(root)))
+        unsafe = _unsafe_root_reason(root)
+        if unsafe:
+            plan.skipped.append(
+                {
+                    "action": "scan",
+                    "path": _mask_path_text(str(root)),
+                    "reason": unsafe,
+                }
+            )
+            continue
+        if not root.exists():
+            _add(FixItem(FIX_CREATE_DIR, root, root))
+            continue
+        if root.is_symlink():
+            plan.skipped.append(
+                {
+                    "action": "scan",
+                    "path": _mask_path_text(str(root)),
+                    "reason": "allowed root is a symlink",
+                }
+            )
+            continue
+        if not root.is_dir():
+            plan.skipped.append(
+                {
+                    "action": "scan",
+                    "path": _mask_path_text(str(root)),
+                    "reason": "not a directory",
+                }
+            )
+            continue
+        for candidate in _iter_temp_files(root):
+            file_key = os.path.normcase(str(candidate))
+            if file_key in seen_files:
+                continue
+            seen_files.add(file_key)
+            problem = _validate_fix_path(candidate, root)
+            if problem:
+                plan.skipped.append(
+                    {
+                        "action": FIX_REMOVE_FILE,
+                        "path": _mask_path_text(str(candidate)),
+                        "reason": problem,
+                    }
+                )
+                continue
+            try:
+                info = candidate.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            if info.st_mtime >= cutoff:
+                continue
+            _add(
+                FixItem(
+                    FIX_REMOVE_FILE,
+                    candidate,
+                    root,
+                    cutoff=cutoff,
+                    size=info.st_size,
+                )
+            )
+    return plan
+
+
+def _create_dir(path: Path) -> None:
+    """Create one directory (module hook so tests can inject failures)."""
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _remove_file(path: Path) -> None:
+    """Delete one file (module hook so tests can inject failures)."""
+    path.unlink()
+
+
+def apply_fixes(
+    plan: FixPlan,
+    *,
+    dry_run: bool = False,
+    max_age_days: int = DEFAULT_FIX_MAX_AGE_DAYS,
+) -> FixReport:
+    """Apply (or preview) a fix plan.
+
+    Every action is validated again right before it runs.  A refused action is
+    recorded in ``skipped``; an ``OSError`` is recorded in ``errors`` and the
+    loop continues, so one unreadable directory cannot hide the rest.  In
+    ``dry_run`` mode nothing is created or deleted and every planned action is
+    reported as skipped with reason ``dry_run``.
+    """
+    fixed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = list(plan.skipped)
+    errors: list[dict[str, Any]] = []
+
+    for item in plan.actions:
+        problem = _validate_fix_path(item.path, item.root)
+        if problem:
+            skipped.append(_fix_record(item, reason=problem))
+            continue
+        if dry_run:
+            skipped.append(_fix_record(item, reason=FIX_DRY_RUN))
+            continue
+
+        if item.action == FIX_CREATE_DIR:
+            if item.path.exists() and not item.path.is_symlink():
+                if item.path.is_dir():
+                    skipped.append(_fix_record(item, reason="already exists"))
+                    continue
+                errors.append(_fix_record(item, error=t("not a directory")))
+                continue
+            try:
+                _create_dir(item.path)
+            except OSError as exc:
+                errors.append(_fix_record(item, error=str(exc)))
+                continue
+            fixed.append(_fix_record(item))
+            continue
+
+        if item.action == FIX_REMOVE_FILE:
+            try:
+                info = item.path.lstat()
+            except FileNotFoundError:
+                skipped.append(_fix_record(item, reason="file not found"))
+                continue
+            except OSError as exc:
+                errors.append(_fix_record(item, error=str(exc)))
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                skipped.append(_fix_record(item, reason="not a regular file"))
+                continue
+            if info.st_mtime >= item.cutoff:
+                skipped.append(_fix_record(item, reason="no longer stale"))
+                continue
+            try:
+                _remove_file(item.path)
+            except FileNotFoundError:
+                skipped.append(_fix_record(item, reason="file not found"))
+                continue
+            except OSError as exc:
+                errors.append(_fix_record(item, error=str(exc)))
+                continue
+            fixed.append(_fix_record(item))
+            continue
+
+        skipped.append(_fix_record(item, reason="unknown action"))
+
+    return FixReport(
+        fixed=fixed,
+        skipped=skipped,
+        errors=errors,
+        dry_run=dry_run,
+        max_age_days=max_age_days,
+    )
+
+
+def _print_fix_report(report: FixReport) -> None:
+    """Print the human form of a fix report."""
+    if report.dry_run:
+        ui.info(t("Dry-run mode: nothing will be changed."))
+    for record in report.fixed:
+        path = record["path"]
+        if record["action"] == FIX_CREATE_DIR:
+            ui.success(t("Created directory: {path}").format(path=path))
+        else:
+            ui.success(
+                t("Removed stale temporary file: {path} ({size})").format(
+                    path=path, size=format_size(int(record.get("bytes", 0)))
+                )
+            )
+    for record in report.skipped:
+        path = record["path"]
+        if record.get("reason") == FIX_DRY_RUN:
+            if record["action"] == FIX_CREATE_DIR:
+                ui.info(t("Would create directory: {path}").format(path=path))
+            elif record["action"] == FIX_REMOVE_FILE:
+                ui.info(
+                    t("Would remove stale temporary file: {path} ({size})").format(
+                        path=path, size=format_size(int(record.get("bytes", 0)))
+                    )
+                )
+        elif record.get("reason") in (
+            "allowed root is a symlink",
+            "path traverses a symlink",
+            "outside the allowed root",
+        ):
+            ui.warn(t("Skipped unsafe path: {path}").format(path=path))
+    for record in report.errors:
+        path = record["path"]
+        if record["action"] == FIX_CREATE_DIR:
+            ui.error(
+                t("Failed to create directory {path}: {error}").format(
+                    path=path, error=record.get("error", "")
+                )
+            )
+        else:
+            ui.error(
+                t("Failed to remove {path}: {error}").format(
+                    path=path, error=record.get("error", "")
+                )
+            )
+    ui.info(
+        t("Fix summary: {fixed} fixed, {skipped} skipped, {errors} failed.").format(
+            fixed=len(report.fixed),
+            skipped=len(report.skipped),
+            errors=len(report.errors),
+        )
     )
 
 
@@ -851,12 +1311,19 @@ def _check_api_port(port: int = API_PORT) -> Check:
     )
 
 
-def collect_checks(port: int = API_PORT, *, online: bool = False) -> list[Check]:
+def collect_checks(
+    port: int = API_PORT,
+    *,
+    online: bool = False,
+    probe_dirs: bool = True,
+) -> list[Check]:
     """Run every check and return the results in display order.
 
     ``online`` appends the network-egress probe; by default the doctor is a
-    purely offline self-check.  Each check is isolated: an exception raised by
-    one probe becomes a failed row instead of aborting the report.
+    purely offline self-check.  ``probe_dirs=False`` keeps the output/log
+    checks read-only (used by ``--fix --dry-run`` so the preview changes
+    nothing).  Each check is isolated: an exception raised by one probe
+    becomes a failed row instead of aborting the report.
     """
     specs: list[tuple[str, str, Callable[[], Check]]] = [
         ("python", t("Python version"), _check_python),
@@ -864,8 +1331,16 @@ def collect_checks(port: int = API_PORT, *, online: bool = False) -> list[Check]
         ("settings", t("settings.toml"), _check_settings_file),
         ("config", t("Configuration"), _check_config),
         ("dependencies", t("Dependencies"), _check_dependencies),
-        ("output_dir", t("Output directory"), _check_output_dir),
-        ("log_dir", t("Log directory"), _check_log_dir),
+        (
+            "output_dir",
+            t("Output directory"),
+            lambda: _check_output_dir(create=probe_dirs),
+        ),
+        (
+            "log_dir",
+            t("Log directory"),
+            lambda: _check_log_dir(create=probe_dirs),
+        ),
         ("disk_space", t("Disk space"), _check_disk_space),
         ("cache", t("Cache directory"), _check_cache_dir),
         ("sites", t("Sites"), _check_sites),
@@ -912,6 +1387,34 @@ class DoctorCmd(Command):
                 "(never fails the command)."
             ),
         )
+        parser.add_argument(
+            "--fix",
+            action="store_true",
+            help=t(
+                "Create missing data directories and remove stale .tmp/.part "
+                "files. Never changes configuration, exports or network state."
+            ),
+        )
+        parser.add_argument(
+            "--dry-run",
+            dest="dry_run",
+            action="store_true",
+            help=t(
+                "Preview --fix actions (implies --fix) without creating or "
+                "deleting anything."
+            ),
+        )
+        parser.add_argument(
+            "--fix-age-days",
+            "--max-age-days",
+            dest="fix_age_days",
+            type=int,
+            default=DEFAULT_FIX_MAX_AGE_DAYS,
+            metavar="N",
+            help=t(
+                "Only remove .tmp/.part files older than N days (default: {days})."
+            ).format(days=DEFAULT_FIX_MAX_AGE_DAYS),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
@@ -924,14 +1427,40 @@ class DoctorCmd(Command):
             fail(t("Invalid input."), EXIT_USAGE)
         online = bool(getattr(args, "online", False))
         as_json = bool(getattr(args, "as_json", False))
-        checks = collect_checks(port, online=True) if online else collect_checks(port)
+        dry_run = bool(getattr(args, "dry_run", False))
+        fix = bool(getattr(args, "fix", False)) or dry_run
+        max_age_days = int(getattr(args, "fix_age_days", DEFAULT_FIX_MAX_AGE_DAYS))
+        if max_age_days < 1:
+            fail(t("The age threshold must be at least 1 day."), EXIT_USAGE)
+
+        fix_report: FixReport | None = None
+        if fix:
+            # Plan and apply before the checks run: the checks then verify the
+            # post-fix state, and the plan still records the directories that
+            # were missing at invocation time.
+            plan = plan_fixes(max_age_days=max_age_days)
+            fix_report = apply_fixes(plan, dry_run=dry_run, max_age_days=max_age_days)
+
+        if dry_run:
+            # The preview must not create directories, not even through the
+            # normal output/log probes.
+            checks = collect_checks(port, online=online, probe_dirs=False)
+        elif online:
+            checks = collect_checks(port, online=True)
+        else:
+            checks = collect_checks(port)
         # ``collect_checks`` already sanitizes; doing it again here keeps the
         # contract for callers that replace it (tests, embedders) without
         # exposing credentials or the user's directory layout.
         checks = [_sanitize_check(check) for check in checks]
         fatal_failures = sum(1 for check in checks if not check.ok and check.fatal)
         warnings = sum(1 for check in checks if not check.ok and not check.fatal)
-        status = "failed" if fatal_failures else ("warnings" if warnings else "ok")
+        fix_errors = len(fix_report.errors) if fix_report is not None else 0
+        status = (
+            "failed"
+            if fatal_failures or fix_errors
+            else ("warnings" if warnings else "ok")
+        )
 
         if as_json:
             payload = {
@@ -944,15 +1473,19 @@ class DoctorCmd(Command):
                     "total": len(checks),
                     "failures": fatal_failures,
                     "optional_failures": warnings,
-                    "ok": fatal_failures == 0,
+                    "ok": fatal_failures == 0 and fix_errors == 0,
                 },
                 "checks": [check.to_dict() for check in checks],
             }
+            if fix_report is not None:
+                # ``fixed``/``skipped``/``errors`` are the stable top-level
+                # fields documented for ``--fix --json``.
+                payload.update(fix_report.to_dict())
             # One line: the document is meant to be piped into ``jq`` and
             # consumed by scripts; pretty-printing only risks truncation in
             # line-oriented tooling.
             ui.emit(json.dumps(payload, ensure_ascii=False))
-            if fatal_failures:
+            if fatal_failures or fix_errors:
                 raise SystemExit(EXIT_FAILURE)
             return
 
@@ -975,6 +1508,9 @@ class DoctorCmd(Command):
             if check.suggestion:
                 ui.info(f"  -> {check.suggestion}")
 
+        if fix_report is not None:
+            _print_fix_report(fix_report)
+
         if fatal_failures:
             ui.error(t("{count} check(s) failed.").format(count=fatal_failures))
             raise SystemExit(EXIT_FAILURE)
@@ -988,6 +1524,8 @@ class DoctorCmd(Command):
                     count=warnings, preview=preview
                 )
             )
-            return
+        elif not fix_errors:
+            ui.success(t("All checks passed."))
 
-        ui.success(t("All checks passed."))
+        if fix_errors:
+            raise SystemExit(EXIT_FAILURE)
