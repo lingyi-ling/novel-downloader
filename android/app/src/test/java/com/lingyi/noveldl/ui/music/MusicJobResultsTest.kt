@@ -24,7 +24,8 @@ class MusicJobResultsTest {
         status: String,
         path: String = "",
         url: String = "",
-    ) = MusicJobResult(status = status, path = path, download_url = url)
+        lyric: String? = null,
+    ) = MusicJobResult(status = status, path = path, download_url = url, lyricPath = lyric)
 
     // ---------- per-page search ids ----------
 
@@ -142,6 +143,59 @@ class MusicJobResultsTest {
                 mapOf(MusicJobResults.trackKey(track("1")) to "/old.mp3"),
             ),
         )
+    }
+
+    // ---------- lyric write-back ----------
+
+    @Test
+    fun lyricsByTrackAlignsResultsWithTheSubmittedOrder() {
+        val chosen = listOf(track("1"), track("2"), track("3"))
+
+        val lyrics = MusicJobResults.lyricsByTrack(
+            chosen,
+            listOf(
+                result("ok", lyric = "/music/a.lrc"),
+                result("fail", lyric = "/music/b.lrc"),
+                result("skip", lyric = "/music/c.lrc"),
+            ),
+        )
+
+        // A failed row never contributes, even when the engine echoed a lyric;
+        // a skipped track keeps its lyric (the engine writes it on skip too).
+        assertEquals(
+            mapOf(
+                MusicJobResults.trackKey(track("1")) to "/music/a.lrc",
+                MusicJobResults.trackKey(track("3")) to "/music/c.lrc",
+            ),
+            lyrics,
+        )
+    }
+
+    @Test
+    fun lyricsByTrackIsEmptyWithoutLyrics() {
+        val chosen = listOf(track("1"), track("2"))
+
+        assertEquals(
+            emptyMap<String, String>(),
+            MusicJobResults.lyricsByTrack(
+                chosen,
+                listOf(result("ok"), result("ok", lyric = "   ")),
+            ),
+        )
+        assertEquals(emptyMap<String, String>(), MusicJobResults.lyricsByTrack(emptyList(), emptyList()))
+    }
+
+    @Test
+    fun lyricsByTrackToleratesShortResultLists() {
+        // Missing results must not shift another track's lyric onto a row.
+        val chosen = listOf(track("1"), track("2"))
+
+        val lyrics = MusicJobResults.lyricsByTrack(
+            chosen,
+            listOf(result("ok", lyric = "/music/a.lrc")),
+        )
+
+        assertEquals(mapOf(MusicJobResults.trackKey(track("1")) to "/music/a.lrc"), lyrics)
     }
 
     // ---------- selection keys ----------

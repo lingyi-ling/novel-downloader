@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Only the verified update downloads are exposed; nothing else in the
-     app's cache is reachable through the FileProvider. -->
+<!-- Two narrow ranges are exposed, each only through a per-URI grant that the
+     app itself attaches to an ACTION_VIEW intent:
+     - cache/updates/ holds the verified update APK;
+     - files/engine_home/downloads/music/ holds the music engine's output,
+       including the `<stem>.lrc` files the result screen opens.
+     No other cache or private path is reachable through the provider. -->
 <paths>
     <cache-path
         name="updates"
         path="updates/" />
+    <files-path
+        name="music"
+        path="engine_home/downloads/music/" />
 </paths>

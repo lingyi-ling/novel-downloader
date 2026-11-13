@@ -140,36 +140,27 @@ object HistoryDownloader {
                     DocumentFile.fromTreeUri(context, treeUri)
                         ?.takeIf { it.isDirectory && it.exists() }
                 }.getOrNull()
-                if (tree == null) {
-                    // The grant survived but the folder was deleted/moved, or
-                    // the provider cannot resolve it any more.
-                    throw DownloadDirectoryUnavailableException(
-                        context.getString(R.string.settings_download_dir_unavailable),
-                    )
-                }
-                val dir = tree.findFile(SUBDIRECTORY)?.takeIf { it.isDirectory }
-                    ?: tree.createDirectory(SUBDIRECTORY)
-                    ?: throw IllegalStateException(
-                        context.getString(R.string.settings_download_dir_create_failed),
-                    )
                 val desiredName = downloadFileName(file.name, file.download_url, file.ext)
                 // Resolve name clashes explicitly instead of relying on the
                 // provider's auto-renaming: some providers overwrite, some
                 // append a suffix, and the success toast should name the file
                 // that actually exists.
-                val fileName = uniqueChildName(
-                    desiredName,
-                    dir.listFiles().mapNotNull { it.name },
+                val prepared = prepareDownloadDestination(
+                    tree = tree?.let(::DocumentFileSafDocument),
+                    desiredName = desiredName,
+                    mimeType = mimeTypeForExtension(file.ext) ?: "application/octet-stream",
+                    unavailableMessage = context.getString(
+                        R.string.settings_download_dir_unavailable,
+                    ),
+                    createFailedMessage = context.getString(
+                        R.string.settings_download_dir_create_failed,
+                    ),
                 )
-                val mime = mimeTypeForExtension(file.ext) ?: "application/octet-stream"
-                val target = dir.createFile(mime, fileName)
-                    ?: throw IllegalStateException(
-                        context.getString(R.string.settings_download_dir_create_failed),
-                    )
+                val target = (prepared as DocumentFileSafDocument).document
                 created = target
                 // Providers may still adjust the display name (e.g. enforce an
                 // extension); report what was actually created.
-                val savedName = target.name ?: fileName
+                val savedName = prepared.name ?: desiredName
 
                 val builder = Request.Builder().url(url)
                 downloadRequestHeaders(Api.apiKey, url, Api.baseUrl).forEach { (name, value) ->
@@ -231,4 +222,31 @@ object HistoryDownloader {
             Result.failure(e)
         }
     }
+}
+
+/**
+ * [SafDocument] view over a `DocumentFile`, so the destination rules in
+ * [prepareDownloadDestination] stay testable on the JVM. Only documents
+ * obtained from the provider are wrapped; [document] is unwrapped again for
+ * the streaming `openOutputStream` call.
+ */
+private class DocumentFileSafDocument(val document: DocumentFile) : SafDocument {
+    override val name: String? get() = document.name
+
+    override val isDirectory: Boolean get() = document.isDirectory
+
+    override val exists: Boolean get() = document.exists()
+
+    override fun findDirectory(displayName: String): SafDocument? =
+        document.findFile(displayName)?.let(::DocumentFileSafDocument)
+
+    override fun createDirectory(displayName: String): SafDocument? =
+        document.createDirectory(displayName)?.let(::DocumentFileSafDocument)
+
+    override fun listChildNames(): List<String> = document.listFiles().mapNotNull { it.name }
+
+    override fun createFile(mimeType: String, displayName: String): SafDocument? =
+        document.createFile(mimeType, displayName)?.let(::DocumentFileSafDocument)
+
+    override fun delete(): Boolean = document.delete()
 }

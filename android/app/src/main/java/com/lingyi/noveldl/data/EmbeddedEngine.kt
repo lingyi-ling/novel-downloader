@@ -18,6 +18,13 @@ object EmbeddedEngine {
     const val PORT = 8081
     const val BASE_URL = "http://127.0.0.1:$PORT/"
 
+    /**
+     * Directory under `filesDir` used as the engine's writable home. The
+     * engine's default `general.output_dir` (`./downloads`) resolves below
+     * it, which is where the music engine also writes `<stem>.lrc`.
+     */
+    const val HOME_DIRECTORY = "engine_home"
+
     @Volatile
     private var started = false
 
@@ -62,7 +69,7 @@ object EmbeddedEngine {
      */
     fun ensureStarted(context: Context) {
         val appContext = context.applicationContext ?: context
-        val home = appContext.filesDir.resolve("engine_home").absolutePath
+        val home = appContext.filesDir.resolve(HOME_DIRECTORY).absolutePath
         ensureStarted(home) {
             try {
                 if (!Python.isStarted()) Python.start(AndroidPlatform(appContext))

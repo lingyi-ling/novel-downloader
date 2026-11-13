@@ -156,6 +156,75 @@ class MusicJobRunnerTest {
     }
 
     @Test
+    fun verifiedLyricsAreReportedPerTrackAndInTheSummary() = runBlocking {
+        val first = track("1")
+        val second = track("2")
+        val skipped = track("3")
+
+        server.enqueue(created("jA"))
+        server.enqueue(
+            done(
+                "jA",
+                """[
+                    {"status":"ok","path":"/music/1.mp3"},
+                    {"status":"ok","path":"/music/2.mp3"},
+                    {"status":"skip","path":"/music/3.mp3"}
+                ]""",
+            ),
+        )
+
+        // Only track 1 and the skipped track 3 have a lyric beside them.
+        val lookup = MusicLyricLookup { path ->
+            when (path) {
+                "/music/1.mp3" -> "/music/1.lrc"
+                "/music/3.mp3" -> "/music/3.lrc"
+                else -> null
+            }
+        }
+        val run = MusicJobRunner(
+            { Api.service() },
+            RecordingSaver(),
+            lyrics = lookup,
+            pollIntervalMs = 0,
+        ).run(
+            "all",
+            listOf(first, second, skipped),
+            idsByTrack(first to "sid-A", second to "sid-A", skipped to "sid-A"),
+        )
+
+        assertEquals(
+            mapOf(
+                MusicJobResults.trackKey(first) to "/music/1.lrc",
+                MusicJobResults.trackKey(skipped) to "/music/3.lrc",
+            ),
+            run.lyricPathsByTrack,
+        )
+        assertEquals(2, run.lyricsSaved)
+        assertNull(run.lyricPathsByTrack[MusicJobResults.trackKey(second)])
+        // Audio paths stay independent of lyric resolution.
+        assertEquals("/music/2.mp3", run.pathsByTrack[MusicJobResults.trackKey(second)])
+    }
+
+    @Test
+    fun aRunWithoutLyricsKeepsTheSummaryEmpty() = runBlocking {
+        val first = track("1")
+
+        server.enqueue(created("jA"))
+        server.enqueue(done("jA", """[{"status":"ok","path":"/music/1.mp3"}]"""))
+
+        val run = MusicJobRunner(
+            { Api.service() },
+            RecordingSaver(),
+            lyrics = MusicLyricLookup { null },
+            pollIntervalMs = 0,
+        ).run("all", listOf(first), idsByTrack(first to "sid-A"))
+
+        assertEquals(emptyMap<String, String>(), run.lyricPathsByTrack)
+        assertEquals(0, run.lyricsSaved)
+        assertEquals("/music/1.mp3", run.pathsByTrack[MusicJobResults.trackKey(first)])
+    }
+
+    @Test
     fun expiredPageDoesNotDiscardTheOtherPagesDownloads() = runBlocking {
         val first = track("1")
         val second = track("2")

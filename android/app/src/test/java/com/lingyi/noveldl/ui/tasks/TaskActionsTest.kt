@@ -225,6 +225,98 @@ class TaskActionsTest {
         )
     }
 
+    // ---- notification focus ----
+
+    @Test
+    fun rowIndexCountsSectionHeadersAndCards() {
+        val running = listOf("r1", "r2")
+        val pending = listOf("p1")
+        val completed = listOf("c1", "c2")
+
+        // 0 running header, 1 r1, 2 r2, 3 pending header, 4 p1,
+        // 5 completed header, 6 c1, 7 c2.
+        assertEquals(1, taskRowIndex(0, running, pending, completed, "r1"))
+        assertEquals(2, taskRowIndex(0, running, pending, completed, "r2"))
+        assertEquals(4, taskRowIndex(0, running, pending, completed, "p1"))
+        assertEquals(6, taskRowIndex(0, running, pending, completed, "c1"))
+        assertEquals(7, taskRowIndex(0, running, pending, completed, "c2"))
+    }
+
+    @Test
+    fun loginRequestCardsShiftEveryRowDown() {
+        // The optional login block is one header plus one card per request.
+        assertEquals(5, taskRowIndex(3, listOf("r1"), emptyList(), emptyList(), "r1"))
+        assertEquals(7, taskRowIndex(3, listOf("r1"), listOf("p1"), emptyList(), "p1"))
+        // 4 login rows, then running header (4), pending header (5),
+        // completed header (6), c1 (7).
+        assertEquals(7, taskRowIndex(3, emptyList(), emptyList(), listOf("c1"), "c1"))
+    }
+
+    @Test
+    fun unknownTaskHasNoRow() {
+        assertNull(taskRowIndex(0, listOf("r1"), listOf("p1"), listOf("c1"), "nope"))
+        assertNull(taskRowIndex(0, emptyList(), emptyList(), emptyList(), "t1"))
+    }
+
+    @Test
+    fun aBlankTaskIdOpensTheListWithoutFocusingACard() {
+        val empty = emptyList<String>()
+
+        assertEquals(
+            TaskFocusDecision.NoTaskId,
+            taskFocusDecision(null, true, 0, empty, empty, empty),
+        )
+        assertEquals(
+            TaskFocusDecision.NoTaskId,
+            taskFocusDecision("   ", true, 0, empty, empty, empty),
+        )
+    }
+
+    @Test
+    fun aListedTaskIsRevealedAtItsRow() {
+        val decision = taskFocusDecision(
+            taskId = " p1 ",
+            synced = true,
+            loginRequestCount = 0,
+            runningIds = listOf("r1", "r2"),
+            pendingIds = listOf("p1"),
+            completedIds = emptyList(),
+        )
+
+        assertEquals(TaskFocusDecision.Reveal("p1", 4), decision)
+    }
+
+    @Test
+    fun aTaskInTheRestoredSnapshotIsRevealedBeforeTheFirstPoll() {
+        // The on-disk snapshot is good enough to scroll to, even when the
+        // server has not answered yet; only the "missing" verdict waits.
+        val decision = taskFocusDecision(
+            taskId = "c1",
+            synced = false,
+            loginRequestCount = 0,
+            runningIds = emptyList(),
+            pendingIds = emptyList(),
+            completedIds = listOf("c1"),
+        )
+
+        // 0 running header, 1 pending header, 2 completed header, 3 c1.
+        assertEquals(TaskFocusDecision.Reveal("c1", 3), decision)
+    }
+
+    @Test
+    fun anUnlistedTaskWaitsForAPollAndThenReportsMissing() {
+        val empty = emptyList<String>()
+
+        assertEquals(
+            TaskFocusDecision.Wait,
+            taskFocusDecision("gone", false, 0, empty, empty, empty),
+        )
+        assertEquals(
+            TaskFocusDecision.Missing("gone"),
+            taskFocusDecision("gone", true, 0, empty, empty, empty),
+        )
+    }
+
     // ---- the retry flow over the wire ----
 
     private lateinit var server: MockWebServer

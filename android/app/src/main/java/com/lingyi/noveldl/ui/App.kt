@@ -21,6 +21,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -39,6 +41,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.SettingsStore
+import com.lingyi.noveldl.notifications.TaskOpenViewModel
 import com.lingyi.noveldl.ui.follow.FollowScreen
 import com.lingyi.noveldl.ui.history.HistoryScreen
 import com.lingyi.noveldl.ui.music.MusicExportViewModel
@@ -57,9 +60,12 @@ internal data class NavItem(
     val icon: ImageVector,
 )
 
+/** Route shared by the bottom bar and notification-driven navigation. */
+internal const val TASKS_ROUTE = "tasks"
+
 internal val navItems = listOf(
     NavItem("search", R.string.nav_search, Icons.Outlined.Search),
-    NavItem("tasks", R.string.nav_tasks, Icons.Outlined.Download),
+    NavItem(TASKS_ROUTE, R.string.nav_tasks, Icons.Outlined.Download),
     NavItem("history", R.string.nav_history, Icons.Outlined.History),
     NavItem("music", R.string.nav_music, Icons.Outlined.LibraryMusic),
     NavItem("follow", R.string.nav_follow, Icons.Outlined.Visibility),
@@ -67,12 +73,32 @@ internal val navItems = listOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NovelApp(store: SettingsStore) {
+fun NovelApp(store: SettingsStore, taskOpen: TaskOpenViewModel) {
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val route = backStackEntry?.destination?.route ?: "search"
+    // Latest notification tap, if any. MainActivity raises it on cold start,
+    // onNewIntent and on a restored intent, so the same path covers the app
+    // being killed, in the foreground, or restored from recents.
+    val openRequest by taskOpen.request.collectAsState()
+
+    LaunchedEffect(openRequest?.token) {
+        val request = openRequest ?: return@LaunchedEffect
+        navController.navigate(TASKS_ROUTE) {
+            // Same options as the bottom bar: keep one copy of each tab and
+            // restore its saved state instead of stacking destinations.
+            popUpTo(navController.graph.findStartDestination().id) {
+                saveState = true
+            }
+            launchSingleTop = true
+            restoreState = true
+        }
+        // Without a task id there is nothing for the tasks screen to locate;
+        // acknowledge here so the one-shot request does not linger.
+        if (request.taskId == null) taskOpen.consume(request.token)
+    }
 
     // The music download job is owned here, at Activity scope, instead of by
     // the music composable: switching tabs (or recomposing the screen) used to
@@ -112,7 +138,7 @@ fun NovelApp(store: SettingsStore) {
     }
 
     val titleRes = when (route) {
-        "tasks" -> R.string.nav_tasks
+        TASKS_ROUTE -> R.string.nav_tasks
         "history" -> R.string.nav_history
         "music" -> R.string.nav_music
         "follow" -> R.string.nav_follow
@@ -162,7 +188,14 @@ fun NovelApp(store: SettingsStore) {
             modifier = Modifier.padding(innerPadding),
         ) {
             composable("search") { SearchScreen(onMessage = notify) }
-            composable("tasks") { TasksScreen(onMessage = notify) }
+            composable(TASKS_ROUTE) {
+                TasksScreen(
+                    onMessage = notify,
+                    focusTaskId = openRequest?.taskId,
+                    focusToken = openRequest?.token,
+                    onFocusHandled = taskOpen::consume,
+                )
+            }
             composable("history") { HistoryScreen(store = store, onMessage = notify) }
             composable("music") {
                 MusicScreen(

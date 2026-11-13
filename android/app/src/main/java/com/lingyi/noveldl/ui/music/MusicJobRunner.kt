@@ -6,7 +6,9 @@ import com.lingyi.noveldl.data.MusicJobRequest
 import com.lingyi.noveldl.data.MusicJobResult
 import com.lingyi.noveldl.data.MusicTrack
 import com.lingyi.noveldl.ui.MUSIC_JOB_POLL_INTERVAL_MS
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * Everything one "download selected" run produced, across every batch.
@@ -35,6 +37,14 @@ data class MusicJobRun(
     val serverPath: String?,
     val errors: List<Throwable>,
     val jobFailure: String?,
+    /**
+     * Verified `<stem>.lrc` paths, keyed like [pathsByTrack]. The screen uses
+     * this map for the per-row lyric button; it covers `ok` and `skip`
+     * results, because the engine keeps the lyric when it skips a track.
+     */
+    val lyricPathsByTrack: Map<String, String> = emptyMap(),
+    /** Results that landed with a lyric file, for the batch summary line. */
+    val lyricsSaved: Int = 0,
 )
 
 /**
@@ -54,6 +64,12 @@ data class MusicJobRun(
 class MusicJobRunner(
     private val service: () -> ApiService,
     private val saver: MusicFileSaver = MusicFileSaver.None,
+    /**
+     * Resolves the `.lrc` the engine wrote beside a finished audio file. The
+     * default finds nothing (unit tests, transports without local files); the
+     * app uses [PrivateMusicLyricLookup].
+     */
+    private val lyrics: MusicLyricLookup = MusicLyricLookup.None,
     private val pollIntervalMs: Long = MUSIC_JOB_POLL_INTERVAL_MS,
     private val awaitForeground: suspend () -> Unit = {},
 ) {
@@ -73,6 +89,7 @@ class MusicJobRunner(
         val total = chosen.size
         val results = mutableListOf<MusicJobResult>()
         val paths = LinkedHashMap<String, String>()
+        val lyricPaths = LinkedHashMap<String, String>()
         val failedKeys = LinkedHashSet<String>()
         val errors = mutableListOf<Throwable>()
         var jobFailure: String? = null
@@ -107,10 +124,30 @@ class MusicJobRunner(
                     )
                 ) {
                     is Watch.Done -> {
-                        results += watch.results
-                        paths.putAll(MusicJobResults.pathsByTrack(batch.tracks, watch.results))
-                        failedKeys += MusicJobResults.failedTrackKeys(batch.tracks, watch.results)
-                        MusicJobResults.downloadable(watch.results).forEach { result ->
+                        // The engine already wrote `<stem>.lrc` beside the
+                        // audio; only verify it exists inside the app sandbox.
+                        // Probes touch the filesystem, so keep them off the
+                        // caller's thread even though a batch is small.
+                        val enriched = withContext(Dispatchers.IO) {
+                            watch.results.map { result ->
+                                val lyric = if (
+                                    result.status == "ok" || result.status == "skip"
+                                ) {
+                                    lyrics.find(result.path)
+                                } else {
+                                    null
+                                }
+                                // Always replace, never trust a value that
+                                // came over the wire: only a path this client
+                                // verified may drive the lyric button.
+                                result.copy(lyricPath = lyric)
+                            }
+                        }
+                        results += enriched
+                        paths.putAll(MusicJobResults.pathsByTrack(batch.tracks, enriched))
+                        lyricPaths.putAll(MusicJobResults.lyricsByTrack(batch.tracks, enriched))
+                        failedKeys += MusicJobResults.failedTrackKeys(batch.tracks, enriched)
+                        MusicJobResults.downloadable(enriched).forEach { result ->
                             saver.save(result).onFailure { failure ->
                                 saveFailures++
                                 if (firstSaveFailure == null) {
@@ -145,6 +182,8 @@ class MusicJobRunner(
             },
             errors = errors,
             jobFailure = jobFailure,
+            lyricPathsByTrack = lyricPaths,
+            lyricsSaved = MusicLyrics.savedCount(results),
         )
     }
 

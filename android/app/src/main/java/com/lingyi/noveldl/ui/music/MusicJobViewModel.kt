@@ -41,6 +41,13 @@ data class MusicJobUiState(
      */
     val paths: Map<String, String> = emptyMap(),
     /**
+     * Verified `<stem>.lrc` paths, keyed like [paths]. A key is present only
+     * when the engine saved the lyric and the file still exists inside the
+     * app's private music directory; the screen renders the per-track lyric
+     * button from it.
+     */
+    val lyricPaths: Map<String, String> = emptyMap(),
+    /**
      * Client-side failure of the last run (job creation or polling). The
      * screen localizes the [com.lingyi.noveldl.data.ApiErrorCode] it carries.
      */
@@ -57,6 +64,8 @@ sealed interface MusicJobEvent {
         val saveFailures: Int,
         val firstSaveFailure: String?,
         val serverPath: String?,
+        /** Tracks that landed with a verified `.lrc` beside the audio. */
+        val lyricsSaved: Int = 0,
     ) : MusicJobEvent
 
     /** The engine reported `failed` for a job; [reason] is its own text. */
@@ -66,14 +75,17 @@ sealed interface MusicJobEvent {
 /**
  * Owns the music download job so it survives navigation.
  *
- * [service], [saver] and [pollIntervalMs] are injectable for JVM tests; the
- * production factory binds the configured API and the DownloadManager saver.
+ * [service], [saver], [lyrics] and [pollIntervalMs] are injectable for JVM
+ * tests; the production factory binds the configured API, the DownloadManager
+ * saver and the private lyric lookup.
  * Events are buffered in a channel: a job that finishes while the user is on
  * another tab still reports its result when they come back.
  */
 class MusicJobViewModel @JvmOverloads constructor(
     private val service: () -> ApiService = { Api.service() },
     private val saver: MusicFileSaver = MusicFileSaver.None,
+    /** Verifies the `.lrc` beside each finished track; no-op by default. */
+    private val lyrics: MusicLyricLookup = MusicLyricLookup.None,
     private val pollIntervalMs: Long = MUSIC_JOB_POLL_INTERVAL_MS,
     /**
      * Survives process death: the finished paths are written here so a later
@@ -140,6 +152,7 @@ class MusicJobViewModel @JvmOverloads constructor(
             val runner = MusicJobRunner(
                 service = service,
                 saver = saver,
+                lyrics = lyrics,
                 pollIntervalMs = pollIntervalMs,
                 awaitForeground = { foreground.first { it } },
             )
@@ -168,6 +181,7 @@ class MusicJobViewModel @JvmOverloads constructor(
                 done = run.total,
                 total = run.total,
                 paths = _state.value.paths + run.pathsByTrack,
+                lyricPaths = _state.value.lyricPaths + run.lyricPathsByTrack,
                 failure = run.errors.firstOrNull(),
             )
             run.jobFailure?.let { events.trySend(MusicJobEvent.Failed(it)) }
@@ -179,6 +193,7 @@ class MusicJobViewModel @JvmOverloads constructor(
                         saveFailures = run.saveFailures,
                         firstSaveFailure = run.firstSaveFailure,
                         serverPath = run.serverPath,
+                        lyricsSaved = run.lyricsSaved,
                     ),
                 )
             }
@@ -193,6 +208,7 @@ class MusicJobViewModel @JvmOverloads constructor(
                 initializer {
                     MusicJobViewModel(
                         saver = DownloadManagerMusicSaver(appContext),
+                        lyrics = PrivateMusicLyricLookup(appContext),
                         paths = MusicPathStore(appContext),
                     )
                 }

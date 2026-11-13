@@ -5,6 +5,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,9 +21,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
@@ -82,12 +85,24 @@ import com.lingyi.noveldl.ui.listPlaceholderRes
 import com.lingyi.noveldl.ui.pollWhileComposed
 import com.lingyi.noveldl.ui.taskStatusLabelRes
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** How long a task stays highlighted after a notification tap. */
+private const val TASK_HIGHLIGHT_MS = 1_600L
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TasksScreen(onMessage: (String) -> Unit) {
+fun TasksScreen(
+    onMessage: (String) -> Unit,
+    // Notification-driven focus request (see TaskOpen); null while none is
+    // pending. `focusToken` changes on every new tap, so the same task can be
+    // revealed again, and `onFocusHandled` acknowledges exactly that tap.
+    focusTaskId: String? = null,
+    focusToken: Int? = null,
+    onFocusHandled: (Int) -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
@@ -127,6 +142,13 @@ fun TasksScreen(onMessage: (String) -> Unit) {
     // Notifications are off: explain the first skipped alert once instead of
     // letting the task finish silently.
     var notificationHintShown by rememberSaveable { mutableStateOf(false) }
+    // True once a poll actually answered. Only then may a notification tap for
+    // an unlisted task be reported as missing; an unreachable server must not
+    // look like the task was deleted.
+    var synced by remember { mutableStateOf(false) }
+    // Task flashing after a notification tap.
+    var highlightedId by remember { mutableStateOf<String?>(null) }
+    val listState = rememberLazyListState()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(refreshKey) {
@@ -157,6 +179,9 @@ fun TasksScreen(onMessage: (String) -> Unit) {
             val tasksResult = Api.call { Api.service().tasks() }
             val response = tasksResult.getOrNull()
             if (response != null) {
+                // From here on the list is authoritative enough to call a
+                // notification's task id missing.
+                synced = true
                 val tasks = response.allTasks()
                 val previous = knownStatuses.toMap()
                 knownStatuses.clear()
@@ -200,6 +225,54 @@ fun TasksScreen(onMessage: (String) -> Unit) {
             loaded = true
             refreshing = false
         }
+    }
+
+    // A tap on a task notification asks for one specific card. Resolving it in
+    // composition (not inside the effect) keeps the effect from restarting on
+    // every 2 s poll while the task list merely changes progress.
+    val focusDecision = if (focusToken == null) {
+        null
+    } else {
+        taskFocusDecision(
+            taskId = focusTaskId,
+            synced = synced,
+            loginRequestCount = loginReqs.requests.size,
+            runningIds = snapshot.running.map { it.task_id },
+            pendingIds = snapshot.pending.map { it.task_id },
+            completedIds = snapshot.completed.map { it.task_id },
+        )
+    }
+
+    LaunchedEffect(focusToken, focusDecision) {
+        val token = focusToken ?: return@LaunchedEffect
+        when (val decision = focusDecision) {
+            // Still waiting for the first answer: keep the request pending so
+            // a later poll can still reveal the task (or call it missing).
+            null, TaskFocusDecision.Wait -> return@LaunchedEffect
+            TaskFocusDecision.NoTaskId -> onFocusHandled(token)
+            is TaskFocusDecision.Missing -> {
+                // The task is gone (finished and pruned, or never existed):
+                // stay on the task page and say so instead of silently
+                // dropping the tap.
+                onFocusHandled(token)
+                onMessage(context.getString(R.string.tasks_open_missing))
+            }
+            is TaskFocusDecision.Reveal -> {
+                expandedIds = expandedIds + decision.taskId
+                highlightedId = decision.taskId
+                onFocusHandled(token)
+                // Acknowledging the request re-keys this effect and would
+                // cancel a scroll started here; the screen scope outlives it.
+                scope.launch { listState.animateScrollToItem(decision.row) }
+            }
+        }
+    }
+
+    // Fade the highlight out on its own; the id check keeps a newer tap lit.
+    LaunchedEffect(highlightedId) {
+        val id = highlightedId ?: return@LaunchedEffect
+        delay(TASK_HIGHLIGHT_MS)
+        if (highlightedId == id) highlightedId = null
     }
 
     fun refreshNow() {
@@ -344,6 +417,7 @@ fun TasksScreen(onMessage: (String) -> Unit) {
             }
             LazyColumn(
                 modifier = Modifier.weight(1f),
+                state = listState,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (loginReqs.requests.isNotEmpty()) {
@@ -370,6 +444,7 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                         task,
                         cancellable = true,
                         expanded = task.task_id in expandedIds,
+                        highlighted = task.task_id == highlightedId,
                         retryable = task.retryOffered(),
                         retryEnabled = task.retryAvailable(retriedIds, retryingIds),
                         onToggleExpand = { toggleExpand(task) },
@@ -385,6 +460,7 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                         task,
                         cancellable = true,
                         expanded = task.task_id in expandedIds,
+                        highlighted = task.task_id == highlightedId,
                         retryable = task.retryOffered(),
                         retryEnabled = task.retryAvailable(retriedIds, retryingIds),
                         onToggleExpand = { toggleExpand(task) },
@@ -402,6 +478,7 @@ fun TasksScreen(onMessage: (String) -> Unit) {
                         task,
                         cancellable = false,
                         expanded = task.task_id in expandedIds,
+                        highlighted = task.task_id == highlightedId,
                         retryable = task.retryOffered(),
                         retryEnabled = task.retryAvailable(retriedIds, retryingIds),
                         onToggleExpand = { toggleExpand(task) },
@@ -540,6 +617,7 @@ private fun TaskCard(
     task: Task,
     cancellable: Boolean,
     expanded: Boolean,
+    highlighted: Boolean,
     retryable: Boolean,
     retryEnabled: Boolean,
     onToggleExpand: () -> Unit,
@@ -580,7 +658,22 @@ private fun TaskCard(
     // The card itself is not clickable: a clickable ancestor would merge the
     // retry/cancel/download buttons into one node and make them unreachable
     // for TalkBack. The detail button below owns the expand action instead.
-    Card(modifier = Modifier.fillMaxWidth()) {
+    // A notification tap briefly tints and outlines its card so the user sees
+    // *which* task the alert was about after the automatic scroll.
+    val cardColors = if (highlighted) {
+        CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+    } else {
+        CardDefaults.cardColors()
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = cardColors,
+        border = if (highlighted) {
+            BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+        } else {
+            null
+        },
+    ) {
         Column(Modifier.padding(12.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),

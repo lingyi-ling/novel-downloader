@@ -41,6 +41,24 @@ class TaskNotifierContractTest {
     }
 
     @Test
+    fun thePendingIntentCarriesTheRealTaskId() {
+        assertTrue(source, source.contains("TaskOpen.openTasksAction(notificationId)"))
+        assertTrue(source, source.contains("putExtra(TaskOpen.EXTRA_TASK_ID"))
+        // The fallback key only keeps the notification id stable for malformed
+        // records; handing it to the activity would focus a task that cannot
+        // exist. The trimmed real id is the only acceptable extra.
+        assertTrue(source, source.contains("event.task.task_id.trim()"))
+        assertFalse(source, source.contains("putExtra(TaskOpen.EXTRA_TASK_ID, taskKey)"))
+    }
+
+    @Test
+    fun aForegroundTapArrivesThroughOnNewIntent() {
+        // CLEAR_TOP alone recreates a standard-launch activity; SINGLE_TOP
+        // keeps it alive so the tap is delivered to onNewIntent instead.
+        assertTrue(source, source.contains("Intent.FLAG_ACTIVITY_SINGLE_TOP"))
+    }
+
+    @Test
     fun channelCreationIsIdempotent() {
         assertTrue(source, source.contains("getNotificationChannel(CHANNEL_ID)"))
         assertTrue(source, source.contains("channelEnsured"))

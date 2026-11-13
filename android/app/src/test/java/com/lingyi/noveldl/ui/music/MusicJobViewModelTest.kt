@@ -155,6 +155,46 @@ class MusicJobViewModelTest {
     }
 
     @Test
+    fun lyricPathsAreExposedForTheRowsAndCountedInTheSummary() = runBlocking {
+        server.enqueue(created("j1"))
+        server.enqueue(
+            done(
+                "j1",
+                """[
+                    {"status":"ok","path":"/a/1.mp3"},
+                    {"status":"ok","path":"/a/2.mp3"}
+                ]""",
+            ),
+        )
+        val first = track("1")
+        val second = track("2")
+        val model = MusicJobViewModel(
+            { Api.service() },
+            lyrics = MusicLyricLookup { path ->
+                if (path == "/a/1.mp3") "/a/1.lrc" else null
+            },
+            pollIntervalMs = 0,
+        )
+
+        model.start(
+            "netease",
+            listOf(first, second),
+            idsByTrack(first to "sid", second to "sid"),
+        )
+        val finished = model.awaitIdle()
+
+        // The screen keys the lyric button by provider + id, like the paths.
+        assertEquals(
+            "/a/1.lrc",
+            finished.lyricPaths[MusicJobResults.trackKey(first)],
+        )
+        assertNull(finished.lyricPaths[MusicJobResults.trackKey(second)])
+
+        val event = withTimeout(5_000) { model.incoming.first() } as MusicJobEvent.Finished
+        assertEquals(1, event.lyricsSaved)
+    }
+
+    @Test
     fun finishedRunIsDeliveredAsAnEventEvenWithoutACollector() = runBlocking {
         server.enqueue(created("j1"))
         server.enqueue(done("j1", """[{"status":"ok","path":"/a/1.mp3"}]"""))
