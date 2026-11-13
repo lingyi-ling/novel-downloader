@@ -350,6 +350,34 @@ def _query_tokens(keyword: str) -> tuple[str, ...]:
     return _query_tokens_cached(keyword)
 
 
+@lru_cache(maxsize=8192)
+def _word_count_cached(raw: str) -> float | None:
+    """
+    Parse one already-stringified word-count label (cached by raw text).
+
+    The caller (:func:`parse_word_count`) has already turned the field into a
+    string, so this layer only normalizes and parses.  The cache key is the raw
+    text: aggregation, filtering and ranking each ask for the same labels
+    repeatedly (a page of rows usually carries a handful of distinct
+    ``"12.3万字"``-style strings), and the function is pure, so caching the
+    result cannot change behaviour.
+    """
+    text = unicodedata.normalize("NFKC", raw).strip()
+    if text.casefold() in _NULL_TOKENS:
+        return None
+    if len(text) > _MAX_WORD_COUNT_LENGTH:
+        return None
+
+    text = text.replace("，", ",")
+    match = _WORD_COUNT_RE.search(text)
+    if match is None:
+        return None
+
+    number = float(match.group(1).replace(",", ""))
+    unit = (match.group(2) or "").casefold()
+    return number * _UNIT_SCALE.get(unit, 1.0)
+
+
 def parse_word_count(value: object) -> float | None:
     """
     Parse a raw word-count string into a number, or ``None`` when unknown.
@@ -370,23 +398,13 @@ def parse_word_count(value: object) -> float | None:
     a year or a chapter number out of a paragraph would distort the
     ``words``/``quality`` ordering.  Every value a bundled site produces is
     far below the limit.
+
+    The parse is memoized by the raw label (see :func:`_word_count_cached`):
+    ranking scores each row once, the local word-count filter then reads the
+    same field, and the final annotation scores the surviving rows again.  A
+    repeated label is therefore parsed once rather than two or three times.
     """
-    text = unicodedata.normalize(
-        "NFKC", str(value if value is not None else "")
-    ).strip()
-    if text.casefold() in _NULL_TOKENS:
-        return None
-    if len(text) > _MAX_WORD_COUNT_LENGTH:
-        return None
-
-    text = text.replace("，", ",")
-    match = _WORD_COUNT_RE.search(text)
-    if match is None:
-        return None
-
-    number = float(match.group(1).replace(",", ""))
-    unit = (match.group(2) or "").casefold()
-    return number * _UNIT_SCALE.get(unit, 1.0)
+    return _word_count_cached(str(value if value is not None else ""))
 
 
 def _relative_delta(amount: int, unit: str) -> timedelta:
@@ -407,31 +425,17 @@ def _relative_delta(amount: int, unit: str) -> timedelta:
     return timedelta(0)
 
 
-def parse_update_date(value: object, *, now: datetime | None = None) -> datetime | None:
+def _parse_update_date_text(text: str, current: datetime) -> datetime | None:
     """
-    Parse a raw update-date string into a ``datetime``, or ``None``.
+    Parse one already-stringified update-date label against ``current``.
 
-    Both absolute formats (``2024-05-01``, ``2024/5/1``, ``2024.5.1 10:00``,
-    ``2024年5月1日``, ISO) and the relative keywords (``刚刚``/``昨天``/
-    ``前天``) / durations such as ``"3天前"`` / ``"2个月前"`` are recognised;
-    the two sets are disjoint, so their internal evaluation order does not
-    affect the result.
-
-    The text is NFKC-normalised before parsing -- like
-    :func:`parse_word_count` -- so the full-width spellings real sites serve
-    (``"２０２４年５月１日"``, ``"２０２４－０５－０１"``, ``"２０２４/５/１"``)
-    parse to the same date as their half-width counterparts.  Folding alone
-    cannot turn a time-of-day value into a date: ``"１２：３０"`` becomes
-    ``"12:30"``, which is not an absolute date format, so it still returns
-    ``None``.
+    ``current`` is always supplied by the caller -- absolute dates do not use
+    it, while relative words (``"3天前"``) do.  Keeping the clock explicit is
+    what makes the memoized wrapper below safe: two calls that resolve a
+    relative date against different instants can never share a cache entry.
     """
-    text = unicodedata.normalize(
-        "NFKC", str(value if value is not None else "")
-    ).strip()
     if text.casefold() in _NULL_TOKENS:
         return None
-
-    current = now or datetime.now()
 
     # Relative forms are checked first: none of them can match an absolute
     # format (those never accept a trailing "前" or the keyword words), so the
@@ -473,6 +477,50 @@ def parse_update_date(value: object, *, now: datetime | None = None) -> datetime
         return datetime.fromisoformat(text)
     except ValueError:
         return None
+
+
+@lru_cache(maxsize=4096)
+def _update_date_cached(raw: str, now: datetime) -> datetime | None:
+    """Memoized :func:`_parse_update_date_text` for one raw label and clock."""
+    return _parse_update_date_text(unicodedata.normalize("NFKC", raw).strip(), now)
+
+
+def parse_update_date(value: object, *, now: datetime | None = None) -> datetime | None:
+    """
+    Parse a raw update-date string into a ``datetime``, or ``None``.
+
+    Both absolute formats (``2024-05-01``, ``2024/5/1``, ``2024.5.1 10:00``,
+    ``2024年5月1日``, ISO) and the relative keywords (``刚刚``/``昨天``/
+    ``前天``) / durations such as ``"3天前"`` / ``"2个月前"`` are recognised;
+    the two sets are disjoint, so their internal evaluation order does not
+    affect the result.
+
+    The text is NFKC-normalised before parsing -- like
+    :func:`parse_word_count` -- so the full-width spellings real sites serve
+    (``"２０２４年５月１日"``, ``"２０２４－０５－０１"``, ``"２０２４/５/１"``)
+    parse to the same date as their half-width counterparts.  Folding alone
+    cannot turn a time-of-day value into a date: ``"１２：３０"`` becomes
+    ``"12:30"``, which is not an absolute date format, so it still returns
+    ``None``.
+
+    When ``now`` is supplied the parse is memoized by ``(raw label, now)``
+    (see :func:`_update_date_cached`): ranking, the local update-date filter
+    and the final annotation all resolve the same labels against the same
+    instant, so each distinct label is parsed once per call instead of once
+    per row.  A relative date is never cached without a clock: ``now=None``
+    means "use the current time", which must be read afresh on every call.
+    An aware clock is not cached either: two equal instants may spell
+    different local wall times, and a relative label's calendar date depends
+    on that spelling.
+    """
+    raw = str(value if value is not None else "")
+    if now is None:
+        return _parse_update_date_text(
+            unicodedata.normalize("NFKC", raw).strip(), datetime.now()
+        )
+    if now.tzinfo is not None:
+        return _parse_update_date_text(unicodedata.normalize("NFKC", raw).strip(), now)
+    return _update_date_cached(raw, now)
 
 
 def _coverage(needle: str, haystack: str) -> float:
