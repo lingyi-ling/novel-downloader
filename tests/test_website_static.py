@@ -255,6 +255,57 @@ def test_data_en_values_are_translated(doc: _Doc) -> None:
         assert not CJK.search(value), f"data-en still contains Chinese: {value[:60]!r}"
 
 
+def test_platform_counts_stay_current(doc: _Doc) -> None:
+    """The hero numbers are the site's factual claims; keep them in one place."""
+    counts = [
+        int(data["data-count"])
+        for data, _ in doc.by_tag("strong")
+        if "data-count" in data
+    ]
+    assert counts == [84, 59, 28, 4]
+
+    labels = {
+        data["data-en"].strip()
+        for data, _ in doc.by_tag("span")
+        if "data-en" in data and data["data-en"].strip()
+    }
+    assert {"Download sites", "Search sources", "Music platforms", "Clients"} <= labels
+
+
+def test_v1_31_value_props_appear_in_both_languages(doc: _Doc, html_text: str) -> None:
+    """v1.31 user value must be woven into existing cards, not a release dump."""
+    english = " ".join(data["data-en"] for data in doc.with_attr("data-en"))
+    for phrase in (
+        "explainable match tier",
+        "per-source progress",
+        "account, dependency and CDM",
+        "Online SQLite backup/restore",
+        "zero deletions",
+        "export --out",
+        "fish completion",
+        "Skip link",
+        "Task snapshots",
+        "ready state is bound to its version",
+    ):
+        assert phrase.lower() in english.lower(), (
+            f"missing English value prop: {phrase}"
+        )
+
+    for phrase in (
+        "匹配等级",
+        "逐源显示进度",
+        "账号、依赖与 CDM",
+        "SQLite 在线备份/恢复",
+        "零删除",
+        "export --out",
+        "fish 补全",
+        "跳过导航",
+        "任务快照",
+        "更新就绪状态与版本绑定",
+    ):
+        assert phrase in html_text, f"missing Chinese value prop: {phrase}"
+
+
 def test_every_visible_chinese_string_has_english(doc: _Doc) -> None:
     """Catch new Chinese copy that forgot the parallel data-en attribute."""
     skip_ancestor_tags = {"script", "style", "title", "code", "pre", "noscript"}
