@@ -245,6 +245,9 @@ input, select, textarea { font: inherit; color: inherit; }
 .btn-danger:hover:not(:disabled) { background: var(--red-bg); border-color: var(--red); }
 .btn-sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: var(--radius-sm); gap: 5px; }
 .btn-sm svg.icon { width: 14px; height: 14px; }
+/* Original + translated lyric buttons sit together without stretching the
+   row; each stays a native button so Tab/Enter work unchanged. */
+.lyric-actions { display: inline-flex; align-items: center; gap: 4px; }
 .btn-lg { height: 44px; padding: 0 18px; font-size: 13.5px; border-radius: var(--radius-md); }
 
 .field {
@@ -401,6 +404,19 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 .filters { display: flex; gap: 8px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
 .filters .field { height: 34px; border-radius: var(--radius-md); flex: 1; min-width: 240px; }
 .filters .merge-toggle { margin-left: auto; }
+/* Optional search filters: the panel wraps on narrow windows instead of
+   pushing the filter row past the content column. The [hidden] rule is needed
+   because these flex displays would otherwise override the attribute. */
+.search-filters { display: flex; gap: 8px; margin-top: 8px; align-items: flex-end; flex-wrap: wrap; }
+.search-filters[hidden] { display: none; }
+.search-filters .filter-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 150px; min-width: 0; }
+.search-filters .filter-label { font-size: 11.5px; color: var(--text-3); }
+.search-filters .field { height: 34px; flex: none; }
+.search-filters .field input { width: 100%; }
+.search-filters .filter-error { flex-basis: 100%; margin: 0; min-height: 0; }
+.search-applied { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 2px 0; font-size: 12px; color: var(--text-2); }
+.search-applied[hidden] { display: none; }
+.search-applied .hint { flex: 1 1 220px; min-width: 0; }
 .hint { font-size: 11.5px; color: var(--text-3); }
 .spin {
   width: 14px; height: 14px; border-radius: 50%; flex: none;
@@ -698,6 +714,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 <symbol id="i-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></symbol>
 <symbol id="i-hist" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/></symbol>
 <symbol id="i-music" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
+<symbol id="i-lyrics" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 11h16M4 16h10"/><path d="M18 14v6"/><circle cx="16" cy="20" r="2"/></symbol>
 <symbol id="i-heart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.5-1.5 3-3.2 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.8 0-3 .5-4.5 2-1.5-1.5-2.7-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4 3 5.5l7 7Z"/></symbol>
 <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/></symbol>
 <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
@@ -773,9 +790,29 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
           <div class="filters">
             <div class="field"><svg class="icon"><use href="#i-pulse"/></svg><input id="q-sites" data-i18n-ph="Site filter, comma separated (blank = all)" placeholder="Site filter, comma separated (blank = all)"></div>
             <label class="merge-toggle" for="q-group"><input type="checkbox" class="cb" id="q-group" checked><span data-i18n="Merge same book">Merge same book</span></label>
+            <button class="btn btn-ghost btn-sm" id="btn-search-filters" aria-expanded="false" aria-controls="search-filter-panel"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Filters">Filters</span><span class="count-chip" id="search-filter-count" hidden></span></button>
             <button class="btn btn-ghost btn-sm" id="btn-rank"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Rankings">Rankings</span></button>
             <button class="btn btn-ghost btn-sm" id="btn-cats"><svg class="icon"><use href="#i-book"/></svg><span data-i18n="Categories">Categories</span></button>
             <span class="hint" id="search-hint"></span>
+          </div>
+          <div class="search-filters" id="search-filter-panel" hidden>
+            <label class="filter-field" for="q-min-words">
+              <span class="filter-label" data-i18n="Min words">Min words</span>
+              <span class="field"><input id="q-min-words" type="number" min="0" step="1" inputmode="numeric" data-i18n-ph="e.g. 100000" placeholder="e.g. 100000"></span>
+            </label>
+            <label class="filter-field" for="q-max-words">
+              <span class="filter-label" data-i18n="Max words">Max words</span>
+              <span class="field"><input id="q-max-words" type="number" min="0" step="1" inputmode="numeric" data-i18n-ph="e.g. 100000" placeholder="e.g. 100000"></span>
+            </label>
+            <label class="filter-field" for="q-updated-after">
+              <span class="filter-label" data-i18n="Updated after">Updated after</span>
+              <span class="field"><input id="q-updated-after" type="date"></span>
+            </label>
+            <p class="hint filter-error" id="search-filter-error" role="alert" hidden></p>
+          </div>
+          <div class="search-applied" id="search-applied" role="status" aria-live="polite" hidden>
+            <span class="hint" id="search-applied-text"></span>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-clear-filters"><svg class="icon"><use href="#i-x"/></svg><span data-i18n="Clear filters">Clear filters</span></button>
           </div>
         </div>
         <div class="card" id="cat-panel" hidden style="margin-top:16px;padding:14px 16px">
@@ -975,6 +1012,14 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
               </select></label>
             <label class="set-row"><span class="lbl" data-i18n="Language">Language</span>
               <select class="picker" id="set-language"></select></label>
+          </div>
+
+          <div class="card settings-card">
+            <div class="settings-title" data-i18n="Search filters">Search filters</div>
+            <div class="settings-help" data-i18n="The last used filters are restored when the app starts.">The last used filters are restored when the app starts.</div>
+            <div class="settings-actions">
+              <button class="btn btn-ghost btn-sm" id="btn-set-clear-search-filters"><svg class="icon"><use href="#i-trash"/></svg><span data-i18n="Clear saved filters">Clear saved filters</span></button>
+            </div>
           </div>
 
           <div class="card settings-card wide">
@@ -1443,6 +1488,18 @@ $("#btn-set-check").onclick = () => {
   call("check_update");
 };
 
+$("#btn-set-clear-search-filters").onclick = async () => {
+  const r = await call("clear_search_filters");
+  if (r && r.ok === false) {
+    toast(r.error || t("Could not clear the saved search filters"), "err", 7000);
+    return;
+  }
+  // Keep the search panel in step: values cleared here must not be saved
+  // again by the next search from this window.
+  clearSearchFilters();
+  toast(t("Saved search filters cleared"), "ok");
+};
+
 $("#btn-set-shortcut").onclick = async () => {
   const r = await call("create_shortcut");
   if (r && r.message) toast(r.message, r.ok ? "ok" : "warn");
@@ -1738,6 +1795,9 @@ let activeSearchKeyword = "";
 /* Bridge id of the search currently polled, so cancel can stop its backend
    work instead of only abandoning the poll loop. */
 let activeSearchId = "";
+/* JSON key of the filters attached to the running search. A repeated search
+   with the same keyword but different filters must supersede the old one. */
+let activeSearchFilterKey = "";
 /* Aggregate searches can return hundreds of rows. Only one screenful is
    built up front; "Show more" appends the next batch. ``data-sel`` always
    holds the index into ``lastResults``, so selection stays global. */
@@ -1860,6 +1920,7 @@ function renderDetail(r, kw) {
 function endSearchUi() {
   searching = false;
   activeSearchKeyword = "";
+  activeSearchFilterKey = "";
   activeSearchId = "";
   $("#search-spin").classList.remove("on");
   $("#btn-search").disabled = false;
@@ -1873,6 +1934,7 @@ function cancelActiveSearch() {
   // Bump the token first: the owner of the old loop checks it and drops out.
   searchSeq++;
   activeSearchKeyword = "";
+  activeSearchFilterKey = "";
   activeSearchId = "";
   if (searching) endSearchUi();
   // Do not leave the bridge ranking / fetching sites nobody will read.
@@ -1915,18 +1977,196 @@ function resetResultList() {
   renderedResultCount = 0;
   renderedKeyword = "";
 }
+
+/* ====================================================== search filters */
+const MAX_SEARCH_WORDS = 1000000000;
+function searchFilterError(message, input) {
+  const box = $("#search-filter-error");
+  if (box) {
+    box.hidden = !message;
+    box.textContent = message || "";
+  }
+  document.querySelectorAll("#search-filter-panel .field.bad").forEach(el => el.classList.remove("bad"));
+  document.querySelectorAll("#search-filter-panel input[aria-invalid]").forEach(el => el.removeAttribute("aria-invalid"));
+  if (input) {
+    const wrap = input.closest(".field");
+    if (wrap) wrap.classList.add("bad");
+    input.setAttribute("aria-invalid", "true");
+  }
+}
+function hideSearchFilterError() { searchFilterError("", null); }
+function setFilterPanel(open, focus = true) {
+  const panel = $("#search-filter-panel");
+  const btn = $("#btn-search-filters");
+  if (!panel || !btn) return;
+  panel.hidden = !open;
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open && focus) {
+    const first = $("#q-min-words");
+    if (first) first.focus({ preventScroll: true });
+  }
+}
+function draftFilterCount() {
+  return ["#q-min-words", "#q-max-words", "#q-updated-after"].filter(sel => {
+    const el = $(sel);
+    return !!(el && String(el.value || "").trim());
+  }).length;
+}
+function updateFilterCount() {
+  const count = draftFilterCount();
+  const chip = $("#search-filter-count");
+  if (!chip) return;
+  chip.hidden = count === 0;
+  chip.textContent = String(count);
+}
+function parseWordFilter(field) {
+  const input = field === "min" ? $("#q-min-words") : $("#q-max-words");
+  if (input && input.validity && input.validity.badInput) {
+    const msg = field === "min"
+      ? t("Min words must be a whole number between 0 and {max}").replace("{max}", MAX_SEARCH_WORDS)
+      : t("Max words must be a whole number between 0 and {max}").replace("{max}", MAX_SEARCH_WORDS);
+    searchFilterError(msg, input);
+    input.focus({ preventScroll: true });
+    return null;
+  }
+  const text = String(input ? input.value : "").trim();
+  if (!text) return { value: null };
+  const msg = field === "min"
+    ? t("Min words must be a whole number between 0 and {max}").replace("{max}", MAX_SEARCH_WORDS)
+    : t("Max words must be a whole number between 0 and {max}").replace("{max}", MAX_SEARCH_WORDS);
+  if (!/^\d+$/.test(text)) {
+    searchFilterError(msg, input);
+    if (input) input.focus({ preventScroll: true });
+    return null;
+  }
+  const value = Number(text);
+  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_SEARCH_WORDS) {
+    searchFilterError(msg, input);
+    if (input) input.focus({ preventScroll: true });
+    return null;
+  }
+  return { value };
+}
+function validDateText(text) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+}
+/**
+ * Read and validate the three optional filters.
+ *
+ * Blank fields mean "no filter". On invalid input the inline error is shown,
+ * the offending field is marked and focused, and ``null`` is returned so the
+ * caller does not start a search; the bridge validates the same values again
+ * because a JS-side check is a convenience, not the security boundary.
+ */
+function readSearchFilters() {
+  hideSearchFilterError();
+  const min = parseWordFilter("min");
+  if (!min) return null;
+  const max = parseWordFilter("max");
+  if (!max) return null;
+  if (min.value !== null && max.value !== null && min.value > max.value) {
+    const message = t("Min words cannot be greater than max words");
+    const input = $("#q-max-words");
+    searchFilterError(message, input);
+    if (input) input.focus({ preventScroll: true });
+    return null;
+  }
+  const dateInput = $("#q-updated-after");
+  let after = "";
+  if (dateInput && dateInput.validity && dateInput.validity.badInput) {
+    searchFilterError(t("Use a YYYY-MM-DD date"), dateInput);
+    dateInput.focus({ preventScroll: true });
+    return null;
+  }
+  if (dateInput) after = String(dateInput.value || "").trim();
+  if (after && !validDateText(after)) {
+    searchFilterError(t("Use a YYYY-MM-DD date"), dateInput);
+    if (dateInput) dateInput.focus({ preventScroll: true });
+    return null;
+  }
+  return { min_words: min.value, max_words: max.value, updated_after: after };
+}
+function filterSummary(filters) {
+  if (!filters) return [];
+  const parts = [];
+  if (filters.min_words != null) parts.push(t("Min words: {n}").replace("{n}", filters.min_words));
+  if (filters.max_words != null) parts.push(t("Max words: {n}").replace("{n}", filters.max_words));
+  if (filters.updated_after) parts.push(t("Updated after {date}").replace("{date}", filters.updated_after));
+  return parts;
+}
+function setAppliedFilters(filters) {
+  const box = $("#search-applied");
+  const text = $("#search-applied-text");
+  if (!box || !text) return;
+  const parts = filterSummary(filters);
+  box.hidden = parts.length === 0;
+  text.textContent = parts.length
+    ? t("Filters applied: {filters}").replace("{filters}", parts.join(" · "))
+    : "";
+}
+function clearSearchFilters() {
+  ["#q-min-words", "#q-max-words", "#q-updated-after"].forEach(sel => {
+    const el = $(sel);
+    if (el) el.value = "";
+  });
+  hideSearchFilterError();
+  updateFilterCount();
+  setAppliedFilters(null);
+  // Clearing the fields also forgets the saved copy, so the next launch does
+  // not bring back filters the user just removed.
+  api("clear_search_filters").catch(() => {});
+}
+/**
+ * Fill the filter panel from the preferences saved by the previous session.
+ *
+ * Only values already validated by the bridge are applied. The panel is
+ * opened (without stealing focus) when there is something to show, and no
+ * search is started: the user still presses Search themselves.
+ */
+function applyStoredSearchFilters(filters) {
+  if (!filters || typeof filters !== "object") return;
+  const min = $("#q-min-words");
+  const max = $("#q-max-words");
+  const after = $("#q-updated-after");
+  if (min) min.value = Number.isInteger(filters.min_words) ? String(filters.min_words) : "";
+  if (max) max.value = Number.isInteger(filters.max_words) ? String(filters.max_words) : "";
+  if (after) {
+    const date = String(filters.updated_after || "");
+    after.value = date && validDateText(date) ? date : "";
+  }
+  updateFilterCount();
+  if (draftFilterCount() > 0) setFilterPanel(true, false);
+}
 async function doSearch() {
   const kw = $("#q").value.trim();
   if (!kw) return;
-  // A repeated Enter / button press while the same query is in flight is a
-  // no-op. A *different* query supersedes it: bumping the token stops the old
-  // poll instead of letting it paint stale rows over the new ones.
-  if (searching && kw === activeSearchKeyword) return;
+  const filters = readSearchFilters();
+  if (!filters) return;
+  // Remember the last valid filter set for the next launch. This also clears
+  // the stored copy when every field is blank. Best effort: a read-only
+  // profile must not stop the search itself.
+  api("save_search_filters", filters.min_words, filters.max_words, filters.updated_after).catch(() => {});
+  const filterKey = JSON.stringify(filters);
+  // A repeated Enter / button press while the same query and filters are in
+  // flight is a no-op. A *different* query or filter set supersedes it:
+  // bumping the token stops the old poll instead of letting it paint stale
+  // rows over the new ones.
+  if (searching && kw === activeSearchKeyword) {
+    if (filterKey === activeSearchFilterKey) return;
+  }
   const previousId = activeSearchId;
   const token = ++searchSeq;
   searching = true;
   activeSearchKeyword = kw;
+  activeSearchFilterKey = filterKey;
   activeSearchId = "";
+  setAppliedFilters(filters);
   if (previousId) api("cancel_search", previousId).catch(() => {});
   $("#search-spin").classList.add("on");
   $("#btn-search").disabled = true;
@@ -1939,13 +2179,16 @@ async function doSearch() {
   const started = performance.now();
   let rendered = -1;
   try {
-    const job = await api("search_async", kw, $("#q-sites").value.trim(), $("#q-group").checked);
+    const job = await api("search_async", kw, $("#q-sites").value.trim(), $("#q-group").checked, filters.min_words, filters.max_words, filters.updated_after);
     if (token !== searchSeq) {
       // The user cancelled (or searched again) while the bridge was starting:
       // stop the orphaned backend search instead of letting it run to timeout.
       if (job && job.search_id) api("cancel_search", job.search_id).catch(() => {});
       return;
     }
+    // The bridge rejects an invalid filter with a structured error; show its
+    // message instead of the generic "Search failed".
+    if (job && job.error) throw new Error(job.error);
     if (!job || !job.search_id) throw new Error(t("Search failed"));
     activeSearchId = job.search_id;
     for (;;) {
@@ -2147,8 +2390,10 @@ $("#detail").addEventListener("click", async e => {
 $("#btn-rank").onclick = async () => {
   const btn = $("#btn-rank");
   // A rank list replaces the search rows: stop any poll still in flight so it
-  // cannot append stale results after this render.
+  // cannot append stale results after this render. The applied-filter strip
+  // belongs to keyword searches only, so it goes away with them.
   cancelActiveSearch();
+  setAppliedFilters(null);
   showSearchProgress("", false);
   btn.disabled = true;
   $("#search-hint").textContent = t("Searching…");
@@ -2211,6 +2456,7 @@ $("#cat-chips").addEventListener("click", async e => {
   const chip = e.target.closest("[data-cat]");
   if (!chip) return;
   cancelActiveSearch();
+  setAppliedFilters(null);
   showSearchProgress("", false);
   $("#cat-hint").textContent = t("Searching…");
   const started = performance.now();
@@ -2234,6 +2480,36 @@ $("#cat-chips").addEventListener("click", async e => {
 });
 $("#btn-search").onclick = doSearch;
 $("#btn-search-cancel").onclick = cancelCurrentSearch;
+/* Optional filters stay collapsed by default so the common search flow is
+   unchanged. The toggle is a normal button (keyboard/screen-reader friendly)
+   and the panel closes with Escape without touching the query. */
+$("#btn-search-filters").onclick = () => setFilterPanel($("#search-filter-panel").hidden);
+$("#search-filter-panel").addEventListener("keydown", e => {
+  if (e.key !== "Escape" || e.isComposing) return;
+  e.preventDefault();
+  setFilterPanel(false);
+  const btn = $("#btn-search-filters");
+  if (btn) btn.focus({ preventScroll: true });
+});
+["#q-min-words", "#q-max-words", "#q-updated-after"].forEach(sel => {
+  const el = $(sel);
+  if (!el) return;
+  el.addEventListener("input", () => { hideSearchFilterError(); updateFilterCount(); });
+  el.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); doSearch(); }
+  });
+});
+$("#btn-clear-filters").onclick = () => {
+  const kw = $("#q").value.trim();
+  // Clear applies to the search that owns the current results. If they came
+  // from this keyword, rerun unfiltered so the list matches the inputs again.
+  const rerun = !!(kw && (searching ? kw === activeSearchKeyword : lastKeyword === kw));
+  clearSearchFilters();
+  if (!rerun) return;
+  if (searching) cancelActiveSearch();
+  doSearch();
+};
+updateFilterCount();
 $("#q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.isComposing) doSearch(); });
 /* Escape inside the search box is deliberately two-step and self-contained:
    a running search is cancelled first (the keyboard twin of the Cancel
@@ -2655,12 +2931,45 @@ function sourceChips(tr) {
   const more = sources.length > 3 ? `<span class="src-tag">+${sources.length - 3}</span>` : "";
   return `<span class="src-tags" title="${esc(sources.join(", "))}">${shown}${more}</span>`;
 }
+
+function lyricLangLabel(lang) {
+  // The bridge reports stable language slots, not localized copy: look the
+  // visible label up here so switching languages relabels old results too.
+  const slot = String(lang || "");
+  if (slot === "原文") return t("Original lyrics");
+  if (slot === "译文") return t("Translated lyrics");
+  return slot || t("Lyrics");
+}
+
+/* One button per saved lyric file. A translation adds a second button next to
+   the original; a single file keeps the historical one-button row. Every
+   button is a native <button>, so Tab/Enter keep working and clicks still go
+   through openPath() (a file deleted since the list was drawn becomes a toast). */
+function lyricButtons(tr, i) {
+  const listed = Array.isArray(tr.lyric_paths)
+    ? tr.lyric_paths
+      .filter(entry => entry && entry.path)
+      .map(entry => ({ lang: String(entry.lang || ""), path: String(entry.path) }))
+    : [];
+  if (!listed.length) {
+    return tr.lyric_path
+      ? `<button type="button" class="btn btn-ghost btn-sm" id="m-lyric-${i}" data-lyric="${esc(tr.lyric_path)}" data-lyric-id="${i}" title="${esc(tr.lyric_path)}" aria-label="${esc(t("Lyrics for {name}").replace("{name}", tr.name))}"><svg class="icon"><use href="#i-lyrics"/></svg>${esc(t("Lyrics"))}</button>`
+      : "";
+  }
+  const baseLabel = t("Lyrics for {name}").replace("{name}", tr.name);
+  const buttons = listed.map((entry, j) => {
+    const label = lyricLangLabel(entry.lang);
+    return `<button type="button" class="btn btn-ghost btn-sm" id="m-lyric-${i}-${j}" data-lyric="${esc(entry.path)}" data-lyric-id="${i}" data-lyric-lang="${esc(entry.lang)}" title="${esc(entry.path)}" aria-label="${esc(label + " — " + baseLabel)}"><svg class="icon"><use href="#i-lyrics"/></svg>${esc(label)}</button>`;
+  }).join("");
+  return `<span class="lyric-actions" role="group" aria-label="${esc(t("Lyrics"))}">${buttons}</span>`;
+}
+
 function renderTracks() {
   const box = $("#m-tracks");
   // Streaming searches redraw this list while the user may be tabbing the
   // checkboxes. Match by track identity (not row index) so focus follows the
   // same song even when partial snapshots merge and reorder the list.
-  const focusKey = captureFocus(box, ["data-key"]);
+  const focusKey = captureFocus(box, ["data-key", "data-lyric-id"]);
   if (!music.tracks.length) {
     box.innerHTML = `<div class="empty"><svg class="icon"><use href="#i-music"/></svg><div class="t">${esc(t("Search a song to begin"))}</div></div>`;
     return;
@@ -2674,6 +2983,7 @@ function renderTracks() {
         <div class="row-sub">${esc(tr.artists)}${tr.album ? " — " + esc(tr.album) : ""}</div>
       </div>
       ${sourceChips(tr)}
+      ${lyricButtons(tr, i)}
       ${tr.ext ? `<span class="hint mono">${esc(tr.ext.toUpperCase())}</span>` : ""}
       <span class="hint mono">${esc(fmtDur(tr.duration_s))}</span>
     </div>`).join("");
@@ -2686,6 +2996,13 @@ $("#m-tracks").addEventListener("change", e => {
   if (cb.checked) music.selected.add(i); else music.selected.delete(i);
   music.userTouched = true;
   $("#btn-m-dl").disabled = music.downloading || !music.searchId || !music.selected.size;
+});
+/* The lyric button only exists when the downloader really saved a ``.lrc``
+   beside the audio; open it through the reporting helper so a file deleted
+   since the list was drawn produces a toast instead of a dead click. */
+$("#m-tracks").addEventListener("click", e => {
+  const btn = e.target.closest("[data-lyric]");
+  if (btn) openPath(btn.dataset.lyric);
 });
 $("#btn-m-selall").onclick = () => {
   music.userTouched = true;
@@ -2887,6 +3204,25 @@ function pollMusic() {
           if (p && target != null && music.tracks[target]) music.tracks[target].path = p;
         });
       }
+      // ``results`` mirrors the same batch and adds ``lyric_path`` (legacy,
+      // original only) plus ``lyric_paths`` (original and/or translation) only
+      // when the downloader really saved those files beside the audio. Render
+      // once the batch settles so failed rows do not grow stale buttons.
+      let hasLyrics = false;
+      if (st && Array.isArray(st.results)) {
+        st.results.forEach((item, i) => {
+          const target = music.batch[i];
+          const tr = item && target != null ? music.tracks[target] : null;
+          if (!tr) return;
+          if (item.path) tr.path = item.path;
+          if (Array.isArray(item.lyric_paths) && item.lyric_paths.length) {
+            tr.lyric_paths = item.lyric_paths;
+            hasLyrics = true;
+          } else delete tr.lyric_paths;
+          if (item.lyric_path) { tr.lyric_path = item.lyric_path; hasLyrics = true; }
+          else delete tr.lyric_path;
+        });
+      }
       if (!st || !st.active) {
         if (music.downloading) {
           music.downloading = false;
@@ -2897,6 +3233,9 @@ function pollMusic() {
           $("#m-progress").querySelector("i").style.width = "0%";
           $("#m-progress").setAttribute("aria-valuenow", "0");
           setTimeout(() => { $("#m-progress").hidden = true; }, 600);
+          // Saved lyrics are a result of the run: redraw the rows so the
+          // "Lyrics" buttons appear without another search.
+          if (hasLyrics) renderTracks();
           // Which rows failed (and why) is page content, not a toast.
           showMusicFailures(st && Array.isArray(st.failed_items) ? st.failed_items : []);
           if (st && st.summary) toast(st.summary, st.failed ? "warn" : "ok", 6000);
@@ -3168,6 +3507,9 @@ function boot() {
     // A saved preference wins; without one, keep the per-window choice from
     // localStorage instead of resetting the user to "light" on every launch.
     applyTheme(state.theme_stored ? state.theme : store.get("theme", "light"));
+    // Restore the filters saved by the last search. Deliberately no search:
+    // the inputs are filled in, the user chooses when to run it.
+    applyStoredSearchFilters(state.search_filters);
     if (state.is_frozen && !state.shortcut_exists) {
       setTimeout(() => toast(t("Click here to create a desktop shortcut"), "info", 6000), 1200);
     }

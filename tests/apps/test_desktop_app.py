@@ -31,7 +31,7 @@ import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1041,6 +1041,309 @@ def test_bridge_search_stays_flat_without_group(
     assert "sources" not in payload["results"][0]
 
 
+def test_bridge_search_passes_optional_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page's min/max/date values reach the search layer as typed kwargs."""
+    calls: dict[str, Any] = {}
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        calls["keyword"] = keyword
+        calls.update(kwargs)
+        return []
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+    bridge = ApiBridge()
+    try:
+        payload = bridge.search("三体", "", False, 4, "10000", 200000, "2024-01-01")
+    finally:
+        bridge.shutdown()
+
+    assert payload["results"] == []
+    assert "error" not in payload
+    assert calls["min_words"] == 10000
+    assert calls["max_words"] == 200000
+    assert calls["updated_after"] == date(2024, 1, 1)
+
+
+def test_bridge_search_omits_blank_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blank inputs mean "no filter" and are not forwarded at all."""
+    calls: dict[str, Any] = {}
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        calls.update(kwargs)
+        return []
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+    bridge = ApiBridge()
+    try:
+        bridge.search("三体", "", False, 4, "", "   ", "")
+    finally:
+        bridge.shutdown()
+
+    assert "min_words" not in calls
+    assert "max_words" not in calls
+    assert "updated_after" not in calls
+
+
+def test_bridge_progressive_search_forwards_filters_to_stream_and_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both the preview chunks and the final ranking carry the same filters."""
+    row = {
+        "site": "alpha",
+        "book_id": "a",
+        "book_url": "https://example.invalid/a",
+        "cover_url": "",
+        "title": "三体",
+        "author": "刘慈欣",
+        "latest_chapter": "",
+        "update_date": "",
+        "word_count": "30万字",
+        "priority": 1,
+    }
+    stream_calls: dict[str, Any] = {}
+    final_calls: dict[str, Any] = {}
+
+    async def fake_stream(keyword: str, **kwargs: Any) -> Any:
+        stream_calls.update(kwargs)
+        yield [row]
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        final_calls.update(kwargs)
+        return [row]
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search_stream", fake_stream)
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    bridge = ApiBridge()
+    try:
+        job = bridge.search_async("三体", "", False, 4, "10000", "200000", "2024-01-01")
+        deadline = time.time() + 5
+        while True:
+            state = bridge.search_progress(job["search_id"])
+            if state["done"] or time.time() > deadline:
+                break
+            time.sleep(0.02)
+    finally:
+        bridge.shutdown()
+
+    assert state["done"] is True
+    for calls in (stream_calls, final_calls):
+        assert calls["min_words"] == 10000
+        assert calls["max_words"] == 200000
+        assert calls["updated_after"] == date(2024, 1, 1)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"min_words": "-1"}, "min_words"),
+        ({"min_words": "ten thousand"}, "min_words"),
+        ({"max_words": 1_000_000_001}, "max_words"),
+        ({"min_words": 100, "max_words": 10}, "max_words"),
+        ({"updated_after": "2024/01/01"}, "updated_after"),
+        ({"updated_after": "2024-02-30"}, "updated_after"),
+    ],
+)
+def test_bridge_rejects_invalid_search_filters(
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, Any],
+    field: str,
+) -> None:
+    """An invalid filter answers a structured error instead of searching."""
+
+    async def fail_search(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("the search layer must not run for invalid filters")
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fail_search)
+    bridge = ApiBridge()
+    try:
+        payload = bridge.search("三体", **kwargs)
+    finally:
+        bridge.shutdown()
+
+    assert payload["results"] == []
+    assert payload["ok"] is False
+    assert payload["error_code"] == "invalid_search_filter"
+    assert payload["error_field"] == field
+    assert payload["error"]
+
+
+def test_bridge_progressive_search_rejects_invalid_filters_before_starting() -> None:
+    """``search_async`` returns the same structured error with ``done=True``."""
+    bridge = ApiBridge()
+    try:
+        payload = bridge.search_async("三体", "", False, 4, "not-a-number")
+    finally:
+        bridge.shutdown()
+
+    assert payload["search_id"] == ""
+    assert payload["results"] == []
+    assert payload["done"] is True
+    assert payload["error_field"] == "min_words"
+    assert payload["error_code"] == "invalid_search_filter"
+
+
+def test_saved_search_filters_round_trip_through_the_prefs_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The last valid filter set is stored in a normalised JSON shape."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    bridge = wa.ApiBridge()
+    try:
+        result = bridge.save_search_filters("10000", 200000, "2024-01-01")
+        assert result["ok"] is True
+        assert result["error"] is None
+        expected = {
+            "min_words": 10000,
+            "max_words": 200000,
+            "updated_after": "2024-01-01",
+        }
+        assert result["filters"] == expected
+        assert json.loads(prefs.read_text(encoding="utf-8")) == {
+            "search_filters": expected
+        }
+
+        # A fresh bridge (the next launch) restores the same values.
+        restored = wa.ApiBridge().get_initial_state()["search_filters"]
+    finally:
+        bridge.shutdown()
+
+    assert restored == expected
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"min_words": "-1"}, "min_words"),
+        ({"max_words": "ten thousand"}, "max_words"),
+        ({"min_words": 100, "max_words": 10}, "max_words"),
+        ({"updated_after": "2024/01/01"}, "updated_after"),
+        ({"updated_after": "2024-02-30"}, "updated_after"),
+    ],
+)
+def test_save_search_filters_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    kwargs: dict[str, Any],
+    field: str,
+) -> None:
+    """The save path reuses the search contract and never writes bad values."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    payload = wa.ApiBridge().save_search_filters(**kwargs)
+
+    assert payload["ok"] is False
+    assert payload["error_code"] == "invalid_search_filter"
+    assert payload["error_field"] == field
+    assert payload["error"]
+    assert not prefs.exists(), "a rejected filter must not reach the file"
+
+
+def test_clear_search_filters_removes_the_saved_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Clearing — explicitly or by searching blank — forgets the filters."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    bridge = wa.ApiBridge()
+    try:
+        assert bridge.save_search_filters("10000", "", "")["ok"] is True
+        assert json.loads(prefs.read_text(encoding="utf-8"))["search_filters"] == {
+            "min_words": 10000
+        }
+
+        assert bridge.clear_search_filters()["ok"] is True
+        assert "search_filters" not in json.loads(prefs.read_text(encoding="utf-8"))
+        assert bridge.get_initial_state()["search_filters"] == {}
+
+        # Saving an all-blank set is the same as clearing.
+        assert bridge.save_search_filters("", "", "")["ok"] is True
+        assert "search_filters" not in json.loads(prefs.read_text(encoding="utf-8"))
+    finally:
+        bridge.shutdown()
+
+
+def test_corrupt_prefs_fall_back_to_no_saved_filters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unreadable prefs are ignored (and preserved) instead of raising."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    prefs.write_text("{ this is not json", encoding="utf-8")
+
+    bridge = wa.ApiBridge()
+    try:
+        assert bridge.get_initial_state()["search_filters"] == {}
+        assert bridge.save_search_filters("1000")["ok"] is True
+    finally:
+        bridge.shutdown()
+
+    backup = prefs.with_name(prefs.name + ".broken")
+    assert backup.read_text(encoding="utf-8") == "{ this is not json"
+    assert json.loads(prefs.read_text(encoding="utf-8")) == {
+        "search_filters": {"min_words": 1000}
+    }
+
+
+def test_invalid_stored_search_filters_are_ignored_field_by_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Hand-edited values are dropped without losing the valid neighbours."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    prefs.write_text(
+        json.dumps(
+            {
+                "search_filters": {
+                    "min_words": "many",
+                    "max_words": 5000,
+                    "updated_after": "2024-02-30",
+                    "evil": "payload",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    bridge = wa.ApiBridge()
+    try:
+        assert bridge.get_initial_state()["search_filters"] == {"max_words": 5000}
+
+        # An impossible min/max pair is discarded as a unit, the date survives.
+        prefs.write_text(
+            json.dumps(
+                {
+                    "search_filters": {
+                        "min_words": 100,
+                        "max_words": 10,
+                        "updated_after": "2024-01-01",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert bridge.get_initial_state()["search_filters"] == {
+            "updated_after": "2024-01-01"
+        }
+
+        # A non-object value (older/broken file) is ignored as a whole.
+        prefs.write_text(json.dumps({"search_filters": ["10000"]}), encoding="utf-8")
+        assert bridge.get_initial_state()["search_filters"] == {}
+    finally:
+        bridge.shutdown()
+
+
 def test_bridge_progressive_search_reports_rows_then_the_ranked_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1483,7 +1786,162 @@ def test_bridge_music_status_and_stop_defaults() -> None:
     assert status["active"] is False
     assert status["total"] == 0
     assert status["paths"] == []
+    assert status["results"] == []
     assert bridge.music_stop() == {"ok": True}
+
+
+def test_bridge_music_results_report_only_existing_lyrics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``lyric_path`` lands in the per-track result only when the ``.lrc`` exists."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    audio = tmp_path / "Track - Artist.mp3"
+    audio.write_bytes(b"\xff\xfb")
+    with_lyrics = tmp_path / "Other - Artist.mp3"
+    with_lyrics.write_bytes(b"\xff\xfb")
+    lrc = with_lyrics.with_suffix(".lrc")
+    lrc.write_text("[00:00.00]hi\n", encoding="utf-8")
+
+    @dataclass
+    class _FakeTrack:
+        name: str = ""
+        artists: str = ""
+        path: str = ""
+
+    def fake_download_mixed(
+        _create_provider: Any, tracks: Any, _opts: Any, **kwargs: Any
+    ) -> tuple[int, int, int, list[object], list[object]]:
+        on_result = kwargs["on_result"]
+        on_result(0, tracks[0], SimpleNamespace(status="ok", path=str(audio)))
+        on_result(1, tracks[1], SimpleNamespace(status="ok", path=str(with_lyrics)))
+        return 2, 0, 0, [], []
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "Track": _FakeTrack,
+            "create": lambda _platform: None,
+            "download_mixed": fake_download_mixed,
+            # A concrete platform skips the aggregate routing.
+            "is_all_platforms": lambda _platform: False,
+        },
+    )
+    monkeypatch.setattr(wa.ApiBridge, "_music_options", staticmethod(lambda _l: None))
+
+    bridge = wa.ApiBridge()
+    rows = [{"name": "Track"}, {"name": "Other"}]
+    assert bridge.music_download("netease", rows)["ok"] is True
+    status = _wait_for_music_idle(bridge)
+
+    # The legacy field is unchanged and still lists both audio files.
+    assert status["paths"] == [str(audio), str(with_lyrics)]
+    assert status["results"][0] == {"path": str(audio)}
+    # Existence filtering: a missing ``.lrc`` must not reach the page.
+    assert "lyric_path" not in status["results"][0]
+    assert status["results"][1] == {
+        "path": str(with_lyrics),
+        "lyric_path": str(lrc),
+        "lyric_paths": [{"lang": "原文", "path": str(lrc)}],
+    }
+    # The batch summary counts tracks whose lyrics landed.
+    assert status["summary"] == (
+        t("Downloaded {n} tracks").replace("{n}", "2")
+        + " · "
+        + t("{n} with lyrics").replace("{n}", "1")
+    )
+
+
+def test_bridge_music_results_report_original_and_translated_lyrics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``lyric_paths`` lists every existing lyric file, original first."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    plain = tmp_path / "Plain - Artist.mp3"
+    plain.write_bytes(b"\xff\xfb")
+    original_only = tmp_path / "Original - Artist.mp3"
+    original_only.write_bytes(b"\xff\xfb")
+    original_lrc = original_only.with_suffix(".lrc")
+    original_lrc.write_text("[00:00.00]original\n", encoding="utf-8")
+    both = tmp_path / "Both - Artist.mp3"
+    both.write_bytes(b"\xff\xfb")
+    both_lrc = both.with_suffix(".lrc")
+    both_lrc.write_text("[00:00.00]original\n", encoding="utf-8")
+    both_zh_lrc = both.with_suffix(".zh.lrc")
+    both_zh_lrc.write_text("[00:00.00]译文\n", encoding="utf-8")
+    translation_only = tmp_path / "Translated - Artist.mp3"
+    translation_only.write_bytes(b"\xff\xfb")
+    translation_lrc = translation_only.with_suffix(".zh.lrc")
+    translation_lrc.write_text("[00:00.00]译文\n", encoding="utf-8")
+
+    @dataclass
+    class _FakeTrack:
+        name: str = ""
+        artists: str = ""
+        path: str = ""
+
+    audio_paths = [plain, original_only, both, translation_only]
+
+    def fake_download_mixed(
+        _create_provider: Any, tracks: Any, _opts: Any, **kwargs: Any
+    ) -> tuple[int, int, int, list[object], list[object]]:
+        on_result = kwargs["on_result"]
+        for index, audio in enumerate(audio_paths):
+            on_result(
+                index, tracks[index], SimpleNamespace(status="ok", path=str(audio))
+            )
+        return len(audio_paths), 0, 0, [], []
+
+    monkeypatch.setattr(
+        wa,
+        "_music_funcs",
+        lambda: {
+            "Track": _FakeTrack,
+            "create": lambda _platform: None,
+            "download_mixed": fake_download_mixed,
+            "is_all_platforms": lambda _platform: False,
+        },
+    )
+    monkeypatch.setattr(wa.ApiBridge, "_music_options", staticmethod(lambda _l: None))
+
+    bridge = wa.ApiBridge()
+    rows = [{"name": str(path.stem)} for path in audio_paths]
+    assert bridge.music_download("netease", rows)["ok"] is True
+    status = _wait_for_music_idle(bridge)
+
+    assert status["paths"] == [str(path) for path in audio_paths]
+    # Neither lyric exists: the old field is absent and the new list is empty.
+    assert status["results"][0] == {"path": str(plain)}
+    # Original only: one entry, and the legacy field still points at it.
+    assert status["results"][1] == {
+        "path": str(original_only),
+        "lyric_path": str(original_lrc),
+        "lyric_paths": [{"lang": "原文", "path": str(original_lrc)}],
+    }
+    # Original + translation: sorted original first, translation second.
+    assert status["results"][2] == {
+        "path": str(both),
+        "lyric_path": str(both_lrc),
+        "lyric_paths": [
+            {"lang": "原文", "path": str(both_lrc)},
+            {"lang": "译文", "path": str(both_zh_lrc)},
+        ],
+    }
+    # Translation only: exposed through ``lyric_paths``; ``lyric_path`` keeps
+    # its historical "original .lrc" meaning and is therefore absent.
+    assert status["results"][3] == {
+        "path": str(translation_only),
+        "lyric_paths": [{"lang": "译文", "path": str(translation_lrc)}],
+    }
+    assert "lyric_path" not in status["results"][3]
+    # Only tracks with the original file count as "lyrics saved" in the summary.
+    assert status["summary"] == (
+        t("Downloaded {n} tracks").replace("{n}", "4")
+        + " · "
+        + t("{n} with lyrics").replace("{n}", "2")
+    )
 
 
 def test_bridge_music_export_writes_playlist(
@@ -2910,6 +3368,7 @@ _DYNAMIC_FIELDS = [
     "tr.name",
     "tr.artists",
     "tr.album",
+    "tr.lyric_path",
     "w.title",
     "w.site",
     "w.book_id",
@@ -3117,11 +3576,13 @@ def test_app_html_polling_redraws_keep_keyboard_focus() -> None:
     tracks = _js_block(
         "function renderTracks()", '$("#m-tracks").addEventListener("change"'
     )
-    assert 'captureFocus(box, ["data-key"])' in tracks
+    assert 'captureFocus(box, ["data-key", "data-lyric-id"])' in tracks
     assert "restoreFocus(box, focusKey);" in tracks
     # Music rows carry an identity key and a name for the checkbox.
     assert 'data-key="${esc(musicTrackKey(tr))}"' in APP_HTML
     assert 'aria-label="${esc(tr.name)}"' in APP_HTML
+    # A focused lyric button survives the redraw too (it has its own key).
+    assert 'data-lyric-id="${i}"' in APP_HTML
 
 
 def test_app_html_labels_unlabelled_controls() -> None:
@@ -3250,7 +3711,8 @@ def test_app_html_search_supersedes_stale_polls() -> None:
     """A new query stops the old loop; duplicate Enter/click stays a no-op."""
     searcher = _js_block("async function doSearch()", "function resultCardHtml")
     assert "const token = ++searchSeq;" in searcher
-    assert "if (searching && kw === activeSearchKeyword) return;" in searcher
+    assert "if (searching && kw === activeSearchKeyword) {" in searcher
+    assert "if (filterKey === activeSearchFilterKey) return;" in searcher
     # The loop checks the token after every await so it cannot paint stale rows.
     assert searcher.count("if (token !== searchSeq) return;") >= 3
     # Only the current owner releases the controls.
@@ -3287,6 +3749,127 @@ def test_app_html_search_progress_and_cancel_contract() -> None:
     cancel = _js_block("function cancelCurrentSearch()", "function resetResultList()")
     assert 't("Search cancelled")' in cancel
     assert "showSearchProgress(frozen ? frozen" in cancel
+
+
+def test_app_html_search_filters_are_optional_and_collapsed() -> None:
+    """The extra controls are additive: the old search bar keeps working."""
+    assert 'id="btn-search-filters"' in APP_HTML
+    assert 'aria-controls="search-filter-panel"' in APP_HTML
+    assert 'aria-expanded="false"' in APP_HTML
+    assert re.search(r'id="search-filter-panel"[^>]*hidden', APP_HTML)
+    for element in ("q-min-words", "q-max-words"):
+        assert f'id="{element}" type="number"' in APP_HTML
+        assert 'min="0" step="1"' in APP_HTML
+    assert 'id="q-updated-after" type="date"' in APP_HTML
+    assert ".search-filters[hidden] { display: none; }" in APP_HTML
+    filters_css = _js_block(".search-filters {", ".search-applied {")
+    assert "flex-wrap: wrap;" in filters_css
+    assert "min-width: 0;" in filters_css
+
+
+def test_app_html_do_search_sends_and_reports_filters() -> None:
+    """The three optional values travel positionally after the group flag."""
+    searcher = _js_block("async function doSearch()", "function resultCardHtml")
+    assert "const filters = readSearchFilters();" in searcher
+    assert "if (!filters) return;" in searcher
+    assert "setAppliedFilters(filters);" in searcher
+    assert (
+        'api("search_async", kw, $("#q-sites").value.trim(), '
+        '$("#q-group").checked, filters.min_words, filters.max_words, '
+        "filters.updated_after)" in searcher
+    )
+    # A structured bridge rejection is shown as its own message.
+    assert "if (job && job.error) throw new Error(job.error);" in searcher
+
+
+def test_app_html_search_filter_validation_and_clear_contract() -> None:
+    """Invalid values are caught in the page; clearing wipes all three fields."""
+    assert 't("Min words must be a whole number between 0 and {max}")' in APP_HTML
+    assert 't("Max words must be a whole number between 0 and {max}")' in APP_HTML
+    assert 't("Min words cannot be greater than max words")' in APP_HTML
+    assert 't("Use a YYYY-MM-DD date")' in APP_HTML
+    assert "function validDateText(text)" in APP_HTML
+    assert 'id="search-filter-error"' in APP_HTML
+    assert 'role="alert"' in APP_HTML
+    assert 'id="search-applied"' in APP_HTML
+    assert 'id="search-applied" role="status" aria-live="polite"' in APP_HTML
+    assert 'id="btn-clear-filters"' in APP_HTML
+    assert 't("Filters applied: {filters}")' in APP_HTML
+    clear = _js_block("function clearSearchFilters()", "async function doSearch()")
+    for selector in ('"#q-min-words"', '"#q-max-words"', '"#q-updated-after"'):
+        assert selector in clear
+    assert "setAppliedFilters(null);" in clear
+    assert '$("#btn-clear-filters").onclick' in APP_HTML
+
+
+def test_app_html_search_filters_are_keyboard_and_narrow_screen_friendly() -> None:
+    """The toggle/panel are ordinary focusable controls and wrap on narrow windows."""
+    assert '$("#search-filter-panel").addEventListener("keydown"' in APP_HTML
+    assert "setFilterPanel(false);" in APP_HTML
+    assert 'e.key === "Enter" && !e.isComposing' in APP_HTML
+    assert "flex: 1 1 150px" in APP_HTML
+
+
+def test_app_html_search_filter_labels_are_in_the_catalog() -> None:
+    """New labels/placeholder/feedback go through the injected catalogue."""
+    catalog = _i18n_catalog()
+    for key in (
+        "Filters",
+        "Min words",
+        "Max words",
+        "Updated after",
+        "Clear filters",
+        "e.g. 100000",
+        "Filters applied: {filters}",
+    ):
+        assert key in catalog
+
+
+def test_app_html_restores_saved_search_filters_without_searching() -> None:
+    """Boot fills the panel from prefs, but never starts a search itself."""
+    restore = _js_block(
+        "function applyStoredSearchFilters(filters)", "async function doSearch()"
+    )
+    for selector in ('"#q-min-words"', '"#q-max-words"', '"#q-updated-after"'):
+        assert selector in restore
+    assert "Number.isInteger(filters.min_words)" in restore
+    assert "Number.isInteger(filters.max_words)" in restore
+    assert "validDateText(date)" in restore
+    # Opening the restored panel must not steal focus from the search box.
+    assert "setFilterPanel(true, false);" in restore
+    assert "doSearch" not in restore
+    assert "applyStoredSearchFilters(state.search_filters);" in APP_HTML
+
+
+def test_app_html_persists_and_clears_search_filters() -> None:
+    """A valid search saves the filters; Clear filters forgets them."""
+    searcher = _js_block("async function doSearch()", "function resultCardHtml")
+    assert (
+        'api("save_search_filters", filters.min_words, filters.max_words, '
+        "filters.updated_after)" in searcher
+    )
+    clear = _js_block("function clearSearchFilters()", "async function doSearch()")
+    assert 'api("clear_search_filters").catch(() => {});' in clear
+
+
+def test_app_html_settings_can_clear_saved_search_filters() -> None:
+    """The settings page owns the explicit "forget my filters" action."""
+    assert 'id="btn-set-clear-search-filters"' in APP_HTML
+    handler = _js_block(
+        '$("#btn-set-clear-search-filters").onclick', '$("#btn-set-shortcut").onclick'
+    )
+    assert 'call("clear_search_filters")' in handler
+    assert "clearSearchFilters();" in handler
+    assert 't("Saved search filters cleared")' in handler
+    catalog = _i18n_catalog()
+    for key in (
+        "Search filters",
+        "The last used filters are restored when the app starts.",
+        "Clear saved filters",
+        "Saved search filters cleared",
+        "Could not clear the saved search filters",
+    ):
+        assert key in catalog
 
 
 def test_app_html_playlist_export_confirms_overwrite() -> None:
@@ -3404,11 +3987,58 @@ def test_app_html_open_path_failures_are_never_swallowed() -> None:
         '$("#tasks-body").addEventListener("click"',
         '$("#hist-body").addEventListener("click"',
         '$("#m-export-open").onclick',
+        '$("#m-tracks").addEventListener("click"',
     ],
 )
 def test_app_html_open_buttons_use_the_reporting_helper(needle: str) -> None:
     """Task exports, history rows and the playlist path all report failures."""
     assert "openPath(" in _js_handler(needle)
+
+
+def test_app_html_music_rows_offer_saved_lyrics() -> None:
+    """A downloaded track with a ``.lrc`` gets a keyboard-reachable button."""
+    # The row only grows the button when the bridge reported an existing file.
+    assert 'data-lyric="${esc(tr.lyric_path)}"' in APP_HTML
+    assert 'id="m-lyric-${i}"' in APP_HTML
+    assert 'data-lyric-id="${i}"' in APP_HTML
+    assert '<svg class="icon"><use href="#i-lyrics"/></svg>' in APP_HTML
+    assert 't("Lyrics for {name}")' in APP_HTML
+    # A native button is tabbable and activates on Enter/Space; it opens the
+    # file through the reporting helper (failure becomes a toast).
+    handler = _js_handler('$("#m-tracks").addEventListener("click"')
+    assert "openPath(btn.dataset.lyric);" in handler
+    # Polling mirrors both paths and lyric paths; rows are repainted once the
+    # batch settles so the buttons appear without a second search.
+    poll = _js_handler("function pollMusic()")
+    assert "item.lyric_path" in poll
+    assert "if (hasLyrics) renderTracks();" in poll
+
+
+def test_app_html_music_rows_offer_translated_lyrics() -> None:
+    """A translated ``.zh.lrc`` gets its own button next to the original."""
+    # The bridge's stable language slots are labelled through the i18n table,
+    # so saved rows follow a later language switch.
+    assert 'if (slot === "原文") return t("Original lyrics");' in APP_HTML
+    assert 'if (slot === "译文") return t("Translated lyrics");' in APP_HTML
+    # One native button per saved file, carrying the path the click handler
+    # already sends through openPath(). The two buttons share a labelled group.
+    helper = _js_handler("function lyricButtons(tr, i)")
+    assert 'data-lyric="${esc(entry.path)}"' in helper
+    assert 'data-lyric-lang="${esc(entry.lang)}"' in helper
+    assert 'role="group"' in helper
+    assert 'type="button"' in helper
+    assert 't("Lyrics for {name}")' in helper
+    # Legacy payloads (lyric_path without lyric_paths) keep the old button.
+    assert 'id="m-lyric-${i}"' in helper
+    assert 'data-lyric="${esc(tr.lyric_path)}"' in helper
+    # The click handler is shared, so translations use the reporting helper too.
+    handler = _js_handler('$("#m-tracks").addEventListener("click"')
+    assert "openPath(btn.dataset.lyric);" in handler
+    # Polling mirrors the list and repaints the rows when any lyric lands.
+    poll = _js_handler("function pollMusic()")
+    assert "item.lyric_paths" in poll
+    assert "tr.lyric_paths = item.lyric_paths;" in poll
+    assert "if (hasLyrics) renderTracks();" in poll
 
 
 def test_app_html_open_download_folder_reports_failure() -> None:
@@ -4085,6 +4715,7 @@ _PAYLOAD_CONTRACT: dict[str, tuple[tuple[str, ...], set[str]]] = {
             "summary",
             "failed",
             "paths",
+            "results",
             "failed_items",
         },
     ),
