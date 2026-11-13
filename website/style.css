@@ -480,6 +480,22 @@ svg { display: block; }
 .to-top:hover { color: var(--accent-ink); border-color: var(--accent); }
 .to-top svg { width: 19px; height: 19px; }
 
+/* ============================================================ download verification
+   Reuses the FAQ disclosure card; only the command blocks need styling. */
+.verify-dl { margin-top: 18px; }
+.verify-dl .verify-title { display: inline-flex; align-items: center; gap: 9px; }
+.verify-dl .verify-title svg { width: 18px; height: 18px; color: var(--accent-ink); }
+.verify-dl details p { padding-bottom: 8px; }
+.verify-dl pre {
+  margin: 2px 0 16px; padding: 12px 14px; overflow-x: auto;
+  background: var(--code-bg); color: var(--code-text); border-radius: 10px;
+  font: 13px/1.7 ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+.verify-dl pre code { font: inherit; background: none; padding: 0; color: inherit; }
+.verify-dl .c { color: #8291a9; user-select: none; }
+.verify-dl .verify-note { font-size: 13px; color: var(--text-3); }
+.verify-dl .dl-link { text-decoration: underline; text-underline-offset: 3px; }
+
 /* ============================================================ reduced motion
    Last in the file on purpose: it must win over the animations and
    transitions declared above. */

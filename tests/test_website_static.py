@@ -598,6 +598,77 @@ def test_download_links_use_the_latest_release(doc: _Doc) -> None:
         assert "/releases/tag/" not in href, href
 
 
+def _verify_dl_block(html_text: str) -> str:
+    match = re.search(
+        r'<details[^>]*\bid="verify-dl"[^>]*>(.*?)</details>', html_text, re.S
+    )
+    assert match is not None, "the download verification disclosure is missing"
+    return match.group(1)
+
+
+def test_download_verification_is_native_and_no_js(doc: _Doc) -> None:
+    entries = [
+        (data, ancestors)
+        for data, ancestors in doc.by_tag("details")
+        if data.get("id") == "verify-dl"
+    ]
+    assert len(entries) == 1
+    data, ancestors = entries[0]
+    # <details open> keeps the guidance readable with JavaScript disabled
+    assert "open" in data
+    assert "hidden" not in data
+    assert any(
+        tag == "section" and attrs.get("id") == "download" for tag, attrs in ancestors
+    ), "the verification card must live in the download section"
+
+    summaries = [
+        attrs
+        for attrs, anc in doc.by_tag("summary")
+        if anc and anc[-1][0] == "details" and anc[-1][1].get("id") == "verify-dl"
+    ]
+    assert len(summaries) == 1
+
+
+def test_download_verification_commands_and_signing_note(html_text: str) -> None:
+    block = _verify_dl_block(html_text)
+    # both platform recipes
+    assert "Get-FileHash" in block
+    assert "-Algorithm SHA256" in block
+    assert "shasum -a 256" in block
+    assert "sha256sum" in block
+    # the published checksum list and the machine-readable manifest
+    base = "https://github.com/lingyi-ling/novel-downloader/releases/latest/download/"
+    assert base + "SHA256SUMS.txt" in block
+    assert base + "latest.json" in block
+
+    # manifest signing is not enabled; say so in both languages and never
+    # imply the checksum proves who published a file
+    lowered = block.lower()
+    assert "签名" in block and "尚未启用" in block
+    assert "not a signature" in lowered
+    assert "not enabled" in lowered
+    assert "is signed" not in lowered
+    assert "已签名" not in block
+
+
+def test_download_verification_is_fully_bilingual(html_text: str) -> None:
+    parsed = _Doc()
+    parsed.feed(_verify_dl_block(html_text))
+    parsed.close()
+
+    entries = parsed.with_attr("data-en")
+    assert len(entries) >= 6
+    for data in entries:
+        value = data["data-en"].strip()
+        assert value
+        assert not CJK.search(value), f"data-en still contains Chinese: {value[:60]!r}"
+
+    english = " ".join(data["data-en"] for data in entries)
+    assert "Verify your download" in english
+    assert "Windows (PowerShell)" in english
+    assert "not a signature" in english
+
+
 def test_canonical_and_locale_metadata(doc: _Doc) -> None:
     canonical = [
         data for data in doc.by_tag("link") if data[0].get("rel") == "canonical"

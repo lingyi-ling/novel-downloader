@@ -403,6 +403,29 @@ cd novel-downloader/android
           <span class="dl-link" data-en="Download APK →">下载 APK →</span>
         </a>
       </div>
+      <div class="faq verify-dl reveal">
+        <details id="verify-dl" open>
+          <summary>
+            <span class="verify-title">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
+              <span data-en="Verify your download">校验你的下载</span>
+            </span>
+          </summary>
+          <p data-en="Every release includes a SHA256SUMS.txt listing each file with its SHA-256; the latest.json read by in-app updates carries the same digests. Hash the file you downloaded and compare it with its line in the list — matching digests mean the bytes are intact.">每个版本都附 SHA256SUMS.txt，逐行列出文件名与 SHA-256；自动更新读取的 latest.json 携带同一批校验值。对下载好的文件算一次哈希，与清单中对应行比对：一致即说明文件完整、未被改动。</p>
+          <p><strong data-en="Windows (PowerShell)">Windows（PowerShell）</strong></p>
+          <pre><code>Get-FileHash .\NovelDownloader-setup-*.exe -Algorithm SHA256</code></pre>
+          <p><strong>macOS / Linux</strong></p>
+          <pre><code>shasum -a 256 NovelDownloader-*.zip   <span class="c" data-en="# macOS"># macOS</span>
+sha256sum NovelDownloader-*.zip       <span class="c" data-en="# Linux"># Linux</span></code></pre>
+          <p>
+            <a class="dl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/latest/download/SHA256SUMS.txt" target="_blank" rel="noopener">SHA256SUMS.txt →</a>
+            <a class="dl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/latest/download/latest.json" target="_blank" rel="noopener">latest.json →</a>
+          </p>
+          <p class="verify-note">
+            <span data-en="Checksums catch corrupted or tampered downloads, but they are not a signature yet: manifest signing is built in and not enabled, so a checksum cannot by itself prove who published a file. Download only from the Releases link on this page or the official GitHub repository.">校验值能发现下载损坏或被替换的文件，但它还不是签名：清单签名机制已内置但尚未启用，校验值本身不能证明发布者身份。请只从本页的 Releases 链接或官方 GitHub 仓库下载。</span>
+          </p>
+        </details>
+      </div>
     </div>
   </section>
 
