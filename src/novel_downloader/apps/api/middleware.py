@@ -486,8 +486,10 @@ class RateLimitMiddleware:
     * Purpose: a buggy integration client stuck in a request loop must not be
       able to hammer the local server indefinitely. Counting happens *before*
       authentication, so a token brute-force is throttled too.
-    * ``limit <= 0`` disables the middleware entirely (pass-through), matching
-      ``--rate-limit 0``.
+    * ``limit <= 0`` disables the middleware entirely (pass-through). The
+      public entry points never pass such a value: ``--rate-limit 0`` is
+      rejected at startup and disabling is requested explicitly with
+      ``--no-rate-limit`` (or ``create_app(rate_limit=None)``).
     * Paths in :data:`RATE_LIMIT_EXEMPT_PATHS` (``/api/v1/health``) are never
       limited: uptime monitors must keep working even while a client is
       locked out.
@@ -532,7 +534,8 @@ class RateLimitMiddleware:
       not become a CPU amplifier under an address flood.
 
     :param app: The wrapped ASGI application.
-    :param limit: Requests admitted per client IP per window; ``<= 0`` disables.
+    :param limit: Requests admitted per client IP per window; ``<= 0``
+        disables (the public entry points validate the value first).
     :param window: Sliding-window length in seconds.
     :param exempt_paths: Paths never limited; defaults to
         :data:`RATE_LIMIT_EXEMPT_PATHS`.

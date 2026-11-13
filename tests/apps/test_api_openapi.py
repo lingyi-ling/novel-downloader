@@ -57,6 +57,9 @@ EXPECTED_SCHEMA_FIELDS: dict[str, set[str]] = {
         "order",
         "limit",
         "group",
+        "min_words",
+        "max_words",
+        "updated_after",
     },
     "BrowseRequest": {"site", "category_id", "gender", "limit"},
     "TaskCreateRequest": {"title", "site", "book_id"},
@@ -130,6 +133,23 @@ def _member_schema(spec: dict[str, Any], name: str) -> dict[str, Any]:
     if ref:
         return _resolve_ref(spec, ref)
     return schema
+
+
+def _operation(spec: dict[str, Any], path: str, method: str = "get") -> dict[str, Any]:
+    """Return one documented operation, asserting it exists."""
+    operation = spec["paths"][path][method]
+    assert isinstance(operation, dict)
+    return operation
+
+
+def _nullable_branch(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return the single non-``null`` branch of an OpenAPI 3.1 ``anyOf``."""
+    branches = schema.get("anyOf")
+    assert isinstance(branches, list), schema
+    non_null = [branch for branch in branches if branch.get("type") != "null"]
+    assert len(non_null) == 1, schema
+    assert any(branch.get("type") == "null" for branch in branches), schema
+    return non_null[0]
 
 
 def _resolve_ref(spec: dict[str, Any], ref: str) -> dict[str, Any]:
@@ -358,7 +378,13 @@ def test_authentication_errors_are_documented(spec: dict[str, Any]) -> None:
     for path, method, operation in _operations(spec):
         response = operation["responses"].get("401")
         assert response is not None, f"{method.upper()} {path} documents no 401"
-        assert str(response.get("description", "")).strip()
+        description = str(response.get("description", ""))
+        assert description.strip()
+        # Clients switch on these strings to decide what to send.
+        assert "Authorization: Bearer" in description
+        assert "X-API-Key" in description
+        schema = response["content"]["application/json"]["schema"]
+        assert schema["properties"]["detail"]["type"] == "string"
 
 
 def test_rate_limit_errors_are_documented(spec: dict[str, Any]) -> None:
@@ -369,8 +395,14 @@ def test_rate_limit_errors_are_documented(spec: dict[str, Any]) -> None:
             assert response is None, f"{method.upper()} {path} documents a 429"
             continue
         assert response is not None, f"{method.upper()} {path} documents no 429"
-        assert str(response.get("description", "")).strip()
-        assert "Retry-After" in response.get("headers", {})
+        description = str(response.get("description", ""))
+        assert description.strip()
+        assert "rate limit" in description.lower()
+        assert "Retry-After" in description
+        retry_after = response.get("headers", {}).get("Retry-After")
+        assert retry_after is not None
+        assert retry_after["schema"]["type"] == "integer"
+        assert retry_after["schema"]["minimum"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +483,132 @@ def test_numeric_bounds_are_documented(spec: dict[str, Any]) -> None:
     search = _member_schema(spec, "SearchRequest")
     assert search["properties"]["timeout"]["maximum"] == 120.0
     assert search["properties"]["timeout"]["exclusiveMinimum"] == 0
+
+
+def test_search_request_documents_filter_types_and_bounds(
+    spec: dict[str, Any],
+) -> None:
+    """The optional local filters keep their documented nullability/bounds."""
+    search = _member_schema(spec, "SearchRequest")
+    properties = search["properties"]
+
+    for name in ("min_words", "max_words"):
+        branch = _nullable_branch(properties[name])
+        assert branch["type"] == "integer"
+        assert branch["minimum"] == 0
+        assert branch["maximum"] == 1_000_000_000
+
+    updated_after = _nullable_branch(properties["updated_after"])
+    assert updated_after["type"] == "string"
+    assert updated_after["format"] == "date"
+
+    # Omitting any filter must remain valid: they only narrow the result set.
+    for name in ("min_words", "max_words", "updated_after"):
+        assert name not in search.get("required", ())
+
+
+def test_search_filter_fields_and_operations_are_described(
+    spec: dict[str, Any],
+) -> None:
+    """A client must be able to learn the filter semantics from the document."""
+    search = _member_schema(spec, "SearchRequest")
+    for name in ("min_words", "max_words", "updated_after"):
+        description = search["properties"][name].get("description")
+        assert isinstance(description, str), name
+        assert description.strip(), name
+
+    for path, method in (("/api/v1/search", "post"), ("/api/v1/search/stream", "get")):
+        description = _operation(spec, path, method)["description"]
+        for name in ("min_words", "max_words", "updated_after"):
+            assert name in description, f"{method.upper()} {path} omits {name}"
+
+
+def test_sse_search_documents_its_query_parameters(spec: dict[str, Any]) -> None:
+    """``GET /search/stream`` accepts the same filters as the JSON endpoint."""
+    operation = _operation(spec, "/api/v1/search/stream")
+    parameters = {
+        parameter["name"]: parameter
+        for parameter in operation["parameters"]
+        if parameter["in"] == "query"
+    }
+
+    assert set(parameters) == {
+        "keyword",
+        "sites",
+        "per_site_limit",
+        "timeout",
+        "min_words",
+        "max_words",
+        "updated_after",
+    }
+    assert parameters["keyword"]["required"] is True
+    assert parameters["keyword"]["schema"]["type"] == "string"
+    for name in (
+        "sites",
+        "per_site_limit",
+        "timeout",
+        "min_words",
+        "max_words",
+        "updated_after",
+    ):
+        assert parameters[name]["required"] is False
+
+    for name in ("min_words", "max_words"):
+        branch = _nullable_branch(parameters[name]["schema"])
+        assert branch["type"] == "integer"
+        assert branch["minimum"] == 0
+        assert branch["maximum"] == 1_000_000_000
+
+    updated_after = _nullable_branch(parameters["updated_after"]["schema"])
+    assert updated_after["type"] == "string"
+    assert updated_after["format"] == "date"
+
+    per_site_limit = parameters["per_site_limit"]["schema"]
+    assert per_site_limit["minimum"] == 1
+    assert per_site_limit["maximum"] == 100
+
+    timeout = parameters["timeout"]["schema"]
+    assert timeout["maximum"] == 120.0
+    assert timeout["exclusiveMinimum"] == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/search/stream",
+        "/api/v1/tasks/stream",
+        "/api/v1/login/requests/stream",
+    ],
+)
+def test_sse_endpoints_document_text_event_stream(
+    spec: dict[str, Any], path: str
+) -> None:
+    """The documented success content type must match what handlers send."""
+    response = _operation(spec, path)["responses"]["200"]
+
+    assert set(response["content"]) == {"text/event-stream"}, response["content"]
+    schema = response["content"]["text/event-stream"]["schema"]
+    assert schema == {"type": "string"}
+
+
+def test_rate_limit_opt_out_is_startup_configuration_not_a_request_field(
+    spec: dict[str, Any],
+) -> None:
+    """``--no-rate-limit`` is a CLI/server switch, never an API input."""
+    forbidden = {"no_rate_limit", "no-rate-limit", "--no-rate-limit"}
+
+    for path, method, operation in _operations(spec):
+        documented = {
+            parameter["name"] for parameter in operation.get("parameters", [])
+        }
+        assert not forbidden & documented, f"{method.upper()} {path}"
+
+    for name, schema in spec["components"]["schemas"].items():
+        assert not forbidden & set(schema.get("properties", {})), name
+
+    description = spec["info"]["description"]
+    assert "--no-rate-limit" in description
+    assert "not a request parameter" in description
 
 
 # ---------------------------------------------------------------------------
