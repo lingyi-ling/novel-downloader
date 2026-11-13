@@ -62,7 +62,6 @@ def _absolutize_argv0() -> None:
 
 def _prepare_home() -> None:
     """Seed ``settings.toml`` in the application home and switch to it."""
-    from novel_downloader.infra.config import copy_default_config
     from novel_downloader.infra.paths import DEFAULT_CONFIG_FILENAME, app_home
 
     _absolutize_argv0()
@@ -73,6 +72,11 @@ def _prepare_home() -> None:
 
     config_path = home / DEFAULT_CONFIG_FILENAME
     if not config_path.is_file():
+        # Only the first launch needs the default template; importing the
+        # config package (and its TOML adapters) on every start would be paid
+        # before the window exists for no benefit.
+        from novel_downloader.infra.config import copy_default_config
+
         copy_default_config(config_path)
 
 

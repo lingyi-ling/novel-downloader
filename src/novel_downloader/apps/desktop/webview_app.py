@@ -37,31 +37,85 @@ import webbrowser
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-from novel_downloader.apps.common.updater import (
-    DEFAULT_REPO,
-    DEFAULT_TIMEOUT,
-    UpdateInfo,
-    check_for_update,
-    detect_install_shape,
-    detect_platform,
-    download_asset,
-    parse_manifest,
-    parse_version,
-    verify_sha256,
-)
 from novel_downloader.apps.constants import DOWNLOAD_SUPPORT_SITES, SEARCH_SUPPORT_SITES
-from novel_downloader.apps.desktop.engine import AsyncEngine
 from novel_downloader.apps.desktop.formatting import format_error, status_label
 from novel_downloader.apps.desktop.web_assets import APP_HTML
 from novel_downloader.infra.i18n import t
 
+if TYPE_CHECKING:
+    from novel_downloader.apps.common.updater import UpdateInfo
+    from novel_downloader.apps.desktop.engine import AsyncEngine
+
 __all__ = ["ApiBridge", "run_webview_app"]
 
 logger = logging.getLogger(__name__)
+
+
+def _updater() -> Any:
+    """
+    Import the update helpers on first use.
+
+    ``novel_downloader.apps.common.updater`` pulls in ``urllib.request`` (and
+    through it ``http.client``), which nothing on the window-creation path
+    needs: update checks run after the page is ready.  Keeping the import here
+    takes that stack out of the cold-start critical path.
+    """
+    from novel_downloader.apps.common import updater
+
+    return updater
+
+
+# The names below re-export the updater helpers lazily.  They are ordinary
+# module-level functions (not attribute aliases) so tests and embedders can
+# keep monkeypatching ``webview_app.download_asset`` and friends while the
+# actual import still happens on first use.
+
+
+def check_for_update(*args: Any, **kwargs: Any) -> Any:
+    """Deferred :func:`novel_downloader.apps.common.updater.check_for_update`."""
+    from novel_downloader.apps.common.updater import check_for_update as impl
+
+    return impl(*args, **kwargs)
+
+
+def detect_install_shape() -> str:
+    """Deferred :func:`updater.detect_install_shape`."""
+    from novel_downloader.apps.common.updater import detect_install_shape as impl
+
+    return impl()
+
+
+def detect_platform() -> str:
+    """Deferred :func:`updater.detect_platform`."""
+    from novel_downloader.apps.common.updater import detect_platform as impl
+
+    return impl()
+
+
+def download_asset(*args: Any, **kwargs: Any) -> Any:
+    """Deferred :func:`updater.download_asset`."""
+    from novel_downloader.apps.common.updater import download_asset as impl
+
+    return impl(*args, **kwargs)
+
+
+def parse_manifest(*args: Any, **kwargs: Any) -> Any:
+    """Deferred :func:`updater.parse_manifest`."""
+    from novel_downloader.apps.common.updater import parse_manifest as impl
+
+    return impl(*args, **kwargs)
+
+
+def verify_sha256(path: Path, expected: str) -> bool:
+    """Deferred :func:`updater.verify_sha256`."""
+    from novel_downloader.apps.common.updater import verify_sha256 as impl
+
+    return impl(path, expected)
+
 
 #: Per-site search timeout handed to :func:`plugins.search.search`.
 SEARCH_SITE_TIMEOUT = 6.0
@@ -90,8 +144,10 @@ _RELEASES_API = (
 _RELEASES_PAGE = "https://github.com/lingyi-ling/novel-downloader/releases/latest"
 #: Minimum interval between update checks (24 hours).
 _UPDATE_CHECK_INTERVAL = 24 * 3600.0
-#: Network timeout for an update check (kept at the shared default, 8 s).
-_UPDATE_TIMEOUT = DEFAULT_TIMEOUT
+#: Network timeout for an update check, in seconds.  Mirrors
+#: ``updater.DEFAULT_TIMEOUT``; importing that module here would load
+#: ``urllib.request`` before the window exists.
+_UPDATE_TIMEOUT = 8.0
 #: Directory under :func:`app_home` holding downloaded update files.
 _UPDATES_DIRNAME = "updates"
 #: PyInstaller's onedir payload directory (pinned by
@@ -210,10 +266,17 @@ Remove-Item -LiteralPath $Zip -Force -ErrorAction SilentlyContinue
 Start-Process -FilePath (Join-Path $AppDir $Exe)
 """
 
-# ``_version_tuple`` is the pre-existing name used by the bridge tests; the
-# implementation lives in :mod:`apps.common.updater` so the update logic has a
-# single source of truth (and the common module stays GUI-free).
-_version_tuple = parse_version
+
+def _version_tuple(value: str | None) -> tuple[int, ...]:
+    """
+    Parse a release version (pre-existing bridge-test hook).
+
+    The implementation lives in :mod:`apps.common.updater` so the update logic
+    has a single source of truth (and the common module stays GUI-free); the
+    import is deferred so loading the bridge does not pull in the network stack.
+    """
+    parsed: tuple[int, ...] = _updater().parse_version(value or "")
+    return parsed
 
 
 #: PowerShell template that writes the .lnk files via the WScript.Shell COM
@@ -1265,7 +1328,8 @@ def _update_due(prefs: Mapping[str, Any], now: float) -> bool:
 def _safe_platform_tag() -> str:
     """``detect_platform()`` that degrades to ``""`` instead of raising."""
     try:
-        return detect_platform()
+        tag: str = detect_platform()
+        return tag
     except Exception:  # noqa: BLE001 - a probe failure is not fatal
         logger.debug("Could not detect the platform tag", exc_info=True)
         return ""
@@ -1979,7 +2043,10 @@ class ApiBridge:
     """
 
     def __init__(self) -> None:
-        self._engine = AsyncEngine()
+        # ``engine`` imports ``asyncio`` (and is only needed once something
+        # actually runs).  Creating it on first use keeps the window path free
+        # of that import; the queue restore or a search creates it later.
+        self._engine_instance: AsyncEngine | None = None
         self._lock = threading.Lock()
         # music download state (polled by the front end)
         self._music_active = False
@@ -2028,6 +2095,19 @@ class ApiBridge:
         self._searches: dict[str, dict[str, Any]] = {}
         # progressive music searches, keyed by their own search id
         self._music_searches: dict[str, dict[str, Any]] = {}
+        # Background task-queue restore, so window creation never waits for it.
+        self._services_thread: threading.Thread | None = None
+
+    @property
+    def _engine(self) -> AsyncEngine:
+        """The background asyncio engine, started on first use."""
+        engine = self._engine_instance
+        if engine is None:
+            from novel_downloader.apps.desktop.engine import AsyncEngine
+
+            engine = AsyncEngine()
+            self._engine_instance = engine
+        return engine
 
     def start_services(self) -> None:
         """
@@ -2046,6 +2126,25 @@ class ApiBridge:
             self._engine.submit(run()).result(TASK_WAIT_TIMEOUT)
         except Exception:  # noqa: BLE001 - the app still works without a queue
             logger.exception("Could not restore the task queue")
+
+    def start_services_background(self) -> threading.Thread:
+        """
+        Restore the queue on a daemon thread and return immediately.
+
+        The queue restore imports the task manager (and ``aiohttp``) and reads
+        ``tasks.json``.  Neither is needed to show the window, so it runs
+        after :class:`ApiBridge` construction while pywebview paints.  The
+        restore is idempotent; an early ``add_task`` still calls
+        :meth:`~TaskManager.start` itself.
+        """
+        thread = threading.Thread(
+            target=self.start_services,
+            name="novel-desktop-services",
+            daemon=True,
+        )
+        self._services_thread = thread
+        thread.start()
+        return thread
 
     # ------------------------------------------------------------------
     # system
@@ -3068,7 +3167,7 @@ class ApiBridge:
         try:
             check = check_for_update(
                 current,
-                slug=DEFAULT_REPO,
+                slug=_updater().DEFAULT_REPO,
                 platform_tag=platform_tag,
                 shape=detect_install_shape(),
                 timeout=_UPDATE_TIMEOUT,
@@ -5053,6 +5152,12 @@ class ApiBridge:
     def shutdown(self) -> None:
         """Stop background work and close the task manager."""
         self._music_stop.set()
+        # A window closed immediately after launch may still be restoring the
+        # queue.  Let that short import/read finish before closing the engine;
+        # a wedged restore must not hold the close for long.
+        thread = self._services_thread
+        if thread is not None and thread.is_alive():
+            thread.join(2.0)
 
         async def close_manager() -> None:
             from novel_downloader.apps.core.task_manager import manager
@@ -5092,7 +5197,9 @@ def run_webview_app() -> int:
     _hold_update_mutex()
 
     bridge = ApiBridge()
-    bridge.start_services()
+    # Importing the task manager and reading tasks.json used to sit between
+    # the user's click and the first paint; it now overlaps window creation.
+    bridge.start_services_background()
     geometry = load_window_geometry(window_state_file())
     if geometry is not None:
         # Fit the saved geometry to the *current* monitors: a window saved on
