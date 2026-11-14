@@ -518,34 +518,39 @@ def _write_plain(markup_text: str) -> None:
 
 def emit(text: str) -> None:
     """
-    Write machine-readable data to stdout, untouched by rich formatting.
+    Write machine-readable data to stdout as UTF-8, untouched by rich formatting.
 
     The data stream is UTF-8 by contract (``json.dumps(..., ensure_ascii=False)``
-    keeps CJK and emoji readable). On Windows a redirected stdout uses the
-    legacy code page (cp936/cp1252/...), where ``print`` raises
-    ``UnicodeEncodeError`` for a song title with an emoji and the command dies
-    with a traceback after an otherwise successful search. Fall back to the
-    byte buffer with an explicit UTF-8 encoding; the text path is kept for
-    streams that can encode the payload (terminals, test capture objects).
-    A lone surrogate is not valid UTF-8 either, so the byte path escapes
-    only what UTF-8 cannot represent instead of raising a second time.
+    keeps CJK and emoji readable), independently of the process locale. On
+    Windows a redirected stdout is a text wrapper over a legacy code page
+    (cp936/cp1252/...): ``print`` may succeed for CJK and silently emit cp936
+    bytes, or raise ``UnicodeEncodeError`` for an emoji. A strict UTF-8
+    consumer then fails to parse the command's own output. Whenever the
+    stream exposes a byte ``buffer`` the payload is therefore written there
+    directly as UTF-8, after flushing any pending text so the two layers
+    cannot interleave. A lone surrogate is not valid UTF-8 either, so that
+    path escapes only what UTF-8 cannot represent.
+
+    Only a stream with no byte buffer (an embedder replaced ``sys.stdout``
+    with a strict legacy-code-page writer) falls back to text: ``print`` is
+    attempted, and an unencodable payload is escaped rather than raising out
+    of an otherwise successful command.
     """
+    stream = sys.stdout
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        # Flush the text layer first so the byte write cannot overtake it.
+        with suppress(OSError, ValueError):
+            stream.flush()
+        payload = (text + "\n").encode("utf-8", "backslashreplace")
+        buffer.write(payload)
+        buffer.flush()
+        return
     try:
         print(text)
     except UnicodeEncodeError:
-        stream = sys.stdout
-        buffer = getattr(stream, "buffer", None)
-        if buffer is not None:
-            # Flush the text layer first so the byte write cannot overtake it.
-            with suppress(OSError, ValueError):
-                stream.flush()
-            payload = (text + "\n").encode("utf-8", "backslashreplace")
-            buffer.write(payload)
-            buffer.flush()
-            return
-        # No byte buffer to escape through (an embedder replaced sys.stdout
-        # with a strict legacy-code-page writer). Keep a successful command
-        # alive by escaping only what that code page cannot represent.
+        # No byte buffer to escape through. Keep a successful command alive
+        # by escaping only what that code page cannot represent.
         encoding = getattr(stream, "encoding", None) or "ascii"
         safe = text.encode(encoding, "backslashreplace").decode(encoding, "replace")
         with suppress(OSError, ValueError, UnicodeError):

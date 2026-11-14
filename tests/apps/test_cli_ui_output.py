@@ -226,6 +226,39 @@ def test_emit_falls_back_without_a_byte_buffer(
     assert "\\U0001f525" in output, "a command must not die on its own output"
 
 
+def _cp936_stdout() -> io.TextIOWrapper:
+    """A redirected Windows stdout: text layer over bytes in cp936."""
+    return io.TextIOWrapper(io.BytesIO(), encoding="cp936", errors="strict")
+
+
+@pytest.mark.parametrize(
+    ("payload", "cp936_encodable"),
+    [
+        # CJK alone is encodable in cp936: the old text path would silently
+        # emit cp936 bytes and a strict UTF-8 consumer would fail.
+        ('{"title": "三体"}', True),
+        # An emoji makes the text path raise instead of producing cp936.
+        ('{"title": "三体 🎵"}', False),
+    ],
+)
+def test_emit_writes_utf8_bytes_on_a_cp936_redirect(
+    monkeypatch: pytest.MonkeyPatch, payload: str, cp936_encodable: bool
+) -> None:
+    stream = _cp936_stdout()
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    ui.emit(payload)
+    stream.flush()
+
+    written = stream.buffer.getvalue()
+    assert written.decode("utf-8") == payload + "\n"
+    assert written == (payload + "\n").encode("utf-8")
+    # Guard against the regression this test exists for: the payload must not
+    # be handed to the code page layer.
+    if cp936_encodable:
+        assert written != (payload + "\n").encode("cp936")
+
+
 def test_emit_survives_a_lone_surrogate_on_a_utf8_buffer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
