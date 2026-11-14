@@ -21,7 +21,8 @@ confirmation; it is the bulk equivalent of ``clean book --all``,
 still sitting in a WAL, and writes one timestamped copy per database while
 mirroring the ``<site>/<book>`` layout. ``--keep N`` prunes older backups of
 each book database down to the newest ``N`` after the new set has been
-published; only files this command itself names (``chapter.<stage>.<UTC>.sqlite``)
+published; only files this command itself names (``chapter.<stage>.<UTC>.sqlite``,
+or ``chapter.<stage>.<UTC>.<n>.sqlite`` when a same-second copy already exists)
 are ever considered, and the files written by the current run are never
 removed. ``storage restore --from FILE`` validates the file (integrity check,
 schema version, required columns) before atomically replacing the target
@@ -80,6 +81,7 @@ from .base import (
     fail,
     is_safe_path_component,
     localize_help,
+    stdin_is_interactive,
 )
 from .base import format_size as format_size  # re-exported for doctor/update
 
@@ -109,13 +111,20 @@ _SUBDIRECTORY_PREFIX = "  └ "
 _CHAPTER_DB_RE = re.compile(r"^chapter\.(?P<stage>[^./\\]+)\.sqlite$")
 
 #: Backup names produced by :class:`StorageBackupCmd`: the stage database name
-#: plus a UTC timestamp inserted before the extension.
+#: plus a UTC timestamp inserted before the extension. A ``.<n>`` sequence is
+#: appended when another backup of the same database already occupies the
+#: same-second name, so concurrent runs never collide.
 _BACKUP_NAME_RE = re.compile(
-    r"^chapter\.(?P<stage>[^./\\]+)\.(?P<stamp>\d{8}T\d{6}Z)\.sqlite$"
+    r"^chapter\.(?P<stage>[^./\\]+)\.(?P<stamp>\d{8}T\d{6}Z)(?:\.(?P<seq>\d+))?\.sqlite$"
 )
 
 #: Timestamp format embedded in backup and pre-restore file names.
 _TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+
+#: Same-second backups claimed per database before the run gives up. Each
+#: collision takes the next ``.<n>`` suffix; a directory holding a thousand
+#: copies of one database from a single second is not a supported workload.
+_MAX_BACKUP_SEQUENCE = 1000
 
 
 @dataclass
@@ -162,9 +171,17 @@ class DirStat:
         }
 
 
-def _resolve_paths() -> dict[str, Path]:
-    """Resolve the four data directories from the current configuration."""
-    config_data = load_or_init_config(None)
+def _resolve_paths(*, non_interactive: bool | None = None) -> dict[str, Path]:
+    """
+    Resolve the four data directories from the current configuration.
+
+    :param non_interactive: Whether a missing configuration may prompt.  The
+        default follows stdin, so a piped/CI invocation never blocks here;
+        ``--json`` callers pass ``True`` even on a terminal.
+    """
+    if non_interactive is None:
+        non_interactive = not stdin_is_interactive()
+    config_data = load_or_init_config(None, non_interactive=non_interactive)
     if config_data is None:
         # ``load_or_init_config`` already reported the reason on stderr.
         raise SystemExit(EXIT_FAILURE)
@@ -478,7 +495,11 @@ class StorageCmd(Command):
         if as_json and clean and not dry_run:
             fail(t("--json and --clean cannot be combined."), EXIT_USAGE)
 
-        stats = _collect(_resolve_paths())
+        stats = _collect(
+            _resolve_paths(
+                non_interactive=as_json or not stdin_is_interactive(),
+            )
+        )
 
         if dry_run:
             _preview_clean(stats, as_json=as_json)
@@ -727,20 +748,22 @@ def _plan_retention(
 ) -> list[Path]:
     """Return the backups ``keep`` allows to be removed, oldest first.
 
-    Only regular files named ``chapter.<stage>.<UTC>.sqlite`` directly by this
-    command are considered; directories, symlinks and every other file are
-    ignored. Backups are grouped by their containing book directory *and*
-    stage, so a book holding both ``raw`` and ``cleaner`` databases keeps ``N``
-    copies of each instead of one stage evicting the other. ``protect`` holds
-    the resolved paths written by the current run: they are still counted for
-    ordering but are never selected for removal (a skewed clock can therefore
-    leave one extra file behind, never delete a fresh backup).
+    Only regular files named ``chapter.<stage>.<UTC>.sqlite`` (optionally
+    ``chapter.<stage>.<UTC>.<n>.sqlite`` for a same-second copy) written
+    directly by this command are considered; directories, symlinks and every
+    other file are ignored. Backups are grouped by their containing book
+    directory *and* stage, so a book holding both ``raw`` and ``cleaner``
+    databases keeps ``N`` copies of each instead of one stage evicting the
+    other. ``protect`` holds the resolved paths written by the current run:
+    they are still counted for ordering but are never selected for removal (a
+    skewed clock can therefore leave one extra file behind, never delete a
+    fresh backup).
 
     Unreadable directories are appended to ``failures`` instead of aborting the
     scan, so one bad subtree cannot make pruning look successful.
     """
 
-    groups: dict[tuple[Path, str], list[tuple[str, Path, Path]]] = {}
+    groups: dict[tuple[Path, str], list[tuple[str, int, Path, Path]]] = {}
 
     def _onerror(exc: OSError) -> None:
         failing = Path(exc.filename) if exc.filename else out_dir
@@ -766,17 +789,28 @@ def _plan_retention(
                 failures.append((candidate, str(exc)))
                 continue
             groups.setdefault((parent, match.group("stage")), []).append(
-                (match.group("stamp"), candidate, resolved)
+                (
+                    match.group("stamp"),
+                    int(match.group("seq") or 0),
+                    candidate,
+                    resolved,
+                )
             )
 
     doomed: list[Path] = []
     for entries in groups.values():
-        # Newest first; the stamp sorts lexicographically because it is fixed
-        # width UTC. The path breaks ties deterministically (same-second runs
-        # are refused by the backup writer, but a hand-made file may exist).
-        entries.sort(key=lambda entry: (entry[0], str(entry[1])), reverse=True)
+        # Newest first: the fixed-width UTC stamp sorts lexicographically, and
+        # the numeric sequence orders same-second copies (``.10`` after ``.9``).
+        # A file without a sequence predates the suffix scheme and counts as
+        # the first copy of that second. The path breaks any remaining tie
+        # deterministically.
+        entries.sort(
+            key=lambda entry: (entry[0], entry[1], str(entry[2])), reverse=True
+        )
         doomed.extend(
-            path for _stamp, path, resolved in entries[keep:] if resolved not in protect
+            path
+            for _stamp, _seq, path, resolved in entries[keep:]
+            if resolved not in protect
         )
     return sorted(doomed, key=str)
 
@@ -837,6 +871,47 @@ def _prune_old_backups(
     return report
 
 
+def _reserve_backup_target(target: Path) -> Path:
+    """Atomically claim ``target``, or the first free ``.<n>`` sibling.
+
+    Two backups of the same database can land in the same UTC second: two
+    concurrent runs, a scheduled job overlapping a manual one, or a clock
+    whose sub-second detail the fixed-width stamp cannot express. The name is
+    claimed with ``O_CREAT|O_EXCL``, so racers can never pick the same file;
+    the loser moves on to ``chapter.<stage>.<UTC>.1.sqlite``, then ``.2``, and
+    so on. The returned path is an empty placeholder owned by the caller: the
+    snapshot writer replaces it atomically and the caller removes it if the
+    snapshot fails.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    base = target.stem  # chapter.<stage>.<UTC>
+    suffix = target.suffix
+    for index in range(0, _MAX_BACKUP_SEQUENCE + 1):
+        candidate = (
+            target if index == 0 else target.with_name(f"{base}.{index}{suffix}")
+        )
+        # A directory (or a file another process is still creating) cannot be
+        # claimed; skip it without opening anything. This also covers Windows,
+        # where opening an existing directory reports EACCES instead of EEXIST.
+        if os.path.lexists(candidate):
+            continue
+        try:
+            handle = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            # Lost the race to a concurrent run; take the next name.
+            continue
+        os.close(handle)
+        return candidate
+
+    # Every accepted name for this second is taken. Raising instead of exiting
+    # lets the caller's cleanup drop the partial set it already published.
+    raise FileExistsError(
+        t("Backup target already exists, refusing to overwrite: {path}").format(
+            path=target
+        )
+    )
+
+
 def _run_backup(
     raw_root: Path,
     out_dir: Path,
@@ -870,13 +945,6 @@ def _run_backup(
         target = (
             out_dir / relative.parent / f"chapter.{match.group('stage')}.{stamp}.sqlite"
         )
-        if target.exists():
-            fail(
-                t("Backup target already exists, refusing to overwrite: {path}").format(
-                    path=target
-                ),
-                EXIT_FAILURE,
-            )
         plan.append((source, target))
 
     if not plan:
@@ -904,8 +972,17 @@ def _run_backup(
     total_bytes = 0
     source = plan[0][0]
     try:
-        for source, target in plan:
-            info = _write_snapshot(source, target)
+        for source, base_target in plan:
+            # Claim the name first: an existing same-second backup (from an
+            # earlier or concurrent run) must be neither overwritten nor fatal.
+            target = _reserve_backup_target(base_target)
+            try:
+                info = _write_snapshot(source, target)
+            except BaseException:
+                # The placeholder is ours; a failed snapshot must not leave an
+                # empty database behind for retention to count.
+                _remove_database_files(target)
+                raise
             created.append(target)
             size = target.stat().st_size
             total_bytes += size
@@ -1301,8 +1378,11 @@ class StorageVerifyCmd(Command):
 
     @classmethod
     def run(cls, args: Namespace) -> None:
-        raw_root = _resolve_paths()["raw"]
-        _run_verify(raw_root, as_json=bool(getattr(args, "as_json", False)))
+        as_json = bool(getattr(args, "as_json", False))
+        raw_root = _resolve_paths(
+            non_interactive=as_json or not stdin_is_interactive()
+        )["raw"]
+        _run_verify(raw_root, as_json=as_json)
 
 
 class StorageBackupCmd(Command):
@@ -1352,11 +1432,14 @@ class StorageBackupCmd(Command):
             )
         if dry_run and keep <= 0:
             fail(t("--dry-run requires --keep."), EXIT_USAGE)
-        raw_root = _resolve_paths()["raw"]
+        as_json = bool(getattr(args, "as_json", False))
+        raw_root = _resolve_paths(
+            non_interactive=as_json or not stdin_is_interactive()
+        )["raw"]
         _run_backup(
             raw_root,
             expand_path(args.out),
-            as_json=bool(getattr(args, "as_json", False)),
+            as_json=as_json,
             keep=keep,
             dry_run=dry_run,
         )
@@ -1397,11 +1480,14 @@ class StorageRestoreCmd(Command):
 
     @classmethod
     def run(cls, args: Namespace) -> None:
-        raw_root = _resolve_paths()["raw"]
+        as_json = bool(getattr(args, "as_json", False))
+        raw_root = _resolve_paths(
+            non_interactive=as_json or not stdin_is_interactive()
+        )["raw"]
         _run_restore(
             raw_root,
             expand_path(args.source),
             args.target,
             assume_yes=bool(getattr(args, "yes", False)),
-            as_json=bool(getattr(args, "as_json", False)),
+            as_json=as_json,
         )

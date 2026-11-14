@@ -19,6 +19,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -153,7 +154,7 @@ def raw_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         "downloads": tmp_path / "downloads",
         "logs": tmp_path / "logs",
     }
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     yield root
 
 
@@ -176,9 +177,15 @@ def _fake_backup(
     site: str = "site",
     book: str = "book",
     stage: str = "raw",
+    seq: int | None = None,
 ) -> Path:
-    """Create a file with the exact name (and layout) ``storage backup`` uses."""
-    path = out / site / book / f"chapter.{stage}.{stamp}.sqlite"
+    """Create a file with a name (and layout) ``storage backup`` uses.
+
+    Without ``seq`` the name is the original ``chapter.<stage>.<UTC>.sqlite``
+    form; with it, the same-second ``chapter.<stage>.<UTC>.<seq>.sqlite``.
+    """
+    suffix = "" if seq is None else f".{seq}"
+    path = out / site / book / f"chapter.{stage}.{stamp}{suffix}.sqlite"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"older backup")
     return path
@@ -237,24 +244,103 @@ def test_backup_includes_uncheckpointed_wal(raw_root: Path, tmp_path: Path) -> N
     assert _ids(backup) == {"wal-only"}
 
 
-def test_backup_refuses_to_overwrite_existing_target(
+def test_backup_in_same_second_does_not_overwrite_or_fail(
     raw_root: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Two runs in one UTC second must both succeed and both survive.
+
+    The second run used to abort with "target already exists". It now claims
+    the next free ``.<n>`` name; whatever already sat on the base name --
+    including a hand-placed file -- is left untouched.
+    """
     monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
     _seed(_book_db(raw_root), "c1")
 
     out = tmp_path / "backups"
-    existing = out / "site" / "book" / f"chapter.raw.{_STAMP}.sqlite"
-    existing.parent.mkdir(parents=True)
+    book_dir = out / "site" / "book"
+    book_dir.mkdir(parents=True)
+    existing = book_dir / f"chapter.raw.{_STAMP}.sqlite"
     existing.write_bytes(b"keep me")
 
-    with pytest.raises(SystemExit) as exc_info:
-        _invoke(["storage", "backup", "--out", str(out)])
-    assert exc_info.value.code == 1
+    _invoke(["storage", "backup", "--out", str(out)])
+    _invoke(["storage", "backup", "--out", str(out)])
+
     assert existing.read_bytes() == b"keep me"
-    assert len(list(out.rglob("*.sqlite"))) == 1
+    assert _names(book_dir) == [
+        f"chapter.raw.{_STAMP}.1.sqlite",
+        f"chapter.raw.{_STAMP}.2.sqlite",
+        f"chapter.raw.{_STAMP}.sqlite",
+    ]
+    for name in (f"chapter.raw.{_STAMP}.1.sqlite", f"chapter.raw.{_STAMP}.2.sqlite"):
+        assert _ids(book_dir / name) == {"c1"}
+
+
+def test_backup_json_reports_the_sequenced_target(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--json`` keeps the base timestamp but names the file actually written."""
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    occupied = _fake_backup(out, _STAMP)
+
+    _invoke(["storage", "backup", "--out", str(out), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["timestamp"] == _STAMP
+    assert payload["count"] == 1
+    assert payload["files"][0]["target"] == str(
+        occupied.with_name(f"chapter.raw.{_STAMP}.1.sqlite")
+    )
+    assert occupied.read_bytes() == b"older backup"
+
+
+def test_concurrent_backups_in_the_same_second_never_collide(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two processes racing on one output directory each get their own file.
+
+    Only the atomic ``O_CREAT|O_EXCL`` claim can guarantee this: both runs plan
+    the same name before either writes.
+    """
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            barrier.wait(timeout=10)
+            _invoke(["storage", "backup", "--out", str(out)])
+        except BaseException as exc:  # noqa: BLE001 - reported by the assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert errors == []
+    book_dir = out / "site" / "book"
+    names = _names(book_dir)
+    assert names == [
+        f"chapter.raw.{_STAMP}.1.sqlite",
+        f"chapter.raw.{_STAMP}.sqlite",
+    ]
+    for name in names:
+        assert _ids(book_dir / name) == {"c1"}
 
 
 def test_backup_works_with_read_only_source(raw_root: Path, tmp_path: Path) -> None:
@@ -396,6 +482,83 @@ def test_keep_counts_each_stage_separately(
     ]
     assert not cleaner_oldest.exists()
     assert cleaner_newest.exists()
+
+
+def test_keep_prunes_same_second_copies_as_separate_backups(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A ``.<n>`` copy is a backup in its own right, newest last.
+
+    Ordering must be numeric per second (``.10`` after ``.9``) and the plain
+    name the oldest of that second, otherwise ``--keep`` would delete the file
+    a concurrent run just wrote and keep a stale one.
+    """
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    base = _fake_backup(out, _STAMP)
+    first = _fake_backup(out, _STAMP, seq=1)
+    second = _fake_backup(out, _STAMP, seq=2)
+
+    _invoke(["storage", "backup", "--out", str(out), "--keep", "2", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert sorted(payload["retention"]["removed"]) == sorted([str(base), str(first)])
+    book_dir = out / "site" / "book"
+    assert sorted(_names(book_dir)) == [
+        f"chapter.raw.{_STAMP}.2.sqlite",
+        f"chapter.raw.{_STAMP}.3.sqlite",
+    ]
+    assert second.exists()
+    assert _ids(book_dir / f"chapter.raw.{_STAMP}.3.sqlite") == {"c1"}
+
+
+def test_keep_spans_numeric_sequence_beyond_one_digit(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``.10`` is newer than ``.9``; lexicographic ordering would say the opposite."""
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root), "c1")
+
+    out = tmp_path / "backups"
+    ninth = _fake_backup(out, "20250101T000000Z", seq=9)
+    tenth = _fake_backup(out, "20250101T000000Z", seq=10)
+
+    _invoke(["storage", "backup", "--out", str(out), "--keep", "2"])
+
+    assert not ninth.exists()
+    assert tenth.exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "stage", "stamp", "seq"),
+    [
+        ("chapter.raw.20250101T000000Z.sqlite", "raw", "20250101T000000Z", None),
+        (
+            "chapter.cleaner.20250101T000000Z.sqlite",
+            "cleaner",
+            "20250101T000000Z",
+            None,
+        ),
+        ("chapter.raw.20250101T000000Z.1.sqlite", "raw", "20250101T000000Z", "1"),
+        ("chapter.raw.20250101T000000Z.12.sqlite", "raw", "20250101T000000Z", "12"),
+    ],
+)
+def test_backup_name_pattern_accepts_legacy_and_sequenced_names(
+    name: str, stage: str, stamp: str, seq: str | None
+) -> None:
+    """Both name generations are recognised; retention sees the same fields."""
+    match = storage._BACKUP_NAME_RE.match(name)
+    assert match is not None
+    assert match.group("stage") == stage
+    assert match.group("stamp") == stamp
+    assert match.group("seq") == seq
 
 
 def test_keep_leaves_non_backup_entries_alone(
@@ -799,6 +962,28 @@ def test_restore_accepts_a_relative_source_path(
     _invoke(["storage", "restore", "--from", str(backup.relative_to(tmp_path))])
 
     assert db.is_file()
+    assert _ids(db) == {"c1", "c2"}
+
+
+def test_restore_derives_target_from_a_sequenced_backup(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-second ``.<n>`` copy restores like any other backup name."""
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    db = _book_db(raw_root)
+    _seed(db, "c1", "c2")
+
+    out = tmp_path / "backups"
+    _invoke(["storage", "backup", "--out", str(out)])
+    _invoke(["storage", "backup", "--out", str(out)])
+    sequenced = out / "site" / "book" / f"chapter.raw.{_STAMP}.1.sqlite"
+    assert sequenced.is_file()
+
+    db.unlink()
+    _invoke(["storage", "restore", "--from", str(sequenced)])
+
     assert _ids(db) == {"c1", "c2"}
 
 
