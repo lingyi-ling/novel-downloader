@@ -272,6 +272,95 @@ def test_platform_counts_stay_current(doc: _Doc) -> None:
     assert {"Download sites", "Search sources", "Music platforms", "Clients"} <= labels
 
 
+def test_features_section_has_nine_well_formed_cards(doc: _Doc) -> None:
+    """The 3x3 value grid is the site's main feature surface: keep all nine,
+    each with an icon, a heading and a bilingual paragraph."""
+
+    def in_features(anc: tuple[tuple[str, dict[str, str]], ...]) -> bool:
+        return any(
+            tag == "section" and attrs.get("id") == "features" for tag, attrs in anc
+        )
+
+    def inside_card(anc: tuple[tuple[str, dict[str, str]], ...]) -> bool:
+        return any(
+            tag == "article" and "card" in attrs.get("class", "").split()
+            for tag, attrs in anc
+        )
+
+    cards = [
+        data
+        for data, anc in doc.by_tag("article")
+        if "card" in data.get("class", "").split() and in_features(anc)
+    ]
+    assert len(cards) == 9
+
+    headings = [data for data, anc in doc.by_tag("h3") if in_features(anc)]
+    assert len(headings) == 9
+
+    paragraphs = [
+        data for data, anc in doc.by_tag("p") if in_features(anc) and inside_card(anc)
+    ]
+    assert len(paragraphs) == 9
+    assert all("data-en" in data for data in paragraphs)
+
+    icons = [
+        data
+        for data, anc in doc.by_tag("div")
+        if "card-ico" in data.get("class", "").split() and in_features(anc)
+    ]
+    assert len(icons) == 9
+
+    svgs = [data for data, anc in doc.by_tag("svg") if in_features(anc)]
+    assert len(svgs) == 9
+
+
+def test_feature_grid_stretches_cards_and_collapses_to_one_column(css: str) -> None:
+    grid = re.search(r"\.grid\s*\{([^}]*)\}", css)
+    assert grid is not None
+    assert "display: grid" in grid.group(1)
+    # rows take the height of their tallest card instead of each card hugging
+    # its own copy, which is what keeps a 3-up row visually aligned
+    assert "align-items: stretch" in grid.group(1)
+    assert re.search(
+        r"\.grid-3\s*\{\s*grid-template-columns:\s*repeat\(3,\s*1fr\)", css
+    )
+    assert re.search(
+        r"@media \(max-width: 560px\)[\s\S]*?\.grid-3,\s*\.grid-4\s*\{"
+        r"\s*grid-template-columns:\s*1fr",
+        css,
+    )
+
+
+def test_verify_code_blocks_scroll_inside_their_card(css: str) -> None:
+    block = re.search(r"\.verify-dl pre\s*\{([^}]*)\}", css)
+    assert block is not None
+    assert "overflow-x: auto" in block.group(1)
+
+    shared = re.search(r"\.tab-panel pre,\s*\.verify-dl pre\s*\{([^}]*)\}", css)
+    assert shared is not None
+    assert "scrollbar-width: thin" in shared.group(1)
+    assert "overscroll-behavior-x: contain" in shared.group(1)
+    # the default overlay scrollbar is invisible until touched on phones; the
+    # slim custom bar shows that a clipped command continues to the right
+    assert re.search(r"\.verify-dl pre::-webkit-scrollbar\s*\{[^}]*height:\s*8px", css)
+
+
+def test_english_text_expansion_guards(css: str) -> None:
+    eyebrow = re.search(r"\.hero-eyebrow\s*\{([^}]*)\}", css)
+    assert eyebrow is not None
+    # English is longer than the Chinese source and used to leave "2.0" alone
+    # after a hyphen break inside the pill
+    assert "text-wrap: balance" in eyebrow.group(1)
+
+    mobile = re.search(r"@media \(max-width: 560px\)\s*\{(.*?)\n\}", css, re.S)
+    assert mobile is not None
+    assert re.search(
+        r'html\[lang="en"\]\s+\.hero-stats\s*\{[^}]*display:\s*grid'
+        r"[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)",
+        mobile.group(1),
+    )
+
+
 def test_v1_31_value_props_appear_in_both_languages(doc: _Doc, html_text: str) -> None:
     """v1.31 user value must be woven into existing cards, not a release dump."""
     english = " ".join(data["data-en"] for data in doc.with_attr("data-en"))

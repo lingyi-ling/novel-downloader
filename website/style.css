@@ -132,6 +132,9 @@ svg { display: block; }
   color: var(--accent-ink); background: var(--accent-soft);
   border: 1px solid var(--accent-soft-2);
   padding: 4px 14px; border-radius: 99px; margin-bottom: 26px;
+  /* English text is ~30% longer than the Chinese source: balance the two
+     lines instead of leaving a dangling "2.0" after a hyphen break. */
+  text-wrap: balance;
 }
 .hero h1 {
   font-size: clamp(38px, 7vw, 68px); line-height: 1.12; letter-spacing: -.03em;
@@ -180,7 +183,7 @@ svg { display: block; }
 }
 .section-sub { text-align: center; color: var(--text-2); margin: 12px 0 44px; }
 
-.grid { display: grid; gap: 18px; }
+.grid { display: grid; align-items: stretch; gap: 18px; }
 .grid-3 { grid-template-columns: repeat(3, 1fr); }
 .grid-4 { grid-template-columns: repeat(4, 1fr); }
 @media (max-width: 900px) {
@@ -195,6 +198,12 @@ svg { display: block; }
   .hero-inner { padding: 64px 20px 52px; }
   .section { padding: 60px 0; }
   .nav-links a:not(:last-child) { display: none; }
+  /* English labels are wider than the Chinese ones, which left the fourth
+     stat alone on its own row; two balanced columns keep them on a grid. */
+  html[lang="en"] .hero-stats {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 22px 16px; max-width: 320px; margin-inline: auto;
+  }
 }
 
 @media (max-width: 420px) {
@@ -495,6 +504,24 @@ svg { display: block; }
 .verify-dl .c { color: #8291a9; user-select: none; }
 .verify-dl .verify-note { font-size: 13px; color: var(--text-3); }
 .verify-dl .dl-link { text-decoration: underline; text-underline-offset: 3px; }
+
+/* Code that is wider than the viewport scrolls inside its own box; a visible,
+   slim scrollbar (rather than the overlay default) tells phone readers the
+   command continues, and containment stops a sideways swipe from paging back. */
+.tab-panel pre,
+.verify-dl pre {
+  scrollbar-width: thin;
+  scrollbar-color: #5a6e8c transparent;
+  overscroll-behavior-x: contain;
+}
+.tab-panel pre::-webkit-scrollbar,
+.verify-dl pre::-webkit-scrollbar { height: 8px; }
+.tab-panel pre::-webkit-scrollbar-track,
+.verify-dl pre::-webkit-scrollbar-track { background: transparent; }
+.tab-panel pre::-webkit-scrollbar-thumb,
+.verify-dl pre::-webkit-scrollbar-thumb {
+  background: #5a6e8c; border-radius: 99px;
+}
 
 /* ============================================================ reduced motion
    Last in the file on purpose: it must win over the animations and
