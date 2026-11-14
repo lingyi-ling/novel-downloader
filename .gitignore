@@ -219,6 +219,11 @@ logs/
 check_format.py
 *.sqlite
 
+# Local runtime state and generated audit reports
+server.pid
+security-workspace.json
+security-history.json
+
 # Local configuration (created by `novel-cli config init`)
 settings.toml
 
