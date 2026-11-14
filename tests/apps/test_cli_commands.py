@@ -2956,7 +2956,7 @@ def test_search_config_path_expands_environment_variables(
     monkeypatch.setattr(search_module.ui, "setup_logging", lambda **_k: None)
     seen: dict[str, Path | None] = {}
 
-    def _load(path: Path | None) -> dict[str, Any]:
+    def _load(path: Path | None, **_kwargs: Any) -> dict[str, Any]:
         seen["path"] = path
         return {"general": {}}
 

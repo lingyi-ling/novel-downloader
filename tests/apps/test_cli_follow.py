@@ -1333,7 +1333,7 @@ def test_storage_json_reports_sizes(
     (paths["cache"] / "c.bin").write_bytes(b"1234567")
     paths["downloads"].mkdir()  # empty directory
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     parser = _parser(StorageCmd)
 
     args = parser.parse_args(["storage", "--json"])
@@ -1368,7 +1368,7 @@ def test_storage_renders_table(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     def render(title: str, columns: list[str], rows: list[list[str]]) -> None:
         captured.append((title, list(columns), list(rows)))
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     _capture_ui(monkeypatch, storage)
     monkeypatch.setattr(storage.ui, "render_table", render)
     parser = _parser(StorageCmd)
@@ -1389,7 +1389,7 @@ def test_storage_clean_yes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
         path.mkdir()
         (path / "file").write_text("x", encoding="utf-8")
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     _capture_ui(monkeypatch, storage)
     parser = _parser(StorageCmd)
 
@@ -1406,7 +1406,7 @@ def test_storage_clean_cancelled(
     paths["logs"].mkdir()
     (paths["logs"] / "file").write_text("x", encoding="utf-8")
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     messages = _capture_ui(monkeypatch, storage)
     monkeypatch.setattr(storage.ui, "confirm", lambda *_a, **_k: False)
     parser = _parser(StorageCmd)
@@ -1421,7 +1421,9 @@ def test_storage_clean_cancelled(
 def test_storage_json_and_clean_conflict(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: _storage_paths(tmp_path))
+    monkeypatch.setattr(
+        storage, "_resolve_paths", lambda **_kwargs: _storage_paths(tmp_path)
+    )
     _capture_ui(monkeypatch, storage)
     parser = _parser(StorageCmd)
 
@@ -1435,7 +1437,7 @@ def test_storage_missing_directories_are_zero(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     paths = _storage_paths(tmp_path)
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
 
     stats = storage._collect(paths)
     assert [(stat.files, stat.bytes) for stat in stats] == [(0, 0)] * 4
@@ -1447,7 +1449,7 @@ def test_storage_clean_confirmation_defaults_to_no(
     paths = _storage_paths(tmp_path)
     paths["logs"].mkdir()
     (paths["logs"] / "file").write_text("x", encoding="utf-8")
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     _capture_ui(monkeypatch, storage)
     monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
 
@@ -1484,7 +1486,7 @@ def test_storage_clean_handles_nested_directories(
     for path in paths.values():
         (path / "file").write_text("x", encoding="utf-8")
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     messages = _capture_ui(monkeypatch, storage)
     monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
     parser = _parser(StorageCmd)
@@ -1508,7 +1510,7 @@ def test_storage_clean_deduplicates_a_shared_path(
         "downloads": tmp_path / "downloads",
         "logs": tmp_path / "logs",
     }
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     messages = _capture_ui(monkeypatch, storage)
     monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
     parser = _parser(StorageCmd)
@@ -1528,7 +1530,7 @@ def test_storage_clean_failure_exits_nonzero_and_keeps_going(
         path.mkdir()
         (path / "file").write_text("x", encoding="utf-8")
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     messages = _capture_ui(monkeypatch, storage)
     monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
     real_remove = storage.remove_path_safely
@@ -1564,7 +1566,7 @@ def test_storage_clean_removes_bucket_link_not_its_target(
     paths["downloads"].parent.mkdir(parents=True, exist_ok=True)
     _make_dir_link(paths["downloads"], target)
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     _capture_ui(monkeypatch, storage)
     monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
     parser = _parser(StorageCmd)
@@ -1584,7 +1586,7 @@ def test_storage_clean_refuses_to_remove_the_working_directory(
         paths[key].mkdir()
     paths["downloads"] = Path.cwd()  # a misconfigured output_dir
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     messages = _capture_ui(monkeypatch, storage)
     monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
     parser = _parser(StorageCmd)
@@ -1609,7 +1611,7 @@ def test_storage_clean_does_not_follow_nested_link(
     (target / "keep.txt").write_text("keep", encoding="utf-8")
     _make_dir_link(paths["cache"] / "site" / "nested", target)
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     _capture_ui(monkeypatch, storage)
     monkeypatch.setattr(storage.ui, "render_table", lambda *_a, **_k: None)
     parser = _parser(StorageCmd)

@@ -105,7 +105,9 @@ class BrowseCmd(Command):
             fail(t("--json and --first cannot be combined."), EXIT_USAGE)
 
         config_path: Path | None = expand_path(args.config) if args.config else None
-        config_data = load_or_init_config(config_path)
+        config_data = load_or_init_config(
+            config_path, non_interactive=as_json or not _stdin_is_tty()
+        )
         if config_data is None:
             raise SystemExit(EXIT_FAILURE)
         adapter = ConfigAdapter(config=config_data)

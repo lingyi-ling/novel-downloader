@@ -564,7 +564,7 @@ def test_storage_clean_dry_run_json_lists_targets_and_keeps_tree(
     sizes["raw"] += 2
     before = {key: _snapshot(path) for key, path in paths.items()}
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     monkeypatch.setattr(storage, "remove_path_safely", _no_removal)
 
     args = _parser(StorageCmd).parse_args(
@@ -601,7 +601,7 @@ def test_storage_clean_dry_run_collapses_nested_targets_and_real_clean(
         paths[key].mkdir()
         (paths[key] / "file.bin").write_bytes(b"x")
 
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     parser = _parser(StorageCmd)
 
     args = parser.parse_args(["storage", "--clean", "--yes", "--dry-run", "--json"])
@@ -631,7 +631,7 @@ def test_storage_clean_dry_run_human_lists_every_target(
         path.mkdir()
         (path / "file.bin").write_bytes(b"x")
     messages: list[str] = []
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     monkeypatch.setattr(storage, "remove_path_safely", _no_removal)
     monkeypatch.setattr(storage.ui, "info", messages.append)
 
@@ -648,7 +648,7 @@ def test_storage_clean_dry_run_human_lists_every_target(
 def test_storage_clean_dry_run_requires_clean(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: {})
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: {})
     args = _parser(StorageCmd).parse_args(["storage", "--dry-run"])
     with pytest.raises(SystemExit) as excinfo:
         args.func(args)
@@ -661,7 +661,7 @@ def test_storage_clean_dry_run_rejects_unsafe_target(
 ) -> None:
     paths = _storage_paths(tmp_path)
     paths["logs"].mkdir()
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
 
     def _refuse(*_a: Any, **_k: Any) -> None:
         raise ValueError("refusing to remove protected directory")

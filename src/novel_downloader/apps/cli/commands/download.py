@@ -36,6 +36,7 @@ from .base import (
     parse_book_args,
     require_safe_book_id,
     require_safe_site,
+    stdin_is_interactive,
 )
 
 #: Failure lines shown by the default (warning-only) report.
@@ -285,7 +286,9 @@ class DownloadCmd(Command):
                 )
             )
 
-        config_data = load_or_init_config(config_path)
+        config_data = load_or_init_config(
+            config_path, non_interactive=as_json or not stdin_is_interactive()
+        )
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)

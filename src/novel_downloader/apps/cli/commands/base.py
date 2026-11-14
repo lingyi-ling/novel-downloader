@@ -7,6 +7,7 @@ novel_downloader.apps.cli.commands.base
 
 import json
 import os
+import sys
 from abc import ABC, abstractmethod
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from collections.abc import Sequence
@@ -34,6 +35,7 @@ __all__ = [
     "removal_preview_payload",
     "require_safe_book_id",
     "require_safe_site",
+    "stdin_is_interactive",
 ]
 
 #: Exit code for a successful run.
@@ -73,6 +75,27 @@ def format_size(count: int) -> str:
         if value < 1024.0:
             return f"{value:.1f} {unit}"
     return f"{value:.1f} PiB"
+
+
+def stdin_is_interactive() -> bool:
+    """
+    Return whether stdin can answer an interactive prompt.
+
+    A pipe, a redirected file, a CI job or a detached terminal all report
+    ``isatty() == False``; prompting there either blocks forever or fails on
+    EOF. Commands consult this before handing control to ``load_or_init_config``
+    so a missing configuration never turns into a prompt in automation.
+
+    The stream itself is not trusted: a closed or partially torn down stdin
+    raises from ``isatty()``, which is treated as "not a terminal".
+    """
+    isatty = getattr(sys.stdin, "isatty", None)
+    if isatty is None:
+        return False
+    try:
+        return bool(isatty())
+    except (OSError, ValueError):
+        return False
 
 
 def removal_preview_payload(

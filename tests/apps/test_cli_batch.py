@@ -66,7 +66,9 @@ def offline(
             "output_dir": str(tmp_path / "downloads"),
         }
     }
-    monkeypatch.setattr(batch, "load_or_init_config", lambda _path=None: config)
+    monkeypatch.setattr(
+        batch, "load_or_init_config", lambda _path=None, **_kwargs: config
+    )
     monkeypatch.setattr(batch.ui, "setup_logging", lambda **_kwargs: None)
     monkeypatch.setattr(batch, "_NOT_FOUND_DIR", tmp_path / "logs")
     return tmp_path
@@ -1531,7 +1533,9 @@ def test_config_directories_are_expanded_when_out_is_omitted(
             "raw_data_dir": f"{ref}/raw",
         }
     }
-    monkeypatch.setattr(batch, "load_or_init_config", lambda _path=None: config)
+    monkeypatch.setattr(
+        batch, "load_or_init_config", lambda _path=None, **_kwargs: config
+    )
     seen: dict[str, Path] = {}
 
     def _fake_download(

@@ -75,6 +75,7 @@ from .base import (
     expand_path,
     fail,
     require_safe_site,
+    stdin_is_interactive,
 )
 
 #: Guards against a pathological line being used as a search keyword or
@@ -297,7 +298,9 @@ class BatchCmd(Command):
         _report_input_problems(parsed)
 
         config_path = expand_path(args.config) if args.config else None
-        config_data = load_or_init_config(config_path)
+        config_data = load_or_init_config(
+            config_path, non_interactive=not stdin_is_interactive()
+        )
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)

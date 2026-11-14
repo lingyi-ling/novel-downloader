@@ -33,6 +33,7 @@ from .base import (
     parse_book_args,
     require_safe_book_id,
     require_safe_site,
+    stdin_is_interactive,
 )
 
 
@@ -134,7 +135,9 @@ class CleanLogsCmd(Command):
     @classmethod
     def run(cls, args: Namespace) -> None:
         config_path: Path | None = expand_path(args.config) if args.config else None
-        config_data = load_or_init_config(config_path)
+        config_data = load_or_init_config(
+            config_path, non_interactive=not stdin_is_interactive()
+        )
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)
@@ -247,7 +250,9 @@ class CleanCacheCmd(Command):
         site = _validated_site(args.site) if args.site is not None else None
 
         config_path: Path | None = expand_path(args.config) if args.config else None
-        config_data = load_or_init_config(config_path)
+        config_data = load_or_init_config(
+            config_path, non_interactive=as_json or not stdin_is_interactive()
+        )
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)
@@ -416,8 +421,11 @@ class CleanBookCmd(Command):
         # key before a config load can prompt or create files.
         site = _validated_site(args.site) if args.site is not None else None
 
+        as_json = bool(getattr(args, "as_json", False))
         config_path: Path | None = expand_path(args.config) if args.config else None
-        config_data = load_or_init_config(config_path)
+        config_data = load_or_init_config(
+            config_path, non_interactive=as_json or not stdin_is_interactive()
+        )
         if config_data is None:
             raise SystemExit(EXIT_FAILURE)
 
@@ -431,7 +439,6 @@ class CleanBookCmd(Command):
             target_dir = raw_data_base
             desc = t("all raw data for all sites")
 
-        as_json = bool(getattr(args, "as_json", False))
         if not target_dir.exists():
             if not as_json:
                 ui.info(
@@ -498,8 +505,11 @@ class CleanBookCmd(Command):
 
         site = _validated_site(site)
 
+        as_json = bool(getattr(args, "as_json", False))
         config_path: Path | None = expand_path(args.config) if args.config else None
-        config_data = load_or_init_config(config_path)
+        config_data = load_or_init_config(
+            config_path, non_interactive=as_json or not stdin_is_interactive()
+        )
         if config_data is None:
             raise SystemExit(EXIT_FAILURE)
 
@@ -509,7 +519,6 @@ class CleanBookCmd(Command):
         remove_metadata = args.metadata or False
         remove_chapters = not args.no_chapters
         remove_media = args.media or False
-        as_json = bool(getattr(args, "as_json", False))
 
         if not (remove_chapters or remove_metadata or remove_media):
             # Same no-op as the real cleanup: nothing selected, no prompt.
@@ -567,7 +576,9 @@ class CleanBookCmd(Command):
         site = _validated_site(args.site) if args.site is not None else None
 
         config_path: Path | None = expand_path(args.config) if args.config else None
-        config_data = load_or_init_config(config_path)
+        config_data = load_or_init_config(
+            config_path, non_interactive=not stdin_is_interactive()
+        )
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)
@@ -647,7 +658,9 @@ class CleanBookCmd(Command):
 
         # Load config
         config_path: Path | None = expand_path(args.config) if args.config else None
-        config_data = load_or_init_config(config_path)
+        config_data = load_or_init_config(
+            config_path, non_interactive=not stdin_is_interactive()
+        )
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)
