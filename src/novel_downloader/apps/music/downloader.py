@@ -36,6 +36,99 @@ _CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)")
 #: not be able to make the process buffer an arbitrary document in memory.
 MAX_COVER_BYTES = 8 * 1024 * 1024
 
+#: Hard ceiling for one audio file.  Lossless tracks are tens of megabytes, so
+#: 1 GiB is already far above any legitimate song; anything larger is a broken
+#: or hostile CDN streaming without end.  The body is checked while it streams,
+#: so the limit also caps the bytes written before the download is abandoned.
+MAX_TRACK_BYTES = 1024 * 1024 * 1024
+
+#: Hard ceiling for one batch invocation (``download_many`` / ``download_mixed``).
+#: Every worker shares the same atomic counter.  Skipped tracks and failed
+#: attempts release what they charged, so this bounds the bytes the batch
+#: actually keeps rather than the size of files already on disk.
+MAX_BATCH_BYTES = 8 * 1024 * 1024 * 1024
+
+
+class _SizeBudgetExceeded(OSError):
+    """A track or batch byte budget was exhausted (deterministic, no retry)."""
+
+
+class _ByteBudget:
+    """Thread-safe byte budget shared by every worker of one batch.
+
+    ``try_consume`` is the only place that increments the counter, so two
+    downloads racing for the last few bytes can never both win.  ``release``
+    gives back the bytes of an attempt that was cancelled, failed, or whose
+    partial file was deleted: those must not occupy the batch budget.
+    """
+
+    __slots__ = ("_limit", "_used", "_lock")
+
+    def __init__(self, limit: int) -> None:
+        try:
+            value = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"下载大小上限必须是正整数（当前 {limit!r}）") from exc
+        if value <= 0:
+            raise ValueError(f"下载大小上限必须是正整数（当前 {limit!r}）")
+        self._limit = value
+        self._used = 0
+        self._lock = threading.Lock()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return self._used
+
+    def try_consume(self, amount: int) -> bool:
+        """Atomically reserve *amount* bytes; False means the limit is hit."""
+        try:
+            value = int(amount)
+        except (TypeError, ValueError):
+            return False
+        if value <= 0:
+            return True
+        with self._lock:
+            if self._used + value > self._limit:
+                return False
+            self._used += value
+            return True
+
+    def release(self, amount: int) -> None:
+        """Return bytes that will no longer be kept on disk."""
+        try:
+            value = int(amount)
+        except (TypeError, ValueError):
+            return
+        if value <= 0:
+            return
+        with self._lock:
+            self._used = max(0, self._used - value)
+
+
+def _positive_limit(value: int | None, default: int, label: str) -> int:
+    """Resolve a configured limit, rejecting zero/negative/non-integer values."""
+    limit = default if value is None else value
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError(f"{label}大小上限必须是正整数（当前 {limit!r}）")
+    return limit
+
+
+def _track_limit(opts) -> int:
+    return _positive_limit(
+        getattr(opts, "max_track_bytes", None), MAX_TRACK_BYTES, "单曲"
+    )
+
+
+def _batch_limit(opts) -> int:
+    return _positive_limit(
+        getattr(opts, "max_batch_bytes", None), MAX_BATCH_BYTES, "整批"
+    )
+
 
 def _fetch_cover(url: str) -> bytes | None:
     """Download cover art with a hard size bound; never raise.
@@ -88,6 +181,15 @@ class DownloadOptions:
     split_folder: bool = True
     skip_existing: bool = True
     retries: int = 2  # 传输类失败自动重试次数（不含首次）
+    # ``None`` 表示使用模块常量；显式给值时必须是正整数。单曲上限在流式
+    # 写入时检查，整批上限由同一次 download_many / download_mixed 的所有
+    # 工作线程共享。新增字段均带默认值，既有调用方无需改动。
+    max_track_bytes: int | None = None
+    max_batch_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        _positive_limit(self.max_track_bytes, MAX_TRACK_BYTES, "单曲")
+        _positive_limit(self.max_batch_bytes, MAX_BATCH_BYTES, "整批")
 
 
 @dataclass
@@ -156,6 +258,8 @@ def _download_file(
     timeout=60,
     resume=True,
     extra_headers=None,
+    max_bytes=None,
+    budget=None,
 ):
     """流式下载到 dest，支持断点续传。
 
@@ -168,20 +272,63 @@ def _download_file(
       重写；起点错位到别处则直接报错（不把可疑字节拼进分片）
     - 回 416 说明分片比服务端文件还大（不可信），丢弃重来
     - 下完校验总大小，不符视为失败，避免留下损坏文件
+
+    大小预算：
+    - ``max_bytes`` 限制单个文件的总大小（含续传时已有的分片），按块累加
+      检查；服务端声明的 Content-Length 也会先做一次快速拒绝
+    - ``budget`` 是整批共享的 :class:`_ByteBudget`，按实际写入磁盘的字节
+      原子扣减；续传起点也算已写入，避免多线程各自只算增量而绕过整批上限
+    - 任一上限命中都抛 :class:`_SizeBudgetExceeded`，删除 ``.part`` 半文件，
+      并归还本次尝试已占用的整批预算；这类失败是确定性的，调用方不应重试
     """
     headers = {"User-Agent": UA}
     if extra_headers:
         headers.update(extra_headers)
     tmp = dest + ".part"
     start = os.path.getsize(tmp) if (resume and os.path.exists(tmp)) else 0
+    if max_bytes is not None and start > max_bytes:
+        _remove(tmp)
+        raise _SizeBudgetExceeded(
+            f"单曲超过大小上限（{human(max_bytes)}），已删除不完整文件"
+        )
     if start:
         headers["Range"] = f"bytes={start}-"
 
-    r = requests.get(url, headers=headers, stream=True, timeout=timeout)
+    charged = 0
+
+    def charge(amount):
+        nonlocal charged
+        if budget is None or amount <= 0:
+            return
+        if not budget.try_consume(amount):
+            raise _SizeBudgetExceeded(
+                f"整批下载超过大小上限（{human(budget.limit)}），已删除不完整文件"
+            )
+        charged += amount
+
+    def refund(amount):
+        """Give back a known part of what this attempt already charged."""
+        nonlocal charged
+        if budget is None or amount <= 0:
+            return
+        budget.release(amount)
+        charged = max(0, charged - amount)
+
+    def release_charged():
+        nonlocal charged
+        if budget is not None and charged:
+            budget.release(charged)
+        charged = 0
+
+    r = None
     try:
+        charge(start)  # 续传分片同样占用磁盘，先记到本批预算
+
+        r = requests.get(url, headers=headers, stream=True, timeout=timeout)
         if start and r.status_code == 416:
             r.close()
             _remove(tmp)
+            release_charged()
             return _download_file(
                 url,
                 dest,
@@ -190,9 +337,13 @@ def _download_file(
                 timeout,
                 resume=False,
                 extra_headers=extra_headers,
+                max_bytes=max_bytes,
+                budget=budget,
             )
         if start and r.status_code != 206:
-            start = 0  # 服务端不支持续传，截断重下
+            # 服务端不支持续传，下面的 "wb" 会丢弃旧分片，预算也要归还
+            refund(start)
+            start = 0
         if r.status_code not in (200, 206):
             raise OSError(f"HTTP {r.status_code}")
 
@@ -206,6 +357,7 @@ def _download_file(
                     )
                 # 服务端无视 Range 却回了 206 且内容从 0 开始：
                 # 分片作废整段重写，避免把完整文件拼到旧分片后面
+                refund(start)
                 start = 0
 
         ctype = (r.headers.get("Content-Type") or "").lower()
@@ -221,6 +373,12 @@ def _download_file(
                 total = int(m.group(1))
         if not total:
             total = start + int(r.headers.get("Content-Length") or 0)
+        # 声明的总大小就超限时不必真的把内容收完；声明可能不准，真正的
+        # 保证仍是下面的逐块检查，这里只是省掉一次无意义的大流量。
+        if max_bytes is not None and total > max_bytes:
+            raise _SizeBudgetExceeded(
+                f"单曲超过大小上限（{human(max_bytes)}），已删除不完整文件"
+            )
 
         done = start
         if progress:
@@ -231,13 +389,30 @@ def _download_file(
                     raise InterruptedError(t("Cancelled by user"))
                 if not chunk:
                     continue
+                size = len(chunk)
+                if max_bytes is not None and done + size > max_bytes:
+                    raise _SizeBudgetExceeded(
+                        f"单曲超过大小上限（{human(max_bytes)}），已删除不完整文件"
+                    )
+                charge(size)  # 预算不足时在写盘前中止，磁盘不会多出这一块
                 f.write(chunk)
-                done += len(chunk)
+                done += size
                 if progress:
                     progress(done, total)
+    except _SizeBudgetExceeded:
+        # 半文件必须消失：下次启动既不会把它当完整文件，也不会继续续传
+        # 一个注定超限的目标。
+        _remove(tmp)
+        release_charged()
+        raise
+    except BaseException:
+        # 传输失败/用户取消保留 .part 供续传，但本批预算不应被它占住。
+        release_charged()
+        raise
     finally:
-        with contextlib.suppress(Exception):
-            r.close()
+        if r is not None:
+            with contextlib.suppress(Exception):
+                r.close()
 
     if total and done != total:
         raise OSError(f"大小不符（期望 {total}，实得 {done}），断点已保留")
@@ -373,14 +548,18 @@ def _write_lyrics(provider, track, dest):
 
 
 def download_track(
-    provider, track, opts: DownloadOptions, progress=None, stop_flag=None
+    provider, track, opts: DownloadOptions, progress=None, stop_flag=None, budget=None
 ):
     """下载单首歌。返回 TrackResult。
 
     直链解析交给 provider（各平台逻辑不同），本函数只管落盘。
     同一目标文件全程持有文件锁（见 _dest_lock），并发批次里的重复
     曲目不会两个线程交叉写同一路径。
+
+    ``budget`` 是同一批次共享的 :class:`_ByteBudget`；单曲上限始终生效，
+    整批上限只在传入预算时累计。超限会返回 ``status="fail"`` 且不重试。
     """
+    max_bytes = _track_limit(opts)  # 配置非法时尽早抛出，而不是逐首试错
     if not track.id:
         return TrackResult("fail", "缺少歌曲 id")
 
@@ -428,7 +607,7 @@ def download_track(
         # 传输类失败自动重试；重试期间 .part 保留，因此顺带就是续传
         size, resumed = 0, 0
         attempts = max(0, opts.retries) + 1  # 0 次重试 = 只尝试 1 次
-        last_err = None
+        last_err: Exception | None = None
         for i in range(attempts):
             try:
                 size, resumed = _download_file(
@@ -437,8 +616,15 @@ def download_track(
                     progress=progress,
                     stop_flag=stop_flag,
                     extra_headers=rr.http_headers,
+                    max_bytes=max_bytes,
+                    budget=budget,
                 )
                 last_err = None
+                break
+            except _SizeBudgetExceeded as e:
+                # 超限是确定性的：重试只会再撞一次上限，而且半文件已被
+                # _download_file 删除，没有可续传的断点。
+                last_err = e
                 break
             except InterruptedError:
                 # 用户中途停止：保留 .part，下次可从这里续传
@@ -447,6 +633,8 @@ def download_track(
                 last_err = e
                 if i < attempts - 1:
                     time.sleep(min(1.5 * (i + 1), 5))
+        if isinstance(last_err, _SizeBudgetExceeded):
+            return TrackResult("fail", str(last_err))
         if last_err is not None:
             detail = f"{type(last_err).__name__} {str(last_err)[:50]}"
             return TrackResult(
@@ -482,12 +670,17 @@ def download_many(
     on_tick=None,
     should_stop=None,
     min_interval=0.2,
+    budget=None,
 ):
     """并发下载多首。
 
     on_result(index, track, TrackResult) —— 每首结束回调
     on_tick(fraction, done_count)        —— 进度回调（内部节流，不会刷爆界面）
     should_stop() -> bool                —— 返回 True 则中止
+
+    ``budget`` 可由 :func:`download_mixed` 传入，让多个平台分组共用同一份
+    整批预算；未传入时为本次调用新建一份。所有工作线程通过同一个
+    原子计数器扣减，因此并发也不会突破上限。
 
     返回 (ok, skip, fail, failed_pairs, failed_tracks)。
     登录态失效（LoginExpired）会向上抛出，由界面层统一处理。
@@ -496,6 +689,9 @@ def download_many(
     total = len(tracks)
     if total == 0:
         return 0, 0, 0, [], []
+    _track_limit(opts)  # fail fast on bad config before workers start
+    if budget is None:
+        budget = _ByteBudget(_batch_limit(opts))
 
     lock = threading.Lock()
     tick_lock = threading.Lock()
@@ -535,7 +731,9 @@ def download_many(
             tick()
 
         try:
-            r = download_track(provider, t, opts, progress=prog, stop_flag=stopped)
+            r = download_track(
+                provider, t, opts, progress=prog, stop_flag=stopped, budget=budget
+            )
         except LoginExpired:
             with lock:
                 active.pop(i, None)
@@ -605,6 +803,10 @@ def download_mixed(
 
     ``platform`` 非空时忽略曲目自带的 provider（单平台界面的历史行为）。
 
+    所有平台分组以及随后的多来源回退共用同一份整批字节预算：某个来源
+    失败后换源重下时，已释放的字节不会重复占用，真正成功写入的字节才
+    留在计数器里。
+
     返回值与 :func:`download_many` 相同：
     ``(ok, skip, fail, failed_pairs, failed_tracks)``。
     """
@@ -612,6 +814,9 @@ def download_mixed(
     total = len(tracks)
     if total == 0:
         return 0, 0, 0, [], []
+
+    _track_limit(opts)  # fail fast on bad config before the first provider call
+    budget = _ByteBudget(_batch_limit(opts))
 
     groups = group_by_provider(tracks, platform)
     counts = {"ok": 0, "skip": 0, "fail": 0}
@@ -689,6 +894,7 @@ def download_mixed(
             on_tick=group_tick,
             should_stop=should_stop,
             min_interval=min_interval,
+            budget=budget,
         )
         counts["ok"] += ok
         counts["skip"] += skip
@@ -727,7 +933,9 @@ def download_mixed(
                 if provider is None:
                     continue
                 try:
-                    result = download_track(provider, alt, opts, stop_flag=should_stop)
+                    result = download_track(
+                        provider, alt, opts, stop_flag=should_stop, budget=budget
+                    )
                 except LoginExpired:
                     raise
                 except Exception:  # noqa: BLE001 - 换下一个来源

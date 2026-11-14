@@ -1218,3 +1218,383 @@ def test_fetch_cover_returns_the_body_within_the_cap(
     monkeypatch.setattr(downloader.requests, "get", lambda *a, **k: response)
 
     assert downloader._fetch_cover("http://fake.test/cover.jpg") == b"abcdef"
+
+
+# ---------------------------------------------------------------------------
+# size budgets: per-track and per-batch
+# ---------------------------------------------------------------------------
+
+
+def _budget_opts(tmp_path: Path, **overrides: object) -> DownloadOptions:
+    values: dict[str, object] = {
+        "out_dir": str(tmp_path),
+        "split_folder": False,
+        "embed_tags": False,
+        "embed_cover": False,
+        "save_lyric": False,
+        "skip_existing": False,
+        "retries": 0,
+    }
+    values.update(overrides)
+    return DownloadOptions(**values)  # type: ignore[arg-type]
+
+
+class _UrlProvider:
+    """Provider whose ``resolve`` always yields a fixed URL."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    def resolve(self, track: Track, level: str | None = None) -> ResolveResult:
+        return ResolveResult(url=self.url, ext="mp3", level=level)
+
+    def lyric(self, track: Track) -> tuple[str, str]:
+        return "", ""
+
+
+class _FailingResponse(_StreamResponse):
+    """Yields one chunk, then breaks the connection mid-body."""
+
+    def iter_content(self, chunk_size: int | None = None):
+        yield b"a" * 120
+        raise OSError("connection reset")
+
+
+def test_music_size_budget_defaults() -> None:
+    assert downloader.MAX_TRACK_BYTES == 1024**3
+    assert downloader.MAX_BATCH_BYTES == 8 * 1024**3
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_track_bytes", 0),
+        ("max_track_bytes", -1),
+        ("max_batch_bytes", 0),
+        ("max_batch_bytes", -5),
+    ],
+)
+def test_download_options_reject_non_positive_size_limits(
+    tmp_path: Path, field: str, value: int
+) -> None:
+    with pytest.raises(ValueError, match="必须是正整数"):
+        _budget_opts(tmp_path, **{field: value})
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_byte_budget_rejects_non_positive_limits(value: int) -> None:
+    with pytest.raises(ValueError, match="必须是正整数"):
+        downloader._ByteBudget(value)
+
+
+def test_byte_budget_is_atomic_under_concurrency() -> None:
+    budget = downloader._ByteBudget(100)
+    guard = threading.Lock()
+    outcomes: list[bool] = []
+    barrier = threading.Barrier(24)
+
+    def worker() -> None:
+        barrier.wait()
+        granted = budget.try_consume(10)
+        with guard:
+            outcomes.append(granted)
+
+    threads = [threading.Thread(target=worker) for _ in range(24)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    # Exactly ten 10-byte reservations fit; the remaining fourteen must fail
+    # atomically instead of letting two workers claim the same bytes.
+    assert outcomes.count(True) == 10
+    assert budget.used == 100
+
+
+def test_download_file_deletes_part_when_track_limit_is_exceeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "song.mp3"
+    response = _StreamResponse(
+        status_code=200,
+        headers={"Content-Length": "400", "Content-Type": "audio/mpeg"},
+        chunks=(b"a" * 200, b"b" * 200),
+    )
+    _install_fake_get(monkeypatch, [response])
+    budget = downloader._ByteBudget(10_000)
+
+    with pytest.raises(downloader._SizeBudgetExceeded, match="单曲超过大小上限"):
+        downloader._download_file(
+            "http://fake.test/a.mp3", str(dest), max_bytes=300, budget=budget
+        )
+
+    assert not dest.exists()
+    # The half file must be gone, not left behind for resume.
+    assert not (tmp_path / "song.mp3.part").exists()
+    # And the aborted attempt must release what it had charged.
+    assert budget.used == 0
+
+
+def test_download_file_rejects_declared_size_before_reading_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "song.mp3"
+    response = _StreamResponse(
+        status_code=200,
+        headers={"Content-Length": "10000", "Content-Type": "audio/mpeg"},
+        chunks=(b"x" * 10,),
+    )
+    calls = _install_fake_get(monkeypatch, [response])
+    budget = downloader._ByteBudget(10_000)
+
+    with pytest.raises(downloader._SizeBudgetExceeded, match="单曲超过大小上限"):
+        downloader._download_file(
+            "http://fake.test/a.mp3", str(dest), max_bytes=100, budget=budget
+        )
+
+    assert len(calls) == 1
+    assert not dest.exists()
+    assert not (tmp_path / "song.mp3.part").exists()
+    assert budget.used == 0
+
+
+def test_download_file_deletes_oversized_resumed_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "song.mp3"
+    part = tmp_path / "song.mp3.part"
+    part.write_bytes(b"A" * 400)
+
+    def never_called(*args: object, **kwargs: object) -> None:
+        pytest.fail("the oversized partial must be rejected before any request")
+
+    monkeypatch.setattr(downloader.requests, "get", never_called)
+    budget = downloader._ByteBudget(10_000)
+
+    with pytest.raises(downloader._SizeBudgetExceeded, match="单曲超过大小上限"):
+        downloader._download_file(
+            "http://fake.test/a.mp3", str(dest), max_bytes=300, budget=budget
+        )
+
+    assert not part.exists()
+    assert budget.used == 0
+
+
+def test_track_limit_failure_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+    response = _StreamResponse(
+        status_code=200,
+        headers={"Content-Length": "600", "Content-Type": "audio/mpeg"},
+        chunks=(b"x" * 600,),
+    )
+    # Only one response is queued: a retry would exhaust the fake and fail
+    # with an AssertionError instead of the budget reason.
+    _install_fake_get(monkeypatch, [response])
+
+    track = Track(provider="fake", id="1", name="Big", artists="Artist", album="Album")
+    opts = _budget_opts(tmp_path, max_track_bytes=500, retries=2)
+    budget = downloader._ByteBudget(10_000)
+
+    result = downloader.download_track(_FakeProvider(), track, opts, budget=budget)
+
+    assert result.status == "fail"
+    assert "单曲超过大小上限" in result.reason
+    assert result.retryable is False
+    assert not (tmp_path / "Big - Artist.mp3").exists()
+    assert list(tmp_path.glob("*.part")) == []
+    assert budget.used == 0
+
+
+def test_download_many_enforces_shared_batch_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+    responses = [
+        _StreamResponse(
+            status_code=200,
+            headers={"Content-Length": "600", "Content-Type": "audio/mpeg"},
+            chunks=(b"a" * 600,),
+        ),
+        _StreamResponse(
+            status_code=200,
+            headers={"Content-Length": "600", "Content-Type": "audio/mpeg"},
+            chunks=(b"b" * 600,),
+        ),
+    ]
+    _install_fake_get(monkeypatch, responses)
+
+    tracks = [
+        Track(provider="fake", id="1", name="One", artists="Artist", album="Album"),
+        Track(provider="fake", id="2", name="Two", artists="Artist", album="Album"),
+    ]
+    opts = _budget_opts(tmp_path, max_batch_bytes=1000)
+
+    ok, skip, fail, pairs, failed = downloader.download_many(
+        _FakeProvider(), tracks, opts, workers=1
+    )
+
+    assert (ok, skip, fail) == (1, 0, 1)
+    assert failed[0] is tracks[1]
+    assert "整批下载超过大小上限" in pairs[0][1]
+    assert (tmp_path / "One - Artist.mp3").is_file()
+    assert not (tmp_path / "Two - Artist.mp3").exists()
+    assert list(tmp_path.glob("*.part")) == []
+
+
+def test_skip_existing_does_not_consume_batch_budget(tmp_path: Path) -> None:
+    _seed_existing_audio(tmp_path)
+    track = Track(provider="fake", id="9", name="Song", artists="Artist", album="Album")
+    budget = downloader._ByteBudget(1)  # would reject even one byte
+
+    result = downloader.download_track(
+        _FakeProvider(), track, _skip_opts(tmp_path), budget=budget
+    )
+
+    assert result.status == "skip"
+    assert budget.used == 0
+
+
+def test_failed_download_releases_budget_but_keeps_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "song.mp3"
+    _install_fake_get(monkeypatch, [_FailingResponse()])
+    budget = downloader._ByteBudget(10_000)
+
+    with pytest.raises(OSError, match="connection reset"):
+        downloader._download_file(
+            "http://fake.test/a.mp3", str(dest), max_bytes=10_000, budget=budget
+        )
+
+    # A retryable failure keeps the partial for resume, but it must not hold
+    # on to the batch budget.
+    part = tmp_path / "song.mp3.part"
+    assert part.exists()
+    assert part.stat().st_size == 120
+    assert budget.used == 0
+
+
+def test_cancelled_download_releases_budget_and_keeps_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "song.mp3"
+    response = _StreamResponse(
+        status_code=200,
+        headers={"Content-Length": "200", "Content-Type": "audio/mpeg"},
+        chunks=(b"a" * 100, b"b" * 100),
+    )
+    _install_fake_get(monkeypatch, [response])
+    budget = downloader._ByteBudget(10_000)
+    checks = {"n": 0}
+
+    def stop_flag() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 1
+
+    with pytest.raises(InterruptedError):
+        downloader._download_file(
+            "http://fake.test/a.mp3",
+            str(dest),
+            stop_flag=stop_flag,
+            max_bytes=10_000,
+            budget=budget,
+        )
+
+    part = tmp_path / "song.mp3.part"
+    assert part.exists()
+    assert part.stat().st_size == 100
+    assert budget.used == 0
+
+
+def test_download_mixed_shares_budget_across_groups_and_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fallback must be charged to the same batch budget as the main group."""
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+    payload = b"x" * 400
+
+    def fake_get(url: str, **kwargs: object) -> _StreamResponse:
+        if url.endswith("/bad.mp3"):
+            return _StreamResponse(status_code=500)
+        return _StreamResponse(
+            status_code=200,
+            headers={"Content-Length": str(len(payload)), "Content-Type": "audio/mpeg"},
+            chunks=(payload,),
+        )
+
+    monkeypatch.setattr(downloader.requests, "get", fake_get)
+
+    primary = Track(
+        provider="bad", id="p", name="Primary", artists="Artist", album="Album"
+    )
+    alternative = Track(
+        provider="good", id="a", name="Primary", artists="Artist", album="Album"
+    )
+    primary.__dict__["_alternatives"] = [alternative]
+    other = Track(
+        provider="good", id="q", name="Other", artists="Artist", album="Album"
+    )
+
+    opts = _budget_opts(tmp_path, max_batch_bytes=700)
+    ok, skip, fail, pairs, failed = downloader.download_mixed(
+        lambda key: _UrlProvider(f"http://fake.test/{key}.mp3"),
+        [primary, other],
+        opts,
+        workers=1,
+    )
+
+    assert (ok, skip, fail) == (1, 0, 1)
+    assert failed[0] is primary
+    # ``other`` consumed 400 of the 700-byte budget; the fallback's 400 more
+    # would exceed it, so the alternative must not be downloaded.
+    assert (tmp_path / "Other - Artist.mp3").is_file()
+    assert not (tmp_path / "Primary - Artist.mp3").exists()
+    assert list(tmp_path.glob("*.part")) == []
+    assert pairs[0][0] == "Primary - Artist"
+
+
+def test_mixed_fallback_reuses_budget_released_by_partial_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bytes from a failed attempt are refunded before the fallback charges."""
+    monkeypatch.setattr(downloader, "_write_tags", lambda *args, **kwargs: None)
+    payload = b"g" * 200
+
+    def fake_get(url: str, **kwargs: object) -> _StreamResponse:
+        if url.endswith("/bad.mp3"):
+            return _FailingResponse()  # writes 120 bytes, then breaks
+        return _StreamResponse(
+            status_code=200,
+            headers={"Content-Length": str(len(payload)), "Content-Type": "audio/mpeg"},
+            chunks=(payload,),
+        )
+
+    monkeypatch.setattr(downloader.requests, "get", fake_get)
+
+    primary = Track(
+        provider="bad", id="p", name="Primary", artists="Artist", album="Album"
+    )
+    alternative = Track(
+        provider="good", id="a", name="Primary", artists="Artist", album="Album"
+    )
+    primary.__dict__["_alternatives"] = [alternative]
+
+    # The failed 120 bytes must be refunded: without the refund the fallback's
+    # 200 bytes would total 320 and exceed this 300-byte budget.  The primary's
+    # ``.part`` is at the same destination, so the fallback also has to refund
+    # the resumed prefix when a 200 response discards it.
+    opts = _budget_opts(tmp_path, max_batch_bytes=300)
+    ok, skip, fail, pairs, failed = downloader.download_mixed(
+        lambda key: _UrlProvider(f"http://fake.test/{key}.mp3"),
+        [primary],
+        opts,
+        workers=1,
+    )
+
+    assert (ok, skip, fail) == (1, 0, 0)
+    assert pairs == []
+    assert failed == []
+    assert (tmp_path / "Primary - Artist.mp3").read_bytes() == payload
+    assert list(tmp_path.glob("*.part")) == []
