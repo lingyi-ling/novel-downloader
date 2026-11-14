@@ -339,8 +339,23 @@ async def test_health_and_sites_shape_parity(
     async with _api_client(parity_engines) as client:
         api_status, api_health, _ = await _api_call(client, "GET", "/api/v1/health")
         emb_status, emb_health, _ = _embedded_call("GET", "/api/v1/health")
-        assert (emb_status, emb_health) == (api_status, api_health)
+        # The shared contract is the historical liveness payload. The REST
+        # server adds read-only diagnostics on top; the embedded server stays a
+        # liveness probe, so old clients see exactly the same core fields on
+        # both transports.
+        assert api_status == emb_status == 200
         assert emb_health == {"status": "ok", "version": __version__}
+        assert {key: api_health[key] for key in ("status", "version")} == emb_health
+        assert set(api_health) >= {
+            "status",
+            "version",
+            "uptime_s",
+            "output_writable",
+            "cache_writable",
+            "rate_limit",
+            "tasks",
+            "music_platforms_available",
+        }
 
         api_status, api_sites, _ = await _api_call(client, "GET", "/api/v1/sites")
         emb_status, emb_sites, _ = _embedded_call("GET", "/api/v1/sites")

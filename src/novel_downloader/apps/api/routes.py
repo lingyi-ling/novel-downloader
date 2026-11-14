@@ -19,12 +19,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, TypeVar, cast
 from urllib.parse import quote
@@ -36,6 +38,7 @@ from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from novel_downloader import __version__
+from novel_downloader.apps.common import history_files
 from novel_downloader.apps.common.history_files import _apply_sort, _scan_files
 from novel_downloader.apps.constants import (
     DOWNLOAD_SUPPORT_SITES,
@@ -50,9 +53,15 @@ from novel_downloader.apps.core.cred_broker import (
 from novel_downloader.apps.core.models import CredRequest, DownloadTask, Status
 from novel_downloader.apps.core.task_manager import TaskManager, manager
 from novel_downloader.apps.core.watchlist import WatchEntry, WatchlistStore
+from novel_downloader.infra.config import get_config_value
 from novel_downloader.plugins import search as search_module
 from novel_downloader.plugins.ranking import normalize_text
-from novel_downloader.plugins.search import search, search_stream
+from novel_downloader.plugins.search import (
+    UnknownSearchSiteError,
+    search,
+    search_stream,
+)
+from novel_downloader.schemas.config import default_cache_dir
 
 from .auth import require_token
 from .constants import (
@@ -92,6 +101,13 @@ from .schemas import (
 
 #: Logger for sanitized failures whose full reason stays server-side.
 logger = logging.getLogger(__name__)
+
+#: Monotonic timestamp captured when this module is imported. The API app
+#: imports the router during construction, so ``uptime_s`` is effectively
+#: "how long this API process has been serving" and is immune to wall-clock
+#: changes. Kept at module scope (rather than per-request) so it is O(1) and
+#: cannot be influenced by a client.
+_STARTED_MONOTONIC = time.monotonic()
 
 #: OpenAPI groups shown in ``/docs``.
 OPENAPI_TAGS: list[dict[str, str]] = [
@@ -310,10 +326,141 @@ async def browse_books(body: BrowseRequest, request: Request) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _configured_path(keys: list[str], default: str) -> Path:
+    """
+    Resolve a configured directory without creating or touching it.
+
+    A missing/unreadable config, an empty value or an invalid path falls back
+    to ``default``; diagnostics must never fail because of a bad config file.
+    """
+    try:
+        raw = get_config_value(keys, default)
+    except Exception:  # noqa: BLE001 - best-effort diagnostics
+        raw = default
+    if not isinstance(raw, str) or not raw.strip():
+        raw = default
+    try:
+        return Path(raw).expanduser()
+    except (OSError, RuntimeError, ValueError):
+        return Path(default)
+
+
+def _output_path() -> Path:
+    """Return the export directory without creating it."""
+    try:
+        return Path(history_files._output_dir()).expanduser()
+    except (OSError, RuntimeError, ValueError):
+        return Path("./downloads")
+
+
+def _cache_path() -> Path:
+    """Return the configured cache directory (``general.cache_dir``)."""
+    return _configured_path(["general", "cache_dir"], default_cache_dir())
+
+
+def _path_writable(path: Path) -> bool:
+    """
+    Best-effort, side-effect-free writability probe.
+
+    A directory that does not exist yet is considered writable when its
+    nearest existing ancestor is a writable directory, because the downloader
+    creates output/cache directories on demand. No directory is created and
+    no file is written here.
+    """
+    try:
+        probe = path
+        while not probe.exists():
+            parent = probe.parent
+            if parent == probe:
+                return False
+            probe = parent
+        return probe.is_dir() and os.access(probe, os.W_OK)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _rate_limit_state(request: Request) -> dict[str, Any]:
+    """
+    Describe the configured rate limiter without importing its middleware.
+
+    ``create_app`` installs ``RateLimitMiddleware`` only when limiting is
+    enabled and keeps its validated values in ``app.user_middleware``. A
+    missing entry therefore means "disabled"; no counter or client identity is
+    exposed.
+    """
+    for middleware in request.app.user_middleware:
+        if getattr(getattr(middleware, "cls", None), "__name__", "") != (
+            "RateLimitMiddleware"
+        ):
+            continue
+        kwargs = getattr(middleware, "kwargs", {})
+        raw_limit = kwargs.get("limit")
+        raw_window = kwargs.get("window")
+        return {
+            "enabled": True,
+            "limit": int(raw_limit) if isinstance(raw_limit, int) else None,
+            "window": float(raw_window)
+            if isinstance(raw_window, (int, float))
+            else None,
+        }
+    return {"enabled": False, "limit": None, "window": None}
+
+
+def _task_counts(mgr: TaskManager) -> dict[str, int]:
+    """Count the in-memory queue groups (no persistence, no network)."""
+    snapshot = mgr.snapshot()
+    return {name: len(snapshot.get(name, [])) for name in _TASK_GROUPS}
+
+
+@lru_cache(maxsize=1)
+def _music_platform_count() -> int:
+    """
+    Return how many music platforms are registered, or ``0``.
+
+    Importing the provider registry only evaluates the lazy registry (it does
+    not import any platform implementation or perform network I/O); the result
+    is cached for the process lifetime. Optional ``music`` extras that are not
+    installed make this a best-effort ``0`` instead of a 500.
+    """
+    try:
+        from novel_downloader.apps.music.providers import available_labels
+
+        return len(available_labels())
+    except Exception:  # noqa: BLE001 - optional component, never fatal
+        return 0
+
+
+# Warm the count while the router is imported so the first health probe never
+# pays for importing the optional music provider package (the probe itself must
+# stay cheap). The call is cached; failure is already folded into ``0``.
+_music_platform_count()
+
+
 @router.get("/health", tags=["system"])
-async def health() -> dict[str, str]:
-    """Liveness probe."""
-    return {"status": "ok", "version": __version__}
+async def health(
+    request: Request,
+    mgr: Annotated[TaskManager, Depends(get_manager)],
+) -> dict[str, Any]:
+    """
+    Read-only liveness and diagnostics probe.
+
+    The historical ``status``/``version`` fields are always present, so old
+    clients and monitoring keep working. The additional fields are cheap,
+    side-effect-free facts about this process: uptime, best-effort directory
+    writability (booleans only, never paths), the configured rate limiter, the
+    current task counts and how many music platforms are registered. No
+    network call, plugin import or filesystem write is performed.
+    """
+    return {
+        "status": "ok",
+        "version": __version__,
+        "uptime_s": round(max(0.0, time.monotonic() - _STARTED_MONOTONIC), 3),
+        "output_writable": _path_writable(_output_path()),
+        "cache_writable": _path_writable(_cache_path()),
+        "rate_limit": _rate_limit_state(request),
+        "tasks": _task_counts(mgr),
+        "music_platforms_available": _music_platform_count(),
+    }
 
 
 @router.get("/sites", tags=["system"])
@@ -371,21 +518,31 @@ async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
         filters["updated_after"] = body.updated_after
 
     timeout = _blocking_timeout(request, "search")
-    results = await _with_timeout(
-        search(
-            body.keyword,
-            sites=body.sites,
-            limit=body.limit,
-            per_site_limit=body.per_site_limit,
-            timeout=body.timeout,
-            sort=body.sort,
-            order=body.order,
-            group=body.group,
-            **filters,
-        ),
-        timeout,
-        "Search",
-    )
+    try:
+        results = await _with_timeout(
+            search(
+                body.keyword,
+                sites=body.sites,
+                limit=body.limit,
+                per_site_limit=body.per_site_limit,
+                timeout=body.timeout,
+                sort=body.sort,
+                order=body.order,
+                group=body.group,
+                **filters,
+            ),
+            timeout,
+            "Search",
+        )
+    except UnknownSearchSiteError as exc:
+        # An explicit site with no registered searcher is a client error: the
+        # aggregate would otherwise skip it and return an empty 200, which is
+        # indistinguishable from "no such book".  Same shape as the schema's
+        # own validation failures.
+        raise HTTPException(
+            status_code=422,
+            detail=f"Request validation failed: sites: {exc}",
+        ) from exc
     return {
         "total": len(results),
         "results": [dict(item) for item in results],

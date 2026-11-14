@@ -614,3 +614,118 @@ def test_updated_after_rejects_non_iso_dates(
     assert out == ""
     assert "--updated-after" in err
     assert "updated_after" not in captured
+
+
+# ---------------------------------------------------------------------------
+# --site validation: a typo is a usage error, not an empty successful search
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_site_is_a_usage_error_listing_available_sites(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A misspelt ``--site`` must fail loudly instead of searching nothing.
+
+    The registry silently skips a key no searcher is registered for, which
+    used to leave the aggregate with "0 site(s) completed" and exit 0 -- the
+    exact signature of "no such book".
+    """
+    monkeypatch.setattr(
+        search_module, "_unknown_search_sites", lambda _sites: ["qiidan"]
+    )
+    monkeypatch.setattr(
+        search_module, "_available_search_sites", lambda: ["b520", "qidian"]
+    )
+    _install_search(monkeypatch, [_row()])
+
+    code, out, err = _run(_args(["--json", "--site", "qiidan", "三体"]), capsys)
+
+    assert code == EXIT_USAGE
+    assert out == ""
+    assert "qiidan" in err
+    # The alternatives are part of the diagnostic, like ``Unsupported site``.
+    assert "b520" in err
+    assert "qidian" in err
+
+
+def test_unknown_site_is_rejected_before_any_search_runs(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def _unexpected(**_kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("an unknown --site must not start a search")
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", _unexpected)
+    monkeypatch.setattr(
+        search_module, "_unknown_search_sites", lambda _sites: ["qiidan"]
+    )
+    monkeypatch.setattr(
+        search_module, "_available_search_sites", lambda: ["b520", "qidian"]
+    )
+
+    code, out, err = _run(_args(["--site", "qiidan", "三体"]), capsys)
+
+    assert code == EXIT_USAGE
+    assert out == ""
+    assert "qiidan" in err
+
+
+def test_unknown_site_is_forwarded_when_the_registry_is_empty(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An empty/unavailable registry cannot judge a key, so it is not rejected.
+
+    This is the fallback that keeps test doubles and partially initialised
+    registries working: validation only applies while the registry can name at
+    least one searcher.
+    """
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        search_module, "_unknown_search_sites", lambda _sites: ["custom_site"]
+    )
+    monkeypatch.setattr(search_module, "_available_search_sites", lambda: [])
+    _install_search(monkeypatch, [], captured=captured)
+
+    code, _out, _err = _run(_args(["--json", "--site", "custom_site", "三体"]), capsys)
+
+    assert code == 0
+    assert captured["sites"] == ["custom_site"]
+
+
+def test_site_validation_follows_registry_case_normalization(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``B520`` resolves like ``b520`` (the registry is case-insensitive)."""
+    captured: dict[str, Any] = {}
+    _install_search(monkeypatch, [], captured=captured)
+
+    code, _out, err = _run(_args(["--json", "--site", "B520", "三体"]), capsys)
+
+    assert code == 0, err
+    # Validation normalizes; the value handed to the engine keeps its spelling.
+    assert captured["sites"] == ["B520"]
+
+
+def test_no_site_selection_skips_registry_validation(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Without ``--site`` the aggregate selection is never validated."""
+
+    def _unexpected(_sites: Any) -> list[str]:
+        raise AssertionError("validation must not run without --site")
+
+    monkeypatch.setattr(search_module, "_unknown_search_sites", _unexpected)
+    _install_search(monkeypatch, [])
+
+    code, _out, _err = _run(_args(["--json", "三体"]), capsys)
+
+    assert code == 0

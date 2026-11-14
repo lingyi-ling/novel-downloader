@@ -11,8 +11,11 @@ __all__ = [
     "GroupedSearchResult",
     "RankedSearchResult",
     "SearchEvent",
+    "UnknownSearchSiteError",
+    "registered_search_site_keys",
     "search",
     "search_stream",
+    "unknown_search_sites",
 ]
 
 import asyncio
@@ -270,6 +273,104 @@ def _site_key(cls: type[BaseSearcher]) -> str:
     if len(parts) >= 2:
         return parts[-2].lower()
     return cls.__name__.lower()
+
+
+class UnknownSearchSiteError(ValueError):
+    """
+    An explicit site selection names a key no searcher is registered for.
+
+    The registry resolves a selection by silently skipping unknown keys
+    (:meth:`PluginRegistry.get_searcher_classes` suppresses the lookup error),
+    so a typo such as ``--site qidain`` produced an empty result set and a
+    successful exit -- indistinguishable from "no such book".  Callers that
+    receive an explicit selection therefore reject it instead.
+
+    :param sites: Rejected keys, as the caller spelled them.
+    :param available: Every searchable key, sorted, for the diagnostic.
+    """
+
+    def __init__(self, sites: Sequence[str], available: Sequence[str]) -> None:
+        self.sites = list(sites)
+        self.available = list(available)
+        super().__init__(
+            "Unknown site(s): {sites}. Available: {available}".format(
+                sites=", ".join(self.sites),
+                available=", ".join(self.available),
+            )
+        )
+
+
+def _explicit_site_key(value: object) -> str:
+    """
+    Normalize one explicitly requested site key exactly like the registry.
+
+    :func:`~novel_downloader.plugins.search_cache.build_key` documents the
+    same identity: stripped, lowercased, and prefixed with ``"n"`` when the
+    first character is a digit.  An empty/blank key is returned as ``""``
+    (the registry raises for it) so the caller can report it as unknown.
+    """
+    try:
+        return registrar._normalize_key(str(value))
+    except ValueError:
+        return ""
+
+
+def unknown_search_sites(sites: Sequence[str] | None) -> list[str]:
+    """
+    Return the explicitly requested site keys nothing is registered for.
+
+    A key is accepted when the registry resolves it, which covers built-in
+    plugins, browser/rule sources and any local plugin already enabled with
+    :meth:`PluginRegistry.enable_local_plugins`.  The lookup normalizes case
+    the same way :func:`_explicit_site_key` does, so ``B520`` is not a typo.
+
+    ``None``/empty means "every registered site" and is never unknown.
+    Duplicates collapse into one check, and the caller's spelling is echoed
+    back.  Only the requested keys are resolved, so a valid selection does not
+    pay the cost of importing every plugin; the full key list is built only
+    when a caller wants to report the alternatives (see
+    :func:`registered_search_site_keys`).
+    """
+    if not sites:
+        return []
+
+    unknown: list[str] = []
+    checked: set[str] = set()
+    for raw in sites:
+        key = _explicit_site_key(raw)
+        if not key:
+            unknown.append(str(raw))
+            continue
+        if key in checked:
+            continue
+        checked.add(key)
+        if not registrar.get_searcher_classes([key], load_all_if_none=False):
+            unknown.append(str(raw))
+    return unknown
+
+
+def registered_search_site_keys() -> list[str]:
+    """Return every site key a searcher is registered for, sorted."""
+    classes = registrar.get_searcher_classes(None, load_all_if_none=True)
+    return sorted({_site_key(cls) for cls in classes})
+
+
+def _reject_unknown_explicit_sites(sites: Sequence[str] | None) -> None:
+    """
+    Raise :class:`UnknownSearchSiteError` for a selection with a bad key.
+
+    An empty registry cannot judge a key (it may be a partially initialised
+    test double or a failed plugin import), so in that case the selection is
+    left to the historical "resolve what you can" behaviour instead of
+    rejecting every explicit site.
+    """
+    unknown = unknown_search_sites(sites)
+    if not unknown:
+        return
+    available = registered_search_site_keys()
+    if not available:
+        return
+    raise UnknownSearchSiteError(unknown, available)
 
 
 def _aggregate_config_fingerprint(
@@ -1324,12 +1425,21 @@ async def search(
         (``rank_score`` 0..1 and ``match_tier`` 0..4); the annotations are
         added to copies, so the cache and the searchers' payloads stay
         pristine.  :func:`search_stream` does not add them.
+    :raises UnknownSearchSiteError: When an explicit ``sites`` entry has no
+        registered searcher (a typo, or a plugin that is not installed).  The
+        error carries the rejected keys and every available key so a caller
+        can report a usage/validation error instead of an empty result set.
     """
     if sites is not None and not sites:
         # An explicit empty selection searches nothing.  The registry treats
         # any falsy ``sites`` (``[]`` included) as "all sites", so the empty
         # selection must be short-circuited here.
         return []
+
+    # An explicit selection is a promise about which sites ran: an unknown key
+    # must not disappear into an empty result set that looks like "no such
+    # book".  ``None`` (all sites) is unaffected.
+    _reject_unknown_explicit_sites(sites)
 
     # Resolve the participating classes before the cache lookup: an aggregate
     # key needs their identity (see ``_build_cache_key``), and a hot

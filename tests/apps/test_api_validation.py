@@ -275,6 +275,39 @@ async def test_search_dedupes_sites_before_forwarding(
 
 
 @pytest.mark.asyncio
+async def test_search_rejects_unknown_sites(client: httpx.AsyncClient) -> None:
+    """An explicit site key with no registered searcher is a 422, not an empty 200.
+
+    The API used to forward the key to the aggregate search, which silently
+    skipped it and returned ``{"total": 0}`` -- indistinguishable from "no such
+    book".  The error names the offending key and the available alternatives,
+    and stays a validation error (no traceback, no 500).
+    """
+    response = await client.post(
+        "/api/v1/search",
+        json={"keyword": "x", "sites": ["definitely_not_a_site"]},
+    )
+
+    _assert_422(response)
+    detail = response.json()["detail"]
+    assert "definitely_not_a_site" in detail
+    assert "Available:" in detail
+    # A real registered key is listed as an alternative.
+    assert "b520" in detail
+
+
+@pytest.mark.asyncio
+async def test_search_empty_sites_still_searches_nothing(
+    client: httpx.AsyncClient,
+) -> None:
+    """An explicit empty selection keeps its "search no site" meaning."""
+    response = await client.post("/api/v1/search", json={"keyword": "x", "sites": []})
+
+    assert response.status_code == 200
+    assert response.json() == {"total": 0, "results": []}
+
+
+@pytest.mark.asyncio
 async def test_search_ignores_unknown_fields(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -29,7 +29,14 @@ from ..ui_adapters import (
     CLILoginUI,
     CLIProcessUI,
 )
-from .base import EXIT_FAILURE, EXIT_USAGE, Command, expand_path, fail
+from .base import (
+    EXIT_FAILURE,
+    EXIT_USAGE,
+    Command,
+    expand_path,
+    fail,
+    stdin_is_interactive,
+)
 
 if TYPE_CHECKING:
     from novel_downloader.plugins.search import SearchEvent
@@ -40,6 +47,31 @@ _MAX_WORD_FILTER = 1_000_000_000
 
 #: The only accepted spelling of ``--updated-after``.
 _FILTER_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _unknown_search_sites(sites: Sequence[str]) -> list[str]:
+    """
+    Return the explicitly requested site keys no searcher is registered for.
+
+    Deliberately a module-level hook: tests can replace it to exercise the
+    diagnostic without depending on the process-wide plugin registry, while
+    the real implementation asks the registry (built-ins, rule sources and any
+    local plugin enabled just before this runs).
+    """
+    from novel_downloader.plugins.search import unknown_search_sites
+
+    return unknown_search_sites(sites)
+
+
+def _available_search_sites() -> list[str]:
+    """Return every site key a searcher is registered for, sorted.
+
+    Only called on the error path, because it makes the registry import every
+    plugin; a valid ``--site`` never pays that cost.
+    """
+    from novel_downloader.plugins.search import registered_search_site_keys
+
+    return registered_search_site_keys()
 
 
 class SearchCmd(Command):
@@ -214,7 +246,9 @@ class SearchCmd(Command):
         group_results_flag: bool = bool(args.group)
         config_path: Path | None = expand_path(args.config) if args.config else None
 
-        config_data = load_or_init_config(config_path)
+        config_data = load_or_init_config(
+            config_path, non_interactive=as_json or not stdin_is_interactive()
+        )
         if config_data is None:
             # ``load_or_init_config`` already reported the reason on stderr.
             raise SystemExit(EXIT_FAILURE)
@@ -229,6 +263,27 @@ class SearchCmd(Command):
                 plugins_cfg.get("local_plugins_path"),
                 override=plugins_cfg.get("override_builtins", False),
             )
+        # A typo in ``--site`` used to resolve to no searcher at all, which the
+        # aggregate reported as "0 site(s) completed" and exit 0 -- the same
+        # output as "no such book".  Reject the selection as a usage error
+        # instead, after local plugins are enabled so their keys count.
+        if sites:
+            unknown_sites = _unknown_search_sites(sites)
+            if unknown_sites:
+                available_sites = _available_search_sites()
+                # An empty registry cannot tell a typo from a plugin tree that
+                # failed to load; keep the historical behaviour rather than
+                # rejecting every explicit site.
+                if available_sites:
+                    fail(
+                        t(
+                            "Unsupported site(s): {sites}. Available: {available}"
+                        ).format(
+                            sites=", ".join(repr(site) for site in unknown_sites),
+                            available=", ".join(available_sites),
+                        ),
+                        EXIT_USAGE,
+                    )
         ui.setup_logging(
             log_dir=adapter.get_log_dir(),
             console_level=adapter.get_log_level(),

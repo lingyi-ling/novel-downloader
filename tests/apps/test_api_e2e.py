@@ -331,7 +331,19 @@ async def test_health_returns_status_and_version(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload == {"status": "ok", "version": __version__}
+    # Historical fields stay byte-for-byte compatible; diagnostics are added
+    # alongside them (clients ignore unknown keys).
+    assert payload["status"] == "ok"
+    assert payload["version"] == __version__
+    assert isinstance(payload["uptime_s"], (int, float))
+    assert payload["uptime_s"] >= 0
+    assert isinstance(payload["output_writable"], bool)
+    assert isinstance(payload["cache_writable"], bool)
+    assert set(payload["tasks"]) == {"pending", "running", "completed"}
+    assert all(isinstance(value, int) for value in payload["tasks"].values())
+    assert isinstance(payload["music_platforms_available"], int)
+    assert payload["music_platforms_available"] >= 0
+    assert set(payload["rate_limit"]) == {"enabled", "limit", "window"}
 
 
 @pytest.mark.asyncio
