@@ -1384,6 +1384,7 @@ class GitHubClient:
         expected: tuple[int, ...] = (200,),
         timeout: float | None = None,
         retries: int = 0,
+        use_proxy: bool = True,
     ) -> Reply:
         headers = {
             "Authorization": f"Bearer {self._token}",
@@ -1402,7 +1403,15 @@ class GitHubClient:
         raw = b""
         for attempt in range(retries + 1):
             try:
-                with urllib.request.urlopen(
+                if use_proxy:
+                    opener = urllib.request.urlopen
+                else:
+                    # System proxies regularly abort large uploads; direct TLS
+                    # avoids a buffering proxy in the middle.
+                    opener = urllib.request.build_opener(
+                        urllib.request.ProxyHandler({})
+                    ).open
+                with opener(
                     request, timeout=timeout if timeout is not None else HTTP_TIMEOUT
                 ) as response:
                     status = int(response.status)
@@ -1652,6 +1661,7 @@ class GitHubClient:
                     content_type="application/octet-stream",
                     expected=(200, 201),
                     timeout=UPLOAD_TIMEOUT,
+                    use_proxy=attempt == 0,
                 )
             except TransientAPIError as exc:
                 if attempt == UPLOAD_ATTEMPTS - 1:

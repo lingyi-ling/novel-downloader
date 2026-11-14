@@ -2414,6 +2414,26 @@ class TestUploadRetry:
 
         assert len(calls) == 3
 
+    def test_upload_retry_bypasses_the_system_proxy(
+        self, release: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(release)
+        spec = self._spec(release, tmp_path)
+        seen: list[bool] = []
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> Any:
+            seen.append(bool(kwargs.get("use_proxy", True)))
+            if len(seen) == 1:
+                raise release.TransientAPIError("proxy aborted the upload")
+            return release.Reply(201, {})
+
+        monkeypatch.setattr(client, "_request", fake_request)
+        monkeypatch.setattr(release.time, "sleep", lambda seconds: None)
+
+        client.upload_asset("https://up.example/assets{?name,label}", spec)
+
+        assert seen == [True, False]
+
     def test_it_gives_up_after_the_attempt_budget(
         self, release: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
