@@ -1,6 +1,6 @@
 ## v1.33.0 (2026-11-13)
 
-第五批并行改进：搜索过滤贯通桌面/Android、存储校验、通知定位、歌词入口与供应链安全；Python **12578 passed / 46 skipped**，Android **513 tests**。
+第五批并行改进：搜索过滤贯通桌面/Android、存储校验、通知定位、歌词入口与供应链安全；Python **12577 passed / 47 skipped**，Android **513 tests**。
 
 ### Feature
 
@@ -28,7 +28,7 @@
 
 ### Test
 
-- Python **12578 passed / 46 skipped**；ruff/format/mypy 全绿
+- Python **12577 passed / 47 skipped**；ruff/format/mypy 全绿
 - Android **513 tests**；CLI e2e 矩阵 9 例、REST/embedded 669 例契约对拍
 
 ## v1.32.0 (2026-11-13)
