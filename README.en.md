@@ -19,21 +19,23 @@ Supports resumable crawling, download queues with progress, multi-format exporti
 
 ## Features
 
-* Multi-site search: 59 search sites and 84 download sites, with aggregate search, ranking, and filtering
+* Multi-site search: 59 search sites and 84 download sites, with aggregate search, ranking, and word-count / last-updated filters (CLI, REST API, desktop, Android)
 * Built-in updates: desktop, CLI and Android check daily; downloads are SHA-256 verified before use. The desktop installs on quit (installer replaces in place, portable replaces its own folder); Android hands the APK to the system installer and never installs silently
 * Download queue and progress: resumable crawling, queue scheduling, and live progress
 * Export to TXT, EPUB, and HTML
 * History export: re-export previously downloaded books at any time
-* Follow updates and self-checks: a built-in follow list that checks for new chapters (optional automatic download), plus `doctor` environment diagnostics and `storage` disk-usage reporting
+* Follow updates and self-checks: a built-in follow list that checks for new chapters (optional automatic download), plus `doctor` environment diagnostics with opt-in `--fix` repairs, and `storage` disk reporting, read-only `verify`, and `backup --keep N` retention
 * Asynchronous and high-performance crawling
 * Pluggable HTTP backends: `aiohttp`, `httpx`, `curl_cffi`
 * Text processing pipeline: ad removal, zh conversion, translation, etc.
 * Optional support for image chapters and obfuscated content
-* Multi-platform music download: 28 music platforms, with all-platform aggregate search that merges the same song into one row with its sources, plus M3U8 playlist export
+* Multi-platform music download: 28 music platforms, with all-platform aggregate search that merges the same song into one row with its sources, lyrics saved as `.lrc` beside the audio (plus `.zh.lrc` when a translation exists), and M3U8 playlist export
 * Plugin system for site parsers, exporters, and processing pipelines
 * Rule-driven book sources: add a site with a JSON rule, no Python code required
 * CLI + local REST API + desktop client: `novel-cli`, `novel-api`, and `novel-desktop` share the same service layer
-* Android client: native Kotlin/Compose app (`android/`) that can talk to a PC-side API or run the full service layer on-device via its optional standalone engine (books and music alike)
+* Desktop client: search filters persist across launches, original and translated lyrics open from the result list, and task-manager/update initialization is deferred for a measured cold start of about 0.1 s
+* Android client: native Kotlin/Compose app (`android/`) that can talk to a PC-side API or run the full service layer on-device via its optional standalone engine (books and music alike); supports a custom SAF download directory, task notifications that open and highlight the matching task, and opening saved lyrics
+* Supply-chain checks: `scripts/scan_secrets.py` can scan the working tree and full history, and is enforced in CI and before release; release assets are additionally audited for archive members and sensitive content
 
 ---
 
@@ -116,6 +118,20 @@ novel-cli download --site n23qb 12282
 # Search and download music (default: every platform, same song merged into one row)
 novel-cli music search "keyword"
 novel-cli music download "keyword" --pick 1
+
+# Filter by word count / last update and print JSON
+novel-cli search "斗破苍穹" --min-words 300000 --updated-after 2024-01-01 --json
+
+# Music download as single-line JSON: status / path / lyric_path
+novel-cli music download "keyword" --pick 1 --json
+
+# Read-only verification of every in-use chapter database; back up and keep the newest 7
+novel-cli storage verify
+novel-cli storage backup --out ~/novel-backups --keep 7
+
+# Preview / apply safe repairs (missing directories, stale temporary files)
+novel-cli doctor --fix --dry-run
+novel-cli doctor --fix
 ```
 
 More examples: [CLI Examples](./docs/guide/cli-examples.en.md). For aggregate search, source merging, playlist export, platform health and DRM limits, see the [Music Downloads guide](./docs/guide/music.en.md).
@@ -130,7 +146,7 @@ After installing the `api` extra, start the local-only REST service with `novel-
 novel-api
 ```
 
-See [Local REST API](docs/guide/api.en.md) for endpoints, authentication, and request examples.
+Search endpoints accept `min_words`, `max_words`, and `updated_after`, filtering results before grouping and limiting; SSE streaming search uses the same semantics as the REST endpoint. See [Local REST API](docs/guide/api.en.md) for endpoints, authentication, and request examples.
 
 ---
 
@@ -141,6 +157,8 @@ novel-desktop
 ```
 
 A graphical interface for search, the download queue, export history, music downloads, and the settings page. The settings page edits the output folder, proxy, automatic updates, and appearance/language, saving them to `settings.toml`. Search results render 60 rows at a time with a "Show more" button, and playlist export asks before overwriting an existing file.
+
+The advanced search panel filters by word count and last-updated date, and the most recent criteria persist and are restored on the next launch (without starting a search automatically). Music results offer original and translated `.lrc` entry points. Task-manager and update initialization are deferred at startup, for a measured cold start of about 0.1 s.
 
 ---
 
@@ -265,6 +283,11 @@ pip install .
 # Optional:
 # pip install .[all]
 # pip install -e .[dev,all]
+
+# Optional: scan the working tree or full history for credentials
+# (reports rule names and locations only, never the matched text)
+python scripts/scan_secrets.py
+python scripts/scan_secrets.py --history
 ```
 
 Translations (optional):

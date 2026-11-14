@@ -19,21 +19,23 @@
 
 ## 功能特性
 
-- **多站点搜索:** 覆盖 59 个搜索站点与 84 个下载站点, 支持聚合搜索、排序与结果筛选
+- **多站点搜索:** 覆盖 59 个搜索站点与 84 个下载站点, 支持聚合搜索、排序, 以及按字数与更新日期过滤（CLI / REST API / 桌面 / Android）
 - **内置更新:** 桌面 / CLI / 安卓每日检查新版本, 下载后先做 SHA-256 校验; 桌面退出时自动安装 (安装版原地覆盖, 便携版替换当前目录), 安卓走系统安装器, 不静默安装
 - **下载队列与进度:** 支持断点续爬、队列调度与实时进度显示
 - **多格式导出:** TXT / EPUB / HTML
 - **历史导出:** 从已下载的书目中随时重新导出
-- **追更与自检:** 内置追更列表, 自动检查新章节并可选自动下载; `doctor` 环境自检与 `storage` 磁盘占用统计
+- **追更与自检:** 内置追更列表, 自动检查新章节并可选自动下载; `doctor` 环境自检（`--fix` 可安全创建缺失目录、清理过期临时文件）, `storage` 磁盘统计、只读完整性校验（`verify`）与保留最近 N 份的备份（`backup --keep N`）
 - **异步与高性能下载**
 - **可插拔 HTTP 后端:** `aiohttp` / `httpx` / `curl_cffi`
 - **文本处理流水线:** 去广告、繁简转换、自动翻译等
 - **图片章节与混淆章节支持 (可选)**
-- **多平台音乐下载:** 支持 28 个音乐平台；默认聚合搜索全部平台, 同一首歌合并为一行并标注来源, 支持歌单导出 (M3U8)
+- **多平台音乐下载:** 支持 28 个音乐平台；默认聚合搜索全部平台, 同一首歌合并为一行并标注来源, 歌词保存为音频旁的 `.lrc`（有译文时另写 `.zh.lrc`）, 支持歌单导出 (M3U8)
 - **插件系统:** 可扩展站点解析器、导出器、Pipeline 等
 - **规则书源 (Book Source):** 新增站点只需写 JSON 规则，无需编写 Python 代码
 - **CLI + 本地 REST API + 桌面客户端:** `novel-cli`、`novel-api`、`novel-desktop` 共享同一服务层
-- **Android 客户端:** 原生 Kotlin/Compose App（`android/`），可连接电脑端 API；也可开启「独立引擎」在本机运行完整服务层（书与音乐均在手机本地）
+- **桌面客户端:** 搜索过滤条件可持久化并在下次启动恢复, 原文/译文歌词双入口; 任务管理与更新检查延迟加载, 实测冷启动约 0.1 秒
+- **Android 客户端:** 原生 Kotlin/Compose App（`android/`），可连接电脑端 API；也可开启「独立引擎」在本机运行完整服务层（书与音乐均在手机本地）; 支持 SAF 自定义下载目录、点击任务通知定位到对应任务, 以及打开已保存的歌词
+- **安全扫描与发版门禁:** `scripts/scan_secrets.py` 可扫描工作区与历史提交, CI 与发版前强制拦截; 发布资产额外做归档成员与敏感内容审计
 
 ---
 
@@ -112,6 +114,20 @@ novel-cli download --site n23qb 12282
 # 搜索并下载音乐（默认搜索全部平台, 同一首歌合并为一行）
 novel-cli music search "关键词"
 novel-cli music download "关键词" --pick 1
+
+# 按字数与更新时间过滤, 单行 JSON 便于脚本消费
+novel-cli search "斗破苍穹" --min-words 300000 --updated-after 2024-01-01 --json
+
+# 音乐下载单行 JSON: 含 status / path / lyric_path
+novel-cli music download "关键词" --pick 1 --json
+
+# 只读校验所有在用章节库; 备份并只保留最近 7 份
+novel-cli storage verify
+novel-cli storage backup --out ~/novel-backups --keep 7
+
+# 预览 / 执行安全修复（创建缺失目录、清理过期临时文件）
+novel-cli doctor --fix --dry-run
+novel-cli doctor --fix
 ```
 
 更多示例见: [CLI 使用示例](./docs/guide/cli-examples.md)；音乐引擎的聚合搜索、来源合并、歌单导出、平台健康与 DRM 限制见 [音乐下载指南](./docs/guide/music.md)。
@@ -124,7 +140,7 @@ novel-cli music download "关键词" --pick 1
 novel-api
 ```
 
-端点、鉴权与请求示例见: [本地 REST API](docs/guide/api.md)
+搜索接口支持 `min_words`、`max_words` 与 `updated_after` 参数, 在分组与截断前过滤结果; SSE 流式搜索与 REST 搜索使用同一套语义。端点、鉴权与请求示例见: [本地 REST API](docs/guide/api.md)
 
 ## 桌面客户端
 
@@ -135,6 +151,10 @@ novel-desktop
 提供搜索、下载队列、历史导出、音乐下载与设置页的图形界面。设置页可修改输出目录、
 代理、自动更新与外观/语言，并保存到 `settings.toml`。搜索结果按 60 条一批渲染，
 底部「显示更多 (Show more)」追加下一批；歌单导出遇到同名文件会先提示，点击后才覆盖。
+
+搜索页的高级面板支持按字数与更新日期过滤，最近使用的条件会持久化并在下次启动恢复
+（恢复后不会自动发起搜索）。音乐结果提供原文/译文 `.lrc` 打开入口。客户端启动时延迟
+加载任务管理与更新检查，实测冷启动约 0.1 秒。
 
 ## 规则书源 (无需写代码即可新增站点)
 
@@ -264,6 +284,10 @@ pip install .
 # 或安装带可选功能:
 # pip install .[all]
 # pip install -e .[dev,all]
+
+# 可选: 扫描工作区或历史提交中的凭据（只报告规则名与位置, 不回显明文）
+python scripts/scan_secrets.py
+python scripts/scan_secrets.py --history
 ```
 
 欢迎提交 Issue / PR。
