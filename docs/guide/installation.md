@@ -25,7 +25,7 @@ pip install novel-downloader
 * `novel-cli`: 命令行入口
 * `novel-api`: 本地 REST API 入口 (需安装 `api` 可选依赖, 见下文)
 
-安装后如需 bash / zsh / fish / PowerShell 的 Tab 补全, 用 `novel-cli completion --shell <shell>` 生成脚本并加载, 具体写法见 [CLI 用法 § completion](./cli-examples.md#11-completion)。
+安装后如需 bash / zsh / fish / PowerShell 的 Tab 补全, 用 `novel-cli completion --shell <shell>` 生成脚本并加载, 具体写法见 [CLI 用法 § completion](./cli-examples.md#11-completion-子命令)。
 
 建议装完先跑一次自检:
 
@@ -40,7 +40,7 @@ novel-cli doctor --fix --dry-run
 novel-cli doctor --fix
 ```
 
-`--fix` 只创建配置中的输出/缓存/日志目录, 并删除这些目录下超过 7 天 (可用 `--fix-age-days` 调整) 的 `.tmp` / `.part` 文件; 不修改配置、导出文件或登录态, 也不会越过这三个根目录或跟随符号链接。完整说明见 [CLI 用法 § doctor](./cli-examples.md#10-doctor)。
+`--fix` 只创建配置中的输出/缓存/日志目录, 并删除这些目录下超过 7 天 (可用 `--fix-age-days` 调整) 的 `.tmp` / `.part` 文件; 不修改配置、导出文件或登录态, 也不会越过这三个根目录或跟随符号链接。完整说明见 [CLI 用法 § doctor](./cli-examples.md#10-doctor-子命令)。
 
 (2) 安装最新开发版 (GitHub)
 

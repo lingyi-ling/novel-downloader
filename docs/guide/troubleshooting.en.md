@@ -768,7 +768,22 @@ novel-cli storage backup --out ~/novel-backups --keep 7
 
 ---
 
-## 16. Still Stuck?
+## 16. Music Download Reports a Track / Batch Size Limit
+
+**Symptoms**: a track's result or the batch summary shows `单曲超过大小上限（1.0GB），已删除不完整文件` ("track exceeds the size limit, incomplete file deleted"); or the batch starts failing after a few tracks with `整批下载超过大小上限（8.0GB），已删除不完整文件` ("batch exceeds the size limit, incomplete file deleted").
+
+**Cause**: the music engine has two hard ceilings: 1 GiB per track and 8 GiB per batch (shared by every worker and platform fallback inside one `download_many` / `download_mixed` call). They stop an expired direct link or a misbehaving CDN from streaming forever. When one is hit, the current track's `.part` is deleted and the attempt is not retried.
+
+**Verify and fix**:
+
+1. A track hitting its limit usually means the direct link returned something other than audio (for example a redirect to an error page whose `Content-Type` was not exposed), or the file really is abnormally large. Try another source or platform first; aggregate search alternatives are tried in order but are subject to the same ceiling.
+2. A batch hitting its limit means the run has charged close to 8 GiB to the budget. Split the download into smaller submissions; files that already completed are unaffected.
+3. A `.part` left by a transport failure or cancellation is kept for resumption but does not occupy the batch budget; deleting it does not affect completed downloads. If a `.part` itself is already over the per-track limit, the next attempt deletes it before starting over.
+4. The CLI, desktop client, Android standalone mode and REST API expose no parameter for these limits and always use the defaults; only Python library callers can override them with `DownloadOptions(max_track_bytes=..., max_batch_bytes=...)`. See [Music Downloads - Download size limits](./music.en.md#download-size-limits).
+
+---
+
+## 17. Still Stuck?
 
 Include the following information when opening an issue:
 

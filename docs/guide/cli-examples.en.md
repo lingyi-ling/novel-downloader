@@ -1293,7 +1293,8 @@ With `--json`:
 | `clean book` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` is `clean book`; `book_id` is the ID when exactly one book is cleaned, otherwise `null` (multiple books or a whole-site clean); `items[]` as above |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` (dir and total fields are described above) |
 | `storage --clean` | `--dry-run --json` | Same dry-run shape as `clean cache`, with `command` set to `storage --clean`, `site`/`book_id` `null`, and `book_ids` `[]` |
-| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files"}`; each `files[]` entry has `source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters` |
+| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files", "retention"}`; each `files[]` entry has `source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters`; `retention` has `keep`, `dry_run`, `candidates`, `removed`, `failed` |
+| `storage verify` | `--json` | `{"ok", "total", "healthy", "corrupt", "errors"}`; each `errors[]` entry has `path` and `reason` |
 | `storage restore` | `--json` | `{"command", "ok", "from", "target", "replaced_existing", "pre_restore_backup", "schema_version", "chapters", "bytes", "sha256"}` |
 | `doctor` | `--json` | `{"summary": {"total", "failures", "optional_failures", "ok"}, "checks": [{"key", "name", "ok", "fatal", ...}]}` |
 

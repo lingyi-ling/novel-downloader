@@ -2,7 +2,7 @@
 
 音乐功能是一个可选引擎, 与小说下载共用同一套服务层。CLI、桌面客户端、Android 独立模式与本地 API 都调用它, 因此平台列表、搜索合并规则和落盘行为在各端一致。
 
-本文说明引擎的行为与边界。具体参数见 [CLI 用法 - music 子命令](./cli-examples.md#7-music) 与 [本地 API 服务 - 音乐](./api.md); 故障现象见 [故障排查](./troubleshooting.md)。
+本文说明引擎的行为与边界。具体参数见 [CLI 用法 - music 子命令](./cli-examples.md#7-music-子命令) 与 [本地 API 服务 - 音乐](./api.md); 故障现象见 [故障排查](./troubleshooting.md)。
 
 > **平台数量不是固定值**: 注册表在导入时按已安装的可选依赖求值, 缺依赖的平台不会出现在列表里。请以 `novel-cli music platforms` 或 `GET /api/v1/music/platforms` 的实际输出为准。
 
@@ -75,7 +75,7 @@ DRM 解密与 HLS 下载还需要**外部**条件 (自备 CDM、`N_m3u8DL-RE`), 
 * 连续两次耗时超过 2 秒且零结果的平台判为「慢且空」, 跳过 5 分钟。
 * 这些状态写入音乐数据目录的 `search_stats.json`, 重启后仍生效。
 * **显式指定平台时不走熔断**, 便于手动重试。
-* 所有平台都失败时 CLI 以非零状态退出; 平台正常响应但零结果属于成功的空搜索。排查步骤见 [故障排查 - 音乐聚合搜索](./troubleshooting.md#8)。
+* 所有平台都失败时 CLI 以非零状态退出; 平台正常响应但零结果属于成功的空搜索。排查步骤见 [故障排查 - 音乐聚合搜索](./troubleshooting.md#8-音乐聚合搜索里部分平台没反应-很慢)。
 
 ---
 
@@ -103,6 +103,35 @@ CLI 不经过 JSON 往返, 在同一个进程里直接使用原始对象, 因此
 * 受限曲目 (VIP 专属、需购买专辑、无版权/已下架、仅试听片段) 返回可读原因并计为失败或跳过, 不会中断整批任务。
 * 传输类失败自动重试 (默认 2 次, 不含首次), 重试期间保留 `.part` 文件, 因此兼作续传。
 * 下载先写 `<目标文件>.part`, 校验大小后再原子改名; 服务端返回 HTML/JSON 错误页 (直链过期) 会被拒绝, 不会把网页当音频保存。
+
+#### 下载大小上限
+
+单曲和整批各有一道硬上限, 防止失效直链或异常 CDN 无限流式写入:
+
+| 范围 | 默认上限 | 说明 |
+| --- | --- | --- |
+| 单曲 | 1 GiB (`MAX_TRACK_BYTES`) | 按块累加检查; 续传时已有的 `.part` 前缀也计入 |
+| 整批 | 8 GiB (`MAX_BATCH_BYTES`) | 一次 `download_many` / `download_mixed` 调用的所有工作线程 (含平台回退) 共享 |
+
+* 服务端声明的 `Content-Length` / `Content-Range` 总大小已经超限时, 响应体不会被读完; 声明缺失或不准时, 逐块检查仍是最终保证。
+* 单曲超限 (或已有 `.part` 本身超过单曲上限): 删除半文件, 不留下可续传的断点, 并且不重试 (重试只会再撞一次上限)。
+* 整批超限: 在写入下一块之前中止并删除当前曲目的半文件; 已经完成的曲目不受影响, 批次继续处理其余曲目。
+* 传输失败或用户取消: 保留 `.part` 供下次续传, 但**归还**本次尝试已占用的整批预算。因此整批上限约束的是本次任务中成功完成与正在进行的下载量, 而不是磁盘上 `.part` 的总大小; 被 `skip_existing` 跳过的文件不占预算。
+* 失败原因会出现在逐曲结果和批量汇总里, 例如 `单曲超过大小上限（1.0GB），已删除不完整文件`、`整批下载超过大小上限（8.0GB），已删除不完整文件` (`human()` 按 1024 进位, 单位显示为 KB/MB/GB)。这类失败是确定性的, `retryable` 为 `false`。
+
+调整方式: CLI、桌面端、Android 独立模式和 REST API **没有暴露**这两个参数, 始终使用上面的默认值; 音乐数据目录的 `settings.json` 也不会读取它们, 写入不会生效。只有以 Python 库方式调用时, 才能通过 `DownloadOptions` 覆盖:
+
+```python
+from novel_downloader.apps.music.downloader import DownloadOptions
+
+opts = DownloadOptions(
+    out_dir="~/Music/novel_downloader",
+    max_track_bytes=512 * 1024 * 1024,  # 单曲 512 MiB
+    max_batch_bytes=2 * 1024**3,        # 整批 2 GiB
+)
+```
+
+两个字段都是字节数, `None` 表示沿用默认常量; 显式值必须是正整数, `0`、负数、布尔值或非整数会在构造 `DownloadOptions` 时抛出 `ValueError` (`...大小上限必须是正整数`)。
 
 落盘命名:
 
@@ -156,7 +185,7 @@ API 的 `POST /api/v1/music/export` 不做搜索, 要求每首曲目自带本地
 
 桌面端音乐页导出歌单时, 目标文件已存在不会静默覆盖: 先提示「歌单已存在: <路径>」, 点击该提示后才替换。
 
-导出链路的 400/429 排查见 [故障排查 - 音乐歌单导出](./troubleshooting.md#12-400-429)。
+导出链路的 400/429 排查见 [故障排查 - 音乐歌单导出](./troubleshooting.md#12-音乐歌单导出返回-400-音乐任务返回-429)。
 
 ---
 
@@ -184,7 +213,7 @@ API 的 `POST /api/v1/music/export` 不做搜索, 要求每首曲目自带本地
 
 内置下载器只接受非 HLS 的直链: 解析时遇到 HLS (m3u8) 会直接返回「HLS 流暂不支持直链下载」。因此即使准备了 CDM 与 `N_m3u8DL-RE`, Apple Music / SoundCloud 的 DRM/HLS 曲目也**不能**在应用内下载, 需要使用支持 Widevine 的外部工具。这不是网络故障, 属于当前版本的预期限制。
 
-完整说明与验证命令见 [故障排查 - TIDAL / YouTube / Apple Music / SoundCloud](./troubleshooting.md#10-tidal-youtube-apple-music-soundcloud)。
+完整说明与验证命令见 [故障排查 - TIDAL / YouTube / Apple Music / SoundCloud](./troubleshooting.md#10-tidal-youtube-apple-music-soundcloud能搜到不等于能下载)。
 
 ---
 
@@ -201,13 +230,13 @@ API 的 `POST /api/v1/music/export` 不做搜索, 要求每首曲目自带本地
 
 默认下载目录是用户音乐目录下的 `novel_downloader` (例如 `~/Music/novel_downloader`)。
 
-这些文件与 Cookie 均为**明文**, 且 `session.json` / `platform_creds.json` 可以直接接管账号。不要提交到仓库、粘贴到 issue 或截图里; 换机或怀疑泄露时删除对应文件并在平台侧注销会话。存储位置与权限建议见 [安全说明 - Cookie 与凭据的存储位置](./security.md#cookie)。
+这些文件与 Cookie 均为**明文**, 且 `session.json` / `platform_creds.json` 可以直接接管账号。不要提交到仓库、粘贴到 issue 或截图里; 换机或怀疑泄露时删除对应文件并在平台侧注销会话。存储位置与权限建议见 [安全说明 - Cookie 与凭据的存储位置](./security.md#cookie-与凭据的存储位置)。
 
 ---
 
 ### 相关文档
 
-* [CLI 用法 - music 子命令](./cli-examples.md#7-music): 五个子命令的完整参数与示例
+* [CLI 用法 - music 子命令](./cli-examples.md#7-music-子命令): 五个子命令的完整参数与示例
 * [本地 API 服务 - 音乐](./api.md): 搜索、同步/异步下载、歌单导出、健康检查端点
 * [故障排查](./troubleshooting.md): 缺少依赖、聚合搜索很慢、DRM 限制、导出 400/429
 * [Android 客户端](./android-app.md): 独立模式内置音乐引擎

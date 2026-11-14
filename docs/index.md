@@ -170,7 +170,7 @@ novel-cli download --help
 * 支持站点见: [支持站点列表](supported-sites/index.md)
 * 更多示例见: [CLI 使用说明](guide/cli-examples.md)
 * 运行中可使用 `CTRL+C` 取消任务
-* 音乐下载见: [CLI 使用说明 - music 子命令](guide/cli-examples.md#7-music)
+* 音乐下载见: [CLI 使用说明 - music 子命令](guide/cli-examples.md#7-music-子命令)
 
 ### 本地 REST API
 
@@ -229,7 +229,7 @@ novel-cli music search "关键词" --platform netease
 novel-cli music download "关键词" --pick 1
 ```
 
-参数说明见: [CLI 使用说明 - music 子命令](guide/cli-examples.md#7-music)。引擎行为 (聚合搜索、来源合并、歌单导出、平台健康、DRM 限制) 见 [音乐下载指南](guide/music.md)。
+参数说明见: [CLI 使用说明 - music 子命令](guide/cli-examples.md#7-music-子命令)。引擎行为 (聚合搜索、来源合并、歌单导出、平台健康、DRM 限制) 见 [音乐下载指南](guide/music.md)。
 
 ---
 

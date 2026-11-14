@@ -104,6 +104,35 @@ Quality levels are `hires` / `lossless` / `exhigh` / `higher` / `standard`; the 
 * Transport failures are retried automatically (2 times by default, not counting the first attempt). The `.part` file is kept during retries, which also provides resumption.
 * A download is written to `<target>.part`, size-checked, then atomically renamed. An HTML/JSON error page returned by the server (expired direct link) is rejected, so a web page is never saved as audio.
 
+#### Download size limits
+
+One track and one batch each have a hard ceiling, so an expired direct link or a misbehaving CDN cannot stream forever:
+
+| Scope | Default | Behaviour |
+| --- | --- | --- |
+| Single track | 1 GiB (`MAX_TRACK_BYTES`) | Checked chunk by chunk; an existing `.part` prefix counts toward the limit |
+| Batch | 8 GiB (`MAX_BATCH_BYTES`) | Shared by every worker of one `download_many` / `download_mixed` call, including platform fallbacks |
+
+* If the declared `Content-Length` / `Content-Range` total already exceeds the limit, the body is not read to the end; when the declaration is missing or wrong, the per-chunk check is the final guarantee.
+* Track over the limit (or an existing `.part` already larger than the limit): the half file is deleted, no resumable point is left, and the attempt is not retried (a retry would hit the same ceiling).
+* Batch over the limit: the download stops before the next chunk is written and the current track's half file is deleted. Tracks that already completed are unaffected and the rest of the batch continues.
+* Transport failure or user cancellation: the `.part` is kept for resumption, but the bytes charged by that attempt are **returned** to the batch budget. The batch ceiling therefore bounds completed and in-flight downloads, not the total size of `.part` files on disk. Files skipped by `skip_existing` consume nothing.
+* The reason appears in the per-track result and the batch summary, for example `单曲超过大小上限（1.0GB），已删除不完整文件` ("track exceeds the size limit, incomplete file deleted") or `整批下载超过大小上限（8.0GB），已删除不完整文件` ("batch exceeds the size limit, incomplete file deleted"). `human()` uses 1024-based units but labels them KB/MB/GB. These failures are deterministic and report `retryable` as `false`.
+
+Adjusting the limits: the CLI, desktop client, Android standalone mode and REST API **do not expose** these fields and always use the defaults above. The music `settings.json` is not consulted for these keys either, so editing it has no effect. Only Python library callers can override them through `DownloadOptions`:
+
+```python
+from novel_downloader.apps.music.downloader import DownloadOptions
+
+opts = DownloadOptions(
+    out_dir="~/Music/novel_downloader",
+    max_track_bytes=512 * 1024 * 1024,  # 512 MiB per track
+    max_batch_bytes=2 * 1024**3,        # 2 GiB per batch
+)
+```
+
+Both fields are byte counts; `None` keeps the default constant. An explicit value must be a positive integer: `0`, a negative number, a boolean or a non-integer raises `ValueError` when `DownloadOptions` is constructed (`...大小上限必须是正整数`).
+
 File naming:
 
 * With `split_folder` enabled: `<out_dir>/<artist>/<album>/<title> - <artist>.<ext>`; disabled: directly under `<out_dir>`.

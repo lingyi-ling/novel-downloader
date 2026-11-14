@@ -1283,7 +1283,8 @@ novel-cli update --json
 | `clean book` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` 为 `clean book`; `book_id` 仅在只清理一本书时为该 ID, 多本书或整站清理时为 `null`; `items[]` 同上 |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` (dir 与 total 字段见上文) |
 | `storage --clean` | `--dry-run --json` | 与 `clean cache` 相同的 dry-run 结构, `command` 为 `storage --clean`, `site`/`book_id` 为 `null`, `book_ids` 为 `[]` |
-| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files"}`; `files[]` 含 `source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters` |
+| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files", "retention"}`; `files[]` 含 `source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`; `retention` 含 `keep`、`dry_run`、`candidates`、`removed`、`failed` |
+| `storage verify` | `--json` | `{"ok", "total", "healthy", "corrupt", "errors"}`; `errors[]` 含 `path`、`reason` |
 | `storage restore` | `--json` | `{"command", "ok", "from", "target", "replaced_existing", "pre_restore_backup", "schema_version", "chapters", "bytes", "sha256"}` |
 | `doctor` | `--json` | `{"summary": {"total", "failures", "optional_failures", "ok"}, "checks": [{"key", "name", "ok", "fatal", ...}]}` |
 

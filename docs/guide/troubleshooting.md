@@ -686,7 +686,7 @@ novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<时�
 
 备份只含 `raw_data` 下的章节数据库, 不含 Cookie/token、`settings.toml`、日志或媒体文件;
 恢复后仍需重新登录, 且备份是明文, 请按敏感数据保管。完整的
-[「备份 → 校验 (SHA-256 / `PRAGMA integrity_check`) → 恢复」流程](./cli-examples.md#9-storage)
+[「备份 → 校验 (SHA-256 / `PRAGMA integrity_check`) → 恢复」流程](./cli-examples.md#9-storage-子命令)
 见 CLI 用法示例。
 
 定时备份时可用 `--keep` 自动轮转。先预览会删哪些旧备份，确认后再真正执行：
@@ -735,7 +735,22 @@ novel-cli storage backup --out ~/novel-backups --keep 7
 
 ---
 
-## 16. 仍有问题？
+## 16. 音乐下载提示「单曲 / 整批超过大小上限」
+
+**现象**：某首歌在逐曲结果或批量汇总里显示 `单曲超过大小上限（1.0GB），已删除不完整文件`；或整批在若干首之后开始失败，并显示 `整批下载超过大小上限（8.0GB），已删除不完整文件`。
+
+**原因**：音乐引擎有两道硬上限——单曲 1 GiB、整批 8 GiB（一次 `download_many` / `download_mixed` 调用内所有工作线程与平台回退共享）。它们用于阻止失效直链或异常 CDN 无限写入。命中后当前曲目的 `.part` 会被删除，且这类失败不会重试。
+
+**排查与处理**：
+
+1. 单曲超限通常意味着直链返回的不是音频（例如被重定向到错误页，但 `Content-Type` 未暴露），或文件确实异常巨大。先换一个来源或平台重试；聚合搜索的备选来源会按顺序尝试，但同样受上限约束。
+2. 整批超限说明本次任务计入预算的下载量已接近 8 GiB。分批下载（减少一次提交的曲目数）即可继续；已经成功的文件不受影响。
+3. 传输失败或取消留下的 `.part` 会保留用于续传，但不占用整批预算；删除它们不影响已完成的下载。若某个 `.part` 本身已超过单曲上限，下次下载会先删除它再重新开始。
+4. CLI、桌面端、Android 独立模式和 REST API 没有调整这两个上限的参数，始终使用默认值；只有以 Python 库方式调用时才能通过 `DownloadOptions(max_track_bytes=..., max_batch_bytes=...)` 覆盖。详见 [音乐下载](./music.md) 的「下载大小上限」小节。
+
+---
+
+## 17. 仍有问题？
 
 带上下面的信息提交 Issue：
 
