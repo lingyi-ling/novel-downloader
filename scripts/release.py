@@ -1383,6 +1383,7 @@ class GitHubClient:
         content_type: str | None = None,
         expected: tuple[int, ...] = (200,),
         timeout: float | None = None,
+        retries: int = 0,
     ) -> Reply:
         headers = {
             "Authorization": f"Bearer {self._token}",
@@ -1397,23 +1398,31 @@ class GitHubClient:
         elif content_type is not None:
             headers["Content-Type"] = content_type
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(
-                request, timeout=timeout if timeout is not None else HTTP_TIMEOUT
-            ) as response:
-                status = int(response.status)
-                raw = response.read()
-        except urllib.error.HTTPError as exc:
-            status = int(exc.code)
-            raw = exc.read()
-        except urllib.error.URLError as exc:
-            raise TransientAPIError(
-                f"network error calling {method} {url}: {exc.reason}"
-            ) from exc
-        except TimeoutError as exc:
-            raise TransientAPIError(
-                f"network timeout calling {method} {url}: {exc}"
-            ) from exc
+        status = 0
+        raw = b""
+        for attempt in range(retries + 1):
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=timeout if timeout is not None else HTTP_TIMEOUT
+                ) as response:
+                    status = int(response.status)
+                    raw = response.read()
+                break
+            except urllib.error.HTTPError as exc:
+                status = int(exc.code)
+                raw = exc.read()
+                break
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                if attempt < retries:
+                    time.sleep(min(2**attempt, 10))
+                    continue
+                reason = getattr(exc, "reason", exc)
+                kind = "timeout" if isinstance(exc, TimeoutError) else "network error"
+                raise TransientAPIError(
+                    f"{kind} calling {method} {url}: {reason}"
+                ) from exc
+        if status == 0:
+            raise TransientAPIError(f"network error calling {method} {url}")
         payload = _parse_json(raw)
         if status not in expected:
             message = (
@@ -1462,7 +1471,7 @@ class GitHubClient:
         interrupted run is found with :meth:`find_draft_release` instead.
         """
         url = f"{self._api}/repos/{self._slug}/releases/tags/{quote(tag)}"
-        reply = self._request("GET", url, expected=(200, 404))
+        reply = self._request("GET", url, expected=(200, 404), retries=3)
         if reply.status == 404:
             return None
         return self._json(reply, f"release lookup for {tag}")
@@ -1470,7 +1479,7 @@ class GitHubClient:
     def get_release_by_id(self, release_id: int) -> dict[str, Any] | None:
         """One release by numeric id; drafts are visible to a write token."""
         url = f"{self._api}/repos/{self._slug}/releases/{release_id}"
-        reply = self._request("GET", url, expected=(200, 404))
+        reply = self._request("GET", url, expected=(200, 404), retries=3)
         if reply.status == 404:
             return None
         return self._json(reply, f"release {release_id}")
@@ -1488,7 +1497,7 @@ class GitHubClient:
                 f"{self._api}/repos/{self._slug}/releases"
                 f"?per_page={RELEASE_LIST_PAGE_SIZE}&page={page}"
             )
-            reply = self._request("GET", url)
+            reply = self._request("GET", url, retries=3)
             items = reply.payload
             if not isinstance(items, list):
                 raise ReleaseError(f"release list page {page}: unexpected API body")
@@ -1506,7 +1515,7 @@ class GitHubClient:
     def get_tag_ref_sha(self, tag: str) -> str | None:
         """The commit a remote tag ref points at, or ``None`` when absent."""
         url = f"{self._api}/repos/{self._slug}/git/ref/tags/{quote(tag)}"
-        reply = self._request("GET", url, expected=(200, 404))
+        reply = self._request("GET", url, expected=(200, 404), retries=3)
         if reply.status == 404:
             return None
         payload = self._json(reply, f"tag ref {tag}")
@@ -1606,7 +1615,7 @@ class GitHubClient:
             f"?name={quote(asset.name)}"
         )
         try:
-            reply = self._request("GET", url, expected=(200,))
+            reply = self._request("GET", url, expected=(200,), retries=3)
         except ReleaseError:
             return False
         if not isinstance(reply.payload, list):

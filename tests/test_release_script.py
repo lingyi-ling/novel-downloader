@@ -956,6 +956,39 @@ class TestGitHubClient:
         http.route_404(f"/releases/tags/{TAG}")
         assert client.get_release_by_tag(TAG) is None
 
+    def test_get_retries_transient_network_errors(
+        self, release: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, http = self._patched(release, monkeypatch)
+        calls = {"n": 0}
+
+        def flaky() -> tuple[int, bytes]:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise urllib.error.URLError(ConnectionResetError("reset"))
+            return 200, json.dumps(RELEASE_JSON).encode("utf-8")
+
+        http.route("GET", f"/releases/tags/{TAG}", flaky)
+        monkeypatch.setattr(release.time, "sleep", lambda _seconds: None)
+        assert client.get_release_by_tag(TAG)["id"] == 7
+        assert calls["n"] == 3
+
+    def test_get_gives_up_after_retries(
+        self, release: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, http = self._patched(release, monkeypatch)
+        calls = {"n": 0}
+
+        def broken() -> tuple[int, bytes]:
+            calls["n"] += 1
+            raise urllib.error.URLError(ConnectionResetError("reset"))
+
+        http.route("GET", f"/releases/tags/{TAG}", broken)
+        monkeypatch.setattr(release.time, "sleep", lambda _seconds: None)
+        with pytest.raises(release.TransientAPIError, match="network error"):
+            client.get_release_by_tag(TAG)
+        assert calls["n"] == 4
+
     def test_create_release_posts_notes(
         self, release: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
