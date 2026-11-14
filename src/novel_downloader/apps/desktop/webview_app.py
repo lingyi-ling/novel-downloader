@@ -242,8 +242,19 @@ if ($items.Count -eq 1 -and $items[0].PSIsContainer) { $source = $items[0].FullN
 $payload = Join-Path $AppDir '_internal'
 for ($attempt = 0; $attempt -lt 10; $attempt++) {
     try {
-        if ((Test-Path -LiteralPath $payload) -and -not (Test-Protected $payload)) {
-            Remove-Item -LiteralPath $payload -Recurse -Force
+        if (Test-Path -LiteralPath $payload) {
+            if (Test-Protected $payload) {
+                # NOVEL_HOME points inside the payload.  Keep that subtree but
+                # still clear its unprotected siblings: skipping the whole
+                # cleanup would leave plugins removed from the new build behind.
+                foreach ($child in @(Get-ChildItem -LiteralPath $payload -Force)) {
+                    if (-not (Test-Protected $child.FullName)) {
+                        Remove-Item -LiteralPath $child.FullName -Recurse -Force
+                    }
+                }
+            } else {
+                Remove-Item -LiteralPath $payload -Recurse -Force
+            }
         }
         break
     } catch {

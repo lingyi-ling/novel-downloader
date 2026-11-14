@@ -23,8 +23,12 @@ import ctypes
 import hashlib
 import inspect
 import os
+import shutil
+import subprocess
+import sys
 import threading
 import time
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1547,6 +1551,285 @@ def test_portable_update_passes_user_data_inside_the_payload(
     assert result["ok"] is True
     argv = calls[0]
     assert argv[argv.index("-Keep") + 1] == str(data)
+
+
+# ---------------------------------------------------------------------------
+# portable update helper, executed for real against a temporary folder
+# ---------------------------------------------------------------------------
+
+#: Final action of the helper.  The execution tests swap it for a marker write
+#: so no GUI is launched; the substitution must match exactly once.
+_PORTABLE_LAUNCH_LINE = "Start-Process -FilePath (Join-Path $AppDir $Exe)"
+_PORTABLE_LAUNCH_STUB = (
+    "$null = New-Item -ItemType File -Path (Join-Path $AppDir '.launch-marker')"
+    " -Force\n"
+    "Set-Content -LiteralPath (Join-Path $AppDir '.launch-marker')"
+    " -Value (Join-Path $AppDir $Exe) -Encoding UTF8"
+)
+
+_POWERSHELL = shutil.which("powershell") or shutil.which("pwsh")
+_requires_powershell = pytest.mark.skipif(
+    sys.platform != "win32" or _POWERSHELL is None,
+    reason="the portable helper is a Windows PowerShell script",
+)
+
+
+def _portable_helper_text() -> str:
+    """The shipped helper with only its restart command stubbed out."""
+    template = wa._PORTABLE_UPDATE_SCRIPT
+    assert template.count(_PORTABLE_LAUNCH_LINE) == 1
+    return template.replace(_PORTABLE_LAUNCH_LINE, _PORTABLE_LAUNCH_STUB)
+
+
+def _install_portable_copy(
+    app_dir: Path,
+    *,
+    with_exe: bool = True,
+    payload: dict[str, str] | None = None,
+) -> Path:
+    """Create a fake portable install and return its executable path."""
+    files = (
+        payload
+        if payload is not None
+        else {
+            "_internal/old_plugin.py": "old plugin",
+            "_internal/sub/old.dll": "old dll",
+        }
+    )
+    for relative, content in files.items():
+        target = app_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    exe = app_dir / "NovelDownloader.exe"
+    if with_exe:
+        exe.write_text("old build", encoding="utf-8")
+    return exe
+
+
+def _write_update_zip(path: Path, entries: dict[str, str]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    return path
+
+
+def _run_portable_helper(
+    tmp_path: Path,
+    *,
+    app_dir: Path,
+    archive: Path,
+    exe: str = "NovelDownloader.exe",
+    keep: tuple[Path, ...] = (),
+) -> subprocess.CompletedProcess[str]:
+    """Run the helper non-interactively against the given paths."""
+    script = tmp_path / "_apply_portable_update.ps1"
+    script.write_text(_portable_helper_text(), encoding="utf-8")
+    command = [
+        _POWERSHELL or "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        # A PID that cannot exist, so the wait loop exits immediately.
+        "-ProcessId",
+        "2000000000",
+        "-Zip",
+        str(archive),
+        "-AppDir",
+        str(app_dir),
+        "-Exe",
+        exe,
+    ]
+    if keep:
+        command.append("-Keep")
+        command.extend(str(item) for item in keep)
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+
+
+def test_portable_helper_restarts_the_new_executable() -> None:
+    """The restart is the helper's last step, after the payload is in place."""
+    lines = [
+        line.strip() for line in wa._PORTABLE_UPDATE_SCRIPT.splitlines() if line.strip()
+    ]
+    assert lines[-1] == _PORTABLE_LAUNCH_LINE
+
+
+@_requires_powershell
+def test_portable_helper_replaces_the_payload_and_keeps_app_home(
+    tmp_path: Path,
+) -> None:
+    """Old payload removed, new payload copied, data outside _internal intact."""
+    app_dir = tmp_path / "portable app"
+    home = tmp_path / "user home"
+    (home / "downloads").mkdir(parents=True)
+    (home / "settings.toml").write_text("user settings", encoding="utf-8")
+    (home / "downloads" / "book.txt").write_text("novel", encoding="utf-8")
+    exe = _install_portable_copy(app_dir)
+    archive = _write_update_zip(
+        tmp_path / "update" / "NovelDownloader-9.0.0-windows-x64.zip",
+        {
+            "_internal/new_module.py": "new module",
+            "_internal/sub/new.dll": "new dll",
+            "NovelDownloader.exe": "new build",
+        },
+    )
+
+    result = _run_portable_helper(tmp_path, app_dir=app_dir, archive=archive)
+
+    assert result.returncode == 0, result.stderr
+    payload = app_dir / wa._PAYLOAD_DIRNAME
+    assert (payload / "new_module.py").read_text(encoding="utf-8") == "new module"
+    assert (payload / "sub" / "new.dll").read_text(encoding="utf-8") == "new dll"
+    assert not (payload / "old_plugin.py").exists()
+    assert not (payload / "sub" / "old.dll").exists()
+    assert exe.read_text(encoding="utf-8") == "new build"
+    marker = (app_dir / ".launch-marker").read_text(encoding="utf-8-sig")
+    assert marker.strip() == str(exe)
+    assert not archive.exists()
+    assert (home / "settings.toml").read_text(encoding="utf-8") == "user settings"
+    assert (home / "downloads" / "book.txt").read_text(encoding="utf-8") == "novel"
+
+
+@_requires_powershell
+def test_portable_helper_keeps_novel_home_inside_the_payload(
+    tmp_path: Path,
+) -> None:
+    """A protected user-data subtree survives while its siblings are cleared."""
+    app_dir = tmp_path / "portable"
+    exe = _install_portable_copy(app_dir)
+    data = app_dir / wa._PAYLOAD_DIRNAME / "data"
+    (data / "downloads").mkdir(parents=True)
+    (data / "settings.toml").write_text("user settings", encoding="utf-8")
+    (data / "downloads" / "book.txt").write_text("novel", encoding="utf-8")
+    archive = _write_update_zip(
+        tmp_path / "update.zip",
+        {
+            "_internal/new_module.py": "new module",
+            "NovelDownloader.exe": "new build",
+        },
+    )
+
+    result = _run_portable_helper(
+        tmp_path, app_dir=app_dir, archive=archive, keep=(data,)
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (data / "settings.toml").read_text(encoding="utf-8") == "user settings"
+    assert (data / "downloads" / "book.txt").read_text(encoding="utf-8") == "novel"
+    payload = app_dir / wa._PAYLOAD_DIRNAME
+    assert (payload / "new_module.py").read_text(encoding="utf-8") == "new module"
+    # Everything outside the protected subtree is still a clean payload.
+    assert not (payload / "old_plugin.py").exists()
+    assert not (payload / "sub" / "old.dll").exists()
+    assert exe.read_text(encoding="utf-8") == "new build"
+
+
+@_requires_powershell
+def test_portable_helper_leaves_the_install_alone_for_a_corrupt_archive(
+    tmp_path: Path,
+) -> None:
+    """A broken zip must fail before anything is removed from the install."""
+    app_dir = tmp_path / "portable"
+    exe = _install_portable_copy(app_dir)
+    archive = tmp_path / "downloaded" / "broken.zip"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"this is not a zip archive")
+
+    result = _run_portable_helper(tmp_path, app_dir=app_dir, archive=archive)
+
+    assert result.returncode != 0
+    assert (app_dir / wa._PAYLOAD_DIRNAME / "old_plugin.py").exists()
+    assert exe.read_text(encoding="utf-8") == "old build"
+    assert archive.exists()
+    assert not (app_dir / ".launch-marker").exists()
+
+
+@_requires_powershell
+def test_portable_helper_requires_the_installed_executable(
+    tmp_path: Path,
+) -> None:
+    """A misplaced AppDir must not be cleaned when its executable is absent."""
+    app_dir = tmp_path / "portable"
+    _install_portable_copy(app_dir, with_exe=False)
+    archive = _write_update_zip(
+        tmp_path / "update.zip",
+        {"_internal/new_module.py": "new module"},
+    )
+
+    result = _run_portable_helper(tmp_path, app_dir=app_dir, archive=archive)
+
+    assert result.returncode != 0
+    output = (result.stdout + result.stderr).lower()
+    assert "executable is missing" in output
+    assert (app_dir / wa._PAYLOAD_DIRNAME / "old_plugin.py").exists()
+    assert archive.exists()
+
+
+@_requires_powershell
+def test_portable_helper_refuses_a_drive_root(tmp_path: Path) -> None:
+    """A misdetected install shape must never clear a whole drive."""
+    app_dir = tmp_path / "portable"
+    _install_portable_copy(app_dir)
+    archive = _write_update_zip(
+        tmp_path / "update.zip",
+        {"_internal/new_module.py": "new module"},
+    )
+    drive_root = Path(tmp_path.drive + "\\")
+
+    result = _run_portable_helper(
+        tmp_path,
+        app_dir=drive_root,
+        archive=archive,
+        exe="definitely-missing.exe",
+    )
+
+    assert result.returncode != 0
+    assert "drive root" in (result.stdout + result.stderr).lower()
+    assert (app_dir / wa._PAYLOAD_DIRNAME / "old_plugin.py").exists()
+
+
+@_requires_powershell
+def test_portable_helper_handles_spaces_and_unicode_in_paths(
+    tmp_path: Path,
+) -> None:
+    """AppDir, archive, home and the protected path may all be non-ASCII."""
+    app_dir = tmp_path / "便携 版" / "程序 目录"
+    home = tmp_path / "用户 数据" / "书音 数据"
+    home.mkdir(parents=True)
+    (home / "settings.toml").write_text("user settings", encoding="utf-8")
+    _install_portable_copy(app_dir)
+    exe = app_dir / "NovelDownloader.exe"
+    data = app_dir / wa._PAYLOAD_DIRNAME / "数据 目录"
+    data.mkdir(parents=True)
+    (data / "settings.toml").write_text("payload settings", encoding="utf-8")
+    archive = _write_update_zip(
+        tmp_path / "下载 更新" / "更新 包.zip",
+        {
+            "_internal/new_module.py": "new module",
+            "NovelDownloader.exe": "new build",
+        },
+    )
+
+    result = _run_portable_helper(
+        tmp_path, app_dir=app_dir, archive=archive, keep=(data,)
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (data / "settings.toml").read_text(encoding="utf-8") == "payload settings"
+    assert (app_dir / wa._PAYLOAD_DIRNAME / "new_module.py").exists()
+    assert not (app_dir / wa._PAYLOAD_DIRNAME / "old_plugin.py").exists()
+    assert exe.read_text(encoding="utf-8") == "new build"
+    assert (home / "settings.toml").read_text(encoding="utf-8") == "user settings"
 
 
 def test_prune_updates_removes_old_artefacts(
