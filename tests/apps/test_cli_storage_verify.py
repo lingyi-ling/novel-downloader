@@ -96,7 +96,7 @@ def raw_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         "downloads": tmp_path / "downloads",
         "logs": tmp_path / "logs",
     }
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     yield root
 
 
@@ -418,7 +418,7 @@ def test_verify_redacts_home_directory_in_json_paths(
         "downloads": tmp_path / "downloads",
         "logs": tmp_path / "logs",
     }
-    monkeypatch.setattr(storage, "_resolve_paths", lambda: paths)
+    monkeypatch.setattr(storage, "_resolve_paths", lambda **_kwargs: paths)
     monkeypatch.setattr(storage, "_home_dir", lambda: str(home))
     db = _book_db(root)
     _write_sqlite(db, ["CREATE TABLE unrelated (id INTEGER)"], version=1)
