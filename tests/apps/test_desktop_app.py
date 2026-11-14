@@ -3810,6 +3810,19 @@ def test_app_html_search_filters_are_keyboard_and_narrow_screen_friendly() -> No
     assert "flex: 1 1 150px" in APP_HTML
 
 
+def test_app_html_search_filter_error_is_not_muted_helper_text() -> None:
+    """The inline alert must not inherit the grey .hint colour.
+
+    ``.filter-error`` also carries ``.hint`` for spacing, so without an
+    explicit colour the message looked like helper text next to the red field
+    ring; keep the error tone and weight pinned in the stylesheet.
+    """
+    rule = re.search(r"\.search-filters \.filter-error \{[^}]*\}", APP_HTML)
+    assert rule, "missing .search-filters .filter-error rule"
+    assert "color: var(--red);" in rule.group(0)
+    assert "font-weight: 600;" in rule.group(0)
+
+
 def test_app_html_search_filter_labels_are_in_the_catalog() -> None:
     """New labels/placeholder/feedback go through the injected catalogue."""
     catalog = _i18n_catalog()
@@ -4039,6 +4052,21 @@ def test_app_html_music_rows_offer_translated_lyrics() -> None:
     assert "item.lyric_paths" in poll
     assert "tr.lyric_paths = item.lyric_paths;" in poll
     assert "if (hasLyrics) renderTracks();" in poll
+
+
+def test_app_html_music_rows_wrap_instead_of_squeezing_the_title() -> None:
+    """The extra lyric button must not collapse the title on narrow windows.
+
+    At 760 px the checkbox, index, source chips, both lyric buttons, format
+    and duration left the title column ~10 px wide, wrapping the song name one
+    character per line. The row wraps at 820 px and keeps a readable title.
+    """
+    assert (
+        "@media (max-width: 820px) {\n"
+        "  .track-row { flex-wrap: wrap; row-gap: 6px; }\n"
+        "  .track-row .row-main { flex: 1 1 160px; min-width: 140px; }\n"
+        "}" in APP_HTML
+    )
 
 
 def test_app_html_open_download_folder_reports_failure() -> None:

@@ -413,7 +413,9 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 .search-filters .filter-label { font-size: 11.5px; color: var(--text-3); }
 .search-filters .field { height: 34px; flex: none; }
 .search-filters .field input { width: 100%; }
-.search-filters .filter-error { flex-basis: 100%; margin: 0; min-height: 0; }
+/* The alert is a .hint for spacing, but it must not inherit the muted hint
+   colour: an error that looks like helper text is easy to miss. */
+.search-filters .filter-error { flex-basis: 100%; margin: 0; min-height: 0; color: var(--red); font-weight: 600; }
 .search-applied { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 2px 0; font-size: 12px; color: var(--text-2); }
 .search-applied[hidden] { display: none; }
 .search-applied .hint { flex: 1 1 220px; min-width: 0; }
@@ -593,6 +595,14 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 }
 .track-row:hover { background: var(--hover); }
 .track-row:last-child { border-bottom: none; }
+/* A translated lyric adds a second button to every row. On a narrow window
+   the chips + both buttons left the title column so thin that the song name
+   wrapped one character per line. Wrap the row instead and keep the title
+   readable; the buttons stay unsqueezed on the next line. */
+@media (max-width: 820px) {
+  .track-row { flex-wrap: wrap; row-gap: 6px; }
+  .track-row .row-main { flex: 1 1 160px; min-width: 140px; }
+}
 .track-row .idx { width: 22px; text-align: right; font-size: 11px; color: var(--text-3); flex: none; }
 .vip-tag {
   font-size: 9.5px; font-weight: 700; letter-spacing: .04em;
