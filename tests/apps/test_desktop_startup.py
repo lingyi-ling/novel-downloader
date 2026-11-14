@@ -21,6 +21,7 @@ DEFERRED_MODULES = (
     "aiohttp",
     "novel_downloader.apps.core.task_manager",
     "novel_downloader.apps.common.updater",
+    "novel_downloader.infra.persistence.state",
     "urllib.request",
     "webview",
 )

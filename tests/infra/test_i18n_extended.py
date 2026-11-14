@@ -8,6 +8,8 @@ same result whether or not ``scripts/compile_mo.py`` has been run.
 from __future__ import annotations
 
 import gettext
+import subprocess
+import sys
 import types
 from collections.abc import Iterator
 from typing import Any
@@ -146,6 +148,38 @@ def test_available_languages_returns_a_copy() -> None:
 # ---------------------------------------------------------------------------
 # get_language / set_language
 # ---------------------------------------------------------------------------
+def test_importing_i18n_does_not_build_state_manager() -> None:
+    """The window path imports ``i18n``; that must not read the state file.
+
+    ``persistence.state`` builds ``state_mgr`` at import time (it reads and may
+    quarantine the state file), so a module-scope import there would delay the
+    first paint.  A fresh interpreter is required: any other test may already
+    have imported the module.
+    """
+    code = (
+        "import sys\n"
+        "import novel_downloader.infra.i18n\n"
+        "print('novel_downloader.infra.persistence.state' in sys.modules)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "False"
+
+
+def test_state_mgr_attribute_resolves_on_first_use() -> None:
+    """``i18n.state_mgr`` still works through the module-level lazy accessor."""
+    manager = i18n.state_mgr
+
+    assert callable(manager.get_language)
+    assert callable(manager.set_language)
+
+
 def test_get_language_prefers_env_over_persisted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

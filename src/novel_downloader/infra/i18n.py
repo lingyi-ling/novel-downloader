@@ -40,8 +40,7 @@ import logging
 import os
 import struct
 from importlib.resources import files
-
-from novel_downloader.infra.persistence.state import state_mgr
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +80,44 @@ LANGUAGE_ALIASES: dict[str, str] = {
 
 _translations: dict[str, gettext.NullTranslations] = {}
 _missing_catalogs_warned: set[str] = set()
+
+#: Cached ``persistence.state.state_mgr``; filled in on first language access.
+_state_mgr_impl: Any = None
+
+
+def _resolve_state_mgr() -> Any:
+    """
+    Return the persisted-state singleton, importing it on first use only.
+
+    ``novel_downloader.infra.persistence.state`` builds ``state_mgr`` eagerly
+    when imported, and that constructor reads (and may quarantine) the state
+    file while pulling in ``paths``/``platformdirs``/``importlib.resources``.
+    None of that is needed to show the desktop window, so the import waits
+    until a language is actually read or written.
+
+    A module attribute named ``state_mgr`` wins over the real singleton: this
+    keeps ``monkeypatch.setattr(i18n, "state_mgr", fake)`` working, and lets
+    callers substitute their own manager by plain assignment.
+
+    :return: The state manager providing ``get_language``/``set_language``.
+    """
+    override = globals().get("state_mgr")
+    if override is not None:
+        return override
+
+    global _state_mgr_impl
+    if _state_mgr_impl is None:
+        from novel_downloader.infra.persistence.state import state_mgr as manager
+
+        _state_mgr_impl = manager
+    return _state_mgr_impl
+
+
+def __getattr__(name: str) -> Any:
+    """Serve ``i18n.state_mgr`` lazily for ``getattr``/``from ... import``."""
+    if name == "state_mgr":
+        return _resolve_state_mgr()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def normalize_language(code: str | None) -> str:
@@ -135,7 +172,7 @@ def get_language() -> str:
     if env_code:
         return env_code
 
-    saved_code = normalize_language(state_mgr.get_language())
+    saved_code = normalize_language(_resolve_state_mgr().get_language())
     if saved_code:
         return saved_code
 
@@ -153,9 +190,10 @@ def set_language(lang: str) -> str:
     code = normalize_language(lang)
     if not code:
         return ""
-    saved_code = state_mgr.get_language()
+    manager = _resolve_state_mgr()
+    saved_code = manager.get_language()
     if normalize_language(saved_code) != code:
-        state_mgr.set_language(code)
+        manager.set_language(code)
     return code
 
 
