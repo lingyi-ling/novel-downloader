@@ -24,6 +24,9 @@ script inspects and (safely) launches the produced executables instead:
 * ``novel-cli --version`` must print the package version,
   ``novel-cli doctor --json`` must emit parseable JSON, and
   ``novel-cli music platforms --json`` must register the heavy platforms;
+* with ``stdout``/``stderr`` redirected to files and every UTF-8 forcing
+  environment variable removed, the same launcher must still emit strict
+  UTF-8 (the entry point reconfigures non-TTY streams itself);
 * ``novel-api --help`` must exit 0 (it imports the whole ASGI stack).
 
 The desktop executable is windowed (``console=False``); it is never launched
@@ -148,6 +151,24 @@ PRUNED_DATA_GLOBS: tuple[str, ...] = (
 #: Data files pruning must never remove (opened by ``import emoji``).
 REQUIRED_DATA_FILES: tuple[str, ...] = ("emoji/unicode_codes/emoji.json",)
 
+#: Environment variables that would force UTF-8 on the child.  The redirected
+#: output gate removes them, otherwise a missing ``sys.stdout.reconfigure``
+#: would stay invisible under a CP936 (or cp1252) console code page.
+UTF8_FORCING_ENV: tuple[str, ...] = (
+    "PYTHONUTF8",
+    "PYTHONIOENCODING",
+    "PYTHONLEGACYWINDOWSSTDIO",
+)
+
+#: ``(label, argv)`` probes for the redirected-output UTF-8 gate.  ``--lang zh``
+#: guarantees non-ASCII output, so a code-page regression cannot hide behind an
+#: all-ASCII payload (the Chinese catalog ships in every bundle).
+UTF8_REDIRECT_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("--version", ("--version",)),
+    ("doctor --json", ("--lang", "zh", "doctor", "--json")),
+    ("search --help", ("--lang", "zh", "search", "--help")),
+)
+
 _VERSION_RE = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 
@@ -265,6 +286,125 @@ def _run(
         timeout=timeout,
         check=False,
     )
+
+
+def _utf8_probe_env() -> dict[str, str]:
+    """Ambient environment minus every UTF-8 forcing variable."""
+    blocked = {name.upper() for name in UTF8_FORCING_ENV}
+    return {
+        key: value for key, value in os.environ.items() if key.upper() not in blocked
+    }
+
+
+def _run_redirected_probe(
+    command: list[str], *, cwd: Path, timeout: float
+) -> tuple[int | None, bytes, bytes, str | None]:
+    """Run *command* with its streams redirected to files, no encoding overrides.
+
+    :return: ``(returncode, stdout, stderr, error)``; ``error`` is set when the
+        process could not start or timed out.  Output is kept as raw bytes:
+        decoding belongs to :func:`_utf8_output_problem`, which can then fail
+        on anything that is not strict UTF-8.
+    """
+    with tempfile.TemporaryDirectory(prefix="noveldl-utf8-") as work:
+        out_path = Path(work) / "stdout.bin"
+        err_path = Path(work) / "stderr.bin"
+        try:
+            with out_path.open("wb") as out, err_path.open("wb") as err:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(cwd),
+                    stdin=subprocess.DEVNULL,
+                    stdout=out,
+                    stderr=err,
+                    env=_utf8_probe_env(),
+                    timeout=timeout,
+                    check=False,
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, b"", b"", str(exc)
+        return (
+            completed.returncode,
+            out_path.read_bytes(),
+            err_path.read_bytes(),
+            None,
+        )
+
+
+def _utf8_output_problem(label: str, data: bytes) -> str | None:
+    """Return why *data* is not strict UTF-8, or None when it is.
+
+    The payload is deliberately never echoed: redirected output can contain
+    local paths, tokens or other user-specific data.
+    """
+    try:
+        text = data.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        return (
+            f"{label} is not valid UTF-8 (byte {exc.start}: {exc.reason}); "
+            "the CLI must emit UTF-8 even when its streams are redirected and "
+            "PYTHONUTF8/PYTHONIOENCODING are unset"
+        )
+    surrogate = next(
+        (index for index, char in enumerate(text) if 0xD800 <= ord(char) <= 0xDFFF),
+        None,
+    )
+    if surrogate is not None:
+        return (
+            f"{label} contains a surrogate code point at character {surrogate}; "
+            "the CLI must emit UTF-8"
+        )
+    return None
+
+
+def _check_cli_utf8_redirection(report: BundleReport, timeout: float) -> None:
+    """Fail when a redirected stream is not strict UTF-8.
+
+    ``packaging/cli_entry._force_utf8_output`` reconfigures non-TTY
+    stdout/stderr to UTF-8.  Every other probe in this script sets
+    ``PYTHONUTF8``/``PYTHONIOENCODING``, which would hide a regression there
+    (the original CP936 bug).  Here the child gets the ambient environment
+    minus those overrides, and its streams point at files -- the exact shape
+    of ``novel-cli ... > out.txt``.
+    """
+    with tempfile.TemporaryDirectory(prefix="noveldl-verify-") as work:
+        cwd = Path(work)
+        saw_non_ascii = False
+        for label, args in UTF8_REDIRECT_PROBES:
+            returncode, out, err, error = _run_redirected_probe(
+                [str(report.exe), *args], cwd=cwd, timeout=timeout
+            )
+            if error is not None:
+                report.problems.append(
+                    f"{label} could not run for the redirected-output gate: {error}"
+                )
+                continue
+            problem = _utf8_output_problem(f"{label} stdout", out)
+            if problem is None:
+                problem = _utf8_output_problem(f"{label} stderr", err)
+            if problem is not None:
+                report.problems.append(problem)
+                continue
+            if returncode != 0:
+                report.problems.append(
+                    f"{label} exited {returncode} with redirected streams; "
+                    "the CLI must emit UTF-8 and complete under a redirected "
+                    "console"
+                )
+                continue
+            if not out:
+                report.problems.append(
+                    f"{label} wrote no stdout with redirected streams"
+                )
+                continue
+            saw_non_ascii = saw_non_ascii or any(byte >= 0x80 for byte in out)
+            report.checks.append(f"{label}: UTF-8 with redirected streams")
+        if not saw_non_ascii and report.ok():
+            report.problems.append(
+                "redirected-output gate saw only ASCII; the localised probes "
+                "must contain non-ASCII text for the gate to detect a code "
+                "page regression"
+            )
 
 
 def _pyz_modules(work_dir: Path) -> set[str] | None:
@@ -634,6 +774,7 @@ def verify_bundle(
         if report.exe.is_file():
             _check_cli_probes(report, expected_version, timeout)
             _check_music_platform_probe(report, timeout)
+            _check_cli_utf8_redirection(report, timeout)
     elif key == "api":
         if report.exe.is_file():
             _check_api_probe(report, timeout)

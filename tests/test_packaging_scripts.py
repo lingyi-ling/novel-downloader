@@ -2772,6 +2772,117 @@ class TestFrozenVerification:
         assert "scripts/verify_frozen.py --bundles cli,api" in python_job
         assert "scripts/verify_frozen.py --bundles desktop" in desktop_job
 
+    def test_utf8_gate_probes_the_documented_commands(self, verify_frozen: Any) -> None:
+        probes = dict(verify_frozen.UTF8_REDIRECT_PROBES)
+        assert {"--version", "doctor --json", "search --help"} <= set(probes)
+        # The two localised probes must force Chinese so the payload contains
+        # non-ASCII bytes even on an English machine.
+        for label in ("doctor --json", "search --help"):
+            assert probes[label][:2] == ("--lang", "zh")
+        assert {"PYTHONUTF8", "PYTHONIOENCODING"} <= set(verify_frozen.UTF8_FORCING_ENV)
+
+    def test_utf8_probe_env_drops_encoding_overrides(
+        self, verify_frozen: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in verify_frozen.UTF8_FORCING_ENV:
+            monkeypatch.setenv(name, "1")
+        monkeypatch.setenv("NOVELDL_PROBE_KEEP", "kept")
+
+        env = verify_frozen._utf8_probe_env()
+
+        blocked = {name.upper() for name in verify_frozen.UTF8_FORCING_ENV}
+        assert not {key for key in env if key.upper() in blocked}
+        assert env["NOVELDL_PROBE_KEEP"] == "kept"
+
+    def test_utf8_gate_redirects_files_and_accepts_utf8(
+        self, verify_frozen: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PYTHONUTF8", "1")
+        monkeypatch.setenv("PYTHONIOENCODING", "cp936")
+        captured: list[tuple[list[str], dict[str, Any]]] = []
+
+        def fake_run(command: list[str], **kwargs: Any) -> Any:
+            captured.append((command, kwargs))
+            kwargs["stdout"].write("版本\n".encode())  # UTF-8 bytes
+            kwargs["stderr"].write(b"")
+            return subprocess.CompletedProcess(args=command, returncode=0)
+
+        monkeypatch.setattr(verify_frozen.subprocess, "run", fake_run)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_cli_utf8_redirection(report, 5.0)
+
+        assert report.ok(), report.problems
+        assert len(captured) == len(verify_frozen.UTF8_REDIRECT_PROBES)
+        assert any("UTF-8 with redirected streams" in c for c in report.checks)
+        for _command, kwargs in captured:
+            # Raw file handles: the gate must judge bytes, not decoded text.
+            assert hasattr(kwargs["stdout"], "write")
+            assert hasattr(kwargs["stderr"], "write")
+            assert kwargs["stdout"] is not subprocess.PIPE
+            assert kwargs["stdin"] is subprocess.DEVNULL
+            env = {key.upper() for key in kwargs["env"]}
+            assert not env & {name.upper() for name in verify_frozen.UTF8_FORCING_ENV}
+
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    def test_utf8_gate_detects_a_missing_runtime_reconfigure(
+        self,
+        verify_frozen: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stream: str,
+    ) -> None:
+        # A frozen process without cli_entry's ``reconfigure`` writes the ANSI
+        # code page (CP936 here) when the stream is a file.  The gate must
+        # fail on those bytes and must not echo them back.
+        def fake_run(command: list[str], **kwargs: Any) -> Any:
+            kwargs["stdout"].write("版本\n".encode())  # UTF-8 bytes
+            kwargs["stderr"].write(b"")
+            kwargs[stream].write("版本\n".encode("gbk"))
+            return subprocess.CompletedProcess(args=command, returncode=0)
+
+        monkeypatch.setattr(verify_frozen.subprocess, "run", fake_run)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_cli_utf8_redirection(report, 5.0)
+
+        assert not report.ok()
+        joined = " ".join(report.problems)
+        assert f"{stream} is not valid UTF-8" in joined
+        assert "the CLI must emit UTF-8" in joined
+        assert "版本" not in joined
+
+    def test_utf8_gate_rejects_ascii_only_probes(
+        self, verify_frozen: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # All-ASCII output passes a byte-level UTF-8 check trivially; without a
+        # non-ASCII payload the gate could never see the CP936 regression.
+        def fake_run(command: list[str], **kwargs: Any) -> Any:
+            kwargs["stdout"].write(b"NovelDownloader 1.34.0\n")
+            kwargs["stderr"].write(b"")
+            return subprocess.CompletedProcess(args=command, returncode=0)
+
+        monkeypatch.setattr(verify_frozen.subprocess, "run", fake_run)
+        report = verify_frozen.BundleReport(key="cli", exe=tmp_path / "x.exe")
+
+        verify_frozen._check_cli_utf8_redirection(report, 5.0)
+
+        assert not report.ok()
+        assert "saw only ASCII" in " ".join(report.problems)
+
+    def test_frozen_cli_passes_the_utf8_gate(self, verify_frozen: Any) -> None:
+        exe = ROOT / "dist" / "novel-cli" / "novel-cli.exe"
+        if not exe.is_file():
+            pytest.skip("frozen novel-cli bundle is not built; run build_cli.py")
+        report = verify_frozen.BundleReport(key="cli", exe=exe)
+
+        verify_frozen._check_cli_utf8_redirection(report, 120.0)
+
+        assert report.ok(), report.problems
+        assert sum(
+            "UTF-8 with redirected streams" in check for check in report.checks
+        ) == len(verify_frozen.UTF8_REDIRECT_PROBES)
+
 
 class TestSpecImageStack:
     """The image stack must be collected by every PyInstaller spec."""
