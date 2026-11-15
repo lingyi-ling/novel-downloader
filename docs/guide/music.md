@@ -181,7 +181,7 @@ opts = DownloadOptions(
 
 MP3 只写**非同步歌词** (`USLT`), 不写 `SYLT`。只解析 `SYLT` (逐行时间轴) 的播放器在内嵌标签里看不到歌词; 这些播放器仍可读取同目录的 `.lrc`, 因此需要广泛兼容时保留 `save_lyric`。`.lrc` 仍是可移植的载体, 内嵌标签只服务于「只读音频文件本身」的播放器。
 
-启用方式: `embed_lyric` **只在库层的 `DownloadOptions` 上存在**。CLI、桌面客户端、Android 独立模式和 REST API 都没有暴露这个开关, 音乐 `settings.json` 也不读取该键, 写入无效。以库方式调用时:
+启用方式: CLI 的 `music download` 用 `--embed-lyric` 打开、`--no-embed-lyric` 关闭; 两者都不传时取音乐设置 `embed_lyric` (默认 `false`)。桌面客户端在「设置 → 音乐下载」中也提供同名开关, 修改后立即写入同一份音乐设置。音乐 `settings.json` 接受布尔值 `"embed_lyric": true/false`, 非布尔值按默认值 (关闭) 处理。Android 独立模式和 REST API 仍未暴露该开关。以库方式调用时:
 
 ```python
 from novel_downloader.apps.music.downloader import DownloadOptions
@@ -260,7 +260,7 @@ API 的 `POST /api/v1/music/export` 不做搜索, 要求每首曲目自带本地
 
 | 文件 | 内容 |
 | --- | --- |
-| `settings.json` | 输出目录、音质、标签/封面/歌词、分文件夹、跳过已存在、并发数 |
+| `settings.json` | 输出目录、音质、标签/封面/歌词 (含内嵌歌词 `embed_lyric`)、分文件夹、跳过已存在、并发数 |
 | `session.json` | 网易云登录态 (浏览器 Cookie) |
 | `platform_creds.json` | 各平台的账号凭据, 如 TIDAL token、汽水 Cookie |
 | `search_stats.json` | 聚合搜索的失败熔断与「慢且空」统计 |

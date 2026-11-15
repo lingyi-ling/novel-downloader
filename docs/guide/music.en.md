@@ -181,7 +181,7 @@ The text source matches `.lrc`: the original is preferred and the translation is
 
 MP3 gets **unsynchronised lyrics** (`USLT`) only; no `SYLT` frame is written. Players that parse only `SYLT` (per-line timing) will not see the embedded lyrics; they can still read the `.lrc` next to the audio, so keep `save_lyric` on when broad compatibility matters. The `.lrc` remains the portable representation; the embedded tag is for players that read the audio file alone.
 
-Enabling it: `embed_lyric` exists only on the library-level `DownloadOptions`. The CLI, desktop client, Android standalone mode and REST API do not expose the switch, and the music `settings.json` does not read the key, so setting it there has no effect. Library callers use:
+Enabling it: `music download` in the CLI turns it on with `--embed-lyric` and off with `--no-embed-lyric`; with neither flag the music setting `embed_lyric` applies (off by default). The desktop client exposes the same switch under Settings → Music downloads and writes it to the same music settings immediately. The music `settings.json` accepts the boolean `"embed_lyric": true/false`; a non-boolean value falls back to the default (off). Android standalone mode and the REST API still do not expose the switch. Library callers use:
 
 ```python
 from novel_downloader.apps.music.downloader import DownloadOptions
@@ -260,7 +260,7 @@ Music runtime data lives in the `music/` subdirectory of the platform data direc
 
 | File | Contents |
 | --- | --- |
-| `settings.json` | Output directory, quality, tags/cover/lyrics, split folders, skip existing, worker count |
+| `settings.json` | Output directory, quality, tags/cover/lyrics (including embedded lyrics via `embed_lyric`), split folders, skip existing, worker count |
 | `session.json` | NetEase login state (browser cookies) |
 | `platform_creds.json` | Per-platform credentials such as a TIDAL token or Soda cookie |
 | `search_stats.json` | Aggregate-search failure breaker and "slow and empty" statistics |

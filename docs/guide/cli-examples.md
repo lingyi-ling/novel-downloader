@@ -1355,7 +1355,7 @@ novel-cli update --json
 | `sources list` | `--json` | 数组, 每项含 `site_key`、`name`、`search`、`hosts`、`origin`; 加 `--check` 时 `status` 才有值 (否则为 `null`); 加 `--probe` 时额外含 `latency_ms`、`http_status` (探测不到时为 `null`) |
 | `update` | `--json` | 单个对象, 固定含 `current`、`latest`、`available`、`asset_name`、`asset_shape`、`asset_size`、`sha256`、`download_path`、`error` 九个字段; 无对应值时除 `current`/`available` 外为 `null` (或 `latest` 为空串)。`asset_shape` 在选中 CLI 资产时为 `cli`; `error` 可能为 `insecure-url`、`missing-digest`、`no-cli-asset` |
 | `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}`; `platform=all` (默认) 时 `tracks[].sources` 列出命中平台, 并额外返回 `platforms` 统计 |
-| `music download` | `--json` | 单行 JSON: `{"platform", "keyword", "out_dir", "level", "total", "ok", "skip", "fail", "lyrics_written", "results": [...]}`; `results[]` 含 `id`、`name`、`artists`、`album`、`duration_s`、`vip`、`platform`、`sources`, 并按结果追加 `status` (`ok`/`skip`/`fail`)、`path`、`lyric_path`、`reason` (后三者按条件出现) |
+| `music download` | `--json` | 单行 JSON: `{"platform", "keyword", "out_dir", "level", "embed_lyric", "total", "ok", "skip", "fail", "lyrics_written", "results": [...]}`; `results[]` 含 `id`、`name`、`artists`、`album`、`duration_s`、`vip`、`platform`、`sources`, 并按结果追加 `status` (`ok`/`skip`/`fail`)、`path`、`lyric_path`、`reason` (后三者按条件出现) |
 | `music platforms` | `--json` | `{平台 key: 显示名}` 对象 |
 | `music health` | `--json` | `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`; 字段名与 `GET /api/v1/music/health` 一致 |
 | `follow list` | `--json` | 数组, 每项含 `site`、`book_id`、`title`、`last_chapter`、`updated_at` |
