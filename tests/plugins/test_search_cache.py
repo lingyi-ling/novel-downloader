@@ -195,8 +195,8 @@ def test_get_returns_fresh_list_each_call() -> None:
 
 
 def test_caller_list_mutation_does_not_pollute_cache() -> None:
-    # ``get`` returns a shallow *list* copy: reordering/append/clear on it must
-    # not affect the cached snapshot (the inner dicts are shared by design).
+    # ``get`` returns a fresh list of fresh row dicts: reordering/append/clear
+    # on the list, or editing a row, must not affect the cached snapshot.
     cache = SearchCache(now=_Clock())
     key = _key()
     cache.put(key, [_result("1")])
@@ -204,6 +204,7 @@ def test_caller_list_mutation_does_not_pollute_cache() -> None:
     fetched = cache.get(key)
     assert fetched is not None
     fetched.append(_result("2"))
+    fetched[0]["title"] = "polluted"
     del fetched[0]
 
     again = cache.get(key)

@@ -311,6 +311,19 @@ def _restore_row(row: object) -> SearchResult | None:
     return cast("SearchResult", restored)
 
 
+def _copy_rows(rows: Sequence[SearchResult]) -> list[SearchResult]:
+    """
+    Return a fresh list holding a fresh dict per row.
+
+    Copying only the list would let a caller mutate a row dict in place and
+    silently change the cached snapshot: the next lookup of the same key would
+    then serve fields this caller wrote, not the site's payload.  A per-row
+    dict copy isolates every field :class:`SearchResult` defines while keeping
+    the stored values (strings, ints) shared, so the cost stays O(rows).
+    """
+    return [cast("SearchResult", dict(row)) for row in rows]
+
+
 @dataclass(frozen=True)
 class CacheStats:
     """Cumulative counters describing a :class:`SearchCache`'s usage."""
@@ -613,7 +626,7 @@ class SearchCache:
         the oldest live ones are evicted until the cache fits ``max_entries``.
         """
         self._purge_expired(now)
-        self._entries[key] = (now, list(results))
+        self._entries[key] = (now, _copy_rows(results))
         self._entries.move_to_end(key)
         while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)
@@ -641,7 +654,7 @@ class SearchCache:
                 if self._now() - stored_at < self._ttl:
                     self._hits += 1
                     self._entries.move_to_end(key)
-                    return list(results)
+                    return _copy_rows(results)
                 del self._entries[key]
             loaded = self._disk_get(key)
             if loaded is not None:
@@ -651,7 +664,7 @@ class SearchCache:
                 # clamped at zero so a backwards wall-clock jump cannot push
                 # the memory expiry into the future.
                 self._store_locked(key, results, self._now() - max(age, 0.0))
-                return list(results)
+                return _copy_rows(results)
             self._misses += 1
             return None
 

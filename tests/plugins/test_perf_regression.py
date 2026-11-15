@@ -635,9 +635,11 @@ def test_cache_storage_grows_linearly_with_result_count(tmp_path: Path) -> None:
 
     cached = cache.get(key)
     assert cached is not None
-    # Only the list is copied; the row dicts are shared, so memory stays O(n).
+    # A fresh list of fresh row dicts: memory stays O(n), and editing a row a
+    # caller received cannot change the cached snapshot.
     assert cached is not large
-    assert cached[0] is large[0]
+    assert cached[0] is not large[0]
+    assert cached[0] == large[0]
     assert len(cached) == 4_000
 
 

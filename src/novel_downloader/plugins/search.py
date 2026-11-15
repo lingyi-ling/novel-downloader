@@ -1150,11 +1150,11 @@ def _annotate_ranked(
     Return copies of ``results`` carrying ``rank_score``, ``match_tier`` and
     ``query_intent``.
 
-    A fresh dict per row is essential: the input list may be -- or point
-    into -- the cached snapshot, and :class:`SearchCache` copies only the
-    list, not the row dicts.  Writing the fields in place would leak derived
-    data into the cache, where a later call would treat it as if the site had
-    returned it (and grouping could then be handed stale annotations).
+    A fresh dict per row is essential even though the cache returns per-row
+    copies: the input list may be caller-owned (``_finalize`` is also used on
+    rows a caller passed in), and writing the fields in place would leak
+    derived data into those rows, where a later call would treat it as if the
+    site had returned it (and grouping could then be handed stale annotations).
 
     The scores are computed here, after filtering/grouping/slicing, so only
     rows the caller actually receives are scored, with the same ``now`` the
