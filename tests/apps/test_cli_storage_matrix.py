@@ -652,6 +652,41 @@ def test_backup_out_inside_raw_data_json(
     assert len(_fresh_backups(out)) == 2
 
 
+@pytest.mark.parametrize(
+    ("argv_extra", "case_id"),
+    [
+        (["--keep", "-1"], "negative_keep"),
+        (["--keep", "abc"], "non_integer_keep"),
+        (["--keep", "0", "--dry-run"], "dry_run_with_zero_keep"),
+        (["--dry-run"], "dry_run_without_keep"),
+    ],
+)
+def test_backup_usage_errors_exit_two_without_writing(
+    argv_extra: list[str],
+    case_id: str,
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Option validation happens before any source is opened or written."""
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    db = _book_db(raw_root)
+    _seed(db, "c1")
+    before = _source_bytes(db)
+
+    out = tmp_path / "backups"
+    with pytest.raises(SystemExit) as exc_info:
+        _invoke(["storage", "backup", "--out", str(out), *argv_extra])
+    assert exc_info.value.code == 2, case_id
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err != ""
+    assert _fresh_backups(out) == []
+    _assert_source_unchanged(db, before)
+
+
 # ---------------------------------------------------------------------------
 # same-second naming and target collisions
 # ---------------------------------------------------------------------------

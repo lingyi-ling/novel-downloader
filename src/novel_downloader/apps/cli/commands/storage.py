@@ -612,6 +612,13 @@ def _source_connection(path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
         if not _needs_snapshot_copy(exc):
             raise
+    except BaseException:
+        # A non-database file raises ``DatabaseError`` (not an
+        # ``OperationalError``), and any other failure must not leak the
+        # handle either: on Windows an open handle makes the caller's rollback
+        # unlink fail, leaving a corrupt copy behind.
+        conn.close()
+        raise
     else:
         try:
             yield conn
