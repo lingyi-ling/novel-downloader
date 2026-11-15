@@ -449,7 +449,7 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 .rc-main .row-title { font-size: 14px; }
 .rc-side { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; flex: none; }
 .rc-side .src-caps { max-width: 260px; }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   .rc { grid-template-columns: 38px minmax(0, 1fr); }
   .rc-cover { width: 38px; height: 52px; }
   .rc-side { grid-column: 1 / -1; flex-direction: row; align-items: center; justify-content: space-between; width: 100%; }
@@ -511,7 +511,15 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 .best-chip {
   font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   color: var(--green); background: var(--green-bg); border-radius: 4px; padding: 1px 6px;
+  flex: none; white-space: nowrap;
 }
+/* The result count and the list-level intent verdict wrap as one unit: the
+   chip explains the count, so it must never be orphaned on its own line. */
+.search-verdict {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  flex: 0 1 auto; min-width: 0; margin-left: auto;
+}
+.search-verdict .hint { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
 /* Query-intent chip: names the field the quality order matched on ("Title
    match" / "Author match"). It sits next to the result count so it explains
    the whole list, not one row. */
@@ -844,8 +852,10 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <button class="btn btn-ghost btn-sm" id="btn-search-filters" aria-expanded="false" aria-controls="search-filter-panel"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Filters">Filters</span><span class="count-chip" id="search-filter-count" hidden></span></button>
             <button class="btn btn-ghost btn-sm" id="btn-rank"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Rankings">Rankings</span></button>
             <button class="btn btn-ghost btn-sm" id="btn-cats"><svg class="icon"><use href="#i-book"/></svg><span data-i18n="Categories">Categories</span></button>
-            <span class="hint" id="search-hint"></span>
-            <span class="intent-chip" id="search-intent" hidden></span>
+            <span class="search-verdict">
+              <span class="hint" id="search-hint"></span>
+              <span class="intent-chip" id="search-intent" role="status" hidden></span>
+            </span>
           </div>
           <div class="search-filters" id="search-filter-panel" hidden>
             <label class="filter-field" for="q-min-words">
@@ -893,6 +903,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
       <div class="topbar">
         <div><h1 data-i18n="Download">Download</h1><div class="sub" data-i18n="Live queue and progress">Live queue and progress</div></div>
         <div class="spacer"></div>
+        <button class="btn btn-ghost" id="btn-retry-failed" disabled><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Retry all failed">Retry all failed</span></button>
         <button class="btn btn-ghost" id="btn-refresh-tasks"><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Refresh">Refresh</span></button>
       </div>
       <div class="scroll" id="tasks-body"></div>
@@ -1075,6 +1086,19 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
           </div>
 
           <div class="card settings-card wide">
+            <div class="settings-title" data-i18n="Search cache">Search cache</div>
+            <div class="settings-help" data-i18n="Recent results are kept briefly so repeating a query does not hit every site again.">Recent results are kept briefly so repeating a query does not hit every site again.</div>
+            <div class="set-row"><span class="lbl" data-i18n="Memory entries">Memory entries</span><span class="settings-value mono" id="set-cache-memory">0</span></div>
+            <div class="set-row"><span class="lbl" data-i18n="Disk entries">Disk entries</span><span class="settings-value mono" id="set-cache-disk">0</span></div>
+            <div class="set-row"><span class="lbl" data-i18n="Cache hits">Cache hits</span><span class="settings-value mono" id="set-cache-hits">0</span></div>
+            <div class="set-row"><span class="lbl" data-i18n="Expired entries">Expired entries</span><span class="settings-value mono" id="set-cache-expired">0</span></div>
+            <div class="settings-note" id="set-cache-note"></div>
+            <div class="settings-actions">
+              <button class="btn btn-ghost btn-sm" id="btn-set-clear-search-cache"><svg class="icon"><use href="#i-trash"/></svg><span data-i18n="Clear search cache">Clear search cache</span></button>
+            </div>
+          </div>
+
+          <div class="card settings-card wide">
             <div class="settings-title" data-i18n="Application">Application</div>
             <div class="set-row"><span class="lbl" data-i18n="Version">Version</span><span class="settings-value mono" id="set-version"></span></div>
             <div class="set-row"><span class="lbl" data-i18n="Config file">Config file</span><span class="settings-value mono" id="set-config" title=""></span></div>
@@ -1082,6 +1106,25 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <div class="settings-actions">
               <button class="btn btn-ghost btn-sm" id="btn-set-shortcut"><svg class="icon"><use href="#i-desktop"/></svg><span data-i18n="Create desktop shortcut">Create desktop shortcut</span></button>
             </div>
+          </div>
+
+          <div class="card settings-card wide">
+            <div class="settings-title" data-i18n="Backup">Backup</div>
+            <div class="settings-help" data-i18n="Export your preferences as JSON, or import them on another device.">Export your preferences as JSON, or import them on another device.</div>
+            <div class="field" style="margin-top:8px">
+              <input id="set-export-path" data-i18n-ph="Export file path (blank = default)" placeholder="Export file path (blank = default)" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="settings-actions">
+              <button class="btn btn-ghost btn-sm" id="btn-set-export"><svg class="icon"><use href="#i-folder"/></svg><span data-i18n="Export settings">Export settings</span></button>
+            </div>
+            <div class="field" style="margin-top:8px">
+              <input id="set-import-path" data-i18n-ph="Import file path" placeholder="Import file path" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="settings-actions">
+              <button class="btn btn-ghost btn-sm" id="btn-set-import"><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Import settings">Import settings</span></button>
+            </div>
+            <div class="settings-note" id="set-transfer-status" role="status" aria-live="polite"></div>
+            <div class="settings-note" data-i18n="Current preferences are backed up to a .bak file before an import.">Current preferences are backed up to a .bak file before an import.</div>
           </div>
         </div>
       </div>
@@ -1420,6 +1463,44 @@ function renderSettings(s) {
   else shortcut.querySelector("span").textContent = t("Create desktop shortcut");
 }
 
+/* Search cache diagnostics: the bridge only ever reads the cache, so these
+   rows are safe to refresh while searches are running. An absent value (the
+   cache has not been touched yet) is rendered as 0, never as a blank cell. */
+function cacheCount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? String(Math.trunc(n)) : "0";
+}
+function renderSearchCacheStats(stats) {
+  const s = stats && typeof stats === "object" ? stats : {};
+  $("#set-cache-memory").textContent = cacheCount(s.memory_entries);
+  $("#set-cache-disk").textContent = cacheCount(s.disk_entries);
+  $("#set-cache-hits").textContent = cacheCount(s.hits);
+  $("#set-cache-expired").textContent = cacheCount(s.expired_entries);
+  const note = $("#set-cache-note");
+  if (!note) return;
+  note.textContent = s.ok === false && s.error ? s.error : "";
+  note.className = "settings-note" + (s.ok === false ? " err" : "");
+}
+async function refreshSearchCacheStats() {
+  renderSearchCacheStats(await call("get_search_cache_stats"));
+}
+
+/* Clearing the cache is destructive enough to need a second click: the first
+   arms the button, the second (within four seconds) actually clears it. A
+   timeout disarms, so a stray click cannot leave the button primed forever. */
+let clearCacheArmed = false;
+let clearCacheTimer = null;
+function setClearSearchCacheLabel(armed) {
+  const button = $("#btn-set-clear-search-cache");
+  const label = button && button.querySelector("span");
+  if (label) label.textContent = armed ? t("Click again to clear") : t("Clear search cache");
+}
+function disarmClearSearchCache() {
+  clearCacheArmed = false;
+  if (clearCacheTimer) { clearTimeout(clearCacheTimer); clearCacheTimer = null; }
+  setClearSearchCacheLabel(false);
+}
+
 /* Music account credentials: the bridge only reports whether a platform is
    configured and the JSON shape it expects. Values are never sent back, so the
    field always starts blank and blank means "leave the saved token alone". */
@@ -1511,6 +1592,7 @@ async function initSettings() {
     renderSettings(s);
   }
   await loadMusicCredentialSettings(preferred);
+  await refreshSearchCacheStats();
 }
 
 $("#btn-set-open").onclick = async () => {
@@ -1552,10 +1634,86 @@ $("#btn-set-clear-search-filters").onclick = async () => {
   toast(t("Saved search filters cleared"), "ok");
 };
 
+$("#btn-set-clear-search-cache").onclick = async () => {
+  const button = $("#btn-set-clear-search-cache");
+  if (!clearCacheArmed) {
+    clearCacheArmed = true;
+    setClearSearchCacheLabel(true);
+    clearCacheTimer = setTimeout(disarmClearSearchCache, 4000);
+    return;
+  }
+  disarmClearSearchCache();
+  button.disabled = true;
+  const r = await call("clear_search_cache");
+  button.disabled = false;
+  if (!r || r.ok !== true) {
+    toast((r && r.error) || t("Could not clear the search cache"), "err", 7000);
+    return;
+  }
+  toast(t("Search cache cleared"), "ok");
+  await refreshSearchCacheStats();
+};
+
 $("#btn-set-shortcut").onclick = async () => {
   const r = await call("create_shortcut");
   if (r && r.message) toast(r.message, r.ok ? "ok" : "warn");
   initSettings();
+};
+
+function showTransferStatus(text, kind) {
+  const node = $("#set-transfer-status");
+  if (!node) return;
+  node.textContent = text || "";
+  node.className = "settings-note " + (kind || "");
+}
+
+$("#btn-set-export").onclick = async () => {
+  const button = $("#btn-set-export");
+  const target = $("#set-export-path");
+  button.disabled = true;
+  const r = await call("export_settings", target.value.trim());
+  button.disabled = false;
+  if (!r) return;
+  if (!r.ok) {
+    const message = r.error || t("Could not export the settings");
+    showTransferStatus(message, "err");
+    toast(message, "err", 8000);
+    return;
+  }
+  // Show the resolved path (the default is generated by the bridge).
+  if (r.path) target.value = r.path;
+  const message = r.message || t("Settings exported to {path}").replace("{path}", r.path || "");
+  showTransferStatus(message, "ok");
+  toast(message, "ok", 6000);
+};
+
+$("#btn-set-import").onclick = async () => {
+  const input = $("#set-import-path");
+  const path = input.value.trim();
+  if (!path) {
+    showTransferStatus(t("Enter a file path"), "warn");
+    toast(t("Enter a file path"), "warn", 6000);
+    input.focus();
+    return;
+  }
+  const button = $("#btn-set-import");
+  button.disabled = true;
+  const r = await call("import_settings", path);
+  button.disabled = false;
+  if (!r) return;
+  if (!r.ok) {
+    const message = r.error || t("Imported settings were not applied");
+    showTransferStatus(message, "err");
+    toast(message, "err", 9000);
+    return;
+  }
+  if (r.settings) renderSettings(r.settings);
+  applyTheme(r.settings ? r.settings.theme : $("#set-theme").value);
+  const message = r.message || t("Settings imported from {path}").replace("{path}", r.path || "");
+  showTransferStatus(message, "ok");
+  toast(message, "ok", 7000);
+  refreshTasks().catch(() => {});
+  refreshFollow().catch(() => {});
 };
 
 $("#btn-set-save").onclick = async () => {
@@ -2780,6 +2938,27 @@ function renderTasks(snap) {
   const badge = $("#badge-live");
   badge.hidden = liveCount === 0;
   badge.textContent = liveCount;
+  // The batch button mirrors the backend filter: a terminal failure with the
+  // fields add_task needs, minus any book that is live right now. Without the
+  // active-book check the button would stay enabled for a row that was
+  // already retried and is now running, inviting a duplicate click.
+  // A book key never renders: concatenation keeps the raw-value guard intact
+  // while still distinguishing sites that happen to share a book id.
+  const bookKey = k => String(k.site) + "\u0000" + String(k.book_id);
+  const activeBooks = new Set(
+    (snap.running || []).concat(snap.processing || [], snap.exporting || [], snap.queued || [])
+      .filter(k => k && k.site && k.book_id)
+      .map(bookKey)
+  );
+  const retryableBooks = new Set();
+  for (const k of done) {
+    if (!k || !k.task_id || !k.site || !k.book_id) continue;
+    if (!(k.retryable || ["failed", "cancelled", "interrupted"].includes(k.status))) continue;
+    const book = bookKey(k);
+    if (!activeBooks.has(book)) retryableBooks.add(book);
+  }
+  const retryAll = $("#btn-retry-failed");
+  if (retryAll) retryAll.disabled = retryableBooks.size === 0;
   if (currentPage !== "download") return;
   const body = $("#tasks-body");
   const focusSnapshot = captureFocus(body, ["data-cancel", "data-retry", "data-open-file", "data-copy-error", "data-open-dir"]);
@@ -2881,7 +3060,39 @@ $("#tasks-body").addEventListener("click", async e => {
     }
   } else if (f) { openPath(f.dataset.openFile); }
 });
+
 $("#btn-refresh-tasks").onclick = refreshTasks;
+$("#btn-retry-failed").onclick = async () => {
+  const btn = $("#btn-retry-failed");
+  if (btn.disabled) return;
+  // Lock the button for the whole round-trip: the manager dedupes by book, but
+  // a second click would still queue up behind the engine and report a batch
+  // the user did not ask for. refreshTasks() restores the real state.
+  btn.disabled = true;
+  try {
+    const res = await call("retry_all_failed");
+    if (!res) return;
+    if (res.ok === false && res.error) {
+      toast(res.error, "err", 7000);
+    } else if ((res.failed || 0) > 0) {
+      // Partial success is still a result; name both halves instead of a
+      // generic "done" that hides the rows that stayed failed.
+      toast(t("Retried {ok} tasks; {failed} failed")
+        .replace("{ok}", String(res.succeeded || 0))
+        .replace("{failed}", String(res.failed)), "warn", 7000);
+    } else if ((res.skipped || 0) > 0) {
+      toast(t("Retried {ok} tasks; {skipped} skipped (batch limit)")
+        .replace("{ok}", String(res.succeeded || 0))
+        .replace("{skipped}", String(res.skipped)), "warn", 7000);
+    } else if ((res.succeeded || 0) > 0) {
+      toast(t("Retried {n} tasks").replace("{n}", String(res.succeeded)), "ok", 3000);
+    } else {
+      toast(t("No failed tasks to retry"), "info", 3000);
+    }
+  } finally {
+    await refreshTasks();
+  }
+};
 
 /* A failed load must not look like an empty folder, and it must offer the
    retry instead of leaving the user to hunt for the Refresh button. Shared by

@@ -328,78 +328,123 @@ def test_features_section_has_nine_well_formed_cards(doc: _Doc) -> None:
     assert len(svgs) == 9
 
 
-def _feature_card(html_text: str, heading_en: str) -> str:
-    """Return the raw markup of the features card whose h3 carries ``heading_en``."""
-    articles = re.findall(
-        r'<article class="card reveal">(.*?)</article>', html_text, re.S
+def _search_demo(html_text: str) -> str:
+    """Return the worked example that follows the 3x3 feature grid."""
+    match = re.search(
+        r"<!-- ={10,} SEARCH DEMO.*?-->(.*?)<!-- /SEARCH DEMO -->",
+        html_text,
+        re.S,
     )
-    matches = [article for article in articles if f'data-en="{heading_en}"' in article]
-    assert len(matches) == 1, f"expected one feature card for {heading_en!r}"
-    return matches[0]
+    assert match is not None, "the aggregate-search worked example is missing"
+    return match.group(1)
+
+
+def _demo_group(demo: str, group_id: str) -> str:
+    """Return one labelled column of the worked example (intent/tiers/sort)."""
+    match = re.search(
+        rf'<div class="sd-group [^"]*" id="{group_id}">(.*?)</div>', demo, re.S
+    )
+    assert match is not None, f"missing {group_id} group in the worked example"
+    return match.group(1)
+
+
+def test_search_demo_stays_out_of_the_three_by_three_grid(
+    doc: _Doc, html_text: str
+) -> None:
+    """The example must not stretch a grid row again.
+
+    Inside the aggregate-search card it made row 1 roughly twice as tall as
+    rows 2-3, leaving a third of a card of empty space beside it.
+    """
+    demos = [
+        (data, ancestors)
+        for data, ancestors in doc.by_tag("div")
+        if "search-demo" in data.get("class", "").split()
+    ]
+    assert len(demos) == 1
+    data, ancestors = demos[0]
+    assert data.get("id") == "search-demo"
+    assert any(
+        tag == "section" and attrs.get("id") == "features" for tag, attrs in ancestors
+    ), "the worked example must stay in the features section"
+    assert not any(tag == "article" for tag, _ in ancestors), (
+        "keep the worked example out of a feature card"
+    )
+
+    features = re.search(
+        r'<section class="section" id="features">(.*?)</section>', html_text, re.S
+    )
+    assert features is not None
+    body = features.group(1)
+    assert body.index('class="grid grid-3"') < body.index('id="search-demo"'), (
+        "the example follows the grid"
+    )
 
 
 def test_aggregate_search_badges_explain_each_result(html_text: str) -> None:
     """Every ranked row says why it landed: a match tier and a relevance score."""
-    card = _feature_card(html_text, "Aggregate search")
+    demo = _search_demo(html_text)
 
+    assert re.search(
+        r'data-en="A Record of a Mortal[^"]*"[^>]*>\s*凡人修仙传\s*<', demo
+    ), "the example must name a book in both languages"
+    assert re.search(r'data-en="Relevance 0\.94"[^>]*>\s*相关度 0\.94\s*<', demo), (
+        "the example row must show its relevance score in both languages"
+    )
+
+    tiers = _demo_group(demo, "sd-tiers")
     for english, chinese in (
         ("Exact", "精确"),
         ("Prefix", "前缀"),
         ("Contains", "包含"),
         ("Partial", "部分"),
     ):
-        assert re.search(rf'data-en="{english}"[^>]*>\s*{chinese}\s*<', card), (
+        assert re.search(rf'data-en="{english}"[^>]*>\s*{chinese}\s*<', tiers), (
             f"missing {english} match-tier badge"
         )
-
-    assert re.search(r'data-en="Relevance 0\.94"[^>]*>\s*相关度 0\.94\s*<', card), (
-        "the example row must show its relevance score in both languages"
-    )
 
 
 def test_aggregate_search_query_intent_is_search_level(html_text: str) -> None:
     """The example explains the list-level query intent without blurring it
     into the per-row match tier: both labels are static, bilingual copy."""
-    card = _feature_card(html_text, "Aggregate search")
+    demo = _search_demo(html_text)
+    intent = _demo_group(demo, "sd-intent")
 
-    for english, chinese in (("Title match", "书名匹配"), ("Author match", "作者匹配")):
-        assert re.search(rf'data-en="{english}"[^>]*>\s*{chinese}\s*<', card), (
-            f"missing {english} query-intent label"
-        )
-
-    rows = re.findall(r'<div style="display:flex;[^"]*">(.*?)</div>', card, re.S)
-    intent_rows = [row for row in rows if 'data-en="Query intent' in row]
-    assert len(intent_rows) == 1, "the query intent must occupy its own example row"
-    intent_row = intent_rows[0]
-
-    assert re.search(r'data-en="Query intent[^"]*"[^>]*>\s*查询意图', intent_row), (
-        "the query-intent row must be labelled in both languages"
+    assert re.search(r'data-en="Query intent"[^>]*>\s*查询意图\s*<', intent), (
+        "the query intent must be labelled in both languages"
     )
-    assert "whole search" in intent_row, (
+    assert "whole search" in intent, (
         "the label must say the intent describes the whole search"
     )
-    assert "not a row-level badge" in intent_row, (
+    assert "not a row-level badge" in intent, (
         "the label must distinguish it from the per-row match-tier badge"
     )
-    assert 'data-en="Title match"' in intent_row
-    assert 'data-en="Author match"' in intent_row
-    assert "hidden" not in intent_row, "the intent labels must show without JS"
+    assert "整次查询" in intent, "the Chinese label must carry the same meaning"
+    assert 'data-en="Title match"' in intent
+    assert 'data-en="Author match"' in intent
+    assert "hidden" not in intent, "the intent labels must show without JS"
 
-    tier_rows = [row for row in rows if 'data-en="Match tier"' in row]
-    assert len(tier_rows) == 1
-    assert "Title match" not in tier_rows[0] and "Author match" not in tier_rows[0], (
-        "query intent must not be mixed into the match-tier row"
+    # search-level scope and row-level tier must not share one visual class
+    assert 'class="sd-scope"' in intent
+    assert "sd-tier" not in intent, "query intent must not look like a result badge"
+
+    tiers = _demo_group(demo, "sd-tiers")
+    assert "Title match" not in tiers and "Author match" not in tiers, (
+        "query intent must not be mixed into the match-tier group"
     )
+    assert 'class="sd-tier"' in tiers
+    assert "sd-scope" not in tiers
 
 
 def test_aggregate_search_sort_options_are_static_markup(html_text: str) -> None:
     """Sort choices must be readable with JS off and never look like dead controls."""
-    card = _feature_card(html_text, "Aggregate search")
+    demo = _search_demo(html_text)
+    sort = _demo_group(demo, "sd-sort")
 
     assert re.search(
         r'data-en="Sort · desktop and Android"[^>]*>\s*排序 · 桌面 / Android\s*<',
-        card,
-    ), "the sort row must name the clients and both languages"
+        sort,
+    ), "the sort group must name the clients and both languages"
 
     for english, chinese in (
         ("Relevance", "相关度"),
@@ -407,14 +452,46 @@ def test_aggregate_search_sort_options_are_static_markup(html_text: str) -> None
         ("Word count", "字数"),
         ("Updated", "更新时间"),
     ):
-        assert re.search(rf'data-en="{english}"[^>]*>\s*{chinese}\s*<', card), (
+        assert re.search(rf'data-en="{english}"[^>]*>\s*{chinese}\s*<', sort), (
             f"missing {english} sort option"
         )
 
-    # Plain text chips, not controls: nothing here needs JS to render, and no
-    # widget pretends to be interactive while being static marketing copy.
+    # plain text, not controls: nothing here needs JS to render, and no widget
+    # pretends to be interactive while being static marketing copy
+    assert "sd-sort-opt" in sort
+    assert "sd-tier" not in sort and "sd-scope" not in sort
     for tag in ("button", "select", "input", "textarea", "script", "noscript"):
-        assert not re.search(rf"<{tag}\b", card), f"sort demo must not use <{tag}>"
+        assert not re.search(rf"<{tag}\b", demo), f"sort demo must not use <{tag}>"
+
+
+def test_search_demo_separates_intent_from_tier_visually(css: str) -> None:
+    """Intent, tier and sort choices must read as three different things."""
+    scope = re.search(r"\.sd-scope\s*\{([^}]*)\}", css)
+    assert scope is not None
+    assert "dashed" in scope.group(1), "scope tags are dashed, not badges"
+    assert "border-radius: 6px" in scope.group(1)
+
+    tier = re.search(r"\.sd-tier\s*\{([^}]*)\}", css)
+    assert tier is not None
+    assert "var(--accent-soft)" in tier.group(1), "tier badges carry the accent tint"
+    assert "border-radius: 99px" in tier.group(1)
+
+    sort = re.search(r"\.sd-sort-opt\s*\{([^}]*)\}", css)
+    assert sort is not None
+    assert "border" not in sort.group(1) and "background" not in sort.group(1), (
+        "sort options are plain text, not buttons or pills"
+    )
+
+    # the example must never be a second row inside the card grid
+    assert re.search(r"\.search-demo\s*\{[^}]*margin-top:\s*18px", css)
+
+
+def test_verify_manifest_links_are_spaced(css: str) -> None:
+    """The two manifest links used to touch, separated by one source space."""
+    block = re.search(r"\.verify-dl \.verify-links\s*\{([^}]*)\}", css)
+    assert block is not None
+    assert "display: flex" in block.group(1)
+    assert "gap:" in block.group(1)
 
 
 def test_feature_grid_stretches_cards_and_collapses_to_one_column(css: str) -> None:

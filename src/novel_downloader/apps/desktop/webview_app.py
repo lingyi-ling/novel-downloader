@@ -19,6 +19,7 @@ responsive:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import errno
@@ -37,14 +38,19 @@ import time
 import webbrowser
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from novel_downloader.apps.constants import DOWNLOAD_SUPPORT_SITES, SEARCH_SUPPORT_SITES
-from novel_downloader.apps.desktop.formatting import format_error, status_label
+from novel_downloader.apps.desktop.formatting import (
+    RetryParams,
+    format_error,
+    retry_params,
+    status_label,
+)
 from novel_downloader.apps.desktop.web_assets import APP_HTML
 from novel_downloader.infra.i18n import t
 
@@ -133,6 +139,14 @@ HEALTH_CHECK_TIMEOUT = 5.0
 MUSIC_SEARCH_LIMIT = 8
 #: Upper bound for awaiting task-manager coroutines.
 TASK_WAIT_TIMEOUT = 30.0
+#: Hard cap on how many finished tasks one "retry all failed" click re-queues.
+#: A backlog can be hundreds of rows; each retry is a full download, so the
+#: batch stays small and the reply reports how many were left for the next click.
+MAX_BATCH_RETRY = 50
+#: How many ``add_task`` calls a batch keeps in flight at once.  The manager
+#: serialises queue mutations behind its own lock anyway; the bound is here so
+#: a large batch cannot spawn an unbounded pile of coroutines.
+BATCH_RETRY_CONCURRENCY = 4
 
 _PREFS_FILENAME = "desktop_prefs.json"
 
@@ -873,6 +887,20 @@ def _i18n_catalog() -> dict[str, str]:
         "Could not clear the saved search filters": t(
             "Could not clear the saved search filters"
         ),
+        "Search cache": t("Search cache"),
+        "Recent results are kept briefly so repeating a query does not hit "
+        "every site again.": t(
+            "Recent results are kept briefly so repeating a query does not hit "
+            "every site again."
+        ),
+        "Memory entries": t("Memory entries"),
+        "Disk entries": t("Disk entries"),
+        "Cache hits": t("Cache hits"),
+        "Expired entries": t("Expired entries"),
+        "Clear search cache": t("Clear search cache"),
+        "Click again to clear": t("Click again to clear"),
+        "Search cache cleared": t("Search cache cleared"),
+        "Could not clear the search cache": t("Could not clear the search cache"),
         "Application": t("Application"),
         "Version": t("Version"),
         "Config file": t("Config file"),
@@ -881,6 +909,40 @@ def _i18n_catalog() -> dict[str, str]:
             "Ctrl+F search, Ctrl+D download selected"
         ),
         "Settings saved": t("Settings saved"),
+        "Backup": t("Backup"),
+        "Export your preferences as JSON, or import them on another device.": t(
+            "Export your preferences as JSON, or import them on another device."
+        ),
+        "Export file path (blank = default)": t("Export file path (blank = default)"),
+        "Export settings": t("Export settings"),
+        "Import file path": t("Import file path"),
+        "Import settings": t("Import settings"),
+        "Current preferences are backed up to a .bak file before an import.": t(
+            "Current preferences are backed up to a .bak file before an import."
+        ),
+        "Enter a file path": t("Enter a file path"),
+        "Not a valid settings file": t("Not a valid settings file"),
+        "Unsupported settings file version": t("Unsupported settings file version"),
+        "Unknown field in the settings file: {field}": t(
+            "Unknown field in the settings file: {field}"
+        ),
+        "Missing field in the settings file: {field}": t(
+            "Missing field in the settings file: {field}"
+        ),
+        "That path is a folder, not a file": t("That path is a folder, not a file"),
+        "The settings file does not exist": t("The settings file does not exist"),
+        "The settings file is too large": t("The settings file is too large"),
+        "The settings file is not valid JSON": t("The settings file is not valid JSON"),
+        "Could not read the settings file: {error}": t(
+            "Could not read the settings file: {error}"
+        ),
+        "Could not back up the current settings: {error}": t(
+            "Could not back up the current settings: {error}"
+        ),
+        "Could not export the settings": t("Could not export the settings"),
+        "Settings exported to {path}": t("Settings exported to {path}"),
+        "Settings imported from {path}": t("Settings imported from {path}"),
+        "Imported settings were not applied": t("Imported settings were not applied"),
         "Some settings were not saved": t("Some settings were not saved"),
         "Could not save the settings": t("Could not save the settings"),
         "Could not write the configuration file: {error}": t(
@@ -1043,6 +1105,13 @@ def _i18n_catalog() -> dict[str, str]:
         "No tasks yet": t("No tasks yet"),
         "This task has already finished": t("This task has already finished"),
         "Could not retry this task": t("Could not retry this task"),
+        "Retry all failed": t("Retry all failed"),
+        "No failed tasks to retry": t("No failed tasks to retry"),
+        "Retried {n} tasks": t("Retried {n} tasks"),
+        "Retried {ok} tasks; {failed} failed": t("Retried {ok} tasks; {failed} failed"),
+        "Retried {ok} tasks; {skipped} skipped (batch limit)": t(
+            "Retried {ok} tasks; {skipped} skipped (batch limit)"
+        ),
         "Copy error": t("Copy error"),
         "Could not copy the error": t("Could not copy the error"),
         "Could not open {path}": t("Could not open {path}"),
@@ -1184,6 +1253,92 @@ def _task_dict(task: object) -> dict[str, Any]:
         "finished_at": getattr(task, "finished_at", None),
         "eta": eta,
         "retryable": status in {"failed", "cancelled"} and bool(site and book_id),
+    }
+
+
+#: Terminal states one batch retry may re-queue.  ``failed`` and ``cancelled``
+#: are the manager's own terminal states; ``interrupted`` is accepted
+#: defensively because a queue written by another client can preserve it.
+_BATCH_RETRY_STATUSES = frozenset({"failed", "cancelled", "interrupted"})
+
+
+def _batch_retry_params(task: object | None) -> RetryParams | None:
+    """
+    Return the arguments needed to re-queue one finished task.
+
+    Falls back to :func:`retry_params` for the manager's states and accepts an
+    ``interrupted`` row as well.  A blank ``site`` or ``book_id`` is still
+    rejected: ``TaskManager.add_task`` cannot reconstruct the download from it.
+    """
+    params = retry_params(task)
+    if params is not None:
+        return params
+    if task is None:
+        return None
+    status_value = getattr(task, "status", None)
+    status = str(getattr(status_value, "value", status_value) or "")
+    if status not in _BATCH_RETRY_STATUSES:
+        return None
+    site = str(getattr(task, "site", "") or "").strip()
+    book_id = str(getattr(task, "book_id", "") or "").strip()
+    if not site or not book_id:
+        return None
+    title = str(getattr(task, "title", "") or "").strip()
+    return RetryParams(title=title, site=site, book_id=book_id)
+
+
+def _batch_retry_targets(
+    snapshot: Mapping[str, Any], *, limit: int | None = None
+) -> tuple[list[RetryParams], int]:
+    """
+    Select the finished tasks a batch retry should submit.
+
+    :param snapshot: ``TaskManager.snapshot()`` shaped mapping.
+    :param limit: Maximum targets to return; defaults to :data:`MAX_BATCH_RETRY`.
+    :return: ``(targets, total)``.  ``targets`` holds the newest failures first
+        and is capped; ``total`` counts every eligible task before the cap.
+        A book that is queued or running under the same ``(site, book_id)`` is
+        skipped entirely, so a batch can never double-submit live work.
+    """
+    capped = MAX_BATCH_RETRY if limit is None else max(0, int(limit))
+    active: set[tuple[str, str]] = set()
+    for bucket in ("running", "pending"):
+        for task in snapshot.get(bucket) or []:
+            site = str(getattr(task, "site", "") or "").strip()
+            book_id = str(getattr(task, "book_id", "") or "").strip()
+            if site and book_id:
+                active.add((site, book_id))
+
+    seen = set(active)
+    targets: list[RetryParams] = []
+    total = 0
+    # ``completed`` is oldest-first; reverse it so the freshest failures are
+    # the ones that fit inside the cap.
+    for task in reversed(list(snapshot.get("completed") or [])):
+        params = _batch_retry_params(task)
+        if params is None:
+            continue
+        key = (params.site, params.book_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        total += 1
+        if len(targets) < capped:
+            targets.append(params)
+    return targets, total
+
+
+def _batch_retry_result(
+    params: RetryParams, *, task_id: str = "", error: str = ""
+) -> dict[str, Any]:
+    """Serialise one attempted task in a batch reply."""
+    return {
+        "ok": not error,
+        "task_id": task_id,
+        "title": params.title or params.book_id,
+        "site": params.site,
+        "book_id": params.book_id,
+        "error": error,
     }
 
 
@@ -1874,9 +2029,9 @@ _PREF_BOOL_KEYS: tuple[str, ...] = (
 _PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks4a", "socks5", "socks5h"})
 
 
-def _write_text_atomic(path: Path, text: str) -> None:
+def _write_bytes_atomic(path: Path, data: bytes) -> None:
     """
-    Replace ``path`` with ``text`` without exposing a half-written file.
+    Replace ``path`` with ``data`` without exposing a half-written file.
 
     A truncate-in-place write can be observed by a concurrent reader (or by
     the next launch after a crash) as an empty preference/config file.  The
@@ -1889,14 +2044,19 @@ def _write_text_atomic(path: Path, text: str) -> None:
     )
     temp = Path(temp_name)
     try:
-        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(text)
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temp, path)
     finally:
         with contextlib.suppress(OSError):
             temp.unlink(missing_ok=True)
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    """UTF-8 (no BOM, ``\\n`` endings) variant of :func:`_write_bytes_atomic`."""
+    _write_bytes_atomic(path, text.encode("utf-8"))
 
 
 def _prefs_file_is_corrupt(path: Path) -> bool:
@@ -2075,6 +2235,208 @@ def _stored_search_sort(prefs: Mapping[str, Any]) -> dict[str, str]:
         else _SEARCH_SORT_DEFAULT_ORDER[key]
     )
     return {"sort": key, "order": direction}
+
+
+# ---------------------------------------------------------------------------
+# settings export / import (preferences only; never credentials)
+# ---------------------------------------------------------------------------
+
+
+#: Marker written into exported preference files so an unrelated JSON document
+#: cannot be imported by mistake.
+_SETTINGS_FILE_APP = "novel-downloader"
+_SETTINGS_FILE_KIND = "desktop-preferences"
+#: Schema version; bumped when the shape or the whitelist changes.
+_SETTINGS_FILE_VERSION = 1
+#: Refuse absurd input before parsing it.  Preferences are tiny; a larger file
+#: is either the wrong document or an attempt to exhaust memory.
+_SETTINGS_FILE_MAX_BYTES = 1_048_576
+#: The only preference keys that may travel between machines.  Credentials
+#: (proxy password, music tokens), device-specific paths (output folder, proxy
+#: address) and throttling state (``last_update_check``) are deliberately out.
+_SETTINGS_FILE_KEYS: tuple[str, ...] = (
+    "theme",
+    *_PREF_BOOL_KEYS,
+    "search_filters",
+    "search_sort",
+)
+_SETTINGS_FILE_TOP_KEYS: tuple[str, ...] = (
+    "app",
+    "kind",
+    "format_version",
+    "app_version",
+    "exported_at",
+    "settings",
+)
+
+
+def _settings_values_from_prefs(prefs: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalise the stored preferences into the exported payload shape."""
+    return {
+        "theme": _prefs_theme(prefs),
+        "auto_check_updates": _prefs_flag(prefs, "auto_check_updates", True),
+        "auto_download_updates": _prefs_flag(prefs, "auto_download_updates", True),
+        "auto_install_on_exit": _prefs_flag(prefs, "auto_install_on_exit", True),
+        "search_filters": _stored_search_filters(prefs),
+        "search_sort": _stored_search_sort(prefs),
+    }
+
+
+def _settings_export_document(
+    prefs: Mapping[str, Any], app_version: str
+) -> dict[str, Any]:
+    """Build the versioned document written by "Export settings"."""
+    exported_at = (
+        datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    return {
+        "app": _SETTINGS_FILE_APP,
+        "kind": _SETTINGS_FILE_KIND,
+        "format_version": _SETTINGS_FILE_VERSION,
+        "app_version": app_version,
+        "exported_at": exported_at,
+        "settings": _settings_values_from_prefs(prefs),
+    }
+
+
+def _invalid_settings_file(message: str | None = None) -> ValueError:
+    """One exception type for every rejected document."""
+    return ValueError(message or t("Not a valid settings file"))
+
+
+def _settings_import_values(document: object) -> dict[str, Any]:
+    """
+    Validate an imported document and return the preference values to store.
+
+    Validation is complete before the caller writes anything: a wrong app
+    marker, an unknown schema version/key, a mistyped switch or an invalid
+    filter must leave the existing preferences untouched.  Unknown keys are a
+    hard error rather than ignored, so a hand-added credential field cannot
+    be smuggled into the preferences file by an import.
+
+    :raises ValueError: with a translated, user-facing message.
+    """
+    if not isinstance(document, dict):
+        raise _invalid_settings_file()
+    if (
+        document.get("app") != _SETTINGS_FILE_APP
+        or document.get("kind") != _SETTINGS_FILE_KIND
+    ):
+        raise _invalid_settings_file()
+    version = document.get("format_version")
+    if isinstance(version, bool) or version != _SETTINGS_FILE_VERSION:
+        raise _invalid_settings_file(t("Unsupported settings file version"))
+
+    unknown_top = sorted(set(document) - set(_SETTINGS_FILE_TOP_KEYS))
+    if unknown_top:
+        raise _invalid_settings_file(
+            t("Unknown field in the settings file: {field}").format(
+                field=unknown_top[0]
+            )
+        )
+
+    settings = document.get("settings")
+    if not isinstance(settings, dict):
+        raise _invalid_settings_file()
+    missing = [key for key in _SETTINGS_FILE_KEYS if key not in settings]
+    if missing:
+        raise _invalid_settings_file(
+            t("Missing field in the settings file: {field}").format(field=missing[0])
+        )
+    unknown = sorted(set(settings) - set(_SETTINGS_FILE_KEYS))
+    if unknown:
+        raise _invalid_settings_file(
+            t("Unknown field in the settings file: {field}").format(field=unknown[0])
+        )
+
+    theme = settings["theme"]
+    if not isinstance(theme, str) or theme not in ("light", "dark"):
+        raise _invalid_settings_file(t("Unknown theme"))
+    for key in _PREF_BOOL_KEYS:
+        if not isinstance(settings[key], bool):
+            raise _invalid_settings_file(t("Expected on/off"))
+
+    raw_filters = settings["search_filters"]
+    if not isinstance(raw_filters, dict):
+        raise _invalid_settings_file()
+    unknown_filters = sorted(
+        set(raw_filters) - {"min_words", "max_words", "updated_after"}
+    )
+    if unknown_filters:
+        raise _invalid_settings_file(
+            t("Unknown field in the settings file: {field}").format(
+                field=unknown_filters[0]
+            )
+        )
+    filters, filter_error = _parse_search_filters(
+        raw_filters.get("min_words"),
+        raw_filters.get("max_words"),
+        raw_filters.get("updated_after"),
+    )
+    if filter_error is not None:
+        raise _invalid_settings_file(str(filter_error.get("error") or ""))
+    stored_filters: dict[str, Any] = {}
+    for key, value in filters.items():
+        stored_filters[key] = value.isoformat() if isinstance(value, date) else value
+
+    raw_sort = settings["search_sort"]
+    if not isinstance(raw_sort, dict):
+        raise _invalid_settings_file()
+    unknown_sort = sorted(set(raw_sort) - {"sort", "order"})
+    if unknown_sort:
+        raise _invalid_settings_file(
+            t("Unknown field in the settings file: {field}").format(
+                field=unknown_sort[0]
+            )
+        )
+    if "sort" not in raw_sort or "order" not in raw_sort:
+        missing_sort = "sort" if "sort" not in raw_sort else "order"
+        raise _invalid_settings_file(
+            t("Missing field in the settings file: {field}").format(field=missing_sort)
+        )
+    if not isinstance(raw_sort["sort"], str) or not isinstance(raw_sort["order"], str):
+        raise _invalid_settings_file(t("Not a valid settings file"))
+    sort_key, sort_order, sort_error = _parse_search_sort(
+        raw_sort["sort"], raw_sort["order"]
+    )
+    if sort_error is not None:
+        raise _invalid_settings_file(str(sort_error.get("error") or ""))
+
+    return {
+        "theme": theme,
+        "auto_check_updates": settings["auto_check_updates"],
+        "auto_download_updates": settings["auto_download_updates"],
+        "auto_install_on_exit": settings["auto_install_on_exit"],
+        "search_filters": stored_filters,
+        "search_sort": {"sort": sort_key, "order": sort_order},
+    }
+
+
+def _settings_export_path(raw: object) -> Path:
+    """Resolve the export target; a blank path means a timestamped default."""
+    text = str(raw or "").strip()
+    if not text:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return _prefs_path().with_name(f"desktop-settings-{stamp}.json")
+    path = _expand_output_dir(text)
+    if not path.suffix:
+        path = path.with_suffix(".json")
+    return path
+
+
+def _settings_import_path(raw: object) -> Path:
+    """Resolve the import source; a blank path is rejected, never defaulted."""
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError(t("Enter a file path"))
+    return _expand_output_dir(text)
+
+
+def _backup_settings_file(path: Path) -> Path:
+    """Copy ``path`` to ``<name>.bak`` atomically and return the backup path."""
+    backup = path.with_name(path.name + ".bak")
+    _write_bytes_atomic(backup, path.read_bytes())
+    return backup
 
 
 # ---------------------------------------------------------------------------
@@ -2443,6 +2805,20 @@ def _active_language() -> str:
     except Exception:  # noqa: BLE001 - a broken catalog must not hide the UI
         logger.debug("Could not resolve the active language", exc_info=True)
         return ""
+
+
+def _shared_search_cache() -> Any:
+    """
+    Return the process-wide search cache used by the search bridge.
+
+    The import is lazy: the desktop window must still start when the search
+    extras are unavailable, and the settings page then reports zeros instead
+    of failing.  ``diagnostics()`` is the read-only snapshot used by the page;
+    ``clear()`` is only called from the explicit settings action.
+    """
+    from novel_downloader.plugins.search import _CACHE
+
+    return _CACHE
 
 
 # ---------------------------------------------------------------------------
@@ -2976,6 +3352,114 @@ class ApiBridge:
         if language_changed:
             result["i18n"] = _i18n_catalog()
         return result
+
+    def export_settings(self, path: str = "") -> dict[str, Any]:
+        """
+        Write the whitelisted preferences to a JSON file (never raises).
+
+        Only :data:`_SETTINGS_FILE_KEYS` are written: credentials, device
+        paths and update-throttle state stay out, so the file is safe to copy
+        to another machine.  A blank ``path`` picks a timestamped file next to
+        the preference file, and a path without an extension gets ``.json``.
+
+        :return: ``{"ok", "path", "error", "message"}``.
+        """
+        target: Path | None = None
+        try:
+            target = _settings_export_path(path)
+            if target.exists() and target.is_dir():
+                raise ValueError(t("That path is a folder, not a file"))
+            document = _settings_export_document(_load_prefs(), self._version())
+            _write_text_atomic(
+                target, json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+            )
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.warning("Could not export the settings: %s", exc)
+            return {
+                "ok": False,
+                "path": str(target) if target is not None else "",
+                "error": format_error(exc),
+                "message": t("Could not export the settings"),
+            }
+        return {
+            "ok": True,
+            "path": str(target),
+            "error": None,
+            "message": t("Settings exported to {path}").format(path=target),
+        }
+
+    def import_settings(self, path: str = "") -> dict[str, Any]:
+        """
+        Validate and apply a settings file, backing up the current prefs first.
+
+        The document is fully validated before anything is written.  When the
+        preference file already exists its bytes are copied to
+        ``<name>.bak`` (atomically) before the atomic preference write, so a
+        failed import can never leave the user without a way back.
+
+        :return: ``{"ok", "path", "backup", "error", "message", "settings"}``.
+        """
+        source: Path | None = None
+        try:
+            source = _settings_import_path(path)
+            if not source.is_file():
+                raise ValueError(t("The settings file does not exist"))
+            if source.stat().st_size > _SETTINGS_FILE_MAX_BYTES:
+                raise ValueError(t("The settings file is too large"))
+            try:
+                text = source.read_text(encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                raise ValueError(t("The settings file is not valid JSON")) from None
+            except OSError as exc:
+                raise ValueError(
+                    t("Could not read the settings file: {error}").format(
+                        error=format_error(exc)
+                    )
+                ) from None
+            try:
+                document = json.loads(text)
+            except ValueError:
+                raise ValueError(t("The settings file is not valid JSON")) from None
+            values = _settings_import_values(document)
+
+            prefs_path = _prefs_path()
+            backup: str | None = None
+            if prefs_path.exists():
+                try:
+                    backup = str(_backup_settings_file(prefs_path))
+                except OSError as exc:
+                    raise ValueError(
+                        t("Could not back up the current settings: {error}").format(
+                            error=format_error(exc)
+                        )
+                    ) from None
+            if _save_prefs(values) is False:
+                raise ValueError(t("Could not save the settings"))
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "path": str(source) if source is not None else "",
+                "backup": None,
+                "error": str(exc),
+                "message": t("Imported settings were not applied"),
+            }
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.exception("Could not import the settings")
+            return {
+                "ok": False,
+                "path": str(source) if source is not None else "",
+                "backup": None,
+                "error": format_error(exc),
+                "message": t("Imported settings were not applied"),
+            }
+        return {
+            "ok": True,
+            "path": str(source),
+            "backup": backup,
+            "error": None,
+            "message": t("Settings imported from {path}").format(path=source),
+            "settings": self.get_settings(),
+        }
 
     def open_path(self, path: str) -> bool:
         """
@@ -4244,6 +4728,64 @@ class ApiBridge:
             "error": None if ok else t("Could not save the settings"),
         }
 
+    def get_search_cache_stats(self) -> dict[str, Any]:
+        """
+        Read the shared search cache's diagnostics (the settings-page rows).
+
+        This is a pure read: ``diagnostics()`` counts expired entries instead
+        of purging them and lists payload files without opening them, so the
+        page can diagnose a slow search without changing cache behaviour.  A
+        cache that has never run (or a missing search extra) reports zeros.
+
+        :return: ``{"ok", "error", "memory_entries", "disk_entries",
+            "disk_enabled", "hits", "misses", "evictions"}``.  Never raises.
+        """
+        try:
+            diag = _shared_search_cache().diagnostics()
+            return {
+                "ok": True,
+                "error": None,
+                "memory_entries": int(diag.memory_entries),
+                "expired_entries": int(diag.expired_entries),
+                "disk_entries": int(diag.disk_entries),
+                "disk_enabled": bool(diag.disk_enabled),
+                "hits": int(diag.hits),
+                "misses": int(diag.misses),
+                "evictions": int(diag.evictions),
+            }
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Could not read the search cache stats", exc_info=True)
+            return {
+                "ok": False,
+                "error": format_error(exc),
+                "memory_entries": 0,
+                "expired_entries": 0,
+                "disk_entries": 0,
+                "disk_enabled": False,
+                "hits": 0,
+                "misses": 0,
+                "evictions": 0,
+            }
+
+    def clear_search_cache(self) -> dict[str, Any]:
+        """
+        Drop every cached search snapshot, in memory and on disk.
+
+        Only the cache's own format files are removed (``SearchCache.clear``);
+        the cumulative hit/miss counters are kept, so the page can still show
+        how much the cache had been used.  The page asks for confirmation
+        before calling this, because the next identical search re-hits every
+        site.
+
+        :return: ``{"ok", "error"}``.  Never raises.
+        """
+        try:
+            _shared_search_cache().clear()
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.exception("Could not clear the search cache")
+            return {"ok": False, "error": format_error(exc)}
+        return {"ok": True, "error": None}
+
     def save_search_sort(
         self,
         sort: str = "quality",
@@ -4795,7 +5337,6 @@ class ApiBridge:
     def retry_task(self, task_id: str) -> dict[str, Any]:
         """Re-queue a failed or cancelled task from the completed list."""
         from novel_downloader.apps.core.task_manager import manager
-        from novel_downloader.apps.desktop.formatting import retry_params
 
         target = next(
             (
@@ -4810,6 +5351,78 @@ class ApiBridge:
             return {"ok": False}
         result = self.add_task(params.site, params.book_id, params.title)
         return {"ok": bool(result.get("ok"))}
+
+    def retry_all_failed(self) -> dict[str, Any]:
+        """
+        Re-queue every retryable finished task in one bounded batch.
+
+        Only terminal failures are selected (``failed``/``cancelled`` plus the
+        defensive ``interrupted``), and a book already queued or running is
+        skipped so the click cannot double-submit live work.  The batch is
+        capped at :data:`MAX_BATCH_RETRY`, newest failures first; overflow is
+        reported as ``skipped``.  One failing row never aborts the rest: the
+        reply carries one result per attempted task and ``ok`` is false when
+        any submission failed.
+        """
+        from novel_downloader.apps.core.task_manager import manager
+
+        targets: list[RetryParams] = []
+        total = 0
+        error = ""
+        try:
+            targets, total = _batch_retry_targets(manager.snapshot())
+        except Exception as exc:  # noqa: BLE001 - surfaced to the front end
+            logger.exception("Could not snapshot the task queue for a batch retry")
+            error = format_error(exc)
+
+        results: list[dict[str, Any]] = []
+        if targets:
+
+            async def run() -> list[dict[str, Any]]:
+                semaphore = asyncio.Semaphore(max(1, BATCH_RETRY_CONCURRENCY))
+
+                async def one(params: RetryParams) -> dict[str, Any]:
+                    async with semaphore:
+                        try:
+                            task = await manager.add_task(
+                                title=params.title or params.book_id,
+                                site=params.site,
+                                book_id=params.book_id,
+                            )
+                        except Exception as exc:  # noqa: BLE001 - one row may fail alone
+                            logger.exception(
+                                "Batch retry failed for %s/%s",
+                                params.site,
+                                params.book_id,
+                            )
+                            return _batch_retry_result(params, error=format_error(exc))
+                        return _batch_retry_result(
+                            params, task_id=str(getattr(task, "task_id", ""))
+                        )
+
+                return list(await asyncio.gather(*(one(params) for params in targets)))
+
+            try:
+                results = self._engine.submit(run()).result(TASK_WAIT_TIMEOUT)
+            except Exception as exc:  # noqa: BLE001 - surfaced to the front end
+                logger.exception("Batch retry could not run on the engine loop")
+                error = format_error(exc)
+                results = [
+                    _batch_retry_result(params, error=error) for params in targets
+                ]
+
+        succeeded = sum(1 for item in results if item.get("ok"))
+        failed = len(results) - succeeded
+        return {
+            "ok": not error and failed == 0,
+            "total": total,
+            "attempted": len(targets),
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": max(total - len(targets), 0),
+            "error": error,
+            "results": results,
+        }
 
     # ------------------------------------------------------------------
     # history

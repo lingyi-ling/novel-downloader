@@ -769,6 +769,77 @@ def test_app_html_narrow_search_row_can_shrink() -> None:
     assert ".search-row .field { flex: 1; min-width: 0; }" in APP_HTML
 
 
+def test_app_html_sort_controls_expose_every_key_and_direction() -> None:
+    """Both pickers exist, name their purpose and cover the ranking keys."""
+    assert 'id="q-sort"' in APP_HTML
+    assert 'id="q-order"' in APP_HTML
+    assert 'data-i18n-title="Sort by"' in APP_HTML
+    assert 'data-i18n-title="Sort direction"' in APP_HTML
+    for key in ("quality", "priority", "words", "update"):
+        assert f'<option value="{key}"' in APP_HTML
+    for direction in ("desc", "asc"):
+        assert f'<option value="{direction}"' in APP_HTML
+    # A new key starts at its natural direction; the pair is remembered.
+    assert (
+        'SEARCH_SORT_DEFAULT_ORDER = { quality: "desc", priority: "asc", '
+        'words: "desc", update: "desc" };' in APP_HTML
+    )
+    assert "function normalizeSearchSort(" in APP_HTML
+    assert "function applyStoredSearchSort(" in APP_HTML
+    assert "function persistSearchSort(" in APP_HTML
+    assert "save_search_sort" in APP_HTML
+    # The sort unit wraps/shrinks instead of pushing the filter row out.
+    assert (
+        ".search-sort { display: flex; gap: 6px; flex: 1 1 240px; min-width: 0; }"
+    ) in APP_HTML
+    assert (
+        ".search-sort select.picker { flex: 1 1 0; min-width: 0; max-width: 190px; }"
+    ) in APP_HTML
+
+
+def test_app_html_best_chip_never_shrinks_or_wraps() -> None:
+    """The best-match chip is a fixed label beside the title, like the badge."""
+    start = APP_HTML.index(".best-chip {")
+    rule = APP_HTML[start : APP_HTML.index("}", start)]
+    assert "flex: none" in rule
+    assert "white-space: nowrap" in rule
+
+
+def test_app_html_verdict_groups_count_and_intent_on_one_line() -> None:
+    """The intent chip explains the result count, so the two wrap together.
+
+    Measured in headless Chromium at 1280x800: with the chip as a bare sibling
+    it was orphaned on its own line at the far left while the count sat on the
+    previous line at the right edge.
+    """
+    assert '<span class="search-verdict">' in APP_HTML
+    assert '<span class="hint" id="search-hint"></span>' in APP_HTML
+    assert (
+        '<span class="intent-chip" id="search-intent" role="status" hidden></span>'
+    ) in APP_HTML
+    start = APP_HTML.index(".search-verdict {")
+    rule = APP_HTML[start : APP_HTML.index("}", start)]
+    assert "display: flex" in rule
+    assert "margin-left: auto" in rule
+    start = APP_HTML.index(".search-verdict .hint {")
+    hint_rule = APP_HTML[start : APP_HTML.index("}", start)]
+    assert "white-space: nowrap" in hint_rule
+    # A status change must be announced, not just painted.
+    assert 'role="status"' in APP_HTML
+
+
+def test_app_html_narrow_result_cards_stack_the_side_column() -> None:
+    """At 760 px the three-column grid left titles ~114 px wide next to a
+    6-source capsule column; the existing stacked layout covers that width."""
+    assert (
+        "@media (max-width: 820px) {\n"
+        "  .rc { grid-template-columns: 38px minmax(0, 1fr); }"
+    ) in APP_HTML
+    start = APP_HTML.index("@media (max-width: 820px) {\n  .rc {")
+    block = APP_HTML[start : APP_HTML.index("\n}", start) + 2]
+    assert ".rc-side { grid-column: 1 / -1;" in block
+
+
 def test_app_html_renders_match_telemetry_badges() -> None:
     """Final ranked rows explain their order; source capsules stay plain."""
     assert "function matchBadgeHtml(" in APP_HTML
@@ -905,6 +976,52 @@ def test_match_badge_renders_only_for_complete_telemetry(tmp_path: Path) -> None
     harness = _MATCH_BADGE_HARNESS.replace("__LOGIC__", APP_HTML[start:end])
     path = tmp_path / "match_badge.js"
     path.write_text(harness, encoding="utf-8")
+    result = subprocess.run(
+        [_node(), str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout
+
+
+def test_search_sort_normalizes_saved_pairs_field_by_field(tmp_path: Path) -> None:
+    """A corrupted pref can never put an unknown key/direction on the wire."""
+    harness = r"""
+const assert = require("assert");
+__LOGIC__
+const DEFAULT = { sort: "quality", order: "desc" };
+assert.deepStrictEqual(normalizeSearchSort(null), DEFAULT);
+assert.deepStrictEqual(normalizeSearchSort("garbage"), DEFAULT);
+assert.deepStrictEqual(normalizeSearchSort({}), DEFAULT);
+assert.deepStrictEqual(
+  normalizeSearchSort({ sort: "words" }),
+  { sort: "words", order: "desc" },
+);
+assert.deepStrictEqual(
+  normalizeSearchSort({ sort: "priority" }),
+  { sort: "priority", order: "asc" },
+);
+assert.deepStrictEqual(
+  normalizeSearchSort({ sort: "update", order: "sideways" }),
+  { sort: "update", order: "desc" },
+);
+// The fields fall back independently: a valid direction survives a bad key.
+assert.deepStrictEqual(
+  normalizeSearchSort({ sort: "nope", order: "asc" }),
+  { sort: "quality", order: "asc" },
+);
+assert.deepStrictEqual(
+  SEARCH_SORT_KEYS.sort(),
+  ["priority", "quality", "update", "words"],
+);
+console.log("ok");
+"""
+    start = APP_HTML.index("/* search-sort-start */")
+    end = APP_HTML.index("/* search-sort-end */")
+    path = tmp_path / "search_sort.js"
+    path.write_text(harness.replace("__LOGIC__", APP_HTML[start:end]), encoding="utf-8")
     result = subprocess.run(
         [_node(), str(path)],
         capture_output=True,
@@ -2292,6 +2409,235 @@ def test_bridge_retry_task_ignores_running(monkeypatch: pytest.MonkeyPatch) -> N
         lambda: {"running": [], "pending": [], "completed": [_fake_task()]},
     )
     assert ApiBridge().retry_task("abc123") == {"ok": False}
+
+
+def test_bridge_retry_all_failed_requeues_idle_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed, cancelled and interrupted rows are batched; live books are not."""
+    calls: list[tuple[str, str, str]] = []
+
+    async def fake_add(*, title: str, site: str, book_id: str) -> Any:
+        calls.append((title, site, book_id))
+        return SimpleNamespace(task_id=f"new-{book_id}")
+
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.add_task", fake_add
+    )
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.snapshot",
+        lambda: {
+            "running": [_fake_task(task_id="run", site="qidian", book_id="4")],
+            "pending": [],
+            "completed": [
+                _fake_task(
+                    task_id="f1",
+                    title="Failed",
+                    site="qidian",
+                    book_id="1",
+                    status=Status.FAILED,
+                ),
+                _fake_task(
+                    task_id="c1",
+                    title="Cancelled",
+                    site="qidian",
+                    book_id="2",
+                    status=Status.CANCELLED,
+                ),
+                _fake_task(
+                    task_id="i1",
+                    title="Interrupted",
+                    site="qidian",
+                    book_id="5",
+                    status="interrupted",
+                ),
+                _fake_task(
+                    task_id="done",
+                    title="Done",
+                    site="qidian",
+                    book_id="3",
+                    status=Status.COMPLETED,
+                ),
+                # The same book is running again: retrying it would double-submit.
+                _fake_task(
+                    task_id="dup",
+                    title="Live again",
+                    site="qidian",
+                    book_id="4",
+                    status=Status.FAILED,
+                ),
+            ],
+        },
+    )
+    bridge = ApiBridge()
+    try:
+        reply = bridge.retry_all_failed()
+    finally:
+        bridge.shutdown()
+
+    assert reply["ok"] is True
+    assert reply["total"] == 3
+    assert reply["attempted"] == 3
+    assert reply["succeeded"] == 3
+    assert reply["failed"] == 0
+    assert reply["skipped"] == 0
+    assert reply["error"] == ""
+    assert sorted(calls) == [
+        ("Cancelled", "qidian", "2"),
+        ("Failed", "qidian", "1"),
+        ("Interrupted", "qidian", "5"),
+    ]
+    assert {row["book_id"] for row in reply["results"]} == {"1", "2", "5"}
+
+
+def test_bridge_retry_all_failed_empty_queue_is_a_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No eligible rows: no add_task call, and zeroed counts instead of an error."""
+
+    async def fake_add(*, title: str, site: str, book_id: str) -> Any:
+        raise AssertionError("an empty batch must not submit anything")
+
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.add_task", fake_add
+    )
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.snapshot",
+        lambda: {"running": [], "pending": [], "completed": []},
+    )
+    bridge = ApiBridge()
+    try:
+        reply = bridge.retry_all_failed()
+    finally:
+        bridge.shutdown()
+
+    assert reply == {
+        "ok": True,
+        "total": 0,
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "skipped": 0,
+        "error": "",
+        "results": [],
+    }
+
+
+def test_bridge_retry_all_failed_reports_partial_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One rejected add must not abort the others; every row gets a result."""
+
+    async def fake_add(*, title: str, site: str, book_id: str) -> Any:
+        if book_id == "2":
+            raise OSError("network down")
+        return SimpleNamespace(task_id=f"new-{book_id}")
+
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.add_task", fake_add
+    )
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.snapshot",
+        lambda: {
+            "running": [],
+            "pending": [],
+            "completed": [
+                _fake_task(
+                    task_id="f1",
+                    title="First",
+                    site="qidian",
+                    book_id="1",
+                    status=Status.FAILED,
+                ),
+                _fake_task(
+                    task_id="f2",
+                    title="Second",
+                    site="qidian",
+                    book_id="2",
+                    status=Status.FAILED,
+                ),
+            ],
+        },
+    )
+    bridge = ApiBridge()
+    try:
+        reply = bridge.retry_all_failed()
+    finally:
+        bridge.shutdown()
+
+    assert reply["ok"] is False
+    assert reply["total"] == 2
+    assert reply["attempted"] == 2
+    assert reply["succeeded"] == 1
+    assert reply["failed"] == 1
+    assert reply["skipped"] == 0
+    assert reply["error"] == ""
+    rows = {row["book_id"]: row for row in reply["results"]}
+    assert rows["1"]["ok"] is True
+    assert rows["1"]["task_id"] == "new-1"
+    assert rows["2"]["ok"] is False
+    assert rows["2"]["task_id"] == ""
+    assert rows["2"]["error"] == "OSError: network down"
+
+
+def test_bridge_retry_all_failed_caps_newest_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap keeps the newest rows and reports the overflow as ``skipped``."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(wa, "MAX_BATCH_RETRY", 1)
+    calls: list[str] = []
+
+    async def fake_add(*, title: str, site: str, book_id: str) -> Any:
+        calls.append(book_id)
+        return SimpleNamespace(task_id=f"new-{book_id}")
+
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.add_task", fake_add
+    )
+    monkeypatch.setattr(
+        "novel_downloader.apps.core.task_manager.manager.snapshot",
+        lambda: {
+            "running": [],
+            "pending": [],
+            "completed": [
+                _fake_task(
+                    task_id="f1",
+                    title="One",
+                    site="qidian",
+                    book_id="1",
+                    status=Status.FAILED,
+                ),
+                _fake_task(
+                    task_id="f2",
+                    title="Two",
+                    site="qidian",
+                    book_id="2",
+                    status=Status.FAILED,
+                ),
+                _fake_task(
+                    task_id="f3",
+                    title="Three",
+                    site="qidian",
+                    book_id="3",
+                    status=Status.FAILED,
+                ),
+            ],
+        },
+    )
+    bridge = ApiBridge()
+    try:
+        reply = bridge.retry_all_failed()
+    finally:
+        bridge.shutdown()
+
+    assert reply["ok"] is True
+    assert reply["total"] == 3
+    assert reply["attempted"] == 1
+    assert reply["succeeded"] == 1
+    assert reply["skipped"] == 2
+    assert calls == ["3"]
 
 
 def test_bridge_watchlist_round_trip(
@@ -4709,6 +5055,35 @@ def test_app_html_cancel_and_retry_report_rejected_requests() -> None:
     assert "openPath(f.dataset.openFile);" in handler
 
 
+def test_app_html_retry_all_failed_button_tracks_retryable_rows() -> None:
+    """The batch button is present, disabled without work, and gated on live books."""
+    button = next(
+        line for line in APP_HTML.splitlines() if 'id="btn-retry-failed"' in line
+    )
+    assert "disabled" in button
+    assert 'data-i18n="Retry all failed"' in button
+
+    renderer = _js_handler("function renderTasks(snap)")
+    assert 'const retryAll = $("#btn-retry-failed");' in renderer
+    assert "retryAll.disabled = retryableBooks.size === 0;" in renderer
+    assert (
+        'k.retryable || ["failed", "cancelled", "interrupted"].includes(k.status)'
+        in renderer
+    )
+    # A live book is excluded before it can count towards the button state.
+    assert "activeBooks.has(book)" in renderer
+
+    handler = _js_handler('$("#btn-retry-failed").onclick')
+    assert 'await call("retry_all_failed")' in handler
+    assert 't("Retried {ok} tasks; {failed} failed")' in handler
+    assert 't("Retried {ok} tasks; {skipped} skipped (batch limit)")' in handler
+    assert 't("Retried {n} tasks")' in handler
+    assert 't("No failed tasks to retry")' in handler
+    # The button stays locked until the queue is re-polled.
+    assert "btn.disabled = true;" in handler
+    assert "await refreshTasks();" in handler
+
+
 def test_app_html_open_path_failures_are_never_swallowed() -> None:
     """``open_path`` answers ``false`` for a vanished file; say so."""
     assert "async function openPath(path)" in APP_HTML
@@ -5418,6 +5793,19 @@ _PAYLOAD_CONTRACT: dict[str, tuple[tuple[str, ...], set[str]]] = {
     "get_tasks": (("get_tasks",), {"running", "queued", "completed"}),
     "cancel_task": (("cancel_task",), {"ok"}),
     "retry_task": (("retry_task",), {"ok"}),
+    "retry_all_failed": (
+        ("retry_all_failed",),
+        {
+            "ok",
+            "total",
+            "attempted",
+            "succeeded",
+            "failed",
+            "skipped",
+            "error",
+            "results",
+        },
+    ),
     "open_downloads_dir": (("open_downloads_dir",), {"ok", "path", "error"}),
     "open_music_dir": (("open_music_dir",), {"ok", "path", "error"}),
     "get_history": (
@@ -6149,6 +6537,354 @@ def test_boot_warns_about_an_unusable_output_folder() -> None:
     assert "not_writable" in boot
     assert "The output folder isn't writable" in boot
     assert 'showPage("settings")' in boot
+
+
+# ---------------------------------------------------------------------------
+# Settings page: export / import (preferences only, never credentials)
+# ---------------------------------------------------------------------------
+
+
+def _settings_document(**overrides: Any) -> dict[str, Any]:
+    """A valid exported document, with optional per-test overrides."""
+    settings: dict[str, Any] = {
+        "theme": "dark",
+        "auto_check_updates": False,
+        "auto_download_updates": False,
+        "auto_install_on_exit": False,
+        "search_filters": {
+            "min_words": 10,
+            "max_words": 500,
+            "updated_after": "2024-01-02",
+        },
+        "search_sort": {"sort": "words", "order": "asc"},
+    }
+    settings.update(overrides)
+    return {
+        "app": "novel-downloader",
+        "kind": "desktop-preferences",
+        "format_version": 1,
+        "app_version": "1.36.0",
+        "exported_at": "2026-11-15T00:00:00Z",
+        "settings": settings,
+    }
+
+
+def test_export_import_settings_round_trip_and_backup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exported prefs import back, and the previous file is preserved as .bak."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    prefs.write_text(
+        json.dumps(
+            {
+                "theme": "dark",
+                "auto_check_updates": False,
+                "auto_download_updates": False,
+                "auto_install_on_exit": False,
+                "search_filters": {
+                    "min_words": 10,
+                    "max_words": 500,
+                    "updated_after": "2024-01-02",
+                },
+                "search_sort": {"sort": "words", "order": "asc"},
+                "proxy_pass": "s3cret",
+                "music_credentials": {"tidal": "token-abc"},
+                "last_update_check": "1700000000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    bridge = wa.ApiBridge()
+    target = tmp_path / "transfer" / "prefs"
+
+    exported = bridge.export_settings(str(target))
+
+    assert exported["ok"] is True, exported
+    exported_path = Path(exported["path"])
+    assert exported_path == target.with_suffix(".json")
+    document = json.loads(exported_path.read_text(encoding="utf-8"))
+    assert document["app"] == "novel-downloader"
+    assert document["kind"] == "desktop-preferences"
+    assert document["format_version"] == 1
+    assert document["settings"] == {
+        "theme": "dark",
+        "auto_check_updates": False,
+        "auto_download_updates": False,
+        "auto_install_on_exit": False,
+        "search_filters": {
+            "min_words": 10,
+            "max_words": 500,
+            "updated_after": "2024-01-02",
+        },
+        "search_sort": {"sort": "words", "order": "asc"},
+    }
+    raw = exported_path.read_text(encoding="utf-8")
+    assert "s3cret" not in raw, "the proxy password must never be exported"
+    assert "token-abc" not in raw, "music tokens must never be exported"
+    assert "last_update_check" not in raw
+
+    # Replace the live file so the backup and the imported values are distinct.
+    current = {
+        "theme": "light",
+        "auto_check_updates": True,
+        "auto_download_updates": True,
+        "auto_install_on_exit": True,
+        "search_filters": {},
+        "search_sort": {"sort": "quality", "order": "desc"},
+        "unrelated": "kept",
+    }
+    current_bytes = json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8")
+    prefs.write_bytes(current_bytes)
+
+    imported = bridge.import_settings(str(exported_path))
+
+    assert imported["ok"] is True, imported
+    assert imported["backup"] == str(prefs.with_name(prefs.name + ".bak"))
+    assert prefs.with_name(prefs.name + ".bak").read_bytes() == current_bytes
+    stored = json.loads(prefs.read_text(encoding="utf-8"))
+    for key, value in document["settings"].items():
+        assert stored[key] == value, key
+    assert stored["unrelated"] == "kept", "import merges, other prefs survive"
+    assert imported["settings"]["theme"] == "dark"
+    assert imported["settings"]["search_filters"]["min_words"] == 10
+
+
+def test_export_settings_never_writes_credential_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Whitelisting is by key: an arbitrary secret in prefs stays behind."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    prefs.write_text(
+        json.dumps(
+            {
+                "theme": "light",
+                "proxy_user": "alice",
+                "proxy_pass": "hunter2",
+                "token": "tok_live_123",
+                "password": "open-sesame",
+                "music_token": "MUSIC-SECRET",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = wa.ApiBridge().export_settings(str(tmp_path / "settings.json"))
+
+    assert result["ok"] is True, result
+    raw = Path(result["path"]).read_text(encoding="utf-8")
+    assert set(json.loads(raw)["settings"]) == {
+        "theme",
+        "auto_check_updates",
+        "auto_download_updates",
+        "auto_install_on_exit",
+        "search_filters",
+        "search_sort",
+    }
+    for secret in ("alice", "hunter2", "tok_live_123", "open-sesame", "MUSIC-SECRET"):
+        assert secret not in raw, secret
+
+
+def test_export_settings_defaults_to_a_timestamped_profile_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+
+    result = wa.ApiBridge().export_settings("")
+
+    assert result["ok"] is True, result
+    path = Path(result["path"])
+    assert path.parent == prefs.parent
+    assert path.name.startswith("desktop-settings-")
+    assert path.suffix == ".json"
+    assert path.is_file()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "not-an-object",
+        "wrong-app",
+        "wrong-kind",
+        "wrong-version",
+        "missing-key",
+        "unknown-key",
+        "bad-theme",
+        "bad-switch",
+        "bad-filters",
+        "unknown-filter",
+        "bad-sort",
+        "bad-sort-order",
+    ],
+)
+def test_import_settings_rejects_invalid_schema_without_side_effects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
+) -> None:
+    """Invalid documents are rejected before any write, not partially applied."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    original = {"theme": "light", "auto_check_updates": True}
+    prefs.write_text(json.dumps(original), encoding="utf-8")
+
+    document: Any = _settings_document()
+    if case == "not-an-object":
+        document = []
+    elif case == "wrong-app":
+        document["app"] = "other-app"
+    elif case == "wrong-kind":
+        document["kind"] = "something-else"
+    elif case == "wrong-version":
+        document["format_version"] = 2
+    elif case == "missing-key":
+        document["settings"].pop("theme")
+    elif case == "unknown-key":
+        document["settings"]["proxy_pass"] = "s3cret"
+    elif case == "bad-theme":
+        document["settings"]["theme"] = "purple"
+    elif case == "bad-switch":
+        document["settings"]["auto_check_updates"] = "false"
+    elif case == "bad-filters":
+        document["settings"]["search_filters"] = []
+    elif case == "unknown-filter":
+        document["settings"]["search_filters"]["token"] = "x"
+    elif case == "bad-sort":
+        document["settings"]["search_sort"]["sort"] = "price"
+    elif case == "bad-sort-order":
+        document["settings"]["search_sort"]["order"] = "sideways"
+    source = tmp_path / "import.json"
+    source.write_text(json.dumps(document), encoding="utf-8")
+
+    result = wa.ApiBridge().import_settings(str(source))
+
+    assert result["ok"] is False, case
+    assert result["error"], case
+    assert prefs.read_text(encoding="utf-8") == json.dumps(original)
+    assert result["backup"] is None
+    assert not prefs.with_name(prefs.name + ".bak").exists(), case
+
+
+def test_import_settings_rejects_malformed_json_without_a_backup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    prefs.write_text('{"theme": "light"}', encoding="utf-8")
+    source = tmp_path / "broken.json"
+    source.write_text("{not json", encoding="utf-8")
+
+    result = wa.ApiBridge().import_settings(str(source))
+
+    assert result["ok"] is False
+    assert result["error"] == t("The settings file is not valid JSON")
+    assert prefs.read_text(encoding="utf-8") == '{"theme": "light"}'
+    assert not prefs.with_name(prefs.name + ".bak").exists()
+
+
+def test_import_settings_requires_a_path_and_rejects_unusable_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    _prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    bridge = wa.ApiBridge()
+
+    blank = bridge.import_settings("")
+    assert blank["ok"] is False
+    assert blank["error"] == t("Enter a file path")
+
+    missing = bridge.import_settings(str(tmp_path / "missing.json"))
+    assert missing["ok"] is False
+    assert missing["error"] == t("The settings file does not exist")
+
+    folder = tmp_path / "folder.json"
+    folder.mkdir()
+    directory = bridge.import_settings(str(folder))
+    assert directory["ok"] is False
+    assert directory["error"] == t("The settings file does not exist")
+
+    oversized = tmp_path / "huge.json"
+    oversized.write_bytes(b"x" * (wa._SETTINGS_FILE_MAX_BYTES + 1))
+    too_large = bridge.import_settings(str(oversized))
+    assert too_large["ok"] is False
+    assert too_large["error"] == t("The settings file is too large")
+
+
+def test_import_settings_write_failure_keeps_the_old_file_and_backup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed preference write reports an error; the backup still exists."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    original = json.dumps({"theme": "light"})
+    prefs.write_text(original, encoding="utf-8")
+    source = tmp_path / "import.json"
+    source.write_text(json.dumps(_settings_document()), encoding="utf-8")
+    monkeypatch.setattr(wa, "_save_prefs", lambda _values: False)
+
+    result = wa.ApiBridge().import_settings(str(source))
+
+    assert result["ok"] is False
+    assert result["error"] == t("Could not save the settings")
+    assert prefs.read_text(encoding="utf-8") == original
+    backup = prefs.with_name(prefs.name + ".bak")
+    assert backup.read_text(encoding="utf-8") == original
+
+
+def test_settings_page_exposes_the_export_import_contract() -> None:
+    """The new controls exist, call the bridge and surface its reply."""
+    for dom_id in (
+        "set-export-path",
+        "btn-set-export",
+        "set-import-path",
+        "btn-set-import",
+        "set-transfer-status",
+    ):
+        assert f'id="{dom_id}"' in APP_HTML, dom_id
+    assert 'data-i18n="Backup"' in APP_HTML
+    assert "Export your preferences as JSON" in APP_HTML
+    assert "backed up to a .bak file" in APP_HTML
+
+    export_handler = _js_handler('$("#btn-set-export").onclick')
+    assert 'call("export_settings", target.value.trim())' in export_handler
+    assert 'showTransferStatus(message, "ok")' in export_handler
+
+    import_handler = _js_handler('$("#btn-set-import").onclick')
+    assert 'call("import_settings", path)' in import_handler
+    assert "renderSettings(r.settings);" in import_handler
+    assert "applyTheme(" in import_handler
+    assert "refreshTasks().catch(() => {});" in import_handler
+    assert "refreshFollow().catch(() => {});" in import_handler
+    assert 'showTransferStatus(message, "err")' in import_handler
+
+    assert callable(getattr(ApiBridge, "export_settings", None))
+    assert callable(getattr(ApiBridge, "import_settings", None))
+
+    catalog = _i18n_catalog()
+    for key in (
+        "Backup",
+        "Export settings",
+        "Import settings",
+        "Export file path (blank = default)",
+        "Import file path",
+        "Not a valid settings file",
+        "Settings exported to {path}",
+        "Settings imported from {path}",
+        "Imported settings were not applied",
+    ):
+        assert key in catalog, key
 
 
 # ---------------------------------------------------------------------------
@@ -6917,3 +7653,226 @@ def test_lock_file_is_never_opened_through_a_symlink(
     assert wa._save_prefs({"theme": "dark"}) is True
     assert victim.read_text(encoding="utf-8") == "keep me"
     assert lock.is_file() and not lock.is_symlink()
+
+
+# ---------------------------------------------------------------------------
+# Settings page: search cache diagnostics and the clear action
+# ---------------------------------------------------------------------------
+
+
+def _fake_cache_diagnostics(**overrides: Any) -> SimpleNamespace:
+    """One ``CacheDiagnostics``-shaped row with every counter at zero."""
+    values: dict[str, Any] = {
+        "memory_entries": 0,
+        "expired_entries": 0,
+        "disk_entries": 0,
+        "disk_enabled": False,
+        "hits": 0,
+        "misses": 0,
+        "evictions": 0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class _FakeSearchCache:
+    """Stand-in for ``plugins.search._CACHE`` that records every access."""
+
+    def __init__(
+        self,
+        diagnostics: SimpleNamespace | BaseException | None = None,
+        *,
+        clear_error: BaseException | None = None,
+    ) -> None:
+        self._diagnostics = diagnostics or _fake_cache_diagnostics()
+        self._clear_error = clear_error
+        self.diagnostic_calls = 0
+        self.clear_calls = 0
+
+    def diagnostics(self) -> Any:
+        self.diagnostic_calls += 1
+        if isinstance(self._diagnostics, BaseException):
+            raise self._diagnostics
+        return self._diagnostics
+
+    def clear(self) -> None:
+        self.clear_calls += 1
+        if self._clear_error is not None:
+            raise self._clear_error
+
+
+def test_bridge_search_cache_stats_are_read_only_and_zero_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An untouched cache reports zeros; reading it must never clear it."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    cache = _FakeSearchCache()
+    monkeypatch.setattr(wa, "_shared_search_cache", lambda: cache)
+
+    stats = wa.ApiBridge().get_search_cache_stats()
+
+    assert stats["ok"] is True
+    assert stats["error"] is None
+    for key in (
+        "memory_entries",
+        "expired_entries",
+        "disk_entries",
+        "hits",
+    ):
+        assert stats[key] == 0
+    assert stats["disk_enabled"] is False
+    assert stats["misses"] == 0
+    assert stats["evictions"] == 0
+    assert cache.diagnostic_calls == 1
+    assert cache.clear_calls == 0, "the stats read must not mutate the cache"
+
+
+def test_bridge_search_cache_stats_report_occupancy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every diagnostic counter reaches the page unchanged."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    cache = _FakeSearchCache(
+        _fake_cache_diagnostics(
+            memory_entries=3,
+            expired_entries=1,
+            disk_entries=2,
+            disk_enabled=True,
+            hits=7,
+            misses=9,
+            evictions=4,
+        )
+    )
+    monkeypatch.setattr(wa, "_shared_search_cache", lambda: cache)
+
+    stats = wa.ApiBridge().get_search_cache_stats()
+
+    assert stats == {
+        "ok": True,
+        "error": None,
+        "memory_entries": 3,
+        "expired_entries": 1,
+        "disk_entries": 2,
+        "disk_enabled": True,
+        "hits": 7,
+        "misses": 9,
+        "evictions": 4,
+    }
+    assert cache.clear_calls == 0
+
+
+def test_bridge_search_cache_stats_degrade_to_zero_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken cache answers a structural payload with zeros, never raises."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setattr(
+        wa,
+        "_shared_search_cache",
+        lambda: _FakeSearchCache(RuntimeError("cache exploded")),
+    )
+
+    stats = wa.ApiBridge().get_search_cache_stats()
+
+    assert stats["ok"] is False
+    assert "cache exploded" in stats["error"]
+    assert stats["memory_entries"] == 0
+    assert stats["expired_entries"] == 0
+    assert stats["disk_entries"] == 0
+    assert stats["hits"] == 0
+
+
+def test_bridge_clear_search_cache_calls_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit settings action clears exactly once and reports success."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    cache = _FakeSearchCache()
+    monkeypatch.setattr(wa, "_shared_search_cache", lambda: cache)
+
+    result = wa.ApiBridge().clear_search_cache()
+
+    assert result == {"ok": True, "error": None}
+    assert cache.clear_calls == 1
+    assert cache.diagnostic_calls == 0
+
+
+def test_bridge_clear_search_cache_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed clear is surfaced instead of looking like a successful click."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    cache = _FakeSearchCache(clear_error=OSError("disk is read-only"))
+    monkeypatch.setattr(wa, "_shared_search_cache", lambda: cache)
+
+    result = wa.ApiBridge().clear_search_cache()
+
+    assert result["ok"] is False
+    assert "OSError" in result["error"]
+    assert "disk is read-only" in result["error"]
+    assert cache.clear_calls == 1
+
+
+def test_app_html_settings_shows_search_cache_stats() -> None:
+    """The settings page owns four counters and a bridge read for them."""
+    for element in (
+        'id="set-cache-memory"',
+        'id="set-cache-disk"',
+        'id="set-cache-hits"',
+        'id="set-cache-expired"',
+        'id="set-cache-note"',
+    ):
+        assert element in APP_HTML
+    for label in (
+        "Search cache",
+        "Memory entries",
+        "Disk entries",
+        "Cache hits",
+        "Expired entries",
+    ):
+        assert f'data-i18n="{label}"' in APP_HTML
+    # Missing/never-touched values render as 0, not as an empty cell.
+    assert "async function refreshSearchCacheStats()" in APP_HTML
+    assert 'call("get_search_cache_stats")' in APP_HTML
+    assert (
+        'return Number.isFinite(n) && n > 0 ? String(Math.trunc(n)) : "0";' in APP_HTML
+    )
+    assert 'data-i18n="Search cache"' in APP_HTML
+
+
+def test_app_html_settings_clear_search_cache_needs_confirmation() -> None:
+    """The first click only arms the button; the second one clears the cache."""
+    assert 'id="btn-set-clear-search-cache"' in APP_HTML
+    assert 'data-i18n="Clear search cache"' in APP_HTML
+    handler = _js_handler('$("#btn-set-clear-search-cache").onclick')
+    assert "if (!clearCacheArmed) {" in handler
+    assert "setClearSearchCacheLabel(true);" in handler
+    assert "clearCacheTimer = setTimeout(disarmClearSearchCache, 4000);" in handler
+    assert handler.index("if (!clearCacheArmed)") < handler.index(
+        'call("clear_search_cache")'
+    )
+    assert 'call("clear_search_cache")' in handler
+    assert "await refreshSearchCacheStats();" in handler
+    assert 't("Search cache cleared")' in handler
+    assert 't("Could not clear the search cache")' in handler
+
+    catalog = _i18n_catalog()
+    for key in (
+        "Search cache",
+        "Recent results are kept briefly so repeating a query does not hit "
+        "every site again.",
+        "Memory entries",
+        "Disk entries",
+        "Cache hits",
+        "Expired entries",
+        "Clear search cache",
+        "Click again to clear",
+        "Search cache cleared",
+        "Could not clear the search cache",
+    ):
+        assert key in catalog
