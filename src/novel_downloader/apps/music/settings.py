@@ -46,10 +46,23 @@ _DEFAULTS: dict[str, Any] = {
     "embed_tags": True,
     "embed_cover": True,
     "save_lyric": True,
+    # Write the same lyrics into the audio tag as well (CLI ``--embed-lyric``).
+    # Independent of ``save_lyric`` and off by default.
+    "embed_lyric": False,
     "split_folder": True,
     "skip_existing": True,
     "workers": DEFAULT_WORKERS,
 }
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Return *value* when it is a real JSON boolean, else *default*.
+
+    Settings are ordinary application state and may have been hand-edited or
+    written by a different client.  ``bool("false")`` is ``True``, so a
+    non-boolean junk value must not silently switch a feature on.
+    """
+    return value if isinstance(value, bool) else default
 
 
 def _read_stored(path: Path) -> dict[str, Any]:
@@ -69,11 +82,17 @@ def _read_stored(path: Path) -> dict[str, Any]:
 
 
 def load_settings() -> dict[str, Any]:
-    """Return stored settings merged over the defaults."""
+    """Return stored settings merged over the defaults.
+
+    ``embed_lyric`` is normalized to a real boolean: a corrupted or
+    hand-edited value degrades to its default (off) instead of being
+    truthy-coerced into enabling the feature.
+    """
     data: dict[str, Any] = dict(_DEFAULTS)
     path: Path = settings_file()
     if path.is_file():
         data.update(_read_stored(path))
+    data["embed_lyric"] = _as_bool(data.get("embed_lyric"), False)
     return data
 
 

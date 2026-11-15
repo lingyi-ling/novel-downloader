@@ -51,6 +51,49 @@ def test_save_does_not_truncate_the_file_in_place(
     assert json.loads(settings_path.read_text(encoding="utf-8"))["level"] == "exhigh"
 
 
+def test_embed_lyric_is_off_by_default(settings_path: Path) -> None:
+    assert music_settings.load_settings()["embed_lyric"] is False
+
+
+def test_embed_lyric_roundtrips_through_save_and_load(settings_path: Path) -> None:
+    music_settings.save_settings({"embed_lyric": True})
+    assert music_settings.load_settings()["embed_lyric"] is True
+
+    music_settings.save_settings({"embed_lyric": False})
+    assert music_settings.load_settings()["embed_lyric"] is False
+
+
+@pytest.mark.parametrize("value", ["true", "false", 1, 0, None, [], {}])
+def test_non_boolean_embed_lyric_falls_back_to_off(
+    settings_path: Path, value: object
+) -> None:
+    """A hand-edited/junk value must never truthy-coerce the feature on."""
+    settings_path.write_text(json.dumps({"embed_lyric": value}), encoding="utf-8")
+
+    assert music_settings.load_settings()["embed_lyric"] is False
+
+
+def test_a_corrupt_document_falls_back_to_embed_lyric_off(
+    settings_path: Path,
+) -> None:
+    settings_path.write_text("{not json", encoding="utf-8")
+
+    loaded = music_settings.load_settings()
+
+    assert loaded["embed_lyric"] is False
+    assert loaded["level"] == "exhigh"
+
+
+def test_save_keeps_an_explicit_embed_lyric_bool(
+    settings_path: Path,
+) -> None:
+    music_settings.save_settings({"embed_lyric": True})
+
+    stored = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    assert stored["embed_lyric"] is True
+
+
 def test_concurrent_saves_do_not_lose_updates(settings_path: Path) -> None:
     workers = 4
     barrier = threading.Barrier(workers)

@@ -129,6 +129,7 @@ def _track(index: int) -> SimpleNamespace:
                 "--limit",
                 "--level",
                 "--out",
+                "--embed-lyric",
                 "--pick",
                 "--json",
             ],

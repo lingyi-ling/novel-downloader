@@ -547,6 +547,111 @@ def test_download_with_pick_invokes_engine(monkeypatch, tmp_path, capsys) -> Non
     assert "Done: 2 succeeded" in out.out + out.err
 
 
+def test_download_embed_lyric_is_off_by_default(monkeypatch, tmp_path) -> None:
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1)]),
+        settings={"out_dir": str(tmp_path)},
+        download_result=(1, 0, 0, [], None),
+    )
+
+    _run(
+        ["music", "download", "--platform", "netease", "hello", "--pick", "1"],
+        monkeypatch,
+        engine,
+    )
+
+    assert engine.download_options_calls[0]["embed_lyric"] is False
+
+
+def test_download_embed_lyric_flag_is_forwarded(monkeypatch, tmp_path) -> None:
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1)]),
+        settings={"out_dir": str(tmp_path)},
+        download_result=(1, 0, 0, [], None),
+    )
+
+    _run(
+        [
+            "music",
+            "download",
+            "--platform",
+            "netease",
+            "hello",
+            "--pick",
+            "1",
+            "--embed-lyric",
+        ],
+        monkeypatch,
+        engine,
+    )
+
+    assert engine.download_options_calls[0]["embed_lyric"] is True
+
+
+def test_download_embed_lyric_defaults_to_the_stored_setting(
+    monkeypatch, tmp_path
+) -> None:
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1)]),
+        settings={"out_dir": str(tmp_path), "embed_lyric": True},
+        download_result=(1, 0, 0, [], None),
+    )
+
+    _run(
+        ["music", "download", "--platform", "netease", "hello", "--pick", "1"],
+        monkeypatch,
+        engine,
+    )
+
+    assert engine.download_options_calls[0]["embed_lyric"] is True
+
+
+def test_download_no_embed_lyric_overrides_the_stored_setting(
+    monkeypatch, tmp_path
+) -> None:
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1)]),
+        settings={"out_dir": str(tmp_path), "embed_lyric": True},
+        download_result=(1, 0, 0, [], None),
+    )
+
+    _run(
+        [
+            "music",
+            "download",
+            "--platform",
+            "netease",
+            "hello",
+            "--pick",
+            "1",
+            "--no-embed-lyric",
+        ],
+        monkeypatch,
+        engine,
+    )
+
+    assert engine.download_options_calls[0]["embed_lyric"] is False
+
+
+def test_download_embed_lyric_ignores_a_non_boolean_setting(
+    monkeypatch, tmp_path
+) -> None:
+    """A hand-edited ``"false"`` must not truthy-coerce the switch on."""
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1)]),
+        settings={"out_dir": str(tmp_path), "embed_lyric": "false"},
+        download_result=(1, 0, 0, [], None),
+    )
+
+    _run(
+        ["music", "download", "--platform", "netease", "hello", "--pick", "1"],
+        monkeypatch,
+        engine,
+    )
+
+    assert engine.download_options_calls[0]["embed_lyric"] is False
+
+
 def test_download_reports_failed_pairs(monkeypatch, capsys) -> None:
     provider = FakeProvider([_track(1)])
     engine = FakeEngine(
@@ -700,6 +805,7 @@ def test_download_json_reports_lyric_path_and_summary(
     assert payload["skip"] == 1
     assert payload["fail"] == 0
     assert payload["lyrics_written"] == 1
+    assert payload["embed_lyric"] is False
 
     first, second = payload["results"]
     assert first["path"] == with_lyric
@@ -711,6 +817,40 @@ def test_download_json_reports_lyric_path_and_summary(
     # Same one-line contract as ``music search --json``.
     assert captured.out.count("\n") == 1
     assert json.loads(captured.out.strip())["keyword"] == "hello"
+
+
+def test_download_json_reports_the_effective_embed_lyric_mode(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    audio = _audio_file(tmp_path, 1, lyric=True)
+    engine = FakeEngine(
+        provider=FakeProvider([_track(1, path=audio)]),
+        settings={"out_dir": str(tmp_path)},
+        download_result=(1, 0, 0, [], []),
+    )
+
+    _run(
+        [
+            "music",
+            "download",
+            "--platform",
+            "netease",
+            "hello",
+            "--pick",
+            "1",
+            "--embed-lyric",
+            "--json",
+        ],
+        monkeypatch,
+        engine,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["embed_lyric"] is True
+    # The existing lyric fields keep their meaning: ``lyrics_written`` still
+    # counts the sidecar files, independent of the embedded tag.
+    assert payload["lyrics_written"] == 1
 
 
 def test_download_json_failure_does_not_report_a_stale_lyric(
@@ -790,6 +930,7 @@ def test_download_json_without_results_still_emits_a_document(
     payload = json.loads(capsys.readouterr().out)
     assert payload["total"] == 0
     assert payload["lyrics_written"] == 0
+    assert payload["embed_lyric"] is False
     assert payload["results"] == []
 
 

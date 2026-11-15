@@ -23,7 +23,12 @@ import re
 import sys
 import tempfile
 import threading
-from argparse import ArgumentParser, Namespace, _SubParsersAction
+from argparse import (
+    ArgumentParser,
+    BooleanOptionalAction,
+    Namespace,
+    _SubParsersAction,
+)
 from dataclasses import dataclass
 from typing import Any
 
@@ -414,12 +419,25 @@ def _existing_lyric_path(audio_path: str) -> str:
         return ""
 
 
+def _setting_bool(settings: dict[str, Any], key: str, default: bool = False) -> bool:
+    """Read one stored switch strictly, falling back to *default*.
+
+    :func:`novel_downloader.apps.music.settings.load_settings` already
+    normalizes ``embed_lyric``.  This guard also covers per-command fakes and
+    older settings documents, where a truthy string such as ``"false"`` must
+    not enable a feature.
+    """
+    value = settings.get(key, default)
+    return value if isinstance(value, bool) else default
+
+
 def _download_payload(
     platform: str,
     keyword: str,
     *,
     out_dir: str,
     level: str,
+    embed_lyric: bool,
     total: int,
     ok: int,
     skip: int,
@@ -434,6 +452,7 @@ def _download_payload(
         "keyword": keyword,
         "out_dir": out_dir,
         "level": level,
+        "embed_lyric": embed_lyric,
         "total": total,
         "ok": ok,
         "skip": skip,
@@ -763,6 +782,15 @@ class MusicDownloadCmd(Command):
             help=t("Output directory (default: from music settings)."),
         )
         parser.add_argument(
+            "--embed-lyric",
+            action=BooleanOptionalAction,
+            default=None,
+            help=t(
+                "Also embed the lyrics in the audio tags. --no-embed-lyric "
+                "turns it off (default: from music settings, usually off)."
+            ),
+        )
+        parser.add_argument(
             "--pick",
             metavar="N[,N|ID]",
             help=t(
@@ -798,6 +826,13 @@ class MusicDownloadCmd(Command):
             str(args.out or settings.get("out_dir") or engine.default_download_dir())
         )
         level = str(args.level or settings.get("level") or "exhigh")
+        # An explicit flag (either polarity) wins over the stored preference;
+        # without one, the setting is the default (itself off by default).
+        embed_lyric = (
+            bool(args.embed_lyric)
+            if getattr(args, "embed_lyric", None) is not None
+            else _setting_bool(settings, "embed_lyric", False)
+        )
         workers = max(1, int(settings.get("workers") or 3))
 
         all_platforms = _is_all_platforms(platform)
@@ -831,6 +866,7 @@ class MusicDownloadCmd(Command):
                             keyword,
                             out_dir=out_dir,
                             level=level,
+                            embed_lyric=embed_lyric,
                             total=0,
                             ok=0,
                             skip=0,
@@ -889,6 +925,7 @@ class MusicDownloadCmd(Command):
             embed_tags=bool(settings.get("embed_tags", True)),
             embed_cover=bool(settings.get("embed_cover", True)),
             save_lyric=bool(settings.get("save_lyric", True)),
+            embed_lyric=embed_lyric,
             split_folder=bool(settings.get("split_folder", True)),
             skip_existing=bool(settings.get("skip_existing", True)),
         )
@@ -981,6 +1018,7 @@ class MusicDownloadCmd(Command):
                 keyword,
                 out_dir=out_dir,
                 level=level,
+                embed_lyric=embed_lyric,
                 total=len(selected),
                 ok=int(ok or 0),
                 skip=int(skip or 0),
