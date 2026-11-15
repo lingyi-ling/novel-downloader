@@ -1474,6 +1474,265 @@ def test_bridge_progressive_search_rejects_invalid_filters_before_starting() -> 
     assert payload["error_code"] == "invalid_search_filter"
 
 
+def test_bridge_search_forwards_sort_and_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page's sort pair reaches the ranking layer unchanged."""
+    calls: dict[str, Any] = {}
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        calls.update(kwargs)
+        return []
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+    bridge = ApiBridge()
+    try:
+        payload = bridge.search("三体", "", False, 4, "", "", "", "words", "asc")
+    finally:
+        bridge.shutdown()
+
+    assert "error" not in payload
+    assert calls["sort"] == "words"
+    assert calls["order"] == "asc"
+
+
+def test_bridge_search_defaults_to_quality_descending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An omitted selection ranks by relevance, best first."""
+    calls: dict[str, Any] = {}
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        calls.update(kwargs)
+        return []
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+    bridge = ApiBridge()
+    try:
+        bridge.search("三体")
+    finally:
+        bridge.shutdown()
+
+    assert calls["sort"] == "quality"
+    assert calls["order"] == "desc"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"sort": "site"}, "sort"),
+        ({"sort": "title"}, "sort"),
+        ({"sort": "bogus"}, "sort"),
+        ({"sort": "quality", "order": "up"}, "order"),
+        ({"sort": "words", "order": "newest"}, "order"),
+    ],
+)
+def test_bridge_rejects_unknown_search_sort(
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, Any],
+    field: str,
+) -> None:
+    """Only the four offered keys and asc/desc are accepted."""
+
+    async def fail_search(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("the search layer must not run for an invalid sort")
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fail_search)
+    bridge = ApiBridge()
+    try:
+        payload = bridge.search("三体", **kwargs)
+    finally:
+        bridge.shutdown()
+
+    assert payload["results"] == []
+    assert payload["ok"] is False
+    assert payload["error_code"] == "invalid_search_sort"
+    assert payload["error_field"] == field
+    assert payload["error"]
+
+
+def test_bridge_progressive_search_rejects_unknown_sort_before_starting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``search_async`` answers the same structured error without a search id."""
+
+    async def fail_stream(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("an invalid sort must not start a stream")
+        yield []  # pragma: no cover - makes the function an async generator
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search_stream", fail_stream)
+    bridge = ApiBridge()
+    try:
+        payload = bridge.search_async("三体", "", False, 4, "", "", "", "author")
+    finally:
+        bridge.shutdown()
+
+    assert payload["search_id"] == ""
+    assert payload["results"] == []
+    assert payload["done"] is True
+    assert payload["error_code"] == "invalid_search_sort"
+    assert payload["error_field"] == "sort"
+
+
+def test_bridge_progressive_search_sorts_only_the_final_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unranked stream ignores sort; the final ranking receives both fields."""
+    row = {
+        "site": "alpha",
+        "book_id": "a",
+        "book_url": "https://example.invalid/a",
+        "cover_url": "",
+        "title": "三体",
+        "author": "刘慈欣",
+        "latest_chapter": "",
+        "update_date": "",
+        "word_count": "30万字",
+        "priority": 1,
+    }
+    stream_calls: dict[str, Any] = {}
+    final_calls: dict[str, Any] = {}
+
+    async def fake_stream(keyword: str, **kwargs: Any) -> Any:
+        stream_calls.update(kwargs)
+        yield [row]
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        final_calls.update(kwargs)
+        return [row]
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search_stream", fake_stream)
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    bridge = ApiBridge()
+    try:
+        job = bridge.search_async("三体", "", False, 4, "", "", "", "update", "asc")
+        deadline = time.time() + 5
+        while True:
+            state = bridge.search_progress(job["search_id"])
+            if state["done"] or time.time() > deadline:
+                break
+            time.sleep(0.02)
+    finally:
+        bridge.shutdown()
+
+    assert state["done"] is True
+    assert "sort" not in stream_calls
+    assert "order" not in stream_calls
+    assert final_calls["sort"] == "update"
+    assert final_calls["order"] == "asc"
+
+
+def test_saved_search_sort_round_trips_through_the_prefs_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The last selection is stored as a normalised pair and restored."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    bridge = wa.ApiBridge()
+    try:
+        result = bridge.save_search_sort("words", "asc")
+        assert result == {
+            "ok": True,
+            "sort": "words",
+            "order": "asc",
+            "error": None,
+        }
+        assert json.loads(prefs.read_text(encoding="utf-8")) == {
+            "search_sort": {"sort": "words", "order": "asc"}
+        }
+        # The next launch restores the same pair.
+        restored = wa.ApiBridge().get_initial_state()["search_sort"]
+    finally:
+        bridge.shutdown()
+
+    assert restored == {"sort": "words", "order": "asc"}
+
+
+def test_saved_search_sort_defaults_and_accepts_a_blank_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A blank direction stores the key's natural direction."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    bridge = wa.ApiBridge()
+    try:
+        assert bridge.save_search_sort()["ok"] is True
+        assert bridge.get_initial_state()["search_sort"] == {
+            "sort": "quality",
+            "order": "desc",
+        }
+        assert bridge.save_search_sort("priority")["ok"] is True
+        assert json.loads(prefs.read_text(encoding="utf-8"))["search_sort"] == {
+            "sort": "priority",
+            "order": "asc",
+        }
+    finally:
+        bridge.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"sort": "site"}, "sort"),
+        ({"sort": "bogus"}, "sort"),
+        ({"sort": "words", "order": "down"}, "order"),
+    ],
+)
+def test_save_search_sort_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    kwargs: dict[str, Any],
+    field: str,
+) -> None:
+    """The save path reuses the search contract and never writes bad values."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    payload = wa.ApiBridge().save_search_sort(**kwargs)
+
+    assert payload["ok"] is False
+    assert payload["error_code"] == "invalid_search_sort"
+    assert payload["error_field"] == field
+    assert payload["error"]
+    assert not prefs.exists(), "a rejected sort must not reach the file"
+
+
+def test_invalid_stored_search_sort_falls_back_field_by_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Hand-edited values become the defaults instead of reaching the ranking."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    prefs, _config = _isolate_settings(monkeypatch, tmp_path)
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    bridge = wa.ApiBridge()
+    try:
+        cases = [
+            (
+                {"sort": "title", "order": "sideways"},
+                {"sort": "quality", "order": "desc"},
+            ),
+            (
+                {"sort": "words", "order": "sideways"},
+                {"sort": "words", "order": "desc"},
+            ),
+            (
+                {"sort": "priority", "order": "desc"},
+                {"sort": "priority", "order": "desc"},
+            ),
+            (["quality", "desc"], {"sort": "quality", "order": "desc"}),
+            ("bogus", {"sort": "quality", "order": "desc"}),
+        ]
+        for stored, expected in cases:
+            prefs.write_text(json.dumps({"search_sort": stored}), encoding="utf-8")
+            assert bridge.get_initial_state()["search_sort"] == expected
+    finally:
+        bridge.shutdown()
+
+
 def test_saved_search_filters_round_trip_through_the_prefs_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -4055,18 +4314,129 @@ def test_app_html_search_filters_are_optional_and_collapsed() -> None:
 
 
 def test_app_html_do_search_sends_and_reports_filters() -> None:
-    """The three optional values travel positionally after the group flag."""
+    """The three optional values and the sort pair travel positionally."""
     searcher = _js_block("async function doSearch()", "function resultCardHtml")
     assert "const filters = readSearchFilters();" in searcher
     assert "if (!filters) return;" in searcher
     assert "setAppliedFilters(filters);" in searcher
+    assert "const sort = searchSortSelection();" in searcher
     assert (
         'api("search_async", kw, $("#q-sites").value.trim(), '
         '$("#q-group").checked, filters.min_words, filters.max_words, '
-        "filters.updated_after)" in searcher
+        "filters.updated_after, sort.sort, sort.order)" in searcher
     )
     # A structured bridge rejection is shown as its own message.
     assert "if (job && job.error) throw new Error(job.error);" in searcher
+
+
+def test_app_html_search_sort_controls_are_in_the_dom() -> None:
+    """The search bar exposes one key select and one direction select."""
+    assert 'id="q-sort"' in APP_HTML
+    assert 'id="q-order"' in APP_HTML
+    for value, label in (
+        ("quality", "Relevance"),
+        ("priority", "Overall quality"),
+        ("words", "Word count"),
+        ("update", "Updated"),
+    ):
+        option = f'<option value="{value}" data-i18n="{label}">{label}</option>'
+        assert option in APP_HTML
+    for value, label in (("desc", "Descending"), ("asc", "Ascending")):
+        option = f'<option value="{value}" data-i18n="{label}">{label}</option>'
+        assert option in APP_HTML
+    # Every visible label (including the two select titles/labels) is in the
+    # injected catalogue, so no control falls back to English in zh_CN.
+    catalog = _i18n_catalog()
+    for key in (
+        "Sort by",
+        "Sort direction",
+        "Relevance",
+        "Overall quality",
+        "Word count",
+        "Updated",
+        "Descending",
+        "Ascending",
+    ):
+        assert key in catalog
+
+
+def test_app_html_search_sort_restores_and_persists_the_selection() -> None:
+    """Boot fills the controls from prefs; a change is saved for next launch."""
+    assert "function normalizeSearchSort(saved)" in APP_HTML
+    assert "function applyStoredSearchSort(saved)" in APP_HTML
+    assert "applyStoredSearchSort(state.search_sort);" in APP_HTML
+    assert (
+        'api("save_search_sort", state.sort, state.order).catch(() => {});' in APP_HTML
+    )
+    # A new key snaps to its natural direction, then a manual order wins.
+    assert (
+        'const SEARCH_SORT_DEFAULT_ORDER = { quality: "desc", priority: "asc", '
+        'words: "desc", update: "desc" };'
+    ) in APP_HTML
+    assert "orderEl.value = SEARCH_SORT_DEFAULT_ORDER[state.sort];" in APP_HTML
+    assert '$("#q-order").addEventListener("change", persistSearchSort);' in APP_HTML
+    # The restored selection never starts a search on its own.
+    restore = _js_block(
+        "function applyStoredSearchSort(saved)", "function persistSearchSort()"
+    )
+    assert "doSearch" not in restore
+
+
+def test_app_html_search_sort_is_part_of_the_running_query_identity() -> None:
+    """Changing the sort and searching again must supersede the old poll."""
+    searcher = _js_block("async function doSearch()", "function resultCardHtml")
+    assert (
+        "const filterKey = JSON.stringify({ filters, sort: sort.sort, "
+        "order: sort.order });" in searcher
+    )
+
+
+def test_app_html_search_sort_wraps_on_narrow_windows() -> None:
+    """The sort pair shrinks/wraps instead of pushing the row past the column."""
+    rule = re.search(r"\.search-sort \{[^}]*\}", APP_HTML)
+    assert rule, "missing .search-sort rule"
+    assert "display: flex;" in rule.group(0)
+    assert "flex: 1 1 240px;" in rule.group(0)
+    assert "min-width: 0;" in rule.group(0)
+    select_rule = re.search(r"\.search-sort select\.picker \{[^}]*\}", APP_HTML)
+    assert select_rule, "missing .search-sort select.picker rule"
+    assert "min-width: 0;" in select_rule.group(0)
+    # The container itself already wraps, so the pair moves to its own line.
+    filters_rule = re.search(r"\.filters \{[^}]*\}", APP_HTML)
+    assert filters_rule and "flex-wrap: wrap;" in filters_rule.group(0)
+
+
+def test_search_sort_normaliser_clamps_stored_values(tmp_path: Path) -> None:
+    """Unknown stored keys/directions fall back without a browser DOM."""
+    start = APP_HTML.index("/* search-sort-start */")
+    end = APP_HTML.index("/* search-sort-end */")
+    harness = (
+        "const assert = require('assert');\n"
+        + APP_HTML[start:end]
+        + "\n"
+        + """function check(saved, sort, order) {
+  assert.deepStrictEqual(normalizeSearchSort(saved), { sort, order });
+}
+check(undefined, "quality", "desc");
+check("bogus", "quality", "desc");
+check({ sort: "words", order: "asc" }, "words", "asc");
+check({ sort: "title", order: "sideways" }, "quality", "desc");
+check({ sort: "words", order: "sideways" }, "words", "desc");
+check({ sort: "priority" }, "priority", "asc");
+check({ sort: "update", order: "asc" }, "update", "asc");
+console.log("ok");
+"""
+    )
+    path = tmp_path / "search_sort.js"
+    path.write_text(harness, encoding="utf-8")
+    result = subprocess.run(
+        [_node(), str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout
 
 
 def test_app_html_search_filter_validation_and_clear_contract() -> None:
@@ -4865,6 +5235,7 @@ _PAYLOAD_CONTRACT: dict[str, tuple[tuple[str, ...], set[str]]] = {
             "auto_check_updates",
             "auto_download_updates",
             "auto_install_on_exit",
+            "search_sort",
             "language",
             "languages",
             "i18n",

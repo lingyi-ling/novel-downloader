@@ -404,6 +404,11 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 .filters { display: flex; gap: 8px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
 .filters .field { height: 34px; border-radius: var(--radius-md); flex: 1; min-width: 240px; }
 .filters .merge-toggle { margin-left: auto; }
+/* Sort controls form one wrapping unit. The selects are allowed to shrink so
+   a narrow window keeps the whole row inside the content column instead of
+   pushing the right-hand buttons past it. */
+.search-sort { display: flex; gap: 6px; flex: 1 1 240px; min-width: 0; }
+.search-sort select.picker { flex: 1 1 0; min-width: 0; max-width: 190px; }
 /* Optional search filters: the panel wraps on narrow windows instead of
    pushing the filter row past the content column. The [hidden] rule is needed
    because these flex displays would otherwise override the attribute. */
@@ -813,6 +818,18 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
           <div class="search-progress" id="search-progress" role="status" aria-live="polite" hidden><span id="search-progress-text"></span></div>
           <div class="filters">
             <div class="field"><svg class="icon"><use href="#i-pulse"/></svg><input id="q-sites" data-i18n-ph="Site filter, comma separated (blank = all)" placeholder="Site filter, comma separated (blank = all)"></div>
+            <div class="search-sort">
+              <select class="picker" id="q-sort" data-i18n-title="Sort by" title="Sort by">
+                <option value="quality" data-i18n="Relevance">Relevance</option>
+                <option value="priority" data-i18n="Overall quality">Overall quality</option>
+                <option value="words" data-i18n="Word count">Word count</option>
+                <option value="update" data-i18n="Updated">Updated</option>
+              </select>
+              <select class="picker" id="q-order" data-i18n-title="Sort direction" title="Sort direction">
+                <option value="desc" data-i18n="Descending">Descending</option>
+                <option value="asc" data-i18n="Ascending">Ascending</option>
+              </select>
+            </div>
             <label class="merge-toggle" for="q-group"><input type="checkbox" class="cb" id="q-group" checked><span data-i18n="Merge same book">Merge same book</span></label>
             <button class="btn btn-ghost btn-sm" id="btn-search-filters" aria-expanded="false" aria-controls="search-filter-panel"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Filters">Filters</span><span class="count-chip" id="search-filter-count" hidden></span></button>
             <button class="btn btn-ghost btn-sm" id="btn-rank"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Rankings">Rankings</span></button>
@@ -2167,18 +2184,80 @@ function applyStoredSearchFilters(filters) {
   updateFilterCount();
   if (draftFilterCount() > 0) setFilterPanel(true, false);
 }
+/* ====================================================== search sort order */
+/* search-sort-start */
+/* The option values are the ranking keys. "quality" is labelled relevance
+   because its ordering key is rank_score; "priority" is the site-priority /
+   completeness ranking. The direction map mirrors ranking.default_order. */
+const SEARCH_SORT_DEFAULT_ORDER = { quality: "desc", priority: "asc", words: "desc", update: "desc" };
+const SEARCH_SORT_KEYS = Object.keys(SEARCH_SORT_DEFAULT_ORDER);
+/**
+ * Normalise a stored ``{sort, order}`` pair, field by field.
+ *
+ * Hand-edited prefs or an older build must not put an unknown key in the
+ * request: an unknown sort becomes "quality" and an unknown direction becomes
+ * that key's natural direction. The result is always a complete pair.
+ */
+function normalizeSearchSort(saved) {
+  const source = saved && typeof saved === "object" ? saved : {};
+  const sort = SEARCH_SORT_KEYS.includes(source.sort) ? source.sort : "quality";
+  const order = (source.order === "asc" || source.order === "desc")
+    ? source.order
+    : SEARCH_SORT_DEFAULT_ORDER[sort];
+  return { sort, order };
+}
+/* search-sort-end */
+function searchSortSelection() {
+  const sortEl = $("#q-sort");
+  const orderEl = $("#q-order");
+  return normalizeSearchSort({
+    sort: sortEl ? sortEl.value : "quality",
+    order: orderEl ? orderEl.value : "",
+  });
+}
+/**
+ * Fill the two sort controls from the preference saved by the previous session.
+ *
+ * No search is started: the user still presses Search themselves, and a
+ * corrupted value falls back to the defaults instead of leaving a blank select.
+ */
+function applyStoredSearchSort(saved) {
+  const sortEl = $("#q-sort");
+  const orderEl = $("#q-order");
+  const state = normalizeSearchSort(saved);
+  if (sortEl) sortEl.value = state.sort;
+  if (orderEl) orderEl.value = state.order;
+}
+function persistSearchSort() {
+  const state = searchSortSelection();
+  api("save_search_sort", state.sort, state.order).catch(() => {});
+}
+/* A new key starts at its natural direction (quality/words/update newest or
+   longest first, site priority best first); the order select then lets the
+   user flip it, and every change is remembered for the next launch. */
+$("#q-sort").addEventListener("change", () => {
+  const orderEl = $("#q-order");
+  const state = searchSortSelection();
+  if (orderEl) orderEl.value = SEARCH_SORT_DEFAULT_ORDER[state.sort];
+  persistSearchSort();
+});
+$("#q-order").addEventListener("change", persistSearchSort);
 async function doSearch() {
   const kw = $("#q").value.trim();
   if (!kw) return;
   const filters = readSearchFilters();
   if (!filters) return;
+  const sort = searchSortSelection();
   // Remember the last valid filter set for the next launch. This also clears
   // the stored copy when every field is blank. Best effort: a read-only
   // profile must not stop the search itself.
   api("save_search_filters", filters.min_words, filters.max_words, filters.updated_after).catch(() => {});
-  const filterKey = JSON.stringify(filters);
-  // A repeated Enter / button press while the same query and filters are in
-  // flight is a no-op. A *different* query or filter set supersedes it:
+  // The sort selection belongs to the running query: changing it and pressing
+  // Search again with the same keyword must supersede the old run instead of
+  // being treated as an identical request.
+  const filterKey = JSON.stringify({ filters, sort: sort.sort, order: sort.order });
+  // A repeated Enter / button press while the same query, filters and sort
+  // are in flight is a no-op. A *different* query/filter/sort supersedes it:
   // bumping the token stops the old poll instead of letting it paint stale
   // rows over the new ones.
   if (searching && kw === activeSearchKeyword) {
@@ -2203,7 +2282,7 @@ async function doSearch() {
   const started = performance.now();
   let rendered = -1;
   try {
-    const job = await api("search_async", kw, $("#q-sites").value.trim(), $("#q-group").checked, filters.min_words, filters.max_words, filters.updated_after);
+    const job = await api("search_async", kw, $("#q-sites").value.trim(), $("#q-group").checked, filters.min_words, filters.max_words, filters.updated_after, sort.sort, sort.order);
     if (token !== searchSeq) {
       // The user cancelled (or searched again) while the bridge was starting:
       // stop the orphaned backend search instead of letting it run to timeout.
@@ -3601,6 +3680,9 @@ function boot() {
     // Restore the filters saved by the last search. Deliberately no search:
     // the inputs are filled in, the user chooses when to run it.
     applyStoredSearchFilters(state.search_filters);
+    // Restore the last sort selection without starting a search either; an
+    // invalid stored pair has already been normalised by the bridge.
+    applyStoredSearchSort(state.search_sort);
     if (state.is_frozen && !state.shortcut_exists) {
       setTimeout(() => toast(t("Click here to create a desktop shortcut"), "info", 6000), 1200);
     }

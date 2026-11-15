@@ -770,6 +770,16 @@ def _i18n_catalog() -> dict[str, str]:
         "Male": t("Male"),
         "Female": t("Female"),
         "Merge same book": t("Merge same book"),
+        # search sort controls: "Relevance" is the quality key (rank_score),
+        # "Overall quality" is the site-priority/completeness ranking.
+        "Sort by": t("Sort by"),
+        "Sort direction": t("Sort direction"),
+        "Relevance": t("Relevance"),
+        "Overall quality": t("Overall quality"),
+        "Word count": t("Word count"),
+        "Updated": t("Updated"),
+        "Descending": t("Descending"),
+        "Ascending": t("Ascending"),
         "Search to see results": t("Search to see results"),
         "Type a title, or browse the rankings and categories": t(
             "Type a title, or browse the rankings and categories"
@@ -1220,6 +1230,22 @@ _MAX_SEARCH_WORDS = 1_000_000_000
 #: reinterpreted by each site's date parser.
 _SEARCH_FILTER_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
+#: Sort keys offered by the desktop search bar.  A deliberate subset of
+#: :data:`novel_downloader.plugins.ranking.SORT_KEYS`: the page labels
+#: ``quality`` as "Relevance" (its ordering key is ``rank_score``) and
+#: ``priority`` as "Overall quality".  Anything else is rejected here instead
+#: of silently falling back, so a typo in the page cannot change the ranking.
+_SEARCH_SORT_KEYS = ("quality", "priority", "words", "update")
+#: Mirrors :func:`novel_downloader.plugins.ranking.default_order` for the keys
+#: above (a lower ``priority`` value is the better site, hence ascending).
+_SEARCH_SORT_DEFAULT_ORDER = {
+    "quality": "desc",
+    "priority": "asc",
+    "words": "desc",
+    "update": "desc",
+}
+_SEARCH_SORT_ORDERS = ("asc", "desc")
+
 
 def _search_filter_error(field: str, message: str) -> dict[str, Any]:
     """Build the structured rejection the page maps back to one filter input."""
@@ -1229,6 +1255,47 @@ def _search_filter_error(field: str, message: str) -> dict[str, Any]:
         "error_code": "invalid_search_filter",
         "error_field": field,
     }
+
+
+def _search_sort_error(field: str, message: str) -> dict[str, Any]:
+    """Build the structured rejection for an unknown sort key/direction."""
+    return {
+        "ok": False,
+        "error": message,
+        "error_code": "invalid_search_sort",
+        "error_field": field,
+    }
+
+
+def _parse_search_sort(
+    sort: object,
+    order: object,
+) -> tuple[str, str, dict[str, Any] | None]:
+    """
+    Validate the page's sort key and direction.
+
+    Returns ``(key, direction, error)``.  ``sort=None`` means the default
+    ``"quality"``; a blank direction means the key's natural direction.  An
+    unknown key or a non-``asc``/``desc`` direction answers the structured
+    payload the page displays instead of searching; the key/direction are then
+    empty strings the caller must not use.
+    """
+    key = "quality" if sort is None else str(sort).strip()
+    if key not in _SEARCH_SORT_KEYS:
+        return "", "", _search_sort_error("sort", t("Unknown sort key"))
+    if order is None or (isinstance(order, str) and not order.strip()):
+        direction = _SEARCH_SORT_DEFAULT_ORDER[key]
+    else:
+        direction = str(order).strip()
+        if direction not in _SEARCH_SORT_ORDERS:
+            return (
+                "",
+                "",
+                _search_sort_error(
+                    "order", t("Sort direction must be ascending or descending")
+                ),
+            )
+    return key, direction, None
 
 
 def _word_filter(field: str, value: object) -> tuple[int | None, dict[str, Any] | None]:
@@ -1976,6 +2043,32 @@ def _stored_search_filters(prefs: Mapping[str, Any]) -> dict[str, Any]:
     return stored
 
 
+def _stored_search_sort(prefs: Mapping[str, Any]) -> dict[str, str]:
+    """
+    Return the saved sort selection, falling back to the defaults field by field.
+
+    A hand-edited or older preference file must never change the ranking to an
+    unknown key: an invalid ``sort`` becomes ``"quality"`` and an invalid
+    ``order`` becomes that key's natural direction.  The result is always a
+    complete pair so the page can apply it without its own defaults.
+    """
+    value = prefs.get("search_sort")
+    source = value if isinstance(value, Mapping) else {}
+    raw_sort = source.get("sort")
+    key = (
+        raw_sort if isinstance(raw_sort, str) and raw_sort in _SEARCH_SORT_KEYS else ""
+    )
+    if not key:
+        key = "quality"
+    raw_order = source.get("order")
+    direction = (
+        raw_order
+        if isinstance(raw_order, str) and raw_order in _SEARCH_SORT_ORDERS
+        else _SEARCH_SORT_DEFAULT_ORDER[key]
+    )
+    return {"sort": key, "order": direction}
+
+
 # ---------------------------------------------------------------------------
 # output directory / configuration file
 # ---------------------------------------------------------------------------
@@ -2501,6 +2594,8 @@ class ApiBridge:
             # The page fills the filter panel from this and does not start a
             # search on its own; invalid/old values are already filtered out.
             "search_filters": _stored_search_filters(prefs),
+            # The last sort selection; always a complete, validated pair.
+            "search_sort": _stored_search_sort(prefs),
             "language": _active_language(),
             "languages": languages,
             "sites": {
@@ -4141,6 +4236,34 @@ class ApiBridge:
             "error": None if ok else t("Could not save the settings"),
         }
 
+    def save_search_sort(
+        self,
+        sort: str = "quality",
+        order: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Persist the last chosen sort key/direction for the next launch.
+
+        The same :func:`_parse_search_sort` contract as the search bridge
+        applies, so an invalid value is rejected with the structured payload
+        the page already knows how to report.  A blank ``order`` stores the
+        key's natural direction.
+
+        :return: ``{"ok", "sort", "order", "error"}`` (plus ``error_code`` and
+            ``error_field`` for a rejected value).  Never raises.
+        """
+        key, direction, error = _parse_search_sort(sort, order)
+        if error is not None:
+            return {**error, "sort": "", "order": ""}
+        stored = {"sort": key, "order": direction}
+        ok = _save_prefs({"search_sort": stored}) is not False
+        return {
+            "ok": ok,
+            "sort": stored["sort"],
+            "order": stored["order"],
+            "error": None if ok else t("Could not save the settings"),
+        }
+
     def search(
         self,
         keyword: str,
@@ -4150,6 +4273,8 @@ class ApiBridge:
         min_words: int | float | str | None = None,
         max_words: int | float | str | None = None,
         updated_after: str | None = None,
+        sort: str = "quality",
+        order: str | None = None,
     ) -> dict[str, Any]:
         """
         Run an aggregate search and return ranked results.
@@ -4165,11 +4290,18 @@ class ApiBridge:
             count; blank means no filter.
         :param updated_after: Optional inclusive lower bound on the update
             date, as ``YYYY-MM-DD``; blank means no filter.
+        :param sort: Ranking key: ``quality`` (relevance/rank_score),
+            ``priority``, ``words`` or ``update``.
+        :param order: ``asc``/``desc``; blank means the key's natural
+            direction.
         """
         text = str(keyword or "").strip()
         if not text:
             return {"results": [], "elapsed": 0.0}
         filters, error = _parse_search_filters(min_words, max_words, updated_after)
+        if error is not None:
+            return {**error, "results": [], "elapsed": 0.0}
+        sort_key, sort_order, error = _parse_search_sort(sort, order)
         if error is not None:
             return {**error, "results": [], "elapsed": 0.0}
         names = [s.strip() for s in str(sites_csv or "").split(",") if s.strip()]
@@ -4186,6 +4318,8 @@ class ApiBridge:
                 timeout=SEARCH_SITE_TIMEOUT,
                 group=bool(group),
                 **filters,
+                sort=sort_key,
+                order=sort_order,
             )
             elapsed = time.perf_counter() - started
             return [
@@ -4209,6 +4343,8 @@ class ApiBridge:
         min_words: int | float | str | None = None,
         max_words: int | float | str | None = None,
         updated_after: str | None = None,
+        sort: str = "quality",
+        order: str | None = None,
     ) -> dict[str, Any]:
         """
         Start a progressive search and return its id.
@@ -4231,11 +4367,24 @@ class ApiBridge:
             count; blank means no filter.
         :param updated_after: Optional inclusive lower bound on the update
             date, as ``YYYY-MM-DD``; blank means no filter.
+        :param sort: Ranking key for the final snapshot: ``quality``
+            (relevance/rank_score), ``priority``, ``words`` or ``update``.
+        :param order: ``asc``/``desc``; blank means the key's natural
+            direction.
         """
         text = str(keyword or "").strip()
         if not text:
             return {"search_id": "", "results": [], "done": True, "elapsed": 0.0}
         filters, error = _parse_search_filters(min_words, max_words, updated_after)
+        if error is not None:
+            return {
+                **error,
+                "search_id": "",
+                "results": [],
+                "done": True,
+                "elapsed": 0.0,
+            }
+        sort_key, sort_order, error = _parse_search_sort(sort, order)
         if error is not None:
             return {
                 **error,
@@ -4372,6 +4521,8 @@ class ApiBridge:
                         timeout=SEARCH_SITE_TIMEOUT,
                         group=bool(group),
                         **filters,
+                        sort=sort_key,
+                        order=sort_order,
                     )
                     with self._lock:
                         if bool(state["cancelled"]):
