@@ -1,3 +1,16 @@
+## v1.35.1 (2026-11-15)
+
+补丁版：把 `search --order` 与排序文档带入发布产物。
+
+### Feature
+
+- **CLI**：`search --order asc|desc`，省略时按排序键自然方向；非法值 exit 2
+- **Docs**：CLI 排序键/方向、桌面排序持久化、Android 排序 chips 与状态恢复
+
+### Test
+
+- Python **12758 passed / 47 skipped**；ruff/format/mypy 全绿
+
 ## v1.35.0 (2026-11-15)
 
 搜索可解释性与排序贯通 CLI/桌面/Android；API 请求追踪与 OpenAPI 契约完善。
