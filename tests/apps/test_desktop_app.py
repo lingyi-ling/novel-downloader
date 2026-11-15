@@ -4544,7 +4544,7 @@ def test_app_html_detail_drawer_is_a_dialog_only_when_narrow() -> None:
 
 
 def test_app_html_result_card_keyboard_does_not_swallow_nested_buttons() -> None:
-    """Enter on a card opens details; Enter on its Download button downloads."""
+    """Enter on the card's title opens details; Enter on Download downloads."""
     handler = _js_block(
         '$("#results").addEventListener("keydown"',
         '$("#results").addEventListener("click"',
@@ -4552,11 +4552,22 @@ def test_app_html_result_card_keyboard_does_not_swallow_nested_buttons() -> None
     assert "e.target !== card" in handler
     assert 'e.key !== "Enter" && e.key !== " "' in handler
     assert "selectResult(+card.dataset.sel);" in handler
+    # The card itself is a mouse affordance; the keyboard target is a native
+    # button around the title, because a role="button" div may not contain the
+    # card's Download button (nested interactive controls are flattened).
+    card = _js_block("function resultCardHtml(", "function moreResultsHtml(")
+    assert 'class="row-title result-open"' in card
+    assert 'type="button"' in card
+    assert 'aria-label="${resultCardLabel(r)}"' in card
+    assert 'data-focus="${i}"' in card
+    assert "tabindex" not in card
+    assert '<div class="card hover result-card" data-sel="${i}">' in card
+    # The Download button is a sibling: it follows the title button's close.
+    assert card.index("</button>") < card.index("data-add=")
     # Selection is exposed, not only painted.
     select = _js_block("function selectResult(i)", "function renderDetail")
     assert 'el.setAttribute("aria-current", "true")' in select
     assert 'el.removeAttribute("aria-current")' in select
-    assert 'tabindex="0"' in APP_HTML
 
 
 def test_app_html_search_escape_is_explicit_and_local() -> None:
@@ -4637,6 +4648,173 @@ def test_app_html_gender_filter_exposes_pressed_state() -> None:
     female = 'setAttribute("aria-pressed", gender === "female" ? "true" : "false")'
     assert male in switch
     assert female in switch
+
+
+def test_app_html_action_toast_is_a_keyboard_control() -> None:
+    """An action toast ("Click to overwrite") is reachable without a mouse."""
+    toaster = _js_block("function toast(msg, kind", "function fmtSize(n)")
+    assert 'box.setAttribute("role", "button");' in toaster
+    assert "box.tabIndex = 0;" in toaster
+    assert 'if (e.key !== "Enter" && e.key !== " ") return;' in toaster
+    assert "onclick();" in toaster
+    # A focused action toast must not disappear under the keyboard user.
+    assert (
+        'box.addEventListener("focusin", () => { clearTimeout(timer); timer = null; });'
+        in toaster
+    )
+    assert 'box.addEventListener("focusout"' in toaster
+    # The live region itself still never steals focus.
+    assert ".focus(" not in toaster
+    assert '.toast[role="button"]:focus-visible' in APP_HTML
+
+
+_LABELLED_CONTROLS = (
+    ("lbl-q", "q"),
+    ("lbl-q-sites", "q-sites"),
+    ("lbl-q-sort", "q-sort"),
+    ("lbl-q-order", "q-order"),
+    ("lbl-m-platform", "m-platform"),
+    ("lbl-m-q", "m-q"),
+    ("lbl-set-out", "set-out"),
+    ("lbl-set-proxy", "set-proxy"),
+    ("lbl-set-proxy-user", "set-proxy-user"),
+    ("lbl-set-proxy-pass", "set-proxy-pass"),
+    ("lbl-set-music-cred-value", "set-music-cred-value"),
+    ("lbl-set-export-path", "set-export-path"),
+    ("lbl-set-import-path", "set-import-path"),
+)
+
+
+def test_app_html_form_labels_are_programmatically_associated() -> None:
+    """Placeholder-only fields get a real label, translated and linked by id."""
+    catalog = _i18n_catalog()
+    for label_id, control_id in _LABELLED_CONTROLS:
+        label = re.search(
+            rf'<label[^>]*id="{label_id}"[^>]*for="{control_id}"[^>]*'
+            rf'data-i18n="([^"]+)"',
+            APP_HTML,
+        )
+        assert label, label_id
+        assert label.group(1) in catalog, label.group(1)
+        control = re.search(
+            rf'<(?:input|select)[^>]*id="{control_id}"[^>]*'
+            rf'aria-labelledby="{label_id}"',
+            APP_HTML,
+        )
+        assert control, control_id
+    # Visually hidden labels need a rule; otherwise they take layout space.
+    assert ".sr-only {" in APP_HTML
+    assert "clip: rect(0 0 0 0);" in APP_HTML
+
+
+def test_app_html_async_feedback_uses_live_regions() -> None:
+    """Loading, success and error states are announced, not only painted."""
+    for element in (
+        'id="cat-hint" role="status"',
+        'id="set-out-status" role="status" aria-live="polite"',
+        'id="set-music-cred-status" role="status" aria-live="polite"',
+        'id="set-cache-note" role="status" aria-live="polite"',
+        'id="update-text" role="status" aria-live="polite"',
+        'id="m-export-title" role="status" aria-live="polite"',
+        'id="m-fail-title" role="status" aria-live="polite"',
+    ):
+        assert element in APP_HTML, element
+    # A failed search or ranking is spoken through the progress strip.
+    searcher = _js_block("async function doSearch()", "/* match-telemetry-start */")
+    assert 'showSearchProgress(t("Search failed")' in searcher
+    assert 'showSearchProgress(t("Search failed")' in _js_block(
+        '$("#btn-rank").onclick', "let catGroups"
+    )
+
+
+def test_app_html_focus_ring_is_visible_in_both_themes() -> None:
+    """The outline is a UI-only indicator: 3:1 against its own surface."""
+    for theme, selector in (
+        ("light", ":root {"),
+        ("dark", ':root[data-theme="dark"] {'),
+    ):
+        tokens = _theme_tokens(selector)
+        ring = _css_color(tokens["--focus"])
+        assert ring[3] == 1.0, f"{theme} --focus must be opaque"
+        for surface in ("--card", "--bg"):
+            ratio = _contrast_ratio(ring, _css_color(tokens[surface]))
+            assert ratio >= 3.0, f"{theme} focus vs {surface} is {ratio:.2f}:1"
+    # The .field wrapper strips the input's native ring; it must draw one.
+    assert ".field input:focus-visible" in APP_HTML
+    assert "select.picker:focus-visible" in APP_HTML
+
+
+def test_app_html_categories_panel_exposes_state_and_escape() -> None:
+    """The category disclosure reports aria-expanded and returns focus on Esc."""
+    assert re.search(
+        r'id="btn-cats"[^>]*aria-expanded="false"[^>]*aria-controls="cat-panel"',
+        APP_HTML,
+    )
+    assert re.search(r'id="cat-panel"[^>]*role="region"', APP_HTML)
+    panel = _js_block("function setCatPanel(open)", '$("#btn-cats").onclick')
+    assert "panel.hidden = !open;" in panel
+    assert 'btn.setAttribute("aria-expanded", open ? "true" : "false");' in panel
+    escape = _js_block(
+        '$("#cat-panel").addEventListener("keydown"', "function switchCat(gender)"
+    )
+    assert "setCatPanel(false);" in escape
+    assert "btn.focus({ preventScroll: true });" in escape
+    handler = _js_block('$("#btn-cats").onclick', "function switchCat(gender)")
+    assert "focusFirstCategory();" in handler
+
+
+def test_app_html_icon_only_buttons_have_translated_names() -> None:
+    """Every icon-only button carries a catalogue-backed accessible name."""
+    catalog = _i18n_catalog()
+    for element, key in (
+        ("shortcut-btn", "Create desktop shortcut"),
+        ("theme-btn", "Theme"),
+        ("m-fail-close", "Close"),
+    ):
+        tag = re.search(rf'<button[^>]*id="{element}"[^>]*>', APP_HTML)
+        assert tag, element
+        assert f'data-i18n-aria="{key}"' in tag.group(0), element
+        assert key in catalog, key
+    # Spinners are decorative; they must not be exposed as nameless graphics.
+    for spinner in ("search-spin", "m-spin", "f-spin"):
+        assert re.search(rf'id="{spinner}" aria-hidden="true"', APP_HTML), spinner
+
+
+def test_app_html_result_repaints_restore_row_focus() -> None:
+    """A streaming repaint (or a drawer close) never drops focus on <body>."""
+    renderer = _js_block(
+        "function renderResults(results, kw)", "function appendResultChunk()"
+    )
+    assert 'captureFocus(box, ["data-focus", "data-more"])' in renderer
+    assert "restoreFocus(box, focusSnapshot);" in renderer
+    hide = _js_block("function hideDetail()", "function openDetail()")
+    assert "box.contains(document.activeElement)" in hide
+    assert "result-card.sel .result-open" in hide
+    # The drawer is a dialog only while the narrow layout is active, and the
+    # wide layout clears the trap semantics again.
+    narrow = _js_block(
+        'narrowDetail.addEventListener("change"', '$("#detail-backdrop")'
+    )
+    assert '$("#detail").classList.remove("open");' in narrow
+    assert "setDetailDialog(false);" in narrow
+
+
+def test_app_html_disclosure_panels_return_focus_on_escape() -> None:
+    """Esc closes the filter panel and hands focus to its toggle."""
+    panel = _js_block(
+        '$("#search-filter-panel").addEventListener("keydown"',
+        '["#q-min-words", "#q-max-words", "#q-updated-after"].forEach',
+    )
+    assert "setFilterPanel(false);" in panel
+    assert "btn.focus({ preventScroll: true });" in panel
+    assert "e.isComposing" in panel
+
+
+def test_app_html_task_progressbar_has_a_name_and_valuetext() -> None:
+    """A bar without a name is just a number; it names the book and the pair."""
+    card = _js_block("function taskCard(k)", "async function refreshTasks()")
+    assert 'role="progressbar" aria-label="${esc(k.title)}"' in card
+    assert 'aria-valuetext="${esc(chapterText)}"' in card
 
 
 # ---------------------------------------------------------------------------

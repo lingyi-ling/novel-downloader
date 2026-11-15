@@ -58,7 +58,10 @@ APP_HTML = r"""<!DOCTYPE html>
   --shadow-2: 0 8px 24px -12px rgba(15, 23, 42, .18);
   --shadow-3: 0 24px 60px -20px rgba(15, 23, 42, .28);
   --scroll: rgba(15, 23, 42, .16);
-  --focus: rgba(194, 65, 12, .45);
+  /* Focus rings are a UI-only indicator, so they must clear 3:1 against the
+     adjacent surface (WCAG 2.4.11). The old 45 % tint measured ~2.4:1 on white,
+     which is invisible to many keyboard users. */
+  --focus: #c2410c;
   --content-max: 1080px;
   --ease: cubic-bezier(.2, .7, .3, 1);
   --radius-sm: 6px;
@@ -96,7 +99,7 @@ APP_HTML = r"""<!DOCTYPE html>
   --shadow-2: 0 8px 24px -12px rgba(0, 0, 0, .6);
   --shadow-3: 0 24px 60px -20px rgba(0, 0, 0, .7);
   --scroll: rgba(232, 238, 247, .16);
-  --focus: rgba(240, 161, 132, .55);
+  --focus: #f0a184;
 }
 
 /* ============================================================ base */
@@ -119,6 +122,12 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 input, select, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--radius-sm); }
 [hidden] { display: none !important; }
+/* Visually hidden but still exposed to assistive tech: programmatic labels for
+   controls whose only visible cue is a placeholder. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 
 /* First tab stop in the document: jump past the six navigation buttons.
    Off-screen until focused so mouse users never see it. */
@@ -260,6 +269,9 @@ input, select, textarea { font: inherit; color: inherit; }
 .field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .field input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; color: var(--text); user-select: text; }
 .field input::placeholder { color: var(--text-3); }
+/* The wrapper strips the native ring, so the input has to draw its own; the
+   old cue was only a 3 px accent-soft halo, far below the 3:1 indicator floor. */
+.field input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; border-radius: var(--radius-sm); }
 .field-lg { height: 44px; border-radius: var(--radius-md); font-size: 14px; }
 
 select.picker {
@@ -271,6 +283,8 @@ select.picker {
 }
 select.picker:hover { border-color: var(--border-strong); }
 select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+/* Keyboard focus needs a visible ring, not just a tinted border. */
+select.picker:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 
 .cb {
   appearance: none; -webkit-appearance: none;
@@ -436,6 +450,15 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
 .result-card { padding: 12px 14px; margin-bottom: 8px; cursor: pointer; }
 .result-card:hover { border-color: var(--border-strong); }
 .result-card.sel { border-color: var(--brand); box-shadow: inset 0 0 0 1px var(--brand); }
+/* The card itself is a mouse affordance; the real keyboard target is this
+   button around the title. Nested inside the card so Enter reaches it while a
+   native <button> (not a clickable div) carries the semantics. */
+.result-open {
+  font: inherit; font-weight: 600; font-size: 14px; color: var(--text);
+  text-align: left; background: none; border: none; padding: 0;
+  white-space: normal; cursor: pointer; border-radius: 2px;
+}
+.result-open:hover { text-decoration: underline; text-underline-offset: 2px; }
 .rc { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 12px; align-items: start; }
 .rc-cover {
   position: relative; width: 44px; height: 60px; margin-top: 1px;
@@ -744,6 +767,10 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 .toast .msg { flex: 1; user-select: text; word-break: break-word; color: var(--text); }
 .toast .x { color: var(--text-3); flex: none; padding: 0 2px; }
 .toast .x:hover { color: var(--text); }
+/* An action toast ("Click to overwrite") is a real control for keyboard users:
+   the whole box is the button, so it needs a pointer and a visible ring. */
+.toast[role="button"] { cursor: pointer; }
+.toast[role="button"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -801,7 +828,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
       <div class="update-bar" id="update-bar" hidden>
         <div class="u-text">
           <svg class="icon"><use href="#i-down"/></svg>
-          <span id="update-text" data-i18n="Update available: v{ver}">Update available: v{ver}</span>
+          <span id="update-text" role="status" aria-live="polite" data-i18n="Update available: v{ver}">Update available: v{ver}</span>
           <span class="u-size" id="update-size"></span>
         </div>
         <div class="u-acts">
@@ -811,8 +838,8 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
         </div>
       </div>
       <div class="foot-row">
-        <button class="icon-btn" id="shortcut-btn" data-i18n-title="Create desktop shortcut" title="Create desktop shortcut"><svg class="icon"><use href="#i-desktop"/></svg></button>
-        <button class="icon-btn" id="theme-btn" data-i18n-title="Theme" title="Theme"><svg class="icon"><use href="#i-moon"/></svg></button>
+        <button class="icon-btn" id="shortcut-btn" data-i18n-title="Create desktop shortcut" data-i18n-aria="Create desktop shortcut" title="Create desktop shortcut"><svg class="icon"><use href="#i-desktop"/></svg></button>
+        <button class="icon-btn" id="theme-btn" data-i18n-title="Theme" data-i18n-aria="Theme" title="Theme"><svg class="icon"><use href="#i-moon"/></svg></button>
         <div class="foot-meta"><span data-i18n="Ctrl+1-6 switch pages">Ctrl+1-6 switch pages</span><br>Ctrl+F / Ctrl+D</div>
       </div>
     </div>
@@ -828,22 +855,25 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
           <div class="search-row">
             <div class="field field-lg">
               <svg class="icon"><use href="#i-search"/></svg>
-              <input id="q" data-i18n-ph="Enter book title or author…" placeholder="Enter book title or author…" autocomplete="off" aria-keyshortcuts="Escape">
+              <label class="sr-only" id="lbl-q" for="q" data-i18n="Enter book title or author…">Enter book title or author…</label>
+              <input id="q" aria-labelledby="lbl-q" data-i18n-ph="Enter book title or author…" placeholder="Enter book title or author…" autocomplete="off" aria-keyshortcuts="Escape">
             </div>
-            <button class="btn btn-primary btn-lg" id="btn-search"><span class="spin" id="search-spin"></span><svg class="icon"><use href="#i-search"/></svg><span data-i18n="Search">Search</span></button>
+            <button class="btn btn-primary btn-lg" id="btn-search"><span class="spin" id="search-spin" aria-hidden="true"></span><svg class="icon"><use href="#i-search"/></svg><span data-i18n="Search">Search</span></button>
             <button class="btn btn-ghost btn-lg" id="btn-search-cancel" hidden><svg class="icon"><use href="#i-x"/></svg><span data-i18n="Cancel">Cancel</span></button>
           </div>
           <div class="search-progress" id="search-progress" role="status" aria-live="polite" hidden><span id="search-progress-text"></span></div>
           <div class="filters">
-            <div class="field"><svg class="icon"><use href="#i-pulse"/></svg><input id="q-sites" data-i18n-ph="Site filter, comma separated (blank = all)" placeholder="Site filter, comma separated (blank = all)"></div>
+            <div class="field"><svg class="icon"><use href="#i-pulse"/></svg><label class="sr-only" id="lbl-q-sites" for="q-sites" data-i18n="Site filter, comma separated (blank = all)">Site filter, comma separated (blank = all)</label><input id="q-sites" aria-labelledby="lbl-q-sites" data-i18n-ph="Site filter, comma separated (blank = all)" placeholder="Site filter, comma separated (blank = all)"></div>
             <div class="search-sort">
-              <select class="picker" id="q-sort" data-i18n-title="Sort by" title="Sort by">
+              <label class="sr-only" id="lbl-q-sort" for="q-sort" data-i18n="Sort by">Sort by</label>
+              <select class="picker" id="q-sort" aria-labelledby="lbl-q-sort" data-i18n-title="Sort by" title="Sort by">
                 <option value="quality" data-i18n="Relevance">Relevance</option>
                 <option value="priority" data-i18n="Overall quality">Overall quality</option>
                 <option value="words" data-i18n="Word count">Word count</option>
                 <option value="update" data-i18n="Updated">Updated</option>
               </select>
-              <select class="picker" id="q-order" data-i18n-title="Sort direction" title="Sort direction">
+              <label class="sr-only" id="lbl-q-order" for="q-order" data-i18n="Sort direction">Sort direction</label>
+              <select class="picker" id="q-order" aria-labelledby="lbl-q-order" data-i18n-title="Sort direction" title="Sort direction">
                 <option value="desc" data-i18n="Descending">Descending</option>
                 <option value="asc" data-i18n="Ascending">Ascending</option>
               </select>
@@ -851,7 +881,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <label class="merge-toggle" for="q-group"><input type="checkbox" class="cb" id="q-group" checked><span data-i18n="Merge same book">Merge same book</span></label>
             <button class="btn btn-ghost btn-sm" id="btn-search-filters" aria-expanded="false" aria-controls="search-filter-panel"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Filters">Filters</span><span class="count-chip" id="search-filter-count" hidden></span></button>
             <button class="btn btn-ghost btn-sm" id="btn-rank"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Rankings">Rankings</span></button>
-            <button class="btn btn-ghost btn-sm" id="btn-cats"><svg class="icon"><use href="#i-book"/></svg><span data-i18n="Categories">Categories</span></button>
+            <button class="btn btn-ghost btn-sm" id="btn-cats" aria-expanded="false" aria-controls="cat-panel"><svg class="icon"><use href="#i-book"/></svg><span data-i18n="Categories">Categories</span></button>
             <span class="search-verdict">
               <span class="hint" id="search-hint"></span>
               <span class="intent-chip" id="search-intent" role="status" hidden></span>
@@ -877,11 +907,11 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <button type="button" class="btn btn-ghost btn-sm" id="btn-clear-filters"><svg class="icon"><use href="#i-x"/></svg><span data-i18n="Clear filters">Clear filters</span></button>
           </div>
         </div>
-        <div class="card" id="cat-panel" hidden style="margin-top:16px;padding:14px 16px">
+        <div class="card" id="cat-panel" role="region" data-i18n-aria="Categories" hidden style="margin-top:16px;padding:14px 16px">
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
             <button class="btn btn-sm btn-primary" id="cat-male" data-i18n="Male" aria-pressed="true">Male</button>
             <button class="btn btn-sm btn-ghost" id="cat-female" data-i18n="Female" aria-pressed="false">Female</button>
-            <span class="hint" id="cat-hint"></span>
+            <span class="hint" id="cat-hint" role="status"></span>
           </div>
           <div id="cat-chips" class="filters" style="gap:8px;flex-wrap:wrap"></div>
         </div>
@@ -932,11 +962,12 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
           <div>
             <div class="music-status" id="m-availability" hidden></div>
             <div class="search-row">
-              <select class="picker" id="m-platform" data-i18n-title="Platform" style="height:48px;border-radius:13px;max-width:230px"></select>
-              <div class="field field-lg"><svg class="icon"><use href="#i-music"/></svg><input id="m-q" data-i18n-ph="Song / artist / album…" placeholder="Song / artist / album…" autocomplete="off" aria-keyshortcuts="Escape"></div>
-              <button class="btn btn-primary" id="btn-m-search" style="height:48px"><span class="spin" id="m-spin"></span><span data-i18n="Search">Search</span></button>
+              <label class="sr-only" id="lbl-m-platform" for="m-platform" data-i18n="Platform">Platform</label>
+              <select class="picker" id="m-platform" aria-labelledby="lbl-m-platform" data-i18n-title="Platform" style="height:48px;border-radius:13px;max-width:230px"></select>
+              <div class="field field-lg"><svg class="icon"><use href="#i-music"/></svg><label class="sr-only" id="lbl-m-q" for="m-q" data-i18n="Song / artist / album…">Song / artist / album…</label><input id="m-q" aria-labelledby="lbl-m-q" data-i18n-ph="Song / artist / album…" placeholder="Song / artist / album…" autocomplete="off" aria-keyshortcuts="Escape"></div>
+              <button class="btn btn-primary" id="btn-m-search" style="height:48px"><span class="spin" id="m-spin" aria-hidden="true"></span><span data-i18n="Search">Search</span></button>
             </div>
-            <div class="hint" id="m-note" style="margin-top:9px"></div>
+            <div class="hint" id="m-note" role="status" aria-live="polite" style="margin-top:9px"></div>
             <div class="search-note" id="m-search-note" role="status" aria-live="polite"></div>
             <div class="section-head"><span data-i18n="Results">Results</span><span class="count-chip" id="m-count">0</span>
               <div class="spacer" style="flex:1"></div>
@@ -945,11 +976,11 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
               <button class="btn btn-sm btn-danger" id="btn-m-stop" hidden><svg class="icon"><use href="#i-stop"/></svg><span data-i18n="Stop">Stop</span></button>
               <button class="btn btn-sm btn-primary" id="btn-m-dl"><svg class="icon"><use href="#i-down"/></svg><span id="m-dl-label" data-i18n="Download selected">Download selected</span></button>
             </div>
-            <div class="progress" id="m-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="margin:0 2px 12px" hidden><i></i></div>
+            <div class="progress" id="m-progress" role="progressbar" data-i18n-aria="Downloading" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="margin:0 2px 12px" hidden><i></i></div>
             <div class="export-note" id="m-export-note" hidden>
               <svg class="icon"><use href="#i-check"/></svg>
               <div class="export-note-main">
-                <div class="export-note-title" id="m-export-title"></div>
+                <div class="export-note-title" id="m-export-title" role="status" aria-live="polite"></div>
                 <input class="export-note-path" id="m-export-path" aria-labelledby="m-export-title" readonly>
               </div>
               <button class="btn btn-ghost btn-sm" id="m-export-copy" data-i18n="Copy">Copy</button>
@@ -957,12 +988,12 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             </div>
             <div class="fail-note" id="m-failures" hidden>
               <div class="fail-note-main">
-                <div class="fail-note-title" id="m-fail-title"></div>
+                <div class="fail-note-title" id="m-fail-title" role="status" aria-live="polite"></div>
                 <div id="m-fail-list"></div>
               </div>
               <div class="fail-actions">
                 <button class="btn btn-primary btn-sm" id="btn-m-retry"><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Retry failed">Retry failed</span></button>
-                <button class="btn btn-ghost btn-sm" id="m-fail-close" title="Close" data-i18n-title="Close"><svg class="icon"><use href="#i-x"/></svg></button>
+                <button class="btn btn-ghost btn-sm" id="m-fail-close" title="Close" data-i18n-title="Close" data-i18n-aria="Close"><svg class="icon"><use href="#i-x"/></svg></button>
               </div>
             </div>
             <div id="m-tracks" role="group" aria-label="" data-i18n-aria="Results"></div>
@@ -994,7 +1025,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
         <div><h1 data-i18n="Follow">Follow</h1><div class="sub" data-i18n="Track new chapters of books you care about">Track new chapters of books you care about</div></div>
         <div class="spacer"></div>
         <button class="btn btn-ghost" id="btn-f-add"><svg class="icon"><use href="#i-plus"/></svg><span data-i18n="Add book">Add book</span></button>
-        <button class="btn btn-primary" id="btn-f-check"><span class="spin" id="f-spin"></span><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Check updates">Check updates</span></button>
+        <button class="btn btn-primary" id="btn-f-check"><span class="spin" id="f-spin" aria-hidden="true"></span><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Check updates">Check updates</span></button>
       </div>
       <div class="follow-status" id="f-status" role="status" aria-live="polite" hidden></div>
       <div class="scroll" id="follow-body"></div>
@@ -1015,9 +1046,10 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <div class="settings-help" data-i18n="Where downloaded books are saved">Where downloaded books are saved</div>
             <div class="field" id="set-out-field">
               <svg class="icon"><use href="#i-folder"/></svg>
-              <input id="set-out" data-i18n-ph="Output folder path" placeholder="Output folder path" spellcheck="false" autocomplete="off">
+              <label class="sr-only" id="lbl-set-out" for="set-out" data-i18n="Output folder path">Output folder path</label>
+              <input id="set-out" aria-labelledby="lbl-set-out" data-i18n-ph="Output folder path" placeholder="Output folder path" spellcheck="false" autocomplete="off">
             </div>
-            <div class="settings-note" id="set-out-status"></div>
+            <div class="settings-note" id="set-out-status" role="status" aria-live="polite"></div>
             <div class="settings-actions">
               <button class="btn btn-ghost btn-sm" id="btn-set-open"><svg class="icon"><use href="#i-folder"/></svg><span data-i18n="Open folder">Open folder</span></button>
             </div>
@@ -1027,13 +1059,16 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <div class="settings-title" data-i18n="Network">Network</div>
             <div class="field">
               <svg class="icon"><use href="#i-pulse"/></svg>
-              <input id="set-proxy" data-i18n-ph="Proxy address, e.g. http://127.0.0.1:7890 (blank = direct)" placeholder="Proxy address, e.g. http://127.0.0.1:7890 (blank = direct)" spellcheck="false" autocomplete="off">
+              <label class="sr-only" id="lbl-set-proxy" for="set-proxy" data-i18n="Proxy address, e.g. http://127.0.0.1:7890 (blank = direct)">Proxy address, e.g. http://127.0.0.1:7890 (blank = direct)</label>
+              <input id="set-proxy" aria-labelledby="lbl-set-proxy" data-i18n-ph="Proxy address, e.g. http://127.0.0.1:7890 (blank = direct)" placeholder="Proxy address, e.g. http://127.0.0.1:7890 (blank = direct)" spellcheck="false" autocomplete="off">
             </div>
             <div class="field" style="margin-top:8px">
-              <input id="set-proxy-user" data-i18n-ph="Proxy username" placeholder="Proxy username" spellcheck="false" autocomplete="off">
+              <label class="sr-only" id="lbl-set-proxy-user" for="set-proxy-user" data-i18n="Proxy username">Proxy username</label>
+              <input id="set-proxy-user" aria-labelledby="lbl-set-proxy-user" data-i18n-ph="Proxy username" placeholder="Proxy username" spellcheck="false" autocomplete="off">
             </div>
             <div class="field" style="margin-top:8px">
-              <input id="set-proxy-pass" type="password" data-i18n-ph="Proxy password" placeholder="Proxy password" autocomplete="new-password">
+              <label class="sr-only" id="lbl-set-proxy-pass" for="set-proxy-pass" data-i18n="Proxy password">Proxy password</label>
+              <input id="set-proxy-pass" aria-labelledby="lbl-set-proxy-pass" type="password" data-i18n-ph="Proxy password" placeholder="Proxy password" autocomplete="new-password">
             </div>
             <label class="set-row" id="set-clear-row" hidden>
               <span class="lbl" data-i18n="Clear saved password">Clear saved password</span>
@@ -1047,9 +1082,10 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <div class="set-row"><span class="lbl" id="set-music-cred-platform-lbl" data-i18n="Platform">Platform</span>
               <select class="picker" id="set-music-cred-platform" aria-labelledby="set-music-cred-platform-lbl" style="height:32px"></select></div>
             <div class="field" style="margin-top:8px">
-              <input id="set-music-cred-value" type="password" data-i18n-ph="Paste the token JSON" placeholder="Paste the token JSON" spellcheck="false" autocomplete="new-password">
+              <label class="sr-only" id="lbl-set-music-cred-value" for="set-music-cred-value" data-i18n="Paste the token JSON">Paste the token JSON</label>
+              <input id="set-music-cred-value" aria-labelledby="lbl-set-music-cred-value" type="password" data-i18n-ph="Paste the token JSON" placeholder="Paste the token JSON" spellcheck="false" autocomplete="new-password">
             </div>
-            <div class="settings-note" id="set-music-cred-status"></div>
+            <div class="settings-note" id="set-music-cred-status" role="status" aria-live="polite"></div>
             <div class="settings-actions">
               <button class="btn btn-primary btn-sm" id="btn-music-cred-save"><svg class="icon"><use href="#i-check"/></svg><span data-i18n="Save credentials">Save credentials</span></button>
               <button class="btn btn-ghost btn-sm" id="btn-music-cred-clear"><svg class="icon"><use href="#i-trash"/></svg><span data-i18n="Clear credentials">Clear credentials</span></button>
@@ -1098,7 +1134,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <div class="set-row"><span class="lbl" data-i18n="Disk entries">Disk entries</span><span class="settings-value mono" id="set-cache-disk">0</span></div>
             <div class="set-row"><span class="lbl" data-i18n="Cache hits">Cache hits</span><span class="settings-value mono" id="set-cache-hits">0</span></div>
             <div class="set-row"><span class="lbl" data-i18n="Expired entries">Expired entries</span><span class="settings-value mono" id="set-cache-expired">0</span></div>
-            <div class="settings-note" id="set-cache-note"></div>
+            <div class="settings-note" id="set-cache-note" role="status" aria-live="polite"></div>
             <div class="settings-actions">
               <button class="btn btn-ghost btn-sm" id="btn-set-clear-search-cache"><svg class="icon"><use href="#i-trash"/></svg><span data-i18n="Clear search cache">Clear search cache</span></button>
             </div>
@@ -1118,13 +1154,15 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <div class="settings-title" data-i18n="Backup">Backup</div>
             <div class="settings-help" data-i18n="Export your preferences as JSON, or import them on another device.">Export your preferences as JSON, or import them on another device.</div>
             <div class="field" style="margin-top:8px">
-              <input id="set-export-path" data-i18n-ph="Export file path (blank = default)" placeholder="Export file path (blank = default)" spellcheck="false" autocomplete="off">
+              <label class="sr-only" id="lbl-set-export-path" for="set-export-path" data-i18n="Export file path (blank = default)">Export file path (blank = default)</label>
+              <input id="set-export-path" aria-labelledby="lbl-set-export-path" data-i18n-ph="Export file path (blank = default)" placeholder="Export file path (blank = default)" spellcheck="false" autocomplete="off">
             </div>
             <div class="settings-actions">
               <button class="btn btn-ghost btn-sm" id="btn-set-export"><svg class="icon"><use href="#i-folder"/></svg><span data-i18n="Export settings">Export settings</span></button>
             </div>
             <div class="field" style="margin-top:8px">
-              <input id="set-import-path" data-i18n-ph="Import file path" placeholder="Import file path" spellcheck="false" autocomplete="off">
+              <label class="sr-only" id="lbl-set-import-path" for="set-import-path" data-i18n="Import file path">Import file path</label>
+              <input id="set-import-path" aria-labelledby="lbl-set-import-path" data-i18n-ph="Import file path" placeholder="Import file path" spellcheck="false" autocomplete="off">
             </div>
             <div class="settings-actions">
               <button class="btn btn-ghost btn-sm" id="btn-set-import"><svg class="icon"><use href="#i-refresh"/></svg><span data-i18n="Import settings">Import settings</span></button>
@@ -1283,16 +1321,35 @@ function toast(msg, kind = "info", ms = 3800, onclick = null) {
   // and would otherwise vanish underneath a keyboard user's focus.
   box.innerHTML = `<span class="bar"></span><span class="msg">${esc(msg)}</span><button type="button" class="x" tabindex="-1" aria-label="${esc(t("Close"))}">✕</button>`;
   box.querySelector(".x").onclick = () => dismiss();
+  let timer = null;
   if (onclick) {
+    // The whole toast is the action ("Click to overwrite", "Open Settings").
+    // A click handler on a plain div is mouse-only, so expose it as a button
+    // and keep it alive while keyboard focus is inside it.
+    box.setAttribute("role", "button");
+    box.tabIndex = 0;
     box.style.cursor = "pointer";
     box.addEventListener("click", e => {
       if (e.target.closest(".x")) return;
       onclick();
       dismiss();
     });
+    box.addEventListener("keydown", e => {
+      if (e.target !== box) return;
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      onclick();
+      dismiss();
+    });
+    box.addEventListener("focusin", () => { clearTimeout(timer); timer = null; });
+    box.addEventListener("focusout", () => {
+      if (!box.isConnected) return;
+      clearTimeout(timer);
+      timer = setTimeout(dismiss, ms);
+    });
   }
   $("#toasts").appendChild(box);
-  const timer = setTimeout(dismiss, ms);
+  timer = setTimeout(dismiss, ms);
   function dismiss() { clearTimeout(timer); box.classList.add("leaving"); setTimeout(() => box.remove(), 240); }
 }
 
@@ -1500,6 +1557,20 @@ function setClearSearchCacheLabel(armed) {
   const button = $("#btn-set-clear-search-cache");
   const label = button && button.querySelector("span");
   if (label) label.textContent = armed ? t("Click again to clear") : t("Clear search cache");
+  // The label swap is invisible to a screen reader, so mirror the armed state
+  // into the polite note. An unrelated message already sitting there wins.
+  const note = $("#set-cache-note");
+  if (!note) return;
+  const armedText = t("Click again to clear");
+  if (armed) {
+    if (!note.textContent || note.textContent === armedText) {
+      note.textContent = armedText;
+      note.className = "settings-note warn";
+    }
+  } else if (note.textContent === armedText) {
+    note.textContent = "";
+    note.className = "settings-note";
+  }
 }
 function disarmClearSearchCache() {
   clearCacheArmed = false;
@@ -2062,10 +2133,17 @@ function setDetailDialog(open) {
 }
 function hideDetail() {
   const box = $("#detail");
+  // A streaming repaint may hide the drawer under a keyboard user's focus;
+  // hand focus back to the row that owns it instead of dropping it on <body>.
+  const hadFocus = box.contains(document.activeElement);
   box.hidden = true;
   box.classList.remove("open");
   setDetailDialog(false);
   $("#detail-backdrop").classList.remove("show");
+  if (hadFocus) {
+    const target = $("#results .result-card.sel .result-open") || $("#q");
+    if (target) target.focus({ preventScroll: true });
+  }
 }
 function openDetail() {
   const box = $("#detail");
@@ -2076,7 +2154,7 @@ function openDetail() {
     const active = document.activeElement;
     detailReturnFocus = (active && active !== document.body)
       ? active
-      : ($("#results .result-card.sel") || $("#q"));
+      : ($("#results .result-card.sel .result-open") || $("#q"));
   }
   box.classList.add("open");
   setDetailDialog(true);
@@ -2092,7 +2170,7 @@ function closeDetail() {
   // Put focus back on the card that opened the drawer (or the search field).
   const target = (detailReturnFocus && document.contains(detailReturnFocus))
     ? detailReturnFocus
-    : ($("#results .result-card.sel") || $("#q"));
+    : ($("#results .result-card.sel .result-open") || $("#q"));
   detailReturnFocus = null;
   if (target && typeof target.focus === "function") target.focus({ preventScroll: true });
 }
@@ -2524,9 +2602,12 @@ async function doSearch() {
   } catch (e) {
     // A superseded search must not overwrite the new query's state.
     if (token !== searchSeq) return;
-    $("#results").innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("Search failed"))}</div><div class="s">${esc(String(e && e.message || e))}</div></div>`;
+    const reason = String(e && e.message || e);
+    $("#results").innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("Search failed"))}</div><div class="s">${esc(reason)}</div></div>`;
     $("#search-hint").textContent = "";
-    showSearchProgress("", false);
+    // The progress strip is a polite live region: the failure must be spoken,
+    // not only painted into the result column.
+    showSearchProgress(t("Search failed") + (reason ? " · " + reason : ""), true);
     showSearchIntent(null);
   } finally {
     // Only the current owner may release the controls; a stale loop leaving
@@ -2628,12 +2709,15 @@ function showSearchIntent(intent) {
 /* query-intent-end */
 function resultCardHtml(r, i, kw) {
   const sub = [r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join('<span style="opacity:.4"> · </span>');
-  return `<div class="card hover result-card" data-sel="${i}" tabindex="0" role="group" aria-label="${resultCardLabel(r)}">
+  // The card keeps a click handler for the mouse, but the keyboard target is
+  // the title <button>: a div with role="button" cannot legally contain the
+  // Download button below it (nested interactive controls).
+  return `<div class="card hover result-card" data-sel="${i}">
     <div class="rc">
       ${coverBox(r)}
       <div class="rc-main">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <span class="row-title" style="white-space:normal">${highlight(r.title, kw)}</span>
+          <button type="button" class="row-title result-open" data-focus="${i}" aria-label="${resultCardLabel(r)}">${highlight(r.title, kw)}</button>
           ${matchBadgeHtml(r)}
           ${r.best ? `<span class="best-chip">${esc(t("Best match"))}</span>` : ""}
         </div>
@@ -2642,7 +2726,7 @@ function resultCardHtml(r, i, kw) {
       </div>
       <div class="rc-side">
         ${sourceCaps(r)}
-        <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
+        <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}" data-focus="${i}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
       </div>
     </div>
   </div>`;
@@ -2666,12 +2750,16 @@ function renderResults(results, kw) {
   // first screen (``#results`` itself is not the scroller).
   const scroller = box.closest(".scroll") || box;
   const scrollTop = scroller.scrollTop;
+  // Every streaming repaint replaces the whole list; if the user was tabbed
+  // onto a row (or "Show more"), put focus back on the same row.
+  const focusSnapshot = captureFocus(box, ["data-focus", "data-more"]);
   renderedKeyword = kw;
   renderedResultCount = Math.min(results.length, Math.max(RESULT_CHUNK, renderedResultCount));
   box.innerHTML = results.slice(0, renderedResultCount)
     .map((r, i) => resultCardHtml(r, i, kw)).join("") +
     moreResultsHtml(results.length, renderedResultCount);
   scroller.scrollTop = scrollTop;
+  restoreFocus(box, focusSnapshot);
 }
 function appendResultChunk() {
   const btn = $("#results-more");
@@ -2807,8 +2895,10 @@ $("#btn-rank").onclick = async () => {
     renderResults(results, "");
     $("#search-hint").textContent = t("{n} results in {s}s").replace("{n}", results.length).replace("{s}", "0.0");
   } catch (e) {
-    $("#results").innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("Search failed"))}</div><div class="s">${esc(String(e && e.message || e))}</div></div>`;
+    const reason = String(e && e.message || e);
+    $("#results").innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("Search failed"))}</div><div class="s">${esc(reason)}</div></div>`;
     $("#search-hint").textContent = "";
+    showSearchProgress(t("Search failed") + (reason ? " · " + reason : ""), true);
   } finally {
     btn.disabled = false;
   }
@@ -2821,11 +2911,22 @@ function renderCatChips() {
     `<button class="btn btn-sm btn-ghost" data-cat="${esc(c.id)}" data-gender="${catGender === "male" ? "1" : "2"}">${esc(c.name)}</button>`
   ).join("");
 }
+function setCatPanel(open) {
+  const panel = $("#cat-panel");
+  const btn = $("#btn-cats");
+  if (!panel) return;
+  panel.hidden = !open;
+  if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+function focusFirstCategory() {
+  const first = $("#cat-chips button");
+  if (first) first.focus({ preventScroll: true });
+}
 $("#btn-cats").onclick = async () => {
   const panel = $("#cat-panel");
-  if (!panel.hidden) { panel.hidden = true; return; }
-  panel.hidden = false;
-  if (Object.keys(catGroups).length) { renderCatChips(); return; }
+  if (!panel.hidden) { setCatPanel(false); return; }
+  setCatPanel(true);
+  if (Object.keys(catGroups).length) { renderCatChips(); focusFirstCategory(); return; }
   $("#cat-hint").textContent = t("Searching…");
   try {
     const data = await call("category_list");
@@ -2836,10 +2937,18 @@ $("#btn-cats").onclick = async () => {
     catGroups = (data && data.groups) || {};
     $("#cat-hint").textContent = "";
     renderCatChips();
+    focusFirstCategory();
   } catch (e) {
     $("#cat-hint").textContent = String(e && e.message || e);
   }
 };
+$("#cat-panel").addEventListener("keydown", e => {
+  if (e.key !== "Escape" || e.isComposing) return;
+  e.preventDefault();
+  setCatPanel(false);
+  const btn = $("#btn-cats");
+  if (btn) btn.focus({ preventScroll: true });
+});
 function switchCat(gender) {
   catGender = gender;
   $("#cat-male").className = "btn btn-sm " + (gender === "male" ? "btn-primary" : "btn-ghost");
@@ -3029,7 +3138,7 @@ function taskCard(k) {
     <div class="row-main">
       <div style="display:flex;align-items:center;gap:9px"><span class="row-title">${esc(k.title)}</span>${pill(k.status)}${retry}</div>
       <div class="row-sub">${meta.join(" ")}</div>
-      ${active || indet ? `<div class="progress ${indet ? "indeterminate" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100"${total > 0 ? ` aria-valuenow="${pct}"` : ""}><i style="width:${pct}%"></i></div>` : ""}
+      ${active || indet ? `<div class="progress ${indet ? "indeterminate" : ""}" role="progressbar" aria-label="${esc(k.title)}" aria-valuemin="0" aria-valuemax="100"${total > 0 ? ` aria-valuenow="${pct}"` : ""}${chapterText ? ` aria-valuetext="${esc(chapterText)}"` : ""}><i style="width:${pct}%"></i></div>` : ""}
       ${err}
     </div>
     <div class="row-actions">${exports}${copyErr}${openDir}
@@ -3280,6 +3389,7 @@ async function doMusicSearch() {
   hideMusicFailures();
   applyMusicTracks([]);
   musicSearchNote(t("Searching…"), false);
+  $("#m-tracks").setAttribute("aria-busy", "true");
   const started = performance.now();
   try {
     const job = await api("music_search_async", platform, kw, 30);
@@ -3340,6 +3450,7 @@ async function doMusicSearch() {
   } finally {
     if (token === musicSearchToken) {
       $("#m-spin").classList.remove("on");
+      $("#m-tracks").removeAttribute("aria-busy");
       $("#btn-m-search").disabled = false;
       $("#btn-m-dl").disabled = music.downloading || !music.searchId || !music.selected.size;
     }
