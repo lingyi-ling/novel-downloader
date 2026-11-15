@@ -402,6 +402,14 @@ def _download_file(
                 done += size
                 if progress:
                     progress(done, total)
+
+        # 这两步也必须在 try 内：长度不符会保留 .part 供续传、改名失败
+        # 可能留下 .part，但它们都是「本次尝试没成功」，已占用的整批预算
+        # 必须归还；否则重试会为同一批字节重复计费。
+        if total and done != total:
+            raise OSError(f"大小不符（期望 {total}，实得 {done}），断点已保留")
+
+        os.replace(tmp, dest)
     except _SizeBudgetExceeded:
         # 半文件必须消失：下次启动既不会把它当完整文件，也不会继续续传
         # 一个注定超限的目标。
@@ -417,10 +425,6 @@ def _download_file(
             with contextlib.suppress(Exception):
                 r.close()
 
-    if total and done != total:
-        raise OSError(f"大小不符（期望 {total}，实得 {done}），断点已保留")
-
-    os.replace(tmp, dest)
     return done, start
 
 
