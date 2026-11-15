@@ -349,12 +349,18 @@ async def test_submit_login_validates_values_type(app: FastAPI) -> None:
 
 
 def _parse_sse(raw: str) -> list[tuple[str, Any]]:
-    """Parse an SSE payload into ``(event, data)`` pairs."""
+    """Parse an SSE payload into ``(event, data)`` pairs.
+
+    Comment-only blocks (``: keepalive``) carry no event and are skipped, as a
+    compliant SSE client does.
+    """
     events: list[tuple[str, Any]] = []
     for block in raw.split("\n\n"):
         if not block.strip():
             continue
         lines = block.split("\n")
+        if not any(line.startswith("event: ") for line in lines):
+            continue
         event = next(
             line[len("event: ") :] for line in lines if line.startswith("event: ")
         )
@@ -402,6 +408,31 @@ async def test_login_requests_stream_http_envelope(
     assert [event for event, _ in events] == ["requests", "requests"]
     assert events[0][1] == [{"req_id": "r1"}]
     assert calls["interval"] == api_routes.LOGIN_STREAM_INTERVAL
+
+
+@pytest.mark.asyncio
+async def test_login_requests_stream_sends_keepalives_while_idle(
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api_routes, "SSE_KEEPALIVE_INTERVAL", 0.01)
+    frame = api_routes._sse_frame("requests", [{"req_id": "r1"}])
+
+    async def slow_stream(interval: float) -> Any:
+        yield frame
+        await asyncio.sleep(0.05)
+        yield frame
+
+    monkeypatch.setattr(api_routes, "_login_request_event_stream", slow_stream)
+
+    async with (
+        _client(app) as client,
+        client.stream("GET", "/api/v1/login/requests/stream") as response,
+    ):
+        raw = "".join([chunk async for chunk in response.aiter_text()])
+
+    assert api_routes.SSE_KEEPALIVE_FRAME in raw
+    assert [event for event, _ in _parse_sse(raw)] == ["requests", "requests"]
 
 
 @pytest.mark.asyncio

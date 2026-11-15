@@ -23,7 +23,7 @@ import os
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 from dataclasses import dataclass
 from datetime import date
 from functools import lru_cache
@@ -147,6 +147,17 @@ TASK_STREAM_INTERVAL = 1.0
 #: Seconds between two polls of the credential broker on
 #: ``GET /login/requests/stream``.
 LOGIN_STREAM_INTERVAL = 1.0
+
+#: Seconds of silence on an SSE stream before a comment frame is sent.
+#:
+#: Proxies and NAT gateways drop long-lived responses that stay byte-silent;
+#: the comment frame resets their idle timers without producing an SSE event,
+#: so the event contract is unchanged.
+SSE_KEEPALIVE_INTERVAL = 15.0
+
+#: Comment frame emitted after :data:`SSE_KEEPALIVE_INTERVAL` of silence.
+#: A leading colon marks an SSE comment; compliant parsers ignore it.
+SSE_KEEPALIVE_FRAME = ": keepalive\n\n"
 
 #: Queue groups in the order they are concatenated when paginating ``/tasks``.
 _TASK_GROUPS = ("pending", "running", "completed")
@@ -564,6 +575,61 @@ def _sse_frame(event: str, payload: Any) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
+async def _stream_with_keepalive(
+    source: AsyncIterator[str],
+    interval: float | None = None,
+) -> AsyncIterator[str]:
+    """
+    Interleave ``: keepalive`` comment frames into an SSE frame source.
+
+    The next source frame is pulled in a background task instead of being
+    awaited inline. That matters for a slow source (a search site may answer
+    only after tens of seconds): while the pull is still pending a comment
+    frame is emitted and the *same* pull is awaited again. Cancelling the pull
+    on every idle timeout would close the source generator and lose its
+    result, which is exactly what must not happen.
+
+    The idle timer starts when the stream starts and is reset after every
+    frame, data or comment. Nothing is emitted at time zero and nothing after
+    the source ends. ``interval`` defaults to :data:`SSE_KEEPALIVE_INTERVAL`;
+    it is resolved at call time so tests can shorten the module constant.
+
+    Closing or cancelling this generator cancels the in-flight pull and closes
+    the source, so the source's own ``finally``/``aclosing`` cleanup runs
+    promptly when the client disconnects.
+    """
+    if interval is None:
+        interval = SSE_KEEPALIVE_INTERVAL
+    iterator = source.__aiter__()
+    pending: asyncio.Future[str] | None = asyncio.ensure_future(anext(iterator))
+    try:
+        while pending is not None:
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if not done:
+                # The source has been silent for a whole interval: keep the
+                # connection alive and keep waiting on the same pull.
+                yield SSE_KEEPALIVE_FRAME
+                continue
+            try:
+                frame = pending.result()
+            except StopAsyncIteration:
+                pending = None
+                break
+            yield frame
+            pending = asyncio.ensure_future(anext(iterator))
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with suppress(asyncio.CancelledError):
+                await pending
+        # A source suspended at its last ``yield`` is still open; closing it
+        # runs the cleanup its caller is entitled to (``aclosing`` etc.).
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is not None:
+            with suppress(asyncio.CancelledError, RuntimeError):
+                await aclose()
+
+
 async def _search_event_stream(
     keyword: str,
     sites: list[str] | None,
@@ -696,6 +762,10 @@ async def stream_search(
 
     ``min_words``/``max_words``/``updated_after`` optionally narrow each
     site's chunk in place; they never reorder rows or change the event shape.
+
+    While the stream is idle for :data:`SSE_KEEPALIVE_INTERVAL` seconds (for
+    example while every site is still answering) a ``: keepalive`` comment
+    frame is written. Comments carry no event; clients may ignore them.
     """
     selected: list[str] | None = None
     if sites is not None:
@@ -710,14 +780,16 @@ async def stream_search(
             ) from exc
 
     return StreamingResponse(
-        _search_event_stream(
-            keyword,
-            selected,
-            per_site_limit,
-            timeout,
-            min_words=min_words,
-            max_words=max_words,
-            updated_after=updated_after,
+        _stream_with_keepalive(
+            _search_event_stream(
+                keyword,
+                selected,
+                per_site_limit,
+                timeout,
+                min_words=min_words,
+                max_words=max_words,
+                updated_after=updated_after,
+            )
         ),
         media_type="text/event-stream",
         headers={
@@ -906,9 +978,13 @@ async def stream_tasks(
     ``data`` is a JSON object with the same ``pending`` / ``running`` /
     ``completed`` structure as ``GET /api/v1/tasks``. The stream ends when the
     client disconnects.
+
+    If the stream ever stays idle for :data:`SSE_KEEPALIVE_INTERVAL` seconds a
+    ``: keepalive`` comment frame is written. Comments carry no event; clients
+    may ignore them.
     """
     return StreamingResponse(
-        _task_event_stream(mgr, TASK_STREAM_INTERVAL),
+        _stream_with_keepalive(_task_event_stream(mgr, TASK_STREAM_INTERVAL)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1044,9 +1120,13 @@ async def stream_login_requests() -> StreamingResponse:
     ``GET /api/v1/login/requests``; a non-empty -> empty transition emits one
     last ``requests`` event with an empty list. The stream ends when the
     client disconnects.
+
+    Quiet periods longer than :data:`SSE_KEEPALIVE_INTERVAL` seconds receive a
+    ``: keepalive`` comment frame. Comments carry no event; clients may ignore
+    them.
     """
     return StreamingResponse(
-        _login_request_event_stream(LOGIN_STREAM_INTERVAL),
+        _stream_with_keepalive(_login_request_event_stream(LOGIN_STREAM_INTERVAL)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -594,12 +594,18 @@ async def test_search_group_must_be_a_boolean(
 
 
 def _parse_sse(raw: str) -> list[tuple[str, Any]]:
-    """Parse an SSE payload into ``(event, data)`` pairs."""
+    """Parse an SSE payload into ``(event, data)`` pairs.
+
+    Comment-only blocks (the stream's ``: keepalive`` frames) carry no event
+    and are skipped, mirroring what a compliant SSE client does.
+    """
     events: list[tuple[str, Any]] = []
     for block in raw.split("\n\n"):
         if not block.strip():
             continue
         lines = block.split("\n")
+        if not any(line.startswith("event: ") for line in lines):
+            continue
         event = next(
             line[len("event: ") :] for line in lines if line.startswith("event: ")
         )
@@ -608,6 +614,101 @@ def _parse_sse(raw: str) -> list[tuple[str, Any]]:
         )
         events.append((event, json.loads(data)))
     return events
+
+
+# ---------------------------------------------------------------------------
+# SSE keepalive comment frames
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_with_keepalive_silent_when_source_is_busy() -> None:
+    async def source() -> Any:
+        for index in range(3):
+            yield f"event: tick\ndata: {index}\n\n"
+
+    frames = [
+        frame async for frame in api_routes._stream_with_keepalive(source(), 0.01)
+    ]
+
+    assert frames == [
+        "event: tick\ndata: 0\n\n",
+        "event: tick\ndata: 1\n\n",
+        "event: tick\ndata: 2\n\n",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_with_keepalive_emits_comment_after_idle() -> None:
+    async def source() -> Any:
+        yield "event: first\ndata: 1\n\n"
+        await asyncio.sleep(0.05)
+        yield "event: second\ndata: 2\n\n"
+
+    frames = [
+        frame async for frame in api_routes._stream_with_keepalive(source(), 0.01)
+    ]
+
+    assert frames[0] == "event: first\ndata: 1\n\n"
+    assert frames[-1] == "event: second\ndata: 2\n\n"
+    # Only comment frames sit between the two data frames: never before the
+    # first frame and never after the last one.
+    assert frames[1:-1]
+    assert set(frames[1:-1]) == {api_routes.SSE_KEEPALIVE_FRAME}
+
+
+@pytest.mark.asyncio
+async def test_stream_with_keepalive_protects_initial_wait() -> None:
+    async def source() -> Any:
+        await asyncio.sleep(0.05)
+        yield "event: late\ndata: 1\n\n"
+
+    frames = [
+        frame async for frame in api_routes._stream_with_keepalive(source(), 0.01)
+    ]
+
+    # A slow first site is exactly the idle window the heartbeat exists for.
+    assert frames[0] == api_routes.SSE_KEEPALIVE_FRAME
+    assert set(frames[:-1]) == {api_routes.SSE_KEEPALIVE_FRAME}
+    assert frames[-1] == "event: late\ndata: 1\n\n"
+
+
+@pytest.mark.asyncio
+async def test_stream_with_keepalive_stops_on_source_error() -> None:
+    boom = RuntimeError("source failed")
+
+    async def source() -> Any:
+        yield "event: first\ndata: 1\n\n"
+        raise boom
+
+    frames: list[str] = []
+    with pytest.raises(RuntimeError) as info:
+        async for frame in api_routes._stream_with_keepalive(source(), 0.01):
+            frames.append(frame)
+
+    assert info.value is boom
+    assert frames == ["event: first\ndata: 1\n\n"]
+
+
+@pytest.mark.asyncio
+async def test_stream_with_keepalive_closes_source_on_cancel() -> None:
+    closed = asyncio.Event()
+
+    async def source() -> Any:
+        try:
+            await asyncio.sleep(3600)
+            yield "never"
+        finally:
+            closed.set()
+
+    stream = api_routes._stream_with_keepalive(source(), 0.01)
+    assert await anext(stream) == api_routes.SSE_KEEPALIVE_FRAME
+
+    # Simulates the client disconnecting: the in-flight pull is cancelled and
+    # the source generator's cleanup runs without waiting for its next frame.
+    await stream.aclose()
+
+    assert closed.is_set()
 
 
 @pytest.mark.asyncio
@@ -700,6 +801,41 @@ async def test_search_stream_emits_results_then_done(
     assert calls["sites"] == ["b520", "qidian"]
     assert calls["per_site_limit"] == 2
     assert calls["timeout"] == 1.5
+
+
+@pytest.mark.asyncio
+async def test_search_stream_sends_keepalives_while_idle(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow first site must not leave the connection byte-silent."""
+    monkeypatch.setattr(api_routes, "SSE_KEEPALIVE_INTERVAL", 0.01)
+
+    async def slow_search_stream(
+        keyword: str,
+        *,
+        sites: list[str] | None = None,
+        per_site_limit: int = 5,
+        timeout: float = 5.0,
+    ) -> Any:
+        await asyncio.sleep(0.05)
+        yield [{"site": "alpha", "book_id": "1"}]
+
+    monkeypatch.setattr(api_routes, "search_stream", slow_search_stream)
+
+    async with client.stream(
+        "GET",
+        "/api/v1/search/stream",
+        params={"keyword": "斗破", "sites": "qidian"},
+    ) as response:
+        raw = "".join([chunk async for chunk in response.aiter_text()])
+
+    assert api_routes.SSE_KEEPALIVE_FRAME in raw
+    # The comment frames are invisible to the event contract.
+    events = _parse_sse(raw)
+    assert [event for event, _ in events] == ["results", "done"]
+    assert events[0][1][0]["book_id"] == "1"
+    assert events[1][1] == {"total": 1}
 
 
 @pytest.mark.asyncio
@@ -1237,6 +1373,28 @@ async def test_tasks_stream_emits_snapshot_events(
     assert events[0][1] == payload
     assert calls["manager"] is fake_manager
     assert calls["interval"] == api_routes.TASK_STREAM_INTERVAL
+
+
+@pytest.mark.asyncio
+async def test_tasks_stream_sends_keepalives_while_idle(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api_routes, "SSE_KEEPALIVE_INTERVAL", 0.01)
+    payload = {"pending": [], "running": [], "completed": []}
+
+    async def slow_stream(mgr: Any, interval: float) -> Any:
+        yield api_routes._sse_frame("snapshot", payload)
+        await asyncio.sleep(0.05)
+        yield api_routes._sse_frame("snapshot", payload)
+
+    monkeypatch.setattr(api_routes, "_task_event_stream", slow_stream)
+
+    async with client.stream("GET", "/api/v1/tasks/stream") as response:
+        raw = "".join([chunk async for chunk in response.aiter_text()])
+
+    assert api_routes.SSE_KEEPALIVE_FRAME in raw
+    assert [event for event, _ in _parse_sse(raw)] == ["snapshot", "snapshot"]
 
 
 @pytest.mark.asyncio

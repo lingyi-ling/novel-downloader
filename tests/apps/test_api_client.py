@@ -234,6 +234,34 @@ def test_iter_tasks_parses_sse_stream() -> None:
     assert recorder.requests[0].url.path == "/api/v1/tasks/stream"
 
 
+def test_iter_tasks_ignores_leading_and_trailing_keepalives() -> None:
+    """Heartbeat comments never count as an event, wherever they appear."""
+    payload = {"pending": [], "running": [], "completed": []}
+    body = (
+        ": keepalive\n"
+        "\n"
+        ": keepalive\n"
+        "\n"
+        "event: snapshot\n"
+        'data: {"pending":[],"running":[],"completed":[]}\n'
+        "\n"
+        ": keepalive\n"
+        "\n"
+    )
+    recorder = Recorder(
+        lambda _request: httpx.Response(
+            200,
+            content=body.encode("utf-8"),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    with make_client(recorder) as client:
+        snapshots = list(client.iter_tasks())
+
+    assert snapshots == [payload]
+
+
 def test_iter_tasks_raises_api_error_for_error_response() -> None:
     recorder = Recorder(
         lambda _request: httpx.Response(401, json={"detail": "Invalid token"})
