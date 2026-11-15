@@ -170,7 +170,7 @@ novel-cli download --help
 * For supported sites, see: [Supported Sites List](supported-sites/index.md)
 * For more examples, see: [CLI Usage Guide](guide/cli-examples.md)
 * You can use `CTRL+C` during a run to cancel the task
-* For music downloads, see: [CLI Usage Guide - music subcommand](guide/cli-examples.en.md#7-music-subcommand)
+* For music downloads, see: [CLI Usage Guide - music subcommand](guide/cli-examples.en.md#music-subcommand)
 
 ### Local REST API
 
@@ -232,7 +232,7 @@ novel-cli music search "keyword" --platform netease
 novel-cli music download "keyword" --pick 1
 ```
 
-For option details, see: [CLI Usage Guide - music subcommand](guide/cli-examples.en.md#7-music-subcommand). For engine behaviour (aggregate search, source merging, playlist export, platform health, DRM limits), see the [Music Downloads guide](guide/music.en.md).
+For option details, see: [CLI Usage Guide - music subcommand](guide/cli-examples.en.md#music-subcommand). For engine behaviour (aggregate search, source merging, playlist export, platform health, DRM limits), see the [Music Downloads guide](guide/music.en.md).
 
 ---
 
