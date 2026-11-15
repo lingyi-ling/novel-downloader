@@ -464,7 +464,7 @@ class SourcesCmd(Command):
                     )
                     item["http_status"] = result.status if result is not None else None
                 payload.append(item)
-            ui.emit(json.dumps(payload, ensure_ascii=False, indent=2))
+            ui.emit(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             if failed:
                 raise SystemExit(EXIT_FAILURE)
             return

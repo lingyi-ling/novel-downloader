@@ -30,17 +30,13 @@ mock HTTP site and an installed rule source, exactly like
 paths that need a deterministic trigger replace one engine/manifest/probe with
 an in-memory fake because a monkeypatch cannot cross a process boundary.
 
-Output-format note: ``sources list --json`` is the one covered command whose
-documented success contract is *multi-line* JSON (see
-``docs/guide/cli-examples.md``, output encoding contract).  It is still
-asserted to be exactly one JSON document with nothing else on stdout; forcing
-it onto a single line would change that documented contract, so the matrix
-records the deviation instead of silently rewriting the format.
+Every covered ``--json`` command emits its document as one compact single-line
+JSON object followed by a single trailing newline, so a line-oriented reader
+can consume one record per line.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import threading
 from collections.abc import Callable, Iterator
@@ -73,11 +69,6 @@ USAGE_ERROR = 2
 #: Exit code for a runtime failure (network, site, config, file, ...).
 RUNTIME_FAILURE = 1
 
-#: stdout formats the matrix knows about.
-SINGLE_LINE = "single-line"
-#: A documented ``indent=2`` multi-line document (``sources list``).
-MULTI_LINE_DOCUMENT = "multi-line"
-
 
 @dataclass(frozen=True)
 class _Context:
@@ -103,8 +94,6 @@ class _Case:
     code: int
     #: Expected top-level JSON type; ``None`` means "stdout must stay empty".
     top_level: type | None = None
-    #: ``SINGLE_LINE`` or ``MULTI_LINE_DOCUMENT``; ignored when no document.
-    stdout_format: str = SINGLE_LINE
     prepare: Prepare | None = None
     inproc: bool = False
     check: PayloadCheck | None = None
@@ -198,13 +187,7 @@ def _assert_case(
         )
         return None
 
-    if case.stdout_format == SINGLE_LINE:
-        payload = _one_line_json(stdout)
-    else:
-        # The documented multi-line form: json.loads() already rejects any
-        # extra text around the document, and the trailing newline is required.
-        assert stdout.endswith("\n"), f"document is not newline-terminated: {stdout!r}"
-        payload = json.loads(stdout)
+    payload = _one_line_json(stdout)
     assert isinstance(payload, case.top_level), (
         f"top-level JSON type is {type(payload).__name__}, "
         f"expected {case.top_level.__name__}"
@@ -590,7 +573,6 @@ SUCCESS_CASES: tuple[_Case, ...] = (
         ("sources", "list", "--json"),
         0,
         list,
-        stdout_format=MULTI_LINE_DOCUMENT,
         check=_check_sources,
     ),
     _Case(
@@ -690,7 +672,6 @@ FAILURE_CASES: tuple[_Case, ...] = (
         ("sources", "list", "--check", "--json"),
         RUNTIME_FAILURE,
         list,
-        stdout_format=MULTI_LINE_DOCUMENT,
         prepare=_prepare_sources_check_failure,
         inproc=True,
         check=_check_sources_failed,
@@ -744,49 +725,3 @@ def test_json_runtime_failure_contract(
 ) -> None:
     """A runtime failure exits 1 and still emits the promised document."""
     _assert_case(case, ctx, monkeypatch, capsys)
-
-
-def test_sources_list_is_the_only_documented_multiline_json_document() -> None:
-    """Record the one covered command whose documented format is multi-line.
-
-    The output-encoding contract names ``sources list`` among the commands
-    that use ``indent=2``; changing it to one line would change a documented
-    user-visible contract.  The matrix therefore accepts (and locks) "one
-    valid JSON document" rather than "one line" for it.  If the format is
-    unified later, update the docs and flip this case to ``SINGLE_LINE``.
-    """
-    multi_line = {
-        " ".join(case.argv[:2])
-        for case in (*SUCCESS_CASES, *FAILURE_CASES)
-        if case.stdout_format == MULTI_LINE_DOCUMENT
-    }
-    assert multi_line == {"sources list"}
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "documented contract: sources list --json emits indent=2 multi-line "
-        "JSON; forcing one line would change the success contract"
-    ),
-)
-def test_sources_list_json_meets_the_uniform_single_line_rule(
-    ctx: _Context,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Pin the deviation: if this starts passing, update docs and the table.
-
-    Strict xfail, so a future compaction of the document turns into an XPASS
-    failure instead of silently leaving the matrix and the prose disagreeing.
-    """
-    case = next(
-        case
-        for case in SUCCESS_CASES
-        if case.argv[:2] == ("sources", "list")
-        and case.stdout_format == MULTI_LINE_DOCUMENT
-    )
-    code, stdout, stderr = _invoke(case, ctx, monkeypatch, capsys)
-    assert code == 0
-    _assert_clean_streams(stdout, stderr)
-    _one_line_json(stdout)
