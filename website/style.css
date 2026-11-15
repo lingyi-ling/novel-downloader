@@ -11,6 +11,9 @@
   --bg-alt: #eef2f7;
   --card: #ffffff;
   --border: #e3e8ef;
+  /* stronger hairline for dashed rules and scope tags, which need to be seen
+     as structure rather than as a disabled control */
+  --border-strong: #c3cddc;
   --text: #16233a;
   --text-2: #475569;
   /* AA on both --bg and --bg-alt (the translucent nav sits over both) */
@@ -34,6 +37,7 @@
   --bg-alt: #0f172a;
   --card: #111c2e;
   --border: #22304a;
+  --border-strong: #344663;
   --text: #e8eef7;
   --text-2: #a9b7cc;
   --text-3: #8291a9;
@@ -254,6 +258,76 @@ svg { display: block; }
   transition: transform .18s ease;
 }
 .download-card:hover .dl-link { transform: translateX(4px); }
+
+/* ============================================================ search demo
+   A worked example of one aggregate search. It sits below the 3×3 grid
+   rather than inside the first card: in-card it made row 1 twice as tall as
+   rows 2–3 (a third of a card of empty space beside it) and its intent labels
+   reused the accent pill that marks a row-level match tier. Three visual
+   languages keep the meanings apart — search-level intent is a dashed neutral
+   scope tag, a match tier is an accent result badge, and a sort option is
+   plain text, never a control. */
+.search-demo {
+  margin-top: 18px; padding: 16px 20px 18px;
+  background: var(--bg-alt); border: 1px solid var(--border);
+  border-radius: var(--radius); display: grid; gap: 12px;
+}
+.sd-head {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 12px;
+  padding-bottom: 10px; border-bottom: 1px dashed var(--border-strong);
+}
+.sd-kicker {
+  font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--text-3);
+}
+.sd-merged { margin-left: auto; font-size: 11.5px; color: var(--text-3); }
+.sd-result { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 8px; }
+.sd-book { font-size: 15px; font-weight: 700; letter-spacing: -.01em; color: var(--text); }
+.sd-note { margin-left: auto; font-size: 11.5px; color: var(--text-2); }
+.sd-score {
+  font-size: 11.5px; font-weight: 600; color: var(--text-2);
+  background: var(--card); border: 1px solid var(--border); border-radius: 99px;
+  padding: 1px 8px; font-variant-numeric: tabular-nums;
+}
+.sd-groups { display: grid; grid-template-columns: 1.25fr 1fr 1.1fr; gap: 10px 24px; }
+.sd-group { display: flex; flex-wrap: wrap; align-items: center; align-content: flex-start; gap: 4px 6px; }
+.sd-label {
+  flex: 1 0 100%; font-size: 11px; font-weight: 700;
+  letter-spacing: .04em; color: var(--text-3);
+}
+.sd-sub {
+  flex: 1 0 100%; margin-top: -2px; font-size: 11.5px; line-height: 1.5;
+  color: var(--text-2);
+}
+/* row-level result badge: the accent pill language used across the cards */
+.sd-tier {
+  font-size: 11.5px; font-weight: 600; color: var(--accent-ink);
+  background: var(--accent-soft); border: 1px solid var(--accent-soft-2);
+  border-radius: 99px; padding: 1px 8px;
+}
+/* search-level scope: neutral, dashed, square-ish — deliberately not a badge */
+.sd-scope {
+  font-size: 11.5px; font-weight: 600; color: var(--text-2);
+  background: var(--card); border: 1px dashed var(--border-strong);
+  border-radius: 6px; padding: 1px 7px;
+}
+.sd-or { font-size: 11.5px; color: var(--text-3); }
+/* plain text with separators: a demo of the choices, not a segmented control */
+.sd-sort-opt { font-size: 11.5px; color: var(--text-2); }
+.sd-sort-opt + .sd-sort-opt::before { content: "·"; margin-right: 6px; color: var(--text-3); }
+.sd-sort-opt.is-on { color: var(--accent-ink); font-weight: 600; }
+.sd-sort-opt.is-on::before {
+  content: ""; display: inline-block; width: 5px; height: 5px; margin-right: 5px;
+  border-radius: 50%; background: var(--accent); vertical-align: 2px;
+}
+@media (max-width: 900px) {
+  .sd-groups { grid-template-columns: 1fr; gap: 12px; }
+}
+@media (max-width: 560px) {
+  .search-demo { padding: 14px 14px 16px; }
+  .sd-merged, .sd-note { margin-left: 0; }
+  .sd-note { flex: 1 0 100%; }
+}
 
 /* ============================================================ tabs / code */
 .tabs {
@@ -504,6 +578,12 @@ svg { display: block; }
 .verify-dl .c { color: #8291a9; user-select: none; }
 .verify-dl .verify-note { font-size: 13px; color: var(--text-3); }
 .verify-dl .dl-link { text-decoration: underline; text-underline-offset: 3px; }
+/* a flex row instead of inline anchors: the two manifests used to touch,
+   separated only by the whitespace of the source line */
+.verify-dl .verify-links {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: 4px 22px; margin: 2px 0 8px;
+}
 
 /* Code that is wider than the viewport scrolls inside its own box; a visible,
    slim scrollbar (rather than the overlay default) tells phone readers the

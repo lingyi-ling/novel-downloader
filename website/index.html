@@ -209,34 +209,7 @@
         <article class="card reveal">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
           <h3 data-en="Aggregate search">聚合搜索</h3>
-          <p data-en="59 sources queried concurrently, ranked by a five-signal quality score with an explainable match tier (exact / prefix / contains / partial) and a relevance score; desktop and Android sort by relevance, quality, word count or update time. Same-book results merge across sites with source capsules and a recent-search cache (optionally on disk, reusable across restarts). Results stream in (first rows in ~0.2s); the desktop app shows per-source progress, failure counts and elapsed time, and a new query cancels the previous one.">59 个搜索源并发查询，按关键词覆盖度、字数、更新时间、站点权重、完结状态五信号排序，并给出可解释的匹配等级（精确 / 前缀 / 包含 / 部分）与相关度分数；桌面与 Android 可按相关度、质量、字数、更新时间切换排序。同书多源合并、来源胶囊、最近搜索缓存（可选落盘，重启后仍可复用）。结果流式到达（首屏约 0.2 秒），桌面端逐源显示进度、失败数与耗时，新搜索自动取消旧请求。</p>
-          <div style="display:grid; gap:8px; margin-top:14px; padding:11px 12px; border:1px solid var(--border); border-radius:10px; background:var(--bg-alt); font-size:13px; color:var(--text-2)">
-            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px">
-              <strong data-en="A Record of a Mortal's Journey to Immortality" style="font-size:13.5px; color:var(--text)">凡人修仙传</strong>
-              <span class="gh-chip inline" data-en="Exact">精确</span>
-              <span class="gh-chip" data-en="Relevance 0.94">相关度 0.94</span>
-            </div>
-            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px">
-              <span data-en="Query intent · describes the whole search, not a row-level badge">查询意图 · 整次查询的判定，不是行级徽标</span>
-              <span class="gh-chip inline" data-en="Title match">书名匹配</span>
-              <span data-en="or">或</span>
-              <span class="gh-chip inline" data-en="Author match">作者匹配</span>
-            </div>
-            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px">
-              <span data-en="Match tier">匹配等级</span>
-              <span class="gh-chip" data-en="Exact">精确</span>
-              <span class="gh-chip" data-en="Prefix">前缀</span>
-              <span class="gh-chip" data-en="Contains">包含</span>
-              <span class="gh-chip" data-en="Partial">部分</span>
-            </div>
-            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px">
-              <span data-en="Sort · desktop and Android">排序 · 桌面 / Android</span>
-              <span class="gh-chip inline" data-en="Relevance">相关度</span>
-              <span class="gh-chip" data-en="Quality">质量</span>
-              <span class="gh-chip" data-en="Word count">字数</span>
-              <span class="gh-chip" data-en="Updated">更新时间</span>
-            </div>
-          </div>
+          <p data-en="59 sources queried concurrently, ranked by a five-signal quality score with an explainable match tier and a relevance score; same-book results merge into one row with source capsules and a recent-search cache (optionally on disk). Results stream in (first rows in ~0.2s); the desktop app shows per-source progress, failure counts and elapsed time, and a new query cancels the previous one.">59 个搜索源并发查询，按关键词覆盖度、字数、更新时间、站点权重、完结状态五信号排序，并给出可解释的匹配等级与相关度分数；同书多源合并成一行、来源胶囊、最近搜索缓存（可选落盘）。结果流式到达（首屏约 0.2 秒），桌面端逐源显示进度、失败数与耗时，新搜索自动取消旧请求。</p>
         </article>
         <article class="card reveal">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg></div>
@@ -279,6 +252,48 @@
           <p data-en="Desktop, CLI and Android read the update manifest (latest.json) at most once every 24 hours. A new version is downloaded in the background and SHA-256 verified; on Windows it installs when you quit (the portable build replaces its own folder), and Android needs one confirmation. The ready state is bound to its version, and the installer restarts the app after a silent update.">桌面、CLI 与安卓每 24 小时最多读取一次更新清单（latest.json）；新版本后台下载并校验 SHA-256，Windows 退出即装（便携版替换当前目录），安卓确认一次即可。更新就绪状态与版本绑定，静默更新后安装器自动重启。</p>
         </article>
       </div>
+
+      <!-- ============================== SEARCH DEMO
+           One worked example, kept outside the 3×3 grid: inside the
+           aggregate-search card it stretched the two short cards beside it
+           to twice their content height, and its intent labels used the same
+           accent treatment as the row-level tier badge. -->
+      <div class="search-demo reveal" id="search-demo">
+        <div class="sd-head">
+          <span class="sd-kicker" data-en="Worked example · one aggregate search">示例 · 一次聚合搜索</span>
+          <span class="sd-merged" data-en="Same book merged across sites">同书多源合并</span>
+        </div>
+        <div class="sd-result">
+          <span class="sd-book" data-en="A Record of a Mortal's Journey to Immortality">凡人修仙传</span>
+          <span class="sd-tier" data-en="Exact">精确</span>
+          <span class="sd-score" data-en="Relevance 0.94">相关度 0.94</span>
+          <span class="sd-note" data-en="Row level · every result carries its own tier and score">行级 · 每条结果各自的匹配等级与分数</span>
+        </div>
+        <div class="sd-groups">
+          <div class="sd-group sd-intent" id="sd-intent">
+            <span class="sd-label" data-en="Query intent">查询意图</span>
+            <span class="sd-sub" data-en="The whole search, not a row-level badge">整次查询，不是行级徽标</span>
+            <span class="sd-scope" data-en="Title match">书名匹配</span>
+            <span class="sd-or" data-en="or">或</span>
+            <span class="sd-scope" data-en="Author match">作者匹配</span>
+          </div>
+          <div class="sd-group sd-tiers" id="sd-tiers">
+            <span class="sd-label" data-en="Match tier">匹配等级</span>
+            <span class="sd-tier" data-en="Exact">精确</span>
+            <span class="sd-tier" data-en="Prefix">前缀</span>
+            <span class="sd-tier" data-en="Contains">包含</span>
+            <span class="sd-tier" data-en="Partial">部分</span>
+          </div>
+          <div class="sd-group sd-sort" id="sd-sort">
+            <span class="sd-label" data-en="Sort · desktop and Android">排序 · 桌面 / Android</span>
+            <span class="sd-sort-opt is-on" data-en="Relevance">相关度</span>
+            <span class="sd-sort-opt" data-en="Quality">质量</span>
+            <span class="sd-sort-opt" data-en="Word count">字数</span>
+            <span class="sd-sort-opt" data-en="Updated">更新时间</span>
+          </div>
+        </div>
+      </div>
+      <!-- /SEARCH DEMO -->
     </div>
   </section>
 
@@ -444,10 +459,10 @@ cd novel-downloader/android
           <p><strong>macOS / Linux</strong></p>
           <pre><code>shasum -a 256 NovelDownloader-*.zip   <span class="c" data-en="# macOS"># macOS</span>
 sha256sum NovelDownloader-*.zip       <span class="c" data-en="# Linux"># Linux</span></code></pre>
-          <p>
+          <div class="verify-links">
             <a class="dl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/latest/download/SHA256SUMS.txt" target="_blank" rel="noopener">SHA256SUMS.txt →</a>
             <a class="dl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/latest/download/latest.json" target="_blank" rel="noopener">latest.json →</a>
-          </p>
+          </div>
           <p class="verify-note">
             <span data-en="Checksums catch corrupted or tampered downloads, but they are not a signature yet: manifest signing is built in and not enabled, so a checksum cannot by itself prove who published a file. Download only from the Releases link on this page or the official GitHub repository.">校验值能发现下载损坏或被替换的文件，但它还不是签名：清单签名机制已内置但尚未启用，校验值本身不能证明发布者身份。请只从本页的 Releases 链接或官方 GitHub 仓库下载。</span>
           </p>
