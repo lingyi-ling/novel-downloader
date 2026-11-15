@@ -1,3 +1,24 @@
+## v1.35.0 (2026-11-15)
+
+搜索可解释性与排序贯通 CLI/桌面/Android；API 请求追踪与 OpenAPI 契约完善。
+
+### Feature
+
+- **搜索排序**：桌面与 Android 新增相关度/质量（书源优先级）/字数/更新时间 + 升降序；桌面记忆选择，Android SavedStateHandle 恢复
+- **匹配徽标**：CLI 标题后缀、桌面/Android 结果徽标显示 精确/前缀/包含/部分/无 + 两位小数相关度；缺失字段不渲染
+- **API 请求追踪**：`X-Request-ID` 接受/生成、全响应回写、日志 `[id]` 前缀、并发 ContextVar 隔离；500/CORS 预检也带头
+- **OpenAPI**：搜索 11 个字段描述与示例、sort/order 枚举、rank_score/match_tier 范围说明
+
+### Fix
+
+- 桌面最终排序快照在行数不变时也会重绘，修复预览停留在未排序状态
+- 桥接剥离非排名行的杂散 rank 字段，防止站点伪造徽标
+
+### Test
+
+- Python **12750 passed / 47 skipped**；Android **534 unit tests** 全过；ruff/format/mypy 全绿
+- 新增 request-id 23 例、OpenAPI 4 例、桌面 16 例、Android 徽标 12 例
+
 ## v1.34.1 (2026-11-15)
 
 补丁版：把重定向 UTF-8、SSE 未知站点校验与发布工具修复带入实际发布产物。
