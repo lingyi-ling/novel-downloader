@@ -486,7 +486,9 @@ async def test_fast_request_is_logged_once_at_info(
     records = _access_records(caplog)
     assert len(records) == 1
     assert records[0].levelno == logging.INFO
-    assert re.fullmatch(r"GET /api/v1/health 200 \d+\.\d+ms", records[0].getMessage())
+    assert re.fullmatch(
+        r"\[[0-9a-f-]{36}\] GET /api/v1/health 200 \d+\.\d+ms", records[0].getMessage()
+    )
 
 
 @pytest.mark.asyncio
@@ -502,8 +504,13 @@ async def test_error_requests_are_logged_with_their_status(
     assert bad_method.status_code == 405
     messages = [record.getMessage() for record in _access_records(caplog)]
     assert len(messages) == 2
-    assert re.fullmatch(r"GET /api/v1/tasks/does-not-exist 404 \d+\.\d+ms", messages[0])
-    assert re.fullmatch(r"DELETE /api/v1/health 405 \d+\.\d+ms", messages[1])
+    assert re.fullmatch(
+        r"\[[0-9a-f-]{36}\] GET /api/v1/tasks/does-not-exist 404 \d+\.\d+ms",
+        messages[0],
+    )
+    assert re.fullmatch(
+        r"\[[0-9a-f-]{36}\] DELETE /api/v1/health 405 \d+\.\d+ms", messages[1]
+    )
 
 
 @pytest.mark.asyncio
@@ -520,7 +527,9 @@ async def test_query_string_is_never_logged(
     assert response.status_code == 200
     messages = [record.getMessage() for record in _access_records(caplog)]
     assert len(messages) == 1
-    assert re.fullmatch(r"GET /api/v1/tasks 200 \d+\.\d+ms", messages[0])
+    assert re.fullmatch(
+        r"\[[0-9a-f-]{36}\] GET /api/v1/tasks 200 \d+\.\d+ms", messages[0]
+    )
     assert "supersecret" not in caplog.text
     assert "api_key" not in caplog.text
 
@@ -541,7 +550,9 @@ async def test_downloads_body_is_never_logged(
     # The access line is present, but the file content never is.
     messages = [record.getMessage() for record in _access_records(caplog)]
     assert len(messages) == 1
-    assert re.fullmatch(r"GET /downloads/book.txt 200 \d+\.\d+ms", messages[0])
+    assert re.fullmatch(
+        r"\[[0-9a-f-]{36}\] GET /downloads/book.txt 200 \d+\.\d+ms", messages[0]
+    )
     assert "download-body-canary" not in caplog.text
 
 
@@ -564,7 +575,9 @@ async def test_slow_request_is_logged_at_warning(
     records = _access_records(caplog)
     assert len(records) == 1
     assert records[0].levelno == logging.WARNING
-    assert re.fullmatch(r"GET /api/v1/tasks 200 \d+\.\d+ms", records[0].getMessage())
+    assert re.fullmatch(
+        r"\[-\] GET /api/v1/tasks 200 \d+\.\d+ms", records[0].getMessage()
+    )
 
 
 @pytest.mark.asyncio
@@ -603,7 +616,9 @@ async def test_request_without_response_is_logged_as_500(
     records = _access_records(caplog)
     assert len(records) == 1
     assert records[0].levelno == logging.INFO
-    assert re.fullmatch(r"POST /api/v1/search 500 \d+\.\d+ms", records[0].getMessage())
+    assert re.fullmatch(
+        r"\[-\] POST /api/v1/search 500 \d+\.\d+ms", records[0].getMessage()
+    )
 
 
 @pytest.mark.asyncio

@@ -28,10 +28,17 @@ Request-hardening helpers shared by the REST API application.
   local server indefinitely. ``/api/v1/health`` is exempt and stale per-IP
   entries are dropped periodically so the counter cannot grow without bound;
   a hard cap on tracked keys (``max_keys``) bounds it even inside one window.
+* :class:`RequestIdMiddleware` assigns every HTTP request a correlation id:
+  a client-supplied ``X-Request-ID`` is reused when it is short and made of
+  safe characters, otherwise a fresh UUID4 is generated. The id is echoed on
+  every response (including error responses) and prefixed to the access log,
+  so a caller can name a failing request and the operator can find that exact
+  request in the log without exposing any internal detail.
 * :class:`RequestLoggingMiddleware` emits exactly one access-log line per
-  request (``method path status duration``). The query string is never logged
-  (it may carry tokens) and response bodies are never read for logging, so
-  the file content streamed from ``/downloads`` stays out of the log.
+  request (``[request_id] method path status duration``). The query string is
+  never logged (it may carry tokens) and response bodies are never read for
+  logging, so the file content streamed from ``/downloads`` stays out of the
+  log.
 * :class:`CacheControlMiddleware` stamps every ``/api/v1`` and ``/downloads``
   response with the right ``Cache-Control``: short client-side caching for
   slowly changing reference data, ``no-store`` for live data and for every
@@ -54,9 +61,12 @@ from __future__ import annotations
 import ipaddress
 import logging
 import math
+import re
 import time
+import uuid
 from collections import OrderedDict, deque
 from collections.abc import Iterable
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -167,6 +177,107 @@ SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
 #: directive blocks script execution while still letting the browser display
 #: plain text and images.
 DOWNLOADS_CSP = "sandbox; default-src 'none'"
+
+# ---------------------------------------------------------------------------
+# Request correlation
+# ---------------------------------------------------------------------------
+
+#: Header a client may send to name a request, and the header the API echoes
+#: on every response.
+REQUEST_ID_HEADER = "X-Request-ID"
+
+#: Longest client-supplied request id accepted. Anything longer is replaced
+#: with a generated id rather than truncated: an unbounded value would bloat
+#: both the log line and the response header.
+MAX_REQUEST_ID_LENGTH = 64
+
+#: Characters accepted in a client-supplied id: visible ASCII without
+#: whitespace, brackets or control characters. This is what keeps the value
+#: from forging a second log field, injecting a header, or emitting terminal
+#: escape sequences. A value that does not match is replaced, not rejected.
+REQUEST_ID_PATTERN = re.compile(rf"[A-Za-z0-9._:-]{{1,{MAX_REQUEST_ID_LENGTH}}}")
+
+#: Correlation id of the request being handled in the current async context.
+#: ASGI runs each request in its own task, so setting it here is isolated per
+#: request; the middleware resets the token afterwards even if the app raises.
+_REQUEST_ID: ContextVar[str] = ContextVar("novel_downloader_request_id", default="")
+
+
+def current_request_id() -> str:
+    """Return the correlation id of the request in this context, or ``""``."""
+    return _REQUEST_ID.get()
+
+
+def _new_request_id() -> str:
+    """Generate a server-side correlation id."""
+    return str(uuid.uuid4())
+
+
+def _request_id_from_scope(scope: Scope) -> str:
+    """
+    Return the client's ``X-Request-ID`` when it is safe to echo, else a UUID4.
+
+    Only the first header occurrence is considered. The value must be 1-64
+    characters from :data:`REQUEST_ID_PATTERN`; anything else (non-ASCII,
+    whitespace, control characters, brackets, overlong) is discarded and
+    replaced by a generated id so hostile input can never reach the log.
+    """
+    for name, value in scope.get("headers", ()):
+        if name != b"x-request-id":
+            continue
+        try:
+            candidate: str = value.decode("ascii")
+        except UnicodeDecodeError:
+            break
+        if REQUEST_ID_PATTERN.fullmatch(candidate):
+            return candidate
+        break
+    return _new_request_id()
+
+
+class RequestIdMiddleware:
+    """
+    Correlate a request with its response and its access-log line.
+
+    The id is resolved once, stored on ``scope["state"]["request_id"]`` (so a
+    route or an error handler can read it from ``request.state``) and published
+    through a :class:`~contextvars.ContextVar`. Every response gets it back in
+    :data:`REQUEST_ID_HEADER`, including responses produced by inner layers
+    such as the rate limiter's ``429`` or the body limit's ``413``.
+
+    Unhandled exceptions are rendered by Starlette's outermost
+    ``ServerErrorMiddleware``, *above* this layer, so the generated ``500``
+    response never passes through the ``send`` wrapper; the catch-all handler
+    in :func:`register_error_handlers` therefore stamps the header itself from
+    the id already stored on the request state.
+
+    This layer is installed outermost so even CORS preflight responses carry
+    the header. It never reads the request body, ``Authorization`` or cookies.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = _request_id_from_scope(scope)
+        # Starlette's Request.state reads and writes this exact mapping.
+        scope.setdefault("state", {})["request_id"] = request_id
+        token = _REQUEST_ID.set(request_id)
+
+        async def send_with_request_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message.setdefault("headers", [])
+                MutableHeaders(scope=message)[REQUEST_ID_HEADER] = request_id
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_request_id)
+        finally:
+            _REQUEST_ID.reset(token)
 
 
 def _content_length(scope: Scope) -> int | None:
@@ -785,12 +896,14 @@ class RequestLoggingMiddleware:
 
     The line has a single fixed shape for every outcome::
 
-        GET /api/v1/sites 200 1.8ms
+        [3f2a...] GET /api/v1/sites 200 1.8ms
 
-    i.e. ``method path status duration_ms``. Fast requests are logged at
-    ``INFO``; requests that took longer than ``slow_seconds`` (default
-    :data:`SLOW_REQUEST_SECONDS`) are logged at ``WARNING`` instead, with the
-    same line format.
+    i.e. ``[request_id] method path status duration_ms``. The id comes from
+    :class:`RequestIdMiddleware`; when this middleware is driven on its own
+    (unit tests, or an app that does not install the request-id layer) the
+    field is ``-``. Fast requests are logged at ``INFO``; requests that took
+    longer than ``slow_seconds`` (default :data:`SLOW_REQUEST_SECONDS`) are
+    logged at ``WARNING`` instead, with the same line format.
 
     Privacy guarantees:
 
@@ -822,6 +935,8 @@ class RequestLoggingMiddleware:
         method = str(scope.get("method", "-"))
         # Deliberately the path only: the query string may carry secrets.
         path = str(scope.get("path", "-"))
+        state = scope.get("state") or {}
+        request_id = str(state.get("request_id") or "-")
         started = time.perf_counter()
         logged = False
 
@@ -834,6 +949,7 @@ class RequestLoggingMiddleware:
                     path,
                     int(message["status"]),
                     time.perf_counter() - started,
+                    request_id,
                 )
             await send(message)
 
@@ -844,11 +960,13 @@ class RequestLoggingMiddleware:
                 # No response head ever went out (client disconnect or an
                 # error raised past the router): still record the request,
                 # reported as the failure it was.
-                self._log(method, path, 500, time.perf_counter() - started)
+                self._log(method, path, 500, time.perf_counter() - started, request_id)
 
-    def _log(self, method: str, path: str, status: int, elapsed: float) -> None:
+    def _log(
+        self, method: str, path: str, status: int, elapsed: float, request_id: str
+    ) -> None:
         """Emit the single access-log line: INFO, or WARNING when slow."""
-        line = f"{method} {path} {status} {elapsed * 1000:.1f}ms"
+        line = f"[{request_id}] {method} {path} {status} {elapsed * 1000:.1f}ms"
         if elapsed > self.slow_seconds:
             logger.warning("%s", line)
         else:
@@ -921,8 +1039,13 @@ def register_error_handlers(app: FastAPI) -> None:
         # otherwise be the only response class without ``no-store``, the
         # ``nosniff``/``no-referrer`` headers, and (in ``--cors`` mode) the
         # origin header a browser needs to read it. Stamp them here as well.
+        #
+        # The request id also has to be written here for the same reason: the
+        # request-id middleware's ``send`` wrapper never sees this response.
+        request_id = getattr(request.state, "request_id", None) or current_request_id()
         headers: dict[str, str] = {
             "Cache-Control": CACHE_CONTROL_NO_STORE,
+            REQUEST_ID_HEADER: request_id or _new_request_id(),
             **dict(SECURITY_HEADERS),
         }
         if getattr(request.app.state, "cors_enabled", False) and request.headers.get(
@@ -931,6 +1054,9 @@ def register_error_handlers(app: FastAPI) -> None:
             # Mirror CORSMiddleware: a wildcard origin is only meaningful (and
             # only emitted) when the request actually carries an Origin.
             headers["Access-Control-Allow-Origin"] = "*"
+            # And let the browser read the id, as CORSMiddleware does for the
+            # responses that pass through it (this one does not).
+            headers["Access-Control-Expose-Headers"] = REQUEST_ID_HEADER
         return JSONResponse(
             status_code=500,
             content={"detail": "Internal server error"},
@@ -953,8 +1079,11 @@ __all__ = [
     "DEFAULT_RATE_LIMIT_WINDOW",
     "DOWNLOADS_CSP",
     "DOWNLOADS_PREFIX",
+    "MAX_REQUEST_ID_LENGTH",
     "ORIGIN_ERROR_DETAIL",
     "RATE_LIMIT_EXEMPT_PATHS",
+    "REQUEST_ID_HEADER",
+    "REQUEST_ID_PATTERN",
     "SECURITY_HEADERS",
     "SLOW_REQUEST_SECONDS",
     "BodySizeLimitMiddleware",
@@ -962,7 +1091,9 @@ __all__ = [
     "DownloadsAuthMiddleware",
     "OriginCheckMiddleware",
     "RateLimitMiddleware",
+    "RequestIdMiddleware",
     "RequestLoggingMiddleware",
     "SecurityHeadersMiddleware",
+    "current_request_id",
     "register_error_handlers",
 ]

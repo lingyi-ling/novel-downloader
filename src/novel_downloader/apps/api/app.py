@@ -43,7 +43,13 @@ Additional hardening
   of tracked keys is capped. Counters are in-memory and per process, so a
   multi-worker uvicorn deployment gives every worker its own budget (``N ×``
   the configured limit in aggregate); ``novel-api`` itself runs one process.
-* Every request is logged as a single ``method path status duration`` line
+* Every response carries an ``X-Request-ID`` correlation id
+  (:class:`novel_downloader.apps.api.middleware.RequestIdMiddleware`): a
+  client-supplied value is reused when it is at most 64 safe characters,
+  otherwise a UUID4 is generated. The same id prefixes the access-log line, so
+  a reported failure can be located without exposing internal detail.
+* Every request is logged as a single ``[request_id] method path status
+  duration`` line
   (:class:`novel_downloader.apps.api.middleware.RequestLoggingMiddleware`,
   ``WARNING`` once it exceeds one second); query strings and response bodies
   are never logged.
@@ -96,11 +102,13 @@ from .middleware import (
     DEFAULT_RATE_LIMIT_MAX_KEYS,
     DEFAULT_RATE_LIMIT_WINDOW,
     RATE_LIMIT_EXEMPT_PATHS,
+    REQUEST_ID_HEADER,
     BodySizeLimitMiddleware,
     CacheControlMiddleware,
     DownloadsAuthMiddleware,
     OriginCheckMiddleware,
     RateLimitMiddleware,
+    RequestIdMiddleware,
     RequestLoggingMiddleware,
     SecurityHeadersMiddleware,
     register_error_handlers,
@@ -125,16 +133,20 @@ CORS_ALLOW_METHODS: tuple[str, ...] = ("GET", "POST", "DELETE", "HEAD", "OPTIONS
 #: Request headers a browser client may send through ``--cors``. The API reads
 #: ``Authorization`` / ``X-API-Key`` for auth and the JSON content type; a
 #: wildcard here would let any custom header through for no benefit.
+#: ``X-Request-ID`` is admitted so a browser client can correlate its own
+#: retries with the server-side access log.
 CORS_ALLOW_HEADERS: tuple[str, ...] = (
     "Accept",
     "Authorization",
     "Content-Type",
     "X-API-Key",
+    REQUEST_ID_HEADER,
 )
 
 #: Response headers browser clients may read through ``--cors``. ``Retry-After``
-#: is needed so a rate-limited browser client can back off correctly.
-CORS_EXPOSE_HEADERS: tuple[str, ...] = ("Retry-After",)
+#: is needed so a rate-limited browser client can back off correctly, and
+#: ``X-Request-ID`` so it can quote the id of a failed request in a bug report.
+CORS_EXPOSE_HEADERS: tuple[str, ...] = ("Retry-After", REQUEST_ID_HEADER)
 
 #: Upper bound accepted for ``rate_limit``. A larger value would not protect a
 #: local service anyway and is almost certainly a configuration mistake.
@@ -496,8 +508,9 @@ def create_app(
     # shares the API's origin.
     application.add_middleware(SecurityHeadersMiddleware)
 
-    # Outermost custom layer: logs one ``method path status duration`` line
-    # per request, whether it succeeded, failed or never produced a response.
+    # Outermost custom log layer: one ``[request_id] method path status
+    # duration`` line per request, whether it succeeded, failed or never
+    # produced a response. RequestIdMiddleware sits above it to set the id.
     application.add_middleware(RequestLoggingMiddleware)
 
     if cors:
@@ -511,6 +524,13 @@ def create_app(
             allow_headers=list(CORS_ALLOW_HEADERS),
             expose_headers=list(CORS_EXPOSE_HEADERS),
         )
+
+    # Outermost of all: assigns/echoes ``X-Request-ID`` on every response,
+    # including CORS preflights and the direct 401/413/429 answers from the
+    # layers below. Installed last so its ``send`` wrapper sees responses that
+    # CORSMiddleware generates itself. The 500 produced by Starlette's error
+    # layer sits above even this and is stamped by the error handler instead.
+    application.add_middleware(RequestIdMiddleware)
 
     downloads = _resolve_output_dir(output_dir)
     # Serving will simply return 404s if the directory cannot be created; do
