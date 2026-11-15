@@ -84,7 +84,7 @@ X-API-Key: my-secret
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/v1/health` | 健康检查，返回 `{status, version}`。 |
+| `GET` | `/api/v1/health` | 存活检查与只读诊断，返回 `{status, version, uptime_s, ...}`（见「健康检查」）。 |
 | `GET` | `/api/v1/sites` | 搜索/下载支持的站点，返回 `{search: {...}, download: {...}}`。 |
 | `POST` | `/api/v1/search` | 聚合搜索多个站点。 |
 | `GET` | `/api/v1/search/stream` | 以 SSE 流式返回各站点搜索结果。 |
@@ -122,6 +122,42 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 
 `status` 取值：`queued`、`running`、`processing`、`exporting`、
 `completed`、`cancelled`、`failed`。
+
+## 健康检查
+
+`GET /api/v1/health` 是只读诊断端点，同时保留历史字段供旧客户端和监控使用：
+
+```json
+{
+  "status": "ok",
+  "version": "1.34.0",
+  "uptime_s": 1234.567,
+  "output_writable": true,
+  "cache_writable": true,
+  "rate_limit": {"enabled": true, "limit": 120, "window": 60.0},
+  "tasks": {"pending": 1, "running": 1, "completed": 8},
+  "music_platforms_available": 28
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `status` | string | 固定为 `"ok"`；能返回即表示进程可响应请求（liveness）。 |
+| `version` | string | 服务端版本号。 |
+| `uptime_s` | number | 本进程已运行秒数，保留 3 位小数；基于 `time.monotonic`，系统时钟调整不会让它倒退或跳变。 |
+| `output_writable` | bool | 导出目录（`general.output_dir`）是否可写。 |
+| `cache_writable` | bool | 缓存目录（`general.cache_dir`）是否可写。 |
+| `rate_limit` | object | 当前进程的限流配置：`{enabled, limit, window}`。 |
+| `tasks` | object | 内存队列各组的任务数：`{pending, running, completed}`。 |
+| `music_platforms_available` | int | 已注册的音乐平台数量；未安装音乐可选依赖时为 `0`。 |
+
+- **向后兼容**：`status` 与 `version` 始终存在，新增字段只是附加信息；只解析这两个字段的旧客户端不受影响。
+- **只读且无副作用**：探测不发起网络请求、不执行搜索或下载、不导入平台实现，也不创建目录或写文件。可写性用 `os.access` 对最近的已存在祖先目录做尽力而为的判断，因此尚未创建的目录只要其父目录可写就被视为可写；响应中**不回传任何路径**，也不包含客户端 IP 或限流计数。
+- **`rate_limit`**：`enabled=true` 表示进程安装了滑动窗口限流，`limit` 为 `--rate-limit`、`window` 为 `--rate-limit-window`（秒）。用 `--no-rate-limit` 启动时三个键仍然存在，值为 `{"enabled": false, "limit": null, "window": null}`；`enabled` 只反映配置，不报告剩余配额或被拒绝次数。
+- **`tasks`**：只返回计数，不返回任务对象；三组与 `GET /api/v1/tasks` 相同，且不受分页影响。`completed` 反映当前进程内存中保留的任务数。
+- **`music_platforms_available`**：从惰性注册表统计并缓存到进程结束；缺少音乐依赖或注册表不可用时为 `0`。该探测不会导入具体平台，也不会联网。
+- `GET /api/v1/health` 不受请求限流影响（见「请求频率限制」），适合作为可用性监控。
+- **内嵌引擎仍只是存活探针**：桌面端与 Android 独立模式的内嵌 `/api/v1/health` 仍只返回 `{"status", "version"}`；上述诊断字段仅由 REST 服务提供，客户端不应假定内嵌传输也带这些字段。
 
 ## 搜索
 
@@ -903,7 +939,8 @@ API 默认启用按客户端 IP 的滑动窗口限流：每个 IP 在 `--rate-li
 `429` 并附带 `Retry-After` 头。该头是**整数秒、向上取整**，表示最早一次被
 接受请求滑出窗口的剩余时间（最小 `1`，不会超过窗口长度），因此按它等待后
 必有空位。`--no-rate-limit` 可完全关闭限流（`--rate-limit 0` 会以参数错误
-退出，不再隐式关闭）；`GET /api/v1/health` 不受限流影响，便于可用性监控。计数发生在鉴权之前，token 暴力枚举同样会被节流；
+退出，不再隐式关闭）；关闭后 `/health` 的 `rate_limit.enabled` 为 `false`，
+`limit` 与 `window` 均为 `null`。`GET /api/v1/health` 不受限流影响，便于可用性监控。计数发生在鉴权之前，token 暴力枚举同样会被节流；
 被拒绝的请求不计数，客户端停止请求后窗口排空即自动恢复。
 
 限流状态只保存在**当前进程内存**中，不跨进程共享、也不持久化：

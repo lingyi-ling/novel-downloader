@@ -91,7 +91,7 @@ and `login/requests/stream`). In the examples below `$BASE` is the API root
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/api/v1/health` | Health check, returns `{status, version}`. |
+| `GET` | `/api/v1/health` | Liveness check and read-only diagnostics, returns `{status, version, uptime_s, ...}` (see "Health check"). |
 | `GET` | `/api/v1/sites` | Sites supported for search/download, returns `{search: {...}, download: {...}}`. |
 | `POST` | `/api/v1/search` | Aggregate search across multiple sites. |
 | `GET` | `/api/v1/search/stream` | Stream per-site search results with SSE. |
@@ -129,6 +129,43 @@ Task object fields:
 
 `status` values: `queued`, `running`, `processing`, `exporting`, `completed`,
 `cancelled`, `failed`.
+
+## Health check
+
+`GET /api/v1/health` is a read-only diagnostics endpoint that keeps the
+historical fields for old clients and monitoring:
+
+```json
+{
+  "status": "ok",
+  "version": "1.34.0",
+  "uptime_s": 1234.567,
+  "output_writable": true,
+  "cache_writable": true,
+  "rate_limit": {"enabled": true, "limit": 120, "window": 60.0},
+  "tasks": {"pending": 1, "running": 1, "completed": 8},
+  "music_platforms_available": 28
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `status` | string | Always `"ok"`; a response means the process can serve requests (liveness). |
+| `version` | string | Server version. |
+| `uptime_s` | number | Seconds this process has been running, rounded to 3 decimals; based on `time.monotonic`, so wall-clock changes neither rewind nor jump it. |
+| `output_writable` | bool | Whether the export directory (`general.output_dir`) is writable. |
+| `cache_writable` | bool | Whether the cache directory (`general.cache_dir`) is writable. |
+| `rate_limit` | object | Rate-limiter configuration for this process: `{enabled, limit, window}`. |
+| `tasks` | object | Task counts per in-memory queue group: `{pending, running, completed}`. |
+| `music_platforms_available` | int | Number of registered music platforms; `0` when the optional music extras are not installed. |
+
+- **Backward compatible**: `status` and `version` are always present and the new fields are additive, so clients that parse only those two are unaffected.
+- **Read-only and side-effect-free**: the probe makes no network request, runs no search or download, imports no platform implementation, and creates no directory or file. Writability is a best-effort `os.access` check on the nearest existing ancestor, so a directory that does not exist yet counts as writable when that ancestor is; the response **never contains a path**, a client IP or a rate-limit counter.
+- **`rate_limit`**: `enabled=true` means the process installed the sliding-window limiter, `limit` is `--rate-limit` and `window` is `--rate-limit-window` in seconds. With `--no-rate-limit` all three keys are still present: `{"enabled": false, "limit": null, "window": null}`. `enabled` reflects configuration only; no remaining quota or rejection count is reported.
+- **`tasks`**: counts only, never task objects; the three groups match `GET /api/v1/tasks` and ignore pagination. `completed` reflects what the current process keeps in memory.
+- **`music_platforms_available`**: counted from the lazy registry and cached for the process lifetime; it is `0` when music dependencies are missing or the registry is unavailable. The probe imports no concrete platform and makes no network call.
+- `GET /api/v1/health` is exempt from request rate limiting (see "Request rate limiting"), which makes it suitable for availability monitoring.
+- **The embedded engine stays a liveness probe**: `/api/v1/health` on the desktop app and Android standalone embedded transport still returns only `{"status", "version"}`. The diagnostic fields above are REST-server only; clients must not assume the embedded transport carries them.
 
 ## Search
 
@@ -1010,10 +1047,11 @@ the remaining time until the oldest admitted request slides out of the window
 (minimum `1`, never more than the window length), so waiting for it always
 finds a free slot. `--no-rate-limit` disables rate limiting entirely
 (`--rate-limit 0` now fails with a usage error instead of silently disabling
-it); `GET /api/v1/health` is exempt so availability monitoring keeps working.
-Counting happens before authentication, so brute-force token guessing is
-throttled too; rejected requests are not counted, and the window drains
-automatically once the client stops.
+it); with limiting off, `/health` reports `rate_limit.enabled` as `false` and
+`limit` / `window` as `null`. `GET /api/v1/health` is exempt so availability
+monitoring keeps working. Counting happens before authentication, so
+brute-force token guessing is throttled too; rejected requests are not counted,
+and the window drains automatically once the client stops.
 
 Rate-limit state lives only in **the current process's memory**; it is neither
 shared across processes nor persisted:

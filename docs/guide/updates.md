@@ -87,6 +87,14 @@ installer。从安装器安装的副本只会更新到安装器，从免安装�
 
 `scripts/release.py` 在上传前会对 `dist/release/` 里的产物运行 `scripts/audit_release_assets.py`：zip / apk（以及实际是 zip 的 `.exe`）中的文本成员会逐行套用 `scripts/scan_secrets.py` 的凭据规则，命中以 `secret-marker` 标记，只报 `资产: 成员:行号: 规则`，不回显明文。它和构建前对 Git 跟踪文件的工作区扫描互补——工作区扫描看源码，资产审计看真正要上传的字节。
 
+发布链路上的两道扫描是串行门禁：
+
+1. **构建前**：`scan_release_secrets`（`scripts/scan_secrets.py` 的工作区模式）扫描 Git 跟踪文件；`--skip-secret-scan` 可以关闭这一步（不推荐）。
+2. **构建后、上传前**：`audit_release_assets.py` 扫描 `dist/release/` 中的实际产物；没有跳过开关。
+3. 两项都通过才会打 tag 并上传；任一命中都会在打 tag 前中止。
+
+v1.34.0 的发布产物通过资产内容扫描，0 命中。
+
 边界与退出码：
 
 - 单个成员超过 2 MiB 跳过；单个资产的文本成员扫描上限 64 MiB；整次审计上限 256 MiB。

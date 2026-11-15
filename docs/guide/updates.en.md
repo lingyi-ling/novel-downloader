@@ -87,6 +87,14 @@ archive.
 
 Before uploading, `scripts/release.py` runs `scripts/audit_release_assets.py` over the artifacts in `dist/release/`: text members inside zip / apk files (and inside an `.exe` that really is a zip) are streamed line by line through the credential rules in `scripts/scan_secrets.py`. A hit is tagged `secret-marker` and reports only `asset: member:line: rule`, never the value. This complements the pre-build working-tree scan of Git-tracked files — the workspace scan sees source, the asset audit sees the bytes that will actually be uploaded.
 
+The release pipeline runs the two scans as serial gates:
+
+1. **Before the build**: `scan_release_secrets` (working-tree mode of `scripts/scan_secrets.py`) scans Git-tracked files; `--skip-secret-scan` turns this step off (not recommended).
+2. **After the build, before upload**: `audit_release_assets.py` scans the actual artifacts in `dist/release/`; there is no skip switch.
+3. Only when both pass are the tag created and the assets uploaded; any hit aborts before tagging.
+
+The v1.34.0 release artifacts passed the asset content scan with 0 hits.
+
 Boundaries and exit codes:
 
 - Members larger than 2 MiB are skipped; text scanning is capped at 64 MiB per asset and 256 MiB per audit run.
