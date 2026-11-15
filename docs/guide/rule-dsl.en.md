@@ -57,7 +57,7 @@ A rule file is configuration, not a program. The loader enforces the following h
 | `site_key` | string | — | Required; unique site identifier. A numeric value automatically gets an `n` prefix |
 | `site_name` | string | `""` | Display name; falls back to `site_key` when omitted |
 | `base_url` | string | `""` | Site root, used by the `{base_url}` template variable (trailing `/` removed) |
-| `encoding` | string | `utf-8` | Page encoding |
+| `encoding` | string | `utf-8` | Page encoding, validated at parse time against Python's codec registry |
 | `format` | string | `html` | Default response format; only `html` or `json`; each section may override it |
 | `priority` | integer | `200` | Source priority; a larger value sorts earlier |
 | `hosts` | string[] | `[]` | Links whose host (lowercase) matches are handled by this rule, together with `resolve` |
@@ -183,12 +183,12 @@ The body processing order is fixed: extract page by page → join with `"\n"` �
 | --- | --- | --- | --- |
 | `url` | string | — | Required; page-number template. Supports `{page}` and the other variables of the enclosing section |
 | `start` | integer | `2` | First page number (page 1 is fetched from the main link) |
-| `max_pages` | integer | empty | When set, fetch exactly `start` through `max_pages` and stop relying on a next-page link |
+| `max_pages` | integer | empty | When set, fetch exactly `start` through `max_pages` and stop relying on a next-page link; parse time requires `<= 50` (`MAX_EXTRA_PAGES`) |
 | `stop_when` | string | empty | Regex (with `re.S`); stop paging when it matches the current page body (the current page is kept) |
 | `loop_guard` | boolean | `true` | Stop when a URL repeats or the response body is unchanged, preventing self-referential loops |
 <!-- /rule-dsl:keys:pages -->
 
-Without `max_pages`, the engine checks whether the current page still contains the next-page URL (full suffix or file name) and continues if it does; the hard cap on extra pages is 50. `stop_when` checks the **entry page** first (a match fetches no extra pages), then each fetched page is checked together with `loop_guard`, whichever fires first. `loop_guard` stops on a repeated URL or an identical response-body digest; set it to `false` to restore the unprotected heuristic.
+Without `max_pages`, the engine checks whether the current page still contains the next-page URL (full suffix or file name) and continues if it does; the hard cap on extra pages is 50, and a `max_pages` value above 50 fails at `parse_rule` time (instead of being silently truncated while fetching). `stop_when` checks the **entry page** first (a match fetches no extra pages), then each fetched page is checked together with `loop_guard`, whichever fires first. `loop_guard` stops on a repeated URL or an identical response-body digest; set it to `false` to restore the unprotected heuristic.
 
 When `max_pages` is smaller than `start`, nothing is reported as an error; no extra page is fetched. JSON APIs usually do not link the next page in the response, so they **must** use `max_pages` (optionally with `stop_when` matching an empty list to stop early); with only `stop_when` and no `max_pages`, the first extra request is never made because the current page has no next-page URL. Chapter-list pages are merged with link de-duplication; body pages are concatenated in order.
 
@@ -366,8 +366,8 @@ Unsupported constructs raise a `RuleError` with the rule location, either at loa
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `concurrency` | integer | empty | Concurrent requests for this source; must be >= 1. `0` is invalid |
-| `min_interval` | number | empty | Lower bound for the interval between requests, **in seconds** |
-| `max_interval` | number | empty | Upper bound for the interval between requests, **in seconds** |
+| `min_interval` | number | empty | Lower bound for the desired interval between requests (a narrow band may land slightly below it), **in seconds** |
+| `max_interval` | number | empty | Upper bound for the interval between requests (not exceeded even after jitter), **in seconds** |
 | `max_attempts` | integer | empty | Maximum attempts per request (including the first); must be >= 1 |
 | `retry_min_interval` | number | empty | Lower bound for retry backoff, **in seconds** |
 | `retry_max_interval` | number | empty | Upper bound for retry backoff, **in seconds** |
@@ -378,7 +378,7 @@ Constraints and mapping:
 - `min_interval <= max_interval` and `retry_min_interval <= retry_max_interval`; a reversed range fails at parse time;
 - Unset fields leave the global configuration unchanged; merging is **immutable** (`dataclasses.replace` produces a new config) and never mutates the shared global object;
 - `concurrency` maps to `max_connections`;
-- `min_interval` / `max_interval` are averaged and mapped to `request_interval`;
+- `min_interval` / `max_interval` are averaged, then capped at `max_interval / 1.1`, and mapped to `request_interval` (the fetch interval only jitters upward, so the cap keeps the actual spacing inside the declared band);
 - `max_attempts` maps to `retry_times = max_attempts - 1` (the latter counts only retries after the first failure);
 - `retry_min_interval` / `retry_max_interval` are averaged and mapped to `backoff_factor`.
 
@@ -388,7 +388,7 @@ Constraints and mapping:
 
 ### `search.single_result_fallback`: single-result fallback
 
-Defaults to `false`. When enabled, if the `item` selector matches **no entries**, the engine treats the whole response as one search result, but only with one of these pieces of evidence:
+Defaults to `false`. When enabled, if a search produces **no results** (normally because the `item` selector matches nothing; the same applies when every matched item is dropped for lacking `url`), the engine treats the whole response as one search result, but only with one of these pieces of evidence:
 
 - the final response URL differs from the request URL (a redirect happened); or
 - a non-empty `book.fields.book_name` can be extracted from the page (or `search.fields.title` as a fallback).
@@ -459,9 +459,9 @@ Two boundaries worth noting:
 - **All interval and backoff fields are in seconds (number)**, never milliseconds. A field name without a unit means seconds (`1.5` is 1.5 seconds). This convention comes from a real incident: a template comment said "seconds" while the code interpreted milliseconds, making the actual interval one thousandth of what was intended.
 - **`concurrency` must be an integer >= 1. `0` is neither "unlimited" nor "serial"; it is invalid**, because a zero-permit semaphore blocks forever. Use `1` for serial.
 - `max_attempts >= 1` and `concurrency >= 1` are enforced at parse time; all `group` / `id_group` / `book_id_group` values must be >= 0, also enforced at parse time.
-- `max_pages` has **no** parse-time validation; when it is smaller than `start`, no extra page is fetched and no error is raised.
+- `max_pages` is only checked against its upper bound at parse time (`<= 50`, i.e. `MAX_EXTRA_PAGES`); when it is smaller than `start`, no extra page is fetched and no error is raised.
 - A larger `priority` sorts earlier; within search results, `0`, `1`, `2` ... are added in order for stable ordering of ties.
-- `encoding` is not validated at parse time; it must be a Python-recognized codec name. The response is decoded with it during download, and a typo fails at the decoding stage.
+- `encoding` is validated at parse time against Python's codec registry (`codecs.lookup`): an unknown name fails immediately; a known name that does not match the site still fails later while decoding the download.
 
 ---
 

@@ -61,7 +61,7 @@
 | `site_key` | string | — | 必填, 站点唯一标识; 纯数字会自动加 `n` 前缀 |
 | `site_name` | string | `""` | 展示名称, 缺省时回退为 `site_key` |
 | `base_url` | string | `""` | 站点根地址, 供 `{base_url}` 模板变量使用 (已去末尾 `/`) |
-| `encoding` | string | `utf-8` | 页面编码 |
+| `encoding` | string | `utf-8` | 页面编码, 解析期用 Python codec 注册表校验 |
 | `format` | string | `html` | 默认响应格式, 只能是 `html` 或 `json`; 各段可覆盖 |
 | `priority` | integer | `200` | 书源优先级, 数值越大越靠前 |
 | `hosts` | string[] | `[]` | 命中这些主机名 (小写) 的链接交给本规则解析, 配合 `resolve` |
@@ -187,12 +187,12 @@
 | --- | --- | --- | --- |
 | `url` | string | — | 必填, 页码模板, 支持 `{page}` 以及所在段的其它变量 |
 | `start` | integer | `2` | 起始页码 (第 1 页由主链接抓取) |
-| `max_pages` | integer | 空 | 指定后固定抓取 `start` ~ `max_pages`, 不再依赖"下一页链接是否存在" |
+| `max_pages` | integer | 空 | 指定后固定抓取 `start` ~ `max_pages`, 不再依赖"下一页链接是否存在"; 解析期要求 `<= 50` (`MAX_EXTRA_PAGES`) |
 | `stop_when` | string | 空 | 正则 (开启 `re.S`); 命中当前页响应体时停止翻页 (当前页保留) |
 | `loop_guard` | boolean | `true` | 重复 URL / 相同响应体时停止翻页, 防止自指链接死循环 |
 <!-- /rule-dsl:keys:pages -->
 
-未设置 `max_pages` 时, 引擎检查当前页响应中是否仍出现下一页 URL (完整后缀或文件名), 出现则继续; 额外页数硬上限为 50。`stop_when` 先检查**入口页** (命中则一个额外页都不抓), 之后每一页抓取后与 `loop_guard` 一并判定, 先触发者生效。`loop_guard` 命中重复 URL 或相同响应体摘要时停止; 设为 `false` 可恢复无保护的启发式。
+未设置 `max_pages` 时, 引擎检查当前页响应中是否仍出现下一页 URL (完整后缀或文件名), 出现则继续; 额外页数硬上限为 50, `max_pages` 本身超过 50 会在 `parse_rule` 阶段报错 (而不是在抓取时被静默截断)。`stop_when` 先检查**入口页** (命中则一个额外页都不抓), 之后每一页抓取后与 `loop_guard` 一并判定, 先触发者生效。`loop_guard` 命中重复 URL 或相同响应体摘要时停止; 设为 `false` 可恢复无保护的启发式。
 
 `max_pages` 小于 `start` 时不会报错, 只是一个额外页都不抓。JSON 接口通常不在响应体里回链下一页, 因此**必须**用 `max_pages` 指定范围 (可再用 `stop_when` 命中空列表来提前结束); 只写 `stop_when` 而没有 `max_pages` 时, 由于当前页不含下一页 URL, 第一页额外请求都不会发出。目录分页结果按章节链接去重合并, 正文分页结果按顺序拼接。
 
@@ -370,8 +370,8 @@ JSON 解码后是 `regex_replace(input, '\\d+', '#')`, mini-js 再把 `\\` 解�
 | 字段 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `concurrency` | integer | 空 | 该源同时进行的请求数, 必须 >= 1; `0` 是非法值 |
-| `min_interval` | number | 空 | 相邻请求间隔的下界, **单位: 秒** |
-| `max_interval` | number | 空 | 相邻请求间隔的上界, **单位: 秒** |
+| `min_interval` | number | 空 | 期望的相邻请求间隔下界 (窄区间时实际值可能略低于它), **单位: 秒** |
+| `max_interval` | number | 空 | 相邻请求间隔的上界 (抖动后也不会超过), **单位: 秒** |
 | `max_attempts` | integer | 空 | 单次请求的最大尝试次数 (含首次), 必须 >= 1 |
 | `retry_min_interval` | number | 空 | 重试退避的下界, **单位: 秒** |
 | `retry_max_interval` | number | 空 | 重试退避的上界, **单位: 秒** |
@@ -382,7 +382,7 @@ JSON 解码后是 `regex_replace(input, '\\d+', '#')`, mini-js 再把 `\\` 解�
 - `min_interval <= max_interval`, `retry_min_interval <= retry_max_interval`; 反向区间在解析时报错;
 - 未设置的字段保持全局配置不变; 合并是**不可变**的 (`dataclasses.replace` 生成新配置), 不会修改共享的全局对象;
 - `concurrency` 映射到 `max_connections`;
-- `min_interval` / `max_interval` 取中点后映射到 `request_interval`;
+- `min_interval` / `max_interval` 先取中点, 再以 `max_interval / 1.1` 封顶后映射到 `request_interval` (抓取间隔只会向上抖动, 封顶保证实际间隔不越过声明的上界);
 - `max_attempts` 映射到 `retry_times = max_attempts - 1` (后者只计首次失败后的重试次数);
 - `retry_min_interval` / `retry_max_interval` 取中点后映射到 `backoff_factor`。
 
@@ -392,7 +392,7 @@ JSON 解码后是 `regex_replace(input, '\\d+', '#')`, mini-js 再把 `\\` 解�
 
 ### `search.single_result_fallback`: 单结果回退
 
-默认 `false`。开启后, 当 `item` 选择器**没有匹配到任何条目**时, 引擎会把整个响应当作一条搜索结果, 但仅在满足以下任一证据时生效:
+默认 `false`。开启后, 当本次搜索**没有产生任何结果**时 (通常是 `item` 选择器零匹配; 匹配到的条目都因缺少 `url` 被丢弃时同样成立), 引擎会把整个响应当作一条搜索结果, 但仅在满足以下任一证据时生效:
 
 - 最终响应 URL 与请求 URL 不同 (说明发生了重定向); 或
 - 页面上能取到非空的 `book.fields.book_name` (或回退到 `search.fields.title`)。
@@ -463,9 +463,9 @@ JSON 解码后是 `regex_replace(input, '\\d+', '#')`, mini-js 再把 `\\` 解�
 - **所有间隔、退避类字段一律使用秒 (number)**, 不使用毫秒。字段名里不带单位时默认就是秒 (`1.5` 表示 1.5 秒)。这条约定来自一次真实事故: 模板注释写"秒"、代码按"毫秒"解释, 实际间隔只有预期的千分之一。
 - **`concurrency` 必须是 >= 1 的整数。`0` 不是"无限", 也不是"串行", 而是非法值**; 零许可的信号量会永久阻塞。想要串行请写 `1`。
 - `max_attempts >= 1` 与 `concurrency >= 1` 在解析期强制; 所有 `group` / `id_group` / `book_id_group` 必须 >= 0, 同样在解析期强制。
-- `max_pages` **没有**解析期校验; 小于 `start` 时只是不抓任何额外页, 不报错。
+- `max_pages` 在解析期只校验上限 (`<= 50`, 即 `MAX_EXTRA_PAGES`); 小于 `start` 时只是不抓任何额外页, 不报错。
 - `priority` 数值越大越靠前; 搜索结果内部按顺序加 `0`、`1`、`2`…, 用于同分时的稳定排序。
-- `encoding` 不做解析期校验; 必须是 Python 能识别的编码名, 下载时按该编码解码响应, 写错会在解码阶段失败。
+- `encoding` 在解析期用 Python 的 codec 注册表校验 (`codecs.lookup`): 无法识别的名字直接报错; 能识别但与站点实际编码不符时, 才会在下载解码阶段失败。
 
 ---
 
