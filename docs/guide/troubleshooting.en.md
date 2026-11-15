@@ -246,6 +246,51 @@ Get-Process -Id <PID>
 
 3. Make sure request paths include `/api/v1`, for example `http://127.0.0.1:8081/api/v1/sites`; the root path serves no API endpoints.
 
+### 3.3 Locate a Failed Request with X-Request-ID
+
+**Symptoms**: an API request fails intermittently (4xx / 5xx / timeout), the log
+contains many requests, and you cannot tell which one the server handled or how
+long it took.
+
+**What to do**:
+
+1. Reproduce it with `curl` and save the response headers and body. The API
+   echoes `X-Request-ID` on **every** response, including `401`, `422`, `429`,
+   and `500`:
+
+   ```bash
+   BASE=http://127.0.0.1:8081
+
+   curl -sS -D /tmp/api_headers.txt -o /tmp/api_body.json \
+     -H "Authorization: Bearer $TOKEN" \
+     "$BASE/api/v1/sites"
+
+   grep -i '^x-request-id:' /tmp/api_headers.txt
+   ```
+
+2. Search the terminal or service log that runs `novel-api` for `[<that id>]`.
+   The access-log line looks like:
+
+   ```text
+   [3f2a1c8e-...] GET /api/v1/sites 500 12.4ms
+   ```
+
+   Query strings and response bodies are never logged, so the id alone points
+   at the exact line.
+
+3. If the request carried its own `X-Request-ID`, it is reused only when it is
+   `1`–`64` characters from `A-Z a-z 0-9 . _ : -`; an invalid or overlong value
+   is silently replaced with a UUID4. Trust the value **written back in the
+   response header**.
+
+4. When reporting the problem, include the `X-Request-ID`, the approximate
+   time, the request method and path, and the status code. Do not include
+   `Authorization`, tokens, cookies, or request bodies.
+
+The id only correlates debugging information: it is not used for
+authentication, rate-limit accounting, or request de-duplication. After a
+server restart, old ids no longer map to any log context.
+
 ---
 
 ## 4. Paths Containing Chinese Characters or Spaces

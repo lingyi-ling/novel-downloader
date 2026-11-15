@@ -262,6 +262,23 @@ can ignore them. The streaming endpoint `/search/stream` emits each site's raw
 preview chunk and **does not** include `rank_score` / `match_tier`; only the
 final `POST /search` results carry them.
 
+The clients surface the same values like this:
+
+| Client | Presentation |
+| --- | --- |
+| CLI | The `Title` cell appends `· Exact 0.91` (tier label plus the two-decimal `rank_score`); `--json` is not trimmed and still prints whatever raw fields the backend supplied. |
+| Desktop app | A colored badge beside the title shows only the tier (`Exact` / `Prefix` / `Contains` / `Partial` / `No match`); the full explanation lives in the tooltip and accessible name: `Match: Exact · score 0.91`. A cross-site merged row also says `(best source)`. |
+| Android app | The badge beside the title reads `Exact · 0.91`; a screen reader announces the full "Match: Exact, relevance score 0.91". With a score but no tier it shows `Relevance 0.80`. |
+
+All three use only usable values: `match_tier` must be an integer in `0..4` and
+`rank_score` a finite number in `0..1`. Unusable values are ignored: the CLI
+and desktop app require both fields before rendering an annotation, while
+Android shows the tier alone when the score is missing and the relevance alone
+when the tier is missing. When both fields are unavailable (old cache entries,
+browse results, an older embedded engine), the row shows no badge/suffix rather
+than a misleading `0.00` or `No match`. The annotation explains the ranking; it
+is never sent back in a later request.
+
 A filtered request (300k–1M words, updated since 2024-01-01, cross-site grouping):
 
 ```bash
@@ -1084,6 +1101,72 @@ shared across processes nor persisted:
   share the proxy peer's single bucket; limit at the proxy if you need
   per-client accounting, or let the API listen directly together with a
   token.
+
+## Request tracing (X-Request-ID)
+
+The API assigns a correlation id to **every HTTP request** and echoes it in the
+`X-Request-ID` header of **every response**: successful responses, `401` /
+`404` / `413` / `422` / `429` errors, and the `500` produced by an unhandled
+exception. The header is present even when the response is generated directly
+by an inner middleware (rate limiter, body-size cap) or by the outermost error
+handler. With `--cors`, browser clients can read it too (the header is listed
+in `Access-Control-Expose-Headers`).
+
+**Accepted and generated values**
+
+- A client may send its own `X-Request-ID` to line up retries, scripts, or a
+  bug report with the server log.
+- Only the **first** occurrence of the header is considered. The value must be
+  `1`–`64` characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, `:`, and `-`.
+- A value that does not match (empty, non-ASCII, whitespace, control
+  characters, brackets, longer than 64 characters) is **silently replaced**
+  with a server-generated UUID4. It is not a `400`, and it does not change the
+  request's business result. Input containing newlines or escape sequences
+  therefore cannot forge a log field or a response header.
+- When the client sends nothing usable, the server generates a UUID4. The
+  client should still read the response header and use that value when
+  reporting.
+
+**Logging**
+
+Every request produces exactly one access-log line with a fixed shape:
+
+```text
+[3f2a1c8e-...] GET /api/v1/sites 200 1.8ms
+```
+
+i.e. `[request id] method path status duration`. The query string is never
+logged (it may carry a token), and response bodies are never read or logged.
+Requests slower than one second are logged at `WARNING` with the same shape.
+Given a failed response's id, search the terminal or service log that runs
+`novel-api` for `[<request id>]` to find that exact line.
+
+**Attaching and reporting from a client**
+
+```bash
+BASE=http://127.0.0.1:8081
+
+curl -sS -D headers.txt -o body.json \
+  -H "X-Request-ID: import-2026-11-15-001" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"keyword": "Three Body"}' \
+  "$BASE/api/v1/search"
+
+# On success or failure, read back the id that was actually used
+grep -i '^x-request-id:' headers.txt
+```
+
+- A programmatic client may generate an id per request and send it; the simpler
+  option is to omit the header and read the server-generated value from the
+  failed response.
+- When reporting a problem, include the `X-Request-ID`, the approximate time,
+  the request method and path, and the status code. **Do not** include
+  `Authorization`, tokens, cookies, or request bodies.
+- The id only correlates and aids debugging: it is not used for
+  authentication, request de-duplication, rate-limit accounting, or
+  persistence. After a server restart, old ids no longer map to any log
+  context.
 
 ## Error codes
 

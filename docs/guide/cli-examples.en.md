@@ -194,6 +194,16 @@ novel-cli search 斗破苍穹 --min-words 300000 --updated-after 2024-01-01 --gr
 
 Filters only narrow this run's result set; they do not change ranking or the response fields. Each filter combination is cached as a distinct request, so a filtered query never reuses an unfiltered snapshot. `--json` still prints a JSON array of results. A malformed date or word count exits with a usage error (exit code `2`) instead of silently disabling the filter.
 
+**Match annotation**: when a result carries the ranking fields, the `Title`
+cell reads `Title · Exact 0.91`. The first part is the `match_tier` label (`4`
+exact / `3` prefix / `2` contains / `1` partial / `0` no match), and the second
+is `rank_score` rounded to two decimals. The suffix appears only when both
+values are valid; old cache entries, streamed previews, and other unranked
+sources keep the plain title rather than a misleading `0.00` or `No match`.
+The annotation explains the ordering, does not change it, and is never written
+back to the cache; `--json` is not trimmed and still prints whatever raw fields
+the backend supplied (see the contract at the end of this page).
+
 !!! note "Why fanqienovel is excluded from aggregate searches"
     Fanqie signs its search requests client-side, and needs **no login**. Selecting the site explicitly uses the official app API: the first run registers a device identity (cached on disk), after which `x-argus` / `x-gorgon` / `x-ladon` are computed locally — no browser window involved.
 

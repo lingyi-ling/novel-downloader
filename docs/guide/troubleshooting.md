@@ -242,6 +242,38 @@ Get-Process -Id <PID>
 
 3. 确认访问路径包含 `/api/v1`，例如 `http://127.0.0.1:8081/api/v1/sites`；根路径没有接口。
 
+### 3.3 用 X-Request-ID 定位一次失败请求
+
+**现象**：某个 API 请求偶发失败（4xx / 5xx / 超时），日志里请求很多，无法确认服务端收到的是哪一次、耗时多久。
+
+**做法**：
+
+1. 用 `curl` 复现并保存响应头与响应体。API 在**每个**响应里回写 `X-Request-ID`，包括 `401`、`422`、`429` 和 `500`：
+
+   ```bash
+   BASE=http://127.0.0.1:8081
+
+   curl -sS -D /tmp/api_headers.txt -o /tmp/api_body.json \
+     -H "Authorization: Bearer $TOKEN" \
+     "$BASE/api/v1/sites"
+
+   grep -i '^x-request-id:' /tmp/api_headers.txt
+   ```
+
+2. 在启动 `novel-api` 的终端或服务日志里搜索 `[<该 ID>]`。访问日志行形如：
+
+   ```text
+   [3f2a1c8e-...] GET /api/v1/sites 500 12.4ms
+   ```
+
+   查询字符串和响应体从不写入日志，所以只需要这个 ID 就能定位到对应那一行。
+
+3. 如果请求里自带了 `X-Request-ID`，只有 `1`–`64` 个 `A-Z a-z 0-9 . _ : -` 字符的值会被沿用；非法或超长的值会被服务端静默替换为 UUID4。因此请以**响应头回写的值**为准。
+
+4. 上报问题时提供：`X-Request-ID`、大致时间、请求方法与路径、状态码。不要附带 `Authorization`、token、Cookie 或请求体。
+
+这个 ID 只用于关联排障，不参与鉴权、限流计数或请求去重；服务重启后旧 ID 不再对应任何日志。
+
 ---
 
 ## 4. 路径包含中文或空格

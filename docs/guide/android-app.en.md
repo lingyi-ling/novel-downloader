@@ -106,6 +106,24 @@ The "Advanced filters" row below the search box expands optional conditions:
 - Filters run in the engine after ranking (the computer API or the standalone engine) and only narrow the result set; ordering is unchanged. With a word-count filter active, rows whose site did not report a word count are dropped; with a date filter active, rows without a parseable update date are dropped. That is not a request failure — "fewer results" usually means exactly this.
 - "Active filters: N" counts the non-blank conditions and offers "Clear filters". The values survive tab switches and a system-initiated process death when the app is restored from Recents.
 
+### Match badge
+
+In the search results, the colored badge beside the title explains how this
+keyword matched the row:
+
+| Badge | `match_tier` | Meaning |
+| --- | --- | --- |
+| Exact | `4` | The keyword equals the primary field (title or author) |
+| Prefix | `3` | The primary field starts with the keyword |
+| Contains | `2` | The primary field contains the keyword |
+| Partial | `1` | The primary field covers only part of the keyword's characters |
+| No match | `0` | No usable match in the primary field |
+
+- When a score is available the badge appends two decimals, e.g. `Exact · 0.91`; a screen reader announces the full "Match: Exact, relevance score 0.91".
+- With a score but no usable tier it shows `Relevance 0.80`; when the score is missing, non-finite, or outside `0..1`, the tier badge still renders on its own.
+- When neither value is usable, no badge is shown. That usually means the row came from an old cache entry, browse results, or an older embedded engine that did not provide ranking data. The app never substitutes `0.00` or "No match".
+- The badge only explains the ordering; it does not change the list order and is never written back to the cache or sent in a later request.
+
 ## Download Directory and File Saving
 
 The History tab lists exported files; tapping one starts saving it. By default the file goes through the system DownloadManager into the public Downloads directory, with progress shown in the notification shade.
