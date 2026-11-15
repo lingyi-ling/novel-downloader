@@ -1373,7 +1373,11 @@ def parse_update_manifest(
     verify_manifest_signature(payload)
 
     schema = payload.get("schema")
-    if schema != MANIFEST_SCHEMA:
+    # ``True == 1`` and ``1.0 == 1`` in Python, so a loose comparison would
+    # accept ``"schema": true`` or ``"schema": 1.0`` as schema 1.  A protocol
+    # version is an exact integer: anything else may mean a different field
+    # layout later, so it is refused now rather than guessed at.
+    if type(schema) is not int or schema != MANIFEST_SCHEMA:
         raise ValueError(f"unsupported manifest schema: {schema!r}")
     version = payload.get("version")
     if not isinstance(version, str) or not version.strip():
