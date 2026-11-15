@@ -343,6 +343,41 @@ def test_aggregate_search_badges_explain_each_result(html_text: str) -> None:
     )
 
 
+def test_aggregate_search_query_intent_is_search_level(html_text: str) -> None:
+    """The example explains the list-level query intent without blurring it
+    into the per-row match tier: both labels are static, bilingual copy."""
+    card = _feature_card(html_text, "Aggregate search")
+
+    for english, chinese in (("Title match", "书名匹配"), ("Author match", "作者匹配")):
+        assert re.search(rf'data-en="{english}"[^>]*>\s*{chinese}\s*<', card), (
+            f"missing {english} query-intent label"
+        )
+
+    rows = re.findall(r'<div style="display:flex;[^"]*">(.*?)</div>', card, re.S)
+    intent_rows = [row for row in rows if 'data-en="Query intent' in row]
+    assert len(intent_rows) == 1, "the query intent must occupy its own example row"
+    intent_row = intent_rows[0]
+
+    assert re.search(r'data-en="Query intent[^"]*"[^>]*>\s*查询意图', intent_row), (
+        "the query-intent row must be labelled in both languages"
+    )
+    assert "whole search" in intent_row, (
+        "the label must say the intent describes the whole search"
+    )
+    assert "not a row-level badge" in intent_row, (
+        "the label must distinguish it from the per-row match-tier badge"
+    )
+    assert 'data-en="Title match"' in intent_row
+    assert 'data-en="Author match"' in intent_row
+    assert "hidden" not in intent_row, "the intent labels must show without JS"
+
+    tier_rows = [row for row in rows if 'data-en="Match tier"' in row]
+    assert len(tier_rows) == 1
+    assert "Title match" not in tier_rows[0] and "Author match" not in tier_rows[0], (
+        "query intent must not be mixed into the match-tier row"
+    )
+
+
 def test_aggregate_search_sort_options_are_static_markup(html_text: str) -> None:
     """Sort choices must be readable with JS off and never look like dead controls."""
     card = _feature_card(html_text, "Aggregate search")
