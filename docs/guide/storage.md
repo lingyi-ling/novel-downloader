@@ -368,41 +368,86 @@ WAL 损坏的处理：
 # 备份布局完整时，目标路径由 <site>/<book> 推导
 novel-cli storage restore \
   --from ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite \
-  -y
+  --force
 
 # 文件被移动/改名，或想恢复到别的位置时，显式给出 --to
 novel-cli storage restore \
   --from ./backup.sqlite \
   --to ./raw_data/qidian/1010868264/chapter.raw.sqlite \
-  -y
+  --force
+
+# 只预览会恢复哪些文件，不写入任何内容
+novel-cli storage restore --from ~/novel-backups --dry-run --json
 ```
 
 规则：
 
-* `--from` 必须是有效章节数据库：完整性、schema 版本、必需列都会先校验，失败则
-  不写入任何东西。
+* `--from` 可以是**单个备份文件**或**备份目录**。文件必须是有效章节数据库：
+  完整性、schema 版本、必需列都会先校验，失败则不写入任何东西；目录则逐个校验
+  其中所有备份，任何一个不通过都会在写入前中止整组。
 * 目标必须位于 `raw_data_dir` 内，文件名必须形如 `chapter.<stage>.sqlite`。
-* 目标已存在时必须加 `-y`，否则以用法错误 `2` 退出，且不写入；目标不存在时
-  不需要 `-y`。
+  目标（或其任一路径组件）是符号链接时拒绝写入；把备份恢复到源自身、或把整组
+  恢复到备份目录内部，同样拒绝。
+* 目标已存在时必须加 `--force`（`-y` / `--yes` 是别名），否则以用法错误 `2`
+  退出，且不写入；目标不存在时不需要 `--force`。
 * 覆盖已有数据库前，旧库会保存为同目录的
   `chapter.<stage>.sqlite.pre-restore-<UTC>.bak`。旧库可读时用在线快照保存；
   旧库本身已损坏、SQLite 打不开时，退化为逐字节复制（连同 sidecar），确保原始
   数据还在。
 * 安装新库后会删除目标旁的旧 `-wal` / `-shm` / `-journal`，避免 SQLite 把属于
   旧文件的日志应用到新库。
-* `--json` 报告含 `from`、`target`、`replaced_existing`、`pre_restore_backup`、
-  `schema_version`、`chapters`、`bytes`、`sha256`。
+* `--dry-run` 只校验并报告计划，**不写入任何文件**；它不要求 `--force`，因此可以
+  安全地预演一次覆盖。校验失败仍以 `1` 退出并给出 `--json` 失败报告。
+* `--no-verify` 只放宽 **schema** 检查（允许恢复由更新版本写出的库），SQLite
+  完整性检查始终执行，物理损坏的文件永远不会被安装。
+* `--json` 成功报告含 `command`、`ok`、`from`、`target`、`restored`、`files[]`、
+  `skipped`、`dry_run`、`error`、`message`；单文件恢复时还会带上原有的
+  `replaced_existing`、`pre_restore_backup`、`schema_version`、`chapters`、
+  `bytes`、`sha256`。失败时 `ok` 为 `false`、`error` 为稳定类别（见下），
+  `restored` 为 `0`。
+
+稳定 `error` 类别：
+
+| `error` | 含义 |
+| --- | --- |
+| `source_missing` | `--from` 指向的文件或目录不存在 |
+| `no_backups` | 目录里没有任何符合备份命名的文件 |
+| `not_database` | 源文件不是 SQLite 数据库 |
+| `integrity_failed` | 源库完整性检查失败 |
+| `wal_damaged` | `-wal` 校验和链在中段损坏 |
+| `schema_unsupported` | schema 新于当前构建，或缺少必需表/列 |
+| `database_error` | 其他 SQLite 错误 |
+| `io_error` | 读取源、写临时文件或原子替换失败 |
+| `config_error` | 配置无法读取；没有恢复任何内容 |
+| `internal_error` | 未预期的异常 |
+
+**整组回滚**：目录恢复在写入前先校验全部源；安装阶段任一目标失败（含 Ctrl+C）
+都会把本次已替换的目标按相反顺序恢复原状——有 `.pre-restore-*.bak` 的移回，
+原本不存在的目标删除——并清理新文件留下的 sidecar。回滚完成后中断继续向上抛出，
+CLI 按惯例输出 `Aborted.` 并以 `1` 退出。
 
 ### 从备份集恢复整本书或全部 {#restore-set}
 
-备份集按 `<site>/<book>/chapter.<stage>.<时间戳>.sqlite` 组织，逐库恢复即可：
+把 `--from` 指向备份目录即可整组恢复：
 
-* 同一本书可能有 `raw`、`cleaner` 等多个 stage，需要分别恢复到各自的
+```bash
+# 恢复整个备份集（只取每个 <book, stage> 的最新副本）
+novel-cli storage restore --from ~/novel-backups --force
+
+# 先预演
+novel-cli storage restore --from ~/novel-backups --dry-run
+```
+
+备份集按 `<site>/<book>/chapter.<stage>.<时间戳>.sqlite` 组织：
+
+* 命令按「书籍目录 + stage」分组，每组只恢复**最新**的一份；`--keep` 留下的
+  历史副本计入 `skipped`，不会被旧副本覆盖新副本。
+* 同一本书可能有 `raw`、`cleaner` 等多个 stage，会分别恢复到各自的
   `chapter.<stage>.sqlite`；不要把一个 stage 的文件恢复成另一个 stage 的目标名。
 * 备份集内不同数据库的时间戳可能不同（例如后来新增了一本书）；按每本书选择
   所需时间点，不要假设整套文件来自同一秒。
 * 如果备份目录被整体移动，`--from` 仍可指向新位置，目标推导只看最后两级目录；
-  布局已被打乱时用 `--to`。
+  布局已被打乱时用 `--to` 指定目标根目录或单个数据库路径。
 * 恢复完成后重新运行 `novel-cli storage verify`，确认全部健康。
 
 ### 撤销一次恢复（使用 `.pre-restore-*.bak`） {#restore-pre-restore}
@@ -413,7 +458,7 @@ novel-cli storage restore \
 novel-cli storage restore \
   --from raw_data/qidian/1010868264/chapter.raw.sqlite.pre-restore-20260102T030405Z.bak \
   --to raw_data/qidian/1010868264/chapter.raw.sqlite \
-  -y
+  --force
 ```
 
 `.bak` 文件名不符合备份命名规则，所以**必须显式给 `--to`**。如果这个 `.bak`

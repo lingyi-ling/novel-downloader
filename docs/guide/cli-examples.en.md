@@ -1017,20 +1017,29 @@ novel-cli storage verify --json
 
 ##### 9.3 storage restore Subcommand
 
-Restore a chapter database from a backup file. The file is validated first (SQLite integrity, schema version, required columns), then the target database is replaced atomically.
+Restore chapter databases from a backup file or a backup directory. Every source is validated first (SQLite integrity, schema version, required columns); only when all of them pass is each target replaced atomically. A failure during installation (Ctrl+C included) rolls the whole group of already-replaced targets back.
 
 **Synopsis**
 
 ```bash
-novel-cli storage restore [-h] --from SOURCE [--to TARGET] [-y] [--json]
+novel-cli storage restore [-h] --from SOURCE [--to TARGET] [--dry-run] [--json]
+                          [--force] [--no-verify]
 ```
 
 **Options**
 
-* `--from SOURCE`: backup file to restore (required)
-* `--to TARGET`: database path to write; it must be inside `raw_data_dir` and named like `chapter.<stage>.sqlite`. When omitted, the path is derived from the backup's `<site>/<book>` layout; if that is not possible, the command exits with a usage error (`2`)
-* `-y, --yes`: allow replacing an existing database. The current file is first preserved next to it as `chapter.<stage>.sqlite.pre-restore-<timestamp>.bak`; without `--yes`, an existing target is refused (exit code `2`)
-* `--json`: print a single-line JSON report with `command`, `ok`, `from`, `target`, `replaced_existing`, `pre_restore_backup`, `schema_version`, `chapters`, `bytes`, `sha256`
+* `--from SOURCE`: backup file or backup directory to restore (required). A directory restores the newest copy of each `<book, stage>` it holds; older copies count as `skipped`
+* `--to TARGET`: database path or target root to write; it must be inside `raw_data_dir`, and a database file must be named like `chapter.<stage>.sqlite`. When omitted, the path is derived from the backup's `<site>/<book>` layout; if that is not possible, the command exits with a usage error (`2`)
+* `--dry-run`: validate and report which files would be restored, **writing nothing**; does not require `--force`
+* `--json`: print a single-line JSON report
+* `--force` (`-y` / `--yes` are aliases): allow replacing an existing database. The current file is first preserved next to it as `chapter.<stage>.sqlite.pre-restore-<timestamp>.bak`; without `--force`, an existing target is refused (exit code `2`)
+* `--no-verify`: skip the strict schema check on the source (so a database written by a newer build stays restorable); the SQLite integrity check is always enforced
+
+**JSON fields**
+
+On success: `command`, `ok`, `from`, `target`, `restored`, `files[]` (each with `source`, `target`, `stage`, plus `replaced_existing`, `pre_restore_backup`, `schema_version`, `chapters`, `bytes`, `sha256`), `skipped`, `dry_run`, `error` (`null` on success), `message` (`null` on success). A single-file restore also repeats the original `replaced_existing`, `pre_restore_backup`, `schema_version`, `chapters`, `bytes`, and `sha256` at the top level, so existing consumers keep working.
+
+On failure: `ok` is `false`, `restored` is `0`, `files` is an empty array, and `error` (a stable category) plus `message` are given. Stable categories: `source_missing`, `no_backups`, `not_database`, `integrity_failed`, `wal_damaged`, `schema_unsupported`, `database_error`, `io_error`, `config_error`, `internal_error`. Usage errors (overwriting an existing database without `--force`, an out-of-tree target, a symbolic link, restoring onto the source itself) exit `2` and print no JSON.
 
 **Examples**
 
@@ -1038,11 +1047,17 @@ novel-cli storage restore [-h] --from SOURCE [--to TARGET] [-y] [--json]
 # Restore into raw_data using the site/book path stored in the backup
 novel-cli storage restore --from ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite
 
+# Restore the whole set (newest copy of each <book, stage> only)
+novel-cli storage restore --from ~/novel-backups --force
+
+# Rehearse it first, writing nothing
+novel-cli storage restore --from ~/novel-backups --dry-run --json
+
 # Restore to an explicit database path, allowing replacement (the old file is backed up first)
-novel-cli storage restore --from ./backup.sqlite --to ./raw_data/qidian/1010868264/chapter.raw.sqlite -y
+novel-cli storage restore --from ./backup.sqlite --to ./raw_data/qidian/1010868264/chapter.raw.sqlite --force
 
 # Scripted use
-novel-cli storage restore --from ./backup.sqlite -y --json
+novel-cli storage restore --from ./backup.sqlite --force --json
 ```
 
 The `--to` filename must look like `chapter.<stage>.sqlite`, and the stage must match the original database (usually `raw` or `cleaner`). Writing to the wrong stage does not affect other files, but the application then reads and writes a different stage database, which looks like “my chapters disappeared”.
@@ -1369,7 +1384,7 @@ novel-cli update --json
 | --- | --- | --- |
 | `0` | Success | The command completed; no search results or no new chapters is still success |
 | `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean`, a failed `storage backup` (including a post-write verification failure, which rolls back the whole set) / `restore`, any failed `music health` platform, any failed `music download` song, unmatched/malformed/download-failed entries in `batch`, a failed `update` check (also no asset for the platform, missing digest, or a failed download with `--yes`) |
-| `2` | Usage error | Missing/conflicting arguments (including argparse errors), an empty `--site`/`--start`/`--end` for `download` (a whitespace-only value counts as empty), `--json` with `--first`, `storage`'s `--json` with `--clean` (without `--dry-run`), `clean cache`/`clean book` `--json` without `--dry-run`, `storage --dry-run` without `--clean`, `storage restore` replacing an existing database without `--yes` or targeting a path outside `raw_data_dir`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, an unknown `music --platform`, `batch` without an input file or with a negative `--interval`, `clean --site` given a traversal value such as `..` or a path separator |
+| `2` | Usage error | Missing/conflicting arguments (including argparse errors), an empty `--site`/`--start`/`--end` for `download` (a whitespace-only value counts as empty), `--json` with `--first`, `storage`'s `--json` with `--clean` (without `--dry-run`), `clean cache`/`clean book` `--json` without `--dry-run`, `storage --dry-run` without `--clean`, `storage restore` replacing an existing database without `--force`, targeting a path outside `raw_data_dir`, targeting through a symbolic link, or restoring a set into the backup directory, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, an unknown `music --platform`, `batch` without an input file or with a negative `--interval`, `clean --site` given a traversal value such as `..` or a path separator |
 
 The `update --check` exit code reports whether the **check** succeeded, not whether an update exists: finding one still returns `0`. `sources list --probe` never changes the exit code by itself — network unreachability only shows as `-` in the `Latency`/`HTTP` columns, and only a failed structural `--check` exits with `1`.
 
@@ -1401,7 +1416,7 @@ With `--json`:
 | `storage --clean` | `--dry-run --json` | Same dry-run shape as `clean cache`, with `command` set to `storage --clean`, `site`/`book_id` `null`, and `book_ids` `[]` |
 | `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files", "verified", "verification_failed", "retention"}`; each `files[]` entry has `source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters`, `verified`; any runtime failure (`ok` is `false`) also has `error` (stable category such as `not_database`, `integrity_failed`, `wal_damaged`, `schema_unsupported`, `sequence_exhausted`, `io_error`, `retention_failed`), `message`, and `source`; after a set-wide rollback `count` is `0` and `files` is `[]` (`retention_failed` is the exception: the new backups are kept and `count` is non-zero); a post-write verification failure additionally sets `verification_failed: true` and adds `verification_error` (`source`, `target`, `reason`); `retention` has `keep`, `dry_run`, `candidates`, `removed`, `failed` |
 | `storage verify` | `--json` | `{"ok", "total", "healthy", "corrupt", "errors"}`; each `errors[]` entry has `path` and `reason`; an interrupted (Ctrl+C) run also includes `"interrupted": true` |
-| `storage restore` | `--json` | `{"command", "ok", "from", "target", "replaced_existing", "pre_restore_backup", "schema_version", "chapters", "bytes", "sha256"}` |
+| `storage restore` | `--json` | `{"command", "ok", "from", "target", "restored", "files", "skipped", "dry_run", "error", "message"}`; each `files[]` entry has `source`, `target`, `stage`, `replaced_existing`, `pre_restore_backup`, `schema_version`, `chapters`, `bytes`, `sha256`; a single-file restore repeats those fields at the top level; on failure `ok` is `false` and `error` is a stable category (`source_missing`, `no_backups`, `not_database`, `integrity_failed`, `wal_damaged`, `schema_unsupported`, `database_error`, `io_error`, `config_error`, `internal_error`) |
 | `doctor` | `--json` | `{"summary": {"total", "failures", "optional_failures", "ok"}, "checks": [{"key", "name", "ok", "fatal", ...}]}` |
 
 ```bash

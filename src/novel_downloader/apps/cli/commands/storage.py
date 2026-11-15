@@ -29,10 +29,15 @@ N`` prunes older backups of each book database down to the newest ``N`` after
 the new, verified set has been published; only files this command itself names
 (``chapter.<stage>.<UTC>.sqlite``, or ``chapter.<stage>.<UTC>.<n>.sqlite`` when
 a same-second copy already exists) are ever considered, and the files written
-by the current run are never removed. ``storage restore --from FILE`` validates
-the file (integrity check, schema version, required columns) before atomically
-replacing the target database; an existing database is preserved in a
-``.pre-restore-*.bak`` sibling first and is never overwritten without ``--yes``.
+by the current run are never removed. ``storage restore --from FILE|DIR``
+validates every source (integrity check, schema version, required columns)
+before atomically installing it; an existing database is preserved in a
+``.pre-restore-*.bak`` sibling first and is never overwritten without
+``--force`` (``--yes`` is kept as an alias). A directory source restores the
+whole ``<site>/<book>`` set, keeping the newest copy of each stage and skipping
+older duplicates; any failure rolls the already-installed group back. Targets
+must stay inside the raw-data directory and are refused when a path component
+is a symbolic link. ``--dry-run`` reports the plan without writing anything.
 Both subcommands accept ``--json`` for a single-line report. A ``backup --json``
 run that fails at runtime always prints that one line with ``ok: false``, a
 stable ``error`` category (``not_database``, ``integrity_failed``,
@@ -1372,16 +1377,73 @@ def _derive_restore_target(source: Path, raw_root: Path) -> Path:
     )
 
 
-def _validated_restore_target(
-    source: Path, raw_root: Path, target_arg: str | None
-) -> Path:
-    """Resolve and validate the database path a restore may write."""
-    target = (
-        expand_path(target_arg)
-        if target_arg
-        else _derive_restore_target(source, raw_root)
-    )
+#: Stable ``error`` identifiers emitted by ``storage restore --json``. A
+#: consumer may branch on ``error`` instead of parsing the localized message.
+RESTORE_ERROR_CATEGORIES: tuple[str, ...] = (
+    "source_missing",
+    "no_backups",
+    "not_database",
+    "integrity_failed",
+    "wal_damaged",
+    "schema_unsupported",
+    "database_error",
+    "io_error",
+    "config_error",
+    "internal_error",
+)
 
+
+class _RestoreSourceError(RuntimeError):
+    """A restore source failed validation before anything was written."""
+
+    def __init__(self, message: str, category: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def _classify_restore_error(exc: BaseException) -> str:
+    """Map a restore failure to its stable ``error`` identifier."""
+    if isinstance(exc, FileNotFoundError):
+        return "source_missing"
+    return _classify_backup_error(exc)
+
+
+@dataclass
+class RestorePlanItem:
+    """One ``source -> target`` pair a restore will install.
+
+    ``stage`` and ``stamp`` come from the backup file name; a file that does
+    not carry the backup naming (a hand-copied ``.bak``) uses the stage of the
+    explicit ``--to`` target and an empty stamp.
+    """
+
+    source: Path
+    target: Path
+    stage: str
+    stamp: str = ""
+    seq: int = 0
+
+
+@dataclass
+class InstalledRestore:
+    """A target a run already replaced, plus how to roll it back.
+
+    ``preserved`` is the ``.pre-restore-*.bak`` holding the original bytes, or
+    ``None`` when the target did not exist before this run.
+    """
+
+    target: Path
+    preserved: Path | None
+
+
+def _validate_target_path(target: Path, raw_root: Path) -> Path:
+    """Resolve and validate one database path a restore may write.
+
+    The target must be named like a chapter database, live strictly inside the
+    raw-data directory, and must not be (or sit behind) a symbolic link: the
+    containment check is done on the resolved path, so a link inside the tree
+    that points elsewhere would otherwise be approved and then written through.
+    """
     if _CHAPTER_DB_RE.match(target.name) is None:
         fail(
             t(
@@ -1390,11 +1452,14 @@ def _validated_restore_target(
             EXIT_USAGE,
         )
 
+    # Lexical absolute form: normalizes ``..`` without following links, so the
+    # walk below still sees every symlink on the user's spelling.
+    absolute = Path(os.path.abspath(target))
     root = raw_root.resolve()
     try:
         resolved = target.resolve()
     except OSError:
-        resolved = target
+        resolved = absolute
     if resolved == root or not resolved.is_relative_to(root):
         fail(
             t("Restore target must be inside the raw data directory: {path}").format(
@@ -1402,7 +1467,262 @@ def _validated_restore_target(
             ),
             EXIT_USAGE,
         )
+
+    probe = absolute
+    # Both spellings of the root stop the walk, so a raw-data directory that is
+    # itself reached through a link is not mistaken for a link inside it.
+    stops = {root, Path(os.path.abspath(raw_root))}
+    while True:
+        # The walk stops at the raw-data root itself: that directory may
+        # legitimately be a symlink (a volume mounted into the data tree), and
+        # the containment check above already ran on its resolved form. Every
+        # component *below* it must be a real directory, so a link planted in
+        # ``raw_data/<site>/<book>`` cannot redirect the write.
+        if probe in stops or probe.parent == probe:
+            break
+        if probe.is_symlink():
+            fail(
+                t("Refusing to restore through a symbolic link: {path}").format(
+                    path=probe
+                ),
+                EXIT_USAGE,
+            )
+        probe = probe.parent
+
+    if target.exists() and not target.is_file():
+        fail(
+            t("Restore target is not a database file: {path}").format(path=target),
+            EXIT_USAGE,
+        )
     return target
+
+
+def _find_backup_sources(root: Path) -> list[tuple[Path, re.Match[str]]]:
+    """Return every backup-named file under ``root``, sorted by path.
+
+    Only regular files named ``chapter.<stage>.<UTC>[.<n>].sqlite`` are
+    considered; a ``.pre-restore-*.bak``, a hand-renamed copy or a foreign file
+    is ignored. Directory symlinks are never followed and file symlinks are
+    skipped, so a link cannot pull foreign bytes into a restore. An unreadable
+    subtree raises instead of silently producing a partial set.
+    """
+    errors: list[OSError] = []
+
+    def _onerror(exc: OSError) -> None:
+        errors.append(exc)
+
+    found: list[tuple[Path, re.Match[str]]] = []
+    for dirpath, dirnames, filenames in os.walk(
+        root, onerror=_onerror, followlinks=False
+    ):
+        dirnames[:] = [
+            name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))
+        ]
+        for name in sorted(filenames):
+            match = _BACKUP_NAME_RE.match(name)
+            if match is None:
+                continue
+            candidate = Path(dirpath) / name
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+            except OSError:
+                continue
+            found.append((candidate, match))
+
+    if errors:
+        raise errors[0]
+    found.sort(key=lambda pair: str(pair[0]))
+    return found
+
+
+def _plan_file_restore(
+    source: Path, raw_root: Path, target_arg: str | None
+) -> list[RestorePlanItem]:
+    """Plan a single-database restore from one backup file."""
+    match = _BACKUP_NAME_RE.match(source.name)
+    if target_arg:
+        target = expand_path(target_arg)
+        target_match = _CHAPTER_DB_RE.match(target.name)
+        if target_match is None:
+            fail(
+                t(
+                    "Restore target must be named like chapter.<stage>.sqlite: {path}"
+                ).format(path=target),
+                EXIT_USAGE,
+            )
+        stage = target_match.group("stage")
+    else:
+        # Without ``--to`` the target comes from the backup name; a file outside
+        # the backup scheme makes ``_derive_restore_target`` exit 2.
+        target = _derive_restore_target(source, raw_root)
+        if match is None:  # pragma: no cover - _derive_restore_target exits
+            fail(
+                t("Cannot derive a restore target from {path}; pass --to.").format(
+                    path=source
+                ),
+                EXIT_USAGE,
+            )
+        stage = match.group("stage")
+
+    return [
+        RestorePlanItem(
+            source=source,
+            target=target,
+            stage=stage,
+            stamp=match.group("stamp") if match is not None else "",
+            seq=int(match.group("seq") or 0) if match is not None else 0,
+        )
+    ]
+
+
+def _plan_directory_restore(
+    source_dir: Path, raw_root: Path, target_arg: str | None
+) -> tuple[list[RestorePlanItem], int]:
+    """Plan a set restore, returning ``(items, skipped)``.
+
+    Backups are grouped by their book directory and stage; only the newest copy
+    of each group is restored and the older ones are counted as ``skipped``.
+    This keeps ``storage backup --keep`` history from restoring an older copy
+    over a newer one in the same run.
+
+    ``--to`` names either the raw-data root that receives the mirrored layout
+    or, for a single-database set, one explicit database path.
+    """
+    found = _find_backup_sources(source_dir)
+
+    single: Path | None = None
+    root = raw_root
+    if target_arg:
+        candidate = expand_path(target_arg)
+        if _CHAPTER_DB_RE.match(candidate.name) is not None:
+            single = candidate
+        else:
+            root = candidate
+
+    groups: dict[tuple[Path, str], list[RestorePlanItem]] = {}
+    for path, match in found:
+        target = single if single is not None else _derive_restore_target(path, root)
+        groups.setdefault((path.parent, match.group("stage")), []).append(
+            RestorePlanItem(
+                source=path,
+                target=target,
+                stage=match.group("stage"),
+                stamp=match.group("stamp"),
+                seq=int(match.group("seq") or 0),
+            )
+        )
+
+    items: list[RestorePlanItem] = []
+    skipped = 0
+    for entries in groups.values():
+        # Newest first: fixed-width UTC stamp, then the same-second sequence.
+        entries.sort(key=lambda item: (item.stamp, item.seq, str(item.source)))
+        entries.reverse()
+        items.append(entries[0])
+        skipped += len(entries) - 1
+
+    items.sort(key=lambda item: str(item.target))
+    if single is not None and len(items) != 1:
+        fail(
+            t(
+                "--to must name a directory when the backup set holds {count} "
+                "database(s)."
+            ).format(count=len(items)),
+            EXIT_USAGE,
+        )
+    return items, skipped
+
+
+def _validate_restore_plan(
+    items: list[RestorePlanItem],
+    *,
+    raw_root: Path,
+    source: Path,
+) -> None:
+    """Reject every structurally unsafe plan entry before anything is read.
+
+    Only path safety is checked here -- containment inside ``raw_data``,
+    symlinks, a file restored onto itself and a target inside the backup tree.
+    The ``--force`` gate is a separate step (:func:`_check_overwrite_gate`) so a
+    corrupt backup is always reported as such instead of being masked by a
+    usage error.
+    """
+    source_root: Path | None = None
+    if source.is_dir():
+        with contextlib.suppress(OSError):
+            source_root = source.resolve()
+
+    for item in items:
+        _validate_target_path(item.target, raw_root)
+        if item.source.is_symlink():
+            fail(
+                t("Refusing to restore from a symbolic link: {path}").format(
+                    path=item.source
+                ),
+                EXIT_USAGE,
+            )
+        try:
+            resolved_source = item.source.resolve()
+            resolved_target = item.target.resolve()
+        except OSError:
+            resolved_source = item.source
+            resolved_target = item.target
+        if resolved_source == resolved_target:
+            fail(
+                t("Refusing to restore a file onto itself: {path}").format(
+                    path=item.target
+                ),
+                EXIT_USAGE,
+            )
+        if source_root is not None and resolved_target.is_relative_to(source_root):
+            fail(
+                t("Refusing to restore into the backup directory: {path}").format(
+                    path=item.target
+                ),
+                EXIT_USAGE,
+            )
+
+
+def _check_overwrite_gate(items: list[RestorePlanItem], *, force: bool) -> None:
+    """Exit 2 unless ``--force`` was given for every existing target."""
+    if force:
+        return
+    for item in items:
+        if item.target.exists():
+            fail(
+                t(
+                    "Refusing to overwrite {path} without --force (the existing "
+                    "database would be backed up first)."
+                ).format(path=item.target),
+                EXIT_USAGE,
+            )
+
+
+def _inspect_restore_source(source: Path, *, verify: bool) -> ChapterDatabaseInfo:
+    """Validate a restore source read-only and return its schema/row count.
+
+    With ``verify`` (the default) the source must pass the same strict checks
+    as ``storage verify``: integrity, schema not newer than this build, and the
+    required table/columns. ``--no-verify`` relaxes only the schema rules (a
+    file written by a newer build stays restorable) while the integrity check
+    is still enforced, so a physically damaged file is never installed.
+    """
+    try:
+        with _source_connection(source) as conn:
+            return inspect_chapter_database(
+                conn,
+                source=str(source),
+                require_schema=verify,
+                allow_newer=not verify,
+            )
+    except (
+        ChapterStorageCorruptError,
+        ChapterStorageSchemaError,
+        sqlite3.Error,
+        OSError,
+    ) as exc:
+        raise _RestoreSourceError(str(exc), _classify_restore_error(exc)) from exc
 
 
 def _preserve_existing(target: Path, stamp: str) -> Path:
@@ -1437,97 +1757,334 @@ def _preserve_existing(target: Path, stamp: str) -> Path:
     return backup
 
 
+def _rollback_restore(installed: list[InstalledRestore]) -> list[str]:
+    """Undo every target a failed run already replaced, newest first.
+
+    A preserved ``.pre-restore-*.bak`` is moved back over the target; a target
+    that did not exist before the run is removed. Sidecars written by the new
+    file are dropped either way. Returns the ``(path: error)`` strings for the
+    entries that could not be restored, so the caller can report a partial
+    rollback instead of claiming success.
+    """
+    failures: list[str] = []
+    for entry in reversed(installed):
+        for suffix in ("-wal", "-shm", "-journal"):
+            with contextlib.suppress(OSError):
+                Path(f"{entry.target}{suffix}").unlink()
+        if entry.preserved is None:
+            with contextlib.suppress(FileNotFoundError):
+                entry.target.unlink()
+            continue
+        try:
+            os.replace(entry.preserved, entry.target)
+        except OSError as exc:
+            failures.append(f"{entry.target}: {exc}")
+    return failures
+
+
+def _restore_plan_payload(
+    items: list[RestorePlanItem],
+    *,
+    source: Path,
+    skipped: int,
+    dry_run: bool,
+) -> dict[str, object]:
+    """Describe a restore plan for ``--dry-run`` and success reports."""
+    files = [
+        {
+            "source": str(item.source),
+            "target": str(item.target),
+            "stage": item.stage,
+        }
+        for item in items
+    ]
+    return {
+        "command": "storage restore",
+        "ok": True,
+        "from": str(source),
+        "target": str(items[0].target) if len(items) == 1 else None,
+        "restored": 0,
+        "files": files,
+        "skipped": skipped,
+        "dry_run": dry_run,
+        "error": None,
+        "message": None,
+    }
+
+
+def _restore_failure_payload(
+    *,
+    category: str,
+    message: str,
+    source: Path,
+    target: Path | None,
+    dry_run: bool,
+    skipped: int = 0,
+) -> dict[str, object]:
+    """Build the one-line ``--json`` report for a failed restore."""
+    return {
+        "command": "storage restore",
+        "ok": False,
+        "from": str(source),
+        "target": str(target) if target is not None else None,
+        "restored": 0,
+        "files": [],
+        "skipped": skipped,
+        "dry_run": dry_run,
+        "error": category,
+        "message": message,
+    }
+
+
+def _report_restore_failure(
+    message: str,
+    *,
+    category: str,
+    source: Path,
+    target: Path | None,
+    dry_run: bool,
+    as_json: bool,
+    skipped: int = 0,
+) -> NoReturn:
+    """Emit the restore failure report (one JSON line when asked) and exit 1."""
+    if as_json:
+        _emit_json(
+            _restore_failure_payload(
+                category=category,
+                message=message,
+                source=source,
+                target=target,
+                dry_run=dry_run,
+                skipped=skipped,
+            )
+        )
+    fail(message)
+
+
 def _run_restore(
     raw_root: Path,
     source: Path,
     target_arg: str | None,
     *,
-    assume_yes: bool,
+    force: bool,
     as_json: bool,
+    dry_run: bool = False,
+    verify: bool = True,
 ) -> None:
-    """Validate ``source`` and atomically install it as the target database."""
-    if not source.is_file():
-        fail(t("Restore source does not exist: {path}").format(path=source))
+    """Validate every source, then install the planned set with rollback.
 
-    target = _validated_restore_target(source, raw_root, target_arg)
-
-    exists = target.exists()
-    if exists and not target.is_file():
-        fail(t("Restore target is not a database file: {path}").format(path=target))
-    if exists and source.resolve() == target.resolve():
-        fail(
-            t("Refusing to restore a file onto itself: {path}").format(path=target),
-            EXIT_USAGE,
+    Nothing is written until the whole plan has been validated: a corrupt or
+    unsupported file anywhere in a directory source aborts the run before the
+    first target is touched. Once installation starts, each target is replaced
+    atomically and the previous database is preserved in a
+    ``.pre-restore-*.bak`` sibling; a failure (including Ctrl+C) rolls every
+    already-installed target back and leaves no half-written group behind.
+    """
+    if not source.exists():
+        _report_restore_failure(
+            t("Restore source does not exist: {path}").format(path=source),
+            category="source_missing",
+            source=source,
+            target=None,
+            dry_run=dry_run,
+            as_json=as_json,
         )
-    if exists and not assume_yes:
-        fail(
-            t(
-                "Refusing to overwrite {path} without --yes "
-                "(the existing database would be backed up first)."
-            ).format(path=target),
-            EXIT_USAGE,
+    if not source.is_file() and not source.is_dir():
+        _report_restore_failure(
+            t("Restore source does not exist: {path}").format(path=source),
+            category="source_missing",
+            source=source,
+            target=None,
+            dry_run=dry_run,
+            as_json=as_json,
         )
 
+    skipped = 0
     try:
-        with _source_connection(source) as conn:
-            info = inspect_chapter_database(conn, source=str(source))
-    except (
-        ChapterStorageCorruptError,
-        ChapterStorageSchemaError,
-        sqlite3.Error,
-        OSError,
-    ) as exc:
-        fail(
-            t("Backup file is not a valid chapter database: {error}").format(error=exc)
+        if source.is_dir():
+            items, skipped = _plan_directory_restore(source, raw_root, target_arg)
+        else:
+            items = _plan_file_restore(source, raw_root, target_arg)
+    except OSError as exc:
+        _report_restore_failure(
+            t("Failed to read {source}: {error}").format(source=source, error=exc),
+            category="io_error",
+            source=source,
+            target=None,
+            dry_run=dry_run,
+            as_json=as_json,
         )
 
-    preserved: Path | None = None
-    if exists:
+    if not items:
+        _report_restore_failure(
+            t("No backup files found in {path}.").format(path=source),
+            category="no_backups",
+            source=source,
+            target=None,
+            dry_run=dry_run,
+            as_json=as_json,
+        )
+
+    _validate_restore_plan(items, raw_root=raw_root, source=source)
+
+    # Validate every source before writing anything, so a bad file later in the
+    # set cannot leave the earlier targets replaced.
+    for item in items:
         try:
-            preserved = _preserve_existing(target, _timestamp())
-        except Exception as exc:
-            fail(
-                t(
-                    "Failed to back up the existing database; nothing was "
-                    "changed: {error}"
-                ).format(error=exc)
+            _inspect_restore_source(item.source, verify=verify)
+        except _RestoreSourceError as exc:
+            _report_restore_failure(
+                t("Backup file is not a valid chapter database: {error}").format(
+                    error=exc
+                ),
+                category=exc.category,
+                source=item.source,
+                target=item.target,
+                dry_run=dry_run,
+                as_json=as_json,
+                skipped=skipped,
             )
-        if not as_json:
+
+    if dry_run:
+        if as_json:
+            _emit_json(
+                _restore_plan_payload(
+                    items, source=source, skipped=skipped, dry_run=True
+                )
+            )
+        else:
+            for item in items:
+                ui.info(
+                    t("Would restore {source} to {target}.").format(
+                        source=item.source, target=item.target
+                    )
+                )
             ui.info(
-                t("Preserved the existing database as {path}.").format(path=preserved)
+                t(
+                    "Dry run: {count} database(s) would be restored from {source}."
+                ).format(count=len(items), source=source)
             )
+        return
 
+    # Enforced after the dry-run return: a preview may describe an overwrite
+    # without being authorised to perform one, and after source validation so a
+    # corrupt backup is reported as corrupt rather than as a usage error.
+    _check_overwrite_gate(items, force=force)
+
+    stamp = _timestamp()
+    installed: list[InstalledRestore] = []
+    entries: list[dict[str, object]] = []
     try:
-        _write_snapshot(source, target)
-    except Exception as exc:
-        fail(t("Failed to restore {source}: {error}").format(source=source, error=exc))
+        for item in items:
+            exists = item.target.exists()
+            preserved: Path | None = None
+            if exists:
+                preserved = _preserve_existing(item.target, stamp)
+                if not as_json:
+                    ui.info(
+                        t("Preserved the existing database as {path}.").format(
+                            path=preserved
+                        )
+                    )
+            # Recorded before the write so a failure part-way through still
+            # restores this target (and drops the stray ``.bak``) on rollback.
+            installed.append(InstalledRestore(item.target, preserved))
+            info = _write_snapshot(item.source, item.target)
+            # Sidecars belong to the replaced file. Their data was captured by
+            # the online backup above; leaving them next to the new file would
+            # let SQLite apply a foreign WAL or roll back a stale journal.
+            for suffix in ("-wal", "-shm", "-journal"):
+                with contextlib.suppress(OSError):
+                    Path(f"{item.target}{suffix}").unlink()
+            entries.append(
+                {
+                    "source": str(item.source),
+                    "target": str(item.target),
+                    "replaced_existing": exists,
+                    "pre_restore_backup": str(preserved) if preserved else None,
+                    "schema_version": info.schema_version,
+                    "chapters": info.chapter_count,
+                    "bytes": item.target.stat().st_size,
+                    "sha256": _sha256(item.target),
+                }
+            )
+            if not as_json and len(items) > 1:
+                ui.info(
+                    t("Restored {source} to {target}.").format(
+                        source=item.source, target=item.target
+                    )
+                )
+    except BaseException as exc:
+        rollback_failures = _rollback_restore(installed)
+        if rollback_failures:
+            _report_restore_failure(
+                t(
+                    "Restore failed and could not be rolled back completely: {error}"
+                ).format(error="; ".join(rollback_failures)),
+                category="io_error",
+                source=source,
+                target=items[0].target,
+                dry_run=dry_run,
+                as_json=as_json,
+                skipped=skipped,
+            )
+        if not isinstance(exc, Exception):
+            # Ctrl+C and other interrupts keep the CLI's usual contract: the
+            # group is rolled back, then the interrupt propagates.
+            raise
+        message = t("Failed to restore {source}: {error}").format(
+            source=source, error=exc
+        )
+        _report_restore_failure(
+            message,
+            category=_classify_restore_error(exc),
+            source=source,
+            target=items[0].target if items else None,
+            dry_run=dry_run,
+            as_json=as_json,
+            skipped=skipped,
+        )
 
-    # Sidecars belong to the replaced file. Their data was captured by the
-    # online backup above; leaving them next to the new file would let SQLite
-    # try to apply a foreign WAL or roll back a stale journal.
-    for suffix in ("-wal", "-shm", "-journal"):
-        with contextlib.suppress(OSError):
-            Path(f"{target}{suffix}").unlink()
+    if skipped and not as_json:
+        ui.info(
+            t("Skipped {count} older backup(s) in the backup set.").format(
+                count=skipped
+            )
+        )
 
-    size = target.stat().st_size
     if as_json:
-        _emit_json(
-            {
-                "command": "storage restore",
-                "ok": True,
-                "from": str(source),
-                "target": str(target),
-                "replaced_existing": exists,
-                "pre_restore_backup": str(preserved) if preserved else None,
-                "schema_version": info.schema_version,
-                "chapters": info.chapter_count,
-                "bytes": size,
-                "sha256": _sha256(target),
-            }
+        payload = _restore_plan_payload(
+            items, source=source, skipped=skipped, dry_run=False
+        )
+        payload["restored"] = len(entries)
+        payload["files"] = entries
+        if len(entries) == 1:
+            # Keep the single-file fields stable for existing consumers.
+            payload.update(
+                {
+                    key: entries[0][key]
+                    for key in (
+                        "replaced_existing",
+                        "pre_restore_backup",
+                        "schema_version",
+                        "chapters",
+                        "bytes",
+                        "sha256",
+                    )
+                }
+            )
+        _emit_json(payload)
+    elif len(entries) == 1:
+        ui.success(
+            t("Restored {source} to {target}.").format(
+                source=entries[0]["source"], target=entries[0]["target"]
+            )
         )
     else:
         ui.success(
-            t("Restored {source} to {target}.").format(source=source, target=target)
+            t("Restored {count} database(s) from {source}.").format(
+                count=len(entries), source=source
+            )
         )
 
 
@@ -1871,7 +2428,7 @@ class StorageBackupCmd(Command):
 
 class StorageRestoreCmd(Command):
     name = "restore"
-    help = t("Restore a chapter database from a backup file.")
+    help = t("Restore chapter databases from a backup file or directory.")
 
     @classmethod
     def add_arguments(cls, parser: ArgumentParser) -> None:
@@ -1879,21 +2436,24 @@ class StorageRestoreCmd(Command):
             "--from",
             dest="source",
             required=True,
-            help=t("Backup file to restore."),
+            help=t(
+                "Backup file or backup directory to restore. A directory "
+                "restores the newest copy of every stage it contains."
+            ),
         )
         parser.add_argument(
             "--to",
             dest="target",
             help=t(
-                "Database path to write (must be inside the raw data directory). "
-                "Derived from the backup's site/book path when omitted."
+                "Database path or raw-data root to write (must be inside the "
+                "raw data directory). Derived from the backup's site/book path "
+                "when omitted."
             ),
         )
         parser.add_argument(
-            "-y",
-            "--yes",
+            "--dry-run",
             action="store_true",
-            help=t("Allow replacing an existing database (it is backed up first)."),
+            help=t("Report what would be restored without writing anything."),
         )
         parser.add_argument(
             "--json",
@@ -1901,17 +2461,60 @@ class StorageRestoreCmd(Command):
             action="store_true",
             help=t("Print a single-line JSON report on stdout."),
         )
+        parser.add_argument(
+            "--force",
+            "-y",
+            "--yes",
+            dest="force",
+            action="store_true",
+            help=t(
+                "Allow replacing existing databases (each one is backed up as "
+                "a .pre-restore-*.bak first)."
+            ),
+        )
+        parser.add_argument(
+            "--no-verify",
+            dest="verify",
+            action="store_false",
+            default=True,
+            help=t(
+                "Skip the strict schema check on the backup (the SQLite "
+                "integrity check is still enforced)."
+            ),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
         as_json = bool(getattr(args, "as_json", False))
-        raw_root = _resolve_paths(
-            non_interactive=as_json or not stdin_is_interactive()
-        )["raw"]
+        source = expand_path(args.source)
+        dry_run = bool(getattr(args, "dry_run", False))
+        try:
+            raw_root = _resolve_paths(
+                non_interactive=as_json or not stdin_is_interactive()
+            )["raw"]
+        except SystemExit as exc:
+            # ``_resolve_paths`` reports a missing configuration on stderr and
+            # exits 1. ``--json`` still owes its consumer one machine-readable
+            # line; usage errors (2) keep their established empty-stdout shape.
+            if as_json and exc.code not in (None, 0, EXIT_USAGE):
+                _emit_json(
+                    _restore_failure_payload(
+                        category="config_error",
+                        message=t(
+                            "Could not load the configuration; nothing was restored."
+                        ),
+                        source=source,
+                        target=None,
+                        dry_run=dry_run,
+                    )
+                )
+            raise
         _run_restore(
             raw_root,
-            expand_path(args.source),
+            source,
             args.target,
-            assume_yes=bool(getattr(args, "yes", False)),
+            force=bool(getattr(args, "force", False)),
             as_json=as_json,
+            dry_run=dry_run,
+            verify=bool(getattr(args, "verify", True)),
         )

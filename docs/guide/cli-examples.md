@@ -992,20 +992,29 @@ novel-cli storage verify --json
 
 ##### 9.3 storage restore 子命令
 
-从备份文件恢复章节数据库。写入前会校验文件 (SQLite 完整性、schema 版本、必需列), 校验通过后原子替换目标数据库。
+从备份文件或备份目录恢复章节数据库。写入前会校验每个源 (SQLite 完整性、schema 版本、必需列), 全部通过后才逐个原子替换目标数据库; 安装阶段任一步失败 (含 Ctrl+C) 都会把本次已替换的目标整组回滚。
 
 **Synopsis**
 
 ```bash
-novel-cli storage restore [-h] --from SOURCE [--to TARGET] [-y] [--json]
+novel-cli storage restore [-h] --from SOURCE [--to TARGET] [--dry-run] [--json]
+                          [--force] [--no-verify]
 ```
 
 **Options**
 
-* `--from SOURCE`: 要恢复的备份文件 (必填)
-* `--to TARGET`: 要写入的数据库路径, 必须位于 `raw_data_dir` 内且文件名形如 `chapter.<stage>.sqlite`; 省略时按备份文件的 `<site>/<book>` 路径推断, 无法推断时以用法错误 (`2`) 退出
-* `-y, --yes`: 允许替换已存在的数据库。替换前会先把它保存为同目录的 `chapter.<stage>.sqlite.pre-restore-<时间戳>.bak`; 不加 `--yes` 时拒绝覆盖 (退出码 `2`)
-* `--json`: 输出单行 JSON 报告, 含 `command`、`ok`、`from`、`target`、`replaced_existing`、`pre_restore_backup`、`schema_version`、`chapters`、`bytes`、`sha256`
+* `--from SOURCE`: 要恢复的备份文件或备份目录 (必填)。目录会恢复其中每个 `<book, stage>` 的最新副本, 更旧的副本计入 `skipped`
+* `--to TARGET`: 要写入的数据库路径或目标根目录, 必须位于 `raw_data_dir` 内; 数据库文件名必须形如 `chapter.<stage>.sqlite`。省略时按备份文件的 `<site>/<book>` 路径推断, 无法推断时以用法错误 (`2`) 退出
+* `--dry-run`: 只校验并报告将恢复哪些文件, **不写入任何内容**; 不要求 `--force`
+* `--json`: 输出单行 JSON 报告
+* `--force` (`-y` / `--yes` 为别名): 允许替换已存在的数据库。替换前会先把它保存为同目录的 `chapter.<stage>.sqlite.pre-restore-<时间戳>.bak`; 不加 `--force` 时拒绝覆盖 (退出码 `2`)
+* `--no-verify`: 跳过源的严格 schema 检查 (允许恢复由更新版本写出的库); SQLite 完整性检查始终执行
+
+**JSON 字段**
+
+成功时: `command`、`ok`、`from`、`target`、`restored`、`files[]` (每项含 `source`、`target`、`stage`, 以及 `replaced_existing`、`pre_restore_backup`、`schema_version`、`chapters`、`bytes`、`sha256`)、`skipped`、`dry_run`、`error` (成功为 `null`)、`message` (成功为 `null`)。单文件恢复还会在顶层重复原有的 `replaced_existing`、`pre_restore_backup`、`schema_version`、`chapters`、`bytes`、`sha256`, 保持旧消费者兼容。
+
+失败时: `ok` 为 `false`、`restored` 为 `0`、`files` 为空数组, 并给出 `error` (稳定类别) 与 `message`。稳定类别: `source_missing`、`no_backups`、`not_database`、`integrity_failed`、`wal_damaged`、`schema_unsupported`、`database_error`、`io_error`、`config_error`、`internal_error`。用法错误 (未加 `--force` 覆盖已有库、目标越界、符号链接、恢复到源自身) 以 `2` 退出且不输出 JSON。
 
 **Examples**
 
@@ -1013,11 +1022,17 @@ novel-cli storage restore [-h] --from SOURCE [--to TARGET] [-y] [--json]
 # 按备份内的站点/书籍路径恢复到 raw_data
 novel-cli storage restore --from ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite
 
+# 恢复整个备份集 (每个 <book, stage> 只取最新副本)
+novel-cli storage restore --from ~/novel-backups --force
+
+# 先预演, 零写入
+novel-cli storage restore --from ~/novel-backups --dry-run --json
+
 # 恢复到显式指定的数据库路径, 并允许替换已有库 (会先备份)
-novel-cli storage restore --from ./backup.sqlite --to ./raw_data/qidian/1010868264/chapter.raw.sqlite -y
+novel-cli storage restore --from ./backup.sqlite --to ./raw_data/qidian/1010868264/chapter.raw.sqlite --force
 
 # 脚本消费
-novel-cli storage restore --from ./backup.sqlite -y --json
+novel-cli storage restore --from ./backup.sqlite --force --json
 ```
 
 `--to` 的文件名必须形如 `chapter.<stage>.sqlite`, 且 `stage` 要与原库一致 (通常是 `raw` 或 `cleaner`)。写错阶段不会影响其他文件, 但应用随后读写的是另一个阶段的数据库, 看起来像“章节丢了”。
@@ -1335,7 +1350,7 @@ novel-cli update --json
 | --- | --- | --- |
 | `0` | 成功 | 命令正常完成; 搜索无结果、追更无新章节也属于成功 |
 | `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败、`storage backup` (含写入后校验失败, 整组回滚)/`restore` 备份或恢复失败、`music health` 有平台失败、`music download` 有歌曲失败、`batch` 存在未匹配/格式错误/下载失败、`update` 检查失败 (以及 `--yes` 时无匹配资产、缺少摘要或下载失败) |
-| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`download` 的 `--site`/`--start`/`--end` 传入空字符串 (仅含空白也算空)、`--json` 与 `--first` 同用、`storage` 的 `--json` 与 `--clean` 同用 (未加 `--dry-run`)、`clean cache`/`clean book` 的 `--json` 未与 `--dry-run` 同用、`storage --dry-run` 未与 `--clean` 同用、`storage restore` 覆盖已有数据库未加 `--yes` 或目标不在 `raw_data_dir` 内、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`music` 的 `--platform` 传入未知平台、`batch` 未提供输入文件或 `--interval` 为负、`clean --site` 传入 `..`/路径分隔符等越界值 |
+| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`download` 的 `--site`/`--start`/`--end` 传入空字符串 (仅含空白也算空)、`--json` 与 `--first` 同用、`storage` 的 `--json` 与 `--clean` 同用 (未加 `--dry-run`)、`clean cache`/`clean book` 的 `--json` 未与 `--dry-run` 同用、`storage --dry-run` 未与 `--clean` 同用、`storage restore` 覆盖已有数据库未加 `--force`、目标不在 `raw_data_dir` 内、目标经过符号链接、或把备份恢复到备份目录自身、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`music` 的 `--platform` 传入未知平台、`batch` 未提供输入文件或 `--interval` 为负、`clean --site` 传入 `..`/路径分隔符等越界值 |
 
 `update --check` 的退出码表示**检查**是否成功, 而不是是否有新版本: 发现有更新仍返回 `0`。`sources list --probe` 本身不改变退出码——网络不可达只在 `Latency`/`HTTP` 列显示为 `-`, 只有 `--check` 的结构校验失败才会以 `1` 退出。
 
@@ -1367,7 +1382,7 @@ novel-cli update --json
 | `storage --clean` | `--dry-run --json` | 与 `clean cache` 相同的 dry-run 结构, `command` 为 `storage --clean`, `site`/`book_id` 为 `null`, `book_ids` 为 `[]` |
 | `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files", "verified", "verification_failed", "retention"}`; `files[]` 含 `source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`、`verified`; 任何运行期失败 (`ok` 为 `false`) 另含 `error` (稳定类别, 如 `not_database`、`integrity_failed`、`wal_damaged`、`schema_unsupported`、`sequence_exhausted`、`io_error`、`retention_failed`)、`message` 与 `source`, 整组回滚时 `count` 为 `0`、`files` 为 `[]` (`retention_failed` 例外: 新备份已保留, `count` 非零); 写入后校验失败还会带 `verification_failed: true` 与 `verification_error` (`source`、`target`、`reason`); `retention` 含 `keep`、`dry_run`、`candidates`、`removed`、`failed` |
 | `storage verify` | `--json` | `{"ok", "total", "healthy", "corrupt", "errors"}`; 每个 `errors[]` 含 `path`、`reason`; 被 Ctrl+C 中断时额外含 `"interrupted": true` |
-| `storage restore` | `--json` | `{"command", "ok", "from", "target", "replaced_existing", "pre_restore_backup", "schema_version", "chapters", "bytes", "sha256"}` |
+| `storage restore` | `--json` | `{"command", "ok", "from", "target", "restored", "files", "skipped", "dry_run", "error", "message"}`; `files[]` 每项含 `source`、`target`、`stage`、`replaced_existing`、`pre_restore_backup`、`schema_version`、`chapters`、`bytes`、`sha256`; 单文件恢复还在顶层重复这些字段; 失败时 `ok` 为 `false`、`error` 为稳定类别 (`source_missing`、`no_backups`、`not_database`、`integrity_failed`、`wal_damaged`、`schema_unsupported`、`database_error`、`io_error`、`config_error`、`internal_error`) |
 | `doctor` | `--json` | `{"summary": {"total", "failures", "optional_failures", "ok"}, "checks": [{"key", "name", "ok", "fatal", ...}]}` |
 
 ```bash

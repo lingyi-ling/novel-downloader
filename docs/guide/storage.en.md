@@ -427,23 +427,31 @@ transaction-consistent).
 # With an intact backup layout, the target path is derived from <site>/<book>
 novel-cli storage restore \
   --from ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite \
-  -y
+  --force
 
 # When the file was moved/renamed, or you want another target, pass --to explicitly
 novel-cli storage restore \
   --from ./backup.sqlite \
   --to ./raw_data/qidian/1010868264/chapter.raw.sqlite \
-  -y
+  --force
+
+# Preview which files would be restored, writing nothing
+novel-cli storage restore --from ~/novel-backups --dry-run --json
 ```
 
 Rules:
 
-* `--from` must be a valid chapter database: integrity, schema version, and
-  required columns are checked first; on failure nothing is written.
+* `--from` accepts a **single backup file** or a **backup directory**. A file
+  must be a valid chapter database: integrity, schema version, and required
+  columns are checked first; on failure nothing is written. A directory has every
+  backup validated up front, and one bad file aborts the whole set before the
+  first write.
 * The target must be inside `raw_data_dir` and named
-  `chapter.<stage>.sqlite`.
-* If the target exists, `-y` is required; otherwise the command exits with usage
-  error `2` and writes nothing. If the target does not exist, `-y` is unnecessary.
+  `chapter.<stage>.sqlite`. A target that is (or sits behind) a symbolic link is
+  refused, as is restoring a backup onto itself or a set into the backup tree.
+* If the target exists, `--force` is required (`-y` / `--yes` are aliases);
+  otherwise the command exits with usage error `2` and writes nothing. If the
+  target does not exist, `--force` is unnecessary.
 * Before replacing an existing database, the old one is saved as
   `chapter.<stage>.sqlite.pre-restore-<UTC>.bak` in the same directory. A readable
   old database is preserved with an online snapshot; a corrupt one that SQLite
@@ -451,15 +459,58 @@ Rules:
   lost.
 * After installing the new database, the old `-wal` / `-shm` / `-journal` beside
   the target are deleted so SQLite cannot apply a foreign log to the new file.
-* `--json` reports `from`, `target`, `replaced_existing`, `pre_restore_backup`,
-  `schema_version`, `chapters`, `bytes`, and `sha256`.
+* `--dry-run` validates and reports the plan **without writing anything**. It does
+  not require `--force`, so an overwrite can be rehearsed safely. A validation
+  failure still exits `1` with the JSON failure report.
+* `--no-verify` relaxes only the **schema** check (so a database written by a
+  newer build stays restorable); the SQLite integrity check is always enforced, so
+  a physically damaged file is never installed.
+* `--json` success reports `command`, `ok`, `from`, `target`, `restored`,
+  `files[]`, `skipped`, `dry_run`, `error`, and `message`. A single-file restore
+  also carries the original `replaced_existing`, `pre_restore_backup`,
+  `schema_version`, `chapters`, `bytes`, and `sha256`. On failure `ok` is `false`,
+  `error` is a stable category (below), and `restored` is `0`.
+
+Stable `error` categories:
+
+| `error` | Meaning |
+| --- | --- |
+| `source_missing` | the file or directory given to `--from` does not exist |
+| `no_backups` | the directory holds no file with a backup name |
+| `not_database` | the source is not a SQLite database |
+| `integrity_failed` | the source failed its integrity check |
+| `wal_damaged` | the `-wal` checksum chain is damaged mid-file |
+| `schema_unsupported` | schema newer than this build, or missing table/columns |
+| `database_error` | another SQLite error |
+| `io_error` | reading the source, writing the temp file, or the atomic replace failed |
+| `config_error` | the configuration could not be loaded; nothing was restored |
+| `internal_error` | unexpected exception |
+
+**Grouped rollback**: a directory restore validates every source before writing;
+if any target then fails (Ctrl+C included), every target this run already
+replaced is restored in reverse order -- a `.pre-restore-*.bak` is moved back and
+a target that did not exist is removed -- and the sidecars left by the new file
+are cleaned up. After the rollback the interrupt keeps propagating, so the CLI
+prints `Aborted.` and exits `1` as usual.
 
 ### Restore a whole book or everything from a backup set {#restore-set}
 
-A backup set is organized as
-`<site>/<book>/chapter.<stage>.<timestamp>.sqlite`; restore each database
-individually:
+Point `--from` at the backup directory to restore the whole set:
 
+```bash
+# Restore the whole set (newest copy of each <book, stage> only)
+novel-cli storage restore --from ~/novel-backups --force
+
+# Rehearse it first
+novel-cli storage restore --from ~/novel-backups --dry-run
+```
+
+A backup set is organized as
+`<site>/<book>/chapter.<stage>.<timestamp>.sqlite`:
+
+* backups are grouped by book directory and stage, and only the **newest** copy of
+  each group is restored; older copies kept by `--keep` are counted in `skipped`
+  and never overwrite a newer one in the same run;
 * one book may have several stages such as `raw` and `cleaner`; restore each to
   its own `chapter.<stage>.sqlite`, never under another stage's target name;
 * timestamps may differ between databases in a set (for example, a book added
@@ -467,7 +518,7 @@ individually:
   set came from the same second;
 * if the backup directory was moved, `--from` can point at the new location;
   target derivation uses only the last two directory levels. If the layout was
-  rearranged, use `--to`;
+  rearranged, use `--to` to name the target root or a single database path;
 * after restoring, run `novel-cli storage verify` again and confirm everything is
   healthy.
 
@@ -479,7 +530,7 @@ The old database left by a replacing restore can be restored back:
 novel-cli storage restore \
   --from raw_data/qidian/1010868264/chapter.raw.sqlite.pre-restore-20260102T030405Z.bak \
   --to raw_data/qidian/1010868264/chapter.raw.sqlite \
-  -y
+  --force
 ```
 
 The `.bak` name does not match the backup naming rules, so **`--to` is
