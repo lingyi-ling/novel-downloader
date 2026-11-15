@@ -140,7 +140,7 @@ Search for novels by keyword
 **Synopsis**
 
 ```bash
-novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] [--min-words N] [--max-words N] [--updated-after YYYY-MM-DD] [--group | --no-group] keyword [keyword ...]
+novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] [--order {asc,desc}] [--min-words N] [--max-words N] [--updated-after YYYY-MM-DD] [--group | --no-group] keyword [keyword ...]
 ```
 
 **Options**
@@ -153,7 +153,8 @@ novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit 
 * `--format FORMAT [FORMAT ...]`: export format used when auto-downloading a confirmed result (defaults to the config file)
 * `--json`: print all search results to stdout as JSON and exit (for scripts)
 * `--first`: download the top-ranked result directly without confirmation (non-interactive)
-* `--sort {quality,priority,site,title,author,words,update}`: result ordering, defaults to `quality`
+* `--sort {quality,priority,site,title,author,words,update}`: result ordering key, defaults to `quality` (combined relevance). `quality` blends keyword relevance, word count, update recency and source quality; `priority` orders by source priority; `words` by word count; `update` by update date; `site` / `title` / `author` order by source, title and author respectively.
+* `--order {asc,desc}`: sort direction. When omitted, the key's **natural direction** applies: descending for `quality` / `words` / `update`, ascending for `priority` / `site` / `title` / `author`. For example, `--sort priority` puts the preferred sources first by default, while `--sort words --order desc` puts the longest books first.
 * `--min-words N` / `--max-words N`: word-count filter (inclusive), `0`–`1000000000`. The site's `word_count` is parsed with the same rules the ranking layer uses (`"30万字"`, `"1,234"`); when set, rows with **no parseable word count** are dropped. Omit both for no filtering.
 * `--updated-after YYYY-MM-DD`: keep only results updated **on or after** that date (inclusive lower bound); the date must be exactly `YYYY-MM-DD`. When set, rows with **no parseable update date** are dropped. Omit it for no filtering.
 * `--group` / `--no-group`: merge the same book across sites into one row, with the `site` column listing every source (`*` marks the best source). Default: no grouping (`--no-group`). Filters run before grouping and the `--limit` cut.
@@ -182,6 +183,15 @@ novel-cli search -s b520 -s n23qb 三体
 # Search title + author together: the two tokens match title and author separately
 novel-cli search "斗破苍穹 天蚕土豆"
 
+# Sort by update date; the natural direction is descending (most recent first)
+novel-cli search 三体 --sort update
+
+# Sort by word count ascending (shortest first)
+novel-cli search 三体 --sort words --order asc
+
+# Sort by source priority (ascending by default, preferred sources first)
+novel-cli search 斗破苍穹 --sort priority
+
 # Only works between 300k and 1M words
 novel-cli search 斗破苍穹 --min-words 300000 --max-words 1000000
 
@@ -194,6 +204,8 @@ novel-cli search 斗破苍穹 --min-words 300000 --updated-after 2024-01-01 --gr
 
 Filters only narrow this run's result set; they do not change ranking or the response fields. Each filter combination is cached as a distinct request, so a filtered query never reuses an unfiltered snapshot. `--json` still prints a JSON array of results. A malformed date or word count exits with a usage error (exit code `2`) instead of silently disabling the filter.
 
+Sorting only changes the order of this run's rows; it does not change the response fields or the cached contents. `--json` still prints the same array of results, with the row order following `--sort` / `--order`. `quality` is the only key that applies the relevance floor; switching to `words` / `update` or another key never drops rows for low relevance.
+
 **Match annotation**: when a result carries the ranking fields, the `Title`
 cell reads `Title · Exact 0.91`. The first part is the `match_tier` label (`4`
 exact / `3` prefix / `2` contains / `1` partial / `0` no match), and the second
@@ -202,7 +214,10 @@ values are valid; old cache entries, streamed previews, and other unranked
 sources keep the plain title rather than a misleading `0.00` or `No match`.
 The annotation explains the ordering, does not change it, and is never written
 back to the cache; `--json` is not trimmed and still prints whatever raw fields
-the backend supplied (see the contract at the end of this page).
+the backend supplied (see the contract at the end of this page). The badge
+describes keyword matching (`match_tier`) and combined relevance
+(`rank_score`), independent of `--sort`: sorting by word count or update date
+does not turn it into a word-count or update-date badge.
 
 !!! note "Why fanqienovel is excluded from aggregate searches"
     Fanqie signs its search requests client-side, and needs **no login**. Selecting the site explicitly uses the official app API: the first run registers a device identity (cached on disk), after which `x-argus` / `x-gorgon` / `x-ladon` are computed locally — no browser window involved.

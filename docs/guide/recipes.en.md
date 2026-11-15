@@ -466,6 +466,16 @@ The desktop client saves the last **valid** filter set, so you do not have to re
 * "Clear saved filters" under "Search filters" in Settings deletes just that record and leaves the current inputs alone.
 * If the preferences file was hand-edited or written by an older build, invalid fields are ignored **one by one** (for example, a minimum greater than the maximum drops both word bounds, and an invalid date drops only the date), so startup never fails.
 
+#### Desktop remembers the sort selection
+
+The "Sort by" and "Sort direction" controls in the search bar decide the row order:
+
+* "Sort by" offers `Relevance` (default, `quality`), `Overall quality` (`priority`), `Word count` (`words`) and `Updated` (`update`); "Sort direction" offers `Descending` / `Ascending`.
+* Each key has a natural direction: `Relevance` / `Word count` / `Updated` default to descending, while `Overall quality` defaults to ascending. **Changing the sort key resets the direction to that key's natural default**; the direction select can then override it.
+* Every change is written to the `search_sort` key of `desktop_prefs.json` (for example, `{"sort": "quality", "order": "desc"}`) and restored on the next launch, but **no search is started automatically**. A hand-edited or older value falls back field by field: an unknown key becomes `quality`, and an unknown direction becomes that key's natural direction.
+* The sort selection is part of the query identity: pressing "Search" again with the same keyword, filters and sort is a no-op, while changing the sort and pressing "Search" runs the query again in the new order.
+* Ordering only changes the row order, not the result contents or the match badge; the badge beside the title still explains keyword relevance only. Filters and ordering do not affect each other.
+
 ---
 
 ### 9. FAQ

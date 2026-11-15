@@ -106,6 +106,16 @@ The "Advanced filters" row below the search box expands optional conditions:
 - Filters run in the engine after ranking (the computer API or the standalone engine) and only narrow the result set; ordering is unchanged. With a word-count filter active, rows whose site did not report a word count are dropped; with a date filter active, rows without a parseable update date are dropped. That is not a request failure — "fewer results" usually means exactly this.
 - "Active filters: N" counts the non-blank conditions and offers "Clear filters". The values survive tab switches and a system-initiated process death when the app is restored from Recents.
 
+### Sorting
+
+The top of the expanded "Advanced filters" panel also holds the result ordering:
+
+- **Sort by**: `Relevance` (default), `Quality`, `Word count`, `Updated`. `Relevance` uses the same combined score as the match badge (`quality`); `Quality` orders by source priority (`priority`); `Word count` by word count (`words`); `Updated` by the last update date (`update`).
+- **Direction**: `Descending` (default) / `Ascending`.
+- The ordering lives in the screen's `SavedStateHandle` alongside the filters, so it is restored after a tab switch and after a system-initiated process death when the app is restored from Recents. A re-search or retry sends the current selection.
+- Ordering is not counted in "Active filters: N" because it changes the presentation, not the result set. "Clear filters" resets the ordering to `Relevance` + `Descending`.
+- Ordering only changes the list order, not the result contents. The match badge still explains keyword relevance (`match_tier` / `rank_score`) and does not change with the sort key or direction.
+
 ### Match badge
 
 In the search results, the colored badge beside the title explains how this

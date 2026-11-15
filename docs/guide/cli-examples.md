@@ -140,7 +140,7 @@ novel-cli download --site n23qb
 **Synopsis**
 
 ```bash
-novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] [--min-words N] [--max-words N] [--updated-after YYYY-MM-DD] [--group | --no-group] keyword [keyword ...]
+novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit M] [--timeout SECS] [--format FORMAT [FORMAT ...]] [--json] [--first] [--sort {quality,priority,site,title,author,words,update}] [--order {asc,desc}] [--min-words N] [--max-words N] [--updated-after YYYY-MM-DD] [--group | --no-group] keyword [keyword ...]
 ```
 
 **Options**
@@ -153,7 +153,8 @@ novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit 
 * `--format FORMAT [FORMAT ...]`: 结果确认后自动下载时的导出格式 (默认使用配置文件设定)
 * `--json`: 将所有搜索结果以 JSON 输出到标准输出后退出 (便于脚本消费)
 * `--first`: 直接下载排名第一的结果, 无需确认 (非交互模式)
-* `--sort {quality,priority,site,title,author,words,update}`: 结果排序方式, 默认为 `quality` (优选)
+* `--sort {quality,priority,site,title,author,words,update}`: 结果排序键, 默认为 `quality` (综合相关度)。`quality` 综合关键词相关度、字数、更新时间和来源质量; `priority` 按书源优先级; `words` 按字数; `update` 按更新时间; `site` / `title` / `author` 分别按来源、书名、作者排序。
+* `--order {asc,desc}`: 排序方向。省略时使用排序键的**自然方向**: `quality` / `words` / `update` 为降序, `priority` / `site` / `title` / `author` 为升序。例如 `--sort priority` 默认把更优先的来源排在前面, `--sort words --order desc` 把字数最多的排在前面。
 * `--min-words N` / `--max-words N`: 字数过滤 (含边界), 取值为 `0`–`1000000000`。站点返回的 `word_count` 会按排名层同一套规则解析 (`"30万字"`、`"1,234"`); 设置后, **没有字数或无法解析**的结果会被丢弃。省略即不过滤。
 * `--updated-after YYYY-MM-DD`: 只保留该日期**当天及之后**更新的结果 (下界, 含当天); 严格使用 `YYYY-MM-DD`。设置后, **没有更新日期或无法解析**的结果会被丢弃。省略即不过滤。
 * `--group` / `--no-group`: 合并跨站点的同名书, 每本书只占一行, `site` 列列出全部来源 (`*` 标记最佳来源)。默认不合并 (`--no-group`)。过滤在分组与 `--limit` 截断之前生效。
@@ -182,6 +183,15 @@ novel-cli search -s b520 -s n23qb 三体
 # 书名 + 作者一起搜: 两个词分别匹配标题与作者
 novel-cli search "斗破苍穹 天蚕土豆"
 
+# 按更新时间排序, 默认降序 (最近更新的在前)
+novel-cli search 三体 --sort update
+
+# 按字数升序, 字数少的在前
+novel-cli search 三体 --sort words --order asc
+
+# 按书源优先级排序 (默认升序, 更优先的来源在前)
+novel-cli search 斗破苍穹 --sort priority
+
 # 只看 30 万字以上、100 万字以下的作品
 novel-cli search 斗破苍穹 --min-words 300000 --max-words 1000000
 
@@ -194,7 +204,9 @@ novel-cli search 斗破苍穹 --min-words 300000 --updated-after 2024-01-01 --gr
 
 过滤参数只缩小本次结果集, 不改变排序评分或响应字段; 不同过滤组合会作为不同请求分别缓存, 不会复用未过滤的快照。`--json` 输出仍是结果数组。日期或字数格式非法时以用法错误 (退出码 `2`) 退出, 不会退化成「无过滤」。
 
-**匹配标注**: 结果带排名派生字段时, 表格的 `Title` 列显示为 `书名 · 精确 0.91`。前半是 `match_tier` 的中文标签 (`4` 精确 / `3` 前缀 / `2` 包含 / `1` 部分 / `0` 无匹配), 后半是保留两位小数的 `rank_score`。只有两个字段都有效才追加; 旧缓存、流式预览或其他未排名来源缺少字段时, 书名保持原样, 不会补 `0.00` 或 `无匹配` 造成误导。标注只解释排序结果, 不改变排序, 也不会写回缓存; `--json` 不做裁剪, 仍输出后端给出的原始字段 (见文末契约)。
+排序只改变本次返回的顺序, 不改变结果字段或缓存内容; `--json` 仍是同样的结果数组, 只是行序随 `--sort` / `--order` 变化。`quality` 是唯一会应用相关度下限的排序键; 改用 `words` / `update` 等键时不会因相关度过滤丢行。
+
+**匹配标注**: 结果带排名派生字段时, 表格的 `Title` 列显示为 `书名 · 精确 0.91`。前半是 `match_tier` 的中文标签 (`4` 精确 / `3` 前缀 / `2` 包含 / `1` 部分 / `0` 无匹配), 后半是保留两位小数的 `rank_score`。只有两个字段都有效才追加; 旧缓存、流式预览或其他未排名来源缺少字段时, 书名保持原样, 不会补 `0.00` 或 `无匹配` 造成误导。标注只解释排序结果, 不改变排序, 也不会写回缓存; `--json` 不做裁剪, 仍输出后端给出的原始字段 (见文末契约)。徽标描述的是关键词匹配 (`match_tier`) 与综合相关度 (`rank_score`), 与当前 `--sort` 无关: 即使按字数或更新时间排序, 它仍只解释相关度, 不会变成「字数」或「更新时间」。
 
 !!! note "番茄为什么不在聚合搜索里"
     番茄的搜索接口要客户端签名, 且**不需要登录**。显式指定站点时会直接走官方 App 接口: 首次使用自动注册一台设备身份 (落盘复用), 之后 `x-argus` / `x-gorgon` / `x-ladon` 全部本地现算, 无需浏览器窗口。
