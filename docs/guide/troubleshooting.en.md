@@ -783,7 +783,35 @@ novel-cli storage backup --out ~/novel-backups --keep 7
 
 ---
 
-## 17. Still Stuck?
+## 17. CLI Output Is Mojibake / JSON Parsing Fails on Windows
+
+**Symptoms**: after redirecting `novel-cli` output to a file or piping it to a script, Chinese text turns into mojibake (for example `锟斤拷` or `????`), and `jq`, `json.loads`, or `ConvertFrom-Json` reports a parse error. The same output looks fine in the terminal.
+
+**Cause**: starting with v1.34.0, the frozen CLI writes both stdout and stderr as UTF-8 when they are not a TTY (see [CLI Usage § Output Encoding Contract](./cli-examples.en.md#output-encoding-contract)). Old consumers still decode with the system code page (cp936/GBK) or Windows PowerShell 5.1's default encoding, so the UTF-8 bytes are misread. The terminal looks fine because a TTY keeps its native encoding and never takes the redirect path.
+
+**Fix**:
+
+1. Make sure the version is at least v1.34.0 and that you use the official frozen CLI; older builds guaranteed UTF-8 only for machine-readable stdout (`--json`/completion scripts).
+2. When piping directly in Windows PowerShell 5.1, set the console output encoding first:
+
+   ```powershell
+   [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+   $r = novel-cli search --json "Three Body" | ConvertFrom-Json
+   ```
+
+3. When writing a file and reading it back, `Get-Content` must specify the encoding:
+
+   ```powershell
+   novel-cli search --json "Three Body" | Set-Content -Encoding UTF8 result.json
+   Get-Content -Encoding UTF8 result.json | ConvertFrom-Json
+   ```
+
+4. Python callers must pass `encoding="utf-8"` explicitly (do not rely on `locale.getpreferredencoding()`); read files written by the CLI with `open(..., encoding="utf-8")`.
+5. In `cmd.exe`, `type` may still display the file through the current code page; `chcp 65001` only affects display, not the file's UTF-8 content.
+
+---
+
+## 18. Still Stuck?
 
 Include the following information when opening an issue:
 

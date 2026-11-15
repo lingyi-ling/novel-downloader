@@ -99,7 +99,7 @@ novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end E
 * `--end`: end chapter **unique ID**, **inclusive** (only applied to the first `book_id`); whitespace handling is the same as `--start`
 * `--no-export`: download only, no export. When enabled, the export step is skipped
 * `--format FORMAT [FORMAT ...]`: export format: `txt` / `epub` / `html`; multiple values allowed; defaults to the setting in the configuration file
-* `--json`: print indented multi-line JSON (`indent=2`) to stdout and exit (structure in the table at the end of this page)
+* `--json`: print compact single-line JSON to stdout and exit (structure in the table at the end of this page)
 * `--strict`: exit non-zero if any chapter could not be downloaded; an incomplete book is not exported, and up to 20 failures are listed (the default only warns with the first 5)
 
 > `--start` / `--end` are used to temporarily download a subset of chapters, and only affect the **first** `book_id` provided on the command line.
@@ -1279,7 +1279,7 @@ With `--json`:
 
 | Command | Option | stdout shape |
 | --- | --- | --- |
-| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; printed as indented multi-line JSON (`indent=2`); `failed` is the number of missing chapters (`0` means complete); `exported` is `{format: [paths...]}`, or `null` with `--no-export` |
+| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; printed as compact single-line JSON; `failed` is the number of missing chapters (`0` means complete); `exported` is `{format: [paths...]}`, or `null` with `--no-export` |
 | `search` | `--json` | Array of results with `site`, `book_id`, `book_url`, `cover_url`, `title`, `author`, `latest_chapter`, `update_date`, `word_count`, `priority`, plus the read-only derived fields `rank_score` (`0..1`) and `match_tier` (`0..4`: `4` exact / `3` prefix / `2` contains / `1` partial / `0` no match) |
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
 | `sources list` | `--json` | Array with `site_key`, `name`, `search`, `hosts`, `origin`; `status` is populated only with `--check` (otherwise `null`); with `--probe` each item also carries `latency_ms` and `http_status` (`null` when unreachable) |
@@ -1312,6 +1312,55 @@ novel-cli storage --json | jq '.total.bytes'
 > `login --list` prints a plain-text list, not JSON. `sources check`, `config`, `clean logs`, `clean state`, and `batch` currently have no `--json`.
 >
 > The `jq` examples above require [jq](https://jqlang.github.io/jq/); without it, read the raw JSON output directly.
+
+#### Output Encoding Contract {#output-encoding-contract}
+
+stdout carries normal command output (`--json`, completion scripts, `--help`, and so on); stderr carries logs, progress, warnings, and errors. Starting with **v1.34.0**, the official frozen CLI (the standalone PyInstaller executable) normalises both streams to UTF-8 when they are not a TTY:
+
+* **Redirects / pipes**: stdout and stderr are written as UTF-8 with no BOM. `--json` uses `ensure_ascii=False`, so CJK text and emoji stay intact instead of becoming `\uXXXX`. Help, logs, and Rich diagnostics no longer mix in cp936/GBK bytes.
+* **Interactive terminal (TTY)**: the encoding is left alone; help, logs, and progress render in the console's native encoding, and colour, width, and progress-bar behaviour are unchanged. `--json` is the exception: its data stream is always UTF-8.
+* **`--json`**: stdout contains exactly one JSON document; logs and hints never mix in. `download`, `search`, `export`, `update`, `music *`, `clean * --dry-run`, `storage backup|verify|restore`, and `doctor` emit **strictly single-line, compact JSON**: no newline other than the final terminator, so a line-oriented reader can consume one record per line. `browse`, `follow list`, `sources list`, and `storage` still use `indent=2` multi-line JSON; they are still one UTF-8 document, but do not assume a single line.
+
+Before v1.34.0 the frozen CLI guaranteed UTF-8 only for machine-readable stdout (`--json` and completion scripts); redirected help and logs still followed the system code page (for example cp936), which could mix encodings in one capture. For source runs (`pip install` / `python -m`), `--json` stdout is likewise always UTF-8, but help and logs follow Python's locale; start with `PYTHONUTF8=1` if you need everything UTF-8 there too.
+
+Old cp936 consumers must change: decoding with the system default code page, Windows PowerShell 5.1's default `Get-Content`, or `subprocess`'s implicit locale decoding will turn UTF-8 into mojibake or break JSON parsing. Be explicit:
+
+**Windows PowerShell**
+
+```powershell
+# Windows PowerShell 5.1: decode native-command output as UTF-8 first
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$result = novel-cli search --json "Three Body" | ConvertFrom-Json
+
+# Write to a file, then read it back (Get-Content needs -Encoding UTF8)
+novel-cli search --json "Three Body" | Set-Content -Encoding UTF8 result.json
+Get-Content -Encoding UTF8 result.json | ConvertFrom-Json
+```
+
+**Git Bash / POSIX shell**
+
+```bash
+novel-cli search --json "Three Body" | jq -r '.[0].title'
+novel-cli search --json "Three Body" > result.json
+python -c "import json; print(json.load(open('result.json', encoding='utf-8'))[0]['title'])"
+```
+
+**Python callers**
+
+```python
+import json
+import subprocess
+
+completed = subprocess.run(
+    ["novel-cli", "search", "--json", "Three Body"],
+    capture_output=True,
+    encoding="utf-8",  # do not rely on locale.getpreferredencoding()
+    check=True,
+)
+data = json.loads(completed.stdout)
+```
+
+> In `cmd.exe`, `type` may still display the file through the current code page; `chcp 65001` only affects display, not the file's UTF-8 bytes. `jq` reads UTF-8 natively and needs no extra setting.
 
 ---
 

@@ -750,7 +750,35 @@ novel-cli storage backup --out ~/novel-backups --keep 7
 
 ---
 
-## 17. 仍有问题？
+## 17. Windows 下 CLI 输出乱码 / JSON 解析失败
+
+**现象**：把 `novel-cli` 的输出重定向到文件或管道给脚本后，中文变成乱码（如 `锟斤拷`、`????`），`jq`、`json.loads` 或 `ConvertFrom-Json` 报解析错误；直接看终端却正常。
+
+**原因**：v1.34.0 起，冻结 CLI 在非 TTY 下把 stdout/stderr 统一写成 UTF-8（见 [CLI 用法 § 输出编码契约](./cli-examples.md#output-encoding-contract)）。旧的消费方仍按系统代码页（cp936/GBK）或 Windows PowerShell 5.1 的默认编码读取，就会把 UTF-8 字节解错。终端里正常，是因为 TTY 保持控制台原生编码，不走重定向路径。
+
+**解决**：
+
+1. 确认版本不低于 v1.34.0，并使用官方冻结 CLI；旧版只有机器可读的 stdout（`--json`/补全脚本）是 UTF-8。
+2. Windows PowerShell 5.1 直接管道时，先设置控制台输出编码：
+
+   ```powershell
+   [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+   $r = novel-cli search --json "三体" | ConvertFrom-Json
+   ```
+
+3. 先写文件再读时，`Get-Content` 必须显式指定编码：
+
+   ```powershell
+   novel-cli search --json "三体" | Set-Content -Encoding UTF8 result.json
+   Get-Content -Encoding UTF8 result.json | ConvertFrom-Json
+   ```
+
+4. Python 调用方显式传 `encoding="utf-8"`（不要依赖 `locale.getpreferredencoding()`）；读取 CLI 写出的文件时用 `open(..., encoding="utf-8")`。
+5. `cmd.exe` 下直接 `type` 文件仍可能按当前代码页显示乱码；`chcp 65001` 只影响显示，文件内容已经是 UTF-8。
+
+---
+
+## 18. 仍有问题？
 
 带上下面的信息提交 Issue：
 

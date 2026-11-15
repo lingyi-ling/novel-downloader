@@ -99,7 +99,7 @@ novel-cli download [-h] [--site SITE] [--config CONFIG] [--start START] [--end E
 * `--end`: 结束章节**唯一 ID**, **包含** (仅用于第一个 `book_id`); 空白处理同 `--start`
 * `--no-export`: 仅下载, 不进行导出。启用后将跳过导出步骤
 * `--format FORMAT [FORMAT ...]`: 导出格式: `txt` / `epub` / `html`, 可指定多个, 默认使用配置文件设定
-* `--json`: 以多行缩进 JSON (`indent=2`) 输出到标准输出并退出 (结构见文末表格)
+* `--json`: 以单行紧凑 JSON 输出到标准输出并退出 (结构见文末表格)
 * `--strict`: 只要有章节下载失败就以非零状态退出; 缺章的书不会导出, 失败清单最多列出 20 条 (默认只警告并列出前 5 条)
 
 > `--start` / `--end` 用于临时下载部分章节, 仅影响**第一个**命令行提供的 `book_id`。
@@ -1269,7 +1269,7 @@ novel-cli update --json
 
 | 命令 | 选项 | stdout 结构 |
 | --- | --- | --- |
-| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; 输出为多行缩进 JSON (`indent=2`); `failed` 为缺失章节数 (`0` 表示完整); `exported` 为 `{格式: [路径...]}`; 指定 `--no-export` 时为 `null` |
+| `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; 输出为单行紧凑 JSON; `failed` 为缺失章节数 (`0` 表示完整); `exported` 为 `{格式: [路径...]}`; 指定 `--no-export` 时为 `null` |
 | `search` | `--json` | 搜索结果数组, 每项含 `site`、`book_id`、`book_url`、`cover_url`、`title`、`author`、`latest_chapter`、`update_date`、`word_count`、`priority`, 以及只读派生字段 `rank_score` (`0..1`) 与 `match_tier` (`0..4`: `4` 精确 / `3` 前缀 / `2` 包含 / `1` 部分 / `0` 无匹配) |
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
 | `sources list` | `--json` | 数组, 每项含 `site_key`、`name`、`search`、`hosts`、`origin`; 加 `--check` 时 `status` 才有值 (否则为 `null`); 加 `--probe` 时额外含 `latency_ms`、`http_status` (探测不到时为 `null`) |
@@ -1302,6 +1302,55 @@ novel-cli storage --json | jq '.total.bytes'
 > `login --list` 也输出纯文本列表, 但不是 JSON; `sources check`、`config`、`clean logs`、`clean state`、`batch` 目前没有 `--json`。
 >
 > 上面的 `jq` 示例需要另行安装 [jq](https://jqlang.github.io/jq/); 不安装时可直接查看原始 JSON 输出。
+
+#### 输出编码契约 {#output-encoding-contract}
+
+stdout 承载命令的正常输出 (`--json`、补全脚本、`--help` 等), stderr 承载日志、进度、警告和错误。自 **v1.34.0** 起, 官方冻结 CLI (PyInstaller 独立可执行文件) 在非 TTY 下把两条流统一为 UTF-8:
+
+* **重定向 / 管道**: stdout 与 stderr 都按 UTF-8 写出, 无 BOM; `--json` 使用 `ensure_ascii=False`, 中文和 emoji 原样保留, 不会变成 `\uXXXX`。帮助、日志和 Rich 诊断同样不再混入 cp936/GBK 字节。
+* **交互终端 (TTY)**: 不强制改写编码, 帮助、日志和进度按控制台原生编码渲染, 颜色、宽度和进度条行为不变。`--json` 的数据流是例外, 始终为 UTF-8。
+* **`--json`**: stdout 只输出一份 JSON 文档, 日志和提示不会混入。`download`、`search`、`export`、`update`、`music *`、`clean * --dry-run`、`storage backup|verify|restore`、`doctor` 为**严格单行紧凑 JSON**: 除结尾换行外没有其他换行符, 可直接按行读取。`browse`、`follow list`、`sources list`、`storage` 仍使用 `indent=2` 多行格式; 它们同样是 UTF-8 的单份文档, 但不要假设只有一行。
+
+v1.34.0 之前, 冻结 CLI 只有机器可读的 stdout (`--json` 与补全脚本) 固定 UTF-8; 重定向后的帮助和日志仍按系统代码页 (如 cp936) 编码, 可能与 JSON 混在一起。源码运行 (`pip install` / `python -m`) 的 `--json` stdout 同样始终是 UTF-8, 但帮助和日志跟随 Python 的 locale; 需要在源码运行下也统一为 UTF-8 时, 用 `PYTHONUTF8=1` 启动。
+
+旧的 cp936 消费方需要改: 按系统默认代码页解码、Windows PowerShell 5.1 的默认 `Get-Content`、以及 `subprocess` 的隐式 locale 解码, 都会把 UTF-8 读成乱码或让 JSON 解析失败。显式指定 UTF-8:
+
+**Windows PowerShell**
+
+```powershell
+# Windows PowerShell 5.1: 先让管道按 UTF-8 解码外部程序输出
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$result = novel-cli search --json "三体" | ConvertFrom-Json
+
+# 落盘再读回 (Get-Content 必须显式 -Encoding UTF8)
+novel-cli search --json "三体" | Set-Content -Encoding UTF8 result.json
+Get-Content -Encoding UTF8 result.json | ConvertFrom-Json
+```
+
+**Git Bash / POSIX shell**
+
+```bash
+novel-cli search --json "三体" | jq -r '.[0].title'
+novel-cli search --json "三体" > result.json
+python -c "import json; print(json.load(open('result.json', encoding='utf-8'))[0]['title'])"
+```
+
+**Python 调用方**
+
+```python
+import json
+import subprocess
+
+completed = subprocess.run(
+    ["novel-cli", "search", "--json", "三体"],
+    capture_output=True,
+    encoding="utf-8",  # 不要依赖 locale.getpreferredencoding()
+    check=True,
+)
+data = json.loads(completed.stdout)
+```
+
+> `cmd.exe` 里直接 `type` 输出文件仍可能按当前代码页显示乱码; `chcp 65001` 只影响显示, 文件本身已经是 UTF-8。`jq` 按 UTF-8 读取, 不需要额外设置。
 
 ---
 
