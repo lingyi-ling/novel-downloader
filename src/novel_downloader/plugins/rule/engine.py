@@ -115,6 +115,18 @@ _SEGMENT_RE = re.compile(r"^([^\[\]]*)(?:\[([^\]]*)\])?$")
 #: Schemes a scraped link may use before it reaches the fetcher.
 _HTTP_SCHEMES = frozenset({"http", "https"})
 
+#: Longest selector echoed back in an error message.  A rule file is bounded,
+#: but a programmatic 1 MiB selector must not turn one typo into a 1 MiB log
+#: line (and the selector may contain data the author did not mean to publish).
+_MAX_SELECTOR_PREVIEW = 120
+
+
+def _selector_preview(selector: str) -> str:
+    """Clip a selector for an error message (the full text is not needed)."""
+    if len(selector) <= _MAX_SELECTOR_PREVIEW:
+        return selector
+    return selector[:_MAX_SELECTOR_PREVIEW] + "…"
+
 
 def strip_nested_html(s: str) -> str:
     """Remove a nested document wrapper some sites embed inside a page."""
@@ -173,11 +185,13 @@ def select(root: Any, selector: str, fmt: str = "html") -> list[Any]:
         try:
             return list(root.xpath(selector))
         except etree.XPathError as e:
-            raise RuleError(f"invalid selector {selector!r}: {e}") from e
+            raise RuleError(
+                f"invalid selector {_selector_preview(selector)!r}: {e}"
+            ) from e
     try:
         return list(root.cssselect(selector))
     except Exception as e:  # cssselect raises various errors on bad input
-        raise RuleError(f"invalid selector {selector!r}: {e}") from e
+        raise RuleError(f"invalid selector {_selector_preview(selector)!r}: {e}") from e
 
 
 def _path_segments(path: str) -> list[tuple[str, str | None]]:
@@ -744,13 +758,29 @@ def abs_url(base: str, url: str) -> str:
         return "https:" + url
     if url.startswith(("http://", "https://")):
         return url
-    return urljoin(base, url)
+    try:
+        return urljoin(base, url)
+    except ValueError:
+        # ``urljoin``/``urlsplit`` reject a malformed bracket expression
+        # (``HTTP://[bad/x``) with a bare ``ValueError``.  ``url`` comes from
+        # page data, so one hostile link must not abort the whole parse.
+        return ""
 
 
 def is_fetchable_url(url: str) -> bool:
     """Whether ``url`` may be handed to the HTTP client (http(s) or relative)."""
-    scheme = urlsplit(url).scheme.lower()
-    return not scheme or scheme in _HTTP_SCHEMES
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # Malformed IPv6 literals (``http://[::1/x``) raise here; such a link
+        # is simply not a navigable target.
+        return False
+    scheme = parts.scheme.lower()
+    if not scheme:
+        return True
+    # ``http:foo`` has the right scheme but no host, so it is not a URL the
+    # HTTP client can open.
+    return scheme in _HTTP_SCHEMES and bool(parts.netloc)
 
 
 def http_url(base: str, url: str) -> str:

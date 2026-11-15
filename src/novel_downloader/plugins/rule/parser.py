@@ -234,8 +234,16 @@ class RuleParser(BaseParser):
         }
 
     @staticmethod
-    def _drop_lines(content: str, patterns: list[str]) -> str:
+    def _drop_lines(
+        content: str, patterns: list[str], *, where: str = "chapter.drop"
+    ) -> str:
         if not patterns:
             return content
-        rx = re.compile("|".join(patterns))
+        try:
+            rx = re.compile("|".join(patterns))
+        except re.error as e:
+            # ``ChapterRule.from_dict`` validates the joined form, so this only
+            # triggers for a programmatically built rule; report it with the
+            # same location instead of leaking a bare ``re.error``.
+            raise RuleError(f"{where}: invalid combined regex: {e}") from e
         return "\n".join(line for line in content.splitlines() if not rx.search(line))

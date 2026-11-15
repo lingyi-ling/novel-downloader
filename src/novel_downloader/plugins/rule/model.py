@@ -257,10 +257,18 @@ def _as_replace(value: Any) -> list[tuple[str, str]]:
 _HEADER_CTRL_RE = re.compile(r"[\r\n\x00]")
 
 
-def _as_headers(value: Any) -> dict[str, str]:
-    """Normalize a request header mapping into ``{str: str}``."""
-    if not isinstance(value, dict):
+def _as_headers(value: Any, *, where: str = "headers") -> dict[str, str]:
+    """
+    Normalize a request header mapping into ``{str: str}``.
+
+    A non-object value is rejected instead of silently becoming ``{}``: a
+    mistyped ``headers`` block is a configuration error, and dropping it means
+    the rule makes unauthenticated requests with no diagnostic.
+    """
+    if value is None:
         return {}
+    if not isinstance(value, dict):
+        raise RuleError(f"{where} must be an object, got {type(value).__name__}")
     out: dict[str, str] = {}
     for k, v in value.items():
         key, val = str(k), _as_str(v)
@@ -397,7 +405,13 @@ def _check_url_template(value: Any, *, where: str, allow_empty: bool = False) ->
     if _HEADER_CTRL_RE.search(text):
         raise RuleError(f"{where} must not contain control characters")
     probe = _URL_PLACEHOLDER_RE.sub("", text)
-    scheme = urlsplit(probe).scheme.lower()
+    try:
+        scheme = urlsplit(probe).scheme.lower()
+    except ValueError as e:
+        # A malformed bracket expression (``http://[::1/x``) makes ``urlsplit``
+        # raise a bare ``ValueError``; without this it escaped ``parse_rule``
+        # and aborted the whole rule scan instead of skipping one file.
+        raise RuleError(f"{where}: malformed URL template ({e})") from e
     if scheme and scheme not in _ALLOWED_URL_SCHEMES:
         raise RuleError(
             f"{where}: unsupported URL scheme {scheme!r} "
@@ -417,9 +431,10 @@ def _check_url_template(value: Any, *, where: str, allow_empty: bool = False) ->
 # "quantified group whose body can repeat ambiguously" shape at load time.
 #
 # This is a best-effort static check, not a proof: it catches ``(a+)+``,
-# ``(a*)*``, ``(\d+)+``, ``(a*b?)+`` and friends, but not overlapping
-# alternations such as ``(a|aa)+`` or backreference blow-ups.  Rule authors
-# must still keep patterns linear.
+# ``(a*)*``, ``(\d+)+``, ``(a*b?)+`` and friends, plus quantified groups whose
+# *plain literal* alternatives prefix one another (``(a|aa)+``).  Alternatives
+# that overlap through character classes (``(\d|\d\d)+``) and backreference
+# blow-ups are not detected.  Rule authors must still keep patterns linear.
 
 
 def _skip_char_class(pattern: str, i: int) -> int:
@@ -600,6 +615,42 @@ def _is_quantified_single_atom(body: str) -> bool:
     return unbounded and after == len(body)
 
 
+#: Characters that make an alternative more than a plain literal run.
+_REGEX_SYNTAX_CHARS = frozenset("\\()[]{}|*+?^$.")
+
+
+def _literal_alternative(alternative: str) -> str | None:
+    """Return ``alternative`` when it is a plain literal, else ``None``."""
+    if not alternative or any(ch in _REGEX_SYNTAX_CHARS for ch in alternative):
+        return None
+    return alternative
+
+
+def _has_overlapping_alternatives(body: str) -> bool:
+    """
+    Whether two top-level alternatives of ``body`` prefix one another.
+
+    ``(a|aa)+`` makes the matcher try both splits at every position, so a
+    failing match backtracks exponentially -- the same shape as ``(a+)+`` but
+    through an alternation instead of a nested quantifier.  Only plain literal
+    alternatives are compared (best effort, like the rest of this analysis);
+    escapes, classes and nested groups are skipped rather than mis-classified.
+    """
+    alternatives = _split_alternatives(body)
+    if len(alternatives) < 2:
+        return False
+    literals = [
+        literal
+        for literal in (_literal_alternative(alt) for alt in alternatives)
+        if literal
+    ]
+    for index, first in enumerate(literals):
+        for second in literals[index + 1 :]:
+            if first == second or first.startswith(second) or second.startswith(first):
+                return True
+    return False
+
+
 def _is_lookaround(pattern: str, start: int) -> bool:
     """
     Whether the group whose body starts at ``start`` is a lookaround.
@@ -658,6 +709,11 @@ def regex_backtracking_risk(pattern: str) -> str | None:
                     "a group is repeated with an unbounded quantifier but its "
                     "body can match the empty string or a single repeated atom, "
                     "so matching backtracks exponentially"
+                )
+            if _has_overlapping_alternatives(body):
+                return (
+                    "a group with ambiguous alternatives is repeated with an "
+                    "unbounded quantifier, so matching backtracks exponentially"
                 )
         i = after
     return None
@@ -1341,7 +1397,7 @@ class SearchRule:
             method=method.upper(),
             data={str(k): _as_str(v) for k, v in (raw_data or {}).items()},
             json_body=json_body,
-            headers=_as_headers(data.get("headers")),
+            headers=_as_headers(data.get("headers"), where="search.headers"),
             format=_section_format(data),
             item=_as_str(data.get("item")),
             fields=fields,
@@ -1499,7 +1555,7 @@ class BookRule:
             },
             chapters=ChaptersRule.from_dict(data.get("chapters") or {}),
             pages=PagesRule.from_dict(pages) if pages else None,
-            headers=_as_headers(data.get("headers")),
+            headers=_as_headers(data.get("headers"), where="book.headers"),
             format=_section_format(data),
         )
 
@@ -1507,6 +1563,36 @@ class BookRule:
 # --------------------------------------------------------------------------- #
 # chapter (content)
 # --------------------------------------------------------------------------- #
+
+
+def _check_drop_union(patterns: list[str]) -> None:
+    """
+    Validate the *combined* ``chapter.drop`` expression built at parse time.
+
+    The parser joins the patterns with ``|`` and compiles the result once per
+    chapter, but each pattern is validated on its own here.  A pattern that is
+    only valid at the start of an expression (``(?i)ad``) makes the joined
+    form fail to compile, which used to surface as a bare ``re.error`` while
+    parsing a chapter -- after the rule had already been accepted.
+    """
+    if len(patterns) < 2:
+        return
+    combined = "|".join(patterns)
+    if len(combined) > MAX_REGEX_LENGTH:
+        raise RuleError(
+            "chapter.drop: combined regex is too long "
+            f"({len(combined)} characters, limit {MAX_REGEX_LENGTH})"
+        )
+    try:
+        re.compile(combined)
+    except re.error as e:
+        raise RuleError(
+            "chapter.drop: patterns cannot be combined into one regex "
+            f"({e}); put global flags such as (?i) at the start of the first "
+            "pattern or into a scoped group"
+        ) from e
+
+
 @dataclass
 class ChapterRule:
     url: str
@@ -1530,6 +1616,7 @@ class ChapterRule:
             _check_regex(p, where="chapter.drop") or ""
             for p in _as_str_list(data.get("drop"), where="chapter.drop")
         ]
+        _check_drop_union(drop)
         container = data.get("container")
         if container is not None and not isinstance(container, str):
             raise RuleError("chapter.container must be a string")
@@ -1546,7 +1633,7 @@ class ChapterRule:
             replace=_as_replace(data.get("replace")),
             drop=drop,
             pages=PagesRule.from_dict(pages) if pages else None,
-            headers=_as_headers(data.get("headers")),
+            headers=_as_headers(data.get("headers"), where="chapter.headers"),
             format=_section_format(data),
             container=container or None,
             preprocess=_as_steps(data.get("preprocess"), where="chapter.preprocess"),
@@ -1676,7 +1763,7 @@ def parse_rule(data: dict[str, Any], *, source: str = "<memory>") -> Rule:
         encoding=_check_encoding(_as_str(data.get("encoding"), "utf-8")),
         format=_check_format(_as_str(data.get("format"), "html").lower()),
         hosts=[h.lower() for h in _as_str_list(data.get("hosts"), where="hosts")],
-        headers=_as_headers(data.get("headers")),
+        headers=_as_headers(data.get("headers"), where="headers"),
         resolve=resolve,
         search=search,
         book=book,
