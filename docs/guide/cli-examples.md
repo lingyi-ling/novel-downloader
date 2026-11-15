@@ -1305,13 +1305,13 @@ novel-cli storage --json | jq '.total.bytes'
 
 #### 输出编码契约 {#output-encoding-contract}
 
-stdout 承载命令的正常输出 (`--json`、补全脚本、`--help` 等), stderr 承载日志、进度、警告和错误。自 **v1.34.0** 起, 官方冻结 CLI (PyInstaller 独立可执行文件) 在非 TTY 下把两条流统一为 UTF-8:
+stdout 承载命令的正常输出 (`--json`、补全脚本、`--help` 等), stderr 承载日志、进度、警告和错误。自 **v1.34.1** 起, 官方冻结 CLI (PyInstaller 独立可执行文件) 在非 TTY 下把两条流统一为 UTF-8:
 
 * **重定向 / 管道**: stdout 与 stderr 都按 UTF-8 写出, 无 BOM; `--json` 使用 `ensure_ascii=False`, 中文和 emoji 原样保留, 不会变成 `\uXXXX`。帮助、日志和 Rich 诊断同样不再混入 cp936/GBK 字节。
 * **交互终端 (TTY)**: 不强制改写编码, 帮助、日志和进度按控制台原生编码渲染, 颜色、宽度和进度条行为不变。`--json` 的数据流是例外, 始终为 UTF-8。
 * **`--json`**: stdout 只输出一份 JSON 文档, 日志和提示不会混入。`download`、`search`、`export`、`update`、`music *`、`clean * --dry-run`、`storage backup|verify|restore`、`doctor` 为**严格单行紧凑 JSON**: 除结尾换行外没有其他换行符, 可直接按行读取。`browse`、`follow list`、`sources list`、`storage` 仍使用 `indent=2` 多行格式; 它们同样是 UTF-8 的单份文档, 但不要假设只有一行。
 
-v1.34.0 之前, 冻结 CLI 只有机器可读的 stdout (`--json` 与补全脚本) 固定 UTF-8; 重定向后的帮助和日志仍按系统代码页 (如 cp936) 编码, 可能与 JSON 混在一起。源码运行 (`pip install` / `python -m`) 的 `--json` stdout 同样始终是 UTF-8, 但帮助和日志跟随 Python 的 locale; 需要在源码运行下也统一为 UTF-8 时, 用 `PYTHONUTF8=1` 启动。
+v1.34.1 之前, 冻结 CLI 只有机器可读的 stdout (`--json` 与补全脚本) 固定 UTF-8; 重定向后的帮助和日志仍按系统代码页 (如 cp936) 编码, 可能与 JSON 混在一起。源码运行 (`pip install` / `python -m`) 的 `--json` stdout 同样始终是 UTF-8, 但帮助和日志跟随 Python 的 locale; 需要在源码运行下也统一为 UTF-8 时, 用 `PYTHONUTF8=1` 启动。
 
 旧的 cp936 消费方需要改: 按系统默认代码页解码、Windows PowerShell 5.1 的默认 `Get-Content`、以及 `subprocess` 的隐式 locale 解码, 都会把 UTF-8 读成乱码或让 JSON 解析失败。显式指定 UTF-8:
 

@@ -754,11 +754,11 @@ novel-cli storage backup --out ~/novel-backups --keep 7
 
 **现象**：把 `novel-cli` 的输出重定向到文件或管道给脚本后，中文变成乱码（如 `锟斤拷`、`????`），`jq`、`json.loads` 或 `ConvertFrom-Json` 报解析错误；直接看终端却正常。
 
-**原因**：v1.34.0 起，冻结 CLI 在非 TTY 下把 stdout/stderr 统一写成 UTF-8（见 [CLI 用法 § 输出编码契约](./cli-examples.md#output-encoding-contract)）。旧的消费方仍按系统代码页（cp936/GBK）或 Windows PowerShell 5.1 的默认编码读取，就会把 UTF-8 字节解错。终端里正常，是因为 TTY 保持控制台原生编码，不走重定向路径。
+**原因**：v1.34.1 起，冻结 CLI 在非 TTY 下把 stdout/stderr 统一写成 UTF-8（见 [CLI 用法 § 输出编码契约](./cli-examples.md#output-encoding-contract)）。旧的消费方仍按系统代码页（cp936/GBK）或 Windows PowerShell 5.1 的默认编码读取，就会把 UTF-8 字节解错。终端里正常，是因为 TTY 保持控制台原生编码，不走重定向路径。
 
 **解决**：
 
-1. 确认版本不低于 v1.34.0，并使用官方冻结 CLI；旧版只有机器可读的 stdout（`--json`/补全脚本）是 UTF-8。
+1. 确认版本不低于 v1.34.1，并使用官方冻结 CLI；旧版只有机器可读的 stdout（`--json`/补全脚本）是 UTF-8。
 2. Windows PowerShell 5.1 直接管道时，先设置控制台输出编码：
 
    ```powershell

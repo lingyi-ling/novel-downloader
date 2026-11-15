@@ -1315,13 +1315,13 @@ novel-cli storage --json | jq '.total.bytes'
 
 #### Output Encoding Contract {#output-encoding-contract}
 
-stdout carries normal command output (`--json`, completion scripts, `--help`, and so on); stderr carries logs, progress, warnings, and errors. Starting with **v1.34.0**, the official frozen CLI (the standalone PyInstaller executable) normalises both streams to UTF-8 when they are not a TTY:
+stdout carries normal command output (`--json`, completion scripts, `--help`, and so on); stderr carries logs, progress, warnings, and errors. Starting with **v1.34.1**, the official frozen CLI (the standalone PyInstaller executable) normalises both streams to UTF-8 when they are not a TTY:
 
 * **Redirects / pipes**: stdout and stderr are written as UTF-8 with no BOM. `--json` uses `ensure_ascii=False`, so CJK text and emoji stay intact instead of becoming `\uXXXX`. Help, logs, and Rich diagnostics no longer mix in cp936/GBK bytes.
 * **Interactive terminal (TTY)**: the encoding is left alone; help, logs, and progress render in the console's native encoding, and colour, width, and progress-bar behaviour are unchanged. `--json` is the exception: its data stream is always UTF-8.
 * **`--json`**: stdout contains exactly one JSON document; logs and hints never mix in. `download`, `search`, `export`, `update`, `music *`, `clean * --dry-run`, `storage backup|verify|restore`, and `doctor` emit **strictly single-line, compact JSON**: no newline other than the final terminator, so a line-oriented reader can consume one record per line. `browse`, `follow list`, `sources list`, and `storage` still use `indent=2` multi-line JSON; they are still one UTF-8 document, but do not assume a single line.
 
-Before v1.34.0 the frozen CLI guaranteed UTF-8 only for machine-readable stdout (`--json` and completion scripts); redirected help and logs still followed the system code page (for example cp936), which could mix encodings in one capture. For source runs (`pip install` / `python -m`), `--json` stdout is likewise always UTF-8, but help and logs follow Python's locale; start with `PYTHONUTF8=1` if you need everything UTF-8 there too.
+Before v1.34.1 the frozen CLI guaranteed UTF-8 only for machine-readable stdout (`--json` and completion scripts); redirected help and logs still followed the system code page (for example cp936), which could mix encodings in one capture. For source runs (`pip install` / `python -m`), `--json` stdout is likewise always UTF-8, but help and logs follow Python's locale; start with `PYTHONUTF8=1` if you need everything UTF-8 there too.
 
 Old cp936 consumers must change: decoding with the system default code page, Windows PowerShell 5.1's default `Get-Content`, or `subprocess`'s implicit locale decoding will turn UTF-8 into mojibake or break JSON parsing. Be explicit:
 

@@ -787,11 +787,11 @@ novel-cli storage backup --out ~/novel-backups --keep 7
 
 **Symptoms**: after redirecting `novel-cli` output to a file or piping it to a script, Chinese text turns into mojibake (for example `锟斤拷` or `????`), and `jq`, `json.loads`, or `ConvertFrom-Json` reports a parse error. The same output looks fine in the terminal.
 
-**Cause**: starting with v1.34.0, the frozen CLI writes both stdout and stderr as UTF-8 when they are not a TTY (see [CLI Usage § Output Encoding Contract](./cli-examples.en.md#output-encoding-contract)). Old consumers still decode with the system code page (cp936/GBK) or Windows PowerShell 5.1's default encoding, so the UTF-8 bytes are misread. The terminal looks fine because a TTY keeps its native encoding and never takes the redirect path.
+**Cause**: starting with v1.34.1, the frozen CLI writes both stdout and stderr as UTF-8 when they are not a TTY (see [CLI Usage § Output Encoding Contract](./cli-examples.en.md#output-encoding-contract)). Old consumers still decode with the system code page (cp936/GBK) or Windows PowerShell 5.1's default encoding, so the UTF-8 bytes are misread. The terminal looks fine because a TTY keeps its native encoding and never takes the redirect path.
 
 **Fix**:
 
-1. Make sure the version is at least v1.34.0 and that you use the official frozen CLI; older builds guaranteed UTF-8 only for machine-readable stdout (`--json`/completion scripts).
+1. Make sure the version is at least v1.34.1 and that you use the official frozen CLI; older builds guaranteed UTF-8 only for machine-readable stdout (`--json`/completion scripts).
 2. When piping directly in Windows PowerShell 5.1, set the console output encoding first:
 
    ```powershell

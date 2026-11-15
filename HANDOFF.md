@@ -7,8 +7,8 @@
 
 ## 0. 一句话现状
 
-- **版本 v1.34.0**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.34.0>
-- 全量测试 **12647 passed / 47 skipped**；`ruff check`、`ruff format --check`（806 files）、`mypy src`（548 files）全绿；Android **513 unit tests**、`lintDebug` 0 error
+- **版本 v1.34.1**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.34.1>
+- 全量测试 **12657 passed / 47 skipped**；`ruff check`、`ruff format --check`（806 files）、`mypy src`（548 files）全绿；Android **513 unit tests**、`lintDebug` 0 error
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
 
@@ -83,7 +83,7 @@ cd android
 - 代理与非代理都断的极端情况：用 `requests` 直连补传（`trust_env=False` + `proxies={}`），补完再 `--skip-build` 跑一遍，让 `verify_assets` 重新核对 digest；不要手工往 release 目录塞文件。
 - **tag 落后 HEAD**（发版后又提交了）：真实构建仍要求 `tag == HEAD`；若资产确实是 tag 那次构建的，用 `--skip-build --allow-tag-behind` 续跑只做上传。tag 不会被移动；历史分叉（tag 不是 HEAD 祖先）照样拒绝。
 - **冻结 CLI 出包后必须验证重定向 UTF-8**：`novel-cli ... > out.txt` 在 CP936 控制台下会崩。`scripts/verify_frozen.py` 已加门禁：子进程不带 `PYTHONUTF8`/`PYTHONIOENCODING`，stdout/stderr 重定向到文件，要求严格 UTF-8 且输出含非 ASCII。
-- **v1.34.0 实测**：资产审计 0 命中，8 个资产上传齐全且 digest 全部一致。
+- **v1.34.1 实测**：资产审计 0 命中，8 个资产上传齐全且 digest 全部一致。
 
 ### 2026-11-08 起：github.com 被链路拦截
 

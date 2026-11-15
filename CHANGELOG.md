@@ -1,3 +1,14 @@
+## v1.34.1 (2026-11-15)
+
+补丁版：把重定向 UTF-8、SSE 未知站点校验与发布工具修复带入实际发布产物。
+
+### Fix
+
+- **冻结 CLI**：非 TTY 的 stdout/stderr 统一 UTF-8，修复 cp936 下 help/日志乱码；`verify_frozen` 增加无编码变量+文件重定向门禁
+- **API**：`GET /search/stream` 显式未知站点返回 422，与 POST 一致
+- **发布工具**：API GET 网络抖动自动重试；上传首次代理失败后直连；tag 落后 HEAD 支持 `--skip-build --allow-tag-behind`
+- **文档**：CLI 输出编码契约、health 诊断字段、页脚更新日志入口
+
 ## v1.34.0 (2026-11-15)
 
 第六批流水线改进：下载上限、备份并发、非交互自动化、UTF-8 契约、健康诊断与官网/桌面视觉修正；Python **12647 passed / 47 skipped**，Android **513 tests**。
