@@ -13,15 +13,19 @@ numeric options (``--limit`` / ``--site-limit``) and multi-word queries.
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import unicodedata
 from contextlib import nullcontext
 from datetime import date
 from typing import Any
 
 import pytest
 
+from novel_downloader.apps.cli import prompts, ui
 from novel_downloader.apps.cli.commands.base import EXIT_USAGE
 from novel_downloader.apps.cli.commands.search import SearchCmd
+from novel_downloader.infra.i18n import t
 from novel_downloader.plugins.search import SearchEvent
 
 #: Every field the documented flat ``--json`` row carries.  ``sources`` is
@@ -729,3 +733,153 @@ def test_no_site_selection_skips_registry_validation(
     code, _out, _err = _run(_args(["--json", "三体"]), capsys)
 
     assert code == 0
+
+
+# ---------------------------------------------------------------------------
+# Human-readable table: ranking telemetry
+#
+# The interactive table is rendered by ``prompts.select_search_result`` (the
+# command itself only waits for a selection), so these tests drive that public
+# helper directly and capture the rows it hands to ``ui.render_table``.
+# ---------------------------------------------------------------------------
+
+
+def _display_width(text: str) -> int:
+    """Terminal cell width, counting East Asian wide/fullwidth as two."""
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def _capture_table(
+    monkeypatch: pytest.MonkeyPatch,
+    results: list[dict[str, Any]],
+) -> tuple[dict[str, Any], Any]:
+    """Render one page of ``results`` without a prompt; return the capture."""
+    seen: dict[str, Any] = {}
+    # ``prompts.ui`` is the ui module itself, so grab the real renderer before
+    # the capture replaces the module attribute.
+    real_render = ui.render_table
+
+    def _fake_table(title: str, columns: list[str], rows: Any) -> None:
+        seen["title"] = title
+        seen["columns"] = list(columns)
+        seen["rows"] = [list(row) for row in rows]
+
+    monkeypatch.setattr(prompts.ui, "render_table", _fake_table)
+    monkeypatch.setattr(prompts.ui, "prompt_choice", lambda *_a, **_k: "")
+    assert prompts.select_search_result(results) is None  # cancel
+    return seen, real_render
+
+
+def test_table_annotates_title_with_tier_and_two_decimal_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen, _real_render = _capture_table(
+        monkeypatch, [_row(title="三体", match_tier=4, rank_score=0.875)]
+    )
+
+    # One column fewer than adding a dedicated rank column: the annotation is
+    # a suffix so a narrow terminal has one less cell to squeeze.
+    assert seen["columns"][1] == t("Title")
+    assert seen["rows"][0][1] == f"三体 · {t('Exact')} 0.88"
+
+
+@pytest.mark.parametrize(
+    ("tier", "msgid"),
+    [
+        (4, "Exact"),
+        (3, "Prefix"),
+        (2, "Contains"),
+        (1, "Partial"),
+        (0, "No match"),
+    ],
+)
+def test_table_maps_every_match_tier_to_its_short_label(
+    tier: int,
+    msgid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen, _real_render = _capture_table(
+        monkeypatch, [_row(title="三体", match_tier=tier, rank_score=0.5)]
+    )
+
+    assert seen["rows"][0][1] == f"三体 · {t(msgid)} 0.50"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # Streamed previews and older cache snapshots carry neither field.
+        {"match_tier": None, "rank_score": None},
+        {"rank_score": 0.875},  # tier missing
+        {"match_tier": 4},  # score missing
+        {"match_tier": True, "rank_score": 0.875},  # bool is not a tier
+        {"match_tier": 5, "rank_score": 0.875},  # out of range
+        {"match_tier": 4, "rank_score": "0.875"},  # not a number
+        {"match_tier": 4, "rank_score": float("nan")},
+        {"match_tier": 4, "rank_score": 1.5},
+    ],
+)
+def test_table_omits_the_suffix_when_telemetry_is_absent_or_unusable(
+    overrides: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _row(title="三体")
+    # Start from "no telemetry at all", then add exactly what the case names.
+    row.pop("match_tier")
+    row.pop("rank_score")
+    row.update(overrides)
+
+    seen, _real_render = _capture_table(monkeypatch, [row])
+
+    assert seen["rows"][0][1] == "三体"
+
+
+def test_table_without_telemetry_keeps_the_exact_legacy_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _row(title="三体")
+    row.pop("match_tier")
+    row.pop("rank_score")
+
+    seen, _real_render = _capture_table(monkeypatch, [row])
+
+    assert seen["columns"] == [
+        t("#"),
+        t("Title"),
+        t("Author"),
+        t("Latest"),
+        t("Updated"),
+        t("Site Name"),
+        t("Book ID"),
+    ]
+    assert seen["rows"] == [
+        ["1", "三体", "刘慈欣", "第一章", "2026-01-01", "beta", "beta-1"]
+    ]
+
+
+@pytest.mark.parametrize("width", [24, 40])
+def test_table_suffix_keeps_cjk_borders_aligned_at_narrow_widths(
+    width: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen, real_render = _capture_table(
+        monkeypatch,
+        [
+            _row(title="斗破苍穹之雷霆震碎", match_tier=0, rank_score=0.0),
+            _row(
+                book_id="beta-2",
+                title="A very long english title",
+                match_tier=3,
+                rank_score=0.75,
+            ),
+        ],
+    )
+
+    stream = io.StringIO()
+    monkeypatch.setattr(ui, "_CONSOLE", ui._build_console(file=stream, width=width))
+    real_render(seen["title"], seen["columns"], seen["rows"])
+
+    lines = [line for line in stream.getvalue().splitlines() if line]
+    assert lines
+    widths = {_display_width(line) for line in lines}
+    assert widths == {width}, f"misaligned table lines: {sorted(widths)}"

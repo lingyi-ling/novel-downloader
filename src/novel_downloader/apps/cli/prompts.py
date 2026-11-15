@@ -187,6 +187,49 @@ def select_books(raw_dir: Path, site: str, per_page: int = 10) -> list[str]:
         ui.warn(t("Invalid input."))
 
 
+#: Human labels for ``match_tier`` 0..4, indexed by the tier.  The msgids are
+#: already in the catalog for the desktop badge, so the CLI reuses the same
+#: wording instead of introducing a second vocabulary for the same value.
+_MATCH_TIER_MSGS = (
+    "No match",
+    "Partial",
+    "Contains",
+    "Prefix",
+    "Exact",
+)
+
+
+def _match_suffix(result: SearchResult) -> str:
+    """
+    The ranking telemetry suffix for one search-result row, or ``""``.
+
+    ``rank_score`` (0..1) and ``match_tier`` (0..4) are added by the ranked
+    aggregate call only: streamed previews and rows restored from an older
+    cache carry neither.  A row without both usable values therefore renders
+    exactly as before -- no placeholder, no dash -- so the table stays
+    meaningful for those sources.  Both values are validated like the desktop
+    badge does, which also rejects ``bool`` (a subclass of ``int``) and
+    non-finite scores that would otherwise format as ``nan``/``inf``.
+    """
+    tier = result.get("match_tier")
+    if isinstance(tier, bool) or not isinstance(tier, int) or not 0 <= tier <= 4:
+        return ""
+    score = result.get("rank_score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return ""
+    score = float(score)
+    if not 0.0 <= score <= 1.0:
+        return ""
+    return f"{t(_MATCH_TIER_MSGS[tier])} {score:.2f}"
+
+
+def _title_cell(result: SearchResult) -> str:
+    """The ``Title`` cell, annotated with ranking telemetry when present."""
+    title = result["title"]
+    suffix = _match_suffix(result)
+    return f"{title} · {suffix}" if suffix else title
+
+
 def _site_cell(result: SearchResult) -> str:
     """
     The ``Site Name`` cell of one search-result row.
@@ -233,7 +276,7 @@ def select_search_result(
     all_rows = [
         [
             str(i),
-            r["title"],
+            _title_cell(r),
             r["author"],
             r["latest_chapter"],
             r["update_date"],
