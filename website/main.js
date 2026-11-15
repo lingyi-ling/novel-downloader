@@ -86,7 +86,7 @@ const PAGE_TITLE = {
 };
 const META_DESC = {
   zh: "异步、模块化、可扩展的小说下载工具链：84 个下载站点、59 个搜索源、28 个音乐平台，CLI / REST API / Windows 桌面 / Android 四端同源。",
-  en: "Async, modular, extensible novel-downloading toolkit: 84 download sites, 59 search sources and 28 music platforms — CLI, REST API, Windows desktop and Android share one service layer.",
+  en: "Async, modular novel and music download toolkit: 84 book sites, 59 search sources and 28 music platforms — CLI, REST API, Windows desktop and Android.",
 };
 function currentLang() {
   return localStorageValue("noveldl-lang") === "en" ? "en" : "zh";

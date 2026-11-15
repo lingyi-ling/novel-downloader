@@ -7,8 +7,10 @@ Static guards for the hand-written marketing site in ``website/``.
 
 The site has no build step and no browser test harness, so everything here is
 a pure static assertion: parse ``index.html``, read the CSS/JS/robots/sitemap
-as text, and verify the accessibility, no-JS fallback, i18n and SEO contracts
-that are easy to break by editing HTML.
+as text, and verify the accessibility, no-JS fallback, i18n and release-link
+contracts that are easy to break by editing HTML.  Crawler-facing SEO
+(title/description budgets, Open Graph, JSON-LD, hreflang, sitemap) lives in
+``tests/test_website_seo.py``.
 
 The tests are intentionally dependency-free (stdlib only).  ``node`` is used
 for a syntax check when it happens to be installed, and skipped otherwise.
@@ -1286,7 +1288,9 @@ def test_canonical_and_locale_metadata(doc: _Doc) -> None:
         for data, _ in doc.by_tag("link")
         if data.get("hreflang")
     }
-    assert alternates["zh-CN"].endswith("?lang=zh")
+    # The page is served in zh-CN by default, so its language alternate is the
+    # canonical URL itself; only the en variant needs a query deep link.
+    assert alternates["zh-CN"] == "http://43.165.170.43/noveldl/"
     assert alternates["en"].endswith("?lang=en")
     assert alternates["x-default"].endswith("/noveldl/")
 
