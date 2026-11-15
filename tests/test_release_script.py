@@ -389,6 +389,7 @@ def _route_tag_steps(
     tag_commit: str = TAG_COMMIT,
     head: str = HEAD_COMMIT,
     remote_commit: str | None = None,
+    ancestor: bool = True,
 ) -> None:
     if remote_commit is None:
         remote_commit = tag_commit if local else head
@@ -400,6 +401,13 @@ def _route_tag_steps(
         stdout=f"{tag_commit}\n" if local else "",
     )
     sub.route(("git", "rev-parse", "HEAD"), stdout=f"{head}\n")
+    if local and tag_commit != head:
+        # A tag that is not HEAD is only considered for a --skip-build
+        # resume, and only when it is an ancestor of HEAD.
+        sub.route(
+            ("git", "merge-base", "--is-ancestor"),
+            returncode=0 if ancestor else 1,
+        )
     sub.route(
         ("git", "ls-remote", "origin"),
         stdout=f"{remote_commit}\trefs/tags/{TAG}\n" if remote else "",
@@ -1154,6 +1162,26 @@ class TestDryRun:
         out = capsys.readouterr().out
         assert "skipped (--skip-build)" in out
         assert str(release_dir) in out
+
+    def test_dry_run_shows_tag_behind_option_state(
+        self,
+        release: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = make_repo(tmp_path)
+        monkeypatch.setattr(release, "REPO_ROOT", root)
+        monkeypatch.setattr(release, "subprocess", FakeSubprocess())
+        monkeypatch.setattr(urllib.request, "urlopen", FakeHTTP())
+
+        assert release.main(["--dry-run", "--skip-build"]) == 0
+        assert "Tag behind  : refused" in capsys.readouterr().out
+
+        assert release.main(["--dry-run", "--skip-build", "--allow-tag-behind"]) == 0
+        out = capsys.readouterr().out
+        assert "Tag behind  : allowed" in out
+        assert "--allow-tag-behind" in out
 
     def test_missing_notes_fail_the_dry_run(
         self,
@@ -2496,7 +2524,7 @@ class TestUploadRetry:
 
 
 class TestTagTarget:
-    def test_local_tag_at_another_commit_aborts(
+    def test_ancestor_tag_without_flag_aborts(
         self,
         release: Any,
         harness: tuple[Path, FakeSubprocess, FakeHTTP],
@@ -2512,8 +2540,114 @@ class TestTagTarget:
         )
 
         assert rc == 2
-        assert "delete or move the tag" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "ancestor of HEAD" in err
+        assert "--skip-build --allow-tag-behind" in err
+        assert "delete or move the tag" in err
         assert not any(command[:2] == ["git", "push"] for command in sub.commands())
+        assert http.requests == []
+
+    def test_ancestor_tag_with_flag_and_skip_build_continues(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root, sub, http = harness
+        release_dir = (
+            root / "dist" / "release" / f"novel-downloader-{VERSION}-windows-x64"
+        )
+        _seed_manifest(release, root, release_dir)
+        _route_tag_steps(
+            sub,
+            local=True,
+            remote=True,
+            tag_commit="a" * 40,
+            head="b" * 40,
+            ancestor=True,
+        )
+        payload = {
+            **RELEASE_JSON,
+            "tag_name": TAG,
+            "body": NOTES,
+            "assets": TestMainIdempotent()._assets_payload(release_dir, stale=None),
+        }
+        http.route_json("GET", f"/releases/tags/{TAG}", 200, payload)
+        http.route_json("GET", f"/releases/{RELEASE_JSON['id']}", 200, payload)
+
+        rc = release.main(
+            [
+                "--skip-build",
+                "--allow-tag-behind",
+                "--skip-android",
+                "--skip-installer",
+                "--repo",
+                SLUG,
+            ]
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "is behind HEAD" in out
+        assert "the tag is not moved" in out
+        assert not any(command[:2] == ["git", "tag"] for command in sub.commands())
+        assert not any(command[:2] == ["git", "push"] for command in sub.commands())
+
+    def test_non_ancestor_tag_rejects_even_with_flag(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root, sub, http = harness
+        _route_tag_steps(
+            sub,
+            local=True,
+            remote=False,
+            tag_commit="a" * 40,
+            head="b" * 40,
+            ancestor=False,
+        )
+
+        rc = release.main(
+            [
+                "--skip-build",
+                "--allow-tag-behind",
+                "--skip-android",
+                "--skip-installer",
+                "--repo",
+                SLUG,
+            ]
+        )
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "not an ancestor of HEAD" in err
+        assert "--allow-tag-behind cannot help" in err
+        assert not any(command[:2] == ["git", "push"] for command in sub.commands())
+        assert http.requests == []
+
+    def test_allow_tag_behind_requires_skip_build(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root, sub, http = harness
+
+        rc = release.main(
+            [
+                "--allow-tag-behind",
+                "--skip-android",
+                "--skip-installer",
+                "--repo",
+                SLUG,
+            ]
+        )
+
+        assert rc == 2
+        assert "requires --skip-build" in capsys.readouterr().err
+        assert sub.calls == []
         assert http.requests == []
 
     def test_remote_tag_at_another_commit_aborts(

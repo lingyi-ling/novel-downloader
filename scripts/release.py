@@ -42,7 +42,10 @@ What a full run does, in order:
    into the build's ``SHA256SUMS.txt``.
 5. Create the ``v<version>`` tag locally and push it.  Both steps are skipped
    when the tag already exists locally / on the remote.  An existing tag that
-   points at another commit is a hard error, never silently reused.  The push
+   points at another commit is a hard error, never silently reused.  The one
+   exception is an explicit resume: when the tag is an ancestor of ``HEAD``
+   and ``--skip-build --allow-tag-behind`` is passed, the existing build is
+   published under the older tag without moving it.  The push
    uses git's own credential chain, or a per-process ``http.extraheader``
    built from ``GITHUB_TOKEN`` / ``GH_TOKEN``; the REST token comes from the
    same variables or from ``git credential fill`` (protocol=https,
@@ -61,6 +64,10 @@ network.  ``--skip-build`` reuses an existing
 ``dist/release/novel-downloader-<version>-*/`` directory, which is how a run
 that died midway (e.g. network drop) is resumed without rebuilding; assets
 already uploaded in that run are skipped by SHA-256 on the next attempt.
+``--allow-tag-behind`` is only accepted together with ``--skip-build``: it
+lets such a resume proceed when ``HEAD`` has moved ahead of the version tag,
+provided the tag is an ancestor of ``HEAD``.  A real build always requires
+the tag to point at ``HEAD``; no run ever moves or deletes a tag.
 
 Exit codes: 0 success; 2 for a ``ReleaseError`` (bad input, failed build,
 API error) and for argparse usage errors.
@@ -1851,6 +1858,16 @@ def tag_exists_local(repo_root: Path, tag: str) -> bool:
     return local_tag_commit(repo_root, tag) is not None
 
 
+def commit_is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
+    """Whether *ancestor* is reachable from *descendant* (read-only local git)."""
+    proc = _run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=repo_root,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
 def print_push_api_hint() -> None:
     """
     Point at ``scripts/push_via_api.py`` when the git endpoint is blocked.
@@ -1924,20 +1941,49 @@ def verify_tag_target(
     local_sha: str | None,
     head_sha: str | None,
     remote_sha: str | None,
+    repo_root: Path,
+    allow_tag_behind: bool = False,
 ) -> None:
     """
-    Refuse to publish under a tag that points at another commit.
+    Refuse to publish under a tag that does not belong to this release.
 
-    Assets are built from ``HEAD`` and are served under the tag's commit.
-    A tag left over from an earlier attempt (or pushed by someone else) at a
-    different commit would attach this build to the wrong source; git cannot
-    fix that without rewriting published history, so this is a hard error.
+    Assets built by a real run come from ``HEAD`` and are served under the
+    tag's commit, so the two must be identical.  A tag left over from an
+    earlier attempt (or pushed by someone else) at a different commit would
+    attach this build to the wrong source; git cannot fix that without
+    rewriting published history, so this is a hard error.
+
+    The single exception is a resumed ``--skip-build`` run whose tag is an
+    ancestor of ``HEAD`` (the release was tagged, then more commits landed).
+    Even then the default is to refuse; *allow_tag_behind* must be set
+    explicitly, and the caller only sets it for ``--skip-build``.  The tag is
+    never moved or deleted here: its remote meaning stays untouched.
     """
     if local_sha is not None and head_sha is not None and local_sha != head_sha:
-        raise ReleaseError(
-            f"tag {tag} already exists locally at {local_sha[:12]}, but HEAD is "
-            f"{head_sha[:12]}; delete or move the tag before releasing"
-        )
+        if commit_is_ancestor(repo_root, local_sha, head_sha):
+            if allow_tag_behind:
+                print(
+                    f"==> Tag {tag} is behind HEAD ({local_sha[:12]} is an "
+                    f"ancestor of {head_sha[:12]}); continuing with "
+                    "--allow-tag-behind, the tag is not moved"
+                )
+            else:
+                raise ReleaseError(
+                    f"tag {tag} exists locally at {local_sha[:12]}, an ancestor "
+                    f"of HEAD {head_sha[:12]}; refusing to publish assets under "
+                    "an older tag.  If these assets were built from the tag's "
+                    "commit (resuming a failed --skip-build run), re-run with "
+                    "--skip-build --allow-tag-behind.  Otherwise check out the "
+                    "tag and rebuild, or delete or move the tag manually "
+                    "(release.py never does that automatically)"
+                )
+        else:
+            raise ReleaseError(
+                f"tag {tag} exists locally at {local_sha[:12]}, but HEAD is "
+                f"{head_sha[:12]} and the tag is not an ancestor of HEAD "
+                "(history diverged); --allow-tag-behind cannot help here.  "
+                "delete or move the tag manually before releasing"
+            )
     expected = local_sha or head_sha
     if remote_sha is not None and expected is not None and remote_sha != expected:
         raise ReleaseError(
@@ -2149,6 +2195,16 @@ def _dry_run(
     print("DRY RUN — nothing below is executed (no builds, git or API calls).")
     print(f"Version     : {version}")
     print(f"Tag         : {tag}")
+    if args.allow_tag_behind:
+        print(
+            "Tag behind  : allowed by flag (--allow-tag-behind with "
+            "--skip-build; tag never moved; ancestry checked at release time)"
+        )
+    else:
+        print(
+            "Tag behind  : refused by default (pass --allow-tag-behind with "
+            "--skip-build to resume; ancestry checked at release time)"
+        )
     print(f"Repository  : {args.repo or '(from git remote origin)'}")
     print(f"Targets     : {', '.join(targets)}")
     print(f"Auth        : {TOKEN_ENV_VARS[0]}/GH_TOKEN env, else git credential fill")
@@ -2284,6 +2340,16 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     # would refuse before the bundles and the APK are built.
     check_release_tag(version, tag)
     targets = _parse_targets(args.targets)
+    # The relaxed tag check exists only for resuming an existing build.  A
+    # real build is tagged HEAD, so a tag behind HEAD must never be accepted
+    # there; reject the combination before any build starts.  (verify_tag_target
+    # also receives allow_tag_behind=False for a real build, as defence in
+    # depth against this gate being skipped.)
+    if args.allow_tag_behind and not args.skip_build:
+        raise ReleaseError(
+            "--allow-tag-behind requires --skip-build: a real build must be "
+            "released from HEAD, so only a resumed build may sit behind the tag"
+        )
     # Notes first: a missing or empty CHANGELOG section is the most actionable
     # error, and it also covers the "released a version that was never
     # documented" case before the version-consistency gate fires.  This also
@@ -2500,7 +2566,12 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     head_sha = head_commit(repo_root)
     remote_sha = remote_tag_commit(repo_root, tag)
     verify_tag_target(
-        tag, local_sha=local_sha, head_sha=head_sha, remote_sha=remote_sha
+        tag,
+        local_sha=local_sha,
+        head_sha=head_sha,
+        remote_sha=remote_sha,
+        repo_root=repo_root,
+        allow_tag_behind=args.allow_tag_behind and args.skip_build,
     )
     if local_sha is not None:
         print(f"==> Tag {tag} exists locally at {local_sha[:12]}, skipping creation")
@@ -2605,6 +2676,15 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-build",
         action="store_true",
         help="reuse the existing dist/release bundle directory",
+    )
+    parser.add_argument(
+        "--allow-tag-behind",
+        action="store_true",
+        help=(
+            "with --skip-build only: allow resuming when the version tag is an "
+            "ancestor of HEAD (HEAD advanced after tagging); the tag is never "
+            "moved or deleted and a real build still requires tag == HEAD"
+        ),
     )
     parser.add_argument(
         "--allow-dirty",
