@@ -80,6 +80,47 @@ ALLOWED_API_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
 #: Verbs that can register a route on ``router``.
 _ROUTE_VERBS = {"get", "post", "put", "delete", "patch", "options"}
 
+#: The complete REST ``GET /api/v1/health`` contract: the historical liveness
+#: pair plus the read-only diagnostics. The set is exact so a new field cannot
+#: arrive unnoticed.
+REST_HEALTH_FIELDS: frozenset[str] = frozenset(
+    {
+        "status",
+        "version",
+        "uptime_s",
+        "output_writable",
+        "cache_writable",
+        "rate_limit",
+        "tasks",
+        "music_platforms_available",
+    }
+)
+
+#: The embedded engine is an Android liveness probe, not an operations
+#: dashboard: exposing host state there would widen the client contract and
+#: risk leaking process details.
+EMBEDDED_HEALTH_FIELDS: frozenset[str] = frozenset({"status", "version"})
+
+#: Diagnostics that must never appear in the embedded response.
+REST_ONLY_HEALTH_FIELDS: frozenset[str] = REST_HEALTH_FIELDS - EMBEDDED_HEALTH_FIELDS
+
+#: Field-name fragments that would turn a health probe into a path or
+#: credential disclosure. ``output_writable`` / ``cache_writable`` are allowed:
+#: they report a boolean, never the configured directory.
+_SENSITIVE_HEALTH_KEY_PARTS: tuple[str, ...] = (
+    "path",
+    "dir",
+    "home",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "api_key",
+    "apikey",
+    "private_key",
+)
+
 _embedded_port = EMBEDDED_PORT
 
 
@@ -327,6 +368,61 @@ def _api_client(parity: SimpleNamespace) -> httpx.AsyncClient:
     )
 
 
+def _sensitive_health_keys(payload: Any) -> list[str]:
+    """Every health field name that looks like a path or a credential."""
+    hits: list[str] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            lowered = key.lower()
+            if any(part in lowered for part in _SENSITIVE_HEALTH_KEY_PARTS):
+                hits.append(key)
+            hits.extend(_sensitive_health_keys(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            hits.extend(_sensitive_health_keys(item))
+    return hits
+
+
+def _assert_rest_health_contract(payload: dict[str, Any]) -> None:
+    """Pin the REST field set and the type of every value."""
+    assert set(payload) == REST_HEALTH_FIELDS
+    assert payload["status"] == "ok"
+    assert isinstance(payload["version"], str) and payload["version"]
+
+    uptime = payload["uptime_s"]
+    assert isinstance(uptime, (int, float)) and not isinstance(uptime, bool)
+    assert uptime >= 0
+
+    # Writability is reported as a boolean only, never as the path itself.
+    assert isinstance(payload["output_writable"], bool)
+    assert isinstance(payload["cache_writable"], bool)
+
+    rate_limit = payload["rate_limit"]
+    assert isinstance(rate_limit, dict)
+    assert set(rate_limit) == {"enabled", "limit", "window"}
+    assert isinstance(rate_limit["enabled"], bool)
+    if rate_limit["enabled"]:
+        assert isinstance(rate_limit["limit"], int)
+        assert not isinstance(rate_limit["limit"], bool)
+        assert isinstance(rate_limit["window"], (int, float))
+        assert not isinstance(rate_limit["window"], bool)
+        assert rate_limit["window"] > 0
+    else:
+        assert rate_limit["limit"] is None
+        assert rate_limit["window"] is None
+
+    tasks = payload["tasks"]
+    assert isinstance(tasks, dict)
+    assert set(tasks) == {"pending", "running", "completed"}
+    for count in tasks.values():
+        assert isinstance(count, int) and not isinstance(count, bool)
+        assert count >= 0
+
+    platforms = payload["music_platforms_available"]
+    assert isinstance(platforms, int) and not isinstance(platforms, bool)
+    assert platforms >= 0
+
+
 # ---------------------------------------------------------------------------
 # response-shape sampling (shared manager mock, both engines)
 # ---------------------------------------------------------------------------
@@ -344,18 +440,24 @@ async def test_health_and_sites_shape_parity(
         # liveness probe, so old clients see exactly the same core fields on
         # both transports.
         assert api_status == emb_status == 200
+        _assert_rest_health_contract(api_health)
+        assert set(emb_health) == EMBEDDED_HEALTH_FIELDS
         assert emb_health == {"status": "ok", "version": __version__}
-        assert {key: api_health[key] for key in ("status", "version")} == emb_health
-        assert set(api_health) >= {
-            "status",
-            "version",
+        # The liveness identity is identical on both ports...
+        for field in EMBEDDED_HEALTH_FIELDS:
+            assert api_health[field] == emb_health[field], field
+        # ...and none of the REST-only diagnostics cross over.
+        assert REST_ONLY_HEALTH_FIELDS.isdisjoint(emb_health)
+        assert {
             "uptime_s",
             "output_writable",
             "cache_writable",
             "rate_limit",
             "tasks",
             "music_platforms_available",
-        }
+        }.isdisjoint(emb_health)
+        assert _sensitive_health_keys(api_health) == []
+        assert _sensitive_health_keys(emb_health) == []
 
         api_status, api_sites, _ = await _api_call(client, "GET", "/api/v1/sites")
         emb_status, emb_sites, _ = _embedded_call("GET", "/api/v1/sites")
@@ -364,6 +466,65 @@ async def test_health_and_sites_shape_parity(
         # both import the same support-site constants, so bodies are equal
         assert emb_sites == api_sites
         assert set(api_sites) == {"search", "download"}
+
+
+@pytest.mark.asyncio
+async def test_health_payloads_never_expose_paths_or_credentials(
+    parity_engines: SimpleNamespace,
+    tmp_path: Path,
+) -> None:
+    async with _api_client(parity_engines) as client:
+        response = await client.get("/api/v1/health")
+        assert response.status_code == 200
+        api_health = response.json()
+    emb_status, emb_health, _ = _embedded_call("GET", "/api/v1/health")
+    assert emb_status == 200
+
+    assert _sensitive_health_keys(api_health) == []
+    assert _sensitive_health_keys(emb_health) == []
+
+    # The configured app home and output directory are host paths; neither
+    # may appear in the JSON even as a value. ``tmp_path`` prefixes both.
+    serialized = response.text + json.dumps(emb_health)
+    assert str(tmp_path) not in serialized
+    assert str(tmp_path / "parity_home") not in serialized
+    assert str(tmp_path / "downloads") not in serialized
+
+
+@pytest.mark.asyncio
+async def test_health_is_exempt_from_rate_limiting_on_both_transports(
+    parity_engines: SimpleNamespace,
+    tmp_path: Path,
+) -> None:
+    """Health must answer 200 even after a client has exhausted its budget."""
+    application = create_app(
+        token="",
+        output_dir=str(tmp_path / "limited-downloads"),
+        rate_limit=1,
+    )
+    transport = httpx.ASGITransport(
+        app=application,
+        client=("198.51.100.7", 4321),
+    )
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        # Prove the limiter is active for ordinary endpoints: one request is
+        # admitted, the next one in the same window is rejected.
+        assert (await client.get("/api/v1/tasks")).status_code == 200
+        assert (await client.get("/api/v1/tasks")).status_code == 429
+
+        # Human/monitoring probes keep working while the client is locked out.
+        for _ in range(5):
+            response = await client.get("/api/v1/health")
+            assert response.status_code == 200
+            assert response.json()["status"] == "ok"
+
+    # The embedded engine has no rate limiter; a burst must still be all 200.
+    for _ in range(5):
+        status, body, _ = _embedded_call("GET", "/api/v1/health")
+        assert status == 200
+        assert body == {"status": "ok", "version": __version__}
 
 
 @pytest.mark.asyncio
