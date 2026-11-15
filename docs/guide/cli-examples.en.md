@@ -648,7 +648,8 @@ novel-cli music search [-h] [--platform KEY] [--limit N] [--json] keyword
 
 novel-cli music download [-h] [--keyword KEYWORD] [--platform KEY] [--limit N]
                          [--level {hires,lossless,exhigh,higher,standard}]
-                         [--out DIR] [--pick N[,N|ID]] [--yes] [--json]
+                         [--out DIR] [--embed-lyric | --no-embed-lyric]
+                         [--pick N[,N|ID]] [--yes] [--json]
                          [KEYWORD]
 
 novel-cli music export-m3u [-h] --keyword KEYWORD [--platform KEY] [--limit N]
@@ -697,9 +698,10 @@ Search first, then select and download songs:
 * Positional `KEYWORD` or `--keyword KEYWORD`: keyword to search for before downloading (use one of them)
 * `--level`: audio quality level, one of `hires` / `lossless` / `exhigh` / `higher` / `standard`; defaults to the music setting, usually `exhigh`
 * `--out DIR`: output directory; defaults to the music setting (falling back to the default download directory)
+* `--embed-lyric` / `--no-embed-lyric`: also write the lyrics into the audio tags (MP3/FLAC/M4A, off by default); with neither flag the music setting `embed_lyric` applies. Independent of `save_lyric` and never changes the standalone `.lrc` files
 * `--pick N[,N|ID]`: download the given search result index/indices (1-based) or song ID(s) without prompting
 * `--yes`: download every search result without prompting
-* `--json`: print a **single-line** download report and exit. Selection is unchanged: `--pick` or `--yes` is still required, a non-interactive shell must pass one explicitly, and otherwise the paged selector appears (or the command exits with a usage error). The top level has `platform`, `keyword`, `out_dir`, `level`, `total`, `ok`, `skip`, `fail`, `lyrics_written`, and `results`; `platform=all` also adds a `platforms` summary. Each `results[]` entry carries `id`, `name`, `artists`, `album`, `duration_s`, `vip`, `platform`, and `sources`, plus:
+* `--json`: print a **single-line** download report and exit. Selection is unchanged: `--pick` or `--yes` is still required, a non-interactive shell must pass one explicitly, and otherwise the paged selector appears (or the command exits with a usage error). The top level has `platform`, `keyword`, `out_dir`, `level`, `embed_lyric`, `total`, `ok`, `skip`, `fail`, `lyrics_written`, and `results`; `platform=all` also adds a `platforms` summary. Each `results[]` entry carries `id`, `name`, `artists`, `album`, `duration_s`, `vip`, `platform`, and `sources`, plus:
   * `status`: `ok` / `skip` / `fail`;
   * `path`: only when there is a usable local audio path and the status is `ok`/`skip`;
   * `lyric_path`: only when the original lyric `<stem>.lrc` was actually written beside the audio (the `<stem>.zh.lrc` translation is not reported separately);
@@ -1389,7 +1391,7 @@ With `--json`:
 | `sources list` | `--json` | Array with `site_key`, `name`, `search`, `hosts`, `origin`; `status` is populated only with `--check` (otherwise `null`); with `--probe` each item also carries `latency_ms` and `http_status` (`null` when unreachable) |
 | `update` | `--json` | One object with exactly nine keys: `current`, `latest`, `available`, `asset_name`, `asset_shape`, `asset_size`, `sha256`, `download_path`, `error`; absent values are `null` (or an empty string for `latest`). `asset_shape` is `cli` when a CLI asset was selected; `error` may be `insecure-url`, `missing-digest`, or `no-cli-asset` |
 | `music search` | `--json` | `{"platform", "keyword", "total", "tracks": [...]}`; with `platform=all` (the default) each track carries `sources` and the response also includes a `platforms` summary |
-| `music download` | `--json` | Single-line JSON: `{"platform", "keyword", "out_dir", "level", "total", "ok", "skip", "fail", "lyrics_written", "results": [...]}`; each `results[]` entry has `id`, `name`, `artists`, `album`, `duration_s`, `vip`, `platform`, `sources`, plus `status` (`ok`/`skip`/`fail`) and the conditional `path`, `lyric_path`, `reason` |
+| `music download` | `--json` | Single-line JSON: `{"platform", "keyword", "out_dir", "level", "embed_lyric", "total", "ok", "skip", "fail", "lyrics_written", "results": [...]}`; each `results[]` entry has `id`, `name`, `artists`, `album`, `duration_s`, `vip`, `platform`, `sources`, plus `status` (`ok`/`skip`/`fail`) and the conditional `path`, `lyric_path`, `reason` |
 | `music platforms` | `--json` | `{platform key: display name}` object |
 | `music health` | `--json` | `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`; field names match `GET /api/v1/music/health` |
 | `follow list` | `--json` | Array with `site`, `book_id`, `title`, `last_chapter`, `updated_at` |
