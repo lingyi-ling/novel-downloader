@@ -15,7 +15,7 @@
 
 ### Test
 
-- Python **12788 passed / 47 skipped**；Android 543+ tests 全过；ruff/format/mypy 全绿
+- Python **12801 passed / 47 skipped**；Android 543+ tests 全过；ruff/format/mypy 全绿
 - 新增 query_intent OpenAPI/行为契约、REST↔embedded parity、Android 解码/展示、补全测试
 
 ## v1.35.1 (2026-11-15)
