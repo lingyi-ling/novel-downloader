@@ -185,6 +185,21 @@ _BODY_LIMIT_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 #: ``api.middleware.BODY_LIMIT_PREFIX``.
 _BODY_LIMIT_PREFIX = "/api/v1"
 
+#: Correlation header the REST API echoes on every response (mirrors
+#: ``api.middleware.REQUEST_ID_HEADER``).  The embedded engine speaks the same
+#: contract so an Android client can quote one id to the operator regardless of
+#: which transport answered.
+_REQUEST_ID_HEADER = "X-Request-ID"
+
+#: Longest client-supplied id accepted (mirrors
+#: ``api.middleware.MAX_REQUEST_ID_LENGTH``).
+_MAX_REQUEST_ID_LENGTH = 64
+
+#: Safe characters for a client-supplied id (mirrors
+#: ``api.middleware.REQUEST_ID_PATTERN``).  Anything else is replaced with a
+#: generated UUID4 rather than rejected.
+_REQUEST_ID_RE = re.compile(rf"[A-Za-z0-9._:-]{{1,{_MAX_REQUEST_ID_LENGTH}}}")
+
 _MSG_BODY_TOO_LARGE = (
     f"Request body too large: the limit for this endpoint is {_MAX_BODY_BYTES} bytes"
 )
@@ -2855,6 +2870,21 @@ def _pattern_matches(pattern: str, path: str) -> bool:
     return True
 
 
+def _request_id_from_headers(headers: Any) -> str:
+    """
+    Return the client's ``X-Request-ID`` when it is safe to echo, else a UUID4.
+
+    Mirrors :func:`novel_downloader.apps.api.middleware._request_id_from_scope`:
+    only the first occurrence is considered, the value must be 1-64 characters
+    from ``A-Z a-z 0-9 . _ : -``, and anything else (empty, overlong, non-ASCII,
+    whitespace or control characters) is replaced instead of rejected.
+    """
+    value = headers.get(_REQUEST_ID_HEADER)
+    if value is not None and _REQUEST_ID_RE.fullmatch(value):
+        return str(value)
+    return str(uuid.uuid4())
+
+
 def _match_route(method: str, path: str) -> tuple[Handler | None, dict[str, str]]:
     """Match ``path`` against the route table; return (handler, params)."""
     # Starlette matches on the still-encoded path, so ``%2F`` never satisfies a
@@ -2915,6 +2945,10 @@ class _Handler(BaseHTTPRequestHandler):
     #: Idle or stalled connections are dropped after this many seconds so a
     #: silent client cannot pin a handler thread forever.
     timeout = 60
+    #: Correlation id for this request, resolved in :meth:`_dispatch`.  A
+    #: non-empty value is added by :meth:`end_headers`, so every response
+    #: (JSON, download, error) carries it exactly once.
+    _request_id: str = ""
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
         logger.debug("%s %s", self.address_string(), fmt % args)
@@ -2944,6 +2978,12 @@ class _Handler(BaseHTTPRequestHandler):
             path,
             code,
         )
+
+    def end_headers(self) -> None:
+        """Finish the response head, adding the request correlation id."""
+        if self._request_id:
+            self.send_header(_REQUEST_ID_HEADER, self._request_id)
+        super().end_headers()
 
     # -- helpers ----------------------------------------------------------
 
@@ -3160,6 +3200,10 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
     def _dispatch(self, method: str) -> None:
+        # Resolve the correlation id before any response can be sent, including
+        # the busy/500 paths below. An instance attribute shadows the harmless
+        # class default and :meth:`end_headers` writes it on every response.
+        self._request_id = _request_id_from_headers(self.headers)
         parsed = urlparse(self.path)
         path = parsed.path
         # Blank values must survive: ``?limit=``, ``?site=`` and ``?status=``
