@@ -4,6 +4,30 @@ The desktop Settings tab edits the common options below (output folder, proxy, a
 
 ![Desktop Settings tab](../assets/images/desktop_settings.png)
 
+### Desktop Settings: Search cache
+
+The **Search cache** card on the desktop Settings page shows the search cache of the **current desktop process**. Search results are cached briefly per query, so repeating the same search is served from the cache instead of contacting every site again. The card reads a read-only snapshot: refreshing it never purges expired entries, opens disk payloads, or changes any cache behaviour. It is read once when the Settings page opens and again after a successful clear.
+
+| Card row | Meaning |
+| -------- | ------- |
+| Memory entries | Number of entries held in memory by this process; includes entries whose TTL has elapsed but that no later write/read has purged yet |
+| Disk entries | Number of payload files of this cache format in the cache directory, whether or not they have expired; always `0` when the disk layer is disabled |
+| Cache hits | Hits since the process started; both memory hits and entries restored from disk into memory count |
+| Expired entries | The subset of memory entries older than the TTL (300 seconds by default); counting them does not purge them, and expired disk files are not included |
+
+A missing value (the cache has not been used yet) or a failed read renders as `0`, with the error shown below the rows; neither affects searches that are already running. The counters are cumulative for the desktop process; clearing the cache does not reset them. Misses and LRU evictions (caused by the memory entry cap, 64 by default) are counted too but not shown separately on this card; use the "Search-cache diagnostics" section of [`novel-cli doctor`](./cli-examples.en.md#10-doctor-subcommand) for the full field set. The disk layer is off by default and is enabled only when `NOVELDL_SEARCH_CACHE_DIR` is set before the search module is first imported; once enabled, each write leaves at most 256 payload files in the directory, and a snapshot larger than 2 MiB stays in memory only.
+
+**Clearing the search cache**
+
+"Clear search cache" requires two clicks: the first click only changes the label to "Click again to clear" and keeps the button armed for four seconds; a second click within four seconds performs the clear, while a timeout restores the normal label so the button never stays armed. The button is disabled while the clear runs. A successful clear:
+
+* drops every in-memory entry;
+* when the disk layer is enabled, deletes this cache format's payload files (`v1-*.json`) from the cache directory (best effort: a file that cannot be deleted is ignored without an error); if `NOVELDL_SEARCH_CACHE_DIR` points at a directory shared with other processes, the disk cache they wrote is removed too, so their later identical searches can only use their own in-memory entries and otherwise re-hit every site;
+* leaves other files in the directory untouched, along with anything not of this cache format;
+* keeps the cumulative hit/miss/eviction counters.
+
+On success a "Search cache cleared" toast appears and the card is refreshed; on failure the toast shows the error text, the card keeps its previous values, and the action can be retried immediately.
+
 ### general Settings
 
 Global runtime settings for downloads / concurrency / rate limits / directories and storage.
