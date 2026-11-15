@@ -41,6 +41,30 @@ class SearchRequestSerializationTest {
     }
 
     @Test
+    fun sortAndOrderUseTheServerFieldNames() {
+        val body = json.encodeToString(
+            SearchRequest.serializer(),
+            SearchRequest(keyword = "x", sort = "words", order = "asc"),
+        )
+
+        assertTrue(body, body.contains("\"sort\":\"words\""))
+        assertTrue(body, body.contains("\"order\":\"asc\""))
+    }
+
+    @Test
+    fun theDefaultQualitySortStaysOffTheWireButAnExplicitOrderDoesNot() {
+        val body = json.encodeToString(
+            SearchRequest.serializer(),
+            SearchRequest(keyword = "x", sort = "quality", order = "desc"),
+        )
+
+        // `sort` equals the model default, so `encodeDefaults = false` omits
+        // it; `order` has no model default and must be sent.
+        assertEquals("""{"keyword":"x","order":"desc"}""", body)
+        assertFalse(body, body.contains("\"sort\""))
+    }
+
+    @Test
     fun unsetFiltersStayOffTheWire() {
         val body = json.encodeToString(
             SearchRequest.serializer(),

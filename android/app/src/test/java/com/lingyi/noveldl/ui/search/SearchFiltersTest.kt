@@ -26,7 +26,47 @@ class SearchFiltersTest {
         assertNull(request.min_words)
         assertNull(request.max_words)
         assertNull(request.updated_after)
+        // Sorting has a default but is still explicit, so the request carries
+        // the same visible ordering the panel shows.
+        assertEquals("quality", request.sort)
+        assertEquals("desc", request.order)
         assertFalse(SearchFilterState().isActive)
+    }
+
+    @Test
+    fun everySortModeMapsToItsServerKey() {
+        val expected = mapOf(
+            SearchSort.QUALITY to "quality",
+            SearchSort.PRIORITY to "priority",
+            SearchSort.WORDS to "words",
+            SearchSort.UPDATE to "update",
+        )
+        expected.forEach { (sort, wire) ->
+            val request = SearchFilterState(sort = sort).toSearchRequest("x")!!
+            assertEquals(wire, request.sort)
+        }
+        assertEquals("desc", SearchFilterState().toSearchRequest("x")!!.order)
+    }
+
+    @Test
+    fun everyOrderMapsToItsWireValue() {
+        SearchOrder.entries.forEach { order ->
+            val request = SearchFilterState(order = order).toSearchRequest("x")!!
+            assertEquals(order.wire, request.order)
+        }
+        assertEquals("asc", SearchFilterState(order = SearchOrder.ASC).toSearchRequest("x")!!.order)
+    }
+
+    @Test
+    fun unknownSavedSortAndOrderFallBackToTheDefaults() {
+        assertEquals(SearchSort.QUALITY, SearchSort.fromWire("relevance"))
+        assertEquals(SearchSort.QUALITY, SearchSort.fromWire(""))
+        assertEquals(SearchSort.QUALITY, SearchSort.fromWire(null))
+        assertEquals(SearchSort.PRIORITY, SearchSort.fromWire(" PRIORITY "))
+
+        assertEquals(SearchOrder.DESC, SearchOrder.fromWire("sideways"))
+        assertEquals(SearchOrder.DESC, SearchOrder.fromWire(null))
+        assertEquals(SearchOrder.ASC, SearchOrder.fromWire("ASC"))
     }
 
     @Test
@@ -167,6 +207,8 @@ class SearchFiltersTest {
             minWords = "100000",
             maxWords = "2000000",
             updatedAfter = "2025-01-01",
+            sort = SearchSort.WORDS,
+            order = SearchOrder.ASC,
         )
         val request = state.toSearchRequest("x", listOf("qidian", "fanqienovel"))
 
@@ -174,6 +216,8 @@ class SearchFiltersTest {
             SearchRequest(
                 keyword = "x",
                 sites = listOf("qidian", "fanqienovel"),
+                sort = "words",
+                order = "asc",
                 min_words = 100000,
                 max_words = 2000000,
                 updated_after = "2025-01-01",

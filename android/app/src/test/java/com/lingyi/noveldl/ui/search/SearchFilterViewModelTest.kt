@@ -107,6 +107,81 @@ class SearchFilterViewModelTest {
     }
 
     @Test
+    fun sortAndOrderEditsAreWrittenToSavedState() {
+        val saved = SavedStateHandle()
+        val model = SearchFilterViewModel(savedState = saved)
+
+        model.updateSort(SearchSort.PRIORITY)
+        model.updateOrder(SearchOrder.ASC)
+
+        assertEquals(SearchSort.PRIORITY, model.state.value.sort)
+        assertEquals(SearchOrder.ASC, model.state.value.order)
+        assertEquals("priority", saved.get<String>(SearchFilterViewModel.SAVED_SORT))
+        assertEquals("asc", saved.get<String>(SearchFilterViewModel.SAVED_ORDER))
+        // Ordering is presentation, not a filter; the active count must not
+        // claim that a filter is narrowing the results.
+        assertEquals(0, model.state.value.activeFilterCount)
+        assertFalse(model.state.value.isActive)
+    }
+
+    @Test
+    fun aNewInstanceRestoresSortAndOrder() {
+        val saved = SavedStateHandle(
+            mapOf(
+                SearchFilterViewModel.SAVED_SORT to "words",
+                SearchFilterViewModel.SAVED_ORDER to "asc",
+            ),
+        )
+
+        val restored = SearchFilterViewModel(savedState = saved)
+
+        assertEquals(SearchSort.WORDS, restored.state.value.sort)
+        assertEquals(SearchOrder.ASC, restored.state.value.order)
+        // The request built after a process-death restore sends the same sort.
+        assertEquals("words", restored.state.value.toSearchRequest("x")?.sort)
+        assertEquals("asc", restored.state.value.toSearchRequest("x")?.order)
+    }
+
+    @Test
+    fun anUnknownSavedSortOrOrderFallsBackToTheDefault() {
+        val saved = SavedStateHandle(
+            mapOf(
+                SearchFilterViewModel.SAVED_MIN_WORDS to "10",
+                SearchFilterViewModel.SAVED_SORT to "relevance",
+                SearchFilterViewModel.SAVED_ORDER to "sideways",
+            ),
+        )
+
+        val model = SearchFilterViewModel(savedState = saved)
+
+        assertEquals(SearchSort.QUALITY, model.state.value.sort)
+        assertEquals(SearchOrder.DESC, model.state.value.order)
+        // The legal filter beside the corrupt values is untouched, and the
+        // screen is usable instead of being stuck on an invalid request.
+        assertEquals("10", model.state.value.minWords)
+        assertTrue(model.state.value.validate().isValid)
+    }
+
+    @Test
+    fun clearRestoresTheDefaultQualitySortAndDirection() {
+        val saved = SavedStateHandle()
+        val model = SearchFilterViewModel(savedState = saved)
+        model.updateSort(SearchSort.UPDATE)
+        model.updateOrder(SearchOrder.ASC)
+
+        model.clear()
+
+        assertEquals(SearchSort.QUALITY, model.state.value.sort)
+        assertEquals(SearchOrder.DESC, model.state.value.order)
+        assertEquals("quality", saved.get<String>(SearchFilterViewModel.SAVED_SORT))
+        assertEquals("desc", saved.get<String>(SearchFilterViewModel.SAVED_ORDER))
+        assertEquals(
+            SearchFilterState.EMPTY,
+            SearchFilterViewModel(savedState = saved).state.value,
+        )
+    }
+
+    @Test
     fun clearResetsTheStateAndTheSavedValues() {
         val saved = SavedStateHandle()
         val model = SearchFilterViewModel(savedState = saved)
@@ -120,6 +195,8 @@ class SearchFilterViewModelTest {
         assertEquals("", saved.get<String>(SearchFilterViewModel.SAVED_MIN_WORDS))
         assertEquals("", saved.get<String>(SearchFilterViewModel.SAVED_MAX_WORDS))
         assertEquals("", saved.get<String>(SearchFilterViewModel.SAVED_UPDATED_AFTER))
+        assertEquals(SearchSort.QUALITY, model.state.value.sort)
+        assertEquals(SearchOrder.DESC, model.state.value.order)
 
         // A new instance after the clear stays empty too.
         assertEquals(
@@ -138,5 +215,7 @@ class SearchFilterViewModelTest {
         assertEquals(SearchFilterState.EMPTY, model.state.value)
         // Nothing was written: the handle still has no keys for the filters.
         assertFalse(saved.contains(SearchFilterViewModel.SAVED_MIN_WORDS))
+        assertFalse(saved.contains(SearchFilterViewModel.SAVED_SORT))
+        assertFalse(saved.contains(SearchFilterViewModel.SAVED_ORDER))
     }
 }

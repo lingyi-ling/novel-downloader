@@ -7,6 +7,51 @@ import java.time.LocalDate
 import java.time.ZoneOffset
 
 /**
+ * The sort keys Android exposes, restricted to the server's `SearchSortKey`
+ * whitelist. The UI labels for these four modes live in the string resources;
+ * `PRIORITY` is shown as "质量" because the API's `priority` key orders rows by
+ * the source site's configured weight (higher first). `QUALITY` is the default
+ * five-signal ranking, whose dominant signal is keyword relevance.
+ */
+enum class SearchSort(val wire: String) {
+    QUALITY("quality"),
+    PRIORITY("priority"),
+    WORDS("words"),
+    UPDATE("update"),
+    ;
+
+    companion object {
+        val DEFAULT = QUALITY
+
+        /**
+         * Maps a saved/wire value back to a known key. Unknown or legacy values
+         * fall back to [DEFAULT] instead of leaking an unsupported string into
+         * a request (the server would answer `422`).
+         */
+        fun fromWire(raw: String?): SearchSort {
+            val text = raw?.trim()?.lowercase()
+            return entries.firstOrNull { it.wire == text } ?: DEFAULT
+        }
+    }
+}
+
+/** Sort direction accepted by the API (`asc` / `desc`); descending by default. */
+enum class SearchOrder(val wire: String) {
+    ASC("asc"),
+    DESC("desc"),
+    ;
+
+    companion object {
+        val DEFAULT = DESC
+
+        fun fromWire(raw: String?): SearchOrder {
+            val text = raw?.trim()?.lowercase()
+            return entries.firstOrNull { it.wire == text } ?: DEFAULT
+        }
+    }
+}
+
+/**
  * Optional search filters shared by the UI and its tests.
  *
  * The fields keep the raw text the user typed (or the date the picker chose)
@@ -14,12 +59,19 @@ import java.time.ZoneOffset
  * error and corrected in place. [toSearchRequest] refuses to build a request
  * while anything is invalid, which keeps malformed numbers/dates off the wire
  * (the server would answer `422`).
+ *
+ * Sorting is carried in the same state (and the same SavedStateHandle) so a
+ * re-search, retry or later page sends the same ordering as the visible
+ * selection. It is not counted by [activeFilterCount]: ordering changes the
+ * presentation of the result set, it does not narrow it.
  */
 data class SearchFilterState(
     val minWords: String = "",
     val maxWords: String = "",
     /** ISO `YYYY-MM-DD`, empty when the date filter is off. */
     val updatedAfter: String = "",
+    val sort: SearchSort = SearchSort.DEFAULT,
+    val order: SearchOrder = SearchOrder.DEFAULT,
 ) {
     /** Number of non-blank fields, including entries that are not valid yet. */
     val activeFilterCount: Int
@@ -56,6 +108,8 @@ data class SearchFilterState(
         return SearchRequest(
             keyword = keyword,
             sites = sites,
+            sort = sort.wire,
+            order = order.wire,
             min_words = parseWordFilter(minWords).value,
             max_words = parseWordFilter(maxWords).value,
             updated_after = parseFilterDate(updatedAfter)?.toString(),

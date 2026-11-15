@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -177,11 +178,13 @@ fun SearchScreen(onMessage: (String) -> Unit) {
 
     fun runSearch(query: String) {
         if (query.isEmpty() || loading) return
-        // Build the body from the live filter state: a re-search and every
-        // retry therefore carry the current bounds without copying them around.
-        // Invalid input is not sent (the server would answer 422); the panel is
-        // opened so the inline error is visible even when it was collapsed.
-        val request = filters.toSearchRequest(query, selectedSitesParam(selectedSites))
+        // Build the body from the ViewModel's current state (not this
+        // composition's snapshot) so a retry after the user changed the sort
+        // or a filter carries the new selection. Invalid input is not sent
+        // (the server would answer 422); the panel is opened so the inline
+        // error is visible even when it was collapsed.
+        val request = filterModel.state.value
+            .toSearchRequest(query, selectedSitesParam(selectedSites))
         if (request == null) {
             showFilters = true
             return
@@ -408,6 +411,8 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 validation = filterValidation,
                 onMinWordsChange = filterModel::updateMinWords,
                 onMaxWordsChange = filterModel::updateMaxWords,
+                onSortChange = filterModel::updateSort,
+                onOrderChange = filterModel::updateOrder,
                 onPickDate = { showDatePicker = true },
                 onClearDate = { filterModel.updateUpdatedAfter("") },
             )
@@ -738,9 +743,10 @@ private fun SearchFilterToggleRow(
 }
 
 /**
- * The expanded filter panel: numeric word bounds plus an inclusive
- * "updated after" date chosen from the Material date picker. Every field is
- * full width so a 2.0 font scale does not squeeze the labels/values.
+ * The expanded filter panel: result ordering, numeric word bounds plus an
+ * inclusive "updated after" date chosen from the Material date picker. Every
+ * control is full width and the chip groups wrap, so a 2.0 font scale does not
+ * squeeze the labels/values or push a chip off screen.
  */
 @Composable
 private fun SearchFilterPanel(
@@ -748,6 +754,8 @@ private fun SearchFilterPanel(
     validation: SearchFilterValidation,
     onMinWordsChange: (String) -> Unit,
     onMaxWordsChange: (String) -> Unit,
+    onSortChange: (SearchSort) -> Unit,
+    onOrderChange: (SearchOrder) -> Unit,
     onPickDate: () -> Unit,
     onClearDate: () -> Unit,
 ) {
@@ -769,6 +777,12 @@ private fun SearchFilterPanel(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        SearchSortSelector(
+            sort = filters.sort,
+            order = filters.order,
+            onSortChange = onSortChange,
+            onOrderChange = onOrderChange,
+        )
         WordFilterField(
             value = filters.minWords,
             onValueChange = onMinWordsChange,
@@ -840,6 +854,79 @@ private fun SearchFilterPanel(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+@StringRes
+private fun searchSortLabelRes(sort: SearchSort): Int = when (sort) {
+    SearchSort.QUALITY -> R.string.search_sort_relevance
+    SearchSort.PRIORITY -> R.string.search_sort_quality
+    SearchSort.WORDS -> R.string.search_sort_words
+    SearchSort.UPDATE -> R.string.search_sort_update
+}
+
+@StringRes
+private fun searchOrderLabelRes(order: SearchOrder): Int = when (order) {
+    SearchOrder.ASC -> R.string.search_sort_asc
+    SearchOrder.DESC -> R.string.search_sort_desc
+}
+
+/**
+ * Sort-key and direction chips. [FlowRow] is used for both groups so a long
+ * translation or a 2.0 font scale wraps onto a second line instead of
+ * squeezing the chips or clipping the last one.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SearchSortSelector(
+    sort: SearchSort,
+    order: SearchOrder,
+    onSortChange: (SearchSort) -> Unit,
+    onOrderChange: (SearchOrder) -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            stringResource(R.string.search_sort_title),
+            style = MaterialTheme.typography.labelLarge,
+        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            SearchSort.entries.forEach { option ->
+                FilterChip(
+                    selected = sort == option,
+                    onClick = { onSortChange(option) },
+                    label = { Text(stringResource(searchSortLabelRes(option))) },
+                )
+            }
+        }
+        Text(
+            stringResource(R.string.search_sort_quality_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            stringResource(R.string.search_sort_order_title),
+            style = MaterialTheme.typography.labelLarge,
+        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            SearchOrder.entries.forEach { option ->
+                FilterChip(
+                    selected = order == option,
+                    onClick = { onOrderChange(option) },
+                    label = { Text(stringResource(searchOrderLabelRes(option))) },
+                )
+            }
+        }
     }
 }
 

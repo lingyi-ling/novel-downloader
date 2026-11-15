@@ -11,14 +11,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Owns the optional word-count/update-date filters of the search screen.
+ * Owns the optional word-count/update-date filters and the result ordering of
+ * the search screen.
  *
  * Why a ViewModel: the screen can be dropped from composition by a tab switch,
  * and the process can be killed in the background. Keeping the filter text in
  * [SavedStateHandle] means both events restore the panel exactly as the user
  * left it, instead of silently returning to an unfiltered search. The search
  * coroutine reads [state] when it builds its request, so a re-search, retry or
- * any later page request carries the same filters without extra plumbing.
+ * any later page request carries the same filters and sort direction without
+ * extra plumbing.
  *
  * Saved values are strings (not `Int`/`LocalDate`) because the raw input is
  * what lets an invalid entry be corrected in place; [toSearchRequest] still
@@ -45,7 +47,18 @@ class SearchFilterViewModel @JvmOverloads constructor(
         update(_state.value.copy(updatedAfter = date.trim()))
     }
 
-    /** Restores every filter to its default (no bounds, no date). */
+    fun updateSort(sort: SearchSort) {
+        update(_state.value.copy(sort = sort))
+    }
+
+    fun updateOrder(order: SearchOrder) {
+        update(_state.value.copy(order = order))
+    }
+
+    /**
+     * Restores every filter to its default (no bounds, no date) and the
+     * ordering to the default quality ranking, newest/highest first.
+     */
     fun clear() {
         update(SearchFilterState.EMPTY)
     }
@@ -63,12 +76,20 @@ class SearchFilterViewModel @JvmOverloads constructor(
         if (next.updatedAfter != previous.updatedAfter) {
             savedState?.set(SAVED_UPDATED_AFTER, next.updatedAfter)
         }
+        if (next.sort != previous.sort) {
+            savedState?.set(SAVED_SORT, next.sort.wire)
+        }
+        if (next.order != previous.order) {
+            savedState?.set(SAVED_ORDER, next.order.wire)
+        }
     }
 
     companion object {
         internal const val SAVED_MIN_WORDS = "search.min_words"
         internal const val SAVED_MAX_WORDS = "search.max_words"
         internal const val SAVED_UPDATED_AFTER = "search.updated_after"
+        internal const val SAVED_SORT = "search.sort"
+        internal const val SAVED_ORDER = "search.order"
 
         /**
          * NavBackStackEntry/Activity-scoped factory. `createSavedStateHandle()`
@@ -89,6 +110,10 @@ class SearchFilterViewModel @JvmOverloads constructor(
                 updatedAfter = parseFilterDate(
                     savedState.get<String>(SAVED_UPDATED_AFTER).orEmpty(),
                 )?.toString().orEmpty(),
+                // Anything outside the server whitelist (an old or corrupt
+                // value) falls back to the default instead of being sent.
+                sort = SearchSort.fromWire(savedState.get<String>(SAVED_SORT)),
+                order = SearchOrder.fromWire(savedState.get<String>(SAVED_ORDER)),
             )
         }
     }

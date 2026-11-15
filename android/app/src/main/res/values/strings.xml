@@ -85,6 +85,15 @@
     <string name="search_filters_words_too_large">字数不能超过 10 亿</string>
     <string name="search_filters_range_invalid">最少字数不能大于最多字数</string>
     <string name="search_filters_invalid_date">日期格式无效，请重新选择</string>
+    <string name="search_sort_title">排序方式</string>
+    <string name="search_sort_relevance">相关度</string>
+    <string name="search_sort_quality">质量</string>
+    <string name="search_sort_words">字数</string>
+    <string name="search_sort_update">更新时间</string>
+    <string name="search_sort_quality_hint">「质量」按书源优先级排序，数值越大越靠前。</string>
+    <string name="search_sort_order_title">排序方向</string>
+    <string name="search_sort_asc">升序</string>
+    <string name="search_sort_desc">降序</string>
 
     <string name="browse_rank">排行榜</string>
     <string name="browse_categories">分类</string>

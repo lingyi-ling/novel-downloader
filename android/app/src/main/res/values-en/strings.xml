@@ -80,6 +80,15 @@
     <string name="search_filters_words_too_large">Word count cannot exceed 1,000,000,000</string>
     <string name="search_filters_range_invalid">Min words cannot be greater than max words</string>
     <string name="search_filters_invalid_date">Invalid date; pick it again</string>
+    <string name="search_sort_title">Sort by</string>
+    <string name="search_sort_relevance">Relevance</string>
+    <string name="search_sort_quality">Quality</string>
+    <string name="search_sort_words">Word count</string>
+    <string name="search_sort_update">Updated</string>
+    <string name="search_sort_quality_hint">Quality orders by source priority; higher-priority sources come first.</string>
+    <string name="search_sort_order_title">Direction</string>
+    <string name="search_sort_asc">Ascending</string>
+    <string name="search_sort_desc">Descending</string>
 
     <string name="browse_rank">Rankings</string>
     <string name="browse_categories">Categories</string>
