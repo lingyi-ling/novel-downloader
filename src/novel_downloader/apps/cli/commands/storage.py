@@ -1050,18 +1050,16 @@ def _run_backup(
             target = _reserve_backup_target(base_target)
             try:
                 info = _write_snapshot(source, target)
+                if verify:
+                    reason = _verify_database(target)
+                    if reason is not None:
+                        raise _BackupVerificationError(source, target, reason)
             except BaseException:
-                # The placeholder is ours; a failed snapshot must not leave an
-                # empty database behind for retention to count.
+                # The placeholder and any copy written for this source are
+                # ours; a failure (including Ctrl+C during verification) must
+                # not leave them behind for retention or a retry to count.
                 _remove_database_files(target)
                 raise
-            if verify:
-                reason = _verify_database(target)
-                if reason is not None:
-                    # Remove the copy before the set-wide rollback below; the
-                    # source database was never opened for writing.
-                    _remove_database_files(target)
-                    raise _BackupVerificationError(source, target, reason)
             created.append(target)
             size = target.stat().st_size
             total_bytes += size
@@ -1095,11 +1093,15 @@ def _run_backup(
             dry_run=dry_run,
             as_json=as_json,
         )
-    except Exception as exc:
-        # A backup set is only useful as a whole; drop the files this run
-        # already produced so a retry cannot mistake them for a full set.
+    except BaseException as exc:
+        # Same rollback for every other failure, including Ctrl+C: a run that
+        # did not publish its complete set must not leave the files it did
+        # write behind.  Interrupts are re-raised so the CLI aborter keeps its
+        # usual contract; ordinary errors are reported and exit 1.
         for path in created:
             _remove_database_files(path)
+        if not isinstance(exc, Exception):
+            raise
         fail(t("Failed to back up {source}: {error}").format(source=source, error=exc))
 
     protected: set[Path] = set()
