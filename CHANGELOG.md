@@ -1,3 +1,23 @@
+## v1.36.0 (2026-11-15)
+
+查询意图贯通全端，排序体验补齐，文档与官网同步。
+
+### Feature
+
+- **查询意图**：CLI JSON/表格、桌面、Android、REST/embedded 顶层 `query_intent`（title/author/null）；仅默认 quality 排序产生，流式/缓存不含
+- **Android 排序**：切换排序键自动回自然方向（quality/words/update=desc，priority=asc），重复点选保留手动方向
+- **CLI**：`search --order asc|desc`，省略按排序键自然方向
+- **官网**：聚合搜索示例加入查询意图，与行级匹配徽标区分
+
+### Fix
+
+- REST 与 embedded 搜索信封完全一致（total/results/query_intent），空 sites 为 null
+
+### Test
+
+- Python **12788 passed / 47 skipped**；Android 543+ tests 全过；ruff/format/mypy 全绿
+- 新增 query_intent OpenAPI/行为契约、REST↔embedded parity、Android 解码/展示、补全测试
+
 ## v1.35.1 (2026-11-15)
 
 补丁版：把 `search --order` 与排序文档带入发布产物。
