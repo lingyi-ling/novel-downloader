@@ -850,6 +850,13 @@ def _i18n_catalog() -> dict[str, str]:
         "Saved; leave blank to keep": t("Saved; leave blank to keep"),
         "Optional": t("Optional"),
         "Clear saved password": t("Clear saved password"),
+        "Music downloads": t("Music downloads"),
+        "Embed lyrics": t("Embed lyrics"),
+        "Also write lyrics into the audio file tags. Independent of saving a "
+        "separate .lrc file.": t(
+            "Also write lyrics into the audio file tags. Independent of saving a "
+            "separate .lrc file."
+        ),
         "Music accounts": t("Music accounts"),
         "Paste account tokens for TIDAL, Apple Music and SoundCloud. They are "
         "stored on this device and never shown again.": t(
@@ -2254,6 +2261,10 @@ _SETTINGS_FILE_MAX_BYTES = 1_048_576
 #: The only preference keys that may travel between machines.  Credentials
 #: (proxy password, music tokens), device-specific paths (output folder, proxy
 #: address) and throttling state (``last_update_check``) are deliberately out.
+#: Music download options such as ``embed_lyric`` live in the music settings
+#: file shared with the CLI rather than in the desktop prefs, so they are
+#: intentionally absent here: exporting them would duplicate the source of
+#: truth and force a schema-version bump that invalidates older exports.
 _SETTINGS_FILE_KEYS: tuple[str, ...] = (
     "theme",
     *_PREF_BOOL_KEYS,
@@ -6152,6 +6163,9 @@ class ApiBridge:
             embed_tags=bool(stored.get("embed_tags", True)),
             embed_cover=bool(stored.get("embed_cover", True)),
             save_lyric=bool(stored.get("save_lyric", True)),
+            # Independent of ``save_lyric`` and off by default, matching the
+            # CLI's ``--embed-lyric`` default and the stored music setting.
+            embed_lyric=bool(stored.get("embed_lyric", False)),
             split_folder=bool(stored.get("split_folder", True)),
             skip_existing=bool(stored.get("skip_existing", True)),
         )
@@ -6270,6 +6284,7 @@ class ApiBridge:
             "embed_tags": bool(stored.get("embed_tags", True)),
             "embed_cover": bool(stored.get("embed_cover", True)),
             "save_lyric": bool(stored.get("save_lyric", True)),
+            "embed_lyric": bool(stored.get("embed_lyric", False)),
             "split_folder": bool(stored.get("split_folder", True)),
             "skip_existing": bool(stored.get("skip_existing", True)),
         }

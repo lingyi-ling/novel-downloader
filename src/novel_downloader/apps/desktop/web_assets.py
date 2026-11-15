@@ -1057,6 +1057,12 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
           </div>
 
           <div class="card settings-card">
+            <div class="settings-title" data-i18n="Music downloads">Music downloads</div>
+            <div class="settings-help" data-i18n="Also write lyrics into the audio file tags. Independent of saving a separate .lrc file.">Also write lyrics into the audio file tags. Independent of saving a separate .lrc file.</div>
+            <label class="set-row"><span class="lbl" data-i18n="Embed lyrics">Embed lyrics</span><input type="checkbox" class="switch" id="set-embed-lyric"></label>
+          </div>
+
+          <div class="card settings-card">
             <div class="settings-title" data-i18n="Updates">Updates</div>
             <label class="set-row"><span class="lbl" data-i18n="Check for updates automatically">Check for updates automatically</span><input type="checkbox" class="switch" id="set-auto-check"></label>
             <label class="set-row"><span class="lbl" data-i18n="Download updates in the background">Download updates in the background</span><input type="checkbox" class="switch" id="set-auto-download"></label>
@@ -1592,8 +1598,25 @@ async function initSettings() {
     renderSettings(s);
   }
   await loadMusicCredentialSettings(preferred);
+  await loadMusicDownloadSettings();
   await refreshSearchCacheStats();
 }
+
+/* Music download options live in the music settings file shared with the CLI,
+   so this card reads and writes that file instead of the desktop prefs
+   transfer format. Toggling persists immediately: it is not part of the
+   settings page's single "Save changes" transaction. */
+async function loadMusicDownloadSettings() {
+  const box = $("#set-embed-lyric");
+  if (!box) return;
+  const st = await call("get_music_settings");
+  if (st) box.checked = !!st.embed_lyric;
+}
+
+$("#set-embed-lyric").addEventListener("change", () => {
+  const box = $("#set-embed-lyric");
+  api("save_music_settings", { embed_lyric: box.checked }).catch(() => {});
+});
 
 $("#btn-set-open").onclick = async () => {
   const r = await call("open_downloads_dir");

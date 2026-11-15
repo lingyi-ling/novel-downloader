@@ -3624,6 +3624,20 @@ msgstr "清除已保存的密码"
 msgid "Music accounts"
 msgstr "音乐账号"
 
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid "Music downloads"
+msgstr "音乐下载"
+
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid "Embed lyrics"
+msgstr "内嵌歌词"
+
+#: src/novel_downloader/apps/desktop/webview_app.py
+msgid ""
+"Also write lyrics into the audio file tags. Independent of saving a "
+"separate .lrc file."
+msgstr "同时把歌词写入音频文件标签；与保存独立 .lrc 文件互不影响。"
+
 #: src/novel_downloader/apps/desktop/webview_app.py:856
 msgid ""
 "Paste account tokens for TIDAL, Apple Music and SoundCloud. They are "

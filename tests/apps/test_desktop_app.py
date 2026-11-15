@@ -642,6 +642,8 @@ def test_window_state_file_lives_in_the_music_data_dir(
         ('id="btn-music-cred-save"',),
         ('id="btn-music-cred-clear"',),
         ("data-music-cred",),
+        # music: the settings page exposes the embedded-lyric switch
+        ('id="set-embed-lyric"',),
     ],
 )
 def test_app_html_contains_core_structures(needle: str) -> None:
@@ -3816,6 +3818,67 @@ def test_bridge_music_settings_round_trip(
     assert stored["save_lyric"] is False
 
 
+def test_bridge_music_settings_persist_embed_lyric(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The settings page switch round-trips through the shared music settings file."""
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.settings.settings_file",
+        lambda: tmp_path / "music_settings.json",
+    )
+    bridge = ApiBridge()
+    # Off by default, matching the music settings and the CLI default.
+    assert bridge.get_music_settings()["embed_lyric"] is False
+
+    bridge.save_music_settings({"embed_lyric": True})
+
+    assert bridge.get_music_settings()["embed_lyric"] is True
+    stored = json.loads((tmp_path / "music_settings.json").read_text("utf-8"))
+    assert stored["embed_lyric"] is True
+
+    bridge.save_music_settings({"embed_lyric": False})
+    assert bridge.get_music_settings()["embed_lyric"] is False
+
+
+def test_bridge_music_options_forward_embed_lyric(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The desktop download builder must pass the stored value to DownloadOptions."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    pytest.importorskip("novel_downloader.apps.music.downloader")
+    settings_path = tmp_path / "music_settings.json"
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.settings.settings_file",
+        lambda: settings_path,
+    )
+    settings_path.write_text(
+        json.dumps({"embed_lyric": True, "out_dir": str(tmp_path)}),
+        encoding="utf-8",
+    )
+
+    options = wa.ApiBridge._music_options(None)
+
+    assert options.embed_lyric is True
+    # ``save_lyric`` stays independent: both can be on without one implying
+    # the other.
+    assert options.save_lyric is True
+
+
+def test_bridge_music_options_default_embed_lyric_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    pytest.importorskip("novel_downloader.apps.music.downloader")
+    monkeypatch.setattr(
+        "novel_downloader.apps.music.settings.settings_file",
+        lambda: tmp_path / "music_settings.json",
+    )
+
+    assert wa.ApiBridge._music_options(None).embed_lyric is False
+
+
 def _music_status_rows(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -5819,6 +5882,7 @@ _PAYLOAD_CONTRACT: dict[str, tuple[tuple[str, ...], set[str]]] = {
             "embed_tags",
             "embed_cover",
             "save_lyric",
+            "embed_lyric",
             "split_folder",
             "skip_existing",
         },
@@ -5961,6 +6025,34 @@ def test_app_html_music_credentials_refresh_the_music_page() -> None:
     # A blank field is a no-op, never an implicit clear.
     assert "if (!value) {" in save
     assert 't("Enter the token JSON before saving")' in save
+
+
+def test_app_html_embed_lyric_setting_loads_and_saves_immediately() -> None:
+    """The settings page switch reads the music settings and persists on change."""
+    assert 'id="set-embed-lyric"' in APP_HTML
+
+    init = _js_handler("async function initSettings()")
+    assert "await loadMusicDownloadSettings();" in init
+
+    loader = _js_handler("async function loadMusicDownloadSettings()")
+    assert 'call("get_music_settings")' in loader
+    assert "box.checked = !!st.embed_lyric" in loader
+
+    change = _js_handler('$("#set-embed-lyric").addEventListener("change"')
+    assert 'api("save_music_settings", { embed_lyric: box.checked })' in change
+
+
+def test_embed_lyric_copy_is_published_to_the_front_end() -> None:
+    """Every new data-i18n key must also be in the injected bridge catalogue."""
+    catalog = _i18n_catalog()
+    for key in (
+        "Music downloads",
+        "Embed lyrics",
+        "Also write lyrics into the audio file tags. Independent of saving a "
+        "separate .lrc file.",
+    ):
+        assert f'data-i18n="{key}"' in APP_HTML, key
+        assert key in catalog, key
 
 
 # ---------------------------------------------------------------------------
