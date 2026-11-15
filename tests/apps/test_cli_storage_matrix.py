@@ -304,8 +304,9 @@ class ShapeCase:
     verify_reason: str | None
     backup_ok: bool
     backup_no_verify_ok: bool
-    #: A damaged source is rejected while the snapshot is being built, before
-    #: any per-file entry exists; that generic path reports on stderr only.
+    #: Every runtime failure now emits one JSON line on stdout (the unified
+    #: ``storage backup --json`` contract); the flag stays so a future shape
+    #: that legitimately cannot report can switch this back.
     backup_emits_json: bool = True
 
 
@@ -365,7 +366,6 @@ SHAPE_CASES: tuple[ShapeCase, ...] = (
         "not a database",
         False,
         False,
-        backup_emits_json=False,
     ),
     ShapeCase(
         "corrupt_main",
@@ -374,7 +374,6 @@ SHAPE_CASES: tuple[ShapeCase, ...] = (
         "integrity",
         False,
         False,
-        backup_emits_json=False,
     ),
     ShapeCase(
         "damaged_wal",
@@ -383,7 +382,6 @@ SHAPE_CASES: tuple[ShapeCase, ...] = (
         "write-ahead log",
         False,
         False,
-        backup_emits_json=False,
     ),
 )
 
@@ -499,10 +497,20 @@ def test_backup_default_shape_matrix(
         if case.backup_emits_json:
             payload = _payload(capsys)
             assert payload["ok"] is False
+            assert payload["error"] in storage.BACKUP_ERROR_CATEGORIES
             assert payload["count"] == 0
             assert payload["files"] == []
             assert payload["verified"] is False
-            assert payload["verification_failed"] is True
+            if payload["verification_failed"]:
+                assert "verification_error" in payload
+            else:
+                # A source rejected before publication reports its own stable
+                # category instead of a post-write verification failure.
+                assert payload["error"] in {
+                    "not_database",
+                    "integrity_failed",
+                    "wal_damaged",
+                }
             assert payload["retention"] == {
                 "keep": 0,
                 "dry_run": False,
@@ -511,9 +519,9 @@ def test_backup_default_shape_matrix(
                 "failed": [],
             }
         else:
-            # Generic snapshot failures are reported on stderr only; this is
-            # the current contract and is asserted here so it cannot change
-            # silently.
+            # Every runtime failure emits the unified ``--json`` line now, so
+            # this branch is unreachable; it stays as a guard should the
+            # contract ever need a shape that cannot report.
             captured = capsys.readouterr()
             assert captured.out == ""
             assert captured.err != ""
@@ -559,8 +567,10 @@ def test_backup_no_verify_shape_matrix(
         captured = capsys.readouterr()
         if case.backup_emits_json:
             assert captured.out.count("\n") == 1
-            assert json.loads(captured.out)["ok"] is False
-        else:
+            failure = json.loads(captured.out)
+            assert failure["ok"] is False
+            assert failure["error"] in storage.BACKUP_ERROR_CATEGORIES
+        else:  # pragma: no cover - every runtime failure now emits JSON
             assert captured.out == ""
             assert captured.err != ""
 
@@ -758,8 +768,13 @@ def test_backup_sequence_exhaustion_rolls_back_and_exits_one(
     assert first.read_bytes() == first_bytes
     assert {path.name for path in book_dir.iterdir()} == {base.name, first.name}
     _assert_source_unchanged(db, before)
-    # Generic I/O failures currently report on stderr only.
-    assert capsys.readouterr().out == ""
+    # Name exhaustion is a runtime failure, so the unified ``--json`` contract
+    # applies: one line with a stable category instead of an empty stdout.
+    payload = _payload(capsys)
+    assert payload["ok"] is False
+    assert payload["error"] == "sequence_exhausted"
+    assert payload["source"] == str(db)
+    assert payload["count"] == 0
 
 
 # ---------------------------------------------------------------------------

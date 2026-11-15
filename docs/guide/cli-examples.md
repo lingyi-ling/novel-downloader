@@ -905,7 +905,7 @@ novel-cli storage backup [-h] --out OUT [--json] [--keep N] [--dry-run] [--no-ve
 **Options**
 
 * `--out OUT`: 接收备份文件的目录 (必填)。支持 `~` 与环境变量, 不存在时会自动创建; 每本书生成 `<out>/<site>/<book>/chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite`。若目标文件已存在则拒绝覆盖
-* `--json`: 输出单行 JSON 报告, 含 `command`、`ok`、`timestamp`、`out`、`count`、`bytes`、`files[]` (`source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`、`verified`)、`verified`、`verification_failed` 与 `retention` (`keep`、`dry_run`、`candidates`、`removed`、`failed`); 没有可备份的数据库时 `count` 为 `0`、`files` 为空数组、`verified` 为 `false`; 校验失败时另含 `verification_error` (`source`、`target`、`reason`)
+* `--json`: 输出单行 JSON 报告, 含 `command`、`ok`、`timestamp`、`out`、`count`、`bytes`、`files[]` (`source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`、`verified`)、`verified`、`verification_failed` 与 `retention` (`keep`、`dry_run`、`candidates`、`removed`、`failed`); 没有可备份的数据库时 `count` 为 `0`、`files` 为空数组、`verified` 为 `false`; 校验失败时另含 `verification_error` (`source`、`target`、`reason`)。**任何运行期失败**同样只输出一行: `ok` 为 `false`, 并含 `error` (稳定类别, 见下)、`message` (人类可读原因) 与 `source` (本次失败的源数据库; 扫描或配置阶段失败时为 `null`), 整组回滚时 `count`、`bytes` 为 `0`、`files` 为空数组、`verified` 为 `false`。用法错误 (如 `--out` 指向文件、`--keep` 为负数、`--dry-run` 缺少 `--keep`) 仍以 `2` 退出且**不**输出 JSON
 * `--keep N`: 备份成功并发布新文件后, 每本书的**每个 stage** 只保留最新 `N` 份, 更旧的删除; `0` (默认) 关闭清理。`N` 为负数时以用法错误 (`2`) 退出
 * `--dry-run`: 只报告 `--keep` 会删除哪些旧备份, **不删除任何文件**; 新备份仍会正常写入。必须与 `--keep N` (`N > 0`) 同用, 否则以用法错误 (`2`) 退出
 * `--no-verify`: 跳过写入后的完整性/schema 校验。**仅用于新 schema**: 当数据库由更新版本写入、当前版本的 schema 校验会判定「版本过新」时, 快照本身仍能成功, 用它保留原始字节。常规备份不要使用——未经校验的副本当前版本无法恢复, 报告中的 `verified` 为 `false`
@@ -914,7 +914,9 @@ novel-cli storage backup [-h] --out OUT [--json] [--keep N] [--dry-run] [--no-ve
 
 * 先删除刚写入的该副本, 再删除**本次运行已写出的全部副本** (整组回滚); 备份只有成套才有意义, 残缺的一组会让重试误以为已经完整。
 * 命令以 `1` 退出, 并且**不执行** `--keep` 轮转; `--out` 下原有的旧备份和 `raw_data` 中的源数据库都不受影响 (源库全程只读)。
-* `--json` 仍输出一行报告: `ok` 为 `false`、`count` 为 `0`、`bytes` 为 `0`、`files` 为空数组、`verified` 为 `false`、`verification_failed` 为 `true`, 并由 `verification_error` (`source`、`target`、`reason`) 说明是哪个副本、为何失败; `retention` 结构不变, 其中的 `candidates`/`removed`/`failed` 为空。
+* `--json` 仍输出一行报告: `ok` 为 `false`、`count` 为 `0`、`bytes` 为 `0`、`files` 为空数组、`verified` 为 `false`、`verification_failed` 为 `true`, 并由 `verification_error` (`source`、`target`、`reason`) 说明是哪个副本、为何失败; `error` 为该失败的具体类别 (`schema_unsupported`、`integrity_failed`、`wal_damaged` 或 `not_database`), `retention` 结构不变, 其中的 `candidates`/`removed`/`failed` 为空。
+
+**其他运行期失败** 遵循同一报告契约, 不会出现 stdout 为空: 源文件不是 SQLite 数据库 (`not_database`)、主库完整性检查失败 (`integrity_failed`)、WAL 损坏 (`wal_damaged`)、同一秒的备份序号耗尽 (`sequence_exhausted`)、目标目录/文件 I/O 失败 (`io_error`)、其他 SQLite 错误 (`database_error`)、配置无法读取 (`config_error`)、意外异常 (`internal_error`)。每种情况都会先删除本次已写出的文件 (整组回滚, 因此 `count` 为 `0`), 以 `1` 退出, 并在 `--json` 的单行报告中给出 `error`、`message` 与 `source`; `--out` 下原有旧备份和 `raw_data` 中的源库都不受影响。`--keep` 轮转本身失败时, 新备份已经可用并会保留, 报告仍是单行 `ok: false` 并额外含 `error: "retention_failed"` 与 `message`。
 
 `--keep` 的删除范围是硬边界: 只考虑 `--out` 下文件名严格匹配 `chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite` 的**普通文件**, 目录、符号链接和任何其他命名 (包括手工改名或旧版本留下的文件) 一律不碰。分组键是「所在书籍目录 + stage」, 因此同一本书的 `raw` 与 `cleaner` 各自保留 `N` 份, 不会互相挤掉; 本次运行刚写出的文件永远受保护, 即使系统时钟回拨也不会删掉新备份。若某个目录无法读取或删除失败, 命令以 `1` 退出并在 `retention.failed` / stderr 中报告, 但已完成的备份仍保留。
 
@@ -1363,7 +1365,7 @@ novel-cli update --json
 | `clean book` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` 为 `clean book`; `book_id` 仅在只清理一本书时为该 ID, 多本书或整站清理时为 `null`; `items[]` 同上 |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` (dir 与 total 字段见上文) |
 | `storage --clean` | `--dry-run --json` | 与 `clean cache` 相同的 dry-run 结构, `command` 为 `storage --clean`, `site`/`book_id` 为 `null`, `book_ids` 为 `[]` |
-| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files", "verified", "verification_failed", "retention"}`; `files[]` 含 `source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`、`verified`; 写入后校验失败时 `ok` 为 `false`、`count` 为 `0`、`files` 为 `[]`, 并另含 `verification_error` (`source`、`target`、`reason`); `retention` 含 `keep`、`dry_run`、`candidates`、`removed`、`failed` |
+| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files", "verified", "verification_failed", "retention"}`; `files[]` 含 `source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`、`verified`; 任何运行期失败 (`ok` 为 `false`) 另含 `error` (稳定类别, 如 `not_database`、`integrity_failed`、`wal_damaged`、`schema_unsupported`、`sequence_exhausted`、`io_error`、`retention_failed`)、`message` 与 `source`, 整组回滚时 `count` 为 `0`、`files` 为 `[]` (`retention_failed` 例外: 新备份已保留, `count` 非零); 写入后校验失败还会带 `verification_failed: true` 与 `verification_error` (`source`、`target`、`reason`); `retention` 含 `keep`、`dry_run`、`candidates`、`removed`、`failed` |
 | `storage verify` | `--json` | `{"ok", "total", "healthy", "corrupt", "errors"}`; 每个 `errors[]` 含 `path`、`reason`; 被 Ctrl+C 中断时额外含 `"interrupted": true` |
 | `storage restore` | `--json` | `{"command", "ok", "from", "target", "replaced_existing", "pre_restore_backup", "schema_version", "chapters", "bytes", "sha256"}` |
 | `doctor` | `--json` | `{"summary": {"total", "failures", "optional_failures", "ok"}, "checks": [{"key", "name", "ok", "fatal", ...}]}` |

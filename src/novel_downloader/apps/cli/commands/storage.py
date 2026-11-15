@@ -33,7 +33,12 @@ by the current run are never removed. ``storage restore --from FILE`` validates
 the file (integrity check, schema version, required columns) before atomically
 replacing the target database; an existing database is preserved in a
 ``.pre-restore-*.bak`` sibling first and is never overwritten without ``--yes``.
-Both subcommands accept ``--json`` for a single-line report.
+Both subcommands accept ``--json`` for a single-line report. A ``backup --json``
+run that fails at runtime always prints that one line with ``ok: false``, a
+stable ``error`` category (``not_database``, ``integrity_failed``,
+``wal_damaged``, ``schema_unsupported``, ``sequence_exhausted``, ``io_error``,
+...), a human-readable ``message`` and the affected ``source``; usage errors
+still exit 2 with no JSON.
 
 ``storage verify`` walks the raw-data directory, opens every
 ``chapter.<stage>.sqlite`` read-only and reports whether it is healthy: SQLite's
@@ -755,6 +760,128 @@ class RetentionReport:
         return not self.failed
 
 
+#: Stable ``error`` identifiers emitted by ``storage backup --json`` when the
+#: run fails. They are part of the machine contract: a consumer may branch on
+#: ``error`` instead of parsing the human-readable ``message``.
+BACKUP_ERROR_CATEGORIES: tuple[str, ...] = (
+    "not_database",
+    "integrity_failed",
+    "wal_damaged",
+    "schema_unsupported",
+    "sequence_exhausted",
+    "io_error",
+    "database_error",
+    "retention_failed",
+    "config_error",
+    "internal_error",
+    "verification_failed",
+)
+
+
+def _classify_backup_error(exc: BaseException) -> str:
+    """Map a backup failure to its stable ``error`` identifier.
+
+    The order matters: :class:`ChapterStorageCorruptError` is also a
+    :class:`sqlite3.DatabaseError`, and the corrupted-target case is already
+    classified by the post-write check.
+    """
+    if isinstance(exc, ChapterStorageSchemaError):
+        return "schema_unsupported"
+    if isinstance(exc, ChapterStorageCorruptError):
+        # Only ``_source_connection`` raises this for a WAL sidecar; the other
+        # instance comes from ``inspect_chapter_database``'s integrity check.
+        text = str(exc).lower()
+        if "write-ahead log" in text:
+            return "wal_damaged"
+        return "integrity_failed"
+    if isinstance(exc, FileExistsError):
+        # Raised by ``_reserve_backup_target`` once every allowed name for the
+        # current second is taken (it never overwrites a backup).
+        return "sequence_exhausted"
+    if isinstance(exc, sqlite3.DatabaseError):
+        if "not a database" in str(exc).lower():
+            return "not_database"
+        return "database_error"
+    if isinstance(exc, OSError):
+        return "io_error"
+    return "internal_error"
+
+
+def _backup_failure_payload(
+    *,
+    category: str,
+    message: str,
+    source: Path | None,
+    out_dir: Path,
+    stamp: str | None,
+    keep: int,
+    dry_run: bool,
+    verification_failed: bool = False,
+    verification_error: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Build the one-line ``--json`` report for a failed backup run.
+
+    ``count`` and ``bytes`` are zero and ``files`` is empty because a failed
+    run rolls back every file it published; the sources and pre-existing
+    backups stay untouched. ``verified`` is false either way: no complete set
+    survived to be checked. The success shape is unchanged.
+    """
+    payload: dict[str, object] = {
+        "command": "storage backup",
+        "ok": False,
+        "error": category,
+        "message": message,
+        "source": str(source) if source is not None else None,
+        "timestamp": stamp,
+        "out": str(out_dir),
+        "count": 0,
+        "bytes": 0,
+        "files": [],
+        "verified": False,
+        "verification_failed": verification_failed,
+        "retention": RetentionReport(keep=keep, dry_run=dry_run).to_dict(),
+    }
+    if verification_error is not None:
+        payload["verification_error"] = verification_error
+    return payload
+
+
+def _report_backup_failure(
+    message: str,
+    *,
+    category: str,
+    source: Path | None,
+    out_dir: Path,
+    stamp: str,
+    keep: int,
+    dry_run: bool,
+    as_json: bool,
+    verification_failed: bool = False,
+    verification_error: dict[str, str] | None = None,
+) -> NoReturn:
+    """Emit the failure report (one JSON line when asked) and exit 1.
+
+    ``--json`` keeps exactly one line on stdout; the human-readable ``message``
+    still goes to stderr through :func:`fail`, so a monitoring script learns
+    both the stable category and why the run failed.
+    """
+    if as_json:
+        _emit_json(
+            _backup_failure_payload(
+                category=category,
+                message=message,
+                source=source,
+                out_dir=out_dir,
+                stamp=stamp,
+                keep=keep,
+                dry_run=dry_run,
+                verification_failed=verification_failed,
+                verification_error=verification_error,
+            )
+        )
+    fail(message)
+
+
 def _plan_retention(
     out_dir: Path,
     keep: int,
@@ -929,13 +1056,26 @@ def _reserve_backup_target(target: Path) -> Path:
 
 
 class _BackupVerificationError(RuntimeError):
-    """A published backup failed the post-write integrity/schema check."""
+    """A published backup failed the post-write integrity/schema check.
 
-    def __init__(self, source: Path, target: Path, reason: str) -> None:
+    ``category`` is the stable machine identifier reported as ``error`` in
+    ``--json`` output (``integrity_failed``, ``schema_unsupported``,
+    ``wal_damaged``, ...). It defaults to ``verification_failed`` so a caller
+    that only supplies a plain reason string keeps a defined identifier.
+    """
+
+    def __init__(
+        self,
+        source: Path,
+        target: Path,
+        reason: str,
+        category: str = "verification_failed",
+    ) -> None:
         super().__init__(reason)
         self.source = source
         self.target = target
         self.reason = reason
+        self.category = category
 
 
 def _report_verification_failure(
@@ -951,34 +1091,29 @@ def _report_verification_failure(
 
     The caller has already removed every file this run wrote, so ``count`` is
     zero: the failed set is not a usable backup. ``--json`` still prints one
-    machine-readable line carrying the failing source, target and reason, so a
-    monitoring script learns why the run failed instead of only its exit code.
+    machine-readable line carrying the stable ``error`` category, the failing
+    source, target and reason, so a monitoring script learns why the run failed
+    instead of only its exit code.
     """
-    if as_json:
-        _emit_json(
-            {
-                "command": "storage backup",
-                "ok": False,
-                "timestamp": stamp,
-                "out": str(out_dir),
-                "count": 0,
-                "bytes": 0,
-                "files": [],
-                "verified": False,
-                "verification_failed": True,
-                "verification_error": {
-                    "source": str(exc.source),
-                    "target": str(exc.target),
-                    "reason": exc.reason,
-                },
-                "retention": RetentionReport(keep=keep, dry_run=dry_run).to_dict(),
-            }
-        )
-    fail(
-        t(
-            "Backup verification failed for {target}: {reason}. No backup from "
-            "this run was kept; the source databases are unchanged."
-        ).format(target=exc.target, reason=exc.reason)
+    message = t(
+        "Backup verification failed for {target}: {reason}. No backup from "
+        "this run was kept; the source databases are unchanged."
+    ).format(target=exc.target, reason=exc.reason)
+    _report_backup_failure(
+        message,
+        category=exc.category,
+        source=exc.source,
+        out_dir=out_dir,
+        stamp=stamp,
+        keep=keep,
+        dry_run=dry_run,
+        as_json=as_json,
+        verification_failed=True,
+        verification_error={
+            "source": str(exc.source),
+            "target": str(exc.target),
+            "reason": exc.reason,
+        },
     )
 
 
@@ -1005,14 +1140,31 @@ def _run_backup(
             EXIT_USAGE,
         )
 
+    # Fixed at the start so every failure report (including one raised while
+    # the source tree is being discovered) carries the run's timestamp.
+    stamp = _timestamp()
+
     root = raw_root.resolve()
     # Only skip the destination when it is a proper subtree of the source; if
     # the user backs up into raw_data itself, discovery runs first and the
     # timestamped names cannot match the source pattern anyway.
     skip = out_dir if out_dir != root and out_dir.is_relative_to(root) else None
-    sources = _find_chapter_databases(root, skip=skip)
+    try:
+        sources = _find_chapter_databases(root, skip=skip)
+    except OSError as exc:
+        # A source tree that cannot be walked is a runtime failure; ``--json``
+        # must still produce its one machine-readable line.
+        _report_backup_failure(
+            t("Failed to back up {source}: {error}").format(source=root, error=exc),
+            category="io_error",
+            source=None,
+            out_dir=out_dir,
+            stamp=stamp,
+            keep=keep,
+            dry_run=dry_run,
+            as_json=as_json,
+        )
 
-    stamp = _timestamp()
     plan: list[tuple[Path, Path]] = []
     for source in sources:
         match = _CHAPTER_DB_RE.match(source.name)
@@ -1060,7 +1212,12 @@ def _run_backup(
                 if verify:
                     reason = _verify_database(target)
                     if reason is not None:
-                        raise _BackupVerificationError(source, target, reason)
+                        raise _BackupVerificationError(
+                            source,
+                            target,
+                            reason,
+                            getattr(reason, "category", "verification_failed"),
+                        )
             except BaseException:
                 # The placeholder and any copy written for this source are
                 # ours; a failure (including Ctrl+C during verification) must
@@ -1109,7 +1266,16 @@ def _run_backup(
             _remove_database_files(path)
         if not isinstance(exc, Exception):
             raise
-        fail(t("Failed to back up {source}: {error}").format(source=source, error=exc))
+        _report_backup_failure(
+            t("Failed to back up {source}: {error}").format(source=source, error=exc),
+            category=_classify_backup_error(exc),
+            source=source,
+            out_dir=out_dir,
+            stamp=stamp,
+            keep=keep,
+            dry_run=dry_run,
+            as_json=as_json,
+        )
 
     protected: set[Path] = set()
     for path in created:
@@ -1136,6 +1302,17 @@ def _run_backup(
                 "verified": verify,
                 "verification_failed": False,
                 "retention": retention.to_dict(),
+                **(
+                    {
+                        "error": "retention_failed",
+                        "message": t(
+                            "Retention failed: {count} old backup(s) could not "
+                            "be removed; the new backups were kept."
+                        ).format(count=len(retention.failed)),
+                    }
+                    if not retention.ok
+                    else {}
+                ),
             }
         )
     else:
@@ -1390,17 +1567,40 @@ def _redact_home(text: str) -> str:
     return text.replace(home, "~") if home else text
 
 
-def _verify_database(path: Path) -> str | None:
+class _VerifyProblem(str):
+    """A verification-failure reason that also carries its stable category.
+
+    Subclassing :class:`str` keeps every existing consumer working unchanged:
+    the value still formats into messages, JSON reports and equality checks
+    exactly like the reason text. ``storage backup`` reads ``category`` to fill
+    the machine-readable ``error`` field, falling back to
+    ``verification_failed`` for a plain string (a monkeypatched or third-party
+    provider of the reason).
+    """
+
+    category: str
+
+    def __new__(cls, reason: str, category: str) -> _VerifyProblem:
+        problem = str.__new__(cls, reason)
+        problem.category = category
+        return problem
+
+
+def _verify_database(path: Path) -> _VerifyProblem | None:
     """Return ``None`` when ``path`` is a healthy chapter database.
 
     The file is only ever read: the WAL sidecar is checksummed before SQLite
     opens the main file, the connection is opened read-only, and a damaged
-    database is neither copied nor renamed. A returned string is the reason the
-    database cannot be used by this build.
+    database is neither copied nor renamed. A returned value is the reason the
+    database cannot be used by this build, carrying the stable failure
+    category used by ``storage backup --json``.
     """
     wal_problem = inspect_wal_damage(path)
     if wal_problem is not None:
-        return t("damaged write-ahead log: {problem}").format(problem=wal_problem)
+        return _VerifyProblem(
+            t("damaged write-ahead log: {problem}").format(problem=wal_problem),
+            "wal_damaged",
+        )
 
     try:
         with _source_connection(path) as conn:
@@ -1410,11 +1610,21 @@ def _verify_database(path: Path) -> str | None:
             conn.execute("PRAGMA query_only = ON")
             inspect_chapter_database(conn, source=_redact_path(path))
     except ChapterStorageSchemaError as exc:
-        return _redact_home(str(exc))
+        return _VerifyProblem(_redact_home(str(exc)), "schema_unsupported")
     except ChapterStorageCorruptError as exc:
-        return _redact_home(str(exc))
-    except (sqlite3.Error, OSError) as exc:
-        return _redact_home(str(exc) or type(exc).__name__)
+        return _VerifyProblem(_redact_home(str(exc)), "integrity_failed")
+    except sqlite3.Error as exc:
+        text = _redact_home(str(exc) or type(exc).__name__)
+        lowered = text.lower()
+        if "not a database" in lowered or "not an sqlite" in lowered:
+            category = "not_database"
+        elif "malformed" in lowered or "corrupt" in lowered:
+            category = "integrity_failed"
+        else:
+            category = "database_error"
+        return _VerifyProblem(text, category)
+    except OSError as exc:
+        return _VerifyProblem(_redact_home(str(exc) or type(exc).__name__), "io_error")
     return None
 
 
@@ -1595,12 +1805,34 @@ class StorageBackupCmd(Command):
         if dry_run and keep <= 0:
             fail(t("--dry-run requires --keep."), EXIT_USAGE)
         as_json = bool(getattr(args, "as_json", False))
-        raw_root = _resolve_paths(
-            non_interactive=as_json or not stdin_is_interactive()
-        )["raw"]
+        out_dir = expand_path(args.out).resolve()
+        try:
+            raw_root = _resolve_paths(
+                non_interactive=as_json or not stdin_is_interactive()
+            )["raw"]
+        except SystemExit as exc:
+            # ``_resolve_paths`` reports a missing/unparsable configuration on
+            # stderr and exits 1. With ``--json`` the runtime-failure contract
+            # still requires one machine-readable line on stdout; the usage
+            # code and every other exit path are left untouched.
+            if as_json and exc.code not in (None, 0, EXIT_USAGE):
+                _emit_json(
+                    _backup_failure_payload(
+                        category="config_error",
+                        message=t(
+                            "Could not load the configuration; no backup was made."
+                        ),
+                        source=None,
+                        out_dir=out_dir,
+                        stamp=_timestamp(),
+                        keep=keep,
+                        dry_run=dry_run,
+                    )
+                )
+            raise
         _run_backup(
             raw_root,
-            expand_path(args.out),
+            out_dir,
             as_json=as_json,
             keep=keep,
             dry_run=dry_run,

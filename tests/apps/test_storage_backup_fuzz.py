@@ -465,7 +465,16 @@ def test_random_failure_or_interrupt_rolls_back_the_run(
         assert error["reason"]
         assert "Backup verification failed" in captured.err
     elif mode in {"write_raise", "write_after_publish_raise"}:
-        assert captured.out == ""
+        # Every runtime failure emits the unified ``--json`` line; the human
+        # explanation still goes to stderr.
+        assert captured.out.count("\n") == 1
+        failure = json.loads(captured.out)
+        assert failure["ok"] is False
+        assert failure["error"] == (
+            "io_error" if mode == "write_raise" else "internal_error"
+        )
+        assert failure["count"] == 0
+        assert failure["files"] == []
         assert "Failed to back up" in captured.err
     else:
         assert captured.out == ""
