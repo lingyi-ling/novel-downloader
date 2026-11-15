@@ -1639,16 +1639,33 @@ def _run_verify(raw_root: Path, *, as_json: bool) -> None:
     checked so far. The interrupt is then re-raised, so ``cli_main`` keeps its
     usual contract ("Aborted." on stderr, exit code 1); a partial report never
     exits 0.
+
+    Two interrupt-specific guarantees hold whatever the stage:
+
+    * an interrupt during discovery (before any database is opened) still
+      produces the one ``--json`` line, with ``total`` 0 because the scan never
+      produced a count;
+    * every completed check is recorded with a single atomic append, so
+      ``checked``, ``healthy``, ``corrupt`` and ``errors`` can never disagree
+      with each other in a partial report.
     """
     if not as_json:
         ui.info(t("Scanning for chapter databases..."))
-    databases = _find_chapter_databases(raw_root)
-    total = len(databases)
-    errors: list[dict[str, str]] = []
-    healthy = 0
-    checked = 0
+    databases: list[Path] = []
     interrupted = False
+    try:
+        databases = _find_chapter_databases(raw_root)
+    except KeyboardInterrupt:
+        # No database is in flight, so the walk has nothing to add: report a
+        # zero total and let the run end as interrupted. A scripted consumer
+        # must not receive an empty stdout for an interrupted ``--json`` run.
+        interrupted = True
 
+    total = len(databases)
+    #: ``(display, reason)`` per completed check; ``reason`` is ``None`` for a
+    #: healthy database. Counters are derived from this list afterwards so an
+    #: interrupt can never leave ``corrupt`` disagreeing with ``errors``.
+    records: list[tuple[str, _VerifyProblem | None]] = []
     try:
         for index, database in enumerate(databases, 1):
             display = _redact_path(database)
@@ -1659,25 +1676,35 @@ def _run_verify(raw_root: Path, *, as_json: bool) -> None:
                     )
                 )
             reason = _verify_database(database)
-            checked += 1
-            if reason is None:
-                healthy += 1
-                if not as_json:
+            # One atomic append per completed check (a signal is only handled
+            # between bytecodes, so the tuple is either fully recorded or the
+            # database counts as still in flight). The old ``checked += 1``
+            # followed by ``healthy += 1`` left a window where an interrupted
+            # healthy database was reported as corrupt with no ``errors``
+            # entry.
+            records.append((display, reason))
+            if not as_json:
+                if reason is None:
                     ui.success(t("{path}: ok").format(path=display))
-            else:
-                errors.append({"path": display, "reason": reason})
-                if not as_json:
+                else:
                     ui.error(
                         t("{path}: corrupt: {reason}").format(
                             path=display, reason=reason
                         )
                     )
     except KeyboardInterrupt:
-        # ``checked`` only counts databases whose verification returned, so the
-        # summary never claims an interrupted database was healthy.
+        # Only completed records are counted, so the summary never claims an
+        # interrupted database was healthy.
         interrupted = True
 
-    corrupt = checked - healthy
+    checked = len(records)
+    healthy = sum(1 for _display, reason in records if reason is None)
+    errors: list[dict[str, str]] = [
+        {"path": display, "reason": reason}
+        for display, reason in records
+        if reason is not None
+    ]
+    corrupt = len(errors)
     ok = not interrupted and corrupt == 0
 
     if as_json:
@@ -1693,9 +1720,9 @@ def _run_verify(raw_root: Path, *, as_json: bool) -> None:
         if interrupted:
             payload["interrupted"] = True
         _emit_json(payload)
-    elif total == 0:
-        ui.info(t("No chapter databases found to verify."))
     elif interrupted:
+        # Checked before the empty-library case: an interrupt during discovery
+        # leaves ``total`` at 0 but is not "nothing to verify".
         ui.warn(
             t(
                 "Interrupted after checking {checked} of {total} database(s): "
@@ -1707,6 +1734,8 @@ def _run_verify(raw_root: Path, *, as_json: bool) -> None:
                 corrupt=corrupt,
             )
         )
+    elif total == 0:
+        ui.info(t("No chapter databases found to verify."))
     else:
         summary = t(
             "Verified {total} database(s): {healthy} healthy, {corrupt} corrupt."
