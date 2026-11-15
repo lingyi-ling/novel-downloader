@@ -1196,6 +1196,62 @@ curl -sS -D - -o /dev/null \
 - 该 ID 只用于关联与排障：不参与鉴权、不用于请求去重、不持久化，也不影响
   限流计数。服务重启后旧 ID 不再有对应的日志上下文。
 
+## 响应头与 CORS 契约
+
+### 安全响应头
+
+所有 `/api/v1/*` 与 `/downloads/*` 响应（成功与失败一视同仁）都带：
+
+| 响应头 | 值 | 作用 |
+| --- | --- | --- |
+| `X-Content-Type-Options` | `nosniff` | 禁止浏览器把响应猜成别的类型。 |
+| `Referrer-Policy` | `no-referrer` | 不把（可能含 token 的）API URL 带给第三方链接。 |
+| `X-Request-ID` | 关联 ID | 见「请求追踪」。 |
+
+`/downloads/*` 额外带 `Content-Security-Policy: sandbox; default-src 'none'`：
+导出目录与 API 同源，恶意导出的 HTML/SVG 因此无法执行脚本去调用本地 API。
+JSON 响应**不**带 CSP。
+
+`Cache-Control` 按路径分配：
+
+| 路径 | 值 |
+| --- | --- |
+| `/api/v1/sites`、`/api/v1/history`、`/api/v1/music/platforms` | `private, max-age=60` |
+| `/api/v1/tasks*`、`/api/v1/login/requests`、`/api/v1/music/jobs*` 等实时数据 | `no-store` |
+| 任意 `4xx` / `5xx` 错误 | `no-store` |
+| `/downloads/*` | `public, max-age=3600` |
+
+SSE 端点自己设置的 `Cache-Control: no-cache` 不会被覆盖。`/docs`、`/redoc`、
+`/openapi.json` 不在上述前缀内，不加这些头。
+
+### CORS
+
+默认**关闭**：不发送任何 `Access-Control-*` 头，且携带非回环 `Origin` 的
+浏览器请求在到达路由前就被拒绝（`403`，带 `no-store` 与安全头）。CLI、SDK、
+curl 不发 `Origin`，不受影响。
+
+`--cors`（或 `create_app(cors=True)`）是显式开关：允许任意来源
+（`Access-Control-Allow-Origin: *`），并移除上面的 `Origin` 闸门。
+
+- **永不**与凭据组合：响应不含 `Access-Control-Allow-Credentials`，浏览器
+  不会带上 Cookie。鉴权走显式请求头。
+- 预检只放行 API 实际使用的动词
+  （`GET`、`POST`、`DELETE`、`HEAD`、`OPTIONS`）与请求头
+  （`Accept`、`Authorization`、`Content-Type`、`X-API-Key`、`X-Request-ID`）；
+  其他动词/头返回 `400`。
+- 浏览器可读取 `Retry-After` 与 `X-Request-ID`
+  （`Access-Control-Expose-Headers`）。
+- 预检响应同样带安全头；不带 `Cache-Control`（浏览器用
+  `Access-Control-Max-Age` 缓存预检，`no-store` 会破坏它）。
+
+!!! note "内嵌引擎（桌面端 / Android 独立模式）"
+    内嵌引擎**没有 CORS 层**：它只绑定 `127.0.0.1`、只服务原生客户端，因此
+    不发送任何 `Access-Control-*` 头，浏览器也无法跨源读取它的响应。它同样
+    带 `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、
+    `X-Request-ID`，以及 `/downloads` 的 sandbox CSP；但**不实现** REST 的
+    `Cache-Control` 策略（原生客户端不经过 HTTP 缓存）。若将来让浏览器访问
+    内嵌端口，需要先补上这两块。
+
 ## 错误码
 
 错误响应统一为 `{"detail": "..."}`（`detail` 为英文，便于客户端判断）：

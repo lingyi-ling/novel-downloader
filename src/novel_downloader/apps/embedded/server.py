@@ -203,6 +203,21 @@ _MAX_REQUEST_ID_LENGTH = 64
 #: generated UUID4 rather than rejected.
 _REQUEST_ID_RE = re.compile(rf"[A-Za-z0-9._:-]{{1,{_MAX_REQUEST_ID_LENGTH}}}")
 
+#: Security response headers on every embedded response (mirrors
+#: ``api.middleware.SECURITY_HEADERS``).  ``nosniff`` keeps a browser from
+#: re-interpreting a JSON or file response as a type the engine did not
+#: declare; ``no-referrer`` keeps the API URL out of ``Referer`` headers sent
+#: to third-party sites linked from a served export.
+_SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+)
+
+#: Sandboxing ``Content-Security-Policy`` for ``/downloads`` (mirrors
+#: ``api.middleware.DOWNLOADS_CSP``): an exported HTML/SVG file must not run
+#: script on the engine's own origin.
+_DOWNLOADS_CSP = "sandbox; default-src 'none'"
+
 _MSG_BODY_TOO_LARGE = (
     f"Request body too large: the limit for this endpoint is {_MAX_BODY_BYTES} bytes"
 )
@@ -2998,10 +3013,25 @@ class _Handler(BaseHTTPRequestHandler):
             code,
         )
 
+    def _is_downloads_target(self) -> bool:
+        """Whether the current request targets the ``/downloads`` mount."""
+        # ``send_error`` can run before ``parse_request`` assigned ``path`` (a
+        # malformed request line), so never assume the attribute exists.
+        raw = getattr(self, "path", "")
+        try:
+            path = urlsplit(raw).path
+        except ValueError:  # pragma: no cover - urlsplit is effectively total
+            return False
+        return path == "/downloads" or path.startswith("/downloads/")
+
     def end_headers(self) -> None:
-        """Finish the response head, adding the request correlation id."""
+        """Finish the response head, adding the correlation id and security headers."""
         if self._request_id:
             self.send_header(_REQUEST_ID_HEADER, self._request_id)
+        for name, value in _SECURITY_HEADERS:
+            self.send_header(name, value)
+        if self._is_downloads_target():
+            self.send_header("Content-Security-Policy", _DOWNLOADS_CSP)
         super().end_headers()
 
     # -- helpers ----------------------------------------------------------

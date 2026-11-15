@@ -625,17 +625,12 @@ def create_app(
     # response on the path; route-set headers (the SSE ``no-cache``) win.
     application.add_middleware(CacheControlMiddleware)
 
-    # Security headers wrap every layer that can answer directly (401/413/429),
-    # so error responses are stamped too. ``nosniff``/``no-referrer`` apply to
-    # the API, and ``/downloads`` additionally gets a sandboxing CSP because it
-    # shares the API's origin.
-    application.add_middleware(SecurityHeadersMiddleware)
-
-    # Outermost custom log layer: one ``[request_id] method path status
-    # duration`` line per request, whether it succeeded, failed or never
-    # produced a response. RequestIdMiddleware sits above it to set the id.
-    application.add_middleware(RequestLoggingMiddleware)
-
+    # CORS is installed *inside* the security-header layer (added before it
+    # below) so the preflight answers CORSMiddleware generates itself — the
+    # ``200`` and the ``400`` for a disallowed verb/header — are stamped with
+    # ``nosniff``/``no-referrer`` like every other response. Preflights
+    # deliberately keep no ``Cache-Control``: browsers cache them via
+    # ``Access-Control-Max-Age``, which ``no-store`` would defeat.
     if cors:
         application.add_middleware(
             CORSMiddleware,
@@ -647,6 +642,18 @@ def create_app(
             allow_headers=list(CORS_ALLOW_HEADERS),
             expose_headers=list(CORS_EXPOSE_HEADERS),
         )
+
+    # Security headers wrap every layer that can answer directly (401/413/429)
+    # *and* the CORS layer above, so error responses and preflights are
+    # stamped too. ``nosniff``/``no-referrer`` apply to the API, and
+    # ``/downloads`` additionally gets a sandboxing CSP because it shares the
+    # API's origin.
+    application.add_middleware(SecurityHeadersMiddleware)
+
+    # Outermost custom log layer: one ``[request_id] method path status
+    # duration`` line per request, whether it succeeded, failed or never
+    # produced a response. RequestIdMiddleware sits above it to set the id.
+    application.add_middleware(RequestLoggingMiddleware)
 
     # Outermost of all: assigns/echoes ``X-Request-ID`` on every response,
     # including CORS preflights and the direct 401/413/429 answers from the

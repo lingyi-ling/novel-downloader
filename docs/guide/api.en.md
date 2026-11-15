@@ -1361,6 +1361,68 @@ curl -sS -D - -o /dev/null \
   persistence. After a server restart, old ids no longer map to any log
   context.
 
+## Response headers and CORS contract
+
+### Security headers
+
+Every `/api/v1/*` and `/downloads/*` response — success or failure — carries:
+
+| Header | Value | Purpose |
+| --- | --- | --- |
+| `X-Content-Type-Options` | `nosniff` | Stops a browser from re-interpreting the response as another type. |
+| `Referrer-Policy` | `no-referrer` | Keeps the (possibly token-bearing) API URL out of `Referer` headers sent to third-party links. |
+| `X-Request-ID` | correlation id | See "Request tracing". |
+
+`/downloads/*` additionally carries
+`Content-Security-Policy: sandbox; default-src 'none'`: the export directory
+shares the API's origin, so a malicious exported HTML/SVG file cannot run
+script to drive the local API. JSON responses carry **no** CSP.
+
+`Cache-Control` is assigned per path:
+
+| Path | Value |
+| --- | --- |
+| `/api/v1/sites`, `/api/v1/history`, `/api/v1/music/platforms` | `private, max-age=60` |
+| `/api/v1/tasks*`, `/api/v1/login/requests`, `/api/v1/music/jobs*` and other live data | `no-store` |
+| Any `4xx` / `5xx` error | `no-store` |
+| `/downloads/*` | `public, max-age=3600` |
+
+A `Cache-Control` set by an SSE route (`no-cache`) is never overridden.
+`/docs`, `/redoc` and `/openapi.json` are outside those prefixes and receive
+none of these headers.
+
+### CORS
+
+Off by default: no `Access-Control-*` header is sent, and a browser request
+carrying a non-loopback `Origin` is rejected with `403` before it reaches the
+router (with `no-store` and the security headers). CLI, SDK and curl send no
+`Origin` and are unaffected.
+
+`--cors` (or `create_app(cors=True)`) is the explicit opt-in: any origin is
+allowed (`Access-Control-Allow-Origin: *`) and the `Origin` gate above is
+removed.
+
+- Credentials are **never** combined with the wildcard: responses carry no
+  `Access-Control-Allow-Credentials`, so a browser sends no cookies.
+  Authentication uses explicit headers.
+- The preflight admits only the verbs the API uses (`GET`, `POST`, `DELETE`,
+  `HEAD`, `OPTIONS`) and the headers it reads (`Accept`, `Authorization`,
+  `Content-Type`, `X-API-Key`, `X-Request-ID`); anything else is a `400`.
+- Browser JavaScript may read `Retry-After` and `X-Request-ID`
+  (`Access-Control-Expose-Headers`).
+- Preflight responses carry the security headers but no `Cache-Control`:
+  browsers cache preflights via `Access-Control-Max-Age`, which `no-store`
+  would defeat.
+
+!!! note "Embedded engine (desktop / Android standalone mode)"
+    The embedded engine has **no CORS layer**: it binds `127.0.0.1` only and
+    serves native clients, so it sends no `Access-Control-*` header and a
+    browser cannot read its responses cross-origin. It does carry
+    `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+    `X-Request-ID`, and the `/downloads` sandbox CSP; it does **not** implement
+    the REST `Cache-Control` policy (native clients do not go through an HTTP
+    cache). Pointing a browser at the embedded port would require adding both.
+
 ## Error codes
 
 Error responses are uniformly `{"detail": "..."}` (`detail` is English so
