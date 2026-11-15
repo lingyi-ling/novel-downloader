@@ -17,6 +17,7 @@ import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -216,6 +217,64 @@ def sanitize(name, fallback="未命名"):
     )
 
 
+#: POSIX caps one path component at 255 *bytes*; Windows caps it at 255 UTF-16
+#: units.  Enforcing the byte limit everywhere keeps a name writable on both.
+_MAX_FILENAME_BYTES = 255
+
+#: ``build_stem`` leaves this room for ``.<ext>`` and the optional ``[id]``
+#: suffix so the finished file name still fits in one component.
+_MAX_STEM_BYTES = 240
+
+#: Extensions that must never be used for the *audio* file: ``.lrc`` is the
+#: sidecar extension, so an audio file named ``<stem>.lrc`` would be replaced
+#: by its own lyrics in :func:`save_lyric`.
+_SIDECAR_EXTS = frozenset({"lrc"})
+
+
+def _truncate_utf8(text: str, limit: int) -> str:
+    """Cut ``text`` to at most ``limit`` UTF-8 bytes without splitting a char."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", "ignore").rstrip(" .") or "未命名"
+
+
+def _audio_filename(stem, ext, suffix=""):
+    """拼出一个合法的单层音频文件名（≤255 UTF-8 字节）。
+
+    ``stem`` / ``ext`` / ``suffix`` 都来自外部数据。分别清洗后拼起来仍可能
+    超过单个路径分量的长度上限，这里按最终字节数分配预算，并优先保留
+    ``[id]`` 后缀（同名不同曲的去重标识），避免截断后互相覆盖。
+    """
+    tail = f" {suffix}" if suffix else ""
+    room = (
+        _MAX_FILENAME_BYTES
+        - len(str(ext).encode("utf-8"))
+        - 1
+        - len(tail.encode("utf-8"))
+    )
+    base = _truncate_utf8(str(stem), max(room, 1))
+    return sanitize_filename(
+        f"{base}{tail}.{ext}",
+        max_length=_MAX_FILENAME_BYTES,
+        collapse_whitespace=False,
+        fallback=f"未命名.{ext}",
+    )
+
+
+def _escapes_out_dir(out_dir, path):
+    """``path`` 解析（含符号链接）后是否落在 ``out_dir`` 之外。
+
+    解析不了（非法字符、环状链接等）一律按越界处理，宁可失败也不写未知位置。
+    """
+    try:
+        root = Path(out_dir).expanduser().resolve()
+        resolved = Path(path).expanduser().resolve()
+        return not (resolved == root or resolved.is_relative_to(root))
+    except (OSError, RuntimeError, ValueError):
+        return True
+
+
 def build_dir(opts: DownloadOptions, track):
     """按需生成 输出目录[/歌手/专辑] 。"""
     if not opts.split_folder:
@@ -224,18 +283,30 @@ def build_dir(opts: DownloadOptions, track):
 
 
 def build_stem(track):
-    """文件名主体：歌名 - 歌手。"""
-    return f"{sanitize(track.name)} - {sanitize(track.artists)}"
+    """文件名主体：歌名 - 歌手。
+
+    两个分量各自已被 ``sanitize`` 限制在 120 字符/255 字节，但拼起来仍可能
+    超过单个路径分量的 255 字节上限（CJK 一字三字节）。这里再按字节截断，
+    并给 ``.<ext>`` 留出空间。
+    """
+    return _truncate_utf8(
+        f"{sanitize(track.name)} - {sanitize(track.artists)}", _MAX_STEM_BYTES
+    )
 
 
 def _safe_ext(ext, default="mp3"):
     """扩展名只保留首个字母数字段。
 
     ext 来自平台接口返回（外部数据），可能被塞进路径分隔符或 ``..``；
-    原样拼进文件名会越出输出目录，这里剥成纯 token。
+    原样拼进文件名会越出输出目录，这里剥成纯 token。同时限制长度，并把
+    歌词后缀 ``lrc`` 挡掉：否则音频会先写成 ``<stem>.lrc``，随后被
+    ``save_lyric`` 的同名旁路文件覆盖。
     """
     m = re.search(r"[A-Za-z0-9]+", str(ext or ""))
-    return m.group(0) if m else default
+    token = m.group(0)[:10] if m else default
+    if token.lower() in _SIDECAR_EXTS:
+        return default
+    return token
 
 
 def _content_range_start(value):
@@ -590,7 +661,12 @@ def download_track(
     ext = _safe_ext(rr.ext or track.ext)
     folder = build_dir(opts, track)
     stem = build_stem(track)
-    dest = os.path.join(folder, f"{stem}.{ext}")
+    dest = os.path.join(folder, _audio_filename(stem, ext))
+
+    # 前面已按字符清洗过，但输出目录里的符号链接仍可能把写入带到目录之外。
+    # 解析后再确认一次；不通过就直接失败，绝不落盘。
+    if _escapes_out_dir(opts.out_dir, dest):
+        return TrackResult("fail", "输出路径越界")
 
     # 同名不同曲的情况：用 id 兜底避免互相覆盖。
     # ext / id 都来自平台返回的外部数据，同样要清洗，防止拼出越界路径
@@ -601,9 +677,9 @@ def download_track(
 
             other = MutaFile(dest, easy=True)
             if other and str(other.get("title", [""])[0]) != track.name:
-                dest = os.path.join(folder, f"{stem} {suffix}.{ext}")
+                dest = os.path.join(folder, _audio_filename(stem, ext, suffix))
         except Exception:
-            dest = os.path.join(folder, f"{stem} {suffix}.{ext}")
+            dest = os.path.join(folder, _audio_filename(stem, ext, suffix))
 
     with _dest_lock(dest):
         if (
@@ -1265,8 +1341,14 @@ def save_lyric(audio_path, lyric, translated=""):
     elif translation:
         pending.append((original_path, translation))
 
+    audio_key = os.path.normcase(os.path.abspath(str(audio_path)))
     written = []
     for path, content in pending:
+        # 旁路歌词只换后缀；若音频名本身的“扩展名”就是 lrc（Windows 上还
+        # 包括大小写变体），写歌词会把音频文件整个替换掉。直接跳过。
+        if os.path.normcase(os.path.abspath(path)) == audio_key:
+            logger.warning("music: 歌词路径与音频相同，已跳过 %s", path)
+            continue
         try:
             if _write_text(path, content):
                 written.append(path)
