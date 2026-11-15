@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -49,6 +50,9 @@ import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiSettings
 import com.lingyi.noveldl.data.DownloadDirectoryUnavailableException
+import com.lingyi.noveldl.data.DownloadFailureException
+import com.lingyi.noveldl.data.DownloadFailureKind
+import com.lingyi.noveldl.data.DownloadProgress
 import com.lingyi.noveldl.data.DownloadTarget
 import com.lingyi.noveldl.data.HistoryDownloader
 import com.lingyi.noveldl.data.HistoryFile
@@ -60,6 +64,8 @@ import com.lingyi.noveldl.ui.formatTimestamp
 import com.lingyi.noveldl.ui.humanSize
 import com.lingyi.noveldl.ui.listPlaceholderRes
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -76,6 +82,15 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
     // while the initial load is still in flight.
     var loaded by remember { mutableStateOf(false) }
     val pendingDownloads = remember { mutableStateMapOf<Long, String>() }
+    // Byte progress of active custom-directory downloads, keyed by file. The
+    // streaming loop reports from Dispatchers.IO; a StateFlow makes those
+    // writes thread-safe and Compose collects them on the main thread without
+    // one dispatcher hop per chunk. A key mapped to null means "started, no
+    // byte sample yet".
+    val progressByFile = remember {
+        MutableStateFlow<Map<String, DownloadProgress?>>(emptyMap())
+    }
+    val activeProgress by progressByFile.collectAsState()
     val latestMessage by rememberUpdatedState(onMessage)
 
     // DownloadManager reports the final result as a broadcast. Only ids we
@@ -154,6 +169,15 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                 reason.ifBlank { context.getString(R.string.history_download_unknown_error) },
             )
         }
+        // A classified SAF write failure gets its own wording (permission /
+        // space / provider); everything else keeps the message it carries.
+        val failureReason: (Throwable) -> String = { error ->
+            if (error is DownloadFailureException) {
+                context.getString(downloadFailureMessageRes(error.kind))
+            } else {
+                error.message.orEmpty()
+            }
+        }
         // Shared by the "no custom directory" case and the runtime fallback
         // after a revoked/deleted tree. The fallback flag picks a notice that
         // names the destination change instead of a plain "started" toast.
@@ -181,31 +205,57 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
             }
             val storedTree = settings.downloadTreeUri
             when (val target = resolveDownloadTarget(storedTree, writeUris)) {
-                is DownloadTarget.CustomTree -> HistoryDownloader.downloadToDirectory(
-                    context,
-                    file,
-                    Uri.parse(target.treeUri),
-                )
-                    .onSuccess { savedName ->
-                        onMessage(
-                            context.getString(
-                                R.string.history_download_custom_done,
-                                customDownloadDirLabel(target.treeUri),
-                                savedName,
-                            ),
+                is DownloadTarget.CustomTree -> {
+                    // Mark the row active before the first byte arrives, so a
+                    // slow connect already shows an indeterminate bar instead
+                    // of an apparently dead button.
+                    val key = downloadKey(file)
+                    progressByFile.update { it + (key to null) }
+                    try {
+                        HistoryDownloader.downloadToDirectory(
+                            context,
+                            file,
+                            Uri.parse(target.treeUri),
+                            onProgress = { sample ->
+                                progressByFile.update { it + (key to sample) }
+                            },
                         )
+                            .onSuccess { savedName ->
+                                onMessage(
+                                    context.getString(
+                                        R.string.history_download_custom_done,
+                                        customDownloadDirLabel(target.treeUri),
+                                        savedName,
+                                    ),
+                                )
+                            }
+                            .onFailure { error ->
+                                // A tree can disappear between the grant
+                                // snapshot and the actual write (folder
+                                // deleted, provider crashed, grant revoked
+                                // mid-transfer). Do not fail the download:
+                                // retry into the system Downloads directory
+                                // and say so. A full volume or a broken
+                                // provider is reported instead, because a
+                                // silent destination change would hide the
+                                // real problem.
+                                val fallback = error is DownloadDirectoryUnavailableException ||
+                                    (
+                                        error is DownloadFailureException &&
+                                            error.kind == DownloadFailureKind.Permission
+                                        )
+                                if (fallback) {
+                                    enqueueSystemDownloads(fallback = true)
+                                } else {
+                                    onMessage(failureMessage(failureReason(error)))
+                                }
+                            }
+                    } finally {
+                        // Progress is transient: the completion/failure notice
+                        // is the durable result.
+                        progressByFile.update { it - key }
                     }
-                    .onFailure { error ->
-                        if (error is DownloadDirectoryUnavailableException) {
-                            // A tree can disappear between the grant snapshot
-                            // and the actual write (folder deleted, provider
-                            // crashed). Do not fail the download: retry into
-                            // the system Downloads directory and say so.
-                            enqueueSystemDownloads(fallback = true)
-                        } else {
-                            onMessage(failureMessage(error.message.orEmpty()))
-                        }
-                    }
+                }
                 DownloadTarget.SystemDownloads ->
                     enqueueSystemDownloads(fallback = storedTree.isNotBlank())
             }
@@ -274,6 +324,28 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                         R.string.history_download_named,
                         displayName,
                     )
+                    // Custom-directory downloads report their bytes here, so a
+                    // large file never looks frozen. null = not downloading;
+                    // a present entry with a null sample = connecting.
+                    val rowKey = downloadKey(file)
+                    val isActive = activeProgress.containsKey(rowKey)
+                    val sample = activeProgress[rowKey]
+                    val progressText = when {
+                        !isActive -> null
+                        sample == null -> stringResource(
+                            R.string.history_download_progress_waiting,
+                        )
+                        sample.totalBytes == null -> stringResource(
+                            R.string.history_download_progress_unknown,
+                            humanSize(sample.bytesWritten),
+                        )
+                        else -> stringResource(
+                            R.string.history_download_progress,
+                            humanSize(sample.bytesWritten),
+                            humanSize(sample.totalBytes),
+                            sample.percent ?: 0,
+                        )
+                    }
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(12.dp)) {
                             Text(displayName, style = MaterialTheme.typography.titleSmall)
@@ -284,9 +356,39 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            if (progressText != null) {
+                                Spacer(Modifier.height(6.dp))
+                                val fraction = sample?.fraction
+                                if (fraction != null) {
+                                    LinearProgressIndicator(
+                                        progress = { fraction },
+                                        modifier = Modifier.fillMaxWidth().semantics {
+                                            contentDescription = progressText
+                                        },
+                                    )
+                                } else {
+                                    // Unknown Content-Length: keep the bar
+                                    // moving instead of claiming 0 %.
+                                    LinearProgressIndicator(
+                                        modifier = Modifier.fillMaxWidth().semantics {
+                                            contentDescription = progressText
+                                        },
+                                    )
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    progressText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                             Spacer(Modifier.height(4.dp))
                             Button(
                                 onClick = { download(file) },
+                                // One transfer per file: a second tap while
+                                // this row is streaming would write a second
+                                // document and split the progress state.
+                                enabled = !isActive,
                                 modifier = Modifier.semantics {
                                     contentDescription = downloadLabel
                                 },
@@ -317,3 +419,11 @@ private fun queryDownload(manager: DownloadManager, id: Long): Pair<Int, Int> {
         -1 to 0
     }
 }
+
+/**
+ * Key for per-file progress state. The download URL identifies a file; the
+ * name covers entries the API returns without one (they still have to keep
+ * separate progress rows).
+ */
+private fun downloadKey(file: HistoryFile): String =
+    file.download_url.ifBlank { "name:${file.name}" }

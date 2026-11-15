@@ -2,6 +2,7 @@ package com.lingyi.noveldl.ui.history
 
 import android.app.DownloadManager
 import com.lingyi.noveldl.R
+import com.lingyi.noveldl.data.DownloadFailureKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -46,5 +47,33 @@ class DownloadErrorsTest {
         // The caller formats the code itself when nothing specific matches.
         assertNull(downloadFailureReasonRes(-1))
         assertNull(downloadFailureReasonRes(424242))
+    }
+
+    @Test
+    fun safWriteFailuresMapToTheirActionableTexts() {
+        assertEquals(
+            R.string.history_download_network_error,
+            downloadFailureMessageRes(DownloadFailureKind.Network),
+        )
+        assertEquals(
+            R.string.download_error_no_space,
+            downloadFailureMessageRes(DownloadFailureKind.NoSpace),
+        )
+        assertEquals(
+            R.string.download_error_permission,
+            downloadFailureMessageRes(DownloadFailureKind.Permission),
+        )
+        assertEquals(
+            R.string.download_error_provider,
+            downloadFailureMessageRes(DownloadFailureKind.Provider),
+        )
+    }
+
+    @Test
+    fun everySafFailureKindHasItsOwnText() {
+        // A new kind that silently reused another kind's text would mislabel
+        // the failure the user is asked to fix.
+        val resources = DownloadFailureKind.values().map(::downloadFailureMessageRes)
+        assertEquals(DownloadFailureKind.values().size, resources.toSet().size)
     }
 }
