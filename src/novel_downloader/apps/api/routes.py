@@ -60,6 +60,7 @@ from novel_downloader.plugins.search import (
     UnknownSearchSiteError,
     search,
     search_stream,
+    unknown_search_sites,
 )
 from novel_downloader.schemas.config import default_cache_dir
 
@@ -633,6 +634,32 @@ def _parse_sites_query(raw: str) -> list[str]:
     return selected
 
 
+def _reject_unknown_stream_sites(sites: list[str]) -> None:
+    """
+    Reject an explicit stream selection with no registered searcher.
+
+    This mirrors :func:`novel_downloader.plugins.search._reject_unknown_explicit_sites`
+    (the check :func:`~novel_downloader.plugins.search.search` performs) so both
+    search transports report the same error for the same key.  It has to run
+    before ``StreamingResponse`` is built: a validation error raised inside the
+    response generator would arrive after the ``200`` headers, leaving the
+    client with an empty stream that looks like "no such book".
+
+    An empty registry cannot judge a key (it may be a partially initialised
+    environment), so the selection is accepted instead of every site being
+    rejected -- exactly like the JSON endpoint.
+
+    :raises UnknownSearchSiteError: when at least one key is unresolvable.
+    """
+    unknown = unknown_search_sites(sites)
+    if not unknown:
+        return
+    available = search_module.registered_search_site_keys()
+    if not available:
+        return
+    raise UnknownSearchSiteError(unknown, available)
+
+
 @router.get(
     "/search/stream",
     tags=["search"],
@@ -666,6 +693,8 @@ async def stream_search(
     if sites is not None:
         try:
             selected = _parse_sites_query(sites)
+            if selected:
+                _reject_unknown_stream_sites(selected)
         except ValueError as exc:
             raise HTTPException(
                 status_code=422,

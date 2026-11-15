@@ -433,15 +433,15 @@ async def test_search_stream_emits_results_then_done(
         timeout: float = 5.0,
     ) -> Any:
         assert keyword == "斗破"
-        assert sites == ["demo"]
-        yield [{"site": "demo", "book_id": "1", "title": "Book"}]
+        assert sites == ["b520"]
+        yield [{"site": "b520", "book_id": "1", "title": "Book"}]
 
     monkeypatch.setattr(api_routes, "search_stream", fake_search_stream)
 
     async with client.stream(
         "GET",
         f"{API}/search/stream",
-        params={"keyword": "斗破", "sites": "demo"},
+        params={"keyword": "斗破", "sites": "b520"},
     ) as response:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")

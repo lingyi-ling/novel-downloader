@@ -297,6 +297,79 @@ async def test_search_rejects_unknown_sites(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_stream_rejects_unknown_sites(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SSE endpoint validates explicit sites before opening the stream.
+
+    A typo used to reach the aggregate search, which silently skipped the key
+    and returned an empty stream indistinguishable from "no such book".  The
+    check now runs before ``StreamingResponse`` is constructed, so the client
+    gets the same ``422`` as the JSON endpoint and the search is never started.
+    """
+    started: list[bool] = []
+
+    async def fake_search_stream(*_args: Any, **_kwargs: Any) -> Any:
+        started.append(True)
+        yield []
+
+    monkeypatch.setattr(api_routes, "search_stream", fake_search_stream)
+
+    response = await client.get(
+        "/api/v1/search/stream",
+        params={"keyword": "x", "sites": "definitely_not_a_site"},
+    )
+
+    _assert_422(response)
+    detail = response.json()["detail"]
+    assert "definitely_not_a_site" in detail
+    assert "Available:" in detail
+    assert "b520" in detail
+    assert started == []
+
+
+@pytest.mark.asyncio
+async def test_search_stream_unknown_site_detail_matches_post(
+    client: httpx.AsyncClient,
+) -> None:
+    """Both transports report an unknown explicit site identically."""
+    post = await client.post(
+        "/api/v1/search",
+        json={"keyword": "x", "sites": ["definitely_not_a_site"]},
+    )
+    stream = await client.get(
+        "/api/v1/search/stream",
+        params={"keyword": "x", "sites": "definitely_not_a_site"},
+    )
+
+    assert post.status_code == stream.status_code == 422
+    assert stream.json()["detail"] == post.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_search_stream_accepts_case_insensitive_known_sites(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A known key spelled with different casing is not a typo."""
+    forwarded: list[list[str] | None] = []
+
+    async def fake_search_stream(
+        _keyword: str, *, sites: list[str] | None = None, **_kwargs: Any
+    ) -> Any:
+        forwarded.append(sites)
+        yield []
+
+    monkeypatch.setattr(api_routes, "search_stream", fake_search_stream)
+
+    response = await client.get(
+        "/api/v1/search/stream", params={"keyword": "x", "sites": "B520"}
+    )
+
+    assert response.status_code == 200
+    assert forwarded == [["B520"]]
+
+
+@pytest.mark.asyncio
 async def test_search_empty_sites_still_searches_nothing(
     client: httpx.AsyncClient,
 ) -> None:

@@ -402,7 +402,7 @@ async def test_search_stream_emits_results_then_done(
         "/api/v1/search/stream",
         params={
             "keyword": "斗破",
-            "sites": "alpha, beta",
+            "sites": "b520, qidian",
             "per_site_limit": 2,
             "timeout": 1.5,
         },
@@ -419,7 +419,7 @@ async def test_search_stream_emits_results_then_done(
     assert [item["book_id"] for item in events[1][1]] == ["2", "3"]
     assert events[2][1] == {"total": 3}
     assert calls["keyword"] == "斗破"
-    assert calls["sites"] == ["alpha", "beta"]
+    assert calls["sites"] == ["b520", "qidian"]
     assert calls["per_site_limit"] == 2
     assert calls["timeout"] == 1.5
 
