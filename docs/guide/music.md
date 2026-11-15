@@ -139,7 +139,7 @@ opts = DownloadOptions(
 * 同名但不同 ID 的曲目用 `<歌名> - <歌手> [<id>].<ext>` 避免互相覆盖。
 * `skip_existing` 只跳过已存在且大于 10 KiB 的同名文件。
 * 标签、封面、歌词都是附加步骤: 任一失败只跳过该步骤, 已下载的音频仍算成功。
-* 歌词写成音频旁的 `<stem>.lrc`; 有译文时另写 `<stem>.zh.lrc`, 详见下方「歌词文件」。
+* 歌词写成音频旁的 `<stem>.lrc`; 有译文时另写 `<stem>.zh.lrc`, 详见下方「歌词文件」。开启 `embed_lyric` 时同一份歌词还会写进音频标签, 见「内嵌歌词」。
 
 #### 歌词文件 (LRC)
 
@@ -162,6 +162,43 @@ opts = DownloadOptions(
 * 音频已存在且被 `skip_existing` 跳过时, 只有 `<stem>.lrc` **不存在**才补写歌词; 已有歌词不联网、不覆盖。补写时若拿到译文, 同样会写 `.zh.lrc`。
 * provider 没返回歌词时, 回退读取搜索结果对象自带的歌词字段, 不额外发起请求; 占位值 (`null`/`none`/`nil`) 不算歌词。
 * 歌词与音频一样是明文文件, 可能包含版权内容; 按普通下载文件保管, 不要提交到仓库。
+
+#### 内嵌歌词 (`embed_lyric`)
+
+`save_lyric` 写的是独立 `.lrc`; `embed_lyric` 控制是否把同一份歌词写进音频文件的元数据。它**默认关闭**, 与 `save_lyric` 相互独立: 两者都开时既有 `.lrc` 也有内嵌歌词, 只开 `embed_lyric` 时只改音频标签、不产生旁路文件。
+
+支持范围按容器扩展名判断, 只有三种:
+
+| 容器 | 写入的标签 | 说明 |
+| --- | --- | --- |
+| MP3 | ID3 `USLT` (unsynchronised lyrics) | 写入前删除已有的 `USLT` 与 `TXXX:LYRICS` / `TXXX:UNSYNCEDLYRICS`, 保存为 ID3v2.3 |
+| FLAC | Vorbis comment `LYRICS` | 只改 Vorbis comment 块, 采样率与格式不变 |
+| M4A | MP4 atom `©lyr` | — |
+
+其他容器 (ogg/opus/wav 等) 静默跳过, 不报错也不写标签。写入只改元数据、不转码: 音频流、格式与码率保持不变。
+
+文本来源与 `.lrc` 一致: 有原文写原文, 只有译文时写译文; 换行统一为 `\n` 并去掉首尾空白; 空歌词或占位值不写。歌词超过 1 MiB (`MAX_LYRIC_BYTES`, 与 `.lrc` 共用同一个上限) 时不写标签; 内容与标签里已有的歌词一致时也不重写, 不改 mtime。
+
+MP3 只写**非同步歌词** (`USLT`), 不写 `SYLT`。只解析 `SYLT` (逐行时间轴) 的播放器在内嵌标签里看不到歌词; 这些播放器仍可读取同目录的 `.lrc`, 因此需要广泛兼容时保留 `save_lyric`。`.lrc` 仍是可移植的载体, 内嵌标签只服务于「只读音频文件本身」的播放器。
+
+启用方式: `embed_lyric` **只在库层的 `DownloadOptions` 上存在**。CLI、桌面客户端、Android 独立模式和 REST API 都没有暴露这个开关, 音乐 `settings.json` 也不读取该键, 写入无效。以库方式调用时:
+
+```python
+from novel_downloader.apps.music.downloader import DownloadOptions
+
+opts = DownloadOptions(
+    out_dir="~/Music/novel_downloader",
+    embed_lyric=True,   # 默认 False
+)
+```
+
+`skip_existing` 跳过已存在的音频时, 内嵌歌词按以下规则补写:
+
+* 只有容器受支持且标签里还没有歌词时才处理; 已有内嵌歌词则完全不碰, 不联网, 文件字节不变。
+* 优先直接读同目录的 `<stem>.lrc` (没有时再读 `.zh.lrc`) 写入标签, 不额外请求歌词接口。
+* 两个 `.lrc` 都不存在时才请求歌词; 若 `save_lyric` 同时开启, 这次请求也会顺带补写缺失的旁路文件。
+
+获取歌词、写标签任一环节失败都只记 WARNING, 已下载的音频仍算成功; 标签写入失败不会回滚或损坏音频文件。
 
 批量下载:
 

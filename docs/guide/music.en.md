@@ -139,7 +139,7 @@ File naming:
 * Same-title tracks with different IDs use `<title> - <artist> [<id>].<ext>` to avoid overwriting each other.
 * `skip_existing` only skips an existing file larger than 10 KiB.
 * Tags, cover and lyrics are best-effort: a failure in any of them skips that step only, and the downloaded audio still counts as successful.
-* Lyrics are written next to the audio as `<stem>.lrc`; a translation is written as `<stem>.zh.lrc`, see "Lyric files" below.
+* Lyrics are written next to the audio as `<stem>.lrc`; a translation is written as `<stem>.zh.lrc`, see "Lyric files" below. With `embed_lyric` on, the same text is also written into the audio tag, see "Embedded lyrics".
 
 #### Lyric files (LRC)
 
@@ -162,6 +162,43 @@ Write boundaries:
 * When the audio already exists and `skip_existing` skips it, lyrics are backfilled only if `<stem>.lrc` is **missing**. Existing lyrics are neither re-fetched nor overwritten; when a backfill does run and a translation is available, `.zh.lrc` is written too.
 * If the provider returns no lyrics, the engine falls back to lyric fields already carried by the search result object without another request; placeholders (`null`/`none`/`nil`) are not lyrics.
 * Lyric files are plaintext like the audio and may contain copyrighted text; store them like any other download and do not commit them to a repository.
+
+#### Embedded lyrics (`embed_lyric`)
+
+`save_lyric` writes the standalone `.lrc`; `embed_lyric` controls whether the same text is also stored in the audio file's metadata. It is **off by default** and independent of `save_lyric`: with both on you get the `.lrc` and the embedded tag; with only `embed_lyric` on, the audio tag is updated and no sidecar is created.
+
+Support is decided by container extension, and covers exactly three:
+
+| Container | Tag written | Notes |
+| --- | --- | --- |
+| MP3 | ID3 `USLT` (unsynchronised lyrics) | Existing `USLT` frames and `TXXX:LYRICS` / `TXXX:UNSYNCEDLYRICS` are removed first; saved as ID3v2.3 |
+| FLAC | Vorbis comment `LYRICS` | Only the Vorbis comment block changes; sample rate and format are preserved |
+| M4A | MP4 atom `©lyr` | — |
+
+Other containers (ogg/opus/wav, ...) are skipped silently: no error and no tag. Writing touches metadata only and never transcodes, so the audio stream, format and bitrate stay unchanged.
+
+The text source matches `.lrc`: the original is preferred and the translation is used when it is the only one available; newlines are normalized to `\n` and surrounding whitespace is trimmed; empty lyrics and placeholders are not written. Lyrics over 1 MiB (`MAX_LYRIC_BYTES`, the same limit as `.lrc`) are not embedded, and text identical to what the tag already holds is not rewritten (the mtime is left alone).
+
+MP3 gets **unsynchronised lyrics** (`USLT`) only; no `SYLT` frame is written. Players that parse only `SYLT` (per-line timing) will not see the embedded lyrics; they can still read the `.lrc` next to the audio, so keep `save_lyric` on when broad compatibility matters. The `.lrc` remains the portable representation; the embedded tag is for players that read the audio file alone.
+
+Enabling it: `embed_lyric` exists only on the library-level `DownloadOptions`. The CLI, desktop client, Android standalone mode and REST API do not expose the switch, and the music `settings.json` does not read the key, so setting it there has no effect. Library callers use:
+
+```python
+from novel_downloader.apps.music.downloader import DownloadOptions
+
+opts = DownloadOptions(
+    out_dir="~/Music/novel_downloader",
+    embed_lyric=True,   # False by default
+)
+```
+
+When `skip_existing` skips an existing audio file, the embedded lyric is backfilled as follows:
+
+* Only when the container is supported and the tag holds no lyrics yet. An existing embedded lyric is never touched: no network request and no byte changes.
+* The `<stem>.lrc` next to the audio is read first (falling back to `.zh.lrc`) and written to the tag, without calling the lyric endpoint.
+* Only when neither `.lrc` exists is the provider asked for lyrics; if `save_lyric` is also on, that same request also backfills the missing sidecar.
+
+A failure in either the lyric fetch or the tag write only logs a WARNING; the downloaded audio still counts as successful, and a failed tag write never rolls back or damages the audio file.
 
 Batch downloads:
 
