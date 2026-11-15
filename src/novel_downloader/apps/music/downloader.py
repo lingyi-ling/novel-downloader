@@ -30,7 +30,14 @@ from .weapi import UA, LoginExpired
 logger = logging.getLogger(__name__)
 
 _CHUNK = 64 * 1024
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+#: Characters that must never reach a playlist line.  Besides C0 controls and
+#: DEL this covers the C1 range -- notably NEL (U+0085) -- plus U+2028/U+2029:
+#: all of them terminate a line for ``str.splitlines()`` and for several M3U
+#: parsers, so a crafted title or path would otherwise split one record into
+#: two lines and inject a fake ``#EXTINF`` entry.  Lone surrogates are folded
+#: in as well: they cannot be encoded to UTF-8 and would abort the write with
+#: a ``UnicodeEncodeError`` instead of the sanitised text.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]+")
 _CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)")
 
 #: Cover art is a small image.  A hostile CDN (or a broken ``cover_url``) must
