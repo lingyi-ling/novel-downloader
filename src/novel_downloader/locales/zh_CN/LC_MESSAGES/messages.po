@@ -463,7 +463,7 @@ msgstr "正在从 {site} 下载（{index}/{total}）"
 #: src/novel_downloader/apps/cli/commands/download.py:380
 #: src/novel_downloader/apps/cli/commands/download.py:432
 #: src/novel_downloader/apps/cli/commands/export.py:406
-#: src/novel_downloader/apps/cli/commands/search.py:452
+#: src/novel_downloader/apps/cli/commands/search.py:472
 #, python-brace-format
 msgid "Site error ({site}): {err}"
 msgstr "站点错误 ({site}): {err}"
@@ -472,7 +472,7 @@ msgstr "站点错误 ({site}): {err}"
 #: src/novel_downloader/apps/cli/commands/batch.py:1061
 #: src/novel_downloader/apps/cli/commands/download.py:376
 #: src/novel_downloader/apps/cli/commands/download.py:429
-#: src/novel_downloader/apps/cli/commands/search.py:446
+#: src/novel_downloader/apps/cli/commands/search.py:466
 #: src/novel_downloader/apps/cli/interactive.py:207
 #, python-brace-format
 msgid "'{site}' is currently not supported: {err}"
@@ -512,7 +512,7 @@ msgstr "书籍 {book_id} 没有已下载的章节。"
 #: src/novel_downloader/apps/cli/commands/batch.py:1114
 #: src/novel_downloader/apps/cli/commands/download.py:586
 #: src/novel_downloader/apps/cli/commands/export.py:516
-#: src/novel_downloader/apps/cli/commands/search.py:495
+#: src/novel_downloader/apps/cli/commands/search.py:515
 #: src/novel_downloader/apps/cli/interactive.py:284
 #: src/novel_downloader/apps/cli/interactive.py:288
 #, python-brace-format
@@ -522,7 +522,7 @@ msgstr "导出失败: {err}"
 #: src/novel_downloader/apps/cli/commands/batch.py:1118
 #: src/novel_downloader/apps/cli/commands/download.py:524
 #: src/novel_downloader/apps/cli/commands/export.py:456
-#: src/novel_downloader/apps/cli/commands/search.py:483
+#: src/novel_downloader/apps/cli/commands/search.py:503
 #: src/novel_downloader/apps/cli/interactive.py:227
 #, python-brace-format
 msgid "Process/export failed for book {book_id}: {err}"
@@ -561,7 +561,7 @@ msgid "Download the top entry without asking (non-interactive)."
 msgstr "直接下载第一条，无需确认（非交互）。"
 
 #: src/novel_downloader/apps/cli/commands/browse.py:105
-#: src/novel_downloader/apps/cli/commands/search.py:240
+#: src/novel_downloader/apps/cli/commands/search.py:256
 msgid "--json and --first cannot be combined."
 msgstr "--json 与 --first 不能同时使用。"
 
@@ -1786,7 +1786,7 @@ msgid ""
 msgstr "网易云登录已失效。请用浏览器重新登录以刷新音乐会话（小说站点可运行 'novel-cli login fanqienovel'），然后重试。"
 
 #: src/novel_downloader/apps/cli/commands/music.py:211
-#: src/novel_downloader/apps/cli/commands/search.py:384
+#: src/novel_downloader/apps/cli/commands/search.py:403
 #: src/novel_downloader/apps/cli/interactive.py:82
 #, python-brace-format
 msgid "Searching for '{keyword}'..."
@@ -1794,7 +1794,7 @@ msgstr "正在搜索 '{keyword}'..."
 
 #: src/novel_downloader/apps/cli/commands/music.py:219
 #: src/novel_downloader/apps/cli/commands/music.py:255
-#: src/novel_downloader/apps/cli/commands/search.py:320
+#: src/novel_downloader/apps/cli/commands/search.py:338
 #: src/novel_downloader/apps/cli/interactive.py:86
 #, python-brace-format
 msgid "Search failed: {err}"
@@ -1920,7 +1920,7 @@ msgstr "以 JSON 输出搜索结果并退出。"
 #: src/novel_downloader/apps/cli/commands/music.py:652
 #: src/novel_downloader/apps/cli/commands/music.py:790
 #: src/novel_downloader/apps/cli/commands/music.py:1233
-#: src/novel_downloader/apps/cli/commands/search.py:201
+#: src/novel_downloader/apps/cli/commands/search.py:217
 #: src/novel_downloader/apps/cli/interactive.py:79
 msgid "No keyword entered."
 msgstr "未输入任何关键字"
@@ -1934,8 +1934,8 @@ msgstr "平台 {platform} 失败：{error}"
 #: src/novel_downloader/apps/cli/commands/music.py:708
 #: src/novel_downloader/apps/cli/commands/music.py:848
 #: src/novel_downloader/apps/cli/commands/music.py:1243
-#: src/novel_downloader/apps/cli/commands/search.py:372
-#: src/novel_downloader/apps/cli/commands/search.py:406
+#: src/novel_downloader/apps/cli/commands/search.py:391
+#: src/novel_downloader/apps/cli/commands/search.py:426
 #, python-brace-format
 msgid "No results found for '{keyword}'."
 msgstr "未找到与 '{keyword}' 相关的结果。"
@@ -1943,7 +1943,7 @@ msgstr "未找到与 '{keyword}' 相关的结果。"
 #: src/novel_downloader/apps/cli/commands/music.py:712
 #: src/novel_downloader/apps/cli/commands/music.py:852
 #: src/novel_downloader/apps/cli/commands/music.py:1247
-#: src/novel_downloader/apps/cli/commands/search.py:410
+#: src/novel_downloader/apps/cli/commands/search.py:430
 #, python-brace-format
 msgid "Found {count} result(s) for '{keyword}'."
 msgstr "找到 {count} 条结果（'{keyword}'）。"
@@ -2132,63 +2132,73 @@ msgstr "将所有搜索结果以 JSON 输出到标准输出后退出。"
 msgid "Download the top result without asking (non-interactive)."
 msgstr "直接下载排名第一的结果，无需确认（非交互模式）。"
 
-#: src/novel_downloader/apps/cli/commands/search.py:143
-msgid "Result ordering (default: quality)."
-msgstr "结果排序方式（默认：优选）。"
+#: src/novel_downloader/apps/cli/commands/search.py:144
+msgid ""
+"Result ordering key: quality, priority, site, title, author, words or "
+"update (default: quality)."
+msgstr "结果排序方式：quality、priority、site、title、author、words 或 update（默认：quality）。"
 
-#: src/novel_downloader/apps/cli/commands/search.py:151
+#: src/novel_downloader/apps/cli/commands/search.py:156
+msgid ""
+"Sort direction: asc or desc. Default: the key's natural direction (desc "
+"for quality, words and update; asc for priority, site, title and author)."
+msgstr ""
+"排序方向：asc 或 desc。默认：该键的自然方向（quality、words、update 为 "
+"desc；priority、site、title、author 为 asc）。"
+
+#: src/novel_downloader/apps/cli/commands/search.py:167
 msgid ""
 "Minimum word count (inclusive); results without a word count are dropped "
 "when set."
 msgstr "最低字数（含）；设置后，无字数的结果会被丢弃。"
 
-#: src/novel_downloader/apps/cli/commands/search.py:161
+#: src/novel_downloader/apps/cli/commands/search.py:177
 msgid ""
 "Maximum word count (inclusive); results without a word count are dropped "
 "when set."
 msgstr "最高字数（含）；设置后，无字数的结果会被丢弃。"
 
-#: src/novel_downloader/apps/cli/commands/search.py:170
+#: src/novel_downloader/apps/cli/commands/search.py:186
 msgid ""
 "Only keep results updated on or after this date; results without an "
 "update date are dropped when set."
 msgstr "仅保留该日期及之后更新的结果；设置后，无更新日期的结果会被丢弃。"
 
-#: src/novel_downloader/apps/cli/commands/search.py:208
+#: src/novel_downloader/apps/cli/commands/search.py:224
 #, python-brace-format
 msgid "--min-words/--max-words must be between 0 and {max}."
 msgstr "--min-words/--max-words 必须在 0 到 {max} 之间。"
 
-#: src/novel_downloader/apps/cli/commands/search.py:220
-#: src/novel_downloader/apps/cli/commands/search.py:229
+#: src/novel_downloader/apps/cli/commands/search.py:236
+#: src/novel_downloader/apps/cli/commands/search.py:245
 #, python-brace-format
 msgid "Invalid --updated-after date: {value} (expected YYYY-MM-DD)."
 msgstr "无效的 --updated-after 日期：{value}（应为 YYYY-MM-DD）。"
 
-#: src/novel_downloader/apps/cli/commands/search.py:280
+#: src/novel_downloader/apps/cli/commands/search.py:298
 #, python-brace-format
 msgid "Unsupported site(s): {sites}. Available: {available}"
 msgstr "不支持的站点：{sites}。可用站点：{available}"
 
-#: src/novel_downloader/apps/cli/commands/search.py:315
+#: src/novel_downloader/apps/cli/commands/search.py:333
 #, python-brace-format
 msgid "{count} result(s)"
 msgstr "{count} 条结果"
 
-#: src/novel_downloader/apps/cli/commands/search.py:323
+#: src/novel_downloader/apps/cli/commands/search.py:341
 msgid "browser-assisted"
 msgstr "浏览器辅助"
 
-#: src/novel_downloader/apps/cli/commands/search.py:325
+#: src/novel_downloader/apps/cli/commands/search.py:343
 msgid "skipped (browser-assisted)"
 msgstr "跳过（浏览器辅助站点）"
 
-#: src/novel_downloader/apps/cli/commands/search.py:333
+#: src/novel_downloader/apps/cli/commands/search.py:351
 #, python-brace-format
 msgid "{done} site(s) completed / {failed} failed / {skipped} skipped"
 msgstr "{done} 个站点完成 / {failed} 个失败 / {skipped} 个跳过"
 
-#: src/novel_downloader/apps/cli/commands/search.py:436
+#: src/novel_downloader/apps/cli/commands/search.py:456
 #: src/novel_downloader/apps/cli/interactive.py:197
 #, python-brace-format
 msgid ""

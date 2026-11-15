@@ -140,7 +140,23 @@ class SearchCmd(Command):
             "--sort",
             choices=list(SORT_KEYS),
             default="quality",
-            help=t("Result ordering (default: quality)."),
+            help=t(
+                "Result ordering key: quality, priority, site, title, author, "
+                "words or update (default: quality)."
+            ),
+        )
+        # ``None`` is meaningful: the ranking layer then applies the key's
+        # natural direction (``desc`` for quality/words/update, ``asc`` for
+        # priority/site/title/author), exactly like the API's omitted ``order``.
+        parser.add_argument(
+            "--order",
+            choices=["asc", "desc"],
+            default=None,
+            help=t(
+                "Sort direction: asc or desc. Default: the key's natural "
+                "direction (desc for quality, words and update; asc for "
+                "priority, site, title and author)."
+            ),
         )
         parser.add_argument(
             "--min-words",
@@ -243,6 +259,8 @@ class SearchCmd(Command):
         per_site_limit = max(1, args.site_limit)
         timeout = max(0.1, float(args.timeout))
         result_sort: str = args.sort
+        # ``None`` keeps the ranking layer's natural direction for the key.
+        result_order: str | None = args.order
         group_results_flag: bool = bool(args.group)
         config_path: Path | None = expand_path(args.config) if args.config else None
 
@@ -356,6 +374,7 @@ class SearchCmd(Command):
                     per_site_limit=per_site_limit,
                     timeout=timeout,
                     sort=result_sort,
+                    order=result_order,
                     on_event=_on_event,
                     group=group_results_flag,
                     min_words=min_words,
@@ -389,6 +408,7 @@ class SearchCmd(Command):
                     per_site_limit=per_site_limit,
                     timeout=timeout,
                     sort=result_sort,
+                    order=result_order,
                     on_event=_on_event,
                     group=group_results_flag,
                     min_words=min_words,

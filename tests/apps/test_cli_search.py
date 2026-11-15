@@ -366,6 +366,111 @@ def test_huge_limits_are_passed_through_without_crashing(
 
 
 # ---------------------------------------------------------------------------
+# Sorting: --sort key and --order direction
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("direction", ["asc", "desc"])
+def test_order_is_forwarded_to_the_aggregate_search(
+    direction: str,
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, Any] = {}
+    _install_search(monkeypatch, [_row()], captured=captured)
+
+    code, out, _err = _run(_args(["--json", "--order", direction, "三体"]), capsys)
+
+    assert code == 0
+    assert captured["order"] == direction
+    assert captured["sort"] == "quality"  # untouched default
+    assert json.loads(out)
+
+
+def test_order_defaults_to_none_for_the_ranking_layer(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Omitted ``--order`` must not invent a direction.
+
+    ``None`` is what makes the ranking layer fall back to the key's natural
+    direction, matching the API's optional ``order`` field.
+    """
+    captured: dict[str, Any] = {}
+    _install_search(monkeypatch, [_row()], captured=captured)
+
+    code, _out, _err = _run(_args(["--json", "三体"]), capsys)
+
+    assert code == 0
+    assert captured["order"] is None
+    assert captured["sort"] == "quality"
+
+
+def test_order_and_sort_are_forwarded_together(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, Any] = {}
+    _install_search(monkeypatch, [_row()], captured=captured)
+
+    code, _out, _err = _run(
+        _args(["--json", "--sort", "priority", "--order", "desc", "三体"]),
+        capsys,
+    )
+
+    assert code == 0
+    assert captured["sort"] == "priority"
+    assert captured["order"] == "desc"
+
+
+@pytest.mark.parametrize("direction", ["sideways", "ASC", ""])
+def test_invalid_order_is_a_usage_error(
+    direction: str,
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    called: list[Any] = []
+
+    async def fake_search(**kwargs: Any) -> list[Any]:  # pragma: no cover
+        called.append(kwargs)
+        return []
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    # The whitelist lives in argparse, so rejection happens before ``run``.
+    with pytest.raises(SystemExit) as excinfo:
+        _args(["--json", "--order", direction, "三体"])
+
+    assert excinfo.value.code == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "--order" in err
+    assert called == []
+
+
+def test_order_reaches_the_human_grouped_path(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The interactive path takes the same kwargs as ``--json``."""
+    captured: dict[str, Any] = {}
+    _install_search(monkeypatch, [_row()], captured=captured)
+
+    code, _out, _err = _run(
+        _args(["--sort", "update", "--order", "asc", "--group", "三体"]), capsys
+    )
+
+    assert code == 0
+    assert captured["sort"] == "update"
+    assert captured["order"] == "asc"
+    assert captured["group"] is True
+
+
+# ---------------------------------------------------------------------------
 # Keyword handling
 # ---------------------------------------------------------------------------
 
