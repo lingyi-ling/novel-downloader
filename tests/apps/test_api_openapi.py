@@ -523,6 +523,77 @@ def test_search_filter_fields_and_operations_are_described(
             assert name in description, f"{method.upper()} {path} omits {name}"
 
 
+def test_every_search_request_field_is_described(spec: dict[str, Any]) -> None:
+    """Every request field carries a description, so none is a bare type."""
+    search = _member_schema(spec, "SearchRequest")
+
+    missing = [
+        name
+        for name, schema in search["properties"].items()
+        if not str(schema.get("description", "")).strip()
+    ]
+    assert not missing, f"SearchRequest fields without a description: {missing}"
+
+
+def test_search_sort_and_order_are_documented(spec: dict[str, Any]) -> None:
+    """The enum values, defaults and directions must be explicit."""
+    properties = _member_schema(spec, "SearchRequest")["properties"]
+
+    sort = properties["sort"]
+    assert sort["enum"] == [
+        "quality",
+        "priority",
+        "site",
+        "title",
+        "author",
+        "words",
+        "update",
+    ]
+    assert sort["default"] == "quality"
+    assert str(sort.get("description", "")).strip()
+
+    order = properties["order"]
+    assert _nullable_branch(order)["enum"] == ["asc", "desc"]
+    description = str(order.get("description", "")).strip()
+    assert description
+    # Omitting ``order`` is a documented behaviour, not an undocumented guess.
+    assert "desc" in description
+    assert "asc" in description
+
+
+def test_search_ranking_telemetry_is_discoverable(spec: dict[str, Any]) -> None:
+    """``rank_score`` / ``match_tier`` live in responses, not in the request.
+
+    The schema has no response model for the plain-dict search payload, so the
+    ranking keys and their ranges are documented in the ``sort`` field (the
+    only request field whose semantics depend on them). The document is the
+    only discovery surface a generated client has.
+    """
+    properties = _member_schema(spec, "SearchRequest")["properties"]
+    descriptions = [
+        str(properties[name].get("description", ""))
+        for name in ("sort", "order", "group")
+    ]
+    corpus = " ".join(descriptions)
+    lowered = corpus.lower()
+
+    assert "rank_score" in corpus
+    assert "match_tier" in corpus
+    assert "0..1" in corpus
+    assert "0..4" in corpus
+    for marker in ("exact", "prefix", "contains", "no match"):
+        assert marker in lowered, marker
+
+
+def test_search_examples_cover_sort_order_and_filters(spec: dict[str, Any]) -> None:
+    """Generated docs show concrete values for the ranking/filter knobs."""
+    properties = _member_schema(spec, "SearchRequest")["properties"]
+
+    for name in ("sort", "order", "min_words", "max_words", "updated_after"):
+        examples = properties[name].get("examples")
+        assert isinstance(examples, list) and examples, name
+
+
 def test_sse_search_documents_its_query_parameters(spec: dict[str, Any]) -> None:
     """``GET /search/stream`` accepts the same filters as the JSON endpoint."""
     operation = _operation(spec, "/api/v1/search/stream")

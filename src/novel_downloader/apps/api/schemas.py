@@ -419,23 +419,102 @@ OptionalPath = Annotated[str | None, AfterValidator(validate_optional_path)]
 class SearchRequest(BaseModel):
     """Body of ``POST /api/v1/search``."""
 
-    keyword: Keyword
-    sites: list[SiteKey] | None = Field(default=None, max_length=MAX_SEARCH_SITES)
-    per_site_limit: int = Field(default=5, ge=1, le=MAX_PER_SITE_LIMIT)
+    #: Required search keyword; the same bounds as ``Keyword`` (non-blank,
+    #: at most :data:`MAX_KEYWORD_LENGTH`).
+    keyword: Keyword = Field(
+        description=(
+            "Required search keyword, 1-200 characters. Blank keywords, "
+            "control characters and unpaired surrogates are rejected with "
+            "``422``. Tokens separated by whitespace, ``·``, ``,`` or ``-`` "
+            "are compared against title and author for a ``title author`` "
+            "style query."
+        ),
+        examples=["斗破苍穹 天蚕土豆"],
+    )
+    #: ``None`` searches every registered site; ``[]`` searches none.
+    sites: list[SiteKey] | None = Field(
+        default=None,
+        max_length=MAX_SEARCH_SITES,
+        description=(
+            "Sites to search, named by registry key (for example "
+            "``qidian``). Omit to search every enabled site; pass ``[]`` to "
+            "search none. At most 100 keys; duplicates are dropped "
+            "case-insensitively. An unknown explicit key is a ``422``."
+        ),
+        examples=[["qidian", "biquge5"]],
+    )
+    per_site_limit: int = Field(
+        default=5,
+        ge=1,
+        le=MAX_PER_SITE_LIMIT,
+        description=(
+            "Maximum number of raw results requested from each site "
+            "(1-100, default 5). This is a per-site page size, not the size "
+            "of the ranked response; use ``limit`` for the latter."
+        ),
+    )
     timeout: float = Field(
         default=5.0,
         gt=0,
         le=MAX_SEARCH_TIMEOUT,
         allow_inf_nan=False,
+        description=(
+            "Per-site wall-clock budget in seconds (0 < timeout <= 120, "
+            "default 5). The aggregate request is additionally bounded by "
+            "the server's own deadline; exceeding that returns ``504``."
+        ),
     )
-    sort: SearchSortKey = "quality"
-    order: Literal["asc", "desc"] | None = None
-    limit: int | None = Field(default=None, ge=1, le=MAX_SEARCH_LIMIT)
+    #: Ranking key; ``quality`` is the match-aware relevance order.
+    sort: SearchSortKey = Field(
+        default="quality",
+        description=(
+            "Ranking key: ``quality`` (default), ``priority``, ``site``, "
+            "``title``, ``author``, ``words`` or ``update``. Under "
+            "``quality`` the ordering is ``match_tier`` first, then "
+            "``rank_score``. Every ranked response row (grouped rows too) "
+            "carries these two read-only derived fields: ``rank_score`` "
+            "(0..1, higher is better) and ``match_tier`` (0..4: 4 = exact "
+            "equality, 3 = prefix, 2 = contains, 1 = partial character "
+            "coverage, 0 = no match)."
+        ),
+        examples=["quality"],
+    )
+    #: Sort direction; omitted means the key's natural direction.
+    order: Literal["asc", "desc"] | None = Field(
+        default=None,
+        description=(
+            "Sort direction, ``asc`` or ``desc``. Omit to use the key's "
+            "natural direction: ``desc`` for ``quality``, ``words`` and "
+            "``update``; ``asc`` for ``priority``, ``site``, ``title`` and "
+            "``author``."
+        ),
+        examples=["desc"],
+    )
+    #: Cap applied after ranking, filtering and grouping.
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_SEARCH_LIMIT,
+        description=(
+            "Maximum number of ranked rows returned after filtering and "
+            "grouping (1-500). Omit for no aggregate cap; "
+            "``per_site_limit`` still bounds each site's contribution."
+        ),
+    )
     #: Fold same-book results into one merged entry per book: each entry is
     #: the book's best source plus a ``sources`` list of every site carrying
     #: it (best first).  Off by default so the response shape stays the flat
     #: one existing clients (Android) expect.
-    group: bool = False
+    group: bool = Field(
+        default=False,
+        description=(
+            "When true, merge same-book rows across sites into one entry per "
+            "book: the best source plus a ``sources`` list of every site "
+            "carrying it (best first). The envelope stays "
+            "``{total, results}``; merged rows keep ``rank_score`` and "
+            "``match_tier`` of the best source."
+        ),
+    )
     #: Optional local filters applied to the ranked rows before grouping and
     #: ``limit``.  A row whose field cannot be parsed is dropped only while
     #: the corresponding filter is set; omitting all three keeps every row.
@@ -444,29 +523,36 @@ class SearchRequest(BaseModel):
         ge=0,
         le=MAX_SEARCH_WORDS,
         description=(
-            "Drop ranked rows whose word count is below this value. Rows "
-            "with an unparseable word count are dropped only while this "
-            "filter is set."
+            "Inclusive minimum word count (0-1000000000). Drop ranked rows "
+            "whose word count is below this value; rows with an unparseable "
+            "word count are dropped only while this filter is set. Omit to "
+            "disable the filter."
         ),
+        examples=[300000],
     )
     max_words: int | None = Field(
         default=None,
         ge=0,
         le=MAX_SEARCH_WORDS,
         description=(
-            "Drop ranked rows whose word count is above this value. Rows "
-            "with an unparseable word count are dropped only while this "
-            "filter is set."
+            "Inclusive maximum word count (0-1000000000). Drop ranked rows "
+            "whose word count is above this value; rows with an unparseable "
+            "word count are dropped only while this filter is set. Omit to "
+            "disable the filter."
         ),
+        examples=[1000000],
     )
     #: Inclusive lower bound on ``update_date`` (``YYYY-MM-DD``); a malformed
     #: date is a ``422``.
     updated_after: date | None = Field(
         default=None,
         description=(
-            "Inclusive lower bound on ``update_date`` (``YYYY-MM-DD``). A "
-            "malformed date is rejected with ``422``."
+            "Inclusive lower bound on ``update_date``, as ``YYYY-MM-DD``. "
+            "Rows with no parseable update date are dropped only while this "
+            "filter is set. Omit to disable the filter; a malformed date is "
+            "rejected with ``422``."
         ),
+        examples=["2024-01-01"],
     )
 
     @field_validator("sites")
