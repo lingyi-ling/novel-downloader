@@ -25,6 +25,7 @@ import errno
 import importlib.util
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -1004,6 +1005,16 @@ def _i18n_catalog() -> dict[str, str]:
         "Use a YYYY-MM-DD date": t("Use a YYYY-MM-DD date"),
         "Author": t("Author"),
         "Best match": t("Best match"),
+        # ranking explainability: tier badge labels and the score tooltip
+        "Exact": t("Exact"),
+        "Prefix": t("Prefix"),
+        "Contains": t("Contains"),
+        "Partial": t("Partial"),
+        "No match": t("No match"),
+        "Match: {tier} · score {score}": t("Match: {tier} · score {score}"),
+        "Match: {tier} · score {score} (best source)": t(
+            "Match: {tier} · score {score} (best source)"
+        ),
         "Show more": t("Show more"),
         "Open in browser": t("Open in browser"),
         "Queued: {title}": t("Queued: {title}"),
@@ -1163,10 +1174,40 @@ def _task_dict(task: object) -> dict[str, Any]:
     }
 
 
-def _result_dict(result: Mapping[str, Any], index: int) -> dict[str, Any]:
-    """Serialise one :class:`SearchResult`; the first hit is flagged best."""
+def _result_dict(
+    result: Mapping[str, Any], index: int, *, ranked: bool = False
+) -> dict[str, Any]:
+    """
+    Serialise one :class:`SearchResult`; the first hit is flagged best.
+
+    ``ranked`` marks the final ranked list -- the only payload allowed to carry
+    the ranking telemetry (``rank_score`` 0..1 and ``match_tier`` 0..4) that
+    :func:`~novel_downloader.plugins.search.search` derives. Streamed preview
+    chunks and the browse lists are the sites' raw rows, so the bridge drops
+    those two keys there: a site that happened to return a same-named field
+    must not paint a badge the ranking never assigned. On the ranked path a
+    value outside the documented range is dropped too, because the page can
+    only explain a real score/tier.
+    """
     data = dict(result)
     data["best"] = index == 0
+    if ranked:
+        score = data.get("rank_score")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(score)
+            or not 0.0 <= score <= 1.0
+        ):
+            data.pop("rank_score", None)
+        else:
+            data["rank_score"] = float(score)
+        tier = data.get("match_tier")
+        if isinstance(tier, bool) or not isinstance(tier, int) or not 0 <= tier <= 4:
+            data.pop("match_tier", None)
+    else:
+        data.pop("rank_score", None)
+        data.pop("match_tier", None)
     return data
 
 
@@ -4147,7 +4188,9 @@ class ApiBridge:
                 **filters,
             )
             elapsed = time.perf_counter() - started
-            return [_result_dict(r, i) for i, r in enumerate(results)], elapsed
+            return [
+                _result_dict(r, i, ranked=True) for i, r in enumerate(results)
+            ], elapsed
 
         try:
             future = self._engine.submit(run())
@@ -4333,7 +4376,10 @@ class ApiBridge:
                     with self._lock:
                         if bool(state["cancelled"]):
                             return
-                    rows = [_result_dict(item, i) for i, item in enumerate(final)]
+                    rows = [
+                        _result_dict(item, i, ranked=True)
+                        for i, item in enumerate(final)
+                    ]
                 with self._lock:
                     state["results"] = rows
                     state["result_count"] = len(rows)

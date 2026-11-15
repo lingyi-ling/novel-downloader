@@ -507,6 +507,20 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
   font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   color: var(--green); background: var(--green-bg); border-radius: 4px; padding: 1px 6px;
 }
+/* Ranking explainability: a short match-tier badge beside the title, with the
+   0..1 rank score in its tooltip/accessible name. Only final ranked rows carry
+   the telemetry; the row keeps its current wrapping so the badge never pushes
+   the title out on a narrow window. */
+.match-badge {
+  display: inline-flex; align-items: center; flex: none;
+  font-size: 10px; font-weight: 700; letter-spacing: .03em;
+  padding: 1px 6px; border-radius: 4px; white-space: nowrap;
+}
+.match-badge.tier-4 { color: var(--green);  background: var(--green-bg); }
+.match-badge.tier-3 { color: var(--blue);   background: var(--blue-bg); }
+.match-badge.tier-2 { color: var(--accent); background: var(--accent-soft); }
+.match-badge.tier-1 { color: var(--yellow); background: var(--yellow-bg); }
+.match-badge.tier-0 { color: var(--gray);   background: var(--gray-bg); }
 mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px; padding: 0 1px; }
 .merge-toggle {
   display: flex; align-items: center; gap: 6px; flex: none;
@@ -2213,7 +2227,11 @@ async function doSearch() {
       if (st.error) throw new Error(st.error);
       if (st.cancelled) break;
       const results = st.results || [];
-      if (results.length !== rendered) {
+      // The final snapshot is authoritative even when the row count did not
+      // change: streams are unranked, so this paint is where the final order,
+      // grouping and the match/score telemetry land. Intermediate polls only
+      // repaint when a new row arrived (no scroll jump otherwise).
+      if (st.done || results.length !== rendered) {
         rendered = results.length;
         lastResults = results; lastKeyword = kw; selIndex = -1;
         hideDetail();
@@ -2239,14 +2257,77 @@ async function doSearch() {
     if (token === searchSeq) endSearchUi();
   }
 }
+/* match-telemetry-start */
+function matchTierLabel(tier) {
+  switch (tier) {
+    case 4: return t("Exact");
+    case 3: return t("Prefix");
+    case 2: return t("Contains");
+    case 1: return t("Partial");
+    default: return t("No match");
+  }
+}
+/**
+ * Read a row's ranking telemetry, or ``null`` when it is absent/unusable.
+ *
+ * Streamed preview chunks are the sites' raw ordering, so they carry neither
+ * ``rank_score`` nor ``match_tier``; the final ranked list adds both. A row
+ * without a numeric 0..1 score and integer 0..4 tier renders no badge at all
+ * instead of a misleading one.
+ */
+function matchTelemetry(r) {
+  if (!r || typeof r !== "object") return null;
+  // Strict types: Number(null) is 0 and Number("") is 0, which would paint a
+  // real-looking badge from a row that carries no telemetry at all.
+  const tier = r.match_tier;
+  if (typeof tier !== "number" || !Number.isInteger(tier) || tier < 0 || tier > 4) return null;
+  const score = r.rank_score;
+  if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 1) return null;
+  return { tier, score };
+}
+/**
+ * Tooltip/accessible text for one telemetry hit.
+ *
+ * For a merged row the badge describes the book's best source (the row's own
+ * site), not every source in ``sources``.
+ */
+function matchTip(hit, grouped) {
+  return (grouped
+    ? t("Match: {tier} · score {score} (best source)")
+    : t("Match: {tier} · score {score}")
+  ).replace("{tier}", matchTierLabel(hit.tier)).replace("{score}", hit.score.toFixed(2));
+}
+/**
+ * Short match-tier badge with the score in its tooltip and accessible name.
+ *
+ * The badge is decorative next to the title; the row's own aria-label carries
+ * the same explanation, so a screen reader hears it without hovering.
+ */
+function matchBadgeHtml(r) {
+  const hit = matchTelemetry(r);
+  if (!hit) return "";
+  const grouped = Array.isArray(r.sources) && r.sources.length > 1;
+  const tip = matchTip(hit, grouped);
+  return `<span class="match-badge tier-${hit.tier}" data-rank-tier="${hit.tier}" data-rank-score="${esc(hit.score)}" data-rank-scope="${grouped ? "group" : "row"}" title="${esc(tip)}" aria-label="${esc(tip)}">${esc(matchTierLabel(hit.tier))}</span>`;
+}
+/** The result card's accessible name: escaped title plus the explanation. */
+function resultCardLabel(r) {
+  const title = esc(r.title);
+  const hit = matchTelemetry(r);
+  if (!hit) return title;
+  const grouped = Array.isArray(r.sources) && r.sources.length > 1;
+  return `${title} · ${esc(matchTip(hit, grouped))}`;
+}
+/* match-telemetry-end */
 function resultCardHtml(r, i, kw) {
   const sub = [r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join('<span style="opacity:.4"> · </span>');
-  return `<div class="card hover result-card" data-sel="${i}" tabindex="0" role="group" aria-label="${esc(r.title)}">
+  return `<div class="card hover result-card" data-sel="${i}" tabindex="0" role="group" aria-label="${resultCardLabel(r)}">
     <div class="rc">
       ${coverBox(r)}
       <div class="rc-main">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <span class="row-title" style="white-space:normal">${highlight(r.title, kw)}</span>
+          ${matchBadgeHtml(r)}
           ${r.best ? `<span class="best-chip">${esc(t("Best match"))}</span>` : ""}
         </div>
         <div class="row-sub">${sub}</div>

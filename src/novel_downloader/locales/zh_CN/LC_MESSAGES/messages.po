@@ -4606,3 +4606,32 @@ msgstr "{source}: 规则至少需要 'book' 或 'chapter' 段"
 msgid "Search timed out after {budget:g}s"
 msgstr "站点超过 {budget:g}s 仍未返回"
 
+#: src/novel_downloader/apps/desktop/webview_app.py:1009
+msgid "Exact"
+msgstr "精确"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:1010
+msgid "Prefix"
+msgstr "前缀"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:1011
+msgid "Contains"
+msgstr "包含"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:1012
+msgid "Partial"
+msgstr "部分"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:1013
+msgid "No match"
+msgstr "无匹配"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:1014
+#, python-brace-format
+msgid "Match: {tier} · score {score}"
+msgstr "匹配：{tier} · 分数 {score}"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:1016
+#, python-brace-format
+msgid "Match: {tier} · score {score} (best source)"
+msgstr "匹配：{tier} · 分数 {score}（主来源）"

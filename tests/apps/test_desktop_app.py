@@ -25,7 +25,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -767,6 +769,152 @@ def test_app_html_narrow_search_row_can_shrink() -> None:
     assert ".search-row .field { flex: 1; min-width: 0; }" in APP_HTML
 
 
+def test_app_html_renders_match_telemetry_badges() -> None:
+    """Final ranked rows explain their order; source capsules stay plain."""
+    assert "function matchBadgeHtml(" in APP_HTML
+    assert 'data-rank-tier="${hit.tier}"' in APP_HTML
+    assert 'data-rank-score="${esc(hit.score)}"' in APP_HTML
+    assert 'data-rank-scope="${grouped ? "group" : "row"}"' in APP_HTML
+    assert "${matchBadgeHtml(r)}" in APP_HTML
+    # The row's accessible name repeats the explanation for screen readers.
+    assert "function resultCardLabel(" in APP_HTML
+    assert 'aria-label="${resultCardLabel(r)}"' in APP_HTML
+    # No telemetry (a streamed preview chunk) -> no badge at all.
+    assert 'if (!hit) return "";' in APP_HTML
+    assert "Number.isFinite(score)" in APP_HTML
+    # Every tier tone reuses an existing status token (all are contrast-tested
+    # by test_app_html_status_tokens_meet_wcag_contrast).
+    for tier, token in (
+        (4, "green"),
+        (3, "blue"),
+        (2, "accent"),
+        (1, "yellow"),
+        (0, "gray"),
+    ):
+        assert f".match-badge.tier-{tier} {{ color: var(--{token});" in APP_HTML
+    # A fixed chip next to a title that keeps the row's existing wrapping.
+    badge_start = APP_HTML.index(".match-badge {")
+    badge_css = APP_HTML[badge_start : APP_HTML.index("}", badge_start)]
+    assert "flex: none" in badge_css
+    assert "white-space: nowrap" in badge_css
+    card = APP_HTML[
+        APP_HTML.index("function resultCardHtml(") : APP_HTML.index(
+            "function moreResultsHtml("
+        )
+    ]
+    assert "flex-wrap:wrap" in card
+    # A merged row's badge explains the best source; the capsules themselves
+    # gain no per-source score badges.
+    caps = APP_HTML[
+        APP_HTML.index("function sourceCaps(") : APP_HTML.index(
+            '$("#results").addEventListener("keydown"'
+        )
+    ]
+    assert "match-badge" not in caps
+    assert "data-rank" not in caps
+
+
+def _node() -> str:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    return node
+
+
+def test_app_html_repaints_the_final_ranked_snapshot() -> None:
+    """A final list with the same row count as the stream still gets painted.
+
+    The stream is unranked and carries no telemetry; without this the page
+    would keep the preview rows and never show the final order/badges.
+    """
+    assert "if (st.done || results.length !== rendered) {" in APP_HTML
+
+
+def test_app_html_inline_script_parses(tmp_path: Path) -> None:
+    """The single-file front end's boot script stays syntactically valid."""
+    script = re.search(r"<script>(.*?)</script>", APP_HTML, re.S)
+    assert script, "the front end must keep its inline boot script"
+    path = tmp_path / "app.js"
+    path.write_text(script.group(1), encoding="utf-8")
+    result = subprocess.run(
+        [_node(), "--check", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+#: Node harness for the badge renderer: no DOM, just the extracted helpers.
+_MATCH_BADGE_HARNESS = r"""
+const assert = require("assert");
+function t(key) { return key; }
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+__LOGIC__
+const base = { title: "T" };
+// A streamed preview carries neither field; a lone field is not a badge.
+assert.strictEqual(matchBadgeHtml(base), "");
+assert.strictEqual(matchBadgeHtml({ ...base, rank_score: 0.5 }), "");
+assert.strictEqual(matchBadgeHtml({ ...base, match_tier: 3 }), "");
+assert.strictEqual(matchBadgeHtml({ ...base, rank_score: null, match_tier: 3 }), "");
+assert.strictEqual(matchBadgeHtml({ ...base, rank_score: 1.2, match_tier: 3 }), "");
+assert.strictEqual(matchBadgeHtml({ ...base, rank_score: 0.5, match_tier: 2.5 }), "");
+assert.strictEqual(resultCardLabel(base), "T");
+const exact = matchBadgeHtml({ ...base, rank_score: 0.5, match_tier: 4 });
+assert.ok(exact.includes('data-rank-tier="4"'));
+assert.ok(exact.includes('data-rank-score="0.5"'));
+assert.ok(exact.includes('class="match-badge tier-4"'));
+assert.ok(exact.includes(">Exact<"));
+assert.ok(exact.includes('data-rank-scope="row"'));
+assert.ok(exact.includes("Match: Exact · score 0.50"));
+assert.strictEqual(
+  resultCardLabel({ ...base, rank_score: 0.5, match_tier: 4 }),
+  "T · Match: Exact · score 0.50",
+);
+assert.strictEqual(
+  resultCardLabel({
+    ...base, rank_score: 0.5, match_tier: 4, sources: ["a", "b"],
+  }),
+  "T · Match: Exact · score 0.50 (best source)",
+);
+const none = matchBadgeHtml({ ...base, rank_score: 0, match_tier: 0 });
+assert.ok(none.includes('class="match-badge tier-0"'));
+assert.ok(none.includes(">No match<"));
+const grouped = matchBadgeHtml({
+  ...base, rank_score: 0.25, match_tier: 2, sources: ["a", "b"],
+});
+assert.ok(grouped.includes('data-rank-scope="group"'));
+assert.ok(grouped.includes("(best source)"));
+assert.ok(grouped.includes(">Contains<"));
+const lone = matchBadgeHtml({
+  ...base, rank_score: 0.25, match_tier: 2, sources: ["a"],
+});
+assert.ok(lone.includes('data-rank-scope="row"'));
+console.log("ok");
+"""
+
+
+def test_match_badge_renders_only_for_complete_telemetry(tmp_path: Path) -> None:
+    """The renderer is driven with real row shapes, not just string greps."""
+    start = APP_HTML.index("/* match-telemetry-start */")
+    end = APP_HTML.index("/* match-telemetry-end */")
+    harness = _MATCH_BADGE_HARNESS.replace("__LOGIC__", APP_HTML[start:end])
+    path = tmp_path / "match_badge.js"
+    path.write_text(harness, encoding="utf-8")
+    result = subprocess.run(
+        [_node(), str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout
+
+
 def test_app_html_mergetoggle_is_registered_as_i18n_key() -> None:
     """The merge toggle label goes through the catalog like every other label."""
     label = next(
@@ -807,6 +955,13 @@ def test_i18n_catalog_covers_script_only_keys() -> None:
         "Search failed",
         "No results",
         "Best match",
+        "Exact",
+        "Prefix",
+        "Contains",
+        "Partial",
+        "No match",
+        "Match: {tier} · score {score}",
+        "Match: {tier} · score {score} (best source)",
         "Open in browser",
         "Queued: {title}",
         "Added to follow list",
@@ -936,6 +1091,51 @@ def test_result_dict_keeps_merged_source_capsules() -> None:
     assert "sources" not in flat
 
 
+def test_result_dict_keeps_rank_telemetry_on_ranked_rows() -> None:
+    """The final ranked list reaches the page with its 0..1 / 0..4 fields."""
+    row = {**_search_result(), "rank_score": 0.875, "match_tier": 4}
+    data = _result_dict(row, 0, ranked=True)
+    assert data["rank_score"] == 0.875
+    assert data["match_tier"] == 4
+    assert data["best"] is True
+    assert data["title"] == "Sample"
+
+
+def test_result_dict_strips_rank_telemetry_from_unranked_rows() -> None:
+    """Streamed preview chunks are the sites' raw ordering: no badge."""
+    row = {**_search_result(), "rank_score": 0.875, "match_tier": 4}
+    data = _result_dict(row, 0)
+    assert "rank_score" not in data
+    assert "match_tier" not in data
+    assert data["best"] is True
+
+
+@pytest.mark.parametrize(
+    ("overrides", "dropped"),
+    [
+        ({"rank_score": 1.5}, "rank_score"),
+        ({"rank_score": -0.1}, "rank_score"),
+        ({"rank_score": float("nan")}, "rank_score"),
+        ({"rank_score": "0.5"}, "rank_score"),
+        ({"rank_score": True}, "rank_score"),
+        ({"match_tier": 5}, "match_tier"),
+        ({"match_tier": -1}, "match_tier"),
+        ({"match_tier": 2.5}, "match_tier"),
+        ({"match_tier": True}, "match_tier"),
+    ],
+)
+def test_result_dict_drops_malformed_rank_telemetry(
+    overrides: dict[str, Any], dropped: str
+) -> None:
+    """Only a real 0..1 score and 0..4 integer tier may reach the page."""
+    row = {**_search_result(), "rank_score": 0.5, "match_tier": 2, **overrides}
+    data = _result_dict(row, 0, ranked=True)
+    assert dropped not in data
+    other = "match_tier" if dropped == "rank_score" else "rank_score"
+    assert other in data
+    assert data["best"] is True
+
+
 def test_music_track_dict_uses_dataclass_fields() -> None:
     base = pytest.importorskip("novel_downloader.apps.music.providers.base")
     track = base.Track(
@@ -1039,6 +1239,93 @@ def test_bridge_search_stays_flat_without_group(
 
     assert calls["group"] is False
     assert "sources" not in payload["results"][0]
+
+
+def test_bridge_search_forwards_rank_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ranked payload keeps the explanation fields the page renders."""
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                **_search_result(),
+                "rank_score": 0.8125,
+                "match_tier": 3,
+                "sources": ["qidian", "alpha"],
+            }
+        ]
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+    bridge = ApiBridge()
+    try:
+        payload = bridge.search("三体", "", True)
+    finally:
+        bridge.shutdown()
+
+    row = payload["results"][0]
+    assert row["rank_score"] == 0.8125
+    assert row["match_tier"] == 3
+    assert row["sources"] == ["qidian", "alpha"]
+    assert row["best"] is True
+
+
+def test_bridge_progressive_search_telemetry_only_on_final_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A preview chunk stays badge-free; the final ranked rows carry the fields."""
+    release = threading.Event()
+    preview = {
+        **_search_result(),
+        "rank_score": 0.9,
+        "match_tier": 4,
+    }
+    final = {
+        **_search_result(),
+        "rank_score": 0.4,
+        "match_tier": 2,
+    }
+
+    async def fake_stream(keyword: str, **kwargs: Any) -> Any:
+        yield [preview]
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        return [final]
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search_stream", fake_stream)
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+    bridge = ApiBridge()
+    try:
+        job = bridge.search_async("三体")
+        deadline = time.time() + 5
+        preview_row: dict[str, Any] | None = None
+        while time.time() < deadline:
+            state = bridge.search_progress(job["search_id"])
+            if state["results"]:
+                preview_row = state["results"][0]
+                break
+            time.sleep(0.02)
+        assert preview_row is not None, "the streamed chunk never reached the page"
+        # The site's own row cannot fake a ranking annotation.
+        assert "rank_score" not in preview_row
+        assert "match_tier" not in preview_row
+
+        release.set()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            state = bridge.search_progress(job["search_id"])
+            if state["done"]:
+                break
+            time.sleep(0.02)
+    finally:
+        release.set()
+        bridge.shutdown()
+
+    assert state["done"] is True
+    assert state["results"][0]["rank_score"] == 0.4
+    assert state["results"][0]["match_tier"] == 2
 
 
 def test_bridge_search_passes_optional_filters(
