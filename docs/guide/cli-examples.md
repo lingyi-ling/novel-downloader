@@ -603,7 +603,7 @@ novel-cli login --list
 
 ---
 
-#### 7. music 子命令
+#### 7. music 子命令 {#music-subcommand}
 
 搜索并下载来自多个音乐平台的歌曲。该功能依赖可选组 `music`, 未安装时命令会打印安装提示:
 
@@ -841,7 +841,7 @@ novel-cli follow check --download --wait --wait-timeout 3600
 
 ---
 
-#### 9. storage 子命令
+#### 9. storage 子命令 {#storage-subcommand}
 
 统计应用四个数据目录的磁盘占用, 并可一次性清理:
 
@@ -1055,7 +1055,7 @@ novel-cli storage restore \
 
 ---
 
-#### 10. doctor 子命令
+#### 10. doctor 子命令 {#doctor-subcommand}
 
 执行一组**离线**自检, 用于快速定位环境问题。
 
@@ -1169,7 +1169,7 @@ NOVELDL_SEARCH_CACHE_DIR=~/.cache/novel-downloader/search novel-cli doctor --jso
 
 ---
 
-#### 11. completion 子命令
+#### 11. completion 子命令 {#completion-subcommand}
 
 输出 `novel-cli` 的 shell 补全脚本。补全内容由命令树自动生成, 是一份扁平词表 (子命令名 + 选项名, 不含选项值), 因此新增子命令后无需手动维护脚本。
 
@@ -1391,7 +1391,7 @@ stdout 承载命令的正常输出 (`--json`、补全脚本、`--help` 等), std
 
 * **重定向 / 管道**: stdout 与 stderr 都按 UTF-8 写出, 无 BOM; `--json` 使用 `ensure_ascii=False`, 中文和 emoji 原样保留, 不会变成 `\uXXXX`。帮助、日志和 Rich 诊断同样不再混入 cp936/GBK 字节。
 * **交互终端 (TTY)**: 不强制改写编码, 帮助、日志和进度按控制台原生编码渲染, 颜色、宽度和进度条行为不变。`--json` 的数据流是例外, 始终为 UTF-8。
-* **`--json`**: stdout 只输出一份 JSON 文档, 日志和提示不会混入。`download`、`search`、`export`、`update`、`music *`、`clean * --dry-run`、`storage backup|verify|restore`、`doctor` 为**严格单行紧凑 JSON**: 除结尾换行外没有其他换行符, 可直接按行读取。`browse`、`follow list`、`sources list`、`storage` 仍使用 `indent=2` 多行格式; 它们同样是 UTF-8 的单份文档, 但不要假设只有一行。
+* **`--json`**: stdout 只输出一份 JSON 文档, 日志和提示不会混入。`download`、`search`、`export`、`sources list`、`update`、`music *`、`clean * --dry-run`、`storage backup|verify|restore`、`doctor` 为**严格单行紧凑 JSON**: 除结尾换行外没有其他换行符, 可直接按行读取。`browse`、`follow list`、`storage` 仍使用 `indent=2` 多行格式; 它们同样是 UTF-8 的单份文档, 但不要假设只有一行。
 
 v1.34.1 之前, 冻结 CLI 只有机器可读的 stdout (`--json` 与补全脚本) 固定 UTF-8; 重定向后的帮助和日志仍按系统代码页 (如 cp936) 编码, 可能与 JSON 混在一起。源码运行 (`pip install` / `python -m`) 的 `--json` stdout 同样始终是 UTF-8, 但帮助和日志跟随 Python 的 locale; 需要在源码运行下也统一为 UTF-8 时, 用 `PYTHONUTF8=1` 启动。
 

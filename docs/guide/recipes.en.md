@@ -305,7 +305,7 @@ On the phone, open `http://192.168.1.23:8081/api/v1/health`. Because the server 
 
 In the app's Settings → Download section, tap "Choose directory" to pick where exported files from the History tab are saved through the system picker (SAF). Files go into a `NovelDL/` subdirectory of the chosen tree, and name clashes become `name (1).ext`. The grant is persisted and survives reboots.
 
-If the system revokes the grant, the directory is deleted, or app data moves to another device, Settings shows "The custom download directory is unavailable" and downloads **fall back to the system Downloads directory** with a notice instead of writing to the wrong place. Choose the directory again or tap "Reset" to recover. See [Troubleshooting - custom download directory](./troubleshooting.en.md#51-the-custom-download-directory-saf-is-unavailable).
+If the system revokes the grant, the directory is deleted, or app data moves to another device, Settings shows "The custom download directory is unavailable" and downloads **fall back to the system Downloads directory** with a notice instead of writing to the wrong place. Choose the directory again or tap "Reset" to recover. See [Troubleshooting - custom download directory](./troubleshooting.en.md#saf-custom-download-directory).
 
 ---
 

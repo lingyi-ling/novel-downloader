@@ -2,7 +2,7 @@
 
 音乐功能是一个可选引擎, 与小说下载共用同一套服务层。CLI、桌面客户端、Android 独立模式与本地 API 都调用它, 因此平台列表、搜索合并规则和落盘行为在各端一致。
 
-本文说明引擎的行为与边界。具体参数见 [CLI 用法 - music 子命令](./cli-examples.md#7-music-子命令) 与 [本地 API 服务 - 音乐](./api.md); 故障现象见 [故障排查](./troubleshooting.md)。
+本文说明引擎的行为与边界。具体参数见 [CLI 用法 - music 子命令](./cli-examples.md#music-subcommand) 与 [本地 API 服务 - 音乐](./api.md); 故障现象见 [故障排查](./troubleshooting.md)。
 
 > **平台数量不是固定值**: 注册表在导入时按已安装的可选依赖求值, 缺依赖的平台不会出现在列表里。请以 `novel-cli music platforms` 或 `GET /api/v1/music/platforms` 的实际输出为准。
 
@@ -75,7 +75,7 @@ DRM 解密与 HLS 下载还需要**外部**条件 (自备 CDM、`N_m3u8DL-RE`), 
 * 连续两次耗时超过 2 秒且零结果的平台判为「慢且空」, 跳过 5 分钟。
 * 这些状态写入音乐数据目录的 `search_stats.json`, 重启后仍生效。
 * **显式指定平台时不走熔断**, 便于手动重试。
-* 所有平台都失败时 CLI 以非零状态退出; 平台正常响应但零结果属于成功的空搜索。排查步骤见 [故障排查 - 音乐聚合搜索](./troubleshooting.md#8-音乐聚合搜索里部分平台没反应-很慢)。
+* 所有平台都失败时 CLI 以非零状态退出; 平台正常响应但零结果属于成功的空搜索。排查步骤见 [故障排查 - 音乐聚合搜索](./troubleshooting.md#music-aggregate-search)。
 
 ---
 
@@ -222,7 +222,7 @@ API 的 `POST /api/v1/music/export` 不做搜索, 要求每首曲目自带本地
 
 桌面端音乐页导出歌单时, 目标文件已存在不会静默覆盖: 先提示「歌单已存在: <路径>」, 点击该提示后才替换。
 
-导出链路的 400/429 排查见 [故障排查 - 音乐歌单导出](./troubleshooting.md#12-音乐歌单导出返回-400-音乐任务返回-429)。
+导出链路的 400/429 排查见 [故障排查 - 音乐歌单导出](./troubleshooting.md#music-playlist-export)。
 
 ---
 
@@ -250,7 +250,7 @@ API 的 `POST /api/v1/music/export` 不做搜索, 要求每首曲目自带本地
 
 内置下载器只接受非 HLS 的直链: 解析时遇到 HLS (m3u8) 会直接返回「HLS 流暂不支持直链下载」。因此即使准备了 CDM 与 `N_m3u8DL-RE`, Apple Music / SoundCloud 的 DRM/HLS 曲目也**不能**在应用内下载, 需要使用支持 Widevine 的外部工具。这不是网络故障, 属于当前版本的预期限制。
 
-完整说明与验证命令见 [故障排查 - TIDAL / YouTube / Apple Music / SoundCloud](./troubleshooting.md#10-tidal-youtube-apple-music-soundcloud能搜到不等于能下载)。
+完整说明与验证命令见 [故障排查 - TIDAL / YouTube / Apple Music / SoundCloud](./troubleshooting.md#tidal-youtube-apple-music-soundcloud)。
 
 ---
 
@@ -267,13 +267,13 @@ API 的 `POST /api/v1/music/export` 不做搜索, 要求每首曲目自带本地
 
 默认下载目录是用户音乐目录下的 `novel_downloader` (例如 `~/Music/novel_downloader`)。
 
-这些文件与 Cookie 均为**明文**, 且 `session.json` / `platform_creds.json` 可以直接接管账号。不要提交到仓库、粘贴到 issue 或截图里; 换机或怀疑泄露时删除对应文件并在平台侧注销会话。存储位置与权限建议见 [安全说明 - Cookie 与凭据的存储位置](./security.md#cookie-与凭据的存储位置)。
+这些文件与 Cookie 均为**明文**, 且 `session.json` / `platform_creds.json` 可以直接接管账号。不要提交到仓库、粘贴到 issue 或截图里; 换机或怀疑泄露时删除对应文件并在平台侧注销会话。存储位置与权限建议见 [安全说明 - Cookie 与凭据的存储位置](./security.md#cookie-credential-storage)。
 
 ---
 
 ### 相关文档
 
-* [CLI 用法 - music 子命令](./cli-examples.md#7-music-子命令): 五个子命令的完整参数与示例
+* [CLI 用法 - music 子命令](./cli-examples.md#music-subcommand): 五个子命令的完整参数与示例
 * [本地 API 服务 - 音乐](./api.md): 搜索、同步/异步下载、歌单导出、健康检查端点
 * [故障排查](./troubleshooting.md): 缺少依赖、聚合搜索很慢、DRM 限制、导出 400/429
 * [Android 客户端](./android-app.md): 独立模式内置音乐引擎

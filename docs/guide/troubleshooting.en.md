@@ -28,7 +28,7 @@ novel-cli doctor --fix             # create missing output/cache/log dirs, clean
 
 ### Search Cache: Identical Searches Still Hit Every Site
 
-The `Search cache` row in `doctor` reports the in-process search cache; see [CLI Usage § doctor](./cli-examples.en.md#10-doctor-subcommand), "Search-cache diagnostics", for the fields and how to read them.
+The `Search cache` row in `doctor` reports the in-process search cache; see [CLI Usage § doctor](./cli-examples.en.md#doctor-subcommand), "Search-cache diagnostics", for the fields and how to read them.
 
 * `hits`, `misses`, and `evictions` are cumulative **for the current process**. A standalone `novel-cli doctor` normally reports all zeros because that process has not searched; that is not a fault. The desktop "Settings → Search cache" panel shows the desktop process's own Memory entries / Disk entries / Cache hits / Expired entries.
 * **Many expired**: when `expired_entries` approaches `memory_entries`, most resident entries are past their TTL (300 seconds by default). Diagnostics counts but does not purge them; they are removed on the next write or when that key is read. If `misses` is also high, repeated searches go back to the sites.
@@ -402,7 +402,7 @@ If the command succeeds, Python itself handles the path fine; the problem usuall
 
 8. The Android app uses cleartext HTTP. For access across networks, use a VPN (such as Tailscale) or an HTTPS reverse proxy, and always set a token.
 
-### 5.1 The Custom Download Directory (SAF) Is Unavailable
+### 5.1 The Custom Download Directory (SAF) Is Unavailable {#saf-custom-download-directory}
 
 **Symptoms**: a download directory was selected in Settings, but files still land in the system Downloads folder; or Settings shows the red message "The custom download directory is unavailable — pick it again in Settings".
 
@@ -416,7 +416,7 @@ If the command succeeds, Python itself handles the path fine; the problem usuall
 * Files are written into a `NovelDL/` subdirectory of the chosen tree. Name clashes become `name (1).ext`, `name (2).ext`, … (case-insensitive), so existing files are never silently overwritten.
 * This setting only affects downloads of exported files from the History tab; music files keep using the music engine's own directories / system download flow.
 
-### 5.2 SAF Download Fails or Progress Stalls
+### 5.2 SAF Download Fails or Progress Stalls {#saf-download-failure}
 
 **Symptoms**: a History download into the custom directory fails with "Not enough storage space", "The file provider failed to write…", or "Network error…", and the file never appears in `NovelDL/`; or progress stays at "Connecting and preparing the file…".
 
@@ -588,7 +588,7 @@ access log.
 
 ---
 
-## 8. Some Music Platforms Do Not Respond / Are Very Slow in Aggregate Search
+## 8. Some Music Platforms Do Not Respond / Are Very Slow in Aggregate Search {#music-aggregate-search}
 
 **Symptoms**: searching "all platforms" returns only a few songs after the progress bar finishes; some platforms never return anything, or the whole search waits out the budget. Searching that platform explicitly may still work.
 
@@ -648,7 +648,7 @@ See [Installation](./installation.en.md) for how install, upgrade, and uninstall
 
 ---
 
-## 10. TIDAL / YouTube / Apple Music / SoundCloud: Searchable Does Not Mean Downloadable
+## 10. TIDAL / YouTube / Apple Music / SoundCloud: Searchable Does Not Mean Downloadable {#tidal-youtube-apple-music-soundcloud}
 
 **Symptoms**: these platforms appear in the list, but search is empty, only previews are returned, or download fails with an HLS-not-supported or no-downloadable-link error (the UI currently shows the Chinese reason strings `HLS 流暂不支持直链下载` / `该平台未返回可下载直链`).
 
@@ -693,7 +693,7 @@ See section 6 for dependency installation and self-check commands.
 
 ---
 
-## 12. Music Playlist Export Returns 400 / Music Jobs Return 429
+## 12. Music Playlist Export Returns 400 / Music Jobs Return 429 {#music-playlist-export}
 
 **Symptoms**: `POST /api/v1/music/export` returns `400`; or `POST /api/v1/music/jobs`
 returns `429` even though the per-IP request rate limit was not hit.
@@ -852,7 +852,7 @@ to stdout only, with `"interrupted": true` when the run was interrupted.
 The backup contains only the chapter databases under `raw_data`; it does not include
 cookies/tokens, `settings.toml`, logs, or media files, so sign in again after a restore,
 and treat the plaintext backup as sensitive data. See the
-[full “back up (verified after writing) → restore” workflow](./cli-examples.en.md#9-storage-subcommand)
+[full “back up (verified after writing) → restore” workflow](./cli-examples.en.md#storage-subcommand)
 in the CLI usage examples.
 
 For scheduled backups, `--keep` rotates old copies automatically. Preview first, then apply:

@@ -152,7 +152,7 @@ Recommendations:
 
 ---
 
-### Where cookies and credentials are stored
+### Where cookies and credentials are stored {#cookie-credential-storage}
 
 | Type | Default location | Override |
 | --- | --- | --- |

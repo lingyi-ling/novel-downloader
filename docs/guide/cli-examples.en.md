@@ -627,7 +627,7 @@ novel-cli login --list
 
 ---
 
-#### 7. music Subcommand
+#### 7. music Subcommand {#music-subcommand}
 
 Search and download songs from multiple music platforms. This feature depends on the optional `music` group; when it is missing, the command prints an installation hint:
 
@@ -864,7 +864,7 @@ Semantics of `--wait`:
 
 ---
 
-#### 9. storage Subcommand
+#### 9. storage Subcommand {#storage-subcommand}
 
 Report the disk usage of the four application data directories, and optionally clean them all:
 
@@ -1078,7 +1078,7 @@ In the JSON report, `replaced_existing` says whether an existing database was re
 
 ---
 
-#### 10. doctor Subcommand
+#### 10. doctor Subcommand {#doctor-subcommand}
 
 Run a set of **offline** self-checks to diagnose environment problems quickly.
 
@@ -1194,7 +1194,7 @@ The environment variable is read when the search module is first imported (for t
 
 ---
 
-#### 11. completion Subcommand
+#### 11. completion Subcommand {#completion-subcommand}
 
 Print a shell completion script for `novel-cli`. The completion is generated from the command tree as a flat word list (subcommand and option names, no option values), so new subcommands appear automatically without maintaining the script by hand.
 
@@ -1423,7 +1423,7 @@ stdout carries normal command output (`--json`, completion scripts, `--help`, an
 
 * **Redirects / pipes**: stdout and stderr are written as UTF-8 with no BOM. `--json` uses `ensure_ascii=False`, so CJK text and emoji stay intact instead of becoming `\uXXXX`. Help, logs, and Rich diagnostics no longer mix in cp936/GBK bytes.
 * **Interactive terminal (TTY)**: the encoding is left alone; help, logs, and progress render in the console's native encoding, and colour, width, and progress-bar behaviour are unchanged. `--json` is the exception: its data stream is always UTF-8.
-* **`--json`**: stdout contains exactly one JSON document; logs and hints never mix in. `download`, `search`, `export`, `update`, `music *`, `clean * --dry-run`, `storage backup|verify|restore`, and `doctor` emit **strictly single-line, compact JSON**: no newline other than the final terminator, so a line-oriented reader can consume one record per line. `browse`, `follow list`, `sources list`, and `storage` still use `indent=2` multi-line JSON; they are still one UTF-8 document, but do not assume a single line.
+* **`--json`**: stdout contains exactly one JSON document; logs and hints never mix in. `download`, `search`, `export`, `sources list`, `update`, `music *`, `clean * --dry-run`, `storage backup|verify|restore`, and `doctor` emit **strictly single-line, compact JSON**: no newline other than the final terminator, so a line-oriented reader can consume one record per line. `browse`, `follow list`, and `storage` still use `indent=2` multi-line JSON; they are still one UTF-8 document, but do not assume a single line.
 
 Before v1.34.1 the frozen CLI guaranteed UTF-8 only for machine-readable stdout (`--json` and completion scripts); redirected help and logs still followed the system code page (for example cp936), which could mix encodings in one capture. For source runs (`pip install` / `python -m`), `--json` stdout is likewise always UTF-8, but help and logs follow Python's locale; start with `PYTHONUTF8=1` if you need everything UTF-8 there too.
 

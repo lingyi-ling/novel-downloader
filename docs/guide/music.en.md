@@ -2,7 +2,7 @@
 
 The music engine is optional and shares the same service layer as novel downloads. The CLI, desktop client, Android standalone mode and local API all use it, so the platform list, merge rules and on-disk behaviour are the same everywhere.
 
-This page describes the engine's behaviour and limits. For parameters see [CLI Usage - music subcommand](./cli-examples.en.md#7-music-subcommand) and [Local API Service - Music](./api.en.md#music); for symptoms see [Troubleshooting](./troubleshooting.en.md).
+This page describes the engine's behaviour and limits. For parameters see [CLI Usage - music subcommand](./cli-examples.en.md#music-subcommand) and [Local API Service - Music](./api.en.md#music); for symptoms see [Troubleshooting](./troubleshooting.en.md).
 
 > **The platform count is not fixed**: the registry is evaluated at import time against the optional dependencies that are actually installed, so a platform whose dependency is missing does not appear. Treat the output of `novel-cli music platforms` or `GET /api/v1/music/platforms` as authoritative.
 
@@ -75,7 +75,7 @@ Failures and circuit breaking:
 * A platform that twice takes over 2 seconds and returns nothing is treated as "slow and empty" and skipped for 5 minutes.
 * This state is written to `search_stats.json` in the music data directory and survives a restart.
 * **Explicitly selecting a platform bypasses the breaker**, which makes manual retries possible.
-* If every platform fails, the CLI exits non-zero; zero results from platforms that answered normally is a successful empty search. For diagnosis see [Troubleshooting - aggregate music search](./troubleshooting.en.md#8-some-music-platforms-do-not-respond-are-very-slow-in-aggregate-search).
+* If every platform fails, the CLI exits non-zero; zero results from platforms that answered normally is a successful empty search. For diagnosis see [Troubleshooting - aggregate music search](./troubleshooting.en.md#music-aggregate-search).
 
 ---
 
@@ -222,7 +222,7 @@ The API `POST /api/v1/music/export` does not search and requires every track to 
 
 When exporting a playlist from the desktop Music tab, an existing target is never silently overwritten: the app first reports "The playlist already exists: <path>" and only replaces the file after you click that message.
 
-For 400/429 export failures see [Troubleshooting - playlist export](./troubleshooting.en.md#12-music-playlist-export-returns-400-music-jobs-return-429).
+For 400/429 export failures see [Troubleshooting - playlist export](./troubleshooting.en.md#music-playlist-export).
 
 ---
 
@@ -250,7 +250,7 @@ A health check performs one **bounded search** only; it does not resolve direct 
 
 The built-in downloader accepts non-HLS direct links only: HLS (m3u8) resolution is rejected immediately with "HLS 流暂不支持直链下载". Even with a CDM and `N_m3u8DL-RE`, DRM/HLS tracks from Apple Music / SoundCloud therefore **cannot** be downloaded in-app; use an external tool that supports Widevine. This is an expected limit of the current version, not a network failure.
 
-Full details and verification commands: [Troubleshooting - TIDAL / YouTube / Apple Music / SoundCloud](./troubleshooting.en.md#10-tidal-youtube-apple-music-soundcloud-searchable-does-not-mean-downloadable).
+Full details and verification commands: [Troubleshooting - TIDAL / YouTube / Apple Music / SoundCloud](./troubleshooting.en.md#tidal-youtube-apple-music-soundcloud).
 
 ---
 
@@ -267,13 +267,13 @@ Music runtime data lives in the `music/` subdirectory of the platform data direc
 
 The default download directory is `novel_downloader` under the user's music directory (for example `~/Music/novel_downloader`).
 
-These files and cookies are stored in **plaintext**, and `session.json` / `platform_creds.json` can take over an account directly. Do not commit them, paste them into issues, or include them in screenshots. Delete the files and sign out on the platform side when switching machines or after a suspected leak. See [Security - where cookies and credentials are stored](./security.en.md#where-cookies-and-credentials-are-stored) for locations and permission advice.
+These files and cookies are stored in **plaintext**, and `session.json` / `platform_creds.json` can take over an account directly. Do not commit them, paste them into issues, or include them in screenshots. Delete the files and sign out on the platform side when switching machines or after a suspected leak. See [Security - where cookies and credentials are stored](./security.en.md#cookie-credential-storage) for locations and permission advice.
 
 ---
 
 ### Related documentation
 
-* [CLI Usage - music subcommand](./cli-examples.en.md#7-music-subcommand): full parameters and examples for the five subcommands
+* [CLI Usage - music subcommand](./cli-examples.en.md#music-subcommand): full parameters and examples for the five subcommands
 * [Local API Service - Music](./api.en.md#music): search, synchronous/asynchronous download, playlist export and health endpoints
 * [Troubleshooting](./troubleshooting.en.md): missing dependencies, slow aggregate search, DRM limits, export 400/429
 * [Android Client](./android-app.en.md): standalone mode bundles the music engine

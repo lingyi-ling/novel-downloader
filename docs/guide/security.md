@@ -156,7 +156,7 @@ cache_dir = "./novel_cache"   # 缓存 + Cookie
 
 ---
 
-### Cookie 与凭据的存储位置
+### Cookie 与凭据的存储位置 {#cookie-credential-storage}
 
 | 类型 | 默认位置 | 覆盖方式 |
 | --- | --- | --- |

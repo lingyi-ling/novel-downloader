@@ -25,7 +25,7 @@ After installation, the following executable commands are provided:
 * `novel-cli`: command-line entry point
 * `novel-api`: local REST API entry point (requires the `api` extra, see below)
 
-For Tab completion in bash / zsh / fish / PowerShell, generate a script with `novel-cli completion --shell <shell>` and load it; see [CLI Usage § completion](./cli-examples.en.md#11-completion-subcommand).
+For Tab completion in bash / zsh / fish / PowerShell, generate a script with `novel-cli completion --shell <shell>` and load it; see [CLI Usage § completion](./cli-examples.en.md#completion-subcommand).
 
 Run a self-check right after installing:
 
@@ -40,7 +40,7 @@ novel-cli doctor --fix --dry-run
 novel-cli doctor --fix
 ```
 
-`--fix` only creates the configured output/cache/log directories and deletes `.tmp` / `.part` files older than 7 days under those roots (adjust with `--fix-age-days`). It never modifies configuration, exports, or login state, and it never leaves those three roots or follows symlinks. See [CLI Usage § doctor](./cli-examples.en.md#10-doctor-subcommand) for the full rules.
+`--fix` only creates the configured output/cache/log directories and deletes `.tmp` / `.part` files older than 7 days under those roots (adjust with `--fix-age-days`). It never modifies configuration, exports, or login state, and it never leaves those three roots or follows symlinks. See [CLI Usage § doctor](./cli-examples.en.md#doctor-subcommand) for the full rules.
 
 (2) Install the latest development version (GitHub)
 

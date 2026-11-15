@@ -199,7 +199,7 @@ API 设置了 token 时，把同一个值填入「API 密钥」。
 - 上述进度与失败处理不改变命名规则：每次写入前仍列出目录内已有名称，同名文件继续按 `name (1).ext`、`name (2).ext` … 去重（大小写不敏感），不会覆盖已有文件。
 
 !!! note "作用范围"
-    自定义目录只影响「历史」页的下载。任务详情里下载导出文件仍走系统 DownloadManager 保存到系统 Downloads；音乐文件按下一节的方式保存。排查步骤见 [故障排查 § 自定义下载目录](./troubleshooting.md#51-saf) 与 [§ SAF 下载失败或进度停住](./troubleshooting.md#52-saf)。
+    自定义目录只影响「历史」页的下载。任务详情里下载导出文件仍走系统 DownloadManager 保存到系统 Downloads；音乐文件按下一节的方式保存。排查步骤见 [故障排查 § 自定义下载目录](./troubleshooting.md#saf-custom-download-directory) 与 [§ SAF 下载失败或进度停住](./troubleshooting.md#saf-download-failure)。
 
 ## 任务、通知与恢复
 

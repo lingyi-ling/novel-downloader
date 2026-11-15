@@ -214,7 +214,7 @@ Write failures are classified by cause, and the target changes only when the dir
 - None of this changes the naming rule: before every write the app lists the existing names in the directory and still de-duplicates clashes as `name (1).ext`, `name (2).ext`, … (case-insensitive), never overwriting existing files.
 
 !!! note "Scope"
-    The custom directory only affects downloads from the History tab. Downloading an exported file from a task's detail panel still goes through the system DownloadManager into system Downloads; music files follow the next section. See [Troubleshooting § custom download directory](./troubleshooting.en.md#51-the-custom-download-directory-saf-is-unavailable) and [§ SAF download fails or progress stalls](./troubleshooting.en.md#52-saf-download-fails-or-progress-stalls).
+    The custom directory only affects downloads from the History tab. Downloading an exported file from a task's detail panel still goes through the system DownloadManager into system Downloads; music files follow the next section. See [Troubleshooting § custom download directory](./troubleshooting.en.md#saf-custom-download-directory) and [§ SAF download fails or progress stalls](./troubleshooting.en.md#saf-download-failure).
 
 ## Tasks, Notifications, and Recovery
 

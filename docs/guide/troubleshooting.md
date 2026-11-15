@@ -28,7 +28,7 @@ novel-cli doctor --fix             # 创建缺失的输出/缓存/日志目录�
 
 ### 搜索结果缓存：相同搜索仍反复访问站点
 
-`doctor` 的「搜索缓存」(`search_cache`) 行给出进程内的搜索缓存计数，字段与读法见 [CLI 用法 § doctor](./cli-examples.md#10-doctor) 的「搜索缓存诊断」。
+`doctor` 的「搜索缓存」(`search_cache`) 行给出进程内的搜索缓存计数，字段与读法见 [CLI 用法 § doctor](./cli-examples.md#doctor-subcommand) 的「搜索缓存诊断」。
 
 * `hits`、`misses`、`evictions` 是**当前进程**的累计值。单独运行 `novel-cli doctor` 通常全为 `0`，因为该进程没有做过搜索，这不代表异常；桌面端「设置 → 搜索缓存」显示的是桌面进程自己的 内存条目 / 磁盘条目 / 缓存命中 / 过期条目。
 * **过期多**：`expired_entries` 接近 `memory_entries`，说明常驻条目大多已超过 TTL（默认 300 秒）。诊断只统计不清理，下一次写入或读取该键时才移除；若 `misses` 同时很高，重复搜索会重新访问站点。
@@ -385,7 +385,7 @@ python -c "import sys; from pathlib import Path; p = Path.cwd(); print('filesyst
 
 8. Android App 使用 HTTP 明文访问；跨网络时请使用 VPN（如 Tailscale）或 HTTPS 反向代理，并始终设置 token。
 
-### 5.1 自定义下载目录 (SAF) 不可用
+### 5.1 自定义下载目录 (SAF) 不可用 {#saf-custom-download-directory}
 
 **现象**：设置里选过下载目录，但下载仍落到系统「下载」目录；或设置页出现红色提示「自定义下载目录不可用，请在设置中重新选择」。
 
@@ -399,7 +399,7 @@ python -c "import sys; from pathlib import Path; p = Path.cwd(); print('filesyst
 * 文件实际写入所选目录下的 `NovelDL/` 子目录；同名文件按 `name (1).ext`、`name (2).ext` … 去重（大小写不敏感），不会静默覆盖已有文件。
 * 该设置只影响「历史」页导出文件的下载；音乐文件仍按音乐引擎自己的目录/系统下载流程保存。
 
-### 5.2 SAF 下载失败或进度停住
+### 5.2 SAF 下载失败或进度停住 {#saf-download-failure}
 
 **现象**：历史页下载在自定义目录下失败，提示「存储空间不足」「文件提供方写入失败…」或「网络错误…」，文件没有出现在 `NovelDL/`；或者进度一直停在「正在连接，准备写入…」。
 
@@ -562,7 +562,7 @@ CDN 与 NAT 的空闲计时器。它是注释，不产生 `results` / `snapshot`
 
 ---
 
-## 8. 音乐聚合搜索里部分平台没反应 / 很慢
+## 8. 音乐聚合搜索里部分平台没反应 / 很慢 {#music-aggregate-search}
 
 **现象**：选择「全部平台」搜索时，进度条走完只回来几首；某些平台一直没有结果，或者整次搜索都要等到预算用完。单独指定该平台时却可能正常。
 
@@ -622,7 +622,7 @@ CDN 与 NAT 的空闲计时器。它是注释，不产生 `results` / `snapshot`
 
 ---
 
-## 10. TIDAL / YouTube / Apple Music / SoundCloud：能搜到不等于能下载
+## 10. TIDAL / YouTube / Apple Music / SoundCloud：能搜到不等于能下载 {#tidal-youtube-apple-music-soundcloud}
 
 **现象**：这些平台出现在列表里，但搜索为空、只返回试听，或下载时报「HLS 流暂不支持直链下载」「该平台未返回可下载直链」。
 
@@ -667,7 +667,7 @@ novel-cli music search "关键词" --platform tidal --limit 5
 
 ---
 
-## 12. 音乐歌单导出返回 400 / 音乐任务返回 429
+## 12. 音乐歌单导出返回 400 / 音乐任务返回 429 {#music-playlist-export}
 
 **现象**：`POST /api/v1/music/export` 返回 `400`；或 `POST /api/v1/music/jobs`
 返回 `429`，即使并没有触发按 IP 的请求限流。
@@ -791,7 +791,7 @@ novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<时�
 
 备份只含 `raw_data` 下的章节数据库, 不含 Cookie/token、`settings.toml`、日志或媒体文件;
 恢复后仍需重新登录, 且备份是明文, 请按敏感数据保管。完整的
-[「备份 (写入后自动校验) → 恢复」流程](./cli-examples.md#9-storage-子命令)
+[「备份 (写入后自动校验) → 恢复」流程](./cli-examples.md#storage-subcommand)
 见 CLI 用法示例。
 
 定时备份时可用 `--keep` 自动轮转。先预览会删哪些旧备份，确认后再真正执行：
