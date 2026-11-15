@@ -153,7 +153,7 @@ novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit 
 * `--format FORMAT [FORMAT ...]`: export format used when auto-downloading a confirmed result (defaults to the config file)
 * `--json`: print all search results to stdout as JSON and exit (for scripts)
 * `--first`: download the top-ranked result directly without confirmation (non-interactive)
-* `--sort {quality,priority,site,title,author,words,update}`: result ordering key, defaults to `quality` (combined relevance). `quality` blends keyword relevance, word count, update recency and source quality; `priority` orders by source priority; `words` by word count; `update` by update date; `site` / `title` / `author` order by source, title and author respectively.
+* `--sort {quality,priority,site,title,author,words,update}`: result ordering key, defaults to `quality` (combined relevance). `quality` blends keyword relevance, word count, update recency and source quality; `priority` orders by source priority; `words` by word count; `update` by update date; `site` / `title` / `author` order by source, title and author respectively. `quality` is also the only key that produces a query-intent verdict (`query_intent`); any other explicit key has no intent annotation, and the `--json` field is `null`.
 * `--order {asc,desc}`: sort direction. When omitted, the key's **natural direction** applies: descending for `quality` / `words` / `update`, ascending for `priority` / `site` / `title` / `author`. For example, `--sort priority` puts the preferred sources first by default, while `--sort words --order desc` puts the longest books first.
 * `--min-words N` / `--max-words N`: word-count filter (inclusive), `0`–`1000000000`. The site's `word_count` is parsed with the same rules the ranking layer uses (`"30万字"`, `"1,234"`); when set, rows with **no parseable word count** are dropped. Omit both for no filtering.
 * `--updated-after YYYY-MM-DD`: keep only results updated **on or after** that date (inclusive lower bound); the date must be exactly `YYYY-MM-DD`. When set, rows with **no parseable update date** are dropped. Omit it for no filtering.
@@ -218,6 +218,19 @@ the backend supplied (see the contract at the end of this page). The badge
 describes keyword matching (`match_tier`) and combined relevance
 (`rank_score`), independent of `--sort`: sorting by word count or update date
 does not turn it into a word-count or update-date badge.
+
+**Query intent**: the final results of the default `quality` order also state
+in the **results title** whether the query as a whole looks like a title or an
+author lookup, e.g. `Search Results · Page 1/2 · Title match` or
+`· Author match`. This is the query-level verdict (`query_intent`), a different
+thing from the row-level `match_tier` / `rank_score` above: a row can match
+well while the whole query still has no clear intent. Only `quality` has a
+verdict; with an explicit `--sort words` / `update` or another key the title
+stays unchanged. Ambiguous queries (for example the multi-token "title +
+author" form) and a query with no matches show nothing — the CLI never guesses
+a label. Every `--json` row carries `query_intent`
+(`"title"` / `"author"` / `null`) for scripts; the field never changes the
+order and is never written back to the cache.
 
 !!! note "Why fanqienovel is excluded from aggregate searches"
     Fanqie signs its search requests client-side, and needs **no login**. Selecting the site explicitly uses the official app API: the first run registers a device identity (cached on disk), after which `x-argus` / `x-gorgon` / `x-ladon` are computed locally — no browser window involved.
@@ -1305,7 +1318,7 @@ With `--json`:
 | Command | Option | stdout shape |
 | --- | --- | --- |
 | `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; printed as compact single-line JSON; `failed` is the number of missing chapters (`0` means complete); `exported` is `{format: [paths...]}`, or `null` with `--no-export` |
-| `search` | `--json` | Array of results with `site`, `book_id`, `book_url`, `cover_url`, `title`, `author`, `latest_chapter`, `update_date`, `word_count`, `priority`, plus the read-only derived fields `rank_score` (`0..1`) and `match_tier` (`0..4`: `4` exact / `3` prefix / `2` contains / `1` partial / `0` no match) |
+| `search` | `--json` | Array of results with `site`, `book_id`, `book_url`, `cover_url`, `title`, `author`, `latest_chapter`, `update_date`, `word_count`, `priority`, plus the read-only derived fields `rank_score` (`0..1`), `match_tier` (`0..4`: `4` exact / `3` prefix / `2` contains / `1` partial / `0` no match) and `query_intent` (`"title"` / `"author"` / `null`; only the default `quality` order has a verdict, other sorts or ambiguous queries give `null`) |
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
 | `sources list` | `--json` | Array with `site_key`, `name`, `search`, `hosts`, `origin`; `status` is populated only with `--check` (otherwise `null`); with `--probe` each item also carries `latency_ms` and `http_status` (`null` when unreachable) |
 | `update` | `--json` | One object with exactly nine keys: `current`, `latest`, `available`, `asset_name`, `asset_shape`, `asset_size`, `sha256`, `download_path`, `error`; absent values are `null` (or an empty string for `latest`). `asset_shape` is `cli` when a CLI asset was selected; `error` may be `insecure-url`, `missing-digest`, or `no-cli-asset` |

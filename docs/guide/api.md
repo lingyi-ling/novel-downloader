@@ -185,12 +185,14 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 - `timeout` 为**每个站点的墙钟预算**（秒）：站点在这段时间内没返回就算超时，
   整个聚合搜索的耗时也大致等于这个值，而不是被最慢的站点拖住。
 - `sort` 可选 `quality`、`priority`、`site`、`title`、`author`、
-  `words`、`update`。
+  `words`、`update`。默认的 `quality` 是唯一使用查询意图判定的排序键；
+  显式选择其它键时，响应里的 `query_intent` 为 `null`（该排序不使用判定）。
 - `order` 可选 `asc` / `desc`；省略时使用该排序键的自然方向。
 - `limit` 为合并后的总结果上限。
 - `group` 默认为 `false`；设为 `true` 时把跨站点的同名书合并为一行，每行是
   该书的最佳来源，并额外带一个 `sources` 数组列出所有命中的站点（最佳来源在前）。
-  外层结构仍是 `{total, results}`，不关心合并的客户端可保持默认值。
+  外层结构仍是 `{total, results, query_intent}`（`query_intent` 见下），
+  不关心合并与意图的客户端可保持默认值。
 - `min_words` / `max_words` 为可选的字数上下界（含边界），取值 `0`–`1000000000`。
   服务端用排名层同一套规则解析 `word_count`（`"30万字"`、`"1,234"`）；只要设置了
   任一字段，**没有字数或无法解析**的行就会被丢弃。省略即不过滤。
@@ -209,6 +211,7 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 ```json
 {
   "total": 2,
+  "query_intent": "title",
   "results": [
     {
       "site": "qidian",
@@ -222,23 +225,47 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
       "word_count": "100万字",
       "priority": 1,
       "rank_score": 0.912345,
-      "match_tier": 4
+      "match_tier": 4,
+      "query_intent": "title"
     }
   ]
 }
 ```
 
-`results[]` 额外携带两个**只读派生字段**（`group: true` 时合并后的行同样有）：
+顶层的 `query_intent` 是对**整次查询**的判定，可为 `null`：
+
+| 值 | 含义 |
+| --- | --- |
+| `"title"` | 结果集整体更像在按书名查找，`quality` 排序以书名匹配为主 |
+| `"author"` | 结果集整体更像在按作者查找，`quality` 排序以作者匹配为主 |
+| `null` | 没有明确判定：查询有歧义（例如「书名 + 作者」的多词查询、证据不足）、未命中任何字段，或本次使用非 `quality` 排序（留空 `sites` 的零结果响应也是 `null`） |
+
+它只解释 `quality` 排序为什么这样排，不参与排序、不写回缓存。`query_intent`
+是**查询级**判定，回答「这次查询整体像书名还是作者」；`match_tier` 是**单行级**
+判定，回答「这一行与关键词在某个字段上匹配到什么程度」。两者不是同一件事：
+一行可以有很高的 `match_tier`，而整次查询的 `query_intent` 仍为 `null`。
+`query_intent` 为 `"author"` 时，`match_tier` 以作者字段为主字段；为 `"title"`
+时以书名为主字段；为 `null` 时沿用历史规则（取书名/作者中更好的一个）。
+判定只接受 `"title"` / `"author"` / `null`；其他值，或同一列表中互相冲突的值，
+一律按 `null` 处理，CLI、桌面端与 Android 都不会替它猜一个标签。
+
+`results[]` 的每个最终行也带有同一个 `query_intent` 键（无判定时为 `null`），
+顶层值由这些行汇总而来；只需要行级数据的脚本可以直接读行内字段。流式端点、
+榜单浏览、旧缓存快照都没有这个键。
+
+`results[]` 额外携带三个**只读派生字段**（`group: true` 时合并后的行同样有）：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `rank_score` | float | `0..1` 的匹配质量分，由本次关键词与结果行计算；含少量时间衰减信号，同一次调用内可比，不同调用之间可能轻微漂移。 |
 | `match_tier` | int | `0..4` 的匹配层级：`4` 精确相等、`3` 前缀、`2` 包含、`1` 部分字符覆盖、`0` 无匹配。对同一关键词与行是确定的。 |
+| `query_intent` | string \| null | 与顶层同名的行级副本：`"title"` / `"author"` / `null`。同一响应的所有行取值相同，无判定时为 `null`。 |
 
-这两个字段是响应附加信息，不写回缓存，也不会修改站点返回的原始行；只需要
+这三个字段是响应附加信息，不写回缓存，也不会修改站点返回的原始行；只需要
 持久化书目的客户端可以忽略它们。流式端点 `/search/stream` 推送的是各站点
-的原始预览分片，**不包含** `rank_score` / `match_tier`，只有 `POST /search`
-的最终结果才带这两个字段。
+的原始预览分片，**不包含** `rank_score` / `match_tier` / `query_intent`，
+只有 `POST /search` 的最终结果才带这些派生字段（SSE 的 `done` 帧只有
+`total`）。
 
 同样的信息在各客户端是这样展示的：
 
@@ -247,6 +274,14 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 | CLI | 表格的 `Title` 列在书名后追加 `· 精确 0.91`（层级 + 两位小数的 `rank_score`）；`--json` 不做裁剪，仍输出后端给出的原始字段。 |
 | 桌面客户端 | 书名旁的彩色徽标只写层级（`精确` / `前缀` / `包含` / `部分` / `无匹配`），完整说明放在悬停提示与无障碍名称里：`匹配：精确 · 分数 0.91`；跨站合并的行会注明 `（主来源）`。 |
 | Android 客户端 | 书名旁的徽标显示 `精确 · 0.91`；读屏播报完整的「匹配度：精确，相关度评分 0.91」。只有分数、没有层级时显示 `相关度 0.80`。 |
+
+`query_intent` 是**列表层级**的说明，展示位置与上表的行级徽标分开：
+
+| 客户端 | 展示方式 |
+| --- | --- |
+| CLI | 结果页标题追加 `· 书名匹配` / `· 作者匹配`，例如 `搜索结果 · 第 1/2 页 · 书名匹配`；`--json` 的行内仍保留 `query_intent` 字段。 |
+| 桌面客户端 | 结果数量旁显示一枚列表级小标签（`书名匹配` / `作者匹配`），重新搜索、清空结果或搜索失败时隐藏；它不是书名旁的单行徽标。 |
+| Android 客户端 | 结果数量旁显示同一个列表级标签（`书名匹配` / `作者匹配`），只在 `query_intent` 为 `"title"` / `"author"` 且结果非空时出现；榜单/分类浏览会清空它，`null` 与未知值不显示，也不会猜一个标签。 |
 
 三个客户端都只使用有效值：`match_tier` 必须是 `0..4` 的整数，
 `rank_score` 必须是 `0..1` 的有限数。无效值会被忽略：CLI 与桌面端要求
@@ -292,7 +327,7 @@ curl -s -X POST "$BASE/api/v1/browse" \
 
 `POST /browse` 的响应使用与 `/search` 相同的外层结构
 `{site, total, results}`，但结果行是站点原样返回的条目，不带搜索的
-`rank_score` / `match_tier` 派生字段。站点不支持浏览
+`rank_score` / `match_tier` / `query_intent` 派生字段。站点不支持浏览
 （该站点的 searcher 没实现 `rank`/`categories`）时返回 `400`，`detail` 里带
 `Site '<site>' does not support browsing.`。
 
@@ -326,6 +361,9 @@ data: {"total":2}
 ```
 
 - 每个站点完成时推送一个 `results` 事件，`data` 是该站点的结果数组。
+- `results` 的 `data` 是站点原始预览行，不带 `rank_score` / `match_tier` /
+  `query_intent`；`done` 只有 `total`。这些派生字段只出现在 `POST /search`
+  的最终响应里。
 - 全部站点结束后推送一个 `done` 事件，`data.total` 为本次推送的总条数。
 - 客户端断开连接时，服务端会关闭底层搜索生成器并取消仍在进行的站点请求。
 - 响应头包含 `Cache-Control: no-cache` 与 `X-Accel-Buffering: no`，

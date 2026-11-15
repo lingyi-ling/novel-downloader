@@ -153,7 +153,7 @@ novel-cli search [-h] [--site SITE] [--config CONFIG] [--limit N] [--site-limit 
 * `--format FORMAT [FORMAT ...]`: 结果确认后自动下载时的导出格式 (默认使用配置文件设定)
 * `--json`: 将所有搜索结果以 JSON 输出到标准输出后退出 (便于脚本消费)
 * `--first`: 直接下载排名第一的结果, 无需确认 (非交互模式)
-* `--sort {quality,priority,site,title,author,words,update}`: 结果排序键, 默认为 `quality` (综合相关度)。`quality` 综合关键词相关度、字数、更新时间和来源质量; `priority` 按书源优先级; `words` 按字数; `update` 按更新时间; `site` / `title` / `author` 分别按来源、书名、作者排序。
+* `--sort {quality,priority,site,title,author,words,update}`: 结果排序键, 默认为 `quality` (综合相关度)。`quality` 综合关键词相关度、字数、更新时间和来源质量; `priority` 按书源优先级; `words` 按字数; `update` 按更新时间; `site` / `title` / `author` 分别按来源、书名、作者排序。`quality` 也是唯一会判定查询意图 (`query_intent`) 的排序键; 显式换用其它键时没有意图标注, `--json` 里该字段为 `null`。
 * `--order {asc,desc}`: 排序方向。省略时使用排序键的**自然方向**: `quality` / `words` / `update` 为降序, `priority` / `site` / `title` / `author` 为升序。例如 `--sort priority` 默认把更优先的来源排在前面, `--sort words --order desc` 把字数最多的排在前面。
 * `--min-words N` / `--max-words N`: 字数过滤 (含边界), 取值为 `0`–`1000000000`。站点返回的 `word_count` 会按排名层同一套规则解析 (`"30万字"`、`"1,234"`); 设置后, **没有字数或无法解析**的结果会被丢弃。省略即不过滤。
 * `--updated-after YYYY-MM-DD`: 只保留该日期**当天及之后**更新的结果 (下界, 含当天); 严格使用 `YYYY-MM-DD`。设置后, **没有更新日期或无法解析**的结果会被丢弃。省略即不过滤。
@@ -207,6 +207,8 @@ novel-cli search 斗破苍穹 --min-words 300000 --updated-after 2024-01-01 --gr
 排序只改变本次返回的顺序, 不改变结果字段或缓存内容; `--json` 仍是同样的结果数组, 只是行序随 `--sort` / `--order` 变化。`quality` 是唯一会应用相关度下限的排序键; 改用 `words` / `update` 等键时不会因相关度过滤丢行。
 
 **匹配标注**: 结果带排名派生字段时, 表格的 `Title` 列显示为 `书名 · 精确 0.91`。前半是 `match_tier` 的中文标签 (`4` 精确 / `3` 前缀 / `2` 包含 / `1` 部分 / `0` 无匹配), 后半是保留两位小数的 `rank_score`。只有两个字段都有效才追加; 旧缓存、流式预览或其他未排名来源缺少字段时, 书名保持原样, 不会补 `0.00` 或 `无匹配` 造成误导。标注只解释排序结果, 不改变排序, 也不会写回缓存; `--json` 不做裁剪, 仍输出后端给出的原始字段 (见文末契约)。徽标描述的是关键词匹配 (`match_tier`) 与综合相关度 (`rank_score`), 与当前 `--sort` 无关: 即使按字数或更新时间排序, 它仍只解释相关度, 不会变成「字数」或「更新时间」。
+
+**查询意图**: 默认 `quality` 排序的最终结果还会在**结果页标题**说明这次查询整体更像书名还是作者, 例如 `搜索结果 · 第 1/2 页 · 书名匹配` 或 `· 作者匹配`。这是查询级判定 (`query_intent`), 与上一段的行级 `match_tier` / `rank_score` 不是同一件事: 一行可以匹配得很好, 而整次查询仍没有明确意图。只有 `quality` 排序有判定; 显式使用 `--sort words` / `update` 等其它键时标题保持原样。查询有歧义 (例如「书名 + 作者」的多词查询) 或完全没有命中时也不显示, 不会猜一个标签。`--json` 的每一行都带 `query_intent` (`"title"` / `"author"` / `null`), 脚本可直接读取; 该字段不改变排序, 也不写回缓存。
 
 !!! note "番茄为什么不在聚合搜索里"
     番茄的搜索接口要客户端签名, 且**不需要登录**。显式指定站点时会直接走官方 App 接口: 首次使用自动注册一台设备身份 (落盘复用), 之后 `x-argus` / `x-gorgon` / `x-ladon` 全部本地现算, 无需浏览器窗口。
@@ -1284,7 +1286,7 @@ novel-cli update --json
 | 命令 | 选项 | stdout 结构 |
 | --- | --- | --- |
 | `download` | `--json` | `{"site": ..., "books": [{"book_id", "downloaded", "failed", "exported"}]}`; 输出为单行紧凑 JSON; `failed` 为缺失章节数 (`0` 表示完整); `exported` 为 `{格式: [路径...]}`; 指定 `--no-export` 时为 `null` |
-| `search` | `--json` | 搜索结果数组, 每项含 `site`、`book_id`、`book_url`、`cover_url`、`title`、`author`、`latest_chapter`、`update_date`、`word_count`、`priority`, 以及只读派生字段 `rank_score` (`0..1`) 与 `match_tier` (`0..4`: `4` 精确 / `3` 前缀 / `2` 包含 / `1` 部分 / `0` 无匹配) |
+| `search` | `--json` | 搜索结果数组, 每项含 `site`、`book_id`、`book_url`、`cover_url`、`title`、`author`、`latest_chapter`、`update_date`、`word_count`、`priority`, 以及只读派生字段 `rank_score` (`0..1`)、`match_tier` (`0..4`: `4` 精确 / `3` 前缀 / `2` 包含 / `1` 部分 / `0` 无匹配) 与 `query_intent` (`"title"` / `"author"` / `null`; 仅默认 `quality` 排序有判定, 其余排序或歧义查询为 `null`) |
 | `export` | `--json` | `{"site": ..., "books": [{"book_id", "exported"}]}` |
 | `sources list` | `--json` | 数组, 每项含 `site_key`、`name`、`search`、`hosts`、`origin`; 加 `--check` 时 `status` 才有值 (否则为 `null`); 加 `--probe` 时额外含 `latency_ms`、`http_status` (探测不到时为 `null`) |
 | `update` | `--json` | 单个对象, 固定含 `current`、`latest`、`available`、`asset_name`、`asset_shape`、`asset_size`、`sha256`、`download_path`、`error` 九个字段; 无对应值时除 `current`/`available` 外为 `null` (或 `latest` 为空串)。`asset_shape` 在选中 CLI 资产时为 `cli`; `error` 可能为 `insecure-url`、`missing-digest`、`no-cli-asset` |

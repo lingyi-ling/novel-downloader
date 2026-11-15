@@ -195,14 +195,16 @@ Request body:
   not answer within this window is treated as timed out, so the whole aggregate
   search takes roughly this long instead of waiting for the slowest site.
 - `sort` accepts `quality`, `priority`, `site`, `title`, `author`, `words`,
-  `update`.
+  `update`. The default `quality` is the only key that uses the query-intent
+  verdict; with any other explicit key the response's `query_intent` is `null`
+  (that ordering does not use the verdict).
 - `order` accepts `asc` / `desc`; when omitted, the key's natural direction is used.
 - `limit` is the total result cap after merging.
 - `group` defaults to `false`; when `true`, same-book results from different
   sites are folded into one row. That row is the book's best source and carries
   an extra `sources` array listing every site that has it (best first). The
-  envelope stays `{total, results}`, so clients that ignore grouping keep the
-  default and see no change.
+  envelope stays `{total, results, query_intent}` (see below), so clients that
+  ignore grouping and intent keep the default and see no change.
 - `min_words` / `max_words` are optional inclusive word-count bounds in the
   range `0`–`1000000000`. The server parses `word_count` with the same rules
   the ranking layer uses (`"30万字"`, `"1,234"`); as soon as either field is
@@ -229,6 +231,7 @@ Response:
 ```json
 {
   "total": 2,
+  "query_intent": "title",
   "results": [
     {
       "site": "qidian",
@@ -242,25 +245,54 @@ Response:
       "word_count": "100万字",
       "priority": 1,
       "rank_score": 0.912345,
-      "match_tier": 4
+      "match_tier": 4,
+      "query_intent": "title"
     }
   ]
 }
 ```
 
-Every `results[]` row also carries two **read-only derived fields** (merged
-rows from `group: true` carry them too):
+The top-level `query_intent` is a verdict on the **whole query** and may be
+`null`:
+
+| Value | Meaning |
+| --- | --- |
+| `"title"` | The result set as a whole looks like a title lookup; the `quality` order is driven by title matches |
+| `"author"` | The result set as a whole looks like an author lookup; the `quality` order is driven by author matches |
+| `null` | No clear verdict: the query is ambiguous (for example the multi-token "title + author" form, or too little evidence), no field matched, or this call used a non-`quality` sort (an empty `sites` selection also returns `null`) |
+
+It explains why the `quality` order is what it is; it never changes the order
+and is never written back to the cache. `query_intent` is a **query-level**
+verdict — "does this query look like a title or an author?" — while
+`match_tier` is a **row-level** verdict: "how strongly does this one row match
+the keyword in one field?" They are different questions: a row can have a high
+`match_tier` while the whole query's `query_intent` is still `null`. When
+`query_intent` is `"author"`, `match_tier` uses the author field as its primary
+field; `"title"` uses the title; `null` keeps the historical rule (the better of
+the two fields). Only `"title"` / `"author"` / `null` are accepted; any other
+value, or conflicting values within one list, is treated as `null`. The CLI,
+desktop app and Android app never guess a label for it.
+
+Every final `results[]` row also carries the same `query_intent` key (`null`
+when there is no verdict); the top-level value is aggregated from those rows,
+and scripts that only need row-level data may read it there. Streaming
+previews, browse results and older cache snapshots have no such key.
+
+In addition to the top-level verdict, each row carries three **read-only
+derived fields** (merged rows from `group: true` carry them too):
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `rank_score` | float | A `0..1` match-quality score computed from this keyword and row; it includes a small recency signal, so it is comparable within one call but may drift slightly between calls. |
 | `match_tier` | int | The `0..4` match tier: `4` exact equality, `3` prefix, `2` containment, `1` partial character coverage, `0` no match. Deterministic for a given keyword and row. |
+| `query_intent` | string \| null | The row-level copy of the top-level verdict: `"title"` / `"author"` / `null`. Every row of one response has the same value; `null` when there is no verdict. |
 
-Both fields are response annotations: they are never written back to the cache
+These fields are response annotations: they are never written back to the cache
 and never modify the row a site returned, so clients that only persist books
 can ignore them. The streaming endpoint `/search/stream` emits each site's raw
-preview chunk and **does not** include `rank_score` / `match_tier`; only the
-final `POST /search` results carry them.
+preview chunk and **does not** include `rank_score` / `match_tier` /
+`query_intent`; only the final `POST /search` results carry these fields (the
+SSE `done` frame has `total` only).
 
 The clients surface the same values like this:
 
@@ -269,6 +301,15 @@ The clients surface the same values like this:
 | CLI | The `Title` cell appends `· Exact 0.91` (tier label plus the two-decimal `rank_score`); `--json` is not trimmed and still prints whatever raw fields the backend supplied. |
 | Desktop app | A colored badge beside the title shows only the tier (`Exact` / `Prefix` / `Contains` / `Partial` / `No match`); the full explanation lives in the tooltip and accessible name: `Match: Exact · score 0.91`. A cross-site merged row also says `(best source)`. |
 | Android app | The badge beside the title reads `Exact · 0.91`; a screen reader announces the full "Match: Exact, relevance score 0.91". With a score but no tier it shows `Relevance 0.80`. |
+
+`query_intent` is a **list-level** explanation, separate from the row badges
+above:
+
+| Client | Presentation |
+| --- | --- |
+| CLI | The results title gains `· Title match` / `· Author match`, e.g. `Search Results · Page 1/2 · Title match`; `--json` keeps `query_intent` on each row. |
+| Desktop app | A small list-level chip beside the result count (`Title match` / `Author match`), hidden on a new search, a result-list reset or a failed search; it is not the per-row badge next to the title. |
+| Android app | The same list-level chip beside the result count (`Title match` / `Author match`); it appears only when `query_intent` is `"title"` / `"author"` and there are results. Rankings/category browsing clear it, and `null` or unknown values show nothing rather than a guessed label. |
 
 All three use only usable values: `match_tier` must be an integer in `0..4` and
 `rank_score` a finite number in `0..1`. Unusable values are ignored: the CLI
@@ -319,7 +360,8 @@ curl -s -X POST "$BASE/api/v1/browse" \
 
 The `POST /browse` response uses the same outer shape as `/search`
 (`{site, total, results}`), but its rows are the site's entries as returned and
-do not carry the search-only `rank_score` / `match_tier` annotations. When a
+do not carry the search-only `rank_score` / `match_tier` / `query_intent`
+annotations. When a
 site does not support browsing (its searcher
 has no `rank`/`categories` implementation), the API returns `400` with
 `Site '<site>' does not support browsing.` in `detail`.
@@ -355,6 +397,9 @@ data: {"total":2}
 
 - One `results` event is pushed when each site finishes; `data` is that site's
   result array.
+- A `results` payload is a site's raw preview rows and does **not** include
+  `rank_score` / `match_tier` / `query_intent`; `done` carries `total` only.
+  These derived fields appear only in the final `POST /search` response.
 - One `done` event is pushed after all sites finish; `data.total` is the total
   number of items pushed in this request.
 - When the client disconnects, the server closes the underlying search generator

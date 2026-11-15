@@ -456,6 +456,26 @@ Key points:
 * Filtering runs after ranking and before `--group` merging and the `--limit` cut, so it only narrows the result set without changing ordering; different filter combinations are cached separately and never reuse an unfiltered snapshot.
 * The API exposes the same semantics as `min_words` / `max_words` / `updated_after`, including on the streaming endpoint.
 
+#### Reading the "Title match / Author match" verdict
+
+The final `quality` (`Relevance`) ordering also states, at the list level,
+whether the search was treated as a title lookup or an author lookup:
+
+```bash
+# REST: top-level query_intent, either "title", "author" or null
+curl -s -X POST "$BASE/api/v1/search" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"keyword":"天蚕土豆"}' | jq -r '.query_intent // "ambiguous"'
+
+# CLI: the table title shows "Title match" / "Author match"; scripts read each row
+novel-cli search 天蚕土豆 --json | jq -r '.[0].query_intent // "ambiguous"'
+```
+
+* `query_intent` is a **query-level** verdict: it answers whether the whole query looks more like a title or an author. `match_tier` / `rank_score` are **row-level** verdicts about one row's match. Do not conflate them.
+* Only the default `quality` sort has a value; an explicit `--sort words` / `update` or another key, streamed previews, browse results and old cache snapshots all give `null` (the CLI adds no title suffix and the desktop app shows no list chip).
+* It never guesses: ambiguous cases such as the multi-token "title + author" form or too little evidence return `null`. The verdict only explains the ordering; it never changes it and is never written back to the cache.
+* Android shows the same list-level chip beside the result count (`Title match` / `Author match`); rankings/category browsing clear it, and `null` or unknown values show nothing.
+
 #### Desktop remembers the last filters
 
 The desktop client saves the last **valid** filter set, so you do not have to re-enter it every time:

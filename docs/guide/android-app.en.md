@@ -134,6 +134,28 @@ keyword matched the row:
 - When neither value is usable, no badge is shown. That usually means the row came from an old cache entry, browse results, or an older embedded engine that did not provide ranking data. The app never substitutes `0.00` or "No match".
 - The badge only explains the ordering; it does not change the list order and is never written back to the cache or sent in a later request.
 
+### Query intent
+
+The final `POST /api/v1/search` response carries a list-level `query_intent`
+that says whether the `Relevance` (`quality`) ordering as a whole looks like a
+title lookup or an author lookup. It may be `null` and only has a value under
+the default `quality` sort. It is not the same thing as the `match_tier` above:
+`match_tier` is a **row-level** match grade, while `query_intent` is a verdict
+on the **whole query**.
+
+Above the results, beside the result count, the app shows the same chip as the
+desktop client — `Title match` / `Author match`:
+
+- It appears only when the response's `query_intent` is `"title"` / `"author"`
+  and there are results; `null`, unknown values and an empty result list show
+  nothing rather than a guessed label.
+- Rankings and category browsing have no keyword, so they clear the chip; a new
+  search then shows the verdict from the new response. Both the connected
+  desktop API and the standalone engine return the same field.
+- The chip only explains the ordering: it does not change the list order and is
+  never written back to the cache. It is independent of the per-row match badge
+  beside the title.
+
 ## Download Directory and File Saving
 
 The History tab lists exported files; tapping one starts saving it. By default the file goes through the system DownloadManager into the public Downloads directory, with progress shown in the notification shade.

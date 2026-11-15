@@ -456,6 +456,25 @@ novel-cli search 斗破苍穹 --min-words 300000 --group --json | jq '.[0]'
 * 过滤在排序之后、`--group` 合并与 `--limit` 截断之前执行，只缩小结果集，不改变排序；不同过滤组合分别缓存，不会复用未过滤的快照。
 * API 侧对应 `min_words` / `max_words` / `updated_after`，流式端点同名查询参数，语义一致。
 
+#### 读懂「书名匹配 / 作者匹配」
+
+`quality`（相关度）排序的最终结果会在列表层级给出查询意图，方便判断这次搜索被当成书名还是作者：
+
+```bash
+# REST：顶层 query_intent，可能是 "title" / "author" / null
+curl -s -X POST "$BASE/api/v1/search" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"keyword":"天蚕土豆"}' | jq -r '.query_intent // "ambiguous"'
+
+# CLI：表格标题显示「书名匹配」/「作者匹配」；脚本读每行的 query_intent
+novel-cli search 天蚕土豆 --json | jq -r '.[0].query_intent // "ambiguous"'
+```
+
+* `query_intent` 是**查询级**判定：它回答整次查询更像书名还是作者；`match_tier` / `rank_score` 是**行级**判定，回答单行匹配得怎样。两者不要混用。
+* 只有默认 `quality` 排序有值；显式换用 `--sort words` / `update` 等其它键、流式预览、榜单浏览和旧缓存都没有，此时为 `null`（CLI 标题不加后缀，桌面端不显示列表标签）。
+* 有歧义时不猜：例如「书名 + 作者」的多词查询、证据不足都会返回 `null`。它只解释排序，不改变排序，也不写回缓存。
+* Android 也已在结果数量旁展示同一个列表级标签（`书名匹配` / `作者匹配`）；榜单/分类浏览会清空它，`null` 或未知值不显示。
+
 #### 桌面端记住上次筛选
 
 桌面端会保存最近一次**有效**的筛选条件，不必每次重新填写：
