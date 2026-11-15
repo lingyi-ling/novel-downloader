@@ -493,13 +493,13 @@ svg { display: block; }
   height: 26px; width: 26px; border-radius: 8px; margin-bottom: 6px;
   background: var(--brand-tile);
 }
-.aw-nav { height: 26px; border-radius: 8px; background: var(--hover, var(--card)); opacity: .6; }
+.aw-nav { height: 26px; border-radius: 8px; background: var(--card); opacity: .6; }
 .aw-nav.active { background: var(--accent-soft); opacity: 1; position: relative; }
 .aw-nav.active::before {
   content: ""; position: absolute; left: -10px; top: 6px; bottom: 6px;
   width: 3px; border-radius: 0 3px 3px 0; background: var(--accent);
 }
-.aw-foot { margin-top: auto; height: 20px; border-radius: 7px; background: var(--hover, var(--card)); opacity: .4; }
+.aw-foot { margin-top: auto; height: 20px; border-radius: 7px; background: var(--card); opacity: .4; }
 .appwin-main { padding: 16px 18px; display: flex; flex-direction: column; gap: 11px; }
 .aw-head { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
 .aw-h1 { height: 16px; width: 90px; border-radius: 6px; background: var(--text); opacity: .85; }

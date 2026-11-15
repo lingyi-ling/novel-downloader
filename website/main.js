@@ -8,6 +8,17 @@ document.documentElement.classList.add("js");
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
+/* Decorative work (GitHub chips, scrollspy) is not needed for first paint:
+   run it at the browser's first idle moment instead of competing with the
+   CSS and HTML the visitor is actually waiting for. */
+function whenIdle(fn) {
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(fn, { timeout: 3000 });
+  } else {
+    setTimeout(fn, 1200);
+  }
+}
+
 /* ------------------------------------------------ theme (persisted) */
 const root = document.documentElement;
 const themeColorMetas = $$('meta[name="theme-color"]');
@@ -50,8 +61,25 @@ syncThemeBtn();
 
 /* ------------------------------------------------ i18n (zh source of truth, data-en swap) */
 const langBtn = $("#lang-btn");
+const metaDesc = document.querySelector('meta[name="description"]');
 /* Collected on the first language switch, then reused for every toggle. */
 let translated = null;
+/* Resolved lazily on the first switch and then reused: a toggle should not
+   re-query nine elements every time. */
+let labelEls = null;
+const LABEL_SPECS = [
+  // the label names the language the button switches *to*: a screen reader
+  // user hears "切换到英文" in Chinese, "Switch to Chinese" in English
+  ["lang-btn", "切换到英文", "Switch to Chinese"],
+  ["theme-btn", "切换主题", "Toggle theme"],
+  ["burger-btn", "打开菜单", "Open menu"],
+  ["to-top", "回到顶部", "Back to top"],
+  ["appwin", "书音 BookTone 桌面客户端预览", "BookTone desktop app preview"],
+  ["start-tabs", "快速开始方式", "Quick start options"],
+  ["nav-links", "主导航", "Main navigation"],
+  ["mobile-menu", "主导航", "Main navigation"],
+  ["foot-links", "页脚链接", "Footer links"],
+];
 const PAGE_TITLE = {
   zh: "书音 BookTone — 小说与音乐 · 多站点聚合 · 四端同源",
   en: "BookTone — aggregate search · async downloads · four clients",
@@ -88,26 +116,16 @@ function applyLang(lang) {
     el.innerHTML = isEn ? el.dataset.en : el.dataset.zh;
   });
   document.title = isEn ? PAGE_TITLE.en : PAGE_TITLE.zh;
-  const metaDesc = document.querySelector('meta[name="description"]');
   if (metaDesc) metaDesc.setAttribute("content", META_DESC[isEn ? "en" : "zh"]);
   // keep control labels in the active language for screen readers
-  const labels = [
-    // the label names the language the button switches *to*: a screen reader
-    // user hears "切换到英文" in Chinese, "Switch to Chinese" in English
-    ["lang-btn", "切换到英文", "Switch to Chinese"],
-    ["theme-btn", "切换主题", "Toggle theme"],
-    ["burger-btn", "打开菜单", "Open menu"],
-    ["to-top", "回到顶部", "Back to top"],
-    ["appwin", "书音 BookTone 桌面客户端预览", "BookTone desktop app preview"],
-    ["start-tabs", "快速开始方式", "Quick start options"],
-    ["nav-links", "主导航", "Main navigation"],
-    ["mobile-menu", "主导航", "Main navigation"],
-    ["foot-links", "页脚链接", "Footer links"],
-  ];
-  labels.forEach(([id, zh, en]) => {
-    const el = document.getElementById(id);
-    if (el) el.setAttribute("aria-label", isEn ? en : zh);
-  });
+  if (!labelEls) {
+    labelEls = LABEL_SPECS.map(([id, zh, en]) => ({
+      el: document.getElementById(id),
+      zh,
+      en,
+    })).filter((entry) => entry.el);
+  }
+  labelEls.forEach(({ el, zh, en }) => el.setAttribute("aria-label", isEn ? en : zh));
   // the menu button label describes the action, which depends on state too
   const burgerEl = document.getElementById("burger-btn");
   if (burgerEl) {
@@ -237,33 +255,38 @@ if ("IntersectionObserver" in window) {
 }
 
 /* ------------------------------------------------ scrollspy */
-const spyLinks = $$(".nav-links a[href^='#'], .mobile-menu a[href^='#']");
-const spyTargets = [
-  ...new Set(
-    spyLinks
-      .map((a) => a.getAttribute("href"))
-      .filter((href) => href && href.length > 1),
-  ),
-]
-  .map((href) => document.querySelector(href))
-  .filter(Boolean);
-if ("IntersectionObserver" in window && spyTargets.length) {
-  const sio = new IntersectionObserver(
-    (entries) => {
-      entries.forEach((entry) => {
-        if (!entry.isIntersecting) return;
-        const active = "#" + entry.target.id;
-        spyLinks.forEach((a) => {
-          const on = a.getAttribute("href") === active;
-          a.classList.toggle("active", on);
-          if (on) a.setAttribute("aria-current", "true");
-          else a.removeAttribute("aria-current");
+/* Decorative nav state, not first paint: query and observe the sections once
+   the page is idle so the initial render is not held up by a dozen lookups. */
+if ("IntersectionObserver" in window) {
+  whenIdle(() => {
+    const spyLinks = $$(".nav-links a[href^='#'], .mobile-menu a[href^='#']");
+    const spyTargets = [
+      ...new Set(
+        spyLinks
+          .map((a) => a.getAttribute("href"))
+          .filter((href) => href && href.length > 1),
+      ),
+    ]
+      .map((href) => document.querySelector(href))
+      .filter(Boolean);
+    if (!spyTargets.length) return;
+    const sio = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          const active = "#" + entry.target.id;
+          spyLinks.forEach((a) => {
+            const on = a.getAttribute("href") === active;
+            a.classList.toggle("active", on);
+            if (on) a.setAttribute("aria-current", "true");
+            else a.removeAttribute("aria-current");
+          });
         });
-      });
-    },
-    { rootMargin: "-40% 0px -55% 0px" },
-  );
-  spyTargets.forEach((sec) => sio.observe(sec));
+      },
+      { rootMargin: "-40% 0px -55% 0px" },
+    );
+    spyTargets.forEach((sec) => sio.observe(sec));
+  });
 }
 
 /* ------------------------------------------------ mobile menu */
@@ -376,13 +399,6 @@ function starsLabel(n) {
 /* Decorative GitHub chips are not needed for first paint: start their
    requests once the browser is idle so they never compete with the CSS/HTML
    that the visitor is actually waiting for. */
-function whenIdle(fn) {
-  if ("requestIdleCallback" in window) {
-    window.requestIdleCallback(fn, { timeout: 3000 });
-  } else {
-    setTimeout(fn, 1200);
-  }
-}
 const starsEl = $("#gh-stars");
 if (starsEl) {
   whenIdle(() => {

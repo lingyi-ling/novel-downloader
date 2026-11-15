@@ -714,7 +714,7 @@ def test_control_labels_switch_language(js: str, doc: _Doc) -> None:
             continue
         chinese_labelled.add(data["id"])
 
-    table = re.search(r"const labels = \[(.*?)\];", js, re.S)
+    table = re.search(r"const (?:labels|LABEL_SPECS) = \[(.*?)\];", js, re.S)
     assert table is not None, "applyLang() label table is missing"
     mapped = set(
         re.findall(r'\[\s*"([a-z0-9-]+)",\s*"[^"]+",\s*"[^"]+"\s*\]', table.group(1))
@@ -1569,3 +1569,216 @@ def test_keyframes_only_animate_compositor_properties(css: str) -> None:
     for body in keyframes:
         for prop in re.findall(r"([a-z-]+)\s*:", body):
             assert prop in allowed, f"@keyframes animates {prop}"
+
+
+# --------------------------------------------------------------------------
+# resource-loading policy
+#
+# The site has no build step and no CDN: every subresource below is a file in
+# website/.  These tests pin the loading decisions that keep first paint cheap
+# so a later edit cannot quietly add a font, a third-party script or a
+# render-blocking request.
+# --------------------------------------------------------------------------
+SPECULATIVE_RELS = {"preconnect", "dns-prefetch", "prefetch", "prerender", "preload"}
+
+
+def _rel_set(data: dict[str, str]) -> set[str]:
+    return set(data.get("rel", "").lower().split())
+
+
+def _site_path(value: str) -> Path:
+    path = value.split("?")[0].split("#")[0]
+    return SITE / path.removeprefix("/noveldl/").lstrip("/")
+
+
+def test_one_local_stylesheet_per_page(doc: _Doc, error_doc: _Doc) -> None:
+    # One same-origin stylesheet is the only render-blocking subresource.
+    for parser in (doc, error_doc):
+        sheets = [
+            data for data, _ in parser.by_tag("link") if "stylesheet" in _rel_set(data)
+        ]
+        assert len(sheets) == 1, sheets
+        assert _local_ref(sheets[0].get("href", "")), sheets[0]
+        assert _site_path(sheets[0]["href"]).is_file()
+
+
+def test_no_third_party_scripts_fonts_or_imports(
+    doc: _Doc, error_doc: _Doc, css: str, js: str
+) -> None:
+    for parser in (doc, error_doc):
+        for data in parser.with_attr("src"):
+            assert _local_ref(data["src"]), f"external subresource: {data['src']}"
+    # the 404 page is deliberately JavaScript-free
+    assert not [data for data, _ in error_doc.by_tag("script") if data.get("src")]
+    # no web fonts and no injected runtime downloads
+    assert "@font-face" not in css
+    assert "@import" not in css
+    assert not re.search(r"url\(", css), "CSS must not fetch fonts or images"
+    assert not re.search(r"document\.createElement\(\s*[\"']script", js)
+    assert "new Worker(" not in js
+    assert not re.search(r"(?<![\w.])import\s*\(", js)
+
+
+def test_speculative_hints_are_absent_or_local(doc: _Doc, error_doc: _Doc) -> None:
+    # No preconnect/dns-prefetch/prefetch/prerender: nothing on the critical
+    # path is third-party, and the GitHub calls are idle-scheduled instead.
+    # If a real local preload is ever added, it must point at a shipped file.
+    for parser in (doc, error_doc):
+        for data, _ in parser.by_tag("link"):
+            rels = _rel_set(data)
+            assert not rels & SPECULATIVE_RELS - {"preload"}, data
+            if "preload" in rels:
+                href = data.get("href", "")
+                assert _local_ref(href), data
+                assert _site_path(href).is_file(), data
+                assert "og-image.png" not in href, data
+
+
+def test_og_image_never_competes_with_first_paint(
+    doc: _Doc, error_doc: _Doc, css: str
+) -> None:
+    # The social card is crawler-only: it must never be an <img>, a
+    # stylesheet url() or a preload target of the rendered page.
+    for parser in (doc, error_doc):
+        for tag, data in parser.order:
+            for attr in ("src", "srcset", "href"):
+                assert "og-image.png" not in data.get(attr, ""), (tag, data)
+    assert "og-image.png" not in css
+    owners = {
+        data.get("property") or data.get("name")
+        for tag, data in doc.order
+        if tag == "meta" and "og-image.png" in data.get("content", "")
+    }
+    assert owners == {"og:image", "twitter:image"}
+
+
+def test_no_media_elements_compete_with_first_paint(doc: _Doc, error_doc: _Doc) -> None:
+    # The page is text + CSS only, so there is nothing to size or lazy-load.
+    # Any future <img>/<video>/<iframe> must carry width/height (or an
+    # aspect-ratio) before it is allowed in; test_images_declare_alt_size_and_loading
+    # already enforces that contract for <img>.
+    for parser in (doc, error_doc):
+        for tag in ("img", "picture", "video", "iframe", "embed", "object", "canvas"):
+            assert not parser.by_tag(tag), f"add intrinsic dimensions for <{tag}>"
+
+
+def test_render_blocking_requests_stay_deferred(doc: _Doc, error_doc: _Doc) -> None:
+    scripts = [data for data, _ in doc.by_tag("script") if data.get("src")]
+    assert [data["src"] for data in scripts] == ["main.js"]
+    assert "defer" in scripts[0]
+    # defer + async would execute before the document is parsed again
+    assert "async" not in scripts[0]
+    # one blocking stylesheet, nothing else in the head pulls bytes
+    for parser in (doc, error_doc):
+        assert (
+            sum("stylesheet" in _rel_set(data) for data, _ in parser.by_tag("link"))
+            == 1
+        )
+
+
+# --------------------------------------------------------------------------
+# JavaScript execution budget
+# --------------------------------------------------------------------------
+def test_decorative_work_waits_for_idle(js: str) -> None:
+    assert re.search(r"function whenIdle\(fn\)", js)
+    assert re.search(r"requestIdleCallback\(fn, \{ timeout: 3000 \}\)", js)
+    assert re.search(r"setTimeout\(fn, 1200\)", js)
+    # scrollspy + stars + release version
+    assert js.count("whenIdle(() => {") >= 3
+    # the scrollspy lookups and observers are inside an idle callback
+    scrollspy = re.search(r"scrollspy \*/", js)
+    menu = re.search(r"/\* -+ mobile menu", js)
+    assert scrollspy is not None and menu is not None
+    assert "whenIdle(() => {" in js[scrollspy.end() : menu.start()]
+    # no request starts at parse time: everything runs from an idle callback
+    assert not re.search(r"^(?:fetch|ghJson|latestVersion)\(", js, re.M)
+
+
+def test_element_queries_are_resolved_once(js: str) -> None:
+    ids = re.findall(r'\$\("#([\w-]+)"\)', js)
+    assert len(ids) == len(set(ids)), "the same #id is queried twice"
+    # language switches reuse their label elements instead of re-querying
+    assert re.search(r"if \(!labelEls\)", js)
+    assert "LABEL_SPECS.map" in js
+
+
+def test_js_does_not_force_synchronous_layout(js: str) -> None:
+    # Reads that force layout inside the scroll/reveal path would stall frames;
+    # the one scroll read (scrollY) happens inside requestAnimationFrame.
+    forced = (
+        "getBoundingClientRect",
+        "getComputedStyle",
+        "offsetWidth",
+        "offsetHeight",
+        "offsetTop",
+        "offsetLeft",
+        "scrollHeight",
+        "scrollWidth",
+        "clientWidth",
+        "clientHeight",
+        "document.write",
+    )
+    for api in forced:
+        assert api not in js, f"{api} forces a synchronous layout"
+    assert re.search(r"requestAnimationFrame\(syncToTop\)", js)
+
+
+# --------------------------------------------------------------------------
+# layout-shift and animation guards
+# --------------------------------------------------------------------------
+def test_demo_window_size_is_font_independent(css: str) -> None:
+    # The showcase mock is built from fixed-size bars, not text: a fallback
+    # font swap cannot change its height.  min-height keeps the first paint
+    # at 300px while the cards are still streaming in.
+    assert "max-width: 860px" in _rule(css, ".appwin")
+    assert "overflow: hidden" in _rule(css, ".appwin")
+    assert "min-height: 300px" in _rule(css, ".appwin-body")
+    assert "grid-template-columns: 150px 1fr" in _rule(css, ".appwin-body")
+    for selector, height in (
+        (".aw-title, .aw-sub", "height: 10px"),
+        (".aw-meta", "height: 8px"),
+        (".aw-h1", "height: 16px"),
+        (".aw-btn", "height: 24px"),
+    ):
+        assert height in _rule(css, selector), selector
+    # count-up digits keep the same advance width while animating
+    assert "font-variant-numeric: tabular-nums" in _rule(css, ".stat strong")
+
+
+def test_animations_touch_only_compositor_properties(css: str) -> None:
+    reveal = _rule(css, ".js .reveal")
+    assert "opacity" in reveal and "transform" in reveal
+    assert not re.search(
+        r"(width|height|top|left|right|bottom|margin|padding)", reveal
+    ), "the reveal must not animate layout properties"
+    # the only keyframe animation is the opacity pulse
+    assert len(re.findall(r"@keyframes", css)) == 1
+    assert set(re.findall(r"animation:\s*([\w-]+)", css)) <= {"none", "awPulse"}
+
+
+def test_reduced_motion_still_wins_the_cascade(css: str) -> None:
+    # The reduced-motion block is last so it overrides every animation above.
+    assert css.rfind("@media (prefers-reduced-motion: reduce)") > css.rfind(
+        "@keyframes"
+    )
+    block = css[css.rfind("@media (prefers-reduced-motion: reduce)") :]
+    assert "animation: none" in block
+    assert "transition: none" in block
+    assert "scroll-behavior: auto" in block
+
+
+def test_css_has_no_unused_class_rules(
+    css: str, html_text: str, error_text: str
+) -> None:
+    # Comments are stripped first: they contain prose such as "WCAG 2.x".
+    stripped = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    classes = set(re.findall(r"\.([A-Za-z_][\w-]*)", stripped))
+    # added by main.js after parse, so they never appear in the markup
+    dynamic = {"js", "in", "open", "show"}
+    pages = html_text + error_text
+    unused = sorted(
+        name
+        for name in classes - dynamic
+        if not re.search(rf'class="[^"]*\b{re.escape(name)}\b', pages)
+    )
+    assert not unused, f"CSS rules match no element: {unused}"
