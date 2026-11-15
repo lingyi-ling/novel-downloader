@@ -57,6 +57,7 @@ plugins:
             书源: Book Sources
             规则 DSL 参考: Rule DSL Reference
             文件保存: File Saving
+            存储与备份: Storage and Backup
             复制 Cookies: Copy Cookies
             架构说明: Architecture
             故障排查: Troubleshooting
@@ -141,6 +142,7 @@ nav:
     - 书源: guide/book-sources.md
     - 规则 DSL 参考: guide/rule-dsl.md
     - 文件保存: guide/file-saving.md
+    - 存储与备份: guide/storage.md
     - 复制 Cookies: guide/copy-cookies.md
     - 架构说明: guide/architecture.md
     - 故障排查: guide/troubleshooting.md
