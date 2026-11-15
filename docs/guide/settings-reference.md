@@ -28,6 +28,99 @@
 
 成功时 Toast 提示「搜索缓存已清除」并刷新卡片；失败时 Toast 显示错误文本，卡片保留原值，可直接重试。
 
+### 桌面设置导出 / 导入 (Settings export / import)
+
+「设置 → Backup」卡片把**桌面偏好**导出为 JSON，并可在另一台机器上导入。导出的不是 `settings.toml`，而是桌面偏好文件 `desktop_prefs.json`（默认位于应用数据目录的 `music/` 下）；文件只包含可跨机器迁移的偏好项，不含任何凭据。导入是**合并写入**，不是恢复出厂设置。
+
+**导出文件契约**
+
+```json
+{
+  "app": "novel-downloader",
+  "kind": "desktop-preferences",
+  "format_version": 1,
+  "app_version": "1.36.0",
+  "exported_at": "2026-11-15T00:00:00Z",
+  "settings": {
+    "theme": "dark",
+    "auto_check_updates": true,
+    "auto_download_updates": true,
+    "auto_install_on_exit": true,
+    "search_filters": {
+      "min_words": 10,
+      "max_words": 500,
+      "updated_after": "2024-01-02"
+    },
+    "search_sort": {"sort": "quality", "order": "desc"}
+  }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `app` | 固定为 `novel-downloader`；值不符时导入直接拒绝 |
+| `kind` | 固定为 `desktop-preferences`，用于把本文件与普通 JSON 区分开 |
+| `format_version` | 当前为 `1`。只接受整数 `1`；`true`、`2`、`"1"` 等一律拒绝，不做向下兼容 |
+| `app_version` | 导出时的应用版本，仅作参考；导入不与当前版本比对 |
+| `exported_at` | UTC 时间戳（秒级，`Z` 结尾），仅作参考 |
+| `settings` | 偏好负载，键值见下面的白名单 |
+
+**白名单（只导出这些键）**
+
+| `settings` 键 | 类型 | 含义 |
+| --- | --- | --- |
+| `theme` | `"light"` / `"dark"` | 外观主题 |
+| `auto_check_updates` | bool | 自动检查更新 |
+| `auto_download_updates` | bool | 后台下载更新 |
+| `auto_install_on_exit` | bool | 退出时安装已下载的更新 |
+| `search_filters` | object | 搜索过滤，可含 `min_words` / `max_words` / `updated_after`（`YYYY-MM-DD`）；未设置时为 `{}` |
+| `search_sort` | object | 搜索排序，固定含 `sort`（`quality` / `priority` / `words` / `update`）与 `order`（`asc` / `desc`） |
+
+**明确不导出**：
+
+| 不导出的内容 | 原因 |
+| --- | --- |
+| 代理地址、代理用户名 / 密码 | 凭据不能随文件传播；地址也可能与本机网络绑定 |
+| 音乐账号 token（TIDAL / Apple Music / SoundCloud 等） | 账号凭据，属于设备私密数据 |
+| 输出目录、界面语言 | 存在 `settings.toml` / 独立状态文件中，按设备与个人习惯设置，不属于桌面偏好文件 |
+| `last_update_check` 等节流状态 | 属于本机运行时状态，迁移没有意义 |
+| 音乐下载选项（如 `embed_lyric`） | 与 CLI 共用音乐设置文件，导出会产生第二个事实来源 |
+
+因此导出的 JSON 可以安全地放进同步盘或聊天工具；代价是换机后代理、账号、输出目录与语言需要重新设置（见「换机迁移的局限」）。
+
+**导出行为**
+
+* 路径留空时，写到桌面偏好文件同目录，文件名形如 `desktop-settings-20261115-143000.json`；指定路径没有扩展名时自动补 `.json`。
+* 写入使用临时文件 + 原子替换，不会留下半个文件。
+* 目标路径是已存在的目录时拒绝导出；其他写入失败只在卡片状态行和 Toast 中报错。
+* 偏好文件缺失或不可读时，导出的是默认值（`theme=light`、三个更新开关均为开、过滤器为空），不会因此报错。
+
+**导入校验**
+
+导入在**写任何内容之前**完成全部校验；任一项失败都不会改动现有配置，也不会生成 `.bak`：
+
+1. 路径不能为空；文件必须存在且是普通文件（目录会被拒绝）。
+2. 文件不能超过 1 MiB（`1,048,576` 字节）；超过即拒绝，避免误选大文件或内存消耗。
+3. 按 UTF-8 读取并允许 BOM（`utf-8-sig`）；其他编码或非法字节按「不是合法 JSON」拒绝。
+4. 顶层必须是 JSON 对象；`app`、`kind` 必须精确匹配；`format_version` 必须严格等于整数 `1`（布尔值 `true` 也会被拒绝）。
+5. 顶层只允许契约中的六个字段，出现未知字段即拒绝；`app_version`、`exported_at` 可以缺失，导入不校验它们的内容。
+6. `settings` 必须包含白名单的全部六个键，缺少任何一个都拒绝；出现白名单之外的键同样拒绝（不允许借导入把 `proxy_pass` 之类的字段塞进偏好文件）。
+7. 字段类型严格：`theme` 只能是 `light` / `dark`；三个更新开关必须是真正的布尔值（字符串 `"false"` 不算）；`min_words` / `max_words` 接受整数、整数值浮点数或纯数字字符串，范围 `0`–`1,000,000,000`，且最小值不得大于最大值；`updated_after` 必须是 `YYYY-MM-DD`；`search_filters` 与 `search_sort` 内部出现未知键同样拒绝，`search_sort` 必须同时包含 `sort` 与 `order`，且 `sort` / `order` 必须在允许值内。
+8. 错误信息显示在卡片状态行与 Toast 中，现有设置保持原样。
+
+**导入是合并写，不是恢复出厂**
+
+`desktop_prefs.json` 中的其他键（包括不在白名单内的历史键、代理密码等）不会被删除；导入只覆盖 `settings` 中出现的那六个偏好键。因此导入一份「默认值」文件不会清空代理口令或账号信息。
+
+写入前，若偏好文件已存在，会先把它复制为同目录的 `<文件名>.bak`（例如 `desktop_prefs.json.bak`），复制本身也是原子写；随后偏好文件通过临时文件 + 原子替换写入。若最终写入失败，旧文件保持原样，`.bak` 仍在，可用它回滚。
+
+**换机迁移的局限**
+
+* 只迁移上面六个桌面偏好。输出目录、代理与账号、音乐 token、界面语言都不在文件里，需要在新机器上手动设置。
+* 导入不检查 `app_version`，但会拒绝 `format_version` 不等于 `1` 的文件；将来格式升级后，旧导出需要在新版本中重新导出，而不是手工改版本号。
+* `.bak` 只有一份：每次走到写入阶段的导入都会覆盖它。它用于回滚最近一次导入，不是历史归档。
+* 导入成功后界面会立即刷新主题与设置卡片，并重新拉取任务 / 关注列表，但**不会重启进程**；界面语言本来就不在导入范围内。
+
 ### general 配置
 
 全局运行时设置, 面向下载 / 并发 / 速率限制 / 目录与存储的通用开关

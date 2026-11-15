@@ -28,6 +28,99 @@ A missing value (the cache has not been used yet) or a failed read renders as `0
 
 On success a "Search cache cleared" toast appears and the card is refreshed; on failure the toast shows the error text, the card keeps its previous values, and the action can be retried immediately.
 
+### Exporting and importing desktop settings
+
+The **Settings → Backup** card exports the **desktop preferences** as JSON and imports them on another machine. It exports `desktop_prefs.json` (by default under the application data directory's `music/` folder), not `settings.toml`; the file contains only preferences that are safe to move between machines. An import **merges** the file into the current preferences; it is not a factory reset.
+
+**Export file contract**
+
+```json
+{
+  "app": "novel-downloader",
+  "kind": "desktop-preferences",
+  "format_version": 1,
+  "app_version": "1.36.0",
+  "exported_at": "2026-11-15T00:00:00Z",
+  "settings": {
+    "theme": "dark",
+    "auto_check_updates": true,
+    "auto_download_updates": true,
+    "auto_install_on_exit": true,
+    "search_filters": {
+      "min_words": 10,
+      "max_words": 500,
+      "updated_after": "2024-01-02"
+    },
+    "search_sort": {"sort": "quality", "order": "desc"}
+  }
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `app` | Fixed to `novel-downloader`; an import is rejected when it does not match |
+| `kind` | Fixed to `desktop-preferences`, so an ordinary JSON file cannot be imported by mistake |
+| `format_version` | Currently `1`. Only the integer `1` is accepted; `true`, `2`, `"1"` and the like are rejected. There is no backward compatibility |
+| `app_version` | Application version at export time; informational only, and an import does not compare it with the running version |
+| `exported_at` | UTC timestamp (second precision, `Z` suffix); informational only |
+| `settings` | Preference payload; keys are listed in the whitelist below |
+
+**Whitelist (these keys are the only ones exported)**
+
+| `settings` key | Type | Meaning |
+| --- | --- | --- |
+| `theme` | `"light"` / `"dark"` | Appearance theme |
+| `auto_check_updates` | bool | Check for updates automatically |
+| `auto_download_updates` | bool | Download updates in the background |
+| `auto_install_on_exit` | bool | Install a downloaded update when quitting |
+| `search_filters` | object | Search filters; may contain `min_words` / `max_words` / `updated_after` (`YYYY-MM-DD`), and is `{}` when none are set |
+| `search_sort` | object | Search sort, always with `sort` (`quality` / `priority` / `words` / `update`) and `order` (`asc` / `desc`) |
+
+**Deliberately not exported**:
+
+| Not exported | Reason |
+| --- | --- |
+| Proxy address, proxy username / password | Credentials must not travel in a file, and an address may be tied to the local network |
+| Music account tokens (TIDAL / Apple Music / SoundCloud, etc.) | Account credentials; device-private data |
+| Output folder, interface language | Stored in `settings.toml` / a separate state file and chosen per device and person; not part of the desktop preferences file |
+| Throttle state such as `last_update_check` | Local runtime state; migrating it is meaningless |
+| Music download options such as `embed_lyric` | Shared with the CLI through the music settings file; exporting them would create a second source of truth |
+
+The exported JSON is therefore safe to put in a sync folder or a chat message; the trade-off is that the proxy, accounts, output folder and language must be set again on the new machine (see "Limits of moving to another machine").
+
+**Export behaviour**
+
+* A blank path writes next to the desktop preferences file with a timestamped name such as `desktop-settings-20261115-143000.json`; a path without an extension gets `.json` appended.
+* The write uses a temporary file plus an atomic replace, so a half-written file is never left behind.
+* Exporting onto an existing directory is refused; other write failures are reported only in the card's status line and the toast.
+* When the preferences file is missing or unreadable, the export contains the defaults (`theme=light`, all three update switches on, empty filters) instead of failing.
+
+**Import validation**
+
+An import validates everything **before writing anything**. Any failure leaves the existing preferences untouched and creates no `.bak`:
+
+1. The path must not be blank; the file must exist and be a regular file (a directory is rejected).
+2. The file must not exceed 1 MiB (`1,048,576` bytes); anything larger is rejected, guarding against picking the wrong document or exhausting memory.
+3. It is read as UTF-8 with an optional BOM (`utf-8-sig`); any other encoding or invalid byte sequence is reported as "not valid JSON".
+4. The top level must be a JSON object; `app` and `kind` must match exactly; `format_version` must be exactly the integer `1` (the boolean `true` is rejected too).
+5. Only the six contract fields are allowed at the top level; any unknown field is rejected. `app_version` and `exported_at` may be absent, and their contents are not validated.
+6. `settings` must contain all six whitelisted keys; a missing key is rejected. A key outside the whitelist is rejected as well, so an import cannot smuggle a field such as `proxy_pass` into the preferences file.
+7. Types are strict: `theme` is only `light` / `dark`; the three update switches must be real booleans (the string `"false"` does not count); `min_words` / `max_words` accept integers, integral floats or digit-only strings in the range `0`–`1,000,000,000`, and the minimum must not exceed the maximum; `updated_after` must be `YYYY-MM-DD`; unknown keys inside `search_filters` and `search_sort` are rejected too, `search_sort` must contain both `sort` and `order`, and both values must be allowed.
+8. The error is shown in the card's status line and the toast, and the current settings stay as they were.
+
+**An import merges; it does not reset**
+
+Other keys in `desktop_prefs.json` (including historical keys outside the whitelist and the proxy password) are not deleted; an import only overwrites the six preference keys present in `settings`. Importing a "default values" file therefore does not wipe the proxy password or account information.
+
+Before writing, if the preferences file exists, it is copied to `<name>.bak` in the same directory (for example `desktop_prefs.json.bak`); that copy is atomic too. The preferences file is then replaced through a temporary file plus an atomic replace. If the final write fails, the old file stays in place and the `.bak` remains, so it can be used to roll back.
+
+**Limits of moving to another machine**
+
+* Only the six desktop preferences above are migrated. The output folder, proxy and accounts, music tokens and interface language are not in the file and must be set manually on the new machine.
+* The import does not check `app_version`, but it rejects a file whose `format_version` is not `1`. If the format is upgraded in a future release, an old export must be re-exported with the new version rather than having its version number edited by hand.
+* There is only one `.bak`: every import that reaches the write stage overwrites it. It is a rollback for the most recent import, not a history archive.
+* After a successful import the UI immediately refreshes the theme and the Settings cards and reloads the task / follow lists, but the process is **not restarted**; the interface language was never part of the import.
+
 ### general Settings
 
 Global runtime settings for downloads / concurrency / rate limits / directories and storage.

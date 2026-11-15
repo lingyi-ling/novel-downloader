@@ -944,7 +944,33 @@ novel-cli storage backup --out ~/novel-backups --keep 7
 
 ---
 
-## 18. Still Stuck?
+## 18. Imported Desktop Settings Are Rejected / Do Not Take Effect
+
+**Symptoms**: clicking "Import settings" shows an error in the card's status line or a toast; or the import reports success but some settings appear unchanged.
+
+**The import is rejected**: an import validates everything before writing. A rejected import leaves the current preferences **completely untouched** and creates no `.bak`. Work through the error:
+
+1. The path is blank, the file does not exist, or it points at a directory: enter the full path of a JSON file, not a folder.
+2. The file is larger than 1 MiB: a preferences file is normally only a few KB, so a larger file is almost certainly the wrong document; export again.
+3. "Not valid JSON": the file must be UTF-8 (a BOM is allowed). Do not use UTF-16, or truncated or hand-assembled JSON.
+4. A version or field error: only a file with `"app": "novel-downloader"`, `"kind": "desktop-preferences"` and `"format_version": 1` is accepted; unknown fields, a missing whitelisted key, or a string switch value such as `"false"` are rejected. Do not add proxy / account fields to `settings` by hand.
+5. After editing an exported file in a text editor, check that quotes, commas and braces are intact; if unsure, export a fresh copy and compare.
+
+**The import succeeds but settings do not change**: an import overwrites only the six whitelisted preferences (theme, the three update switches, `search_filters`, `search_sort`), and it merges. The following never change through an import:
+
+* the output folder, proxy, music account tokens and interface language — they live in `settings.toml` or a separate state file and must be changed on the Settings page;
+* any other preference key outside the whitelist keeps its current value;
+* the import immediately refreshes the theme and the Settings cards but does not restart the process; if the UI still shows old values, switch to another page and back, or restart the app to confirm.
+
+After a successful import the card's status line shows "Settings imported from <path>" together with the backup file path.
+
+**What `.bak` is for**: every import that reaches the write stage first copies the current preferences file to `desktop_prefs.json.bak` in the same directory (the original file name plus `.bak`), so it can roll back the **most recent** import. There is only one such file and the next import overwrites it; a rejected import never creates it. To roll back, quit the desktop app first (so in-process state cannot overwrite the file), copy `.bak` back over `desktop_prefs.json`, and start the app again. The preferences file lives by default under the application data directory's `music/` folder (on Windows usually `%LOCALAPPDATA%\novel_downloader\music\`), or under `NOVEL_MUSIC_HOME` when that is set.
+
+For the full contract and whitelist see [Settings Reference § Exporting and importing desktop settings](./settings-reference.en.md#exporting-and-importing-desktop-settings).
+
+---
+
+## 19. Still Stuck?
 
 Include the following information when opening an issue:
 
