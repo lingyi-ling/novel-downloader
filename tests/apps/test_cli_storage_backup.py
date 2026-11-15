@@ -384,7 +384,152 @@ def test_backup_with_no_databases_is_a_noop(
     payload = json.loads(capsys.readouterr().out)
     assert payload["count"] == 0
     assert payload["files"] == []
+    # Nothing was written, so there was nothing to verify; that is neither a
+    # skipped run nor a failed check.
+    assert payload["verified"] is False
+    assert payload["verification_failed"] is False
     assert not out.exists()
+
+
+# ---------------------------------------------------------------------------
+# backup verification (default on; --no-verify)
+# ---------------------------------------------------------------------------
+
+
+def test_backup_verifies_every_new_copy_by_default(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A normal run re-checks the published bytes and says so in --json."""
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    _seed(_book_db(raw_root, book="book-a"), "a1")
+    _seed(_book_db(raw_root, book="book-b"), "b1")
+
+    out = tmp_path / "backups"
+    _invoke(["storage", "backup", "--out", str(out), "--json"])
+
+    captured = capsys.readouterr()
+    assert captured.out.count("\n") == 1
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["ok"] is True
+    assert payload["count"] == 2
+    assert payload["verified"] is True
+    assert payload["verification_failed"] is False
+    assert len(payload["files"]) == 2
+    assert all(entry["verified"] is True for entry in payload["files"])
+    for entry in payload["files"]:
+        backup = Path(entry["target"])
+        book = Path(entry["source"]).parent.name
+        assert backup.is_file()
+        assert _ids(backup) == {"a1" if book == "book-a" else "b1"}
+
+
+def test_verification_failure_rolls_back_the_run_and_keeps_sources(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A backup this build cannot restore removes the whole set and exits 1.
+
+    ``book-a`` validates and is written first; ``book-b`` has a newer schema
+    (integrity is fine, so the snapshot itself succeeds) and fails the strict
+    post-write check. The earlier copy must go too: a partial set would let a
+    retry mistake it for a complete backup. Retention must not run either, so
+    an existing old backup survives untouched.
+    """
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    good_db = _book_db(raw_root, book="book-a")
+    newer_db = _book_db(raw_root, book="book-b")
+    _seed(good_db, "a1")
+    _newer_schema_db(newer_db)
+
+    out = tmp_path / "backups"
+    old = _fake_backup(out, "20250101T000000Z", book="book-a")
+
+    with pytest.raises(SystemExit) as exc_info:
+        _invoke(["storage", "backup", "--out", str(out), "--keep", "1", "--json"])
+    assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert captured.out.count("\n") == 1
+    assert payload["ok"] is False
+    assert payload["count"] == 0
+    assert payload["bytes"] == 0
+    assert payload["files"] == []
+    assert payload["verified"] is False
+    assert payload["verification_failed"] is True
+    assert payload["retention"] == {
+        "keep": 1,
+        "dry_run": False,
+        "candidates": [],
+        "removed": [],
+        "failed": [],
+    }
+    error = payload["verification_error"]
+    assert error["source"] == str(newer_db)
+    assert Path(error["target"]).name == f"chapter.raw.{_STAMP}.sqlite"
+    assert "newer" in error["reason"]
+    assert "Backup verification failed" in captured.err
+    assert "newer" in captured.err
+
+    # Neither source was modified; only the pre-existing backup remains.
+    assert _ids(good_db) == {"a1"}
+    assert _raw_version(newer_db) == SCHEMA_VERSION + 1
+    assert old.exists()
+    assert _names(out / "site" / "book-a") == [old.name]
+    assert not list(out.rglob(f"chapter.raw.{_STAMP}*.sqlite"))
+
+
+def test_verification_failure_without_json_reports_on_stderr(
+    raw_root: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _newer_schema_db(_book_db(raw_root))
+
+    out = tmp_path / "backups"
+    with pytest.raises(SystemExit) as exc_info:
+        _invoke(["storage", "backup", "--out", str(out)])
+    assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Backup verification failed" in captured.err
+    assert not list(out.rglob("*.sqlite"))
+
+
+def test_no_verify_preserves_a_backup_this_build_cannot_open(
+    raw_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--no-verify`` writes the copy and reports that nothing was checked."""
+    monkeypatch.setattr(storage, "_timestamp", lambda: _STAMP)
+    db = _book_db(raw_root)
+    _newer_schema_db(db)
+
+    out = tmp_path / "backups"
+    _invoke(["storage", "backup", "--out", str(out), "--no-verify", "--json"])
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["ok"] is True
+    assert payload["count"] == 1
+    assert payload["verified"] is False
+    assert payload["verification_failed"] is False
+    assert payload["files"][0]["verified"] is False
+
+    backup = out / "site" / "book" / f"chapter.raw.{_STAMP}.sqlite"
+    assert backup.is_file()
+    # The faithful copy keeps the newer schema version instead of failing.
+    assert _raw_version(backup) == SCHEMA_VERSION + 1
 
 
 # ---------------------------------------------------------------------------

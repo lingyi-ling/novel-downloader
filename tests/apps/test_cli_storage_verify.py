@@ -400,6 +400,121 @@ def test_verify_json_exits_zero_when_everything_is_healthy(
 
 
 # ---------------------------------------------------------------------------
+# progress and interruption
+# ---------------------------------------------------------------------------
+
+
+def test_verify_human_mode_reports_per_database_progress(
+    raw_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every database is announced on stderr before it is opened."""
+    first = _book_db(raw_root, "site-a", "book-1")
+    second = _book_db(raw_root, "site-b", "book-2")
+    _seed(first, "c1")
+    _seed(second, "c2")
+
+    _invoke(["storage", "verify"])
+
+    err = capsys.readouterr().err
+    # The console folds long paths, so the counter and the trailing file name
+    # are matched separately; their order still proves the interleaving.
+    assert "Checking 1/2" in err
+    assert "Checking 2/2" in err
+    first_ok = err.index("chapter.raw.sqlite: ok")
+    second_ok = err.index("chapter.raw.sqlite: ok", first_ok + 1)
+    assert err.index("Checking 1/2") < first_ok
+    assert first_ok < err.index("Checking 2/2") < second_ok
+    # Both category directories are named in the progress stream.
+    assert "book-1" in err
+    assert "book-2" in err
+
+
+def test_verify_json_mode_keeps_stderr_quiet(
+    raw_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--json`` must not leak progress lines to stderr."""
+    _seed(_book_db(raw_root), "c1")
+
+    _invoke(["storage", "verify", "--json"])
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out)["total"] == 1
+
+
+def test_verify_interrupt_summarizes_checked_databases(
+    raw_root: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl+C reports what was checked and propagates to the CLI aborter."""
+    _seed(_book_db(raw_root, "site-a", "book-1"), "c1")
+    _seed(_book_db(raw_root, "site-b", "book-2"), "c2")
+    real_verify = storage._verify_database
+    calls: list[Path] = []
+
+    def interrupt_second(path: Path) -> str | None:
+        calls.append(path)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return real_verify(path)
+
+    monkeypatch.setattr(storage, "_verify_database", interrupt_second)
+
+    with pytest.raises(KeyboardInterrupt):
+        _invoke(["storage", "verify"])
+
+    err = capsys.readouterr().err
+    assert (
+        storage.t(
+            "Interrupted after checking {checked} of {total} database(s): "
+            "{healthy} healthy, {corrupt} corrupt."
+        ).format(checked=1, total=2, healthy=1, corrupt=0)
+        in err
+    )
+    # The second database was announced but the interrupted check produced no
+    # result, so exactly one database is reported healthy.
+    assert "Checking 2/2" in err
+    assert err.count("chapter.raw.sqlite: ok") == 1
+
+
+def test_verify_json_interrupt_emits_one_line_report_and_exits_nonzero(
+    raw_root: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted ``--json`` run still emits one JSON line on stdout."""
+    _seed(_book_db(raw_root, "site-a", "book-1"), "c1")
+    _seed(_book_db(raw_root, "site-b", "book-2"), "c2")
+    real_verify = storage._verify_database
+    calls: list[Path] = []
+
+    def interrupt_second(path: Path) -> str | None:
+        calls.append(path)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return real_verify(path)
+
+    monkeypatch.setattr(storage, "_verify_database", interrupt_second)
+
+    with pytest.raises(KeyboardInterrupt):
+        _invoke(["storage", "verify", "--json"])
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.endswith("\n")
+    assert "\n" not in captured.out.strip()
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "total": 2,
+        "healthy": 1,
+        "corrupt": 0,
+        "errors": [],
+        "interrupted": True,
+    }
+
+
+# ---------------------------------------------------------------------------
 # path redaction and symlinks
 # ---------------------------------------------------------------------------
 

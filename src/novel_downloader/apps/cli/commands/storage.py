@@ -19,16 +19,21 @@ confirmation; it is the bulk equivalent of ``clean book --all``,
 ``storage backup --out DIR`` takes a consistent SQLite online backup of every
 ``chapter.<stage>.sqlite`` file under the raw-data directory, including data
 still sitting in a WAL, and writes one timestamped copy per database while
-mirroring the ``<site>/<book>`` layout. ``--keep N`` prunes older backups of
-each book database down to the newest ``N`` after the new set has been
-published; only files this command itself names (``chapter.<stage>.<UTC>.sqlite``,
-or ``chapter.<stage>.<UTC>.<n>.sqlite`` when a same-second copy already exists)
-are ever considered, and the files written by the current run are never
-removed. ``storage restore --from FILE`` validates the file (integrity check,
-schema version, required columns) before atomically replacing the target
-database; an existing database is preserved in a ``.pre-restore-*.bak``
-sibling first and is never overwritten without ``--yes``. Both subcommands
-accept ``--json`` for a single-line report.
+mirroring the ``<site>/<book>`` layout. Every copy is re-read after it is
+published and checked with the same integrity and schema rules as ``storage
+verify``; a copy that fails is removed together with the rest of the set this
+run produced, the command exits 1, and the source databases are left untouched.
+``--no-verify`` skips that post-write check so a copy this build cannot open
+(a database written by a newer build, for example) is still preserved. ``--keep
+N`` prunes older backups of each book database down to the newest ``N`` after
+the new, verified set has been published; only files this command itself names
+(``chapter.<stage>.<UTC>.sqlite``, or ``chapter.<stage>.<UTC>.<n>.sqlite`` when
+a same-second copy already exists) are ever considered, and the files written
+by the current run are never removed. ``storage restore --from FILE`` validates
+the file (integrity check, schema version, required columns) before atomically
+replacing the target database; an existing database is preserved in a
+``.pre-restore-*.bak`` sibling first and is never overwritten without ``--yes``.
+Both subcommands accept ``--json`` for a single-line report.
 
 ``storage verify`` walks the raw-data directory, opens every
 ``chapter.<stage>.sqlite`` read-only and reports whether it is healthy: SQLite's
@@ -36,7 +41,10 @@ integrity check, the schema version (older is fine, newer is not), the required
 columns and a checksum walk of any ``-wal`` sidecar. Damaged files are only
 reported -- unlike the download path, this command never copies, renames or
 repairs them. Paths that live under the user's home directory are shortened to
-``~`` so the report can be shared without leaking the local layout.
+``~`` so the report can be shared without leaking the local layout. Human mode
+announces the scan and every database on stderr as it goes, and a Ctrl+C stops
+the walk with a summary of what was checked so far; ``--json`` stays a single
+line on stdout.
 """
 
 from __future__ import annotations
@@ -54,6 +62,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NoReturn
 
 from novel_downloader.apps.cli import ui
 from novel_downloader.apps.utils import load_or_init_config
@@ -912,6 +921,60 @@ def _reserve_backup_target(target: Path) -> Path:
     )
 
 
+class _BackupVerificationError(RuntimeError):
+    """A published backup failed the post-write integrity/schema check."""
+
+    def __init__(self, source: Path, target: Path, reason: str) -> None:
+        super().__init__(reason)
+        self.source = source
+        self.target = target
+        self.reason = reason
+
+
+def _report_verification_failure(
+    exc: _BackupVerificationError,
+    *,
+    out_dir: Path,
+    stamp: str,
+    keep: int,
+    dry_run: bool,
+    as_json: bool,
+) -> NoReturn:
+    """Explain a failed post-write check and exit 1.
+
+    The caller has already removed every file this run wrote, so ``count`` is
+    zero: the failed set is not a usable backup. ``--json`` still prints one
+    machine-readable line carrying the failing source, target and reason, so a
+    monitoring script learns why the run failed instead of only its exit code.
+    """
+    if as_json:
+        _emit_json(
+            {
+                "command": "storage backup",
+                "ok": False,
+                "timestamp": stamp,
+                "out": str(out_dir),
+                "count": 0,
+                "bytes": 0,
+                "files": [],
+                "verified": False,
+                "verification_failed": True,
+                "verification_error": {
+                    "source": str(exc.source),
+                    "target": str(exc.target),
+                    "reason": exc.reason,
+                },
+                "retention": RetentionReport(keep=keep, dry_run=dry_run).to_dict(),
+            }
+        )
+    fail(
+        t(
+            "Backup verification failed for {target}: {reason}. No backup from "
+            "this run was kept; the source databases are unchanged."
+        ).format(target=exc.target, reason=exc.reason)
+    )
+
+
 def _run_backup(
     raw_root: Path,
     out_dir: Path,
@@ -919,8 +982,15 @@ def _run_backup(
     as_json: bool,
     keep: int = 0,
     dry_run: bool = False,
+    verify: bool = True,
 ) -> None:
-    """Back up every chapter database below ``raw_root`` into ``out_dir``."""
+    """Back up every chapter database below ``raw_root`` into ``out_dir``.
+
+    Each published copy is re-read and validated with the same rules as
+    ``storage verify`` unless ``verify`` is false. A failed check removes the
+    whole set this run wrote (backups are only useful as a complete set) and
+    exits 1; the source databases are never modified either way.
+    """
     out_dir = out_dir.resolve()
     if out_dir.exists() and not out_dir.is_dir():
         fail(
@@ -960,6 +1030,8 @@ def _run_backup(
                     "count": 0,
                     "bytes": 0,
                     "files": [],
+                    "verified": False,
+                    "verification_failed": False,
                     "retention": RetentionReport(keep=keep, dry_run=dry_run).to_dict(),
                 }
             )
@@ -983,6 +1055,13 @@ def _run_backup(
                 # empty database behind for retention to count.
                 _remove_database_files(target)
                 raise
+            if verify:
+                reason = _verify_database(target)
+                if reason is not None:
+                    # Remove the copy before the set-wide rollback below; the
+                    # source database was never opened for writing.
+                    _remove_database_files(target)
+                    raise _BackupVerificationError(source, target, reason)
             created.append(target)
             size = target.stat().st_size
             total_bytes += size
@@ -994,6 +1073,7 @@ def _run_backup(
                     "sha256": _sha256(target),
                     "schema_version": info.schema_version,
                     "chapters": info.chapter_count,
+                    "verified": verify,
                 }
             )
             if not as_json:
@@ -1002,6 +1082,19 @@ def _run_backup(
                         source=source, target=target
                     )
                 )
+    except _BackupVerificationError as exc:
+        # A backup set is only useful as a whole; drop the files this run
+        # already produced so a retry cannot mistake them for a full set.
+        for path in created:
+            _remove_database_files(path)
+        _report_verification_failure(
+            exc,
+            out_dir=out_dir,
+            stamp=stamp,
+            keep=keep,
+            dry_run=dry_run,
+            as_json=as_json,
+        )
     except Exception as exc:
         # A backup set is only useful as a whole; drop the files this run
         # already produced so a retry cannot mistake them for a full set.
@@ -1031,6 +1124,8 @@ def _run_backup(
                 "count": len(entries),
                 "bytes": total_bytes,
                 "files": entries,
+                "verified": verify,
+                "verification_failed": False,
                 "retention": retention.to_dict(),
             }
         )
@@ -1315,41 +1410,84 @@ def _verify_database(path: Path) -> str | None:
 
 
 def _run_verify(raw_root: Path, *, as_json: bool) -> None:
-    """Check every chapter database below ``raw_root`` without modifying it."""
+    """Check every chapter database below ``raw_root`` without modifying it.
+
+    In human mode the scan and every database are announced on stderr before
+    they are opened, so a large or slow library never looks hung. ``--json``
+    deliberately prints nothing but the single final report on stdout.
+
+    A Ctrl+C stops the walk after the database in flight and reports what was
+    checked so far. The interrupt is then re-raised, so ``cli_main`` keeps its
+    usual contract ("Aborted." on stderr, exit code 1); a partial report never
+    exits 0.
+    """
+    if not as_json:
+        ui.info(t("Scanning for chapter databases..."))
     databases = _find_chapter_databases(raw_root)
+    total = len(databases)
     errors: list[dict[str, str]] = []
     healthy = 0
+    checked = 0
+    interrupted = False
 
-    for database in databases:
-        display = _redact_path(database)
-        reason = _verify_database(database)
-        if reason is None:
-            healthy += 1
+    try:
+        for index, database in enumerate(databases, 1):
+            display = _redact_path(database)
             if not as_json:
-                ui.success(t("{path}: ok").format(path=display))
-        else:
-            errors.append({"path": display, "reason": reason})
-            if not as_json:
-                ui.error(
-                    t("{path}: corrupt: {reason}").format(path=display, reason=reason)
+                ui.info(
+                    t("Checking {index}/{total}: {path}").format(
+                        index=index, total=total, path=display
+                    )
                 )
+            reason = _verify_database(database)
+            checked += 1
+            if reason is None:
+                healthy += 1
+                if not as_json:
+                    ui.success(t("{path}: ok").format(path=display))
+            else:
+                errors.append({"path": display, "reason": reason})
+                if not as_json:
+                    ui.error(
+                        t("{path}: corrupt: {reason}").format(
+                            path=display, reason=reason
+                        )
+                    )
+    except KeyboardInterrupt:
+        # ``checked`` only counts databases whose verification returned, so the
+        # summary never claims an interrupted database was healthy.
+        interrupted = True
 
-    total = len(databases)
-    corrupt = total - healthy
-    ok = corrupt == 0
+    corrupt = checked - healthy
+    ok = not interrupted and corrupt == 0
 
     if as_json:
-        _emit_json(
-            {
-                "ok": ok,
-                "total": total,
-                "healthy": healthy,
-                "corrupt": corrupt,
-                "errors": errors,
-            }
-        )
+        payload: dict[str, object] = {
+            "ok": ok,
+            "total": total,
+            "healthy": healthy,
+            "corrupt": corrupt,
+            "errors": errors,
+        }
+        # Only an interrupted run adds the marker; the normal payload keeps its
+        # established shape for existing consumers.
+        if interrupted:
+            payload["interrupted"] = True
+        _emit_json(payload)
     elif total == 0:
         ui.info(t("No chapter databases found to verify."))
+    elif interrupted:
+        ui.warn(
+            t(
+                "Interrupted after checking {checked} of {total} database(s): "
+                "{healthy} healthy, {corrupt} corrupt."
+            ).format(
+                checked=checked,
+                total=total,
+                healthy=healthy,
+                corrupt=corrupt,
+            )
+        )
     else:
         summary = t(
             "Verified {total} database(s): {healthy} healthy, {corrupt} corrupt."
@@ -1359,6 +1497,10 @@ def _run_verify(raw_root: Path, *, as_json: bool) -> None:
         else:
             ui.error(summary)
 
+    if interrupted:
+        # Let ``cli_main`` print "Aborted." and turn this into exit code 1,
+        # exactly as for any other interrupted command.
+        raise KeyboardInterrupt
     if not ok:
         raise SystemExit(EXIT_FAILURE)
 
@@ -1420,11 +1562,22 @@ class StorageBackupCmd(Command):
                 "them; the new backup itself is still written."
             ),
         )
+        parser.add_argument(
+            "--no-verify",
+            dest="verify",
+            action="store_false",
+            default=True,
+            help=t(
+                "Write the new backups without the post-write integrity and "
+                "schema check that 'storage verify' performs."
+            ),
+        )
 
     @classmethod
     def run(cls, args: Namespace) -> None:
         keep = int(getattr(args, "keep", 0) or 0)
         dry_run = bool(getattr(args, "dry_run", False))
+        verify = bool(getattr(args, "verify", True))
         if keep < 0:
             fail(
                 t("--keep must be 0 (disabled) or a positive integer."),
@@ -1442,6 +1595,7 @@ class StorageBackupCmd(Command):
             as_json=as_json,
             keep=keep,
             dry_run=dry_run,
+            verify=verify,
         )
 
 
