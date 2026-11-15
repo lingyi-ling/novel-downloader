@@ -26,6 +26,16 @@ novel-cli doctor --fix             # create missing output/cache/log dirs, clean
 
 `--fix` only acts inside the configured output, cache, and log directories, refuses `..` and symlinks, and never changes configuration, exports, or login state. By default it removes only temporary files older than 7 days (adjust with `--fix-age-days`). It does not repair configuration errors, missing dependencies, or a busy port; follow the suggestions on those check rows instead.
 
+### Search Cache: Identical Searches Still Hit Every Site
+
+The `Search cache` row in `doctor` reports the in-process search cache; see [CLI Usage § doctor](./cli-examples.en.md#10-doctor-subcommand), "Search-cache diagnostics", for the fields and how to read them.
+
+* `hits`, `misses`, and `evictions` are cumulative **for the current process**. A standalone `novel-cli doctor` normally reports all zeros because that process has not searched; that is not a fault. The desktop "Settings → Search cache" panel shows the desktop process's own Memory entries / Disk entries / Cache hits / Expired entries.
+* **Many expired**: when `expired_entries` approaches `memory_entries`, most resident entries are past their TTL (300 seconds by default). Diagnostics counts but does not purge them; they are removed on the next write or when that key is read. If `misses` is also high, repeated searches go back to the sites.
+* **Low hit rate**: with enough identical queries, if `misses` clearly outnumbers `hits`, first confirm that `--limit`, filters, and site selection match exactly, then check whether `evictions` keeps rising (more distinct entries than memory capacity, 64 by default) and whether `fingerprint` changed between runs (a searcher/browser-assist configuration change invalidates every old aggregate entry).
+* `disk_entries=0` with `disk_enabled=false` is the default memory-only mode, not a fault; the disk layer is enabled only when `NOVELDL_SEARCH_CACHE_DIR` is set before the process starts.
+* The cache only holds short-lived results. To force a fresh search, use **Clear search cache** in the desktop settings page (entries are dropped, cumulative counters are kept), or restart the process in memory-only mode. `novel-cli clean cache` targets the configured cache directory (site cookies / chapter caches) and does not clear the search cache's memory entries.
+
 Then collect the version and logs:
 
 ```bash
@@ -507,6 +517,53 @@ curl -x http://127.0.0.1:7890 -I https://www.google.com
    ```
 
 6. Music platforms may read the system proxy themselves. If novels download but music times out, check the system proxy and platform reachability first.
+
+### 7.1 SSE Stream Dropped After Idle (502 / 504 / Unexpected EOF)
+
+**Symptoms**: `/api/v1/search/stream`, `/api/v1/tasks/stream` or
+`/api/v1/login/requests/stream` connects fine and then drops after a quiet
+period; a reverse proxy returns `502` / `504`, or the client reports
+`Unexpected EOF` / `connection reset`. It is most likely when sites are slow and
+search results take a while to arrive.
+
+**How it works**: each of the three streams writes a `: keepalive` comment frame
+after 15 seconds of silence, which resets the idle timers of proxies, CDNs and
+NAT gateways. It is a comment and produces no `results` / `snapshot` /
+`requests` / `done` event. The interval is `SSE_KEEPALIVE_INTERVAL` in
+`src/novel_downloader/apps/api/routes.py`; see
+[SSE keepalive in the API docs](api.en.md#sse-keepalive) for the full behaviour.
+
+**Diagnose**:
+
+1. Connect directly and confirm the heartbeat is being written:
+
+   ```bash
+   curl -N -v "http://127.0.0.1:8081/api/v1/tasks/stream" \
+     -H "Authorization: Bearer $TOKEN"
+   ```
+
+   A `: keepalive` line should appear roughly every 15 seconds.
+
+2. If direct access is stable but the proxied one drops, check the idle/read
+   timeout at every hop.
+   - nginx: `proxy_read_timeout` must exceed 15 seconds (the default 60 is
+     fine), and set `proxy_buffering off;`. `X-Accel-Buffering: no` is honoured
+     only by nginx.
+   - CDN / cloud load balancer: make sure the idle limit exceeds the keepalive
+     interval (Cloudflare's is 100 seconds) and that `text/event-stream` is not
+     cached.
+3. Keep client read timeouts at 15 seconds or more. `EventSource` ignores
+   comment frames automatically and reconnects on its own; a hand-rolled `fetch`
+   parser must skip lines starting with `:` and must not treat a comment-only
+   block as JSON or as a dropped stream.
+4. NAT gateways commonly reclaim idle connections after 30–120 seconds. If the
+   heartbeat is visible locally but disappears across one network segment, that
+   segment is probably buffering the response; fix the proxy/NAT rather than
+   shortening the server-side heartbeat.
+
+**Still dropping**: set the log level to `DEBUG` to confirm the server writes
+heartbeats, then compare the disconnect time with `ss` / `netstat` or the proxy
+access log.
 
 ---
 

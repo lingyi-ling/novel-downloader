@@ -406,6 +406,8 @@ data: {"total":2}
   and cancels site requests still in flight.
 - Response headers include `Cache-Control: no-cache` and
   `X-Accel-Buffering: no`, so reverse proxies do not buffer the stream.
+- A `: keepalive` comment frame is written after 15 seconds of silence; it
+  carries no event. See [SSE keepalive](#sse-keepalive).
 
 Use `curl -N` to observe the live event stream:
 
@@ -426,6 +428,64 @@ curl -N "http://127.0.0.1:8081/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&s
     `Authorization` or `X-API-Key` header. Browser `EventSource` cannot set
     custom headers, so read the response stream with `fetch` or use a client
     such as `curl` that can set headers.
+
+## SSE keepalive {#sse-keepalive}
+
+All three SSE endpoints (`search/stream`, `tasks/stream`,
+`login/requests/stream`) share one keepalive: after **15 seconds** of silence on
+any of them, the server writes a comment frame that starts with a colon:
+
+```
+: keepalive
+```
+
+- **Ignore it, as the SSE spec requires.** A line starting with a colon is a
+  comment, not an event. The keepalive carries no `event` or `data`, never
+  triggers `EventSource`'s `message`, and never produces a `results` /
+  `snapshot` / `requests` / `done` event. Hand-rolled `fetch` parsers must skip
+  lines starting with `:` and comment-only event blocks, and must not feed them
+  to a JSON parser.
+- **The event contract is unchanged.** Keepalives do not alter event order,
+  count, or `done.total`; a client can only treat one as proof that the
+  connection is still alive.
+- **Timing.** The idle timer starts when the stream opens and resets after every
+  frame, data or comment, so nothing is emitted at `t=0`. No keepalive is sent
+  immediately before the first frame; one only appears if that first frame takes
+  longer than 15 seconds (for example while every site is still answering),
+  which is exactly the initial wait it protects. The stream ends immediately
+  after its last frame, and **no keepalive is sent after it ends**.
+  `tasks/stream` emits a `snapshot` every second, so its keepalive only shows up
+  during abnormal silence; `login/requests/stream` goes silent once the queue
+  empties and therefore keeps receiving keepalives.
+- **Why it exists.** Reverse proxies, load balancers, CDNs and NAT gateways
+  reclaim connections that stay byte-silent for too long. The keepalive resets
+  their idle timers so a search is not cut off with `502` / `504` or a reset
+  connection before its results arrive.
+- **Where to tune it.** The interval and frame are defined in
+  `src/novel_downloader/apps/api/routes.py` as `SSE_KEEPALIVE_INTERVAL`
+  (default `15.0` seconds) and `SSE_KEEPALIVE_FRAME` (`: keepalive\n\n`).
+  `_stream_with_keepalive()` also takes an `interval` argument, which tests use
+  to shorten it. Changing the interval affects only the heartbeat, never the
+  event format.
+
+!!! tip "Troubleshooting behind a proxy or NAT"
+    - **Idle read timeouts on the client and every hop must exceed 15 seconds.**
+      An HTTP client with a 10-second read timeout disconnects before the first
+      keepalive can arrive.
+    - On nginx, keep `proxy_read_timeout` above 15 seconds (the default 60 is
+      fine) and disable buffering for the location: `proxy_buffering off;`.
+      The backend does send `X-Accel-Buffering: no`, but only nginx honours it,
+      and an explicit setting is more reliable.
+    - CDNs and cloud load balancers usually have an idle limit (Cloudflare's is
+      100 seconds); make sure it exceeds the keepalive interval and that
+      `text/event-stream` is not cached.
+    - NAT gateways commonly reclaim idle connections after 30–120 seconds. If a
+      stream always dies at a fixed number of seconds while a local
+      `curl -N -v` shows a `: keepalive` every 15 seconds, the heartbeats are
+      not crossing the middle layer (buffered or not flushed). Fix the proxy
+      configuration rather than the client's reconnect logic.
+    - Watch the raw lines with `curl -N -v`: normally a `: keepalive` appears
+      roughly every 15 seconds, with `event:` / `data:` frames in between.
 
 ## Download tasks
 
@@ -508,6 +568,10 @@ data: {"pending":[],"running":[],"completed":[{"task_id":"a","status":"completed
   shared across requests.
 - Response headers include `Cache-Control: no-cache` and
   `X-Accel-Buffering: no`.
+- After 15 seconds of silence a `: keepalive` comment frame is written as well
+  (it carries no event). Normally a `snapshot` arrives every second, so the
+  keepalive only appears during abnormal silence. See
+  [SSE keepalive](#sse-keepalive).
 - Authentication matches the search stream: pass the token via
   `Authorization: Bearer` or `X-API-Key`, so browser clients must read the
   stream with `fetch` instead of `EventSource`.
@@ -630,8 +694,10 @@ the waiting task resumes at once. Error codes:
     requests exist it pushes `requests` events (`data` has the same shape as
     the `requests` array from `GET /login/requests`); when the queue empties it
     pushes one final empty-array event and then stays silent until a new request
-    appears. Disconnecting stops it. Authentication matches the other SSE
-    endpoints (`Authorization` / `X-API-Key` headers).
+    appears. During that silence a `: keepalive` comment frame is written every
+    15 seconds; ignore it (see [SSE keepalive](#sse-keepalive)). Disconnecting
+    stops it. Authentication matches the other SSE endpoints (`Authorization` /
+    `X-API-Key` headers).
 
 ## Following books
 

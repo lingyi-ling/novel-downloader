@@ -26,6 +26,16 @@ novel-cli doctor --fix             # 创建缺失的输出/缓存/日志目录�
 
 `--fix` 只在配置的输出、缓存、日志三个目录内动作，拒绝 `..` 与符号链接，不改配置、导出文件或登录态；默认只删除 7 天前的临时文件（`--fix-age-days` 可调）。配置错误、依赖缺失、端口占用等问题它不会代修，仍需按检查项的建议处理。
 
+### 搜索结果缓存：相同搜索仍反复访问站点
+
+`doctor` 的 `Search cache` 行给出进程内的搜索缓存计数，字段与读法见 [CLI 用法 § doctor](./cli-examples.md#10-doctor-子命令) 的「搜索缓存诊断」。
+
+* `hits`、`misses`、`evictions` 是**当前进程**的累计值。单独运行 `novel-cli doctor` 通常全为 `0`，因为该进程没有做过搜索，这不代表异常；桌面端「设置 → Search cache」显示的是桌面进程自己的 Memory entries / Disk entries / Cache hits / Expired entries。
+* **过期多**：`expired_entries` 接近 `memory_entries`，说明常驻条目大多已超过 TTL（默认 300 秒）。诊断只统计不清理，下一次写入或读取该键时才移除；若 `misses` 同时很高，重复搜索会重新访问站点。
+* **命中低**：在足够多的相同查询下，若 `misses` 明显多于 `hits`，先确认 `--limit`、过滤条件、站点选择完全一致，再看 `evictions` 是否持续增长（条目数超过内存容量，默认 64），以及 `fingerprint` 是否在两次运行之间变化（搜索器/浏览器辅助配置变了，旧聚合条目全部失效）。
+* 磁盘条目为 `0` 且 `disk_enabled=false` 是默认的仅内存模式，不是故障；磁盘层需在进程启动前设置 `NOVELDL_SEARCH_CACHE_DIR` 才会启用。
+* 缓存只保存短期结果。需要强制重查时，用桌面端设置页的 **Clear search cache**（清空条目，累计计数保留），或在仅内存模式下重启进程。`novel-cli clean cache` 针对配置的缓存目录（站点 Cookie / 章节缓存），不清空搜索缓存的内存条目。
+
 然后收集版本与日志：
 
 ```bash
@@ -490,6 +500,44 @@ curl -x http://127.0.0.1:7890 -I https://www.google.com
    ```
 
 6. 音乐平台可能自行读取系统代理；若小说可下载但音乐超时，优先检查系统代理与平台可达性。
+
+### 7.1 SSE 流空闲后被断开（502 / 504 / Unexpected EOF）
+
+**现象**：`/api/v1/search/stream`、`/api/v1/tasks/stream` 或
+`/api/v1/login/requests/stream` 刚连上时正常，静默一段时间后断开；反向代理
+返回 `502` / `504`，或客户端报 `Unexpected EOF` / `connection reset`。站点
+响应慢、搜索结果迟迟不返回时最容易命中。
+
+**机制**：三个流每静默 15 秒会发送一个 `: keepalive` 注释帧，用于复位代理、
+CDN 与 NAT 的空闲计时器。它是注释，不产生 `results` / `snapshot` /
+`requests` / `done` 事件。间隔常量在
+`src/novel_downloader/apps/api/routes.py` 的 `SSE_KEEPALIVE_INTERVAL`，
+完整行为见 [API 文档的「SSE 心跳」](api.md#sse-keepalive)。
+
+**排查**：
+
+1. 直连服务，确认心跳确实在写：
+
+   ```bash
+   curl -N -v "http://127.0.0.1:8081/api/v1/tasks/stream" \
+     -H "Authorization: Bearer $TOKEN"
+   ```
+
+   正常时应每 15 秒左右出现一行 `: keepalive`。
+
+2. 直连稳定、经代理后断开：检查每一跳的空闲/读超时。
+   - nginx：`proxy_read_timeout` 必须大于 15 秒（默认 60 秒即可），并设置
+     `proxy_buffering off;`。`X-Accel-Buffering: no` 只对 nginx 生效。
+   - CDN / 云负载均衡：确认空闲上限大于心跳间隔（如 Cloudflare 为 100 秒），
+     并关闭对 `text/event-stream` 的缓存。
+3. 客户端读超时不要小于 15 秒。`EventSource` 会自动忽略注释帧并自行重连；
+   自写的 `fetch` 解析器应跳过以 `:` 开头的行，不要把空事件块当成 JSON 或
+   断流信号。
+4. NAT 网关常在 30–120 秒回收空闲连接。若本地能看到心跳、跨过某段网络后
+   却消失，多半是该段缓冲了响应；应修代理/NAT，而不是缩短服务端心跳。
+
+**仍被断开时**：把日志级别调到 `DEBUG`，确认服务端在写心跳；再用
+`ss` / `netstat` 或代理访问日志对照断开时刻。
 
 ---
 

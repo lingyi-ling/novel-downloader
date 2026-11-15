@@ -368,6 +368,8 @@ data: {"total":2}
 - 客户端断开连接时，服务端会关闭底层搜索生成器并取消仍在进行的站点请求。
 - 响应头包含 `Cache-Control: no-cache` 与 `X-Accel-Buffering: no`，
   使用反向代理时也不会被缓冲。
+- 流空闲 15 秒时会写入 `: keepalive` 注释帧；它不产生事件，详见
+  [SSE 心跳](#sse-keepalive)。
 
 用 `curl -N` 观察实时事件流：
 
@@ -387,6 +389,52 @@ curl -N "http://127.0.0.1:8081/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&s
     SSE 端点同样受 token 保护，只能通过 `Authorization` 或 `X-API-Key`
     请求头传递。浏览器的 `EventSource` 无法自定义请求头，因此请改用
     `fetch` 读取响应流，或使用 `curl` 等可设置请求头的客户端。
+
+## SSE 心跳（keepalive） {#sse-keepalive}
+
+三个 SSE 端点（`search/stream`、`tasks/stream`、`login/requests/stream`）
+共用同一套心跳：任一端点静默 **15 秒**后，服务端写入一个以冒号开头的
+注释帧：
+
+```
+: keepalive
+```
+
+- **按 SSE 规范忽略它。** 冒号开头的行是注释而不是事件；心跳不携带
+  `event` 或 `data`，不会触发 `EventSource` 的 `message`，也不会产生
+  `results` / `snapshot` / `requests` / `done` 事件。基于 `fetch` 自行解析
+  的实现要跳过以 `:` 开头的行以及只含注释的空事件块，不要把它们交给
+  JSON 解析器。
+- **事件契约不变。** 心跳不改变事件顺序、数量或 `done.total`；客户端
+  只能把心跳当作连接仍然存活的信号。
+- **计时规则。** 空闲计时从流建立时开始，每写入一帧（数据帧或注释帧）
+  后重置，`t=0` 不发送任何内容。首帧前不会立即发送心跳；只有首帧等待
+  超过 15 秒（例如所有站点都还在响应）才会先收到心跳，这正是它要保护
+  的初始等待。流在最后一帧后立即结束，**结束后不再发送心跳**。
+  `tasks/stream` 每秒都有 `snapshot`，只有异常静默时才会看到心跳；
+  `login/requests/stream` 在队列清空后转为静默，因此会持续收到心跳。
+- **存在理由。** 反向代理、负载均衡器、CDN 和 NAT 网关会回收长时间
+  没有任何字节流动的连接；心跳复位这些空闲计时器，避免搜索结果还没
+  返回就被 `502` / `504` / 连接重置截断。
+- **可调常量。** 间隔与帧内容定义在
+  `src/novel_downloader/apps/api/routes.py`：`SSE_KEEPALIVE_INTERVAL`
+  （默认 `15.0` 秒）与 `SSE_KEEPALIVE_FRAME`（`: keepalive\n\n`）。
+  `_stream_with_keepalive()` 还接受 `interval` 参数，测试用它缩短间隔。
+  调整间隔只影响心跳，不改变事件格式。
+
+!!! tip "代理 / NAT 下的排障"
+    - 客户端和中间层的**空闲读超时必须大于 15 秒**。把 HTTP 客户端读超时
+      设为 10 秒，会在心跳到达前主动断开。
+    - nginx 确认 `proxy_read_timeout` 大于 15 秒（默认 60 秒即可），并关闭
+      该 location 的缓冲：`proxy_buffering off;`。后端虽然返回
+      `X-Accel-Buffering: no`，但只有 nginx 识别它，显式配置更可靠。
+    - CDN / 云负载均衡通常有空闲上限（例如 Cloudflare 为 100 秒）；确认
+      它大于心跳间隔，并关闭对 `text/event-stream` 的缓存。
+    - NAT 网关常在 30–120 秒回收空闲连接。若流总在固定秒数断开，而本地
+      `curl -N -v` 能看到每 15 秒的 `: keepalive`，说明心跳没有穿过中间层
+      （被缓冲或未刷新），应从代理配置排查，而不是改客户端重连逻辑。
+    - 用 `curl -N -v` 观察原始行：正常时应每 15 秒左右出现一次
+      `: keepalive`，其余时间是 `event:` / `data:` 帧。
 
 ## 下载任务
 
@@ -458,6 +506,9 @@ data: {"pending":[],"running":[],"completed":[{"task_id":"a","status":"completed
 - Stream 的生命周期与请求一致：客户端断开后服务端立即停止轮询并释放资源，
   不会留下后台任务。因此没有 `Last-Event-ID` 重放，也不跨请求共享状态。
 - 响应头包含 `Cache-Control: no-cache` 与 `X-Accel-Buffering: no`。
+- 空闲 15 秒时同样会写入 `: keepalive` 注释帧（不产生事件）；正常情况下
+  每秒都有 `snapshot`，只有流异常静默时才会看到它。见
+  [SSE 心跳](#sse-keepalive)。
 - 鉴权方式与搜索流相同：通过 `Authorization: Bearer` 或 `X-API-Key`
   请求头传递，因此浏览器端需使用 `fetch` 读取流，不能直接用 `EventSource`。
 
@@ -570,7 +621,9 @@ curl -s -X POST "$BASE/api/v1/login/requests/<req_id>" \
     服务端每秒轮询一次凭据队列：有待处理请求时推送 `requests` 事件
     （`data` 与 `GET /login/requests` 的 `requests` 数组同构）；队列清空时
     推送最后一个空数组事件，之后静默，直到出现新请求。客户端断开即停止。
-    鉴权方式与其他 SSE 端点相同（`Authorization` / `X-API-Key` 请求头）。
+    静默期间每 15 秒写入一次 `: keepalive` 注释帧，忽略即可（见
+    [SSE 心跳](#sse-keepalive)）。鉴权方式与其他 SSE 端点相同
+    （`Authorization` / `X-API-Key` 请求头）。
 
 ## 追更
 
