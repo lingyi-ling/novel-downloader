@@ -76,6 +76,8 @@ NEW_OPTIONS = (
     (" doctor", "--max-age-days"),
     (" export", "--out"),
     (" export", "--stage"),
+    (" search", "--sort"),
+    (" search", "--order"),
     (" search", "--min-words"),
     (" search", "--max-words"),
     (" search", "--updated-after"),
@@ -93,7 +95,13 @@ NEW_OPTIONS = (
 #: New options grouped by the path that must offer them in every shell.
 NEW_SURFACE = {
     " doctor": ("--fix", "--dry-run", "--fix-age-days", "--max-age-days"),
-    " search": ("--min-words", "--max-words", "--updated-after"),
+    " search": (
+        "--sort",
+        "--order",
+        "--min-words",
+        "--max-words",
+        "--updated-after",
+    ),
     " storage backup": ("--out", "--json", "--keep", "--dry-run"),
     " storage verify": ("--json",),
 }
@@ -189,6 +197,8 @@ def test_scripts_offer_the_new_options(shell: str) -> None:
         "--keep",
         "--platform",
         "--keyword",
+        "--sort",
+        "--order",
         "--min-words",
         "--max-words",
         "--updated-after",
@@ -410,6 +420,8 @@ def test_option_values_are_not_completed(shell: str) -> None:
         " storage backup --out",
         " storage backup --keep",
         " storage restore --from",
+        " search --sort",
+        " search --order",
         " search --min-words",
         " search --max-words",
         " search --updated-after",
