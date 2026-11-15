@@ -588,6 +588,36 @@ def test_search_ranking_telemetry_is_discoverable(spec: dict[str, Any]) -> None:
         assert marker in lowered, marker
 
 
+def test_search_success_response_documents_the_query_intent_verdict(
+    spec: dict[str, Any],
+) -> None:
+    """The untyped 200 payload exposes its top-level key in the description.
+
+    ``POST /search`` returns a plain dict, so FastAPI emits a permissive object
+    schema without a field list. The response contract (``total``, ``results``
+    and the nullable top-level ``query_intent``) therefore lives in the
+    operation description; the 200 schema must not invent typed properties for
+    fields the server does not model.
+    """
+    operation = _operation(spec, "/api/v1/search", "post")
+    description = operation["description"]
+
+    # The envelope and the additive verdict are discoverable to a generated
+    # client even though no response model declares them.
+    assert '{"total", "results"}' in description
+    assert "query_intent" in description
+    assert '"title"' in description
+    assert '"author"' in description
+    assert "null" in description
+
+    response_schema = operation["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]
+    assert response_schema["type"] == "object"
+    assert response_schema.get("additionalProperties") is True
+    assert "properties" not in response_schema
+
+
 def test_search_examples_cover_sort_order_and_filters(spec: dict[str, Any]) -> None:
     """Generated docs show concrete values for the ranking/filter knobs."""
     properties = _member_schema(spec, "SearchRequest")["properties"]

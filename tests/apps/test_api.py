@@ -186,6 +186,51 @@ async def test_history_lists_exported_files(
 # ---------------------------------------------------------------------------
 
 
+def _intent_row(
+    book_id: str, *, title: str, author: str, **extra: Any
+) -> dict[str, Any]:
+    """Build one searcher-shaped row without a ``query_intent`` verdict."""
+    return {
+        "site": "demo",
+        "book_id": book_id,
+        "book_url": f"https://example.invalid/{book_id}",
+        "cover_url": "",
+        "title": title,
+        "author": author,
+        "latest_chapter": "1",
+        "update_date": "",
+        "word_count": "",
+        "priority": 1,
+        **extra,
+    }
+
+
+def _rank_like_the_plugin(
+    rows: list[dict[str, Any]], keyword: str, **kwargs: Any
+) -> list[dict[str, Any]]:
+    """Run the real ranking/finalisation step behind a fake ``search``.
+
+    The endpoint delegates ranking (and the ``query_intent`` verdict) to
+    :mod:`novel_downloader.plugins.search`. Feeding the same rows through
+    ``_finalize`` keeps these tests on that real verdict instead of a
+    hand-written row label, without a network call.
+    """
+    from novel_downloader.plugins.search import _finalize
+
+    return _finalize(
+        [dict(row) for row in rows],
+        keyword=keyword,
+        sort=kwargs["sort"],
+        order=kwargs["order"],
+        limit=kwargs["limit"],
+        group=kwargs["group"],
+        min_relevance=None,
+        min_words=kwargs.get("min_words"),
+        max_words=kwargs.get("max_words"),
+        updated_after=kwargs.get("updated_after"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_search_validation_rejects_missing_keyword(
     client: httpx.AsyncClient,
@@ -322,6 +367,170 @@ async def test_search_omits_a_conflicting_query_intent(
 
     assert response.status_code == 200
     assert response.json()["query_intent"] is None
+
+
+@pytest.mark.asyncio
+async def test_search_reports_a_title_query_intent(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        _intent_row("42", title="斗破苍穹", author="天蚕土豆"),
+        _intent_row("43", title="斗破苍穹", author="天蚕土豆"),
+    ]
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        return _rank_like_the_plugin(rows, keyword, **kwargs)
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search", json={"keyword": "斗破苍穹", "sites": ["demo"]}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["query_intent"] == "title"
+    assert {row["query_intent"] for row in payload["results"]} == {"title"}
+
+
+@pytest.mark.asyncio
+async def test_search_reports_an_author_query_intent(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        _intent_row("42", title="斗破苍穹", author="天蚕土豆"),
+        _intent_row("43", title="斗破苍穹", author="天蚕土豆"),
+    ]
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        return _rank_like_the_plugin(rows, keyword, **kwargs)
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search", json={"keyword": "天蚕土豆", "sites": ["demo"]}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["query_intent"] == "author"
+    assert {row["query_intent"] for row in payload["results"]} == {"author"}
+
+
+@pytest.mark.asyncio
+async def test_search_reports_no_query_intent_when_the_verdict_is_either(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The keyword overlaps neither the title nor the author, so the ranking
+    # keeps its historical "either" behaviour; the API must surface that as
+    # null rather than leaking the internal placeholder.
+    rows = [
+        _intent_row("42", title="斗破苍穹", author="天蚕土豆"),
+        _intent_row("43", title="斗破苍穹", author="天蚕土豆"),
+    ]
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        return _rank_like_the_plugin(rows, keyword, **kwargs)
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search", json={"keyword": "量子力学", "sites": ["demo"]}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["query_intent"] is None
+    assert {row["query_intent"] for row in payload["results"]} == {None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sort",
+    ["priority", "site", "title", "author", "words", "update"],
+)
+async def test_search_non_quality_sorts_report_no_query_intent(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    sort: str,
+) -> None:
+    # The verdict only explains the default quality order. An explicit other
+    # sort must stay null even though the same rows would yield "title" under
+    # ``quality``.
+    rows = [
+        _intent_row("42", title="斗破苍穹", author="天蚕土豆"),
+        _intent_row("43", title="斗破苍穹", author="天蚕土豆"),
+    ]
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        assert kwargs["sort"] == sort
+        return _rank_like_the_plugin(rows, keyword, **kwargs)
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search",
+        json={"keyword": "斗破苍穹", "sites": ["demo"], "sort": sort},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["query_intent"] is None
+    assert {row["query_intent"] for row in payload["results"]} == {None}
+
+
+@pytest.mark.asyncio
+async def test_search_with_an_empty_site_list_never_searches(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search", json={"keyword": "斗破苍穹", "sites": []}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"total": 0, "results": [], "query_intent": None}
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_search_legacy_rows_keep_their_shape_and_report_no_intent(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A row from an older searcher/cache carries no verdict. The endpoint is
+    # additive only: it must pass the row through untouched (unknown fields
+    # included) and report a null top-level verdict.
+    row = _intent_row("42", title="Book", author="Author", legacy_field="kept")
+
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        return [dict(row)]
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search", json={"keyword": "Book", "sites": ["demo"]}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"total", "results", "query_intent"}
+    assert payload["total"] == 1
+    assert payload["query_intent"] is None
+    assert payload["results"][0] == row
+    assert "query_intent" not in payload["results"][0]
 
 
 @pytest.mark.asyncio
