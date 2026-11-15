@@ -687,6 +687,46 @@ def test_download_links_use_the_latest_release(doc: _Doc) -> None:
         assert "/releases/tag/" not in href, href
 
 
+def test_footer_release_notes_link_is_static_and_safe(doc: _Doc) -> None:
+    """The changelog entry must be a plain footer link: usable with JS off,
+    opened safely, bilingual, and pointed at a file that actually exists."""
+    url = "https://github.com/lingyi-ling/novel-downloader/blob/main/CHANGELOG.md"
+    matches = [
+        (data, ancestors)
+        for data, ancestors in doc.by_tag("a")
+        if data.get("href") == url
+    ]
+    assert len(matches) == 1, "exactly one footer link must point at CHANGELOG.md"
+    data, ancestors = matches[0]
+
+    # it belongs to the footer navigation, next to GitHub / Docs / Issues
+    assert any(
+        tag == "nav" and attrs.get("id") == "foot-links" for tag, attrs in ancestors
+    ), "the release-notes link must live in the footer navigation"
+    # a plain anchor in static markup: no reveal gating, so it shows with JS off
+    assert not any(
+        "reveal" in attrs.get("class", "").split() for _, attrs in ancestors
+    ), "the release-notes link must not depend on scroll-reveal JS"
+    assert "hidden" not in data
+
+    assert data.get("target") == "_blank"
+    assert "noopener" in data.get("rel", "").split(), data.get("rel")
+    assert data.get("data-en", "").strip() == "Release notes"
+
+    labels = [
+        text.strip()
+        for text, text_ancestors in doc.texts
+        if text.strip()
+        and any(
+            tag == "a" and attrs.get("href") == url for tag, attrs in text_ancestors
+        )
+    ]
+    assert "更新日志" in labels
+
+    # a changelog link that 404s is worse than no link at all
+    assert (ROOT / "CHANGELOG.md").is_file()
+
+
 def _verify_dl_block(html_text: str) -> str:
     match = re.search(
         r'<details[^>]*\bid="verify-dl"[^>]*>(.*?)</details>', html_text, re.S
