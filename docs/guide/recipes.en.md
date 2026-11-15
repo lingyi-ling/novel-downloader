@@ -223,6 +223,21 @@ When a scheduled task is too much setup, use the desktop client (`novel-desktop`
 
 > The "Music" tab also offers a "Check platforms" health check that probes every music platform at once.
 
+#### Retry all failed tasks
+
+"Retry all failed" in the top-right corner of the Download tab re-queues every finished task that did not succeed in one go, instead of pressing "Retry" row by row. It works from the same task snapshot the page polls, and the button is disabled immediately and re-enabled by the next refresh.
+
+* **Only terminal failures:** the batch takes `failed` and `cancelled` rows from the finished list (including tasks you cancelled yourself), plus `interrupted` (for example a queue entry left over from a previous exit). `completed` rows and tasks still queued or running are never retried.
+* **No duplicate live work:** a book (identified by site + book ID) that is already queued or running is skipped entirely, even when it also has an older failure row. If one book has several failure rows, only the newest is retried. The button is enabled only while at least one retryable row has no live task.
+* **At most 50 books per click, newest first:** the overflow is reported as skipped (batch limit); click again to retry the rest.
+* **Up to 4 concurrent submissions:** retries are added to the queue four at a time. Actual downloading still follows the task manager's concurrency and rate limits (`general.workers`, `general.request_interval`, `general.max_rps`, ...); it does not start four downloads at once.
+* **One failing row never aborts the batch:** the rest are still submitted, and the toast reports the outcome:
+  * all succeeded: "Retried N tasks";
+  * some failed: "Retried X tasks; Y failed" (the failed rows stay in the list for an individual retry);
+  * some skipped: "Retried X tasks; Z skipped (batch limit)";
+  * nothing to do: "No failed tasks to retry".
+* A retry reuses the original site, book ID, and title; a record without a site or book ID cannot be retried. If reading the queue snapshot itself fails, only an error is shown and nothing is submitted.
+
 ---
 
 ### 5. Connect the Android client to the computer
