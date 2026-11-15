@@ -42,7 +42,10 @@
 | 单个规则文件大小 | 1 MiB (`1024 * 1024` 字节) | 从磁盘读取 (`load_rules`) 与远程安装/抓取分别使用同值的上限 |
 | `fallback` 链嵌套深度 | 16 层 | 每个字段的回退链 |
 | `search.json_body` 嵌套深度 | 32 层 | JSON 请求体 |
+| URL 长度 | 8192 字符 | 规则模板、渲染后的抓取 URL、页面里的链接 |
 | URL scheme | 字面量只允许 `http` / `https` | `search.url`、`book.url`、`chapter.url` 等模板; 相对路径仍允许 |
+| URL userinfo | 禁止 | `https://user:pass@host/` 在加载期即被拒绝, 凭据请写进 `headers` |
+| 请求头字符 | 名称不得含空白/冒号/控制字符, 值不得含控制字符 | 顶层与各段 `headers`; 渲染后的值会再过滤一次 |
 
 * 深度上限防止恶意规则在**校验阶段**就触发 `RecursionError` (那会变成崩溃而不是
   一条可读的规则错误)。
@@ -50,6 +53,13 @@
   `{base_url}/book/{book_id}/` 这类常见写法不受影响; `base_url` 单独校验。
 * 模板渲染后的最终 URL 还会在抓取前再过一次 scheme 检查: 即使模板本身合法,
   页面数据替换出来的 `file://` / `javascript:` 也会被拒绝。
+* URL 中出现控制字符 (C0 / DEL) 一律拒绝; curl 后端会把这些字节原样发出, 而
+  aiohttp / httpx 会直接报错, 因此统一在入口拦掉。
+* 抓取用的 URL 允许 `http://127.0.0.1`、局域网地址等私网目标 (自建书源与本地
+  测试站点是合法用法); **远程规则下载**走更严的公开地址策略, 见
+  `plugins/rule/remote.py`。
+* 封面等图片链接与章节链接共用同一套 allow-list; `file:` / `data:` 等非 http(s)
+  值会被清空, 不会写进媒体目录。
 
 ---
 

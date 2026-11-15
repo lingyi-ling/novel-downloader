@@ -110,7 +110,19 @@ class CurlCffiSession(BaseSession):
                 # explicit proxy, which would bypass the facade's own decision
                 # on the curl backend only.  An empty bypass list hands that
                 # decision back to us.
-                curl_options={CurlOpt.NOPROXY: ""},
+                #
+                # ``PROTOCOLS_STR`` / ``REDIR_PROTOCOLS_STR`` restrict both the
+                # initial request and every redirect hop to HTTP(S).  Without
+                # them curl reads ``file:///etc/passwd`` straight off disk and
+                # will follow an ``ftp:``/``gopher:`` redirect, so the same
+                # scraped URL that aiohttp/httpx refuse would still work here.
+                # This is the backend-level backstop; callers additionally
+                # apply the shared URL allow-list.
+                curl_options={
+                    CurlOpt.NOPROXY: "",
+                    CurlOpt.PROTOCOLS_STR: "http,https",
+                    CurlOpt.REDIR_PROTOCOLS_STR: "http,https",
+                },
                 trust_env=False,
             )
 

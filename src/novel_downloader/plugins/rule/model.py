@@ -97,6 +97,10 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from novel_downloader.infra.i18n import t
+from novel_downloader.plugins.utils.url_safety import (
+    MAX_FETCH_URL_LENGTH,
+    has_url_control_chars,
+)
 from novel_downloader.schemas import FetcherConfig
 
 __all__ = [
@@ -254,7 +258,14 @@ def _as_replace(value: Any) -> list[tuple[str, str]]:
 
 
 #: Control characters that must never appear in a header name or value.
-_HEADER_CTRL_RE = re.compile(r"[\r\n\x00]")
+#: Tab is legal inside a field value (RFC 9110 ``field-vchar``) but never in a
+#: name; DEL is never legal in either.  Rejecting the whole C0 range matters
+#: because curl forwards ``\x01``/``\x0b``/``\x0c`` verbatim while aiohttp and
+#: httpx refuse them, so the same rule would behave differently per backend.
+_HEADER_VALUE_CTRL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+_HEADER_NAME_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+#: Characters that make a header name ambiguous (a pasted ``"X: Y"`` key).
+_HEADER_NAME_ILLEGAL_RE = re.compile(r"[\s:]")
 
 
 def _as_headers(value: Any, *, where: str = "headers") -> dict[str, str]:
@@ -264,6 +275,12 @@ def _as_headers(value: Any, *, where: str = "headers") -> dict[str, str]:
     A non-object value is rejected instead of silently becoming ``{}``: a
     mistyped ``headers`` block is a configuration error, and dropping it means
     the rule makes unauthenticated requests with no diagnostic.
+
+    Header names and values are validated separately: a name must be a token
+    (no whitespace, colon or control character) and a value must be free of
+    control characters.  Both are request-input, so a value such as
+    ``"a\\r\\nX-Evil: 1"`` is refused at load time rather than handed to a
+    backend that may forward it (curl does, for ``\\x01``-style controls).
     """
     if value is None:
         return {}
@@ -272,13 +289,28 @@ def _as_headers(value: Any, *, where: str = "headers") -> dict[str, str]:
     out: dict[str, str] = {}
     for k, v in value.items():
         key, val = str(k), _as_str(v)
-        if _HEADER_CTRL_RE.search(key) or _HEADER_CTRL_RE.search(val):
+        if (
+            _HEADER_NAME_CTRL_RE.search(key)
+            or _HEADER_NAME_ILLEGAL_RE.search(key)
+            or _HEADER_VALUE_CTRL_RE.search(val)
+        ):
             raise RuleError(
                 f"header {key!r} must not contain control characters "
                 "(CR/LF/NUL are rejected to prevent header injection)"
             )
         out[key] = val
     return out
+
+
+def strip_header_control_chars(value: str) -> str:
+    """
+    Remove characters that are never valid in an HTTP header value.
+
+    Used for *rendered* header values, where the substituted part comes from
+    page data (``{book_id}``) and cannot be rejected at load time.  Tab is
+    kept: it is legal inside a field value and several sites send it.
+    """
+    return _HEADER_VALUE_CTRL_RE.sub("", value)
 
 
 def _as_int(value: Any, default: int, *, where: str) -> int:
@@ -394,6 +426,12 @@ def _check_url_template(value: Any, *, where: str, allow_empty: bool = False) ->
     ``{base_url}/book/{book_id}/`` form stays valid; ``base_url`` itself is
     validated separately in :func:`parse_rule`.  Relative and protocol-relative
     templates are allowed -- the site origin fills them in.
+
+    An absolute template is additionally held to the shared fetch policy: it
+    needs a host, must not carry ``user:pass@`` userinfo (which would silently
+    become an ``Authorization`` header), must not contain a backslash in the
+    authority and must stay under
+    :data:`~novel_downloader.plugins.utils.url_safety.MAX_FETCH_URL_LENGTH`.
     """
     if not isinstance(value, str):
         raise RuleError(f"{where} must be a URL string, got {type(value).__name__}")
@@ -402,21 +440,48 @@ def _check_url_template(value: Any, *, where: str, allow_empty: bool = False) ->
         if allow_empty:
             return ""
         raise RuleError(f"{where} must be a non-empty URL template")
-    if _HEADER_CTRL_RE.search(text):
+    if has_url_control_chars(text):
         raise RuleError(f"{where} must not contain control characters")
+    if len(text) > MAX_FETCH_URL_LENGTH:
+        raise RuleError(
+            f"{where} is too long ({len(text)} characters, "
+            f"limit {MAX_FETCH_URL_LENGTH})"
+        )
     probe = _URL_PLACEHOLDER_RE.sub("", text)
     try:
-        scheme = urlsplit(probe).scheme.lower()
+        parts = urlsplit(probe)
+        raw_parts = urlsplit(text)
     except ValueError as e:
         # A malformed bracket expression (``http://[::1/x``) makes ``urlsplit``
         # raise a bare ``ValueError``; without this it escaped ``parse_rule``
         # and aborted the whole rule scan instead of skipping one file.
         raise RuleError(f"{where}: malformed URL template ({e})") from e
+    scheme = parts.scheme.lower()
     if scheme and scheme not in _ALLOWED_URL_SCHEMES:
         raise RuleError(
             f"{where}: unsupported URL scheme {scheme!r} "
             "(rule URLs may only use http/https; a relative path is allowed)"
         )
+    # A template whose authority is itself a placeholder (``http://{host}/x``)
+    # can only be checked once it is rendered; the fetcher re-applies the full
+    # policy to the rendered URL.  Everything else is checked here.
+    authority_is_dynamic = bool(_URL_PLACEHOLDER_RE.search(raw_parts.netloc))
+    if scheme and not authority_is_dynamic:
+        if not parts.netloc or not parts.hostname:
+            raise RuleError(f"{where}: URL template has no host")
+        if parts.username is not None or parts.password is not None:
+            raise RuleError(
+                f"{where}: URL must not contain credentials "
+                "(remove 'user:pass@' from the URL; use headers instead)"
+            )
+        if "\\" in parts.netloc:
+            raise RuleError(f"{where}: URL must not contain a backslash in the host")
+        try:
+            port = parts.port
+        except ValueError as e:
+            raise RuleError(f"{where}: URL has an invalid port") from e
+        if port is not None and not 1 <= port <= 65535:
+            raise RuleError(f"{where}: URL has an invalid port")
     return text
 
 

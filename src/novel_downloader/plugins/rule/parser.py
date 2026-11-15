@@ -24,7 +24,6 @@ from novel_downloader.schemas import (
 )
 
 from .engine import (
-    abs_url,
     extract,
     extract_multi,
     http_url,
@@ -105,7 +104,10 @@ class RuleParser(BaseParser):
         info: BookInfoDict = {
             "book_name": field_value("book_name"),
             "author": field_value("author"),
-            "cover_url": abs_url(base, field_value("cover_url")),
+            # A scraped cover is untrusted page data: route it through the same
+            # http(s) allow-list as chapter links so a ``file:``/``data:``
+            # value never reaches the media downloader (curl would read it).
+            "cover_url": http_url(base, field_value("cover_url")),
             "update_time": field_value("update_time"),
             "summary": field_value("summary"),
             "extra": {"site": rule.site_key},

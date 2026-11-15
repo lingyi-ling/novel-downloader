@@ -16,9 +16,10 @@ from typing import Any, ClassVar
 from urllib.parse import quote_plus, urlsplit
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.utils.url_safety import is_http_fetch_url
 from novel_downloader.schemas import SearchResult
 
-from .engine import abs_url, extract, http_url, parse_page, render, select
+from .engine import extract, http_url, parse_page, render, select
 from .model import Rule
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,19 @@ class RuleSearcher(BaseSearcher):
         headers = dict(search.headers) if search.headers else None
         self._request_url = url
         self._final_url = ""
+
+        # The rendered URL can differ from the template (``{base_url}`` is a
+        # whole authority when the rule writes ``http://{host}/``), so the
+        # allow-list is re-applied here.  ``session`` is an aiohttp client,
+        # which refuses non-HTTP schemes itself; checking first turns the
+        # failure into one log line instead of a backend-specific exception.
+        if not is_http_fetch_url(url):
+            logger.error(
+                "Refusing non-HTTP search URL for keyword '%s' (site=%s)",
+                keyword,
+                self.site_name,
+            )
+            return ""
 
         try:
             if search.json_body is not None:
@@ -142,7 +156,7 @@ class RuleSearcher(BaseSearcher):
                     site=rule.site_key,
                     book_id=self._book_id(book_url, id_rx, search.book_id_group),
                     book_url=book_url,
-                    cover_url=abs_url(base, field("cover", item)),
+                    cover_url=http_url(base, field("cover", item)),
                     title=field("title", item),
                     author=field("author", item),
                     latest_chapter=field("latest", item),
@@ -206,7 +220,7 @@ class RuleSearcher(BaseSearcher):
                 site=rule.site_key,
                 book_id=self._book_id(book_url, id_rx, search.book_id_group),
                 book_url=book_url,
-                cover_url=abs_url(base, value("cover_url", "cover")),
+                cover_url=http_url(base, value("cover_url", "cover")),
                 title=title,
                 author=value("author", "author"),
                 latest_chapter="",

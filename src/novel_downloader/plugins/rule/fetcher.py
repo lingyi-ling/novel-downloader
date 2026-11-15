@@ -14,7 +14,6 @@ pagination pages (``book.pages`` / ``chapter.pages``).
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, ClassVar
 
 from novel_downloader.plugins.base.fetcher import BaseFetcher
@@ -26,14 +25,17 @@ from .engine import (
     render,
     should_stop_pagination,
 )
-from .model import MAX_EXTRA_PAGES, PagesRule, Rule, RuleError
+from .model import (
+    MAX_EXTRA_PAGES,
+    PagesRule,
+    Rule,
+    RuleError,
+    strip_header_control_chars,
+)
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["RuleFetcher"]
-
-#: Control characters never valid in a rendered header value (CRLF injection).
-_HEADER_CTRL_RE = re.compile(r"[\r\n\x00]")
 
 
 class RuleFetcher(BaseFetcher):
@@ -53,7 +55,8 @@ class RuleFetcher(BaseFetcher):
         # substituted into it (``chapter_id``) can still make the *rendered*
         # URL ``file://`` / ``javascript:`` when the template is just a
         # placeholder.  Refuse it with a readable error instead of letting a
-        # backend-specific exception escape.
+        # backend-specific exception escape (curl would happily read a local
+        # file for ``file://``).
         if not is_fetchable_url(url):
             raise RuleError(
                 f"{self.site_name}: refusing non-HTTP URL {url!r} "
@@ -70,14 +73,15 @@ class RuleFetcher(BaseFetcher):
         """
         Render ``{base_url}`` / ``{book_id}`` ... placeholders inside headers.
 
-        Rendered values come partly from page data (``book_id``), so any CR/LF
-        or NUL they carry is stripped: passing them through would make the HTTP
-        client raise a raw ``ValueError`` on header injection.
+        Rendered values come partly from page data (``book_id``), so any
+        control character they carry is stripped: passing them through would
+        make the HTTP client raise a raw ``ValueError`` on header injection
+        (or, for curl, send them verbatim).
         """
         out: dict[str, str] = {}
         for key, value in headers.items():
             rendered = render(value, base_url=base, **fmt)
-            clean = _HEADER_CTRL_RE.sub("", rendered)
+            clean = strip_header_control_chars(rendered)
             if clean != rendered:
                 logger.warning(
                     "Stripped control characters from rendered header %r", key

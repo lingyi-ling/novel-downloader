@@ -41,11 +41,17 @@ A rule file is configuration, not a program. The loader enforces the following h
 | Single rule file size | 1 MiB (`1024 * 1024` bytes) | Disk loading (`load_rules`) and remote install/fetch each use the same limit |
 | `fallback` chain nesting depth | 16 levels | Per-field fallback chain |
 | `search.json_body` nesting depth | 32 levels | JSON request body |
+| URL length | 8192 characters | Rule templates, rendered fetch URLs and scraped links |
 | URL scheme | Literals may only be `http` / `https` | `search.url`, `book.url`, `chapter.url` and other templates; relative paths are still allowed |
+| URL userinfo | Rejected | `https://user:pass@host/` fails at load time; put credentials in `headers` |
+| Header characters | Names may not contain whitespace, a colon or control characters; values may not contain control characters | Top-level and per-section `headers`; rendered values are filtered again |
 
 * The depth limits stop a malicious rule from triggering `RecursionError` during **validation** (which would be a crash rather than a readable rule error).
 * `{name}` placeholders in a URL template are removed before the scheme check, so common forms such as `{base_url}/book/{book_id}/` are unaffected; `base_url` is validated separately.
 * The final rendered URL is checked again for its scheme before fetching: even when the template itself is valid, a `file://` / `javascript:` value substituted from page data is rejected.
+* Control characters (C0 / DEL) in a URL are always rejected: curl forwards those bytes verbatim while aiohttp/httpx refuse them, so the check is done at the entry point.
+* Fetched URLs may point at `http://127.0.0.1` or a LAN address (self-hosted sources and local test sites are legitimate). **Remote rule downloads** use the stricter public-address policy in `plugins/rule/remote.py`.
+* Cover images share the same allow-list as chapter links: a `file:` / `data:` value is cleared and never written into the media directory.
 
 ---
 

@@ -56,12 +56,17 @@ import logging
 import re
 from collections.abc import Callable, Sequence
 from typing import Any
-from urllib.parse import quote, unquote, urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin
 
 from lxml import etree
 from lxml import html as lxml_html
 
 from novel_downloader.libs.mini_js import MiniJS
+from novel_downloader.plugins.utils.url_safety import (
+    MAX_FETCH_URL_LENGTH,
+    has_url_control_chars,
+    is_http_fetch_url,
+)
 
 from .model import (
     MAX_REGEX_LENGTH,
@@ -111,9 +116,6 @@ _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 
 #: A single dot-path segment: ``key``, ``key[2]``, ``key[*]`` or ``[0]``
 _SEGMENT_RE = re.compile(r"^([^\[\]]*)(?:\[([^\]]*)\])?$")
-
-#: Schemes a scraped link may use before it reaches the fetcher.
-_HTTP_SCHEMES = frozenset({"http", "https"})
 
 #: Longest selector echoed back in an error message.  A rule file is bounded,
 #: but a programmatic 1 MiB selector must not turn one typo into a 1 MiB log
@@ -750,37 +752,44 @@ def render(template: str, **kv: Any) -> str:
 
 
 def abs_url(base: str, url: str) -> str:
-    """Resolve ``url`` against ``base`` and normalize protocol-relative URLs."""
+    """
+    Resolve ``url`` against ``base`` and normalize protocol-relative URLs.
+
+    This only makes the link absolute; whether it may be fetched is decided by
+    :func:`is_fetchable_url` / :func:`http_url`.  A value with control
+    characters is dropped here as well: resolving it would only produce a
+    target every backend rejects (or, for curl, forwards verbatim).
+    """
     url = (url or "").strip()
-    if not url:
+    if not url or len(url) > MAX_FETCH_URL_LENGTH or has_url_control_chars(url):
         return ""
     if url.startswith("//"):
         return "https:" + url
     if url.startswith(("http://", "https://")):
         return url
     try:
-        return urljoin(base, url)
+        resolved = urljoin(base, url)
     except ValueError:
         # ``urljoin``/``urlsplit`` reject a malformed bracket expression
         # (``HTTP://[bad/x``) with a bare ``ValueError``.  ``url`` comes from
         # page data, so one hostile link must not abort the whole parse.
         return ""
+    if len(resolved) > MAX_FETCH_URL_LENGTH or has_url_control_chars(resolved):
+        return ""
+    return resolved
 
 
 def is_fetchable_url(url: str) -> bool:
-    """Whether ``url`` may be handed to the HTTP client (http(s) or relative)."""
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        # Malformed IPv6 literals (``http://[::1/x``) raise here; such a link
-        # is simply not a navigable target.
-        return False
-    scheme = parts.scheme.lower()
-    if not scheme:
-        return True
-    # ``http:foo`` has the right scheme but no host, so it is not a URL the
-    # HTTP client can open.
-    return scheme in _HTTP_SCHEMES and bool(parts.netloc)
+    """
+    Whether ``url`` may be handed to the HTTP client.
+
+    Relative values are accepted: a rule without ``base_url`` still needs
+    them, and they fail to fetch like any other relative URL.  An absolute
+    value must be ``http(s)`` with a host, must not carry credentials and must
+    not contain control characters (see
+    :func:`novel_downloader.plugins.utils.url_safety.is_http_fetch_url`).
+    """
+    return is_http_fetch_url(url, allow_relative=True)
 
 
 def http_url(base: str, url: str) -> str:

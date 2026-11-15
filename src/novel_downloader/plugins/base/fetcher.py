@@ -45,6 +45,7 @@ from novel_downloader.plugins.base.errors import (
     TransportError,
 )
 from novel_downloader.plugins.utils.rate_limiter import TokenBucketRateLimiter
+from novel_downloader.plugins.utils.url_safety import is_http_fetch_url
 from novel_downloader.schemas import FetcherConfig, LoginField, MediaResource
 
 logger = logging.getLogger(__name__)
@@ -323,10 +324,23 @@ class BaseFetcher(abc.ABC):
         page, so the retry loop returns the whole response and
         :meth:`fetch_data` unwraps the body for existing callers.
 
+        Only an absolute ``http(s)`` URL is accepted.  Callers pass scraped
+        ``src`` values here, and the backends disagree about other schemes:
+        curl reads ``file:///`` from the local disk and follows an ``ftp:``
+        redirect, so a hostile page could otherwise copy a local file into the
+        media directory.  A refused URL is a skipped asset, exactly like a 404.
+
         :param url: The target URL.
         :return: the successful response, or ``None`` when the fetcher's
             retries are exhausted.
         """
+        if not is_http_fetch_url(url):
+            logger.warning(
+                "Refusing non-HTTP media URL (site=%s) %s",
+                self.site_name,
+                url,
+            )
+            return None
         for attempt in range(self._retry_times + 1):
             if self._rate_limiter:
                 await self._rate_limiter.wait()
