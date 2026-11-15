@@ -118,6 +118,18 @@ MAX_TRACK_PATH_LENGTH = 1024
 MAX_PLATFORM_LENGTH = 64
 MAX_LEVEL_LENGTH = 64
 
+#: Audio quality levels accepted by the music download endpoints. The docs
+#: advertise exactly this set; an unknown value would otherwise reach the
+#: provider and fail per-track instead of being rejected as a malformed
+#: request. The embedded server mirrors this tuple.
+MUSIC_AUDIO_LEVELS: tuple[str, ...] = (
+    "hires",
+    "lossless",
+    "exhigh",
+    "higher",
+    "standard",
+)
+
 #: Limits for client-supplied per-track HTTP headers.
 MAX_HEADER_COUNT = 32
 MAX_HEADER_NAME_LENGTH = 64
@@ -337,11 +349,20 @@ def validate_media_url(value: str) -> str:
 
 
 def validate_optional_level(value: str | None) -> str | None:
-    """Normalize an optional audio level; blank means the engine default."""
+    """Normalize an optional audio level; blank means the engine default.
+
+    Only the levels documented for ``POST /api/v1/music/download`` are
+    accepted. Unknown values are a ``422`` at the request boundary rather
+    than a per-track download failure deep inside a provider.
+    """
     if value is None:
         return None
     cleaned = _clean_text(value, "level", MAX_LEVEL_LENGTH, allow_blank=True)
-    return cleaned or None
+    if not cleaned:
+        return None
+    if cleaned not in MUSIC_AUDIO_LEVELS:
+        raise ValueError("level must be one of: " + ", ".join(MUSIC_AUDIO_LEVELS))
+    return cleaned
 
 
 def validate_optional_path(value: str | None) -> str | None:

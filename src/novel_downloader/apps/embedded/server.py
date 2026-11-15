@@ -142,6 +142,9 @@ _MAX_SEARCH_WORDS = 1_000_000_000
 _MAX_MUSIC_OFFSET = 10_000
 _MAX_PLATFORM_LENGTH = 64
 _MAX_LEVEL_LENGTH = 64
+#: Mirrors ``schemas.MUSIC_AUDIO_LEVELS``: unknown quality values are a 422
+#: on both transports, not a per-track provider failure.
+_MUSIC_AUDIO_LEVELS = ("hires", "lossless", "exhigh", "higher", "standard")
 _MAX_OPTIONAL_PATH_LENGTH = 1024
 _MAX_MUSIC_TRACK_TEXT_LENGTH = 512
 _MAX_MUSIC_LYRIC_LENGTH = 100_000
@@ -1867,13 +1870,17 @@ def _optional_text_field(
     name: str,
     max_length: int,
     entries: list[dict[str, Any]],
+    *,
+    choices: tuple[str, ...] | None = None,
 ) -> str | None:
     """
     Validate an optional path/level field like ``schemas.OptionalPath``.
 
     Absent/null means "use the default"; a non-string is a ``string_type``
     error (the old code ``str()``-coerced it, accepting payloads REST rejects)
-    and a blank value collapses to ``None``.
+    and a blank value collapses to ``None``.  ``choices`` mirrors an
+    enumerated field (the audio ``level``): a non-matching value is the same
+    ``value_error`` REST's ``AfterValidator`` produces.
     """
     raw, error = _typed_string(body, name)
     if error is not None:
@@ -1885,7 +1892,13 @@ def _optional_text_field(
     if error is not None:
         entries.append(error)
         return None
-    return cleaned or None
+    value = cleaned or None
+    if value is not None and choices is not None and value not in choices:
+        entries.append(
+            _value_error(name, f"{name} must be one of: {', '.join(choices)}")
+        )
+        return None
+    return value
 
 
 def _health_timeout(
@@ -2467,7 +2480,13 @@ def _music_download_args(
     # ``level`` / ``out_dir`` are ``OptionalLevel`` / ``OptionalPath``: a
     # non-string (or a hostile value) is a 422 here, before the filesystem
     # policy runs, exactly like the REST request model.
-    level = _optional_text_field(body, "level", _MAX_LEVEL_LENGTH, entries)
+    level = _optional_text_field(
+        body,
+        "level",
+        _MAX_LEVEL_LENGTH,
+        entries,
+        choices=_MUSIC_AUDIO_LEVELS,
+    )
     raw_out_dir = _optional_text_field(
         body, "out_dir", _MAX_OPTIONAL_PATH_LENGTH, entries
     )
