@@ -47,10 +47,20 @@ class SearchFilterViewModel @JvmOverloads constructor(
         update(_state.value.copy(updatedAfter = date.trim()))
     }
 
+    /**
+     * Selects a sort key. A newly selected key starts in its natural
+     * direction ([SearchSort.naturalOrder]), matching the desktop search bar
+     * so `priority` does not open with the worst sites first. Re-selecting the
+     * active key is a no-op, so a direction the user flipped by hand survives
+     * an accidental tap on the same chip.
+     */
     fun updateSort(sort: SearchSort) {
-        update(_state.value.copy(sort = sort))
+        val current = _state.value
+        if (current.sort == sort) return
+        update(current.copy(sort = sort, order = sort.naturalOrder))
     }
 
+    /** Explicit direction choice; always honoured until the key changes. */
     fun updateOrder(order: SearchOrder) {
         update(_state.value.copy(order = order))
     }
@@ -102,6 +112,9 @@ class SearchFilterViewModel @JvmOverloads constructor(
 
         private fun restore(savedState: SavedStateHandle?): SearchFilterState {
             if (savedState == null) return SearchFilterState.EMPTY
+            // Anything outside the server whitelist (an old or corrupt value)
+            // falls back to the default instead of being sent.
+            val sort = SearchSort.fromWire(savedState.get<String>(SAVED_SORT))
             return SearchFilterState(
                 minWords = savedState.get<String>(SAVED_MIN_WORDS).orEmpty(),
                 maxWords = savedState.get<String>(SAVED_MAX_WORDS).orEmpty(),
@@ -110,10 +123,13 @@ class SearchFilterViewModel @JvmOverloads constructor(
                 updatedAfter = parseFilterDate(
                     savedState.get<String>(SAVED_UPDATED_AFTER).orEmpty(),
                 )?.toString().orEmpty(),
-                // Anything outside the server whitelist (an old or corrupt
-                // value) falls back to the default instead of being sent.
-                sort = SearchSort.fromWire(savedState.get<String>(SAVED_SORT)),
-                order = SearchOrder.fromWire(savedState.get<String>(SAVED_ORDER)),
+                sort = sort,
+                // A saved direction always wins, including one the user flipped
+                // by hand. Only an absent/unknown value falls back to the
+                // restored key's natural direction (an older build that only
+                // saved the key lands on the new default instead of `desc`).
+                order = SearchOrder.fromWireOrNull(savedState.get<String>(SAVED_ORDER))
+                    ?: sort.naturalOrder,
             )
         }
     }

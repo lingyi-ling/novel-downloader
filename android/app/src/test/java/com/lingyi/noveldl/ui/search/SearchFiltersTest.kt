@@ -58,6 +58,31 @@ class SearchFiltersTest {
     }
 
     @Test
+    fun eachSortKeyDefaultsToItsNaturalDirection() {
+        // Mirrors ranking.default_order and the desktop search bar. "quality"
+        // ranks by site priority (lower is better), hence ascending.
+        val expected = mapOf(
+            SearchSort.QUALITY to SearchOrder.DESC,
+            SearchSort.PRIORITY to SearchOrder.ASC,
+            SearchSort.WORDS to SearchOrder.DESC,
+            SearchSort.UPDATE to SearchOrder.DESC,
+        )
+
+        assertEquals(expected, SearchSort.entries.associateWith { it.naturalOrder })
+        assertEquals(SearchOrder.DESC, SearchSort.DEFAULT.naturalOrder)
+        assertEquals(SearchOrder.DESC, SearchFilterState().order)
+    }
+
+    @Test
+    fun anUnrecognisedOrderHasNoWireValueButAFallback() {
+        assertNull(SearchOrder.fromWireOrNull(null))
+        assertNull(SearchOrder.fromWireOrNull(""))
+        assertNull(SearchOrder.fromWireOrNull("sideways"))
+        assertEquals(SearchOrder.ASC, SearchOrder.fromWireOrNull(" ASC "))
+        assertEquals(SearchOrder.DESC, SearchOrder.fromWire(null))
+    }
+
+    @Test
     fun unknownSavedSortAndOrderFallBackToTheDefaults() {
         assertEquals(SearchSort.QUALITY, SearchSort.fromWire("relevance"))
         assertEquals(SearchSort.QUALITY, SearchSort.fromWire(""))

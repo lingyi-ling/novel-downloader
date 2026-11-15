@@ -143,6 +143,155 @@ class SearchFilterViewModelTest {
     }
 
     @Test
+    fun eachSortKeyStartsWithItsNaturalDirection() {
+        // Mirrors the desktop search bar: quality/words/update newest or
+        // longest first, site priority best first.
+        val expected = mapOf(
+            SearchSort.QUALITY to SearchOrder.DESC,
+            SearchSort.PRIORITY to SearchOrder.ASC,
+            SearchSort.WORDS to SearchOrder.DESC,
+            SearchSort.UPDATE to SearchOrder.DESC,
+        )
+        assertEquals(SearchSort.entries.toSet(), expected.keys)
+
+        expected.forEach { (sort, natural) ->
+            val saved = SavedStateHandle()
+            val model = SearchFilterViewModel(savedState = saved)
+            // Seed another key when the target is already active: selecting
+            // the active key is a no-op by design, so the loop must exercise a
+            // real key change.
+            if (model.state.value.sort == sort) {
+                model.updateSort(
+                    if (sort == SearchSort.QUALITY) SearchSort.UPDATE else SearchSort.QUALITY,
+                )
+            }
+            // Flip first, so the reset is observable even when the natural
+            // direction happens to be the default `desc`.
+            model.updateOrder(natural.flipped())
+
+            model.updateSort(sort)
+
+            assertEquals(sort, model.state.value.sort)
+            assertEquals("sort=${sort.wire}", natural, model.state.value.order)
+            assertEquals(sort.wire, saved.get<String>(SearchFilterViewModel.SAVED_SORT))
+            assertEquals(
+                "sort=${sort.wire}",
+                natural.wire,
+                saved.get<String>(SearchFilterViewModel.SAVED_ORDER),
+            )
+            // The request and a later restore both keep the pair.
+            assertEquals(
+                "sort=${sort.wire}",
+                natural.wire,
+                model.state.value.toSearchRequest("x")?.order,
+            )
+            assertEquals(
+                sort,
+                SearchFilterViewModel(savedState = saved).state.value.sort,
+            )
+        }
+    }
+
+    @Test
+    fun switchingTheSortKeyOverridesAManualDirection() {
+        val model = SearchFilterViewModel(savedState = SavedStateHandle())
+        model.updateOrder(SearchOrder.ASC)
+        assertEquals(SearchOrder.ASC, model.state.value.order)
+
+        // Selecting a different key is a fresh start: words is natural `desc`.
+        model.updateSort(SearchSort.WORDS)
+
+        assertEquals(SearchFilterState(sort = SearchSort.WORDS), model.state.value)
+    }
+
+    @Test
+    fun reSelectingTheActiveSortKeyKeepsTheManualDirection() {
+        val saved = SavedStateHandle()
+        val model = SearchFilterViewModel(savedState = saved)
+        model.updateSort(SearchSort.PRIORITY)
+        assertEquals(SearchOrder.ASC, model.state.value.order)
+
+        model.updateOrder(SearchOrder.DESC)
+        // A second tap on the already-selected chip (which Compose still
+        // delivers) must not silently undo the flip.
+        model.updateSort(SearchSort.PRIORITY)
+
+        assertEquals(SearchSort.PRIORITY, model.state.value.sort)
+        assertEquals(SearchOrder.DESC, model.state.value.order)
+        assertEquals("desc", saved.get<String>(SearchFilterViewModel.SAVED_ORDER))
+    }
+
+    @Test
+    fun updateOrderStaysManualAcrossUnrelatedEdits() {
+        val saved = SavedStateHandle()
+        val model = SearchFilterViewModel(savedState = saved)
+        model.updateSort(SearchSort.UPDATE)
+        model.updateOrder(SearchOrder.ASC)
+
+        model.updateMinWords("1000")
+        model.updateMaxWords("5000")
+        model.updateUpdatedAfter("2024-05-01")
+
+        assertEquals(SearchOrder.ASC, model.state.value.order)
+        assertEquals("asc", saved.get<String>(SearchFilterViewModel.SAVED_ORDER))
+    }
+
+    @Test
+    fun eachSortKeyRestoresTheSavedDirectionEvenWhenItIsNotNatural() {
+        // A direction the user flipped by hand is never re-normalised, so a
+        // process-death restore looks exactly like the panel they left.
+        SearchSort.entries.forEach { sort ->
+            val manual = sort.naturalOrder.flipped()
+            val saved = SavedStateHandle(
+                mapOf(
+                    SearchFilterViewModel.SAVED_SORT to sort.wire,
+                    SearchFilterViewModel.SAVED_ORDER to manual.wire,
+                ),
+            )
+
+            val restored = SearchFilterViewModel(savedState = saved)
+
+            assertEquals(sort, restored.state.value.sort)
+            assertEquals("sort=${sort.wire}", manual, restored.state.value.order)
+            assertEquals(
+                "sort=${sort.wire}",
+                manual.wire,
+                restored.state.value.toSearchRequest("x")?.order,
+            )
+        }
+    }
+
+    @Test
+    fun aMissingSavedDirectionFallsBackToTheRestoredKeysNaturalOrder() {
+        SearchSort.entries.forEach { sort ->
+            // An older build (or a corrupt handle) may have saved only the key.
+            val saved = SavedStateHandle(
+                mapOf(SearchFilterViewModel.SAVED_SORT to sort.wire),
+            )
+
+            val restored = SearchFilterViewModel(savedState = saved)
+
+            assertEquals(sort, restored.state.value.sort)
+            assertEquals("sort=${sort.wire}", sort.naturalOrder, restored.state.value.order)
+        }
+    }
+
+    @Test
+    fun anUnknownSavedDirectionFallsBackToTheRestoredKeysNaturalOrder() {
+        val saved = SavedStateHandle(
+            mapOf(
+                SearchFilterViewModel.SAVED_SORT to "priority",
+                SearchFilterViewModel.SAVED_ORDER to "sideways",
+            ),
+        )
+
+        val restored = SearchFilterViewModel(savedState = saved)
+
+        assertEquals(SearchSort.PRIORITY, restored.state.value.sort)
+        assertEquals(SearchOrder.ASC, restored.state.value.order)
+    }
+
+    @Test
     fun anUnknownSavedSortOrOrderFallsBackToTheDefault() {
         val saved = SavedStateHandle(
             mapOf(
@@ -217,5 +366,10 @@ class SearchFilterViewModelTest {
         assertFalse(saved.contains(SearchFilterViewModel.SAVED_MIN_WORDS))
         assertFalse(saved.contains(SearchFilterViewModel.SAVED_SORT))
         assertFalse(saved.contains(SearchFilterViewModel.SAVED_ORDER))
+    }
+
+    private fun SearchOrder.flipped(): SearchOrder = when (this) {
+        SearchOrder.ASC -> SearchOrder.DESC
+        SearchOrder.DESC -> SearchOrder.ASC
     }
 }

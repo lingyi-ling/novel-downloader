@@ -12,12 +12,18 @@ import java.time.ZoneOffset
  * `PRIORITY` is shown as "质量" because the API's `priority` key orders rows by
  * the source site's configured weight (higher first). `QUALITY` is the default
  * five-signal ranking, whose dominant signal is keyword relevance.
+ *
+ * [naturalOrder] mirrors the server's `ranking.default_order` and the desktop
+ * search bar: picking a key starts it in its natural direction, and the user
+ * can still flip the direction afterwards.
  */
-enum class SearchSort(val wire: String) {
-    QUALITY("quality"),
-    PRIORITY("priority"),
-    WORDS("words"),
-    UPDATE("update"),
+enum class SearchSort(val wire: String, val naturalOrder: SearchOrder) {
+    QUALITY("quality", SearchOrder.DESC),
+    // A lower site-priority value is the better site, so "quality" ranks
+    // ascending; the other keys start newest/longest first.
+    PRIORITY("priority", SearchOrder.ASC),
+    WORDS("words", SearchOrder.DESC),
+    UPDATE("update", SearchOrder.DESC),
     ;
 
     companion object {
@@ -35,19 +41,23 @@ enum class SearchSort(val wire: String) {
     }
 }
 
-/** Sort direction accepted by the API (`asc` / `desc`); descending by default. */
+/** Sort direction accepted by the API (`asc` / `desc`). */
 enum class SearchOrder(val wire: String) {
     ASC("asc"),
     DESC("desc"),
     ;
 
     companion object {
+        /** Fallback when nothing usable was saved; the default key's natural order. */
         val DEFAULT = DESC
 
-        fun fromWire(raw: String?): SearchOrder {
+        /** The recognised direction, or `null` when the value is absent/unknown. */
+        fun fromWireOrNull(raw: String?): SearchOrder? {
             val text = raw?.trim()?.lowercase()
-            return entries.firstOrNull { it.wire == text } ?: DEFAULT
+            return entries.firstOrNull { it.wire == text }
         }
+
+        fun fromWire(raw: String?): SearchOrder = fromWireOrNull(raw) ?: DEFAULT
     }
 }
 
