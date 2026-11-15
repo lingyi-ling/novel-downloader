@@ -84,6 +84,19 @@ Bottom tabs: **Search / Tasks / History / Music / Follow**.
 
 ## Search and Filters
 
+### Recent searches
+
+The strip under the search box lists the terms you searched recently (the section is hidden while the list is empty). Tap one to run the same search again:
+
+- At most **10** terms are kept, newest first; the oldest one is dropped when the list is full.
+- A term is recorded as soon as a search is **submitted**, so a search whose request fails or that runs offline is still kept — that is usually the one worth retrying. A blank keyword, or a search blocked by invalid filters before it is sent, is not recorded.
+- Submitting the same term again does not duplicate it: comparison ignores case and extra whitespace (`Harry` and `harry` are the same entry); the entry moves to the front and shows the latest spelling.
+- Each term is stored up to 200 characters and truncated beyond that; leading, trailing and repeated whitespace is collapsed to single spaces first. Blank terms are not stored.
+- Tapping an entry puts the term back in the search box and re-runs the search with the **current** site selection, filters and ordering, not the ones from the original search. That search records the term again, so it stays at the front.
+- The × on an entry deletes only that term; "Clear search history" next to the heading deletes them all. Both act immediately, with no confirmation.
+- The list lives only in `search_history.json` in the app's private files directory: it needs no network or engine, and holds no account, site-selection or result data. Uninstalling the app or clearing its data removes it along with everything else.
+- If the file is corrupt, oversized or written by a newer app version, the list is treated as empty instead of raising an error; the next search rewrites it. Writes go to a temporary file in the same directory and then replace the target atomically, so an interrupted write never leaves a half-written list.
+
 ### Site selection
 
 The "Search sites" field opens a multi-select dialog rather than a text box:
