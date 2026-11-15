@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as dist_version
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from novel_downloader.apps.cli import ui
 from novel_downloader.apps.constants import DOWNLOAD_SUPPORT_SITES
@@ -64,6 +64,9 @@ from novel_downloader.plugins import registrar
 
 from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail
 from .storage import disk_free, format_size, scan_tree
+
+if TYPE_CHECKING:
+    from novel_downloader.plugins.search_cache import SearchCache
 
 #: Minimum Python version supported by the project (``requires-python``).
 MIN_PYTHON = (3, 11)
@@ -1120,6 +1123,80 @@ def _check_cache_dir() -> Check:
     )
 
 
+def _search_cache() -> SearchCache:
+    """Return the process-wide search cache (imported lazily, no I/O)."""
+    from novel_downloader.plugins.search import _CACHE
+
+    return _CACHE
+
+
+def _search_cache_fingerprint() -> str:
+    """Return the configuration fingerprint aggregate searches are keyed on."""
+    from novel_downloader.plugins import search as search_module
+
+    classes = registrar.get_searcher_classes(load_all_if_none=True)
+    return search_module._aggregate_config_fingerprint(
+        classes, search_module._browser_assisted_sites()
+    )
+
+
+def _check_search_cache() -> Check:
+    """Report search-cache occupancy and usage (advisory).
+
+    The numbers come from :meth:`SearchCache.diagnostics`, a read-only
+    snapshot: nothing is purged and no payload file is opened.  The disk
+    layer reports ``0`` entries when it is disabled, so the row is meaningful
+    for the default memory-only configuration too.  The configuration
+    fingerprint is included because a change to the registered/browser-assisted
+    site set invalidates aggregate-search entries, which is a common reason a
+    "warm" cache still misses.  No cache key (keyword, site selection or
+    filters) is ever exposed.
+    """
+    try:
+        snapshot = _search_cache().diagnostics()
+    except Exception as exc:
+        return Check(
+            t("Search cache"),
+            False,
+            t("unavailable: {error}").format(error=str(exc)[:_MAX_FAILURE_TEXT]),
+            fatal=False,
+            key="search_cache",
+        )
+    try:
+        fingerprint = _search_cache_fingerprint()
+    except Exception:
+        # The fingerprint only annotates the cache state; failing to compute
+        # it must not turn a working cache into a failed check.
+        fingerprint = ""
+    detail = t(
+        "{memory} memory / {disk} disk entry(s), {hits} hit(s), {expired} expired"
+    ).format(
+        memory=snapshot.memory_entries,
+        disk=snapshot.disk_entries,
+        hits=snapshot.hits,
+        expired=snapshot.expired_entries,
+    )
+    if fingerprint:
+        detail += " " + t("(fingerprint {fingerprint})").format(fingerprint=fingerprint)
+    return Check(
+        t("Search cache"),
+        True,
+        detail,
+        fatal=False,
+        key="search_cache",
+        data={
+            "memory_entries": snapshot.memory_entries,
+            "expired_entries": snapshot.expired_entries,
+            "disk_enabled": snapshot.disk_enabled,
+            "disk_entries": snapshot.disk_entries,
+            "hits": snapshot.hits,
+            "misses": snapshot.misses,
+            "evictions": snapshot.evictions,
+            "fingerprint": fingerprint,
+        },
+    )
+
+
 def _check_sites() -> Check:
     """Report how many download sites are registered."""
     count = len(DOWNLOAD_SUPPORT_SITES)
@@ -1343,6 +1420,7 @@ def collect_checks(
         ),
         ("disk_space", t("Disk space"), _check_disk_space),
         ("cache", t("Cache directory"), _check_cache_dir),
+        ("search_cache", t("Search cache"), _check_search_cache),
         ("sites", t("Sites"), _check_sites),
         ("site_plugins", t("Site plugins"), _check_site_plugins),
         ("searchers", t("Searchers"), _check_searchers),

@@ -55,6 +55,7 @@ from novel_downloader.schemas import SearchResult
 
 __all__ = [
     "DISK_DIR_ENV",
+    "CacheDiagnostics",
     "CacheKey",
     "CacheStats",
     "SearchCache",
@@ -314,6 +315,27 @@ def _restore_row(row: object) -> SearchResult | None:
 class CacheStats:
     """Cumulative counters describing a :class:`SearchCache`'s usage."""
 
+    hits: int
+    misses: int
+    evictions: int
+
+
+@dataclass(frozen=True)
+class CacheDiagnostics:
+    """Read-only occupancy and usage snapshot, for diagnostics only.
+
+    ``memory_entries`` counts every entry currently held in memory, including
+    the ones whose TTL has already elapsed but that no ``put``/``get`` has
+    purged yet; ``expired_entries`` is the subset of those.  ``disk_entries``
+    is the number of this cache's payload files in the configured directory,
+    and is always ``0`` when the disk layer is disabled.  No cache key (and
+    therefore no keyword or site selection) is exposed.
+    """
+
+    memory_entries: int
+    expired_entries: int
+    disk_enabled: bool
+    disk_entries: int
     hits: int
     misses: int
     evictions: int
@@ -668,6 +690,43 @@ class SearchCache:
         """Return a snapshot of the cumulative usage counters."""
         with self._lock:
             return CacheStats(
+                hits=self._hits,
+                misses=self._misses,
+                evictions=self._evictions,
+            )
+
+    def diagnostics(self) -> CacheDiagnostics:
+        """Return a read-only occupancy/usage snapshot for diagnostics.
+
+        This never mutates the cache or the disk layer: expired entries are
+        counted, not purged, and the payload files are listed, not opened.
+        A missing or unreadable disk directory simply reports ``0`` files, so
+        a diagnostic caller does not have to special-case a cache that has
+        never written anything.
+        """
+        with self._lock:
+            now = self._now()
+            expired = sum(
+                1
+                for stored_at, _results in self._entries.values()
+                if now - stored_at >= self._ttl
+            )
+            disk_entries = 0
+            if self._disk_dir is not None:
+                try:
+                    disk_entries = sum(
+                        1
+                        for _path in self._disk_dir.glob(
+                            f"{_DISK_PREFIX}*{_DISK_SUFFIX}"
+                        )
+                    )
+                except (OSError, ValueError):
+                    disk_entries = 0
+            return CacheDiagnostics(
+                memory_entries=len(self._entries),
+                expired_entries=expired,
+                disk_enabled=self._disk_dir is not None,
+                disk_entries=disk_entries,
                 hits=self._hits,
                 misses=self._misses,
                 evictions=self._evictions,

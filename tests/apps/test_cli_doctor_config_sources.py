@@ -94,7 +94,8 @@ def test_doctor_collect_checks_isolates_a_crashing_check(
     assert {"package", "dependencies", "site_plugins", "music", "api_port"} <= set(
         by_key
     )
-    assert len(checks) == 14
+    assert "search_cache" in by_key
+    assert len(checks) == 15
 
 
 def test_doctor_treats_a_non_check_return_value_as_a_failure() -> None:
@@ -242,6 +243,90 @@ def test_doctor_absolute_configured_paths_are_masked(
     detail = payload["checks"][0]["detail"]
     assert str(tmp_path) not in detail
     assert "downloads" in detail
+
+
+# ---------------------------------------------------------------------------
+# doctor: search-cache diagnostics
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_search_cache_reports_occupancy_hits_and_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from novel_downloader.plugins.search_cache import SearchCache, build_key
+
+    clock = [1_700_000_000.0]
+    cache = SearchCache(
+        ttl=60.0,
+        now=lambda: clock[0],
+        wall_clock=lambda: clock[0],
+        disk_dir=tmp_path / "search-cache",
+    )
+    keyword = "private hidden query"
+    key = build_key(keyword, None, config_fingerprint="current")
+    cache.put(key, [])
+    assert cache.get(key) is not None
+
+    # Expire the entry in place: diagnostics counts it but does not purge it.
+    clock[0] += 61.0
+    monkeypatch.setattr(doctor, "_search_cache", lambda: cache)
+    monkeypatch.setattr(doctor, "_search_cache_fingerprint", lambda: "abc123")
+
+    check = doctor._check_search_cache()
+
+    assert check.ok is True
+    assert check.fatal is False
+    data = check.data or {}
+    assert data["memory_entries"] == 1
+    assert data["expired_entries"] == 1
+    assert data["disk_enabled"] is True
+    assert data["disk_entries"] == 1
+    assert data["hits"] == 1
+    assert data["fingerprint"] == "abc123"
+    assert "1 memory / 1 disk entry(s), 1 hit(s), 1 expired" in check.detail
+    # No cache key content (keyword/site selection) may reach the report.
+    assert keyword not in check.detail
+    assert keyword not in json.dumps(data)
+
+
+def test_doctor_search_cache_reports_zero_disk_entries_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novel_downloader.plugins.search_cache import SearchCache
+
+    # ``disk_dir=""`` bypasses ``NOVELDL_SEARCH_CACHE_DIR``: memory-only.
+    cache = SearchCache(disk_dir="", now=lambda: 0.0, wall_clock=lambda: 0.0)
+    monkeypatch.setattr(doctor, "_search_cache", lambda: cache)
+    monkeypatch.setattr(doctor, "_search_cache_fingerprint", lambda: "fp")
+
+    check = doctor._check_search_cache()
+
+    data = check.data or {}
+    assert check.ok is True and check.fatal is False
+    assert data["disk_enabled"] is False
+    assert data["disk_entries"] == 0
+    assert "0 disk entry(s)" in check.detail
+
+
+def test_doctor_search_cache_fingerprint_failure_keeps_the_check_advisory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novel_downloader.plugins.search_cache import SearchCache
+
+    cache = SearchCache(disk_dir="", now=lambda: 0.0, wall_clock=lambda: 0.0)
+
+    def _raise() -> str:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(doctor, "_search_cache", lambda: cache)
+    monkeypatch.setattr(doctor, "_search_cache_fingerprint", _raise)
+
+    check = doctor._check_search_cache()
+
+    assert check.ok is True
+    assert check.fatal is False
+    assert (check.data or {})["fingerprint"] == ""
 
 
 # ---------------------------------------------------------------------------
