@@ -6,6 +6,15 @@ The site is served by nginx from ``/var/www/noveldl`` (see
 ``/etc/nginx/sites-available/parfait.conf``).  Deployment is a plain file sync:
 no build step, no package manager, no service restart.
 
+``website/404.html`` is deployed like any other page, but nginx only uses it
+when the server config names it, for example::
+
+    error_page 404 /noveldl/404.html;
+    location = /noveldl/404.html { internal; }
+
+That config is not part of this repository; the deployment script cannot
+install it because it only has passwordless sudo for the document root.
+
 Authentication, in order of preference:
 
 * an SSH key / agent (``~/.ssh/id_ed25519`` and friends, tried by paramiko);
@@ -59,6 +68,10 @@ CLEANUP_TIMEOUT = 30.0
 #: (an editor backup, a build artifact) never gets published by accident.
 SITE_FILES: tuple[str, ...] = (
     "index.html",
+    # Static 404 page.  Publishing the file is not enough on its own: nginx
+    # must point at it with ``error_page 404 /noveldl/404.html;``.  That
+    # server config lives outside this repository (see the module docstring).
+    "404.html",
     "main.js",
     "style.css",
     "favicon.svg",

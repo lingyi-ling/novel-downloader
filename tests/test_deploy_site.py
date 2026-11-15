@@ -105,6 +105,28 @@ def test_every_website_file_is_on_the_deploy_list() -> None:
     )
 
 
+def test_the_404_page_is_published() -> None:
+    """The static 404 page must not stay behind when the site is synced."""
+    assert "404.html" in deploy_site.SITE_FILES
+    assert (_SCRIPT.parent.parent / "website" / "404.html").is_file()
+
+
+def test_dry_run_includes_the_404_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site = _make_site(tmp_path, deploy_site.SITE_FILES)
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("dry run must not open a connection")
+
+    monkeypatch.setattr(deploy_site, "_connect", _boom)
+
+    names = deploy_site.deploy(site_dir=site, dry_run=True)
+
+    assert names.count("404.html") == 1
+    assert names.index("index.html") < names.index("404.html")
+
+
 def test_a_relative_docroot_is_rejected(tmp_path: Path) -> None:
     site = _make_site(tmp_path, deploy_site.REQUIRED_FILES)
 

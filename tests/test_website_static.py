@@ -29,6 +29,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SITE = ROOT / "website"
 INDEX = SITE / "index.html"
+ERROR_PAGE = SITE / "404.html"
 CSS_FILE = SITE / "style.css"
 JS_FILE = SITE / "main.js"
 ROBOTS = SITE / "robots.txt"
@@ -129,6 +130,19 @@ def html_text() -> str:
 def doc(html_text: str) -> _Doc:
     parser = _Doc()
     parser.feed(html_text)
+    parser.close()
+    return parser
+
+
+@pytest.fixture(scope="module")
+def error_text() -> str:
+    return ERROR_PAGE.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def error_doc(error_text: str) -> _Doc:
+    parser = _Doc()
+    parser.feed(error_text)
     parser.close()
     return parser
 
@@ -916,6 +930,114 @@ def test_robots_and_sitemap_agree(doc: _Doc) -> None:
     assert sitemap.strip() == canonical
     # no fixed old releases anywhere on the page
     assert "/releases/tag/v" not in INDEX.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# static 404 page
+# --------------------------------------------------------------------------
+def test_404_is_a_noindex_landmark_document(error_text: str, error_doc: _Doc) -> None:
+    assert ERROR_PAGE.is_file()
+
+    html = [data for tag, data, _ in error_doc.elements if tag == "html"][0]
+    assert html["lang"] == "zh-CN"
+    assert error_doc.headings.count(1) == 1
+
+    tags = [tag for tag, _, _ in error_doc.elements]
+    for landmark in ("header", "nav", "main", "footer"):
+        assert landmark in tags
+
+    assert error_doc.body_link is not None
+    assert error_doc.body_link.get("class") == "skip-link"
+    assert error_doc.body_link.get("href") == "#main"
+
+    main = [data for tag, data, _ in error_doc.elements if tag == "main"][0]
+    assert main.get("id") == "main"
+    assert main.get("tabindex") == "-1"
+
+    robots = [data for data in error_doc.with_attr("name") if data["name"] == "robots"]
+    assert robots and "noindex" in robots[0]["content"].lower()
+
+    title = re.search(r"<title>(.*?)</title>", error_text, re.S)
+    assert title is not None and "404" in title.group(1)
+
+
+def test_404_copy_is_bilingual_without_javascript(
+    error_text: str, error_doc: _Doc
+) -> None:
+    english = " ".join(
+        text.strip()
+        for text, ancestors in error_doc.texts
+        if text.strip() and any(attrs.get("lang") == "en" for _, attrs in ancestors)
+    )
+    assert "Page not found" in english
+    assert "This address does not exist" in english
+    for label in ("Home", "Download", "Docs", "Features", "Quick start", "FAQ"):
+        assert label in english, f"missing English label: {label}"
+
+    # The Chinese half is literal markup too, not something JS injects.
+    for phrase in ("页面走丢了", "这个地址不存在", "返回首页", "更新日志"):
+        assert phrase in error_text, f"missing Chinese copy: {phrase}"
+
+
+def test_404_returns_to_site_navigation(error_doc: _Doc, doc: _Doc) -> None:
+    hrefs = [data.get("href", "") for data in error_doc.with_attr("href")]
+
+    assert "/noveldl/" in hrefs
+    assert "/noveldl/#download" in hrefs
+    docs = "https://github.com/lingyi-ling/novel-downloader/tree/main/docs"
+    assert docs in hrefs
+
+    # The in-page shortcuts must land on sections that actually exist.
+    index_ids = set(doc.ids)
+    fragments = {
+        href.split("#", 1)[1]
+        for href in hrefs
+        if href.startswith("/noveldl/#") and "#" in href
+    }
+    assert {"features", "clients", "start", "download", "faq"} <= fragments
+    assert fragments <= index_ids, f"dangling 404 targets: {fragments - index_ids}"
+
+    for data, _ in error_doc.by_tag("a"):
+        href = data.get("href", "")
+        if href.startswith("http") and data.get("target") == "_blank":
+            assert "noopener" in data.get("rel", "").split(), href
+
+
+def test_404_needs_no_javascript(error_text: str, error_doc: _Doc) -> None:
+    assert not re.search(r"<script\b[^>]*\bsrc=", error_text)
+    # Nothing is hidden until a script runs, and no control requires JS.
+    assert ".reveal" not in error_text
+    assert not [data for _, data, _ in error_doc.elements if "hidden" in data]
+    for phrase in ("页面走丢了", "Page not found", "返回首页", "Download", "Docs"):
+        assert phrase in error_text
+
+    # The only inline script is the pre-paint theme choice; it cannot hide
+    # content (and the page is complete when it never runs).
+    scripts = re.findall(r"<script[^>]*>(.*?)</script>", error_text, re.S)
+    assert len(scripts) == 1
+    assert "noveldl-theme" in scripts[0]
+    assert "display" not in scripts[0] and "hidden" not in scripts[0]
+
+
+def test_404_local_assets_resolve_under_the_site_prefix(error_doc: _Doc) -> None:
+    """The page is served at arbitrary depths, so its URLs are absolute."""
+    prefix = "/noveldl/"
+    refs: set[str] = set()
+    for attrs in error_doc.with_attr("href") + error_doc.with_attr("src"):
+        for attr in ("href", "src"):
+            value = attrs.get(attr, "")
+            if not value.startswith(prefix):
+                continue
+            refs.add(value)
+            relative = value[len(prefix) :].split("?")[0].split("#")[0]
+            if relative:
+                assert (SITE / relative).is_file(), f"missing local asset: {value}"
+
+    assert prefix + "style.css" in refs
+    assert prefix + "favicon.svg" in refs
+    # The 404 page reuses the main site's shell instead of a second design.
+    assert '<header class="nav">' in ERROR_PAGE.read_text(encoding="utf-8")
+    assert '<footer class="footer">' in ERROR_PAGE.read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
