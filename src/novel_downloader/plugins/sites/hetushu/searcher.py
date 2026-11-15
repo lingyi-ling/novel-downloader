@@ -7,9 +7,8 @@ novel_downloader.plugins.sites.hetushu.searcher
 
 import logging
 
-from lxml import html
-
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -42,20 +41,30 @@ class HetushuSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath('//dl[@class="list" and @id="body"]/dd')
         results: list[SearchResult] = []
 
-        for idx, row in enumerate(rows):
+        for row in rows:
             href = self._first_str(row.xpath(".//h4/a/@href"))
             if not href:
                 continue
 
-            if limit is not None and idx >= limit:
+            # "/book/7631/index.html?from=search" -> "7631"
+            path = href.strip().split("#", 1)[0].split("?", 1)[0].rstrip("/")
+            if path.endswith("/index.html"):
+                path = path[: -len("/index.html")]
+            book_id = path.rsplit("/", 1)[-1]
+            if not book_id:
+                continue
+
+            # ``limit`` counts parsed rows, so a broken row must not consume
+            # the caller's budget and hide the next valid result.
+            if limit is not None and len(results) >= limit:
                 break
 
-            # "/book/7631/index.html" -> "7631"
-            book_id = href.rstrip("/index.html").split("/")[-1]
             book_url = self._abs_url(href)
 
             title = self._first_str(row.xpath(".//h4/a/text()"))
@@ -69,7 +78,7 @@ class HetushuSearcher(BaseSearcher):
             cover_url = self._abs_url(cover_rel) if cover_rel else ""
 
             # Compute priority
-            prio = self.priority + idx
+            prio = self.priority + len(results)
 
             results.append(
                 SearchResult(

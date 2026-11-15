@@ -25,11 +25,12 @@ the same technique the main-channel ``westnovel`` searcher uses on
 
 import asyncio
 import time
+from urllib.parse import urlsplit
 
 import aiohttp
-from lxml import html
 
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -182,12 +183,14 @@ class WestnovelSubSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath('//div[@id="sitebox"]//dl')
         results: list[SearchResult] = []
         query = self._query.lower()
 
-        for idx, row in enumerate(rows):
+        for row in rows:
             href = self._first_str(row.xpath("./dd/h3/a[1]/@href"))
             if not href:
                 continue
@@ -197,19 +200,27 @@ class WestnovelSubSearcher(BaseSearcher):
             if query and query not in title.lower():
                 continue
 
+            # '/q/list/8156.html' -> 'q-list-8156'.  Absolute and
+            # protocol-relative links yield the same id; queries/fragments
+            # never become part of it.
+            path = urlsplit(href if not href.startswith("//") else "https:" + href)
+            parts = path.path.strip("/").split("/")
+            if len(parts) < 3 or parts[-1].split(".", 1)[0] == "":
+                continue
+            book_id = "-".join([parts[-3], parts[-2], parts[-1].split(".", 1)[0]])
+            if not book_id:
+                continue
+
+            # ``limit`` counts parsed rows, so a filtered/broken row must not
+            # consume the caller's budget.
             if limit is not None and len(results) >= limit:
                 break
 
-            # '/q/list/8156.html' -> 'q-list-8156'
-            parts = href.strip("/").split("/")
-            if len(parts) != 3 or parts[-1].split(".", 1)[0] == "":
-                continue
-            book_id = "-".join([parts[0], parts[1], parts[-1].split(".", 1)[0]])
             book_url = self._abs_url(href)
 
             cover_url = self._abs_url(self._first_str(row.xpath("./dt//img/@src")))
 
-            prio = self.priority + idx
+            prio = self.priority + len(results)
             results.append(
                 SearchResult(
                     site=self.site_name,

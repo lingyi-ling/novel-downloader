@@ -16,3 +16,4 @@ class KtshuParser(Biquge1Parser):
     """
 
     site_name: str = "ktshu"
+    BASE_URL: str = "https://www.ktshu.cc"

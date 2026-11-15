@@ -11,9 +11,11 @@ import logging
 import re
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -46,7 +48,9 @@ class HetushuParser(BaseParser):
         if len(raw_pages) < 2:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
         try:
             catalog_data = json.loads(raw_pages[1])
         except (json.JSONDecodeError, TypeError):
@@ -65,8 +69,12 @@ class HetushuParser(BaseParser):
                 '//div[contains(@class,"book_info")]/div[contains(.,"作者")]/a/text()'
             )
         )
-        cover_url = self.BASE_URL + self._first_str(
-            tree.xpath('//div[contains(@class,"book_info")]//img/@src')
+        cover_url = resolve_url(
+            tree,
+            self._first_str(
+                tree.xpath('//div[contains(@class,"book_info")]//img/@src')
+            ),
+            fallback_base=self.BASE_URL,
         )
 
         cls_attr = self._first_str(
@@ -107,6 +115,10 @@ class HetushuParser(BaseParser):
                     chapter_id = (
                         str(elem[2]) if len(elem) > 2 and elem[2] is not None else ""
                     )
+                    # A titled row without an id cannot be fetched; drop it
+                    # instead of emitting a chapter with an empty id.
+                    if title and not chapter_id:
+                        continue
                     curr_vol["chapters"].append(
                         {"title": title, "url": "", "chapterId": chapter_id}
                     )
@@ -142,7 +154,9 @@ class HetushuParser(BaseParser):
         if len(raw_pages) < 2 or not raw_pages[0].strip() or not raw_pages[1].strip():
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         title = ""
         paragraphs: list[str] = []

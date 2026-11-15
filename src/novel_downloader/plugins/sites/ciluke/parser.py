@@ -16,3 +16,4 @@ class CilukeParser(Biquge1Parser):
     """
 
     site_name: str = "ciluke"
+    BASE_URL: str = "https://www.ciluke.com"

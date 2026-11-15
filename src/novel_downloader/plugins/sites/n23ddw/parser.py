@@ -16,3 +16,4 @@ class N23ddwParser(Biquge3Parser):
     """
 
     site_name: str = "n23ddw"
+    BASE_URL: str = "https://www.23ddw.net"

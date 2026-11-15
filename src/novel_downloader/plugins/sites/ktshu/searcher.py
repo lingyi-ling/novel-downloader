@@ -18,5 +18,9 @@ class KtshuSearcher(ManggNetSearcher):
 
     @staticmethod
     def _url_to_id(url: str) -> str:
-        # "/book/62773/" -> "62773"
-        return url.strip("/").rsplit("/", 1)[-1]
+        # "/book/62773/" -> "62773"; absolute links, queries and the
+        # ".html" suffix must not change the id.
+        path = ManggNetSearcher._url_path(url).strip("/")
+        if not path:
+            return ""
+        return path.rsplit("/", 1)[-1].split(".", 1)[0]

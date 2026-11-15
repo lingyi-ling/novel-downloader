@@ -10,10 +10,13 @@ import logging
 import re
 from typing import Any
 
-from lxml import html
-
 from novel_downloader.infra.paths import LINOVELIB_MAP_PATH
 from novel_downloader.plugins.base.parser import BaseParser
+from novel_downloader.plugins.common.parser._utils import (
+    chapter_id_from_href,
+    parse_html_tree,
+    resolve_url,
+)
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import (
     BookInfoDict,
@@ -33,6 +36,7 @@ class LinovelibParser(BaseParser):
     """
 
     site_name: str = "linovelib"
+    BASE_URL: str = "https://www.linovelib.com"
 
     _PCTHEMA_MAP: dict[str, str] = {}
 
@@ -48,7 +52,9 @@ class LinovelibParser(BaseParser):
         if not raw_pages:
             return None
 
-        tree = html.fromstring(raw_pages[0])
+        tree = parse_html_tree(raw_pages[0])
+        if tree is None:
+            return None
 
         book_name = (
             self._first_str(
@@ -67,12 +73,14 @@ class LinovelibParser(BaseParser):
                 )
             )
         )
-        cover_url = (
+        cover_url = resolve_url(
+            tree,
             self._first_str(tree.xpath("//meta[@property='og:image']/@content"))
             or self._first_str(tree.xpath("//meta[@name='pic']/@content"))
             or self._first_str(
                 tree.xpath("//div[contains(@class,'book-img')]//img/@src")
-            )
+            ),
+            fallback_base=self.BASE_URL,
         )
         serial_status = self._first_str(
             tree.xpath("//meta[@property='og:novel:status']/@content")
@@ -113,7 +121,9 @@ class LinovelibParser(BaseParser):
         vol_pages = raw_pages[1:]
         volumes: list[VolumeInfoDict] = []
         for vol_page in vol_pages:
-            vol_tree = html.fromstring(vol_page)
+            vol_tree = parse_html_tree(vol_page)
+            if vol_tree is None:
+                continue
 
             vol_full_title = self._first_str(
                 vol_tree.xpath("//meta[@property='og:title']/@content")
@@ -125,10 +135,13 @@ class LinovelibParser(BaseParser):
             if book_name and volume_name.startswith(book_name):
                 volume_name = volume_name[len(book_name) :].lstrip(" ：:·-—")
 
-            volume_cover = self._first_str(
-                vol_tree.xpath("//meta[@property='og:image']/@content")
-            ) or self._first_str(
-                vol_tree.xpath("//div[contains(@class,'book-img')]//img/@src")
+            volume_cover = resolve_url(
+                vol_tree,
+                self._first_str(vol_tree.xpath("//meta[@property='og:image']/@content"))
+                or self._first_str(
+                    vol_tree.xpath("//div[contains(@class,'book-img')]//img/@src")
+                ),
+                fallback_base=self.BASE_URL,
             )
 
             vol_update_time = self._first_str(
@@ -150,17 +163,23 @@ class LinovelibParser(BaseParser):
                 vol_tree.xpath("//div[contains(@class,'book-dec')]//p//text()")
             )
 
-            chapters: list[ChapterInfoDict] = [
-                {
-                    "title": (a.text or "").strip(),
-                    "url": (a.get("href") or "").strip(),
-                    # '/novel/4668/276082.html' -> '276082'
-                    "chapterId": (a.get("href") or "")
-                    .rsplit("/", 1)[-1]
-                    .split(".", 1)[0],
-                }
-                for a in vol_tree.xpath("//div[contains(@class,'book-new-chapter')]//a")
-            ]
+            chapters: list[ChapterInfoDict] = []
+            for a in vol_tree.xpath("//div[contains(@class,'book-new-chapter')]//a"):
+                href = (a.get("href") or "").strip()
+                title = (a.text or "").strip()
+                if not href:
+                    continue
+                # '/novel/4668/276082.html?from=toc' -> '276082'
+                chapter_id = chapter_id_from_href(href)
+                if not chapter_id:
+                    continue
+                chapters.append(
+                    {
+                        "title": title,
+                        "url": href,
+                        "chapterId": chapter_id,
+                    }
+                )
 
             volumes.append(
                 {
@@ -208,7 +227,9 @@ class LinovelibParser(BaseParser):
         curr_paragraph_idx = 0
 
         for curr_html in self._usable_pages(raw_pages):
-            tree = html.fromstring(curr_html)
+            tree = parse_html_tree(curr_html)
+            if tree is None:
+                continue
 
             if not title:
                 title = self._first_str(
@@ -246,8 +267,8 @@ class LinovelibParser(BaseParser):
                     if not src:
                         continue
                     src = src.strip()
-                    if src.startswith("//"):
-                        src = "https:" + src
+                    if not src.startswith("data:"):
+                        src = resolve_url(tree, src, fallback_base=self.BASE_URL)
 
                     resources.append(
                         {

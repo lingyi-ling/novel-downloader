@@ -7,9 +7,8 @@ novel_downloader.plugins.sites.mangg_net.searcher
 
 from urllib.parse import urlsplit
 
-from lxml import html
-
 from novel_downloader.plugins.base.searcher import BaseSearcher
+from novel_downloader.plugins.common.parser._utils import parse_html_tree
 from novel_downloader.plugins.registry import registrar
 from novel_downloader.schemas import SearchResult
 
@@ -34,7 +33,9 @@ class ManggNetSearcher(BaseSearcher):
     def _parse_html(
         self, html_str: str, limit: int | None = None
     ) -> list[SearchResult]:
-        doc = html.fromstring(html_str)
+        doc = parse_html_tree(html_str)
+        if doc is None:
+            return []
         rows = doc.xpath(
             '//div[contains(@class,"col-12") and contains(@class,"col-md-6")]/dl'
         )
