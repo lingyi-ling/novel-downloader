@@ -112,7 +112,7 @@
       <a href="https://github.com/lingyi-ling/novel-downloader" target="_blank" rel="noopener">GitHub</a>
     </nav>
     <div class="nav-actions">
-      <button class="lang-btn" id="lang-btn" aria-label="切换语言">EN</button>
+      <button class="lang-btn" id="lang-btn" aria-label="切换到英文">EN</button>
       <button class="icon-btn" id="theme-btn" aria-label="切换主题" aria-pressed="false">
         <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
         <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/></svg>
@@ -342,7 +342,7 @@
           <button type="button" class="tab" id="tab-engine" role="tab" aria-selected="false" aria-controls="panel-engine" tabindex="-1" data-tab="engine" data-en="Standalone">独立引擎</button>
         </div>
         <div class="tab-panel active" id="panel-cli" role="tabpanel" aria-labelledby="tab-cli" tabindex="0" data-panel="cli">
-          <pre><code><span class="c" data-en="# Windows one-line install (PowerShell, no admin needed)"># Windows 一键安装（PowerShell，无需管理员）</span>
+          <pre tabindex="0"><code><span class="c" data-en="# Windows one-line install (PowerShell, no admin needed)"># Windows 一键安装（PowerShell，无需管理员）</span>
 irm https://raw.githubusercontent.com/lingyi-ling/novel-downloader/main/bin/install.ps1 | iex
 
 <span class="c" data-en="# Linux / macOS one-line install"># Linux / macOS 一键安装</span>
@@ -368,7 +368,7 @@ novel-cli follow add qidian 107580
 novel-cli music search "晴天"  <span class="c" data-en="# searches every platform by default"># 默认搜索全部平台</span></code></pre>
         </div>
         <div class="tab-panel" id="panel-api" role="tabpanel" aria-labelledby="tab-api" tabindex="0" data-panel="api">
-          <pre><code><span class="c" data-en="# Start the local REST service (127.0.0.1:8081)"># 启动本地 REST 服务（127.0.0.1:8081）</span>
+          <pre tabindex="0"><code><span class="c" data-en="# Start the local REST service (127.0.0.1:8081)"># 启动本地 REST 服务（127.0.0.1:8081）</span>
 pip install "novel-downloader[api]"
 novel-api
 
@@ -383,7 +383,7 @@ curl -X POST http://127.0.0.1:8081/api/v1/tasks \
   -d '{"site": "qidian", "book_id": "107580", "title": "凡人修仙传"}'</code></pre>
         </div>
         <div class="tab-panel" id="panel-desktop" role="tabpanel" aria-labelledby="tab-desktop" tabindex="0" data-panel="desktop">
-          <pre><code><span class="c" data-en="# Install (includes the pywebview desktop shell)"># 安装（含 pywebview 桌面壳）</span>
+          <pre tabindex="0"><code><span class="c" data-en="# Install (includes the pywebview desktop shell)"># 安装（含 pywebview 桌面壳）</span>
 pip install -U novel-downloader
 
 <span class="c" data-en="# Launch the GUI"># 启动图形界面</span>
@@ -394,7 +394,7 @@ novel-desktop
 # Ctrl+1-6 切换六个页面</span></code></pre>
         </div>
         <div class="tab-panel" id="panel-android" role="tabpanel" aria-labelledby="tab-android" tabindex="0" data-panel="android">
-          <pre><code><span class="c" data-en="# 1. Download the signed APK from Releases (no build needed)"># 1. 直接下载签名 APK（无需自行打包）</span>
+          <pre tabindex="0"><code><span class="c" data-en="# 1. Download the signed APK from Releases (no build needed)"># 1. 直接下载签名 APK（无需自行打包）</span>
 https://github.com/lingyi-ling/novel-downloader/releases/latest
 
 <span class="c" data-en="# Install it, then choose a mode in Settings:"># 2. 安装后到设置页选择模式：</span>
@@ -408,7 +408,7 @@ cd novel-downloader/android
 <span class="c" data-en="# — or flip on the standalone engine in the app: embedded Python, full service layer on the phone"># ——或在 App 内开启「独立引擎」，内嵌 Python，手机单机直跑全套服务层</span></code></pre>
         </div>
         <div class="tab-panel" id="panel-engine" role="tabpanel" aria-labelledby="tab-engine" tabindex="0" data-panel="engine">
-          <pre><code><span class="c" data-en="# Android app → Settings → enable the standalone engine"># Android App → 设置 → 开启「独立引擎」</span>
+          <pre tabindex="0"><code><span class="c" data-en="# Android app → Settings → enable the standalone engine"># Android App → 设置 → 开启「独立引擎」</span>
 <span class="c" data-en="# Embedded Python 3.12 (Chaquopy), initialized automatically on first enable"># 内嵌 Python 3.12（Chaquopy），首次开启时自动初始化</span>
 <span class="c" data-en="# The full service layer runs on the phone — loopback API, local only"># 全套服务层跑在手机本地 —— 环回 API，仅本机可访问</span>
 <span class="c" data-en="# All 84 download sites / 59 search sources, no PC needed"># 84 站点 / 59 搜索源单机直跑，无需电脑</span>
@@ -455,9 +455,9 @@ cd novel-downloader/android
           </summary>
           <p data-en="Every release includes a SHA256SUMS.txt listing each file with its SHA-256; the latest.json read by in-app updates carries the same digests. Hash the file you downloaded and compare it with its line in the list — matching digests mean the bytes are intact.">每个版本都附 SHA256SUMS.txt，逐行列出文件名与 SHA-256；自动更新读取的 latest.json 携带同一批校验值。对下载好的文件算一次哈希，与清单中对应行比对：一致即说明文件完整、未被改动。</p>
           <p><strong data-en="Windows (PowerShell)">Windows（PowerShell）</strong></p>
-          <pre><code>Get-FileHash .\NovelDownloader-setup-*.exe -Algorithm SHA256</code></pre>
+          <pre tabindex="0"><code>Get-FileHash .\NovelDownloader-setup-*.exe -Algorithm SHA256</code></pre>
           <p><strong>macOS / Linux</strong></p>
-          <pre><code>shasum -a 256 NovelDownloader-*.zip   <span class="c" data-en="# macOS"># macOS</span>
+          <pre tabindex="0"><code>shasum -a 256 NovelDownloader-*.zip   <span class="c" data-en="# macOS"># macOS</span>
 sha256sum NovelDownloader-*.zip       <span class="c" data-en="# Linux"># Linux</span></code></pre>
           <div class="verify-links">
             <a class="dl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/latest/download/SHA256SUMS.txt" target="_blank" rel="noopener">SHA256SUMS.txt →</a>

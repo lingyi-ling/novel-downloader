@@ -92,7 +92,9 @@ function applyLang(lang) {
   if (metaDesc) metaDesc.setAttribute("content", META_DESC[isEn ? "en" : "zh"]);
   // keep control labels in the active language for screen readers
   const labels = [
-    ["lang-btn", "切换语言", "Switch language"],
+    // the label names the language the button switches *to*: a screen reader
+    // user hears "切换到英文" in Chinese, "Switch to Chinese" in English
+    ["lang-btn", "切换到英文", "Switch to Chinese"],
     ["theme-btn", "切换主题", "Toggle theme"],
     ["burger-btn", "打开菜单", "Open menu"],
     ["to-top", "回到顶部", "Back to top"],
@@ -279,10 +281,28 @@ function setMenu(open, opts) {
   );
   if (open === false && opts && opts.focus) burger.focus();
 }
+/* After an in-page menu link navigates, the menu is hidden; the clicked link
+   would take focus with it and drop the keyboard user back to the document
+   start. Move focus to the target heading instead (tabindex=-1 is the
+   programmatic-focus idiom and does not add a tab stop). */
+function focusMenuTarget(link) {
+  const href = link.getAttribute("href") || "";
+  if (!href.startsWith("#") || href.length < 2) return false;
+  const target = document.getElementById(href.slice(1));
+  if (!target) return false;
+  const heading = target.querySelector("h1, h2, h3") || target;
+  if (!heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
+  heading.focus({ preventScroll: true });
+  return true;
+}
 if (burger && mobileMenu) {
   burger.addEventListener("click", () => setMenu(mobileMenu.hidden));
   mobileMenu.addEventListener("click", (e) => {
-    if (e.target.closest("a")) setMenu(false);
+    const link = e.target.closest("a");
+    if (!link) return;
+    setMenu(false);
+    // external links open a new tab: keep focus on a visible control here
+    if (!focusMenuTarget(link)) burger.focus();
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !mobileMenu.hidden) setMenu(false, { focus: true });

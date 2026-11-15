@@ -69,6 +69,18 @@ body {
 a { color: inherit; text-decoration: none; }
 svg { display: block; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The universal rule above already covers every focusable element. Listing the
+   audited surfaces explicitly keeps a later refactor from dropping one: nav
+   links, brand, language / theme controls, cards that are links, FAQ
+   disclosures, footer links, the back-to-top button and the 404 shortcuts. */
+.nav-links a:focus-visible, .mobile-menu a:focus-visible, .brand:focus-visible,
+.lang-btn:focus-visible, .icon-btn:focus-visible, .btn:focus-visible,
+.download-card:focus-visible, .dl-link:focus-visible,
+.faq summary:focus-visible,
+.foot-links a:focus-visible, .to-top:focus-visible, .error-nav a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 /* accent-filled controls need a ring that reads against both the accent fill
    and the page: text-color ring + page-color halo gap */
 .btn-primary:focus-visible, .skip-link:focus {
@@ -392,12 +404,16 @@ svg { display: block; }
 
 /* ============================================================ skip link */
 .skip-link {
-  position: fixed; top: -48px; left: 16px; z-index: 100;
+  position: fixed; top: 0; left: 16px; z-index: 100;
   background: var(--accent); color: var(--on-accent);
   padding: 8px 16px; border-radius: 0 0 10px 10px; font-weight: 600;
-  transition: top .2s ease;
+  /* A fixed negative `top` stops hiding the link once text-only zoom makes
+     the control taller than that offset; a percentage transform is height
+     independent, so the link never peeks into the page until focused. */
+  transform: translateY(calc(-100% - 8px));
+  transition: transform .2s ease;
 }
-.skip-link:focus { top: 0; }
+.skip-link:focus { transform: none; }
 /* the skip target only scrolls into view: a ring around the whole page body
    reads as a rendering bug rather than a focus cue */
 #main:focus-visible { outline: none; }
@@ -610,5 +626,10 @@ svg { display: block; }
   html { scroll-behavior: auto; }
   .js .reveal, .reveal { opacity: 1; transform: none; transition: none; }
   .aw-progress i { animation: none; }
-  .card, .client-card, .appwin, .to-top, .btn, .tab, .faq summary::after, .skip-link { transition: none; }
+  .card, .client-card, .appwin, .to-top, .btn, .tab, .icon-btn, .dl-link,
+  .faq summary::after, .skip-link { transition: none; }
+  /* Transitions are gone, but hover/press transforms would still snap into
+     place; drop the movement itself for reduced-motion users. */
+  .btn:hover, .btn:active, .card:hover, .client-card:hover, .icon-btn:active,
+  .download-card:hover .dl-link, .to-top { transform: none; }
 }

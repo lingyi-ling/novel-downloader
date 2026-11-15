@@ -57,6 +57,53 @@ CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 # --------------------------------------------------------------------------
+# colour helpers (WCAG 2.x relative luminance / contrast)
+# --------------------------------------------------------------------------
+def _luminance(color: str) -> float:
+    color = color.lstrip("#")
+    channels = [int(color[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [
+        channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(foreground: str, background: str) -> float:
+    first, second = _luminance(foreground), _luminance(background)
+    high, low = max(first, second), min(first, second)
+    return (high + 0.05) / (low + 0.05)
+
+
+def _blend(foreground: str, background: str, alpha: float) -> str:
+    """Composite a hex colour over another at one alpha, as a browser does."""
+    foreground = foreground.lstrip("#")
+    background = background.lstrip("#")
+    channels = [
+        round(
+            int(foreground[i : i + 2], 16) * alpha
+            + int(background[i : i + 2], 16) * (1 - alpha)
+        )
+        for i in (0, 2, 4)
+    ]
+    return "#{:02x}{:02x}{:02x}".format(*channels)
+
+
+def _tokens(css: str, selector: str) -> dict[str, str]:
+    """Hex design tokens declared by one selector block."""
+    match = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert match is not None, selector
+    return dict(re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]{6})", match.group(1)))
+
+
+def _rule(css: str, selector: str) -> str:
+    """Body of the first rule with this exact selector."""
+    match = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert match is not None, selector
+    return match.group(1)
+
+
+# --------------------------------------------------------------------------
 # tiny HTML tree/query helpers
 # --------------------------------------------------------------------------
 class _Doc(HTMLParser):
@@ -193,6 +240,55 @@ def test_landmarks_and_skip_link(doc: _Doc) -> None:
     assert main.get("tabindex") == "-1"
 
 
+def test_landmarks_are_unique_and_navs_are_labelled(doc: _Doc, error_doc: _Doc) -> None:
+    for parser in (doc, error_doc):
+        tags = [tag for tag, _, _ in parser.elements]
+        for landmark in ("header", "main", "footer"):
+            assert tags.count(landmark) == 1, f"{landmark} must appear once"
+
+        order = [tag for tag, _ in parser.order]
+        assert order.index("header") < order.index("main") < order.index("footer")
+
+        for data, _ in parser.by_tag("nav"):
+            assert data.get("aria-label"), "every nav landmark needs a name"
+
+        for tag, _, ancestors in parser.elements:
+            if tag in {"header", "main", "footer"}:
+                assert not any(
+                    parent in {"header", "main", "footer"} for parent, _ in ancestors
+                ), f"{tag} must be a top-level landmark"
+
+
+def test_aria_references_and_states_are_valid(doc: _Doc, error_doc: _Doc) -> None:
+    focusable = {"a", "button", "input", "select", "textarea", "summary"}
+    for parser in (doc, error_doc):
+        ids = set(parser.ids)
+        for attribute in ("aria-controls", "aria-labelledby"):
+            for data in parser.with_attr(attribute):
+                targets = [
+                    value for value in re.split(r"\s+", data[attribute]) if value
+                ]
+                assert targets, f"empty {attribute}"
+                for target in targets:
+                    assert target in ids, f"{attribute}={target} has no such id"
+
+        for data in parser.with_attr("aria-expanded"):
+            assert data["aria-expanded"] in {"true", "false"}
+        for data in parser.with_attr("aria-pressed"):
+            assert data["aria-pressed"] in {"true", "false"}
+        for data in parser.with_attr("aria-selected"):
+            assert data["aria-selected"] in {"true", "false"}
+        for data in parser.with_attr("aria-hidden"):
+            assert data["aria-hidden"] in {"true", "false"}
+
+        for tag, data, _ in parser.elements:
+            if data.get("aria-hidden") == "true":
+                assert tag not in focusable, f"focusable <{tag}> is aria-hidden"
+            if "tabindex" in data:
+                # positive tabindex reorders the whole document and is a bug
+                assert int(data["tabindex"]) in {0, -1}, data
+
+
 def test_ids_are_unique(doc: _Doc) -> None:
     duplicates = {item for item in doc.ids if doc.ids.count(item) > 1}
     assert not duplicates
@@ -216,17 +312,19 @@ def test_external_links_open_safely(doc: _Doc) -> None:
             assert "noopener" in attrs.get("rel", ""), href
 
 
-def test_inline_svg_is_decorative(doc: _Doc) -> None:
-    for svg in doc.svgs:
-        assert svg.get("aria-hidden") == "true" or (
-            svg.get("role") == "img" and svg.get("aria-label")
-        ), svg
+def test_inline_svg_is_decorative(doc: _Doc, error_doc: _Doc) -> None:
+    for parser in (doc, error_doc):
+        for svg in parser.svgs:
+            assert svg.get("aria-hidden") == "true" or (
+                svg.get("role") == "img" and svg.get("aria-label")
+            ), svg
 
 
-def test_role_img_has_a_label(doc: _Doc) -> None:
-    for _, data, _ in doc.elements:
-        if data.get("role") == "img":
-            assert data.get("aria-label"), data
+def test_role_img_has_a_label(doc: _Doc, error_doc: _Doc) -> None:
+    for parser in (doc, error_doc):
+        for _, data, _ in parser.elements:
+            if data.get("role") == "img":
+                assert data.get("aria-label"), data
 
 
 # --------------------------------------------------------------------------
@@ -630,6 +728,38 @@ def test_control_labels_switch_language(js: str, doc: _Doc) -> None:
     assert 'meta[name="description"]' in js
 
 
+def test_language_button_names_the_target_language(doc: _Doc, js: str) -> None:
+    """``aria-label="切换语言"`` told screen-reader users nothing about what
+    the button would switch to; the label must name the destination."""
+    button = [data for data, _ in doc.by_tag("button") if data.get("id") == "lang-btn"][
+        0
+    ]
+    assert button.get("aria-label") == "切换到英文"
+    assert re.search(r'\["lang-btn",\s*"切换到英文",\s*"Switch to Chinese"\]', js), (
+        "applyLang() must announce the destination language"
+    )
+
+
+def test_mobile_menu_moves_focus_to_the_target(js: str) -> None:
+    """Hiding the open menu hides the link that was just activated; without a
+    move the keyboard user's focus falls back to the document start."""
+    assert "focusMenuTarget" in js
+    assert re.search(r"focus\(\{ preventScroll: true \}\)", js)
+    assert re.search(r'setAttribute\("tabindex", "-1"\)', js)
+    assert re.search(r"if \(!focusMenuTarget\(link\)\) burger\.focus\(\)", js)
+
+
+def test_code_blocks_are_keyboard_scrollable(doc: _Doc, css: str) -> None:
+    """A horizontally scrollable <pre> is not reachable by keyboard in every
+    browser unless it is focusable."""
+    pres = [data for data, _ in doc.by_tag("pre")]
+    assert len(pres) >= 7
+    for data in pres:
+        assert data.get("tabindex") == "0", data
+    for selector in (".tab-panel pre", ".verify-dl pre"):
+        assert "overflow-x: auto" in _rule(css, selector)
+
+
 def test_i18n_boot_is_defensive(js: str) -> None:
     # storage failures (private mode / disabled cookies) must never throw
     assert "noveldl-lang" in js
@@ -758,29 +888,8 @@ def test_focus_is_visible(css: str) -> None:
 
 
 def test_contrast_of_text_tokens(css: str) -> None:
-    def variables(selector: str) -> dict[str, str]:
-        match = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css)
-        assert match is not None, selector
-        return dict(re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]{6})", match.group(1)))
-
-    def luminance(color: str) -> float:
-        color = color.lstrip("#")
-        channels = [int(color[i : i + 2], 16) / 255 for i in (0, 2, 4)]
-        linear = [
-            channel / 12.92
-            if channel <= 0.04045
-            else ((channel + 0.055) / 1.055) ** 2.4
-            for channel in channels
-        ]
-        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
-
-    def ratio(foreground: str, background: str) -> float:
-        first, second = luminance(foreground), luminance(background)
-        high, low = max(first, second), min(first, second)
-        return (high + 0.05) / (low + 0.05)
-
-    light = variables(":root")
-    dark = variables(':root[data-theme="dark"]')
+    light = _tokens(css, ":root")
+    dark = _tokens(css, ':root[data-theme="dark"]')
     pairs = [
         (light, "--text", "--bg"),
         (light, "--text", "--bg-alt"),
@@ -805,8 +914,196 @@ def test_contrast_of_text_tokens(css: str) -> None:
         (dark, "--on-accent", "--accent"),
     ]
     for palette, foreground, background in pairs:
-        value = ratio(palette[foreground], palette[background])
+        value = _contrast(palette[foreground], palette[background])
         assert value >= 4.5, f"{foreground} on {background}: {value:.2f}:1"
+
+
+def test_contrast_extends_to_every_text_surface(css: str) -> None:
+    """Accent text, button labels and code panels must pass AA too.
+
+    The base test covers the main text tokens; these are the pairings the
+    components actually use (accent on the alternate section background,
+    accent-ink headings on the page background, buttons on hover, code text).
+    """
+    light = _tokens(css, ":root")
+    dark = _tokens(css, ':root[data-theme="dark"]')
+    pairs = [
+        (light, "--accent", "--bg-alt"),
+        (light, "--accent", "--card"),
+        (light, "--accent-ink", "--bg"),
+        (light, "--accent-ink", "--bg-alt"),
+        (light, "--on-accent", "--accent-hover"),
+        (light, "--code-text", "--code-bg"),
+        (dark, "--accent", "--bg-alt"),
+        (dark, "--accent", "--card"),
+        (dark, "--accent-ink", "--bg"),
+        (dark, "--accent-ink", "--bg-alt"),
+        (dark, "--on-accent", "--accent-hover"),
+        (dark, "--code-text", "--code-bg"),
+    ]
+    for palette, foreground, background in pairs:
+        value = _contrast(palette[foreground], palette[background])
+        assert value >= 4.5, f"{foreground} on {background}: {value:.2f}:1"
+
+
+def test_code_panel_literal_colours_meet_aa(css: str) -> None:
+    """The code panels use literal greys instead of tokens; keep them AA."""
+    light = _tokens(css, ":root")
+    dark = _tokens(css, ':root[data-theme="dark"]')
+    for selector in (
+        ".tab",
+        ".tab:hover",
+        ".tab-panel .c",
+        ".verify-dl .c",
+        ".noscript-note",
+    ):
+        match = re.search(r"color:\s*(#[0-9a-fA-F]{6})", _rule(css, selector))
+        assert match is not None, selector
+        colour = match.group(1)
+        for name, palette in (("light", light), ("dark", dark)):
+            value = _contrast(colour, palette["--code-bg"])
+            assert value >= 4.5, f"{selector} {colour} on {name} code-bg: {value:.2f}:1"
+
+
+def test_accent_tinted_badges_keep_aa_contrast(css: str) -> None:
+    """Eyebrow, client tags, version pills and tier badges are accent-soft
+    tints, so contrast must be computed against the composited colour."""
+    for selector in (
+        ":root",
+        ':root[data-theme="dark"]',
+    ):
+        palette = _tokens(css, selector)
+        block = _rule(css, selector)
+        rgba = re.search(
+            r"--accent-soft:\s*rgba\(\s*(\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\s*\)",
+            block,
+        )
+        assert rgba is not None, selector
+        tint = "#{:02x}{:02x}{:02x}".format(
+            *(int(rgba.group(index)) for index in (1, 2, 3))
+        )
+        alpha = float(rgba.group(4))
+        for surface in ("--bg", "--bg-alt", "--card"):
+            background = _blend(tint, palette[surface], alpha)
+            value = _contrast(palette["--accent-ink"], background)
+            assert value >= 4.5, (
+                f"accent-ink on accent-soft/{surface} ({selector}): {value:.2f}:1"
+            )
+
+
+def test_404_action_labels_are_not_dimmed(error_text: str, css: str) -> None:
+    """Dimming the English half of the 404 buttons to .76 dropped the primary
+    label to 3.61:1. The labels must keep the button's full foreground."""
+    block = _rule(error_text, ".error-actions .btn span")
+    for value in re.findall(r"opacity:\s*([0-9.]+)", block):
+        assert float(value) >= 1.0, "dimmed 404 button labels fail AA"
+    light = _tokens(css, ":root")
+    assert _contrast(light["--on-accent"], light["--accent"]) >= 4.5
+    assert _contrast(light["--text"], light["--card"]) >= 4.5
+
+
+def test_focus_visible_ring_covers_interactive_surfaces(css: str) -> None:
+    """Every keyboard-reachable control must keep a visible ring.
+
+    The universal :focus-visible rule covers all of them; the explicit list is
+    the audited contract, so deleting one selector from a refactor fails here.
+    """
+    base = re.search(r"(?m)^:focus-visible\s*\{([^}]*)\}", css)
+    assert base is not None, "no universal :focus-visible rule"
+    assert "outline: 2px solid var(--accent)" in base.group(1)
+    assert "outline-offset: 2px" in base.group(1)
+
+    for selector in (
+        ".nav-links a:focus-visible",
+        ".mobile-menu a:focus-visible",
+        ".brand:focus-visible",
+        ".lang-btn:focus-visible",
+        ".icon-btn:focus-visible",
+        ".btn:focus-visible",
+        ".download-card:focus-visible",
+        ".dl-link:focus-visible",
+        ".faq summary:focus-visible",
+        ".foot-links a:focus-visible",
+        ".to-top:focus-visible",
+        ".error-nav a:focus-visible",
+        ".tab:focus-visible",
+        ".btn-primary:focus-visible",
+        ".skip-link:focus",
+    ):
+        assert selector in css, f"missing focus style: {selector}"
+
+    # The only element allowed to suppress its ring is the skip-link target,
+    # which is a scroll target rather than a control.
+    no_outline = re.findall(r"([^{}]+)\{[^{}]*outline:\s*none[^{}]*\}", css)
+    assert no_outline, "expected the documented #main exception"
+    assert all("#main" in selector for selector in no_outline), no_outline
+
+    # Non-text contrast: the ring itself must be visible against every surface
+    # it can be drawn on (WCAG 1.4.11 needs 3:1).
+    for selector in (":root", ':root[data-theme="dark"]'):
+        palette = _tokens(css, selector)
+        for foreground, backgrounds in (
+            ("--accent", ("--bg", "--bg-alt", "--card")),
+            ("--text", ("--bg", "--card")),
+            ("--code-text", ("--code-bg",)),
+        ):
+            for background in backgrounds:
+                value = _contrast(palette[foreground], palette[background])
+                assert value >= 3.0, (
+                    f"focus ring {foreground} on {background}: {value:.2f}:1"
+                )
+
+
+def test_skip_link_is_height_independent_until_focused(css: str) -> None:
+    """A fixed negative `top` stops hiding the link once text zoom makes it
+    taller; the hidden state must be a percentage transform."""
+    block = _rule(css, ".skip-link")
+    assert "position: fixed" in block
+    assert "translateY(calc(-100% - 8px))" in block
+    assert "display: none" not in block
+    assert not re.search(r"top:\s*-\d", block), "fixed negative top can peek at zoom"
+    focus = re.findall(r"\.skip-link:focus[^{,]*\{([^}]*)\}", css)
+    assert any("transform: none" in body for body in focus), (
+        "focusing the skip link must reveal it"
+    )
+
+
+def test_skip_link_is_the_first_body_element(doc: _Doc, error_doc: _Doc) -> None:
+    for parser in (doc, error_doc):
+        body_at = next(
+            index for index, (tag, _) in enumerate(parser.order) if tag == "body"
+        )
+        tag, data = parser.order[body_at + 1]
+        assert tag == "a", "the skip link must be the first element in <body>"
+        assert "skip-link" in data.get("class", "").split()
+        assert data.get("href") == "#main"
+
+
+def test_reduced_motion_covers_leftover_transforms(css: str, js: str) -> None:
+    match = re.search(
+        r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*)\}\s*$", css, re.S
+    )
+    assert match is not None
+    block = match.group(1)
+
+    transition_rules = re.findall(r"([^{}]+)\{[^}]*transition:\s*none[^}]*\}", block)
+    assert any(
+        ".icon-btn" in rule and ".dl-link" in rule and ".skip-link" in rule
+        for rule in transition_rules
+    ), "icon, download-link and skip-link transitions must stop"
+    transform_rules = re.findall(r"([^{}]+)\{[^}]*transform:\s*none[^}]*\}", block)
+    assert any(".download-card:hover .dl-link" in rule for rule in transform_rules), (
+        "the download-link nudge must be disabled"
+    )
+    assert any(
+        ".btn:hover" in rule and ".card:hover" in rule for rule in transform_rules
+    ), "hover lifts must be disabled"
+
+    assert 'matchMedia("(prefers-reduced-motion: reduce)")' in js
+    assert re.search(r"if \(reduceMotion\.matches\)", js)
+    assert re.search(
+        r"behavior:\s*reduceMotion\.matches\s*\?\s*\"auto\"\s*:\s*\"smooth\"", js
+    )
 
 
 def test_main_js_parses(js: str) -> None:
@@ -1080,6 +1377,46 @@ def test_404_returns_to_site_navigation(error_doc: _Doc, doc: _Doc) -> None:
             assert "noopener" in data.get("rel", "").split(), href
 
 
+def test_404_header_links_stay_visible_without_js(
+    error_text: str, error_doc: _Doc
+) -> None:
+    """style.css hides the header links below 760px for the burger menu; this
+    page has no JavaScript, so its inline layout must keep them visible."""
+    assert re.search(
+        r"@media \(max-width: 760px\)[\s\S]*?\.nav-links\s*\{[^}]*display:\s*flex",
+        error_text,
+    ), "the 404 header nav must not vanish on phones"
+    assert re.search(
+        r"\.nav-links a:not\(:last-child\)\s*\{\s*display:\s*inline", error_text
+    ), "the 560px rule that keeps only the last link must be overridden"
+    assert re.search(
+        r"@media \(max-width: 560px\)\s*\{[\s\S]*?"
+        r'\.nav-links a span\[lang="en"\]\s*\{\s*display:\s*none',
+        error_text,
+    ), "phones drop the English halves so the links fit"
+    # The override only wins because the inline block follows the stylesheet.
+    assert error_text.index('rel="stylesheet"') < error_text.index(
+        "@media (max-width: 760px)"
+    )
+
+    header_links = [
+        data
+        for data, ancestors in error_doc.by_tag("a")
+        if any(tag == "header" for tag, _ in ancestors)
+    ]
+    hrefs = {data.get("href", "") for data in header_links}
+    assert "/noveldl/" in hrefs, "the brand/home link must stay in the header"
+    assert "/noveldl/#download" in hrefs
+
+
+def test_404_skip_link_marks_the_english_run(error_text: str) -> None:
+    assert re.search(
+        r'<a class="skip-link" href="#main">[^<]*'
+        r'<span lang="en">Skip to main content</span>',
+        error_text,
+    ), "the English half of the skip link needs a lang attribute"
+
+
 def test_404_needs_no_javascript(error_text: str, error_doc: _Doc) -> None:
     assert not re.search(r"<script\b[^>]*\bsrc=", error_text)
     # Nothing is hidden until a script runs, and no control requires JS.
@@ -1170,14 +1507,15 @@ def test_external_scripts_never_block_parsing(doc: _Doc) -> None:
         assert "defer" in data or "async" in data or data.get("type") == "module", data
 
 
-def test_images_declare_alt_size_and_loading(doc: _Doc) -> None:
-    for data, _ in doc.by_tag("img"):
-        assert "alt" in data, data
-        assert data.get("width", "").isdigit(), data
-        assert data.get("height", "").isdigit(), data
-        # explicit lazy/eager keeps future images from becoming accidental
-        # render-blocking or below-the-fold downloads
-        assert data.get("loading") in {"lazy", "eager"}, data
+def test_images_declare_alt_size_and_loading(doc: _Doc, error_doc: _Doc) -> None:
+    for parser in (doc, error_doc):
+        for data, _ in parser.by_tag("img"):
+            assert "alt" in data, data
+            assert data.get("width", "").isdigit(), data
+            assert data.get("height", "").isdigit(), data
+            # explicit lazy/eager keeps future images from becoming accidental
+            # render-blocking or below-the-fold downloads
+            assert data.get("loading") in {"lazy", "eager"}, data
 
 
 def test_og_image_dimensions_match_metadata(doc: _Doc) -> None:
