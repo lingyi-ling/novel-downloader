@@ -28,13 +28,21 @@ novel-cli doctor --fix             # 创建缺失的输出/缓存/日志目录�
 
 ### 搜索结果缓存：相同搜索仍反复访问站点
 
-`doctor` 的 `Search cache` 行给出进程内的搜索缓存计数，字段与读法见 [CLI 用法 § doctor](./cli-examples.md#10-doctor-子命令) 的「搜索缓存诊断」。
+`doctor` 的「搜索缓存」(`search_cache`) 行给出进程内的搜索缓存计数，字段与读法见 [CLI 用法 § doctor](./cli-examples.md#10-doctor) 的「搜索缓存诊断」。
 
-* `hits`、`misses`、`evictions` 是**当前进程**的累计值。单独运行 `novel-cli doctor` 通常全为 `0`，因为该进程没有做过搜索，这不代表异常；桌面端「设置 → Search cache」显示的是桌面进程自己的 Memory entries / Disk entries / Cache hits / Expired entries。
+* `hits`、`misses`、`evictions` 是**当前进程**的累计值。单独运行 `novel-cli doctor` 通常全为 `0`，因为该进程没有做过搜索，这不代表异常；桌面端「设置 → 搜索缓存」显示的是桌面进程自己的 内存条目 / 磁盘条目 / 缓存命中 / 过期条目。
 * **过期多**：`expired_entries` 接近 `memory_entries`，说明常驻条目大多已超过 TTL（默认 300 秒）。诊断只统计不清理，下一次写入或读取该键时才移除；若 `misses` 同时很高，重复搜索会重新访问站点。
 * **命中低**：在足够多的相同查询下，若 `misses` 明显多于 `hits`，先确认 `--limit`、过滤条件、站点选择完全一致，再看 `evictions` 是否持续增长（条目数超过内存容量，默认 64），以及 `fingerprint` 是否在两次运行之间变化（搜索器/浏览器辅助配置变了，旧聚合条目全部失效）。
-* 磁盘条目为 `0` 且 `disk_enabled=false` 是默认的仅内存模式，不是故障；磁盘层需在进程启动前设置 `NOVELDL_SEARCH_CACHE_DIR` 才会启用。
-* 缓存只保存短期结果。需要强制重查时，用桌面端设置页的 **Clear search cache**（清空条目，累计计数保留），或在仅内存模式下重启进程。`novel-cli clean cache` 针对配置的缓存目录（站点 Cookie / 章节缓存），不清空搜索缓存的内存条目。
+* 磁盘条目为 `0` 且 `disk_enabled=false` 是默认的仅内存模式，不是故障；磁盘层需在搜索模块首次导入前（对 CLI 即进程启动前）设置 `NOVELDL_SEARCH_CACHE_DIR` 才会启用。
+* 缓存只保存短期结果。需要强制重查时，用桌面端设置页的 **清除搜索缓存**（清空条目，累计计数保留），或在仅内存模式下重启进程。`novel-cli clean cache` 针对配置的缓存目录（站点 Cookie / 章节缓存），不清空搜索缓存的内存条目。
+
+要看完整字段（仍然只有计数与指纹，不含关键词）：
+
+```bash
+novel-cli doctor --json | jq '.checks[] | select(.key == "search_cache")'
+```
+
+然后再按上面的规律判断；这一条命令里的 `hits`/`misses` 仍只是该新进程的计数。
 
 然后收集版本与日志：
 
@@ -764,9 +772,13 @@ novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<时�
 `restore` 会先校验备份文件 (完整性、schema 版本、必需列) 再原子替换; 覆盖已有数据库时
 旧库会先保存为同目录的 `*.pre-restore-*.bak`。目标路径必须位于 `raw_data_dir` 内。
 
+`storage backup` 默认在写入后重新读取每个副本并做完整性/schema 校验; 任一失败会删除本次运行写出的整组备份并以 `1` 退出, 源库和已有旧备份都不动。只有备份由更新版本写入、当前版本无法校验 (新 schema) 时才用 `--no-verify`; 这样的副本恢复前要自行用 `sha256sum` / `PRAGMA integrity_check` 确认。
+
+`storage verify` 在终端把逐库进度写到 stderr, 按 Ctrl+C 会停止并打印已查汇总后以 `1` 退出; `--json` 始终只在 stdout 输出一行, 中断时带 `"interrupted": true`。
+
 备份只含 `raw_data` 下的章节数据库, 不含 Cookie/token、`settings.toml`、日志或媒体文件;
 恢复后仍需重新登录, 且备份是明文, 请按敏感数据保管。完整的
-[「备份 → 校验 (SHA-256 / `PRAGMA integrity_check`) → 恢复」流程](./cli-examples.md#9-storage-子命令)
+[「备份 (写入后自动校验) → 恢复」流程](./cli-examples.md#9-storage-子命令)
 见 CLI 用法示例。
 
 定时备份时可用 `--keep` 自动轮转。先预览会删哪些旧备份，确认后再真正执行：

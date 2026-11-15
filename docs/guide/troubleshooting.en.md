@@ -33,8 +33,16 @@ The `Search cache` row in `doctor` reports the in-process search cache; see [CLI
 * `hits`, `misses`, and `evictions` are cumulative **for the current process**. A standalone `novel-cli doctor` normally reports all zeros because that process has not searched; that is not a fault. The desktop "Settings → Search cache" panel shows the desktop process's own Memory entries / Disk entries / Cache hits / Expired entries.
 * **Many expired**: when `expired_entries` approaches `memory_entries`, most resident entries are past their TTL (300 seconds by default). Diagnostics counts but does not purge them; they are removed on the next write or when that key is read. If `misses` is also high, repeated searches go back to the sites.
 * **Low hit rate**: with enough identical queries, if `misses` clearly outnumbers `hits`, first confirm that `--limit`, filters, and site selection match exactly, then check whether `evictions` keeps rising (more distinct entries than memory capacity, 64 by default) and whether `fingerprint` changed between runs (a searcher/browser-assist configuration change invalidates every old aggregate entry).
-* `disk_entries=0` with `disk_enabled=false` is the default memory-only mode, not a fault; the disk layer is enabled only when `NOVELDL_SEARCH_CACHE_DIR` is set before the process starts.
+* `disk_entries=0` with `disk_enabled=false` is the default memory-only mode, not a fault; the disk layer is enabled only when `NOVELDL_SEARCH_CACHE_DIR` is set before the search module is first imported (for the CLI, before the process starts).
 * The cache only holds short-lived results. To force a fresh search, use **Clear search cache** in the desktop settings page (entries are dropped, cumulative counters are kept), or restart the process in memory-only mode. `novel-cli clean cache` targets the configured cache directory (site cookies / chapter caches) and does not clear the search cache's memory entries.
+
+For the full field set (still only counters and the fingerprint, never a keyword):
+
+```bash
+novel-cli doctor --json | jq '.checks[] | select(.key == "search_cache")'
+```
+
+Then judge by the patterns above; in this command `hits`/`misses` are still only that new process's counters.
 
 Then collect the version and logs:
 
@@ -818,10 +826,20 @@ atomically replacing the target; when an existing database is replaced, the old 
 is preserved as `*.pre-restore-*.bak` in the same directory. The target must be
 inside `raw_data_dir`.
 
+`storage backup` re-reads and validates every copy after writing by default; a failure
+removes the whole set this run wrote and exits `1`, leaving the source databases and
+existing old backups untouched. Use `--no-verify` only when a database was written by
+a newer build that this build cannot validate (a newer schema); confirm such a copy
+with `sha256sum` / `PRAGMA integrity_check` before restoring it.
+
+`storage verify` prints per-database progress to stderr in the terminal; Ctrl+C stops
+the scan, prints the partial summary, and exits `1`. `--json` always writes one line
+to stdout only, with `"interrupted": true` when the run was interrupted.
+
 The backup contains only the chapter databases under `raw_data`; it does not include
 cookies/tokens, `settings.toml`, logs, or media files, so sign in again after a restore,
 and treat the plaintext backup as sensitive data. See the
-[full “back up → verify (SHA-256 / `PRAGMA integrity_check`) → restore” workflow](./cli-examples.en.md#9-storage-subcommand)
+[full “back up (verified after writing) → restore” workflow](./cli-examples.en.md#9-storage-subcommand)
 in the CLI usage examples.
 
 For scheduled backups, `--keep` rotates old copies automatically. Preview first, then apply:

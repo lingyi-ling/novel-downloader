@@ -624,7 +624,8 @@ novel-cli music search [-h] [--platform KEY] [--limit N] [--json] keyword
 
 novel-cli music download [-h] [--keyword KEYWORD] [--platform KEY] [--limit N]
                          [--level {hires,lossless,exhigh,higher,standard}]
-                         [--out DIR] [--pick N[,N|ID]] [--yes] [--json]
+                         [--out DIR] [--embed-lyric | --no-embed-lyric]
+                         [--pick N[,N|ID]] [--yes] [--json]
                          [KEYWORD]
 
 novel-cli music export-m3u [-h] --keyword KEYWORD [--platform KEY] [--limit N]
@@ -673,9 +674,10 @@ novel-cli music search "关键词" --json
 * 位置参数 `KEYWORD` 或 `--keyword KEYWORD`: 下载前搜索的关键词 (二选一)
 * `--level`: 音质档位, 可选 `hires` / `lossless` / `exhigh` / `higher` / `standard`; 省略时取音乐设置, 通常为 `exhigh`
 * `--out DIR`: 输出目录; 省略时取音乐设置 (未配置则使用默认下载目录)
+* `--embed-lyric` / `--no-embed-lyric`: 是否同时把歌词写入音频标签 (MP3/FLAC/M4A, 默认关闭); 两者都不传时取音乐设置 `embed_lyric`。与 `save_lyric` 相互独立, 不影响独立 `.lrc` 文件
 * `--pick N[,N|ID]`: 无需确认, 按搜索结果序号 (从 1 开始) 或歌曲 ID 下载, 可传入多个值
 * `--yes`: 无需确认, 直接下载全部搜索结果
-* `--json`: 以**单行** JSON 输出下载报告后退出。选择流程不受影响: 仍需 `--pick` 或 `--yes`, 非交互环境必须显式提供, 否则会进入分页选择界面 (或报用法错误)。顶层含 `platform`、`keyword`、`out_dir`、`level`、`total`、`ok`、`skip`、`fail`、`lyrics_written` 与 `results`; `platform=all` 时额外含 `platforms` 统计。`results[]` 逐首记录 `id`、`name`、`artists`、`album`、`duration_s`、`vip`、`platform`、`sources`, 并按结果追加:
+* `--json`: 以**单行** JSON 输出下载报告后退出。选择流程不受影响: 仍需 `--pick` 或 `--yes`, 非交互环境必须显式提供, 否则会进入分页选择界面 (或报用法错误)。顶层含 `platform`、`keyword`、`out_dir`、`level`、`embed_lyric`、`total`、`ok`、`skip`、`fail`、`lyrics_written` 与 `results`; `platform=all` 时额外含 `platforms` 统计。`results[]` 逐首记录 `id`、`name`、`artists`、`album`、`duration_s`、`vip`、`platform`、`sources`, 并按结果追加:
   * `status`: `ok` / `skip` / `fail`;
   * `path`: 有可用的本地音频路径且状态为 `ok`/`skip` 时才有;
   * `lyric_path`: 仅当原文歌词 `<stem>.lrc` 真正写在音频旁时才有 (译文 `<stem>.zh.lrc` 不单独报告);
@@ -897,15 +899,22 @@ novel-cli storage --clean -y
 **Synopsis**
 
 ```bash
-novel-cli storage backup [-h] --out OUT [--json] [--keep N] [--dry-run]
+novel-cli storage backup [-h] --out OUT [--json] [--keep N] [--dry-run] [--no-verify]
 ```
 
 **Options**
 
 * `--out OUT`: 接收备份文件的目录 (必填)。支持 `~` 与环境变量, 不存在时会自动创建; 每本书生成 `<out>/<site>/<book>/chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite`。若目标文件已存在则拒绝覆盖
-* `--json`: 输出单行 JSON 报告, 含 `command`、`ok`、`timestamp`、`out`、`count`、`bytes`、`files[]` (`source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`) 与 `retention` (`keep`、`dry_run`、`candidates`、`removed`、`failed`); 没有可备份的数据库时 `count` 为 `0`、`files` 为空数组
+* `--json`: 输出单行 JSON 报告, 含 `command`、`ok`、`timestamp`、`out`、`count`、`bytes`、`files[]` (`source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`、`verified`)、`verified`、`verification_failed` 与 `retention` (`keep`、`dry_run`、`candidates`、`removed`、`failed`); 没有可备份的数据库时 `count` 为 `0`、`files` 为空数组、`verified` 为 `false`; 校验失败时另含 `verification_error` (`source`、`target`、`reason`)
 * `--keep N`: 备份成功并发布新文件后, 每本书的**每个 stage** 只保留最新 `N` 份, 更旧的删除; `0` (默认) 关闭清理。`N` 为负数时以用法错误 (`2`) 退出
 * `--dry-run`: 只报告 `--keep` 会删除哪些旧备份, **不删除任何文件**; 新备份仍会正常写入。必须与 `--keep N` (`N > 0`) 同用, 否则以用法错误 (`2`) 退出
+* `--no-verify`: 跳过写入后的完整性/schema 校验。**仅用于新 schema**: 当数据库由更新版本写入、当前版本的 schema 校验会判定「版本过新」时, 快照本身仍能成功, 用它保留原始字节。常规备份不要使用——未经校验的副本当前版本无法恢复, 报告中的 `verified` 为 `false`
+
+每个副本写入后都会**重新读取并校验** (与 `storage verify` 同一套规则: WAL 校验和、只读 SQLite 完整性、schema 版本、必需列), 确认备份真的可用, 而不只是复制成功。任意一个副本校验失败时:
+
+* 先删除刚写入的该副本, 再删除**本次运行已写出的全部副本** (整组回滚); 备份只有成套才有意义, 残缺的一组会让重试误以为已经完整。
+* 命令以 `1` 退出, 并且**不执行** `--keep` 轮转; `--out` 下原有的旧备份和 `raw_data` 中的源数据库都不受影响 (源库全程只读)。
+* `--json` 仍输出一行报告: `ok` 为 `false`、`count` 为 `0`、`bytes` 为 `0`、`files` 为空数组、`verified` 为 `false`、`verification_failed` 为 `true`, 并由 `verification_error` (`source`、`target`、`reason`) 说明是哪个副本、为何失败; `retention` 结构不变, 其中的 `candidates`/`removed`/`failed` 为空。
 
 `--keep` 的删除范围是硬边界: 只考虑 `--out` 下文件名严格匹配 `chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite` 的**普通文件**, 目录、符号链接和任何其他命名 (包括手工改名或旧版本留下的文件) 一律不碰。分组键是「所在书籍目录 + stage」, 因此同一本书的 `raw` 与 `cleaner` 各自保留 `N` 份, 不会互相挤掉; 本次运行刚写出的文件永远受保护, 即使系统时钟回拨也不会删掉新备份。若某个目录无法读取或删除失败, 命令以 `1` 退出并在 `retention.failed` / stderr 中报告, 但已完成的备份仍保留。
 
@@ -930,6 +939,9 @@ novel-cli storage backup --out ./backups --json
 
 # 定时任务: 备份 + 轮转, 失败时退出非零
 novel-cli storage backup --out ./backups --keep 14 --json
+
+# 仅用于新 schema: 当前版本无法校验、但需要保留原始字节的数据库
+novel-cli storage backup --out ~/novel-backups --no-verify
 ```
 
 ##### 9.2 storage verify 子命令
@@ -944,7 +956,7 @@ novel-cli storage verify [-h] [--json]
 
 **Options**
 
-* `--json`: 输出单行 JSON 报告 `{ok, total, healthy, corrupt, errors[]}`, 每个错误含 `path` 与 `reason`
+* `--json`: 输出单行 JSON 报告 `{ok, total, healthy, corrupt, errors[]}`, 每个错误含 `path` 与 `reason`; 被 Ctrl+C 中断时额外含 `"interrupted": true` 且 `ok` 为 `false`
 
 **检查内容**
 
@@ -953,10 +965,17 @@ novel-cli storage verify [-h] [--json]
 * 复用 `restore` 的同一套校验: SQLite 完整性、schema 版本、必需列。任何一项不通过都记为 `corrupt` 并给出原因。
 * 每个数据库输出一行 `ok` 或 `corrupt: <原因>`; 家目录前缀会显示为 `~`。
 
+**进度与中断**
+
+* 人类可读模式下, 扫描开始和每个数据库都会在**标准错误**逐条打印 (`Scanning for chapter databases...`、`Checking 3/12: ...`, 随后是 `path: ok` / `path: corrupt: <原因>`), 因此大库或慢盘不会看起来像卡死; 标准输出保持干净, `--json` 的单行报告不会被进度污染。
+* 按 Ctrl+C 会在**当前数据库**检查结束后停止, 在标准错误打印已完成部分的汇总 `Interrupted after checking X of Y database(s): H healthy, C corrupt.`, 随后按 CLI 惯例输出 `Aborted.` 并以 `1` 退出。
+* 汇总只统计已经返回结果的数据库, 不会把中断时正在检查的那个算作 healthy; `total` 仍是扫描时的总数。部分结果**永不**以 `0` 退出。
+* `--json` 中断时仍在标准输出给出完整一行: `ok` 为 `false`、`interrupted` 为 `true`, 其余计数只反映已完成部分, `errors` 只含已确认的损坏项。
+
 **退出码与边界**
 
-* 全部健康 (包括一个数据库都没有) 退出 `0`; 任意一个损坏退出 `1`。
-* 只扫描 `raw_data` 下的**在用**数据库, 不扫描 `storage backup --out` 的备份目录; 备份副本需用 `sha256sum` / `PRAGMA integrity_check` 校验 (见 9.4)。
+* 全部健康 (包括一个数据库都没有) 退出 `0`; 任意一个损坏或被中断退出 `1`。
+* 只扫描 `raw_data` 下的**在用**数据库, 不扫描 `storage backup --out` 的备份目录。备份副本在写入时已由 `storage backup` 默认校验; 归档后若要再确认 (副本被移动/复制、由旧版本生成, 或备份时用了 `--no-verify`), 用 `sha256sum` / `PRAGMA integrity_check` (见 9.4)。
 * 校验是只读的, 不会「修复」损坏库; 确认损坏后应从备份 `restore`, 或删除该库让应用重新下载。
 
 **Examples**
@@ -1003,14 +1022,14 @@ novel-cli storage restore --from ./backup.sqlite -y --json
 
 ##### 9.4 备份 → 校验 → 恢复完整流程
 
-1. 备份, 并把机器可读报告保存下来 (其中的 `sha256`、`schema_version`、`chapters` 用于下一步核对):
+1. 备份, 并把机器可读报告保存下来 (其中的 `sha256`、`schema_version`、`chapters` 用于下一步核对)。每个副本写入后都已由 `storage backup` 默认重新读取并校验; 校验失败的整组不会留下, 命令以 `1` 退出:
 
 ```bash
 mkdir -p ~/novel-backups
 novel-cli storage backup --out ~/novel-backups --json > ~/novel-backups/last-backup.json
 ```
 
-2. 恢复前校验副本: 摘要必须与报告一致, SQLite 完整性检查必须返回 `ok`。`restore` 本身会再次执行完整性、schema 版本与必需列校验, 这一步只是为了提前发现复制不完整或磁盘损坏:
+2. 恢复前再核对副本 (可选, 但建议对归档副本做): 摘要必须与报告一致, SQLite 完整性检查必须返回 `ok`。`storage backup` 默认已在写入后执行同一套完整性、schema 版本与必需列校验, `restore` 也会再执行一次; 这一步用于发现备份之后发生的复制不完整、磁盘损坏或被移动过的副本:
 
 ```bash
 jq -r '.files[] | "\(.sha256)  \(.target)"' ~/novel-backups/last-backup.json | sha256sum -c -
@@ -1018,9 +1037,9 @@ sqlite3 ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite 'P
 # 期望输出: ok
 ```
 
-以上命令需要 `jq`、`sha256sum` (Git Bash / Linux / macOS) 与 `sqlite3` 命令行工具; 没有 `sqlite3` 时可跳过完整性检查, `restore` 仍会强制执行同样的校验。
+以上命令需要 `jq`、`sha256sum` (Git Bash / Linux / macOS) 与 `sqlite3` 命令行工具; 没有 `sqlite3` 时可跳过完整性检查, `restore` 仍会强制执行同样的校验。若备份时用了 `--no-verify`, 这一步是唯一的校验机会; 未校验的副本不要直接 `restore`。
 
-`novel-cli storage verify` 校验的是 `raw_data` 里的**在用**数据库 (只读), 不读取备份目录; 若要确认备份副本本身没坏, 仍用上面的 `sha256sum` / `PRAGMA integrity_check`。两者互补: 一个查当前数据, 一个查归档副本。
+`novel-cli storage verify` 校验的是 `raw_data` 里的**在用**数据库 (只读), 不读取备份目录。备份副本的可恢复性已由 `storage backup` 在写入后默认保证; 对移动、复制、旧版本生成或 `--no-verify` 写出的副本, 仍用上面的 `sha256sum` / `PRAGMA integrity_check`。两者互补: 一个查当前数据, 一个查归档副本。
 
 3. 恢复并核对结果。目标已存在时必须加 `-y`, 命令会先把旧库保存为同目录的 `chapter.<stage>.sqlite.pre-restore-<时间戳>.bak`:
 
@@ -1055,6 +1074,7 @@ novel-cli doctor [-h] [--port N] [--json] [--online] [--fix] [--dry-run] [--fix-
 * 日志目录能否创建并写入
 * 输出目录所在卷的剩余空间 (低于 512 MiB 只警告)
 * 缓存目录大小与可由 `clean cache` 回收的空间 (仅提示)
+* 搜索结果缓存的内存/磁盘条目、命中/过期/淘汰计数与聚合搜索配置指纹 (只读; 参见下文「搜索缓存诊断」)
 * 已注册下载站点数量
 * 抽样站点插件能否导入 (单个失败只警告, 全部失败才判定失败)
 * 可加载的搜索器数量
@@ -1100,6 +1120,50 @@ novel-cli doctor --fix --json
 `--fix --json` 在常规文档之外追加 `dry_run`、`max_age_days`、`fixed`、`skipped`、`errors` 与 `fix_summary`; 每条修复记录的 `path` 已做脱敏 (家目录显示为 `~`, 其他绝对路径只保留尾部)。
 
 > 所有必需检查通过时退出码为 `0`, 任意必需检查失败为 `1`。失败项下方会打印一条可执行的修复建议。可选检查 (`optional`) 只产生警告, 不影响退出码。
+
+**搜索缓存诊断 (`search_cache`)**
+
+「搜索缓存」(`search_cache`) 行读取搜索缓存的**只读快照**: 不清理过期条目、不打开磁盘 payload、不改变任何缓存状态; 报告里**不会出现关键词、站点选择或过滤条件**, 只有计数与一个不透明指纹。它是可选 (`optional`) 检查——读取失败只产生警告, 不影响退出码。
+
+人类可读输出形如 `N 条内存 / M 条磁盘，命中 H 次，E 条过期 （指纹 X）`, 只显示 memory/disk/hits/expired; 完整字段在 `--json` 的 `checks[]` 中 (`key` 为 `search_cache`):
+
+| 字段 | 含义 |
+| --- | --- |
+| `memory_entries` | 内存中的条目数, **包含** TTL 已过但尚未被清理的条目 |
+| `disk_entries` | 磁盘层中属于本缓存格式的 payload 文件数; 磁盘层关闭时为 `0` (目录缺失或不可读也是 `0`) |
+| `disk_enabled` | 磁盘层是否启用; 默认关闭, 只有在搜索模块首次导入前设置 `NOVELDL_SEARCH_CACHE_DIR` 才启用 (对 CLI 即进程启动前) |
+| `expired_entries` | `memory_entries` 中 TTL 已过期的子集; 只统计, 不清理 |
+| `hits` | 命中次数 (内存有效命中, 或磁盘命中后提升到内存), 当前进程累计 |
+| `misses` | 未命中次数, 当前进程累计 |
+| `evictions` | 因内存容量上限被 LRU 淘汰的条目数; 不含 TTL 过期, 也不含磁盘层清理 |
+| `fingerprint` | 聚合搜索 (不指定 `--site`) 的配置指纹: 参与站点集合与浏览器辅助站点集合的 16 个十六进制字符的 SHA-256 前缀; 显式 `--site` 的条目不带它; 计算失败时为空字符串 |
+
+**怎么读这些数字**
+
+* 计数是**当前进程**的累计值。`novel-cli doctor` 是独立进程, 通常没有做过搜索, 所以 `hits`/`misses`/`evictions` 为 `0` 是正常的, 不代表缓存故障; 要看真实命中情况, 应在已经处理过搜索的长驻进程里查看——桌面端「设置 → 搜索缓存」显示 内存条目 / 磁盘条目 / 缓存命中 / 过期条目, 完整 JSON 字段以 `doctor --json` 为准。
+* 命中率 = `hits / (hits + misses)`。样本很小时不要下结论; 多次**相同**搜索仍大量未命中, 才说明没有复用。常见原因是 `--limit`、过滤条件或站点选择不同 (它们都参与键), 超过 TTL (默认 300 秒), 指纹变化, 或条目被 LRU 淘汰。
+* **过期多**: `expired_entries` 接近 `memory_entries` 时, 常驻条目大多已过期。诊断只统计不清理, 这些条目要等到下一次写入或该键被读取才移除; 它们不会无限增长, 但意味着缓存实际是冷的。若 `misses` 同时很高, 搜索会重新访问站点, 属预期。
+* **命中低**: 在足够多的重复查询下, 若 `misses` 明显多于 `hits` (命中率长期偏低), 先看 `evictions` 是否持续增长——不同查询数超过内存容量 (默认 64 条) 属于容量抖动——再确认 TTL 与 `fingerprint`; 单独一次运行里的 `0` 不能作为依据。
+* 磁盘层关闭时 `disk_enabled=false`、`disk_entries=0` 是**正常**配置, 不是磁盘缓存故障; 默认就是仅内存。
+* `fingerprint` 变化说明搜索器集合或浏览器辅助站点集合变了 (例如升级新增/移除了站点): 旧的聚合缓存条目不再匹配, 变更后的第一次聚合搜索会全部未命中。指纹本身不含任何查询内容; 指纹计算失败时字段留空, 该行不会因此失败。
+
+**用 `--json` 排查**
+
+```bash
+# 只取搜索缓存这一项; 没有 jq 时去掉管道, 在整份 JSON 的 checks[] 里找 "key": "search_cache"
+novel-cli doctor --json | jq '.checks[] | select(.key == "search_cache")'
+```
+
+输出字段与上表一一对应, 仍然只有计数与指纹, 不含关键词、站点选择或过滤条件。
+
+```bash
+# 验证磁盘层配置是否被当前进程读到 (只统计已有 payload, 不写入、不清理)
+NOVELDL_SEARCH_CACHE_DIR=~/.cache/novel-downloader/search novel-cli doctor --json
+```
+
+环境变量在搜索模块首次导入 (对 CLI 即进程启动) 时读取, 因此这条命令下 `disk_enabled` 应为 `true`、`disk_entries` 等于该目录中本缓存格式的文件数。若启动搜索服务的进程里设置了变量、`doctor` 却仍显示 `false`, 检查变量是否真正导出到了该进程 (拼写、作用域、服务/桌面快捷方式的环境)。反过来, 未设置时 `disk_enabled=false` 且 `disk_entries=0` 就是默认的仅内存模式。
+
+`hits`/`misses`/`evictions` 是进程累计值, 每次运行 `doctor` 都是一个没有执行过搜索的新进程, 因此这次调用里的 `0` 不能用来判断缓存好坏; 真实命中情况只在长驻进程 (桌面端设置页) 里有意义, 字段定义与本段一致。
 
 ---
 
@@ -1268,7 +1332,7 @@ novel-cli update --json
 | 退出码 | 含义 | 典型场景 |
 | --- | --- | --- |
 | `0` | 成功 | 命令正常完成; 搜索无结果、追更无新章节也属于成功 |
-| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败、`storage backup`/`restore` 备份或恢复失败、`music health` 有平台失败、`music download` 有歌曲失败、`batch` 存在未匹配/格式错误/下载失败、`update` 检查失败 (以及 `--yes` 时无匹配资产、缺少摘要或下载失败) |
+| `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败、`storage backup` (含写入后校验失败, 整组回滚)/`restore` 备份或恢复失败、`music health` 有平台失败、`music download` 有歌曲失败、`batch` 存在未匹配/格式错误/下载失败、`update` 检查失败 (以及 `--yes` 时无匹配资产、缺少摘要或下载失败) |
 | `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`download` 的 `--site`/`--start`/`--end` 传入空字符串 (仅含空白也算空)、`--json` 与 `--first` 同用、`storage` 的 `--json` 与 `--clean` 同用 (未加 `--dry-run`)、`clean cache`/`clean book` 的 `--json` 未与 `--dry-run` 同用、`storage --dry-run` 未与 `--clean` 同用、`storage restore` 覆盖已有数据库未加 `--yes` 或目标不在 `raw_data_dir` 内、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`music` 的 `--platform` 传入未知平台、`batch` 未提供输入文件或 `--interval` 为负、`clean --site` 传入 `..`/路径分隔符等越界值 |
 
 `update --check` 的退出码表示**检查**是否成功, 而不是是否有新版本: 发现有更新仍返回 `0`。`sources list --probe` 本身不改变退出码——网络不可达只在 `Latency`/`HTTP` 列显示为 `-`, 只有 `--check` 的结构校验失败才会以 `1` 退出。
@@ -1299,8 +1363,8 @@ novel-cli update --json
 | `clean book` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` 为 `clean book`; `book_id` 仅在只清理一本书时为该 ID, 多本书或整站清理时为 `null`; `items[]` 同上 |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` (dir 与 total 字段见上文) |
 | `storage --clean` | `--dry-run --json` | 与 `clean cache` 相同的 dry-run 结构, `command` 为 `storage --clean`, `site`/`book_id` 为 `null`, `book_ids` 为 `[]` |
-| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files", "retention"}`; `files[]` 含 `source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`; `retention` 含 `keep`、`dry_run`、`candidates`、`removed`、`failed` |
-| `storage verify` | `--json` | `{"ok", "total", "healthy", "corrupt", "errors"}`; `errors[]` 含 `path`、`reason` |
+| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files", "verified", "verification_failed", "retention"}`; `files[]` 含 `source`、`target`、`bytes`、`sha256`、`schema_version`、`chapters`、`verified`; 写入后校验失败时 `ok` 为 `false`、`count` 为 `0`、`files` 为 `[]`, 并另含 `verification_error` (`source`、`target`、`reason`); `retention` 含 `keep`、`dry_run`、`candidates`、`removed`、`failed` |
+| `storage verify` | `--json` | `{"ok", "total", "healthy", "corrupt", "errors"}`; 每个 `errors[]` 含 `path`、`reason`; 被 Ctrl+C 中断时额外含 `"interrupted": true` |
 | `storage restore` | `--json` | `{"command", "ok", "from", "target", "replaced_existing", "pre_restore_backup", "schema_version", "chapters", "bytes", "sha256"}` |
 | `doctor` | `--json` | `{"summary": {"total", "failures", "optional_failures", "ok"}, "checks": [{"key", "name", "ok", "fatal", ...}]}` |
 

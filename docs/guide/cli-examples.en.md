@@ -922,15 +922,22 @@ Take a consistent snapshot (SQLite online backup, including data still in the WA
 **Synopsis**
 
 ```bash
-novel-cli storage backup [-h] --out OUT [--json] [--keep N] [--dry-run]
+novel-cli storage backup [-h] --out OUT [--json] [--keep N] [--dry-run] [--no-verify]
 ```
 
 **Options**
 
 * `--out OUT`: directory that receives the backup files (required). Supports `~` and environment variables and is created when missing; each book produces `<out>/<site>/<book>/chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite`. An existing target file is never overwritten
-* `--json`: print a single-line JSON report with `command`, `ok`, `timestamp`, `out`, `count`, `bytes`, `files[]` (`source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters`), and `retention` (`keep`, `dry_run`, `candidates`, `removed`, `failed`); with no databases to back up, `count` is `0` and `files` is an empty array
+* `--json`: print a single-line JSON report with `command`, `ok`, `timestamp`, `out`, `count`, `bytes`, `files[]` (`source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters`, `verified`), `verified`, `verification_failed`, and `retention` (`keep`, `dry_run`, `candidates`, `removed`, `failed`); with no databases to back up, `count` is `0`, `files` is an empty array, and `verified` is `false`; a verification failure also adds `verification_error` (`source`, `target`, `reason`)
 * `--keep N`: after a successful backup publishes the new files, keep only the newest `N` backups **per book database and stage** and delete older ones; `0` (the default) disables pruning. A negative value exits with a usage error (`2`)
 * `--dry-run`: only report which old backups `--keep` would delete, **without deleting anything**; the new backup is still written. It requires `--keep N` with `N > 0`, otherwise it exits with a usage error (`2`)
+* `--no-verify`: skip the post-write integrity/schema check. **Only for a newer schema**: when a database was written by a newer build and this build's schema check would reject it as "newer than supported", the snapshot itself still succeeds; this flag preserves those bytes. Do not use it for routine backups — a copy that was not verified cannot be restored by this build, and `verified` is `false` in the report
+
+Every copy is **re-read and validated** after it is published, using the same rules as `storage verify` (WAL checksum, read-only SQLite integrity, schema version, required columns), so a successful run means the set is actually usable, not merely that the bytes were copied. If any copy fails:
+
+* The failing copy is removed first, then **every copy this run already wrote** is deleted (set-wide rollback). A backup set is only useful as a whole; a partial set would let a retry mistake it for a complete backup.
+* The command exits `1` and does **not** run `--keep` rotation; pre-existing backups under `--out` and the source databases under `raw_data` are untouched (sources are only ever read).
+* `--json` still emits one report: `ok` is `false`, `count` is `0`, `bytes` is `0`, `files` is an empty array, `verified` is `false`, and `verification_failed` is `true`; `verification_error` (`source`, `target`, `reason`) names the copy and why it failed. `retention` keeps its shape with empty `candidates`/`removed`/`failed`.
 
 `--keep` has a hard boundary: it only considers **regular files** directly under `--out` whose names exactly match `chapter.<stage>.<YYYYMMDDTHHMMSSZ>.sqlite`. Directories, symlinks, and every other name (including hand-renamed files or files left by older versions) are never touched. Retention is grouped by "containing book directory + stage", so a book holding both `raw` and `cleaner` databases keeps `N` of each instead of one stage evicting the other; files written by the current run are always protected, so even a clock skew cannot delete a fresh backup. If a directory cannot be read or a delete fails, the command exits `1` and reports it in `retention.failed` / stderr, while the completed backups stay in place.
 
@@ -955,6 +962,9 @@ novel-cli storage backup --out ./backups --json
 
 # Scheduled task: back up + rotate, non-zero on failure
 novel-cli storage backup --out ./backups --keep 14 --json
+
+# Only for a newer schema: preserve databases this build cannot validate
+novel-cli storage backup --out ~/novel-backups --no-verify
 ```
 
 ##### 9.2 storage verify Subcommand
@@ -969,7 +979,7 @@ novel-cli storage verify [-h] [--json]
 
 **Options**
 
-* `--json`: print a single-line JSON report `{ok, total, healthy, corrupt, errors[]}`, where each error has `path` and `reason`
+* `--json`: print a single-line JSON report `{ok, total, healthy, corrupt, errors[]}`, where each error has `path` and `reason`; an interrupted (Ctrl+C) run also includes `"interrupted": true` and reports `ok` as `false`
 
 **What it checks**
 
@@ -978,10 +988,17 @@ novel-cli storage verify [-h] [--json]
 * It reuses the exact validation `restore` performs: SQLite integrity, schema version, and required columns. Any failure marks the database `corrupt` with a reason.
 * Each database prints one `ok` or `corrupt: <reason>` line; a home-directory prefix is shown as `~`.
 
+**Progress and interrupts**
+
+* In human mode the scan start and every database are printed to **stderr** as they are opened (`Scanning for chapter databases...`, `Checking 3/12: ...`, then `path: ok` / `path: corrupt: <reason>`), so a large or slow library never looks hung; stdout stays clean, so the single-line `--json` report is never mixed with progress.
+* Ctrl+C stops the walk **after the database in flight** and prints a partial summary to stderr: `Interrupted after checking X of Y database(s): H healthy, C corrupt.` The CLI then prints its usual `Aborted.` and exits `1`.
+* The summary counts only databases whose check returned; the one interrupted mid-check is never reported healthy. `total` remains the count from the initial scan, and a partial result **never** exits `0`.
+* With `--json`, an interrupted run still prints exactly one line: `ok` is `false`, `interrupted` is `true`, the counters cover only completed checks, and `errors` contains only confirmed corruption.
+
 **Exit codes and boundaries**
 
-* Exit `0` when every database is healthy (including the case of none at all); exit `1` if any is corrupt.
-* It scans only the **live** databases under `raw_data`, not the directory passed to `storage backup --out`; verify backup copies separately with `sha256sum` / `PRAGMA integrity_check` (see 9.4).
+* Exit `0` when every database is healthy (including the case of none at all); exit `1` if any is corrupt or the run is interrupted.
+* It scans only the **live** databases under `raw_data`, not the directory passed to `storage backup --out`. Backup copies are validated at write time by `storage backup` by default; to re-confirm an archived copy (moved/copied, produced by an older version, or written with `--no-verify`), use `sha256sum` / `PRAGMA integrity_check` (see 9.4).
 * Verification is read-only and never "repairs" a corrupt database; after confirming the damage, `restore` it from a backup or delete it so the app downloads it again.
 
 **Examples**
@@ -1028,14 +1045,14 @@ The `--to` filename must look like `chapter.<stage>.sqlite`, and the stage must 
 
 ##### 9.4 Full Workflow: Back Up → Verify → Restore
 
-1. Back up and keep the machine-readable report (its `sha256`, `schema_version`, and `chapters` fields are used in the next step):
+1. Back up and keep the machine-readable report (its `sha256`, `schema_version`, and `chapters` fields are used in the next step). Every copy has already been re-read and validated by `storage backup` by default; a set that fails is not left behind and the command exits `1`:
 
 ```bash
 mkdir -p ~/novel-backups
 novel-cli storage backup --out ~/novel-backups --json > ~/novel-backups/last-backup.json
 ```
 
-2. Verify the copy before restoring: every digest must match the report, and SQLite's integrity check must return `ok`. `restore` repeats the integrity, schema-version, and required-column checks itself; this step just catches a truncated copy or disk damage earlier:
+2. Optionally re-check the copy before restoring (recommended for archived copies): every digest must match the report, and SQLite's integrity check must return `ok`. `storage backup` already ran the same integrity, schema-version, and required-column checks after writing, and `restore` runs them again; this step catches a copy that was moved, truncated, or damaged on disk after the backup:
 
 ```bash
 jq -r '.files[] | "\(.sha256)  \(.target)"' ~/novel-backups/last-backup.json | sha256sum -c -
@@ -1043,9 +1060,9 @@ sqlite3 ~/novel-backups/qidian/1010868264/chapter.raw.20260102T030405Z.sqlite 'P
 # expected output: ok
 ```
 
-These commands need `jq`, `sha256sum` (Git Bash / Linux / macOS), and the `sqlite3` CLI; if `sqlite3` is unavailable, skip the integrity check — `restore` still enforces the same validation.
+These commands need `jq`, `sha256sum` (Git Bash / Linux / macOS), and the `sqlite3` CLI; if `sqlite3` is unavailable, skip the integrity check — `restore` still enforces the same validation. If the backup was written with `--no-verify`, this step is the only validation it gets; do not `restore` an unverified copy directly.
 
-`novel-cli storage verify` checks the **live** databases under `raw_data` (read-only) and does not read the backup directory; to confirm a backup copy itself is intact, keep using `sha256sum` / `PRAGMA integrity_check` above. They are complementary: one checks current data, the other the archived copy.
+`novel-cli storage verify` checks the **live** databases under `raw_data` (read-only) and does not read the backup directory. A backup copy's restorability is guaranteed at write time by `storage backup`; for copies that were moved, copied, produced by an older version, or written with `--no-verify`, keep using `sha256sum` / `PRAGMA integrity_check` above. They are complementary: one checks current data, the other the archived copy.
 
 3. Restore and check the result. If the target already exists, `-y` is required; the old database is first preserved as `chapter.<stage>.sqlite.pre-restore-<timestamp>.bak` in the same directory:
 
@@ -1080,6 +1097,7 @@ novel-cli doctor [-h] [--port N] [--json] [--online] [--fix] [--dry-run] [--fix-
 * The log directory can be created and written
 * Free space on the output directory's volume (warns below 512 MiB)
 * Cache directory size and how much `clean cache` could reclaim (informational)
+* Search-cache memory/disk occupancy, hit/expired/eviction counters, and the aggregate-search configuration fingerprint (read-only; see "Search-cache diagnostics" below)
 * Number of registered download sites
 * A sample of site plugins imports (one failure is a warning; only all failures are fatal)
 * Number of loadable searchers
@@ -1125,6 +1143,52 @@ novel-cli doctor --fix --json
 `--fix --json` adds `dry_run`, `max_age_days`, `fixed`, `skipped`, `errors`, and `fix_summary` to the usual document; each fix record's `path` is masked (the home directory becomes `~`, other absolute paths keep only their tail).
 
 > Exit code is `0` when every required check passes and `1` otherwise. Each failing row prints an actionable fix. Optional checks (`optional`) only produce warnings and do not affect the exit code.
+
+**Search-cache diagnostics (`search_cache`)**
+
+The `Search cache` row reads a **read-only snapshot** of the search cache: it does not purge expired entries, open disk payloads, or change any cache state, and the report **never contains a keyword, site selection, or filter**. Only counters and an opaque fingerprint are shown. It is an optional (`optional`) check — a failed read is a warning and does not affect the exit code.
+
+The human-readable output looks like `N memory / M disk entry(s), H hit(s), E expired (fingerprint X)`, which shows only memory/disk/hits/expired; the full field set is in `--json` under `checks[]` (with `key` set to `search_cache`):
+
+| Field | Meaning |
+| --- | --- |
+| `memory_entries` | Entries currently held in memory, **including** ones whose TTL has elapsed but that have not been purged yet |
+| `disk_entries` | Payload files of this cache's format in the disk layer; `0` when the disk layer is disabled (also `0` when the directory is missing or unreadable) |
+| `disk_enabled` | Whether the disk layer is enabled; off by default, and enabled only when `NOVELDL_SEARCH_CACHE_DIR` is set before the search module is first imported (for the CLI, before the process starts) |
+| `expired_entries` | The subset of `memory_entries` past its TTL; counted, not purged |
+| `hits` | Successful lookups (a valid memory entry, or a disk entry promoted into memory), cumulative for the current process |
+| `misses` | Failed lookups, cumulative for the current process |
+| `evictions` | Entries evicted by LRU because of the memory capacity limit; excludes TTL expiry and disk-layer pruning |
+| `fingerprint` | Configuration fingerprint for aggregate searches (no `--site`): the 16-hex-character SHA-256 prefix of the participating-site set plus the browser-assisted site set; entries for an explicit `--site` do not carry it; empty when it cannot be computed |
+
+**How to read these numbers**
+
+* The counters are cumulative **for the current process**. A standalone `novel-cli doctor` has normally not searched, so `hits`/`misses`/`evictions` being `0` is normal and does not indicate a broken cache. For real hit statistics, look in a long-lived process that has served searches — the desktop "Settings → Search cache" panel shows Memory entries / Disk entries / Cache hits / Expired entries, and `doctor --json` is the source for the full field set.
+* Hit rate = `hits / (hits + misses)`. Do not draw conclusions from a small sample; only repeated **identical** searches that still mostly miss indicate the snapshot is not being reused. Common causes are different `--limit`, filters, or site selection (all are part of the key), an elapsed TTL (300 seconds by default), a changed fingerprint, or LRU eviction.
+* **Many expired**: when `expired_entries` approaches `memory_entries`, most resident entries are past their TTL. Diagnostics only counts them; they are removed on the next write or when that key is read. They cannot grow without bound, but they mean the cache is effectively cold. If `misses` is also high, searches go back to the sites, as expected.
+* **Low hit rate**: with enough repeated queries, if `misses` clearly outnumbers `hits` (a persistently low hit rate), first check whether `evictions` keeps rising — more distinct queries than the memory capacity (64 entries by default) is capacity thrashing — then re-check the TTL and `fingerprint`. A `0` from a single run is not evidence either way.
+* `disk_enabled=false` with `disk_entries=0` is the **normal** default memory-only configuration, not a disk-cache fault.
+* A changing `fingerprint` means the searcher set or the browser-assisted site set changed (for example, an upgrade added or removed a site): old aggregate entries no longer match, so the first aggregate search after the change misses everything. The fingerprint contains no query content; if it cannot be computed the field stays empty and the row still passes.
+
+**Inspecting it with `--json`**
+
+```bash
+# Pick just the search-cache row; without jq, drop the pipe and look for
+# "key": "search_cache" in checks[] of the full document
+novel-cli doctor --json | jq '.checks[] | select(.key == "search_cache")'
+```
+
+The fields match the table above, and the output still contains only counters and the fingerprint — no keyword, site selection, or filter.
+
+```bash
+# Verify that the disk layer setting is visible to this process
+# (counts existing payloads only; writes and purges nothing)
+NOVELDL_SEARCH_CACHE_DIR=~/.cache/novel-downloader/search novel-cli doctor --json
+```
+
+The environment variable is read when the search module is first imported (for the CLI, at process start), so under this command `disk_enabled` should be `true` and `disk_entries` should equal the number of payload files of this cache's format in that directory. If the process that serves searches has the variable set but `doctor` still reports `false`, check that it is actually exported into that process (spelling, scope, service or desktop-shortcut environment). Conversely, `disk_enabled=false` with `disk_entries=0` when it is unset is the default memory-only mode.
+
+`hits`/`misses`/`evictions` are cumulative for the process, and every `doctor` run is a new process that has not searched, so a `0` from this call says nothing about cache health; real hit behaviour is only meaningful in a long-lived process (the desktop settings panel), with the same field definitions.
 
 ---
 
@@ -1300,7 +1364,7 @@ novel-cli update --json
 | Code | Meaning | Typical cases |
 | --- | --- | --- |
 | `0` | Success | The command completed; no search results or no new chapters is still success |
-| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean`, a failed `storage backup` / `restore`, any failed `music health` platform, any failed `music download` song, unmatched/malformed/download-failed entries in `batch`, a failed `update` check (also no asset for the platform, missing digest, or a failed download with `--yes`) |
+| `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean`, a failed `storage backup` (including a post-write verification failure, which rolls back the whole set) / `restore`, any failed `music health` platform, any failed `music download` song, unmatched/malformed/download-failed entries in `batch`, a failed `update` check (also no asset for the platform, missing digest, or a failed download with `--yes`) |
 | `2` | Usage error | Missing/conflicting arguments (including argparse errors), an empty `--site`/`--start`/`--end` for `download` (a whitespace-only value counts as empty), `--json` with `--first`, `storage`'s `--json` with `--clean` (without `--dry-run`), `clean cache`/`clean book` `--json` without `--dry-run`, `storage --dry-run` without `--clean`, `storage restore` replacing an existing database without `--yes` or targeting a path outside `raw_data_dir`, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, an unknown `music --platform`, `batch` without an input file or with a negative `--interval`, `clean --site` given a traversal value such as `..` or a path separator |
 
 The `update --check` exit code reports whether the **check** succeeded, not whether an update exists: finding one still returns `0`. `sources list --probe` never changes the exit code by itself — network unreachability only shows as `-` in the `Latency`/`HTTP` columns, and only a failed structural `--check` exits with `1`.
@@ -1331,8 +1395,8 @@ With `--json`:
 | `clean book` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` is `clean book`; `book_id` is the ID when exactly one book is cleaned, otherwise `null` (multiple books or a whole-site clean); `items[]` as above |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` (dir and total fields are described above) |
 | `storage --clean` | `--dry-run --json` | Same dry-run shape as `clean cache`, with `command` set to `storage --clean`, `site`/`book_id` `null`, and `book_ids` `[]` |
-| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files", "retention"}`; each `files[]` entry has `source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters`; `retention` has `keep`, `dry_run`, `candidates`, `removed`, `failed` |
-| `storage verify` | `--json` | `{"ok", "total", "healthy", "corrupt", "errors"}`; each `errors[]` entry has `path` and `reason` |
+| `storage backup` | `--json` | `{"command", "ok", "timestamp", "out", "count", "bytes", "files", "verified", "verification_failed", "retention"}`; each `files[]` entry has `source`, `target`, `bytes`, `sha256`, `schema_version`, `chapters`, `verified`; a post-write verification failure reports `ok` as `false`, `count` as `0`, `files` as `[]`, and adds `verification_error` (`source`, `target`, `reason`); `retention` has `keep`, `dry_run`, `candidates`, `removed`, `failed` |
+| `storage verify` | `--json` | `{"ok", "total", "healthy", "corrupt", "errors"}`; each `errors[]` entry has `path` and `reason`; an interrupted (Ctrl+C) run also includes `"interrupted": true` |
 | `storage restore` | `--json` | `{"command", "ok", "from", "target", "replaced_existing", "pre_restore_backup", "schema_version", "chapters", "bytes", "sha256"}` |
 | `doctor` | `--json` | `{"summary": {"total", "failures", "optional_failures", "ok"}, "checks": [{"key", "name", "ok", "fatal", ...}]}` |
 
