@@ -367,7 +367,8 @@ data: {"total":2}
 - 全部站点结束后推送一个 `done` 事件，`data.total` 为本次推送的总条数。
 - 客户端断开连接时，服务端会关闭底层搜索生成器并取消仍在进行的站点请求。
 - 响应头包含 `Cache-Control: no-cache` 与 `X-Accel-Buffering: no`，
-  使用反向代理时也不会被缓冲。
+  使用反向代理时也不会被缓冲；`X-Request-ID` 也随响应头返回（见
+  [请求追踪](#request-id)）。
 - 流空闲 15 秒时会写入 `: keepalive` 注释帧；它不产生事件，详见
   [SSE 心跳](#sse-keepalive)。
 
@@ -421,6 +422,45 @@ curl -N "http://127.0.0.1:8081/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&s
   （默认 `15.0` 秒）与 `SSE_KEEPALIVE_FRAME`（`: keepalive\n\n`）。
   `_stream_with_keepalive()` 还接受 `interval` 参数，测试用它缩短间隔。
   调整间隔只影响心跳，不改变事件格式。
+
+### 断线重连与请求 ID {#sse-reconnect}
+
+每条 SSE 连接就是一次普通 HTTP 请求：每次（重新）连接都会单独经过
+`X-Request-ID` 处理，并在访问日志里单独记一行。因此：
+
+- **每次重连都是一次新请求。** 不发送 `X-Request-ID` 时，每次重连都会得到
+  一个新的 UUID4，日志里每次连接各占一行。想把多次重连归为同一次排障会话，
+  就在每次重连时发送同一个 `X-Request-ID`（服务端会原样沿用）；想区分尝试
+  次数，就每次换一个值（如 `search-retry-01`、`search-retry-02`）。服务端
+  不做去重：相同 ID 的多行日志就是多次连接。
+- **心跳不携带 ID，也不支持断点续传。** `: keepalive` 只是注释帧，其中没有
+  请求 ID、事件 ID 或序号；本 API 的 SSE 帧也不写 `id:` 字段，因此不会出现
+  `Last-Event-ID`，重连后从新的 `results` / `snapshot` / `requests` 重新开始，
+  `done` 不会重放。心跳只证明连接仍然存活。
+- **日志路径不含查询串。** 搜索词与过滤参数都在 query string 里，访问日志只
+  记 `/api/v1/search/stream`，所以重连排障要以 `X-Request-ID` 为准。
+- **重连必须重新发送请求头。** token 与 `X-Request-ID` 都是请求头，每次重连
+  都要重新带上；`EventSource` 不能自定义请求头，带 token 的部署请用 `fetch`。
+
+下面的示例用固定 ID 建立流并在断线后沿用同一个 ID 重连；`grep` 过滤掉注释
+行后，剩下的就是事件帧（保留 `event:` / `data:` 行）：
+
+```bash
+BASE=http://127.0.0.1:8081
+RID=search-retry-01
+
+# 第一次连接（-N 关闭 curl 缓冲，-sS 只保留错误提示）
+curl -N -sS -H "Authorization: Bearer $TOKEN" -H "X-Request-ID: $RID" \
+  "$BASE/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&sites=qidian"
+
+# 断线后重连：沿用同一个 ID；--line-buffered 让事件实时输出
+curl -N -sS -H "Authorization: Bearer $TOKEN" -H "X-Request-ID: $RID" \
+  "$BASE/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&sites=qidian" \
+  | grep --line-buffered -v '^:'
+```
+
+用 `curl -N -v` 可以在 stderr 看到响应头里的 `X-Request-ID`：合法值原样回显，
+非法值则显示服务端新生成的 UUID4。
 
 !!! tip "代理 / NAT 下的排障"
     - 客户端和中间层的**空闲读超时必须大于 15 秒**。把 HTTP 客户端读超时
@@ -1072,7 +1112,7 @@ API 默认启用按客户端 IP 的滑动窗口限流：每个 IP 在 `--rate-li
   桶——需要按真实客户端区分时，请在代理层限流，或让 API 直接监听并配合
   token 使用。
 
-## 请求追踪（X-Request-ID）
+## 请求追踪（X-Request-ID） {#request-id}
 
 API 给**每个 HTTP 请求**分配一个关联 ID，并在**每个响应**的
 `X-Request-ID` 头里回写，包括成功响应、`401` / `404` / `413` / `422` /
@@ -1080,6 +1120,9 @@ API 给**每个 HTTP 请求**分配一个关联 ID，并在**每个响应**的
 （限流、请求体上限）或最外层的错误处理器直接生成，也会带上这个头；开启
 `--cors` 时，浏览器客户端还能读取它（该头在 `Access-Control-Expose-Headers`
 中）。
+
+错误响应体保持统一的 `{"detail": "..."}` 形状，**不会**额外插入 ID；关联
+方式是响应头里的值与访问日志行的 `[<ID>]` 前缀，两者始终是同一个字符串。
 
 **接受与生成规则**
 
@@ -1093,6 +1136,15 @@ API 给**每个 HTTP 请求**分配一个关联 ID，并在**每个响应**的
 - 客户端未提供（或提供后不可用）时，服务端生成 UUID4。客户端仍应读取响应
   头，把生成的值用于上报。
 
+!!! note "内嵌引擎（桌面端 / Android 独立模式）"
+    内嵌 HTTP 引擎（`apps/embedded/server.py`）与 REST 服务使用同一份请求 ID
+    契约：同一个头名；只考虑第一个同名头；只接受 `1`–`64` 个
+    `A-Z a-z 0-9 . _ : -` 字符；缺失或非法时生成 UUID4；并在每个响应
+    （JSON、下载文件、`404` / `405`、`503 Embedded engine busy`）的
+    `X-Request-ID` 头里回显。因此无论请求由哪种传输处理，客户端都可以用同
+    一个 ID 上报。差别在日志：REST 服务的访问日志行以 `[<ID>]` 开头，内嵌
+    引擎的访问日志是 `DEBUG` 级别且不带 ID，请以响应头回显的值为准。
+
 **日志**
 
 每次请求恰好写一行访问日志，格式固定为：
@@ -1105,6 +1157,10 @@ API 给**每个 HTTP 请求**分配一个关联 ID，并在**每个响应**的
 token），响应体也从不读取或记录。超过 1 秒的请求改用 `WARNING` 级别，行
 格式不变。拿到失败响应的 ID 后，在启动 `novel-api` 的终端或服务日志里搜索
 `[<请求 ID>]`，就能定位到对应那一行。
+
+SSE 连接同样只记一行：日志在响应头发出、流建立时写入，耗时是到响应头发出
+为止的时间，不是流的存活时长；每次重连都会产生新的一行（见
+[SSE 心跳与重连](#sse-reconnect)）。
 
 **客户端如何附带与上报**
 
@@ -1120,6 +1176,17 @@ curl -sS -D headers.txt -o body.json \
 
 # 无论成功还是失败，都从响应头读回最终使用的 ID
 grep -i '^x-request-id:' headers.txt
+```
+
+发送非法值（这里含空格）不会报错，但会被替换成服务端生成的 UUID4：
+
+```bash
+BASE=http://127.0.0.1:8081
+
+curl -sS -D - -o /dev/null \
+  -H "X-Request-ID: bad id" \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE/api/v1/health" | grep -i '^x-request-id:'
 ```
 
 - 程序化客户端可在每次请求前生成自己的 ID 并写入该头；更简单的做法是不发

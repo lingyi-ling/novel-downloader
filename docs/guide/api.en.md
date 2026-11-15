@@ -406,6 +406,7 @@ data: {"total":2}
   and cancels site requests still in flight.
 - Response headers include `Cache-Control: no-cache` and
   `X-Accel-Buffering: no`, so reverse proxies do not buffer the stream.
+  `X-Request-ID` is returned as well; see [Request tracing](#request-id).
 - A `: keepalive` comment frame is written after 15 seconds of silence; it
   carries no event. See [SSE keepalive](#sse-keepalive).
 
@@ -467,6 +468,54 @@ any of them, the server writes a comment frame that starts with a colon:
   `_stream_with_keepalive()` also takes an `interval` argument, which tests use
   to shorten it. Changing the interval affects only the heartbeat, never the
   event format.
+
+### Reconnecting and X-Request-ID {#sse-reconnect}
+
+Every SSE connection is an ordinary HTTP request: each (re)connection goes
+through `X-Request-ID` resolution on its own and gets its own access-log line.
+So:
+
+- **Every reconnect is a new request.** Without an `X-Request-ID`, each
+  reconnect receives a fresh UUID4 and appears as a separate log line. To group
+  several reconnects into one troubleshooting session, send the same
+  `X-Request-ID` on every reconnect (the server reuses it verbatim); to tell
+  attempts apart, change it each time (for example `search-retry-01`,
+  `search-retry-02`). The server does not de-duplicate: multiple log lines with
+  the same id mean multiple connections.
+- **Keepalives carry no id and do not resume the stream.** `: keepalive` is only
+  a comment frame: no request id, event id, or sequence number. Frames from this
+  API also never include an `id:` field, so there is no `Last-Event-ID` and no
+  replay. After a reconnect the client starts over with new `results` /
+  `snapshot` / `requests`; a `done` event is not replayed. A keepalive only
+  proves that the connection is still alive.
+- **The logged path has no query string.** The keyword and filters live in the
+  query string, while the access log records only
+  `/api/v1/search/stream`; use the `X-Request-ID` to correlate reconnects.
+- **Reconnect must resend the headers.** The token and `X-Request-ID` are
+  request headers, so every reconnect has to carry them again; `EventSource`
+  cannot set custom headers, so use `fetch` when a token is configured.
+
+The example below opens the stream with a fixed id and reuses it after a drop;
+`grep` removes comment lines, leaving the event frames (`event:` / `data:`
+lines):
+
+```bash
+BASE=http://127.0.0.1:8081
+RID=search-retry-01
+
+# first connection (-N disables curl buffering; -sS keeps only errors)
+curl -N -sS -H "Authorization: Bearer $TOKEN" -H "X-Request-ID: $RID" \
+  "$BASE/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&sites=qidian"
+
+# reconnect after a drop: same id; --line-buffered streams events immediately
+curl -N -sS -H "Authorization: Bearer $TOKEN" -H "X-Request-ID: $RID" \
+  "$BASE/api/v1/search/stream?keyword=%E6%96%97%E7%A0%B4&sites=qidian" \
+  | grep --line-buffered -v '^:'
+```
+
+Use `curl -N -v` to see the `X-Request-ID` in the response headers on stderr: a
+valid value is echoed verbatim, while an invalid one shows the UUID4 the server
+generated instead.
 
 !!! tip "Troubleshooting behind a proxy or NAT"
     - **Idle read timeouts on the client and every hop must exceed 15 seconds.**
@@ -1213,7 +1262,7 @@ shared across processes nor persisted:
   per-client accounting, or let the API listen directly together with a
   token.
 
-## Request tracing (X-Request-ID)
+## Request tracing (X-Request-ID) {#request-id}
 
 The API assigns a correlation id to **every HTTP request** and echoes it in the
 `X-Request-ID` header of **every response**: successful responses, `401` /
@@ -1222,6 +1271,10 @@ exception. The header is present even when the response is generated directly
 by an inner middleware (rate limiter, body-size cap) or by the outermost error
 handler. With `--cors`, browser clients can read it too (the header is listed
 in `Access-Control-Expose-Headers`).
+
+The error body keeps the uniform `{"detail": "..."}` shape and does **not**
+include the id; the correlation is carried by the response header and by the
+`[<id>]` prefix of the access-log line — always the same string.
 
 **Accepted and generated values**
 
@@ -1238,6 +1291,18 @@ in `Access-Control-Expose-Headers`).
   client should still read the response header and use that value when
   reporting.
 
+!!! note "Embedded engine (desktop / Android standalone mode)"
+    The embedded HTTP engine (`apps/embedded/server.py`) implements the same
+    request-id contract as the REST server: same header name; only the first
+    occurrence is considered; only `1`–`64` characters from
+    `A-Z a-z 0-9 . _ : -` are accepted; a missing or invalid value is replaced
+    with a generated UUID4; and every response (JSON, downloaded file,
+    `404` / `405`, the `503 Embedded engine busy`) echoes it in
+    `X-Request-ID`. A client can therefore quote one id regardless of which
+    transport answered. The difference is logging: the REST access-log line
+    starts with `[<id>]`, while the embedded engine logs at `DEBUG` without the
+    id, so trust the value echoed in the response header.
+
 **Logging**
 
 Every request produces exactly one access-log line with a fixed shape:
@@ -1251,6 +1316,11 @@ logged (it may carry a token), and response bodies are never read or logged.
 Requests slower than one second are logged at `WARNING` with the same shape.
 Given a failed response's id, search the terminal or service log that runs
 `novel-api` for `[<request id>]` to find that exact line.
+
+An SSE connection also produces exactly one line: the log is written when the
+response head is sent (the stream opens), and its duration is the time until
+that head is sent, not the lifetime of the stream; every reconnect adds another
+line (see [SSE keepalive and reconnecting](#sse-reconnect)).
 
 **Attaching and reporting from a client**
 
@@ -1266,6 +1336,18 @@ curl -sS -D headers.txt -o body.json \
 
 # On success or failure, read back the id that was actually used
 grep -i '^x-request-id:' headers.txt
+```
+
+An invalid value (with a space here) is not an error, but it is replaced by a
+server-generated UUID4:
+
+```bash
+BASE=http://127.0.0.1:8081
+
+curl -sS -D - -o /dev/null \
+  -H "X-Request-ID: bad id" \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE/api/v1/health" | grep -i '^x-request-id:'
 ```
 
 - A programmatic client may generate an id per request and send it; the simpler
