@@ -209,7 +209,28 @@
         <article class="card reveal">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
           <h3 data-en="Aggregate search">聚合搜索</h3>
-          <p data-en="59 sources queried concurrently, ranked by a five-signal quality score with an explainable match tier (exact / prefix / contains / partial) and a relevance score; same-book results merge across sites with source capsules and a recent-search cache (optionally on disk, reusable across restarts). Results stream in (first rows in ~0.2s); the desktop app shows per-source progress, failure counts and elapsed time, and a new query cancels the previous one.">59 个搜索源并发查询，按关键词覆盖度、字数、更新时间、站点权重、完结状态五信号排序，并给出可解释的匹配等级（精确 / 前缀 / 包含 / 部分）与相关度分数；同书多源合并、来源胶囊、最近搜索缓存（可选落盘，重启后仍可复用）。结果流式到达（首屏约 0.2 秒），桌面端逐源显示进度、失败数与耗时，新搜索自动取消旧请求。</p>
+          <p data-en="59 sources queried concurrently, ranked by a five-signal quality score with an explainable match tier (exact / prefix / contains / partial) and a relevance score; desktop and Android sort by relevance, quality, word count or update time. Same-book results merge across sites with source capsules and a recent-search cache (optionally on disk, reusable across restarts). Results stream in (first rows in ~0.2s); the desktop app shows per-source progress, failure counts and elapsed time, and a new query cancels the previous one.">59 个搜索源并发查询，按关键词覆盖度、字数、更新时间、站点权重、完结状态五信号排序，并给出可解释的匹配等级（精确 / 前缀 / 包含 / 部分）与相关度分数；桌面与 Android 可按相关度、质量、字数、更新时间切换排序。同书多源合并、来源胶囊、最近搜索缓存（可选落盘，重启后仍可复用）。结果流式到达（首屏约 0.2 秒），桌面端逐源显示进度、失败数与耗时，新搜索自动取消旧请求。</p>
+          <div style="display:grid; gap:8px; margin-top:14px; padding:11px 12px; border:1px solid var(--border); border-radius:10px; background:var(--bg-alt); font-size:13px; color:var(--text-2)">
+            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px">
+              <strong data-en="A Record of a Mortal's Journey to Immortality" style="font-size:13.5px; color:var(--text)">凡人修仙传</strong>
+              <span class="gh-chip inline" data-en="Exact">精确</span>
+              <span class="gh-chip" data-en="Relevance 0.94">相关度 0.94</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px">
+              <span data-en="Match tier">匹配等级</span>
+              <span class="gh-chip" data-en="Exact">精确</span>
+              <span class="gh-chip" data-en="Prefix">前缀</span>
+              <span class="gh-chip" data-en="Contains">包含</span>
+              <span class="gh-chip" data-en="Partial">部分</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px">
+              <span data-en="Sort · desktop and Android">排序 · 桌面 / Android</span>
+              <span class="gh-chip inline" data-en="Relevance">相关度</span>
+              <span class="gh-chip" data-en="Quality">质量</span>
+              <span class="gh-chip" data-en="Word count">字数</span>
+              <span class="gh-chip" data-en="Updated">更新时间</span>
+            </div>
+          </div>
         </article>
         <article class="card reveal">
           <div class="card-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg></div>

@@ -314,6 +314,60 @@ def test_features_section_has_nine_well_formed_cards(doc: _Doc) -> None:
     assert len(svgs) == 9
 
 
+def _feature_card(html_text: str, heading_en: str) -> str:
+    """Return the raw markup of the features card whose h3 carries ``heading_en``."""
+    articles = re.findall(
+        r'<article class="card reveal">(.*?)</article>', html_text, re.S
+    )
+    matches = [article for article in articles if f'data-en="{heading_en}"' in article]
+    assert len(matches) == 1, f"expected one feature card for {heading_en!r}"
+    return matches[0]
+
+
+def test_aggregate_search_badges_explain_each_result(html_text: str) -> None:
+    """Every ranked row says why it landed: a match tier and a relevance score."""
+    card = _feature_card(html_text, "Aggregate search")
+
+    for english, chinese in (
+        ("Exact", "精确"),
+        ("Prefix", "前缀"),
+        ("Contains", "包含"),
+        ("Partial", "部分"),
+    ):
+        assert re.search(rf'data-en="{english}"[^>]*>\s*{chinese}\s*<', card), (
+            f"missing {english} match-tier badge"
+        )
+
+    assert re.search(r'data-en="Relevance 0\.94"[^>]*>\s*相关度 0\.94\s*<', card), (
+        "the example row must show its relevance score in both languages"
+    )
+
+
+def test_aggregate_search_sort_options_are_static_markup(html_text: str) -> None:
+    """Sort choices must be readable with JS off and never look like dead controls."""
+    card = _feature_card(html_text, "Aggregate search")
+
+    assert re.search(
+        r'data-en="Sort · desktop and Android"[^>]*>\s*排序 · 桌面 / Android\s*<',
+        card,
+    ), "the sort row must name the clients and both languages"
+
+    for english, chinese in (
+        ("Relevance", "相关度"),
+        ("Quality", "质量"),
+        ("Word count", "字数"),
+        ("Updated", "更新时间"),
+    ):
+        assert re.search(rf'data-en="{english}"[^>]*>\s*{chinese}\s*<', card), (
+            f"missing {english} sort option"
+        )
+
+    # Plain text chips, not controls: nothing here needs JS to render, and no
+    # widget pretends to be interactive while being static marketing copy.
+    for tag in ("button", "select", "input", "textarea", "script", "noscript"):
+        assert not re.search(rf"<{tag}\b", card), f"sort demo must not use <{tag}>"
+
+
 def test_feature_grid_stretches_cards_and_collapses_to_one_column(css: str) -> None:
     grid = re.search(r"\.grid\s*\{([^}]*)\}", css)
     assert grid is not None
