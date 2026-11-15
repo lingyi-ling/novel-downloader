@@ -78,6 +78,12 @@ cd android
   ```
   已上传且 digest 一致的资产会跳过。
 - `git push` 失败通常重试几轮就好（曾连续失败 6 次后成功）；本机没有 `gh`，GitHub 相关 API 操作用 Python `urllib` + `git credential fill` 取令牌。
+- **`api.github.com` 本身也会抖**：`SSL EOF occurred in violation of protocol` / `RemoteDisconnected` 会在第一次 GET 就让发版中止。读取端点已带 `retries=3` 指数退避，重试耗尽才抛 `TransientAPIError`；遇到时直接重跑，不用重建。
+- **大文件上传会被系统代理掐断**：55–70 MB 走代理常半路断连。`upload_asset` 首次尝试走系统代理，失败后自动直连重试（`use_proxy=False`，共 4 次、退避 4/8/16 s）；超时的那次其实传完了会返回 `already_exists`，digest 一致即视为成功。
+- 代理与非代理都断的极端情况：用 `requests` 直连补传（`trust_env=False` + `proxies={}`），补完再 `--skip-build` 跑一遍，让 `verify_assets` 重新核对 digest；不要手工往 release 目录塞文件。
+- **tag 落后 HEAD**（发版后又提交了）：真实构建仍要求 `tag == HEAD`；若资产确实是 tag 那次构建的，用 `--skip-build --allow-tag-behind` 续跑只做上传。tag 不会被移动；历史分叉（tag 不是 HEAD 祖先）照样拒绝。
+- **冻结 CLI 出包后必须验证重定向 UTF-8**：`novel-cli ... > out.txt` 在 CP936 控制台下会崩。`scripts/verify_frozen.py` 已加门禁：子进程不带 `PYTHONUTF8`/`PYTHONIOENCODING`，stdout/stderr 重定向到文件，要求严格 UTF-8 且输出含非 ASCII。
+- **v1.34.0 实测**：资产审计 0 命中，8 个资产上传齐全且 digest 全部一致。
 
 ### 2026-11-08 起：github.com 被链路拦截
 
