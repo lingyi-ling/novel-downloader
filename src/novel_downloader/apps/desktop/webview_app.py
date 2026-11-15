@@ -1850,7 +1850,9 @@ def _load_prefs() -> dict[str, Any]:
     try:
         loaded = json.loads(_prefs_path().read_text(encoding="utf-8"))
         return loaded if isinstance(loaded, dict) else {}
-    except (OSError, TypeError, ValueError):
+    except (OSError, RuntimeError, TypeError, ValueError):
+        # ``RuntimeError`` is what ``Path.expanduser`` raises when the home
+        # directory cannot be resolved; the window must still start then.
         return {}
 
 
@@ -2122,8 +2124,13 @@ def _save_prefs(values: dict[str, Any]) -> bool:
         (the settings page) must not tell the user their change was saved
         when the profile directory is read-only.
     """
-    path = _prefs_path()
+    path: Path | None = None
     try:
+        # Resolving the path can itself fail: the profile directory is
+        # created on demand, so an unusable ``NOVEL_MUSIC_HOME`` (a file in
+        # place of a folder, an unresolvable ``~``) raises here.  That is a
+        # save failure like any other, not an exception for the bridge.
+        path = _prefs_path()
         with _cross_process_lock(path):
             stored = _load_prefs()
             if _prefs_file_is_corrupt(path):
@@ -2135,9 +2142,10 @@ def _save_prefs(values: dict[str, Any]) -> bool:
         # left untouched, so the caller can report a retryable failure.
         logger.warning("Timed out waiting for the desktop prefs lock: %s", path)
         return False
-    except (OSError, TypeError, ValueError):
+    except (OSError, RuntimeError, TypeError, ValueError):
+        # ``RuntimeError`` covers an unresolvable home directory;
         # ``TypeError``/``ValueError`` guard against unserialisable stored
-        # content; preferences are best effort and never fatal.
+        # content.  Preferences are best effort and never fatal.
         logger.debug("Could not persist desktop prefs", exc_info=True)
         return False
     return True
@@ -2154,8 +2162,9 @@ def _remove_prefs_keys(*keys: str) -> bool:
 
     :return: ``True`` when the file no longer holds the keys.
     """
-    path = _prefs_path()
+    path: Path | None = None
     try:
+        path = _prefs_path()
         with _cross_process_lock(path):
             stored = _load_prefs()
             if _prefs_file_is_corrupt(path):
@@ -2168,7 +2177,7 @@ def _remove_prefs_keys(*keys: str) -> bool:
     except _LockTimeoutError:
         logger.warning("Timed out waiting for the desktop prefs lock: %s", path)
         return False
-    except (OSError, TypeError, ValueError):
+    except (OSError, RuntimeError, TypeError, ValueError):
         logger.debug("Could not persist desktop prefs", exc_info=True)
         return False
     return True

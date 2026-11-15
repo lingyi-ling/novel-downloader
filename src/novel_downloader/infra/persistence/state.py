@@ -39,10 +39,25 @@ class StateManager:
         """
         Save the user's language preference.
 
+        The in-memory value is rolled back when the write fails.  Without the
+        rollback a failed save (read-only profile, full disk) would leave
+        ``get_language`` reporting a language that is not on disk: the caller
+        sees the new code in this session, the next launch reverts, and a
+        retry with the same code is skipped as "already saved".
+
         :param lang: Language code
+        :raises OSError: when the state file cannot be written.
         """
+        previous = self._data.get("lang")
         self._data["lang"] = lang
-        self._save()
+        try:
+            self._save()
+        except BaseException:
+            if previous is None:
+                self._data.pop("lang", None)
+            else:
+                self._data["lang"] = previous
+            raise
 
     def _load(self) -> dict[str, Any]:
         """
