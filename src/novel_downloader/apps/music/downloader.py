@@ -1,4 +1,4 @@
-"""下载与落盘：直链下载、ID3/FLAC 标签、封面内嵌、歌词文件。
+"""下载与落盘：直链下载、ID3/FLAC 标签、封面内嵌、歌词文件与内嵌歌词。
 
 v1.0 关键决策：
 - 先下到 .part 临时文件再改名，避免中断留下半截文件被当成"已下载"
@@ -178,6 +178,9 @@ class DownloadOptions:
     embed_tags: bool = True
     embed_cover: bool = True
     save_lyric: bool = True
+    #: 把歌词同时写进音频标签（mp3/flac/m4a）。默认关闭，与 ``save_lyric``
+    #: 相互独立：两者都开时既有 ``.lrc`` 也有内嵌歌词。
+    embed_lyric: bool = False
     split_folder: bool = True
     skip_existing: bool = True
     retries: int = 2  # 传输类失败自动重试次数（不含首次）
@@ -527,11 +530,14 @@ def _lyric_missing(audio_path):
     return not os.path.exists(original_path)
 
 
-def _write_lyrics(provider, track, dest):
-    """获取并落盘歌词；任何失败只记 WARNING，绝不影响音频结果。
+def _write_lyrics(provider, track, dest, *, save=True, embed=False):
+    """获取并落盘歌词（.lrc 与/或音频标签）；任何失败只记 WARNING。
 
     provider 可能返回空白/占位值，归一后再判断是否用 Track 自带字段
     回退（聚合搜索/序列化往返后常常已经带着 lyric，不必再联网）。
+
+    ``save`` 控制旁路 ``.lrc``，``embed`` 控制写进音频标签；两者互不影响，
+    任一环节失败都不会让已下载的音频变成失败。
     """
     try:
         lrc, tlrc = provider.lyric(track) or ("", "")
@@ -541,10 +547,18 @@ def _write_lyrics(provider, track, dest):
     lrc = _coerce_lyric(lrc)
     tlrc = _coerce_lyric(tlrc)
     fallback_lrc, fallback_tlrc = track_lyrics(track)
-    try:
-        save_lyric(dest, lrc or fallback_lrc, tlrc or fallback_tlrc)
-    except Exception as exc:  # noqa: BLE001 - 歌词落盘失败不影响音频
-        logger.warning("music: 歌词落盘失败 %s: %s", dest, exc)
+    lrc = lrc or fallback_lrc
+    tlrc = tlrc or fallback_tlrc
+    if save:
+        try:
+            save_lyric(dest, lrc, tlrc)
+        except Exception as exc:  # noqa: BLE001 - 歌词落盘失败不影响音频
+            logger.warning("music: 歌词落盘失败 %s: %s", dest, exc)
+    if embed:
+        # 与 ``save_lyric`` 一致：有原文用原文，只有译文时用译文
+        text = lrc or tlrc
+        if text:
+            _embed_lyric_or_warn(dest, text)
 
 
 def download_track(
@@ -594,10 +608,25 @@ def download_track(
             and os.path.getsize(dest) > 10240
         ):
             _remember_path(track, dest)
-            # 音频已存在就不重新下载，但歌词可能是后加的：缺 .lrc 才补写，
-            # 已有歌词则完全跳过（不联网，也不改 mtime）。
-            if opts.save_lyric and _lyric_missing(dest):
-                _write_lyrics(provider, track, dest)
+            # 音频已存在就不重新下载，但歌词可能是后加的：缺 .lrc 才补写；
+            # 开了内嵌且标签里还没有歌词时才补标签。已有歌词则完全跳过
+            # （不联网，也不改 mtime）。
+            need_sidecar = opts.save_lyric and _lyric_missing(dest)
+            need_embed = (
+                opts.embed_lyric and _embed_supported(dest) and not embedded_lyric(dest)
+            )
+            if need_sidecar:
+                _write_lyrics(provider, track, dest, embed=opts.embed_lyric)
+            elif need_embed:
+                # 旁路文件已经在，直接用它补标签，不必再请求歌词接口
+                original_lrc, translated_lrc = lyric_paths(dest)
+                text = _read_lyric_file(original_lrc) or _read_lyric_file(
+                    translated_lrc
+                )
+                if text:
+                    _embed_lyric_or_warn(dest, text)
+                else:
+                    _write_lyrics(provider, track, dest, save=False, embed=True)
             return TrackResult(
                 "skip", "已存在", path=dest, bytes_=os.path.getsize(dest)
             )
@@ -653,8 +682,14 @@ def download_track(
                     cover = _fetch_cover(pic)
             _write_tags(dest, track, cover if opts.embed_cover else None)
 
-        if opts.save_lyric:
-            _write_lyrics(provider, track, dest)
+        if opts.save_lyric or opts.embed_lyric:
+            _write_lyrics(
+                provider,
+                track,
+                dest,
+                save=opts.save_lyric,
+                embed=opts.embed_lyric,
+            )
 
         return TrackResult(
             "ok", path=dest, bytes_=size, level=rr.level, resumed_from=resumed
@@ -999,8 +1034,15 @@ def human(size):
 
 
 #: 歌词是纯文本。超过这个大小的响应多半是错误页、完整网页或别的
-#: 东西，原样落盘只会把播放器目录撑坏；直接跳过并告警。
+#: 东西，原样落盘只会把播放器目录撑坏；直接跳过并告警。内嵌歌词复用
+#: 同一个上限，避免把超大文本塞进标签。
 MAX_LYRIC_BYTES = 1024 * 1024
+
+#: 支持内嵌歌词的容器（按扩展名分派）。
+_LYRIC_TAG_EXTS = frozenset({".mp3", ".flac", ".m4a"})
+
+#: MP3（TXXX 兼容写法）/FLAC 里存放原文歌词的标签名。
+_LYRIC_TAG_KEYS = ("LYRICS", "UNSYNCEDLYRICS")
 
 #: Track / provider 私有数据里可能承载歌词的键。
 _LYRIC_KEYS = ("lyric", "lyrics", "lrc", "lyric_text")
@@ -1227,6 +1269,169 @@ def save_lyric(audio_path, lyric, translated=""):
         except Exception as exc:  # noqa: BLE001 - 歌词失败不影响音频
             logger.warning("music: 歌词保存失败 %s: %s", path, exc)
     return written
+
+
+# ---------------------------------------------------------------------------
+# 歌词写进音频标签（mp3 / flac / m4a）
+# ---------------------------------------------------------------------------
+
+
+def _embed_supported(path):
+    """该扩展名是否支持内嵌歌词（只按扩展名判断，不看文件内容）。"""
+    return os.path.splitext(str(path))[1].lower() in _LYRIC_TAG_EXTS
+
+
+def _lyric_text_value(values):
+    """把标签里的歌词值（字符串或多值列表）合成一个字符串。"""
+    if isinstance(values, str):
+        return values
+    if isinstance(values, (list, tuple)):
+        return "\n".join(str(item) for item in values if item)
+    return str(values or "")
+
+
+def _id3_lyric(tags):
+    """从 ID3 标签读原文歌词：``USLT`` 优先，兼容 ``TXXX:LYRICS``。"""
+    try:
+        frames = tags.getall("USLT")
+    except Exception:  # noqa: BLE001 - 畸形标签按没有歌词处理
+        frames = []
+    for frame in frames:
+        text = _lyric_text_value(getattr(frame, "text", ""))
+        if text:
+            return text
+    try:
+        frames = tags.getall("TXXX")
+    except Exception:  # noqa: BLE001 - 畸形标签按没有歌词处理
+        frames = []
+    for frame in frames:
+        desc = str(getattr(frame, "desc", "")).upper()
+        if desc in _LYRIC_TAG_KEYS:
+            text = _lyric_text_value(getattr(frame, "text", ""))
+            if text:
+                return text
+    return ""
+
+
+def _vorbis_lyric(audio):
+    """从 FLAC 的 Vorbis comment 里读原文歌词。"""
+    for key in _LYRIC_TAG_KEYS:
+        text = _lyric_text_value(audio.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _mp4_lyric(audio):
+    """从 MP4/M4A 的 ``©lyr`` 原子读原文歌词。"""
+    tags = getattr(audio, "tags", None)
+    if not tags:
+        return ""
+    return _lyric_text_value(tags.get("\xa9lyr"))
+
+
+def embedded_lyric(path):
+    """读取音频标签里的原文歌词；不支持/损坏/缺依赖时返回空串。"""
+    ext = os.path.splitext(str(path))[1].lower()
+    try:
+        if ext == ".mp3":
+            from mutagen.id3 import ID3
+
+            return _id3_lyric(ID3(path))
+        if ext == ".flac":
+            from mutagen.flac import FLAC
+
+            return _vorbis_lyric(FLAC(path))
+        if ext == ".m4a":
+            from mutagen.mp4 import MP4
+
+            return _mp4_lyric(MP4(path))
+    except Exception:  # noqa: BLE001 - 读不出来就当没有
+        return ""
+    return ""
+
+
+def _write_id3_lyric(path, text):
+    from mutagen.id3 import ID3, USLT, ID3NoHeaderError
+
+    try:
+        tags = ID3(path)
+    except ID3NoHeaderError:
+        tags = ID3()
+    # 去掉别家工具写的 TXXX 歌词，避免同一个文件里存两份
+    for frame in list(tags.getall("TXXX")):
+        if str(getattr(frame, "desc", "")).upper() in _LYRIC_TAG_KEYS:
+            tags.delall(f"TXXX:{frame.desc}")
+    tags.delall("USLT")
+    tags.add(USLT(encoding=3, lang="eng", desc="Lyrics", text=text))
+    tags.save(path, v2_version=3)
+    return True
+
+
+def _write_vorbis_lyric(path, text):
+    from mutagen.flac import FLAC
+
+    audio = FLAC(path)
+    audio["LYRICS"] = [text]
+    audio.save()
+    return True
+
+
+def _write_mp4_lyric(path, text):
+    from mutagen.mp4 import MP4
+
+    audio = MP4(path)
+    audio["\xa9lyr"] = [text]
+    audio.save()
+    return True
+
+
+def write_embedded_lyric(path, lyric):
+    """把歌词写进音频标签，返回是否真的改写了文件。
+
+    支持 mp3（ID3 ``USLT``）、flac（Vorbis ``LYRICS``）、m4a（``©lyr``）。
+    只改元数据、不转码，音频流、格式与码率保持不变；歌词为空或与标签
+    现有内容一致时不写盘。超过 :data:`MAX_LYRIC_BYTES` 抛 ``ValueError``，
+    不支持的容器返回 ``False``；标签解析/写入异常原样抛出，由调用方兜底。
+    """
+    text = _normalize_lrc(lyric)
+    if not text:
+        return False
+    if len(text.encode("utf-8")) > MAX_LYRIC_BYTES:
+        raise ValueError(f"歌词超过 {MAX_LYRIC_BYTES} 字节上限")
+    if not _embed_supported(path):
+        return False
+    if _normalize_lrc(embedded_lyric(path)) == text:
+        return False
+    ext = os.path.splitext(str(path))[1].lower()
+    if ext == ".mp3":
+        return _write_id3_lyric(path, text)
+    if ext == ".flac":
+        return _write_vorbis_lyric(path, text)
+    return _write_mp4_lyric(path, text)
+
+
+def _embed_lyric_or_warn(path, text):
+    """内嵌歌词；任何失败只记 WARNING，绝不影响音频结果。"""
+    try:
+        write_embedded_lyric(path, text)
+    except Exception as exc:  # noqa: BLE001 - 歌词标签失败不影响音频
+        logger.warning("music: 歌词写入标签失败 %s: %s", path, exc)
+
+
+def _read_lyric_file(path):
+    """读取 UTF-8 歌词文件；不存在、超限或解码失败时返回空串。"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(MAX_LYRIC_BYTES + 1)
+    except OSError:
+        return ""
+    if len(data) > MAX_LYRIC_BYTES:
+        return ""
+    try:
+        return _normalize_lrc(data.decode("utf-8-sig"))
+    except UnicodeDecodeError:
+        return ""
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import struct
 import threading
 import time
 from pathlib import Path
@@ -41,6 +42,44 @@ _MP3_FRAME = b"\xff\xfb\x90\x64" + b"\x00" * 413
 
 def _mp3_bytes() -> bytes:
     return _MP3_FRAME * 4
+
+
+def _minimal_flac_bytes() -> bytes:
+    """One STREAMINFO block and no frames: enough for mutagen to open/save."""
+    streaminfo = (
+        struct.pack(">HH", 4096, 4096)
+        + b"\x00\x00\x00"  # minimum frame size
+        + b"\x00\x00\x00"  # maximum frame size
+    )
+    # 44100 Hz (20 bits), 2 channels (3), 16 bps (5), 0 total samples (36).
+    packed = (44100 << 44) | (1 << 41) | (15 << 36)
+    streaminfo += struct.pack(">Q", packed) + b"\x00" * 16  # MD5 signature
+    return (
+        b"fLaC"
+        + bytes([0x80])  # last metadata block, type 0 (STREAMINFO)
+        + len(streaminfo).to_bytes(3, "big")
+        + streaminfo
+    )
+
+
+def _box(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", len(payload) + 8) + kind + payload
+
+
+def _minimal_m4a_bytes() -> bytes:
+    """ftyp + moov/mvhd only: mutagen parses and saves tags without an mdat."""
+    ftyp = _box(b"ftyp", b"M4A " + struct.pack(">I", 0) + b"M4A mp42isom")
+    mvhd = (
+        b"\x00\x00\x00\x00"  # version + flags
+        + struct.pack(">IIII", 0, 0, 1000, 0)  # times, timescale, duration
+        + struct.pack(">I", 0x00010000)  # rate
+        + struct.pack(">H", 0x0100)  # volume
+        + b"\x00" * 10  # reserved
+        + struct.pack(">9I", 0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000)
+        + b"\x00" * 24  # predefined
+        + struct.pack(">I", 1)  # next track id
+    )
+    return ftyp + _box(b"moov", _box(b"mvhd", mvhd))
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +476,104 @@ def test_write_tags_missing_mutagen_is_silent(
 
 
 # ---------------------------------------------------------------------------
+# Embedded lyrics (mp3 / flac / m4a)
+# ---------------------------------------------------------------------------
+
+
+def test_embed_lyric_option_is_off_by_default(tmp_path: Path) -> None:
+    opts = DownloadOptions(out_dir=str(tmp_path))
+
+    assert opts.embed_lyric is False
+
+
+def test_write_embedded_lyric_mp3_roundtrip(tmp_path: Path) -> None:
+    pytest.importorskip("mutagen")
+    from mutagen.id3 import ID3
+    from mutagen.mp3 import MP3
+
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(_mp3_bytes())
+
+    assert downloader.write_embedded_lyric(
+        str(audio), "[00:01.00]Hello\r\n[00:02.00]World"
+    )
+    # CRLF is normalized exactly like the .lrc sidecar.
+    assert downloader.embedded_lyric(str(audio)) == ("[00:01.00]Hello\n[00:02.00]World")
+    frames = ID3(str(audio)).getall("USLT")
+    assert len(frames) == 1
+    assert frames[0].text == "[00:01.00]Hello\n[00:02.00]World"
+    # Only metadata was added: the MPEG frames and the bitrate are untouched.
+    assert audio.read_bytes().endswith(_mp3_bytes())
+    assert MP3(str(audio)).info.bitrate == 128_000
+    # This helper never writes a sidecar; that stays save_lyric's job.
+    assert not (tmp_path / "song.lrc").exists()
+
+
+def test_write_embedded_lyric_flac_roundtrip(tmp_path: Path) -> None:
+    pytest.importorskip("mutagen")
+    from mutagen.flac import FLAC
+
+    audio = tmp_path / "song.flac"
+    audio.write_bytes(_minimal_flac_bytes())
+
+    assert downloader.write_embedded_lyric(str(audio), "[00:03.00]flac")
+    assert downloader.embedded_lyric(str(audio)) == "[00:03.00]flac"
+    parsed = FLAC(str(audio))
+    assert parsed["LYRICS"] == ["[00:03.00]flac"]
+    # Format and sample rate survive: only the Vorbis comment block changed.
+    assert parsed.info.sample_rate == 44_100
+
+
+def test_write_embedded_lyric_m4a_roundtrip(tmp_path: Path) -> None:
+    pytest.importorskip("mutagen")
+    from mutagen.mp4 import MP4
+
+    audio = tmp_path / "song.m4a"
+    audio.write_bytes(_minimal_m4a_bytes())
+
+    assert downloader.write_embedded_lyric(str(audio), "[00:04.00]m4a")
+    assert downloader.embedded_lyric(str(audio)) == "[00:04.00]m4a"
+    assert MP4(str(audio)).tags["\xa9lyr"] == ["[00:04.00]m4a"]
+
+
+def test_write_embedded_lyric_skips_blank_and_identical_text(tmp_path: Path) -> None:
+    pytest.importorskip("mutagen")
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(_mp3_bytes())
+
+    assert downloader.write_embedded_lyric(str(audio), "") is False
+    assert audio.read_bytes() == _mp3_bytes()
+
+    assert downloader.write_embedded_lyric(str(audio), "[00:01.00]same") is True
+    after_first = audio.read_bytes()
+    # Same text again: no rewrite, no mtime churn.
+    assert downloader.write_embedded_lyric(str(audio), "[00:01.00]same") is False
+    assert audio.read_bytes() == after_first
+
+
+def test_write_embedded_lyric_ignores_unsupported_containers(tmp_path: Path) -> None:
+    audio = tmp_path / "song.ogg"
+    audio.write_bytes(b"OggS not really ogg")
+
+    assert downloader.write_embedded_lyric(str(audio), "[00:01.00]x") is False
+    assert audio.read_bytes() == b"OggS not really ogg"
+
+
+def test_write_embedded_lyric_rejects_oversized_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mutagen")
+    audio = tmp_path / "song.mp3"
+    audio.write_bytes(_mp3_bytes())
+    monkeypatch.setattr(downloader, "MAX_LYRIC_BYTES", 32)
+
+    with pytest.raises(ValueError, match="上限"):
+        downloader.write_embedded_lyric(str(audio), "x" * 64)
+
+    assert audio.read_bytes() == _mp3_bytes()
+
+
+# ---------------------------------------------------------------------------
 # download_track orchestration
 # ---------------------------------------------------------------------------
 
@@ -487,6 +624,114 @@ def test_download_track_writes_lyrics_and_remembers_path(
     assert Path(tmp_path / "歌名 - 歌手.zh.lrc").read_text(encoding="utf-8") == (
         "[00:01.00]译文\n"
     )
+
+
+def test_download_track_embeds_lyric_and_keeps_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mutagen")
+    monkeypatch.setattr(downloader, "_download_file", _fake_download)
+
+    track = Track(provider="fake", id="1", name="Song", artists="Artist", album="Album")
+    opts = DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=True,
+        embed_lyric=True,
+        skip_existing=False,
+        retries=0,
+    )
+
+    result = downloader.download_track(_FakeProvider(), track, opts)
+
+    assert result.status == "ok"
+    # Both outputs exist: the portability sidecar and the in-file tag.
+    assert Path(tmp_path / "Song - Artist.lrc").is_file()
+    assert downloader.embedded_lyric(result.path) == "[00:01.00]Original"
+
+
+def test_download_track_can_embed_lyric_without_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mutagen")
+    monkeypatch.setattr(downloader, "_download_file", _fake_download)
+
+    track = Track(provider="fake", id="2", name="Song", artists="Artist", album="Album")
+    opts = DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=False,
+        embed_lyric=True,
+        skip_existing=False,
+        retries=0,
+    )
+
+    result = downloader.download_track(_FakeProvider(), track, opts)
+
+    assert result.status == "ok"
+    assert downloader.embedded_lyric(result.path) == "[00:01.00]Original"
+    assert list(tmp_path.glob("*.lrc")) == []
+
+
+def test_download_track_without_lyrics_embeds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mutagen")
+    monkeypatch.setattr(downloader, "_download_file", _fake_download)
+
+    track = Track(provider="fake", id="3", name="Song", artists="Artist", album="Album")
+    opts = DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=False,
+        embed_lyric=True,
+        skip_existing=False,
+        retries=0,
+    )
+
+    result = downloader.download_track(_FakeProvider(("", "")), track, opts)
+
+    assert result.status == "ok"
+    assert downloader.embedded_lyric(result.path) == ""
+    assert list(tmp_path.glob("*.lrc")) == []
+
+
+def test_embed_lyric_failure_does_not_fail_audio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(downloader, "_download_file", _fake_download)
+
+    def broken_embed(path: str, text: str) -> bool:
+        raise OSError("tag writer unavailable")
+
+    monkeypatch.setattr(downloader, "write_embedded_lyric", broken_embed)
+
+    track = Track(provider="fake", id="4", name="Song", artists="Artist", album="Album")
+    opts = DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=True,
+        embed_lyric=True,
+        skip_existing=False,
+        retries=0,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=downloader.__name__):
+        result = downloader.download_track(_FakeProvider(), track, opts)
+
+    assert result.status == "ok"
+    assert Path(tmp_path / "Song - Artist.lrc").is_file()
+    assert "歌词写入标签失败" in caplog.text
 
 
 def test_download_track_lyric_failure_does_not_fail_audio(
@@ -826,6 +1071,78 @@ def test_skip_existing_lyrics_use_the_id_suffixed_audio_path(
     # The lyric sidecar follows the actual audio path, keeping the same stem.
     assert (tmp_path / "Song - Artist [11].lrc").is_file()
     assert not (tmp_path / "Song - Artist.lrc").exists()
+
+
+def _embed_skip_opts(tmp_path: Path, *, save_lyric: bool = True) -> DownloadOptions:
+    return DownloadOptions(
+        out_dir=str(tmp_path),
+        split_folder=False,
+        embed_tags=False,
+        embed_cover=False,
+        save_lyric=save_lyric,
+        embed_lyric=True,
+        skip_existing=True,
+        retries=0,
+    )
+
+
+def test_skip_existing_backfills_tag_from_sidecar_without_network(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("mutagen")
+    existing = _seed_existing_audio(tmp_path)
+    sidecar = tmp_path / "Song - Artist.lrc"
+    sidecar.write_text("[00:09.00]sidecar only\n", encoding="utf-8")
+
+    class CountingProvider(_FakeProvider):
+        calls = 0
+
+        def lyric(self, track: Track) -> tuple[str, str]:
+            CountingProvider.calls += 1
+            return super().lyric(track)
+
+    track = Track(
+        provider="fake", id="12", name="Song", artists="Artist", album="Album"
+    )
+
+    result = downloader.download_track(
+        CountingProvider(), track, _embed_skip_opts(tmp_path)
+    )
+
+    assert result.status == "skip"
+    # The sidecar already had the text: no lyric request is needed.
+    assert CountingProvider.calls == 0
+    assert downloader.embedded_lyric(str(existing)) == "[00:09.00]sidecar only"
+    assert sidecar.read_text(encoding="utf-8") == "[00:09.00]sidecar only\n"
+
+
+def test_skip_existing_leaves_existing_embedded_lyric_untouched(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("mutagen")
+    existing = _seed_existing_audio(tmp_path)
+    assert downloader.write_embedded_lyric(str(existing), "[00:08.00]keep")
+    audio_before = existing.read_bytes()
+
+    class CountingProvider(_FakeProvider):
+        calls = 0
+
+        def lyric(self, track: Track) -> tuple[str, str]:
+            CountingProvider.calls += 1
+            return super().lyric(track)
+
+    track = Track(
+        provider="fake", id="13", name="Song", artists="Artist", album="Album"
+    )
+
+    result = downloader.download_track(
+        CountingProvider(), track, _embed_skip_opts(tmp_path, save_lyric=False)
+    )
+
+    assert result.status == "skip"
+    assert CountingProvider.calls == 0
+    # Already tagged and no sidecar requested: the audio is left byte-identical.
+    assert existing.read_bytes() == audio_before
 
 
 # ---------------------------------------------------------------------------
