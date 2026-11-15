@@ -377,7 +377,11 @@ async def test_search_empty_sites_still_searches_nothing(
     response = await client.post("/api/v1/search", json={"keyword": "x", "sites": []})
 
     assert response.status_code == 200
-    assert response.json() == {"total": 0, "results": []}
+    assert response.json() == {
+        "total": 0,
+        "results": [],
+        "query_intent": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -718,8 +722,8 @@ async def test_search_forwards_local_filters(
     )
 
     assert response.status_code == 200
-    # The response envelope is unchanged by the new request fields.
-    assert set(response.json()) == {"total", "results"}
+    # The response envelope gains only the derived intent field.
+    assert set(response.json()) == {"total", "results", "query_intent"}
     assert forwarded["min_words"] == 10_000
     assert forwarded["max_words"] == 500_000
     assert forwarded["updated_after"] == date(2024, 1, 1)

@@ -43,6 +43,7 @@ BASE_FIELDS = {
     "priority",
     "rank_score",
     "match_tier",
+    "query_intent",
 }
 
 
@@ -71,6 +72,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
         "priority": 100,
         "rank_score": 0.875,
         "match_tier": 4,
+        "query_intent": None,
     }
     row.update(overrides)
     return row
@@ -208,6 +210,39 @@ def test_json_group_output_is_one_line_and_keeps_sources(
     payload = json.loads(out)
     assert payload[0]["sources"] == ["beta", "alpha"]
     assert set(payload[0]) >= BASE_FIELDS
+
+
+def test_json_row_carries_the_detected_query_intent(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The aggregate search attaches the intent verdict to its final rows; the
+    # CLI must not drop it while serialising.
+    _install_search(monkeypatch, [_row(query_intent="author")])
+
+    code, out, _err = _run(_args(["--json", "刘慈欣"]), capsys)
+
+    assert code == 0
+    payload = json.loads(out)
+    assert payload[0]["query_intent"] == "author"
+    assert set(payload[0]) >= BASE_FIELDS
+
+
+def test_json_row_carries_null_query_intent_for_ambiguous_queries(
+    search_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install_search(monkeypatch, [_row(query_intent=None)])
+
+    code, out, _err = _run(_args(["--json", "量子力学"]), capsys)
+
+    assert code == 0
+    payload = json.loads(out)
+    # The key exists (stable shape) and is null, matching the REST contract.
+    assert "query_intent" in payload[0]
+    assert payload[0]["query_intent"] is None
 
 
 def test_json_failure_details_stay_off_stdout(
@@ -937,6 +972,55 @@ def test_table_omits_the_suffix_when_telemetry_is_absent_or_unusable(
     seen, _real_render = _capture_table(monkeypatch, [row])
 
     assert seen["rows"][0][1] == "三体"
+
+
+@pytest.mark.parametrize(
+    ("intent", "msgid"),
+    [("title", "Title match"), ("author", "Author match")],
+)
+def test_table_title_notes_the_detected_query_intent(
+    intent: str,
+    msgid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The title bar explains *why* the quality order looks the way it does.
+    # All ranked rows of one call share the same verdict.
+    seen, _real_render = _capture_table(
+        monkeypatch,
+        [
+            _row(title="三体", query_intent=intent),
+            _row(title="三体II", query_intent=intent),
+        ],
+    )
+
+    assert seen["title"].endswith(f"· {t(msgid)}")
+    assert seen["title"].startswith(
+        t("Search Results · Page {page}/{total_pages}").format(page=1, total_pages=1)
+    )
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [_row(query_intent=None)],
+        # Streamed previews / older snapshots carry no derived field at all.
+        [{**{k: v for k, v in _row().items() if k != "query_intent"}}],
+        # A conflicting snapshot must not claim a single intent.
+        [
+            _row(query_intent="title"),
+            _row(query_intent="author"),
+        ],
+        [_row(query_intent="book")],
+    ],
+)
+def test_table_title_has_no_intent_note_without_a_clear_verdict(
+    rows: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen, _real_render = _capture_table(monkeypatch, rows)
+
+    assert t("Title match") not in seen["title"]
+    assert t("Author match") not in seen["title"]
 
 
 def test_table_without_telemetry_keeps_the_exact_legacy_layout(

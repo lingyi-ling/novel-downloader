@@ -13,6 +13,7 @@ __all__ = [
     "SearchEvent",
     "UnknownSearchSiteError",
     "registered_search_site_keys",
+    "query_intent_of",
     "search",
     "search_stream",
     "unknown_search_sites",
@@ -24,7 +25,7 @@ import hashlib
 import logging
 import re
 import unicodedata
-from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Literal, cast
@@ -76,7 +77,7 @@ class RankedSearchResult(SearchResult, total=False):
     """
     A final :func:`search` row with its ranking telemetry attached.
 
-    ``search`` adds two optional keys to every returned row (and to grouped
+    ``search`` adds three optional keys to every returned row (and to grouped
     merged rows); :func:`search_stream` deliberately does not, because a
     streamed chunk is a site's raw preview rather than a ranked final result:
 
@@ -90,17 +91,25 @@ class RankedSearchResult(SearchResult, total=False):
       :func:`~novel_downloader.plugins.ranking.match_tier_of`).  Under
       ``sort="quality"`` with a decided intent it is exactly the outer
       ordering key, so it explains why a sparse exact hit outranks a
-      metadata-rich collision.
+      metadata-rich collision;
+    * ``query_intent`` -- ``"title"`` or ``"author"`` when the result set as a
+      whole clearly points at that field (see
+      :func:`~novel_downloader.plugins.ranking.detect_query_intent`), else
+      ``None``.  It is the verdict the quality ordering used, exposed so a UI
+      or a script can say *why* the rows are ordered this way.  An explicit
+      non-quality ``sort`` does not use the verdict, so it reports ``None``.
 
-    Both keys are derived data, not part of the cached snapshot: they are
+    All three keys are derived data, not part of the cached snapshot: they are
     attached to copies returned to the caller, and consumers that compare or
     persist rows can ignore them.  ``rank_score`` carries a small recency
-    signal, so its value can drift slightly between calls; ``match_tier`` is
-    fully deterministic for a given keyword and row.
+    signal, so its value can drift slightly between calls; ``match_tier`` and
+    ``query_intent`` are fully deterministic for a given keyword and result
+    set.
     """
 
     rank_score: float
     match_tier: int
+    query_intent: Literal["title", "author"] | None
 
 
 #: Per-host connection ceiling for the aggregate session. aiohttp defaults to
@@ -1138,7 +1147,8 @@ def _annotate_ranked(
     now: datetime,
 ) -> list[SearchResult]:
     """
-    Return copies of ``results`` carrying ``rank_score`` and ``match_tier``.
+    Return copies of ``results`` carrying ``rank_score``, ``match_tier`` and
+    ``query_intent``.
 
     A fresh dict per row is essential: the input list may be -- or point
     into -- the cached snapshot, and :class:`SearchCache` copies only the
@@ -1150,6 +1160,11 @@ def _annotate_ranked(
     rows the caller actually receives are scored, with the same ``now`` the
     ranking used (all rows of one call are therefore comparable).
     """
+    verdict: Literal["title", "author"] | None = (
+        cast("Literal['title', 'author']", intent)
+        if intent in ("title", "author")
+        else None
+    )
     annotated: list[SearchResult] = []
     for result in results:
         row = cast(
@@ -1160,10 +1175,39 @@ def _annotate_ranked(
                     rank_score(result, keyword, intent=intent, now=now), 6
                 ),
                 "match_tier": match_tier_of(result, keyword, intent=intent),
+                "query_intent": verdict,
             },
         )
         annotated.append(row)
     return annotated
+
+
+def query_intent_of(
+    results: Sequence[SearchResult],
+) -> Literal["title", "author"] | None:
+    """
+    Return the intent verdict attached to a ranked result list, or ``None``.
+
+    :func:`search` writes ``query_intent`` on every final row (the same value
+    for the whole call); this helper is the single way the CLI, REST and
+    desktop fronts read it, so all three report the same answer.  A list of
+    streamed preview rows, an older cache snapshot or a caller-supplied row
+    carries no verdict, and ``"either"``/unknown/conflicting values all yield
+    ``None`` instead of a misleading label.
+    """
+    verdicts: set[str] = set()
+    for result in results:
+        value = cast("Mapping[str, object]", result).get("query_intent")
+        if value is None:
+            continue
+        if value not in ("title", "author"):
+            # An unexpected non-null value means the row did not come from
+            # ``search``; refuse to guess.
+            return None
+        verdicts.add(value)
+    if len(verdicts) == 1:
+        return cast("Literal['title', 'author']", verdicts.pop())
+    return None
 
 
 #: The only accepted spelling of an ``updated_after`` filter.  A date object
@@ -1282,8 +1326,8 @@ def _finalize(
        :func:`~novel_downloader.plugins.ranking.filter_by_relevance`);
     6. ``limit`` is applied last, so with ``group=True`` it counts books
        rather than raw rows;
-    7. every surviving row is annotated with ``rank_score`` and
-       ``match_tier`` (see :class:`RankedSearchResult`) on a *copy*: rows are
+    7. every surviving row is annotated with ``rank_score``, ``match_tier`` and
+       ``query_intent`` (see :class:`RankedSearchResult`) on a *copy*: rows are
        never mutated, so the cached snapshot and any caller-owned input stay
        free of derived fields.
 
@@ -1422,9 +1466,9 @@ async def search(
         when none is set, rows carrying missing fields are kept unchanged.
     :return: A flat list of `SearchResult` objects.  Every row also carries
         the ranking telemetry described by :class:`RankedSearchResult`
-        (``rank_score`` 0..1 and ``match_tier`` 0..4); the annotations are
-        added to copies, so the cache and the searchers' payloads stay
-        pristine.  :func:`search_stream` does not add them.
+        (``rank_score`` 0..1, ``match_tier`` 0..4 and ``query_intent``);
+        the annotations are added to copies, so the cache and the searchers'
+        payloads stay pristine.  :func:`search_stream` does not add them.
     :raises UnknownSearchSiteError: When an explicit ``sites`` entry has no
         registered searcher (a typo, or a plugin that is not installed).  The
         error carries the rejected keys and every available key so a caller
@@ -1600,9 +1644,9 @@ async def search_stream(
     then this site's rows that pass them), because they only narrow the same
     rows rather than reorder them.  The ranking telemetry :func:`search`
     attaches to final rows
-    (``rank_score`` / ``match_tier``, see :class:`RankedSearchResult`) is
-    deliberately absent too: a chunk is a progressive preview, not a ranked
-    final result.
+    (``rank_score`` / ``match_tier`` / ``query_intent``, see
+    :class:`RankedSearchResult`) is deliberately absent too: a chunk is a
+    progressive preview, not a ranked final result.
 
     The cache stores the *raw* per-site payloads; cleaning happens on every
     yield, so a cache hit produces the same chunks as a fresh run (see

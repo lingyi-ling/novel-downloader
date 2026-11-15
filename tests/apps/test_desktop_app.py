@@ -915,6 +915,44 @@ def test_match_badge_renders_only_for_complete_telemetry(tmp_path: Path) -> None
     assert "ok" in result.stdout
 
 
+def test_query_intent_label_maps_only_explicit_verdicts(tmp_path: Path) -> None:
+    """The label next to the result count names title/author, never either."""
+    harness = r"""
+const assert = require("assert");
+function t(key) { return key; }
+__LOGIC__
+assert.strictEqual(queryIntentLabel("title"), "Title match");
+assert.strictEqual(queryIntentLabel("author"), "Author match");
+assert.strictEqual(queryIntentLabel(null), "");
+assert.strictEqual(queryIntentLabel(undefined), "");
+assert.strictEqual(queryIntentLabel("either"), "");
+assert.strictEqual(queryIntentLabel("book"), "");
+console.log("ok");
+"""
+    start = APP_HTML.index("/* query-intent-start */")
+    end = APP_HTML.index("/* query-intent-end */")
+    path = tmp_path / "query_intent.js"
+    path.write_text(harness.replace("__LOGIC__", APP_HTML[start:end]), encoding="utf-8")
+    result = subprocess.run(
+        [_node(), str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout
+
+
+def test_app_html_has_an_intent_chip_hooked_to_the_final_snapshot() -> None:
+    assert 'id="search-intent"' in APP_HTML
+    # The chip sets its own display, so the hidden attribute needs a rule.
+    assert ".intent-chip[hidden] { display: none; }" in APP_HTML
+    assert "showSearchIntent(" in APP_HTML
+    # The chip is cleared when a new search starts, so a previous verdict
+    # cannot describe a different query.
+    assert "showSearchIntent(null)" in APP_HTML
+
+
 def test_app_html_mergetoggle_is_registered_as_i18n_key() -> None:
     """The merge toggle label goes through the catalog like every other label."""
     label = next(
@@ -962,6 +1000,8 @@ def test_i18n_catalog_covers_script_only_keys() -> None:
         "No match",
         "Match: {tier} · score {score}",
         "Match: {tier} · score {score} (best source)",
+        "Title match",
+        "Author match",
         "Open in browser",
         "Queued: {title}",
         "Added to follow list",
@@ -1099,6 +1139,32 @@ def test_result_dict_keeps_rank_telemetry_on_ranked_rows() -> None:
     assert data["match_tier"] == 4
     assert data["best"] is True
     assert data["title"] == "Sample"
+
+
+def test_result_dict_keeps_query_intent_on_ranked_rows() -> None:
+    """The final ranked list reaches the page with its intent verdict."""
+    row = {**_search_result(), "query_intent": "title"}
+    data = _result_dict(row, 0, ranked=True)
+    assert data["query_intent"] == "title"
+    assert data["best"] is True
+
+    # "either"/unknown is null, not a missing key: the page gets one shape.
+    ambiguous = _result_dict({**_search_result(), "query_intent": None}, 0, ranked=True)
+    assert ambiguous["query_intent"] is None
+
+
+def test_result_dict_normalises_or_drops_a_bogus_query_intent() -> None:
+    row = {**_search_result(), "query_intent": "book"}
+    data = _result_dict(row, 0, ranked=True)
+    assert data["query_intent"] is None
+
+
+def test_result_dict_strips_query_intent_from_unranked_rows() -> None:
+    """Streamed preview chunks are raw site rows: no intent badge."""
+    row = {**_search_result(), "query_intent": "author"}
+    data = _result_dict(row, 0)
+    assert "query_intent" not in data
+    assert data["best"] is True
 
 
 def test_result_dict_strips_rank_telemetry_from_unranked_rows() -> None:
@@ -1279,11 +1345,13 @@ def test_bridge_progressive_search_telemetry_only_on_final_rows(
         **_search_result(),
         "rank_score": 0.9,
         "match_tier": 4,
+        "query_intent": "author",
     }
     final = {
         **_search_result(),
         "rank_score": 0.4,
         "match_tier": 2,
+        "query_intent": "title",
     }
 
     async def fake_stream(keyword: str, **kwargs: Any) -> Any:
@@ -1311,6 +1379,7 @@ def test_bridge_progressive_search_telemetry_only_on_final_rows(
         # The site's own row cannot fake a ranking annotation.
         assert "rank_score" not in preview_row
         assert "match_tier" not in preview_row
+        assert "query_intent" not in preview_row
 
         release.set()
         deadline = time.time() + 5
@@ -1326,6 +1395,7 @@ def test_bridge_progressive_search_telemetry_only_on_final_rows(
     assert state["done"] is True
     assert state["results"][0]["rank_score"] == 0.4
     assert state["results"][0]["match_tier"] == 2
+    assert state["results"][0]["query_intent"] == "title"
 
 
 def test_bridge_search_passes_optional_filters(

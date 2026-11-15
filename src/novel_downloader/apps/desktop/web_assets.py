@@ -512,6 +512,16 @@ select.picker:focus { border-color: var(--accent); outline: none; box-shadow: 0 
   font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   color: var(--green); background: var(--green-bg); border-radius: 4px; padding: 1px 6px;
 }
+/* Query-intent chip: names the field the quality order matched on ("Title
+   match" / "Author match"). It sits next to the result count so it explains
+   the whole list, not one row. */
+.intent-chip {
+  display: inline-flex; align-items: center; flex: none;
+  font-size: 10px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+  color: var(--accent); background: var(--accent-soft); border-radius: 4px;
+  padding: 1px 6px; white-space: nowrap;
+}
+.intent-chip[hidden] { display: none; }
 /* Ranking explainability: a short match-tier badge beside the title, with the
    0..1 rank score in its tooltip/accessible name. Only final ranked rows carry
    the telemetry; the row keeps its current wrapping so the badge never pushes
@@ -835,6 +845,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <button class="btn btn-ghost btn-sm" id="btn-rank"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Rankings">Rankings</span></button>
             <button class="btn btn-ghost btn-sm" id="btn-cats"><svg class="icon"><use href="#i-book"/></svg><span data-i18n="Categories">Categories</span></button>
             <span class="hint" id="search-hint"></span>
+            <span class="intent-chip" id="search-intent" hidden></span>
           </div>
           <div class="search-filters" id="search-filter-panel" hidden>
             <label class="filter-field" for="q-min-words">
@@ -2017,6 +2028,8 @@ function cancelCurrentSearch() {
 function resetResultList() {
   renderedResultCount = 0;
   renderedKeyword = "";
+  // A previous query's intent must never describe the new list.
+  showSearchIntent(null);
 }
 
 /* ====================================================== search filters */
@@ -2315,6 +2328,9 @@ async function doSearch() {
         lastResults = results; lastKeyword = kw; selIndex = -1;
         hideDetail();
         renderResults(results, kw);
+        // The final snapshot is the only one carrying the intent verdict;
+        // every row of one call shares it, so the first row is enough.
+        showSearchIntent(results.length ? results[0].query_intent : null);
       }
       if (token !== searchSeq) return;
       const secs = Number(st.elapsed) > 0
@@ -2330,6 +2346,7 @@ async function doSearch() {
     $("#results").innerHTML = `<div class="empty"><svg class="icon"><use href="#i-search"/></svg><div class="t">${esc(t("Search failed"))}</div><div class="s">${esc(String(e && e.message || e))}</div></div>`;
     $("#search-hint").textContent = "";
     showSearchProgress("", false);
+    showSearchIntent(null);
   } finally {
     // Only the current owner may release the controls; a stale loop leaving
     // them disabled would lock the search box for the rest of the session.
@@ -2398,6 +2415,36 @@ function resultCardLabel(r) {
   return `${title} · ${esc(matchTip(hit, grouped))}`;
 }
 /* match-telemetry-end */
+/* query-intent-start */
+/** Label for the detected query intent, or "" when there is no clear verdict. */
+function queryIntentLabel(intent) {
+  if (intent === "title") return t("Title match");
+  if (intent === "author") return t("Author match");
+  return "";
+}
+/**
+ * Show the list-level intent chip ("Title match" / "Author match").
+ *
+ * The verdict describes the final ranked snapshot only. Streamed previews and
+ * ambiguous queries carry none, so the chip stays hidden rather than claiming
+ * an ordering the ranking did not use.
+ */
+function showSearchIntent(intent) {
+  const chip = $("#search-intent");
+  if (!chip) return;
+  const label = queryIntentLabel(intent);
+  chip.hidden = !label;
+  if (label) {
+    chip.textContent = label;
+    chip.title = label;
+    chip.setAttribute("aria-label", label);
+  } else {
+    chip.textContent = "";
+    chip.removeAttribute("title");
+    chip.removeAttribute("aria-label");
+  }
+}
+/* query-intent-end */
 function resultCardHtml(r, i, kw) {
   const sub = [r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join('<span style="opacity:.4"> · </span>');
   return `<div class="card hover result-card" data-sel="${i}" tabindex="0" role="group" aria-label="${resultCardLabel(r)}">

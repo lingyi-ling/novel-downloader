@@ -198,6 +198,28 @@ _MATCH_TIER_MSGS = (
     "Exact",
 )
 
+#: Title-bar notes for the query-intent verdict.  The same msgids label the
+#: desktop chip, so both fronts describe the ordering with one vocabulary.
+_QUERY_INTENT_MSGS = {
+    "title": "Title match",
+    "author": "Author match",
+}
+
+
+def _query_intent(results: Sequence[SearchResult]) -> str:
+    """
+    Return the title-bar note for the ranked list, or ``""``.
+
+    Reads the explicit ``query_intent`` verdict :func:`search` attaches to
+    final rows.  Streamed previews, older cache snapshots and ambiguous
+    verdicts carry none; conflicting values are also ignored rather than
+    guessed, so the title bar only explains an order the ranking really used.
+    """
+    from novel_downloader.plugins.search import query_intent_of
+
+    intent = query_intent_of(results)
+    return t(_QUERY_INTENT_MSGS[intent]) if intent is not None else ""
+
 
 def _match_suffix(result: SearchResult) -> str:
     """
@@ -263,6 +285,7 @@ def select_search_result(
     total = len(results)
     total_pages = max(1, (total + per_page - 1) // per_page)
     page = 1
+    intent_note = _query_intent(results)
 
     columns = [
         t("#"),
@@ -292,10 +315,13 @@ def select_search_result(
 
         page_rows = all_rows[start - 1 : end]
 
+        title = t("Search Results · Page {page}/{total_pages}").format(
+            page=page, total_pages=total_pages
+        )
+        if intent_note:
+            title = f"{title} · {intent_note}"
         ui.render_table(
-            t("Search Results · Page {page}/{total_pages}").format(
-                page=page, total_pages=total_pages
-            ),
+            title,
             columns,
             page_rows,
         )

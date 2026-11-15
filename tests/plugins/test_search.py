@@ -90,15 +90,15 @@ def _stub_result(site: str, book_id: str) -> SearchResult:
     }
 
 
-_DEBUG_KEYS = frozenset({"rank_score", "match_tier"})
+_DEBUG_KEYS = frozenset({"rank_score", "match_tier", "query_intent"})
 
 
 def _plain(rows: Sequence[SearchResult]) -> list[SearchResult]:
     """Strip the ranking telemetry ``search`` attaches to final rows.
 
     ``search`` annotates every returned row with ``rank_score``/``match_tier``
-    (see ``RankedSearchResult``); tests that compare against a raw site row
-    use this to ignore those derived keys.
+    and ``query_intent`` (see ``RankedSearchResult``); tests that compare
+    against a raw site row use this to ignore those derived keys.
     """
     return [
         cast(
@@ -2246,6 +2246,57 @@ async def test_search_annotates_final_rows_with_ranking_telemetry(
     # Both rows share the same metadata, so the exact title outranks the
     # derivative and the annotated scores follow the returned order.
     assert results[0]["rank_score"] > results[1]["rank_score"]
+    # The detected intent is exposed verbatim on every final row, so the CLI,
+    # REST and desktop fronts can explain the ordering without re-deriving it.
+    assert [item["query_intent"] for item in results] == ["title", "title"]
+
+
+@pytest.mark.asyncio
+async def test_query_intent_is_null_when_no_clear_intent_is_detected(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_RecordingSearcher])
+    )
+
+    results = await search("量子力学")
+
+    assert results
+    # No field overlap at all -> "either"; the derived key is still present on
+    # ranked rows, with a null value, so consumers have one stable shape.
+    assert [item["query_intent"] for item in results] == [None]
+
+
+@pytest.mark.asyncio
+async def test_query_intent_is_null_for_explicit_non_quality_sorts(
+    monkeypatch: pytest.MonkeyPatch, _fresh_state: None
+) -> None:
+    monkeypatch.setattr(
+        registrar, "get_searcher_classes", _mirror_registry([_MixedRelevanceSearcher])
+    )
+
+    # Intent only explains the quality ordering; an explicit title/word/update
+    # sort does not use it, so exposing a verdict there would be misleading.
+    for sort in ("title", "words", "update"):
+        results = await search("斗破苍穹", sort=sort)
+        assert results
+        assert all(item["query_intent"] is None for item in results)
+
+
+def test_query_intent_of_reads_only_consistent_ranked_rows() -> None:
+    from novel_downloader.plugins.search import query_intent_of
+
+    assert query_intent_of([]) is None
+    assert query_intent_of([{"title": "x"}]) is None
+    assert query_intent_of([{"query_intent": "title"}]) == "title"
+    assert query_intent_of([{"query_intent": "author"}]) == "author"
+    # A streamed preview / older snapshot has no derived field.
+    assert query_intent_of([{"query_intent": None}]) is None
+    # Conflicting or unknown values must not produce a misleading verdict.
+    assert (
+        query_intent_of([{"query_intent": "title"}, {"query_intent": "author"}]) is None
+    )
+    assert query_intent_of([{"query_intent": "book"}]) is None
 
 
 @pytest.mark.asyncio
@@ -2294,8 +2345,8 @@ def test_ranking_telemetry_is_derived_never_an_input() -> None:
     # Pre-set telemetry that would win if ranking/grouping ever read it.
     poisoned = _finalize(
         [
-            {**weak, "rank_score": 1.0, "match_tier": 4},
-            {**strong, "rank_score": 0.0, "match_tier": 0},
+            {**weak, "rank_score": 1.0, "match_tier": 4, "query_intent": "author"},
+            {**strong, "rank_score": 0.0, "match_tier": 0, "query_intent": "title"},
         ],
         keyword="斗破苍穹",
         sort="quality",
@@ -2312,6 +2363,7 @@ def test_ranking_telemetry_is_derived_never_an_input() -> None:
         baseline[0]["match_tier"],
         baseline[1]["match_tier"],
     ]
+    assert [row["query_intent"] for row in poisoned] == ["title", "title"]
 
 
 @pytest.mark.asyncio

@@ -250,10 +250,78 @@ async def test_search_returns_plugin_results(
     assert calls["keyword"] == "斗破"
     assert calls["kwargs"]["per_site_limit"] == 3
     assert calls["kwargs"]["timeout"] == 2.5
-    # Default response shape: the flat envelope, no grouping requested.
+    # Default response shape: the flat envelope, no grouping requested. The
+    # top-level intent is null when the search layer returned no verdict.
     assert calls["kwargs"]["group"] is False
-    assert set(payload) == {"total", "results"}
+    assert set(payload) == {"total", "results", "query_intent"}
+    assert payload["query_intent"] is None
     assert "sources" not in payload["results"][0]
+
+
+@pytest.mark.asyncio
+async def test_search_exposes_the_detected_query_intent(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        row = {
+            "site": "demo",
+            "book_id": "42",
+            "book_url": "https://example.invalid/42",
+            "cover_url": "",
+            "title": "Book",
+            "author": "天蚕土豆",
+            "latest_chapter": "1",
+            "update_date": "",
+            "word_count": "",
+            "priority": 1,
+            "query_intent": "author",
+        }
+        return [dict(row), {**row, "book_id": "43"}]
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search", json={"keyword": "天蚕土豆", "sites": ["demo"]}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["query_intent"] == "author"
+    assert {row["query_intent"] for row in payload["results"]} == {"author"}
+
+
+@pytest.mark.asyncio
+async def test_search_omits_a_conflicting_query_intent(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_search(keyword: str, **kwargs: Any) -> list[dict[str, Any]]:
+        base = {
+            "site": "demo",
+            "book_id": "42",
+            "book_url": "https://example.invalid/42",
+            "cover_url": "",
+            "title": "Book",
+            "author": "Author",
+            "latest_chapter": "1",
+            "update_date": "",
+            "word_count": "",
+            "priority": 1,
+        }
+        return [
+            {**base, "query_intent": "title"},
+            {**base, "book_id": "43", "query_intent": "author"},
+        ]
+
+    monkeypatch.setattr(api_routes, "search", fake_search)
+
+    response = await client.post(
+        "/api/v1/search", json={"keyword": "Book", "sites": ["demo"]}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["query_intent"] is None
 
 
 @pytest.mark.asyncio
@@ -292,7 +360,8 @@ async def test_search_group_returns_merged_entries(
     assert response.status_code == 200
     payload = response.json()
     # Same envelope as the flat mode; merged entries carry the capsules.
-    assert set(payload) == {"total", "results"}
+    assert set(payload) == {"total", "results", "query_intent"}
+    assert payload["query_intent"] is None
     assert payload["total"] == 1
     entry = payload["results"][0]
     assert entry["book_id"] == "7"

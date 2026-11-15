@@ -164,7 +164,7 @@ async def test_boundary_filters_are_accepted_on_every_transport(
 
     response = await rest_client.post("/api/v1/search", json=payload)
     assert response.status_code == 200, (payload, response.text)
-    assert set(response.json()) == {"total", "results"}
+    assert set(response.json()) == {"total", "results", "query_intent"}
 
     assert eserver._handle_search(payload, {}, {}) == {"total": 0, "results": []}
 

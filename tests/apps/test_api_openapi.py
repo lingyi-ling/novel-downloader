@@ -562,12 +562,12 @@ def test_search_sort_and_order_are_documented(spec: dict[str, Any]) -> None:
 
 
 def test_search_ranking_telemetry_is_discoverable(spec: dict[str, Any]) -> None:
-    """``rank_score`` / ``match_tier`` live in responses, not in the request.
+    """``rank_score`` / ``match_tier`` / ``query_intent`` live in responses.
 
     The schema has no response model for the plain-dict search payload, so the
-    ranking keys and their ranges are documented in the ``sort`` field (the
-    only request field whose semantics depend on them). The document is the
-    only discovery surface a generated client has.
+    ranking keys, their ranges and the query-intent verdict are documented in
+    the ``sort`` field (the only request field whose semantics depend on them).
+    The document is the only discovery surface a generated client has.
     """
     properties = _member_schema(spec, "SearchRequest")["properties"]
     descriptions = [
@@ -579,9 +579,12 @@ def test_search_ranking_telemetry_is_discoverable(spec: dict[str, Any]) -> None:
 
     assert "rank_score" in corpus
     assert "match_tier" in corpus
+    assert "query_intent" in corpus
     assert "0..1" in corpus
     assert "0..4" in corpus
     for marker in ("exact", "prefix", "contains", "no match"):
+        assert marker in lowered, marker
+    for marker in ("title", "author", "null"):
         assert marker in lowered, marker
 
 

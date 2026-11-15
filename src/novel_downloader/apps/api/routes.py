@@ -58,6 +58,7 @@ from novel_downloader.plugins import search as search_module
 from novel_downloader.plugins.ranking import normalize_text
 from novel_downloader.plugins.search import (
     UnknownSearchSiteError,
+    query_intent_of,
     search,
     search_stream,
     unknown_search_sites,
@@ -491,7 +492,11 @@ async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
     each entry is the book's best source plus a ``sources`` key listing every
     site carrying it (best first).  The envelope stays the same
     ``{"total", "results"}`` shape in both modes, so clients that ignore
-    ``group`` (the default) see no change at all.
+    ``group`` (the default) see no change at all, plus one additive
+    ``query_intent`` key: ``"title"``/``"author"`` when the result set clearly
+    points at that field under the default quality ordering, else ``null``.
+    It explains the ordering without changing it, and is read from the ranked
+    rows ``search`` returns.
 
     ``min_words``/``max_words``/``updated_after`` optionally filter the ranked
     rows before grouping and ``limit``.  They only narrow the result set; the
@@ -504,7 +509,7 @@ async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
     if body.sites is not None and not body.sites:
         # An explicit empty selection means "search no site": do not start
         # the aggregate search at all.
-        return {"total": 0, "results": []}
+        return {"total": 0, "results": [], "query_intent": None}
 
     # Only forward filters that were actually requested.  A request without
     # them keeps the historical ``search`` keyword set, which also keeps the
@@ -547,6 +552,9 @@ async def search_books(body: SearchRequest, request: Request) -> dict[str, Any]:
     return {
         "total": len(results),
         "results": [dict(item) for item in results],
+        # Derived, additive and nullable: clients that predate it keep reading
+        # the unchanged total/results pair.
+        "query_intent": query_intent_of(results),
     }
 
 

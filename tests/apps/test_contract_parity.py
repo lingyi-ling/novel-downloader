@@ -605,8 +605,14 @@ async def test_search_request_forwarding_parity(
             client, "POST", "/api/v1/search", body
         )
         emb_status, emb_body, _ = _embedded_call("POST", "/api/v1/search", body)
-        assert (api_status, api_body) == (emb_status, emb_body)
+        # The REST response adds the derived top-level ``query_intent``; the
+        # Android embedded engine keeps its documented ``total``/``results``
+        # envelope (an additive field the mobile client does not consume).
+        # Everything else — including the forwarded call — stays identical.
         assert api_status == 200
+        assert isinstance(api_body, dict)
+        assert api_body.pop("query_intent") is None
+        assert (api_status, api_body) == (emb_status, emb_body)
         assert set(api_body) == {"total", "results"}
         # both engines saw the same request, ``group`` included
         assert parity_engines.search_calls[0] == parity_engines.search_calls[1]

@@ -685,7 +685,11 @@ async def test_body_within_limit_is_accepted(
         )
 
     assert response.status_code == 200
-    assert response.json() == {"total": 0, "results": []}
+    assert response.json() == {
+        "total": 0,
+        "results": [],
+        "query_intent": None,
+    }
 
 
 def test_every_api_write_route_is_body_limited(make_app: Any) -> None:

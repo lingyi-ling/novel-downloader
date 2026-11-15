@@ -1025,6 +1025,9 @@ def _i18n_catalog() -> dict[str, str]:
         "Match: {tier} · score {score} (best source)": t(
             "Match: {tier} · score {score} (best source)"
         ),
+        # query-intent chip: says which field the quality order matched on
+        "Title match": t("Title match"),
+        "Author match": t("Author match"),
         "Show more": t("Show more"),
         "Open in browser": t("Open in browser"),
         "Queued: {title}": t("Queued: {title}"),
@@ -1191,13 +1194,15 @@ def _result_dict(
     Serialise one :class:`SearchResult`; the first hit is flagged best.
 
     ``ranked`` marks the final ranked list -- the only payload allowed to carry
-    the ranking telemetry (``rank_score`` 0..1 and ``match_tier`` 0..4) that
-    :func:`~novel_downloader.plugins.search.search` derives. Streamed preview
-    chunks and the browse lists are the sites' raw rows, so the bridge drops
-    those two keys there: a site that happened to return a same-named field
-    must not paint a badge the ranking never assigned. On the ranked path a
-    value outside the documented range is dropped too, because the page can
-    only explain a real score/tier.
+    the ranking telemetry (``rank_score`` 0..1, ``match_tier`` 0..4 and
+    ``query_intent``) that :func:`~novel_downloader.plugins.search.search`
+    derives. Streamed preview chunks and the browse lists are the sites' raw
+    rows, so the bridge drops those keys there: a site that happened to return
+    a same-named field must not paint a badge the ranking never assigned. On
+    the ranked path a value outside the documented range is dropped too,
+    because the page can only explain a real score/tier; the intent key is
+    normalised to ``None`` for ``"either"``/anything unknown so the page sees
+    one stable shape.
     """
     data = dict(result)
     data["best"] = index == 0
@@ -1215,9 +1220,12 @@ def _result_dict(
         tier = data.get("match_tier")
         if isinstance(tier, bool) or not isinstance(tier, int) or not 0 <= tier <= 4:
             data.pop("match_tier", None)
+        intent = data.get("query_intent")
+        data["query_intent"] = intent if intent in ("title", "author") else None
     else:
         data.pop("rank_score", None)
         data.pop("match_tier", None)
+        data.pop("query_intent", None)
     return data
 
 

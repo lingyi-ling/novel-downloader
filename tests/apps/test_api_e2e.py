@@ -2200,7 +2200,7 @@ async def test_oversized_body_returns_413(
     # A body under the limit still goes through.
     ok = await tiny_body_client.post(f"{API}/search", json={"keyword": "ok"})
     assert ok.status_code == 200
-    assert ok.json() == {"total": 0, "results": []}
+    assert ok.json() == {"total": 0, "results": [], "query_intent": None}
 
 
 # ---------------------------------------------------------------------------

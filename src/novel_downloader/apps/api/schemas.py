@@ -475,7 +475,11 @@ class SearchRequest(BaseModel):
             "carries these two read-only derived fields: ``rank_score`` "
             "(0..1, higher is better) and ``match_tier`` (0..4: 4 = exact "
             "equality, 3 = prefix, 2 = contains, 1 = partial character "
-            "coverage, 0 = no match)."
+            "coverage, 0 = no match). The response's top-level "
+            '``query_intent`` is ``"title"`` or ``"author"`` when the '
+            "result set clearly points at one field under ``quality``; it is "
+            "``null`` for an ambiguous/unknown verdict or an explicit "
+            "non-quality sort. It explains the ordering and never changes it."
         ),
         examples=["quality"],
     )
@@ -511,7 +515,8 @@ class SearchRequest(BaseModel):
             "When true, merge same-book rows across sites into one entry per "
             "book: the best source plus a ``sources`` list of every site "
             "carrying it (best first). The envelope stays "
-            "``{total, results}``; merged rows keep ``rank_score`` and "
+            "``{total, results}`` plus the nullable ``query_intent`` "
+            "explanation; merged rows keep ``rank_score`` and "
             "``match_tier`` of the best source."
         ),
     )
