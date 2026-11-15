@@ -351,7 +351,11 @@ async def test_search_with_empty_sites_returns_no_results(
         all_sites = await client.post("/api/v1/search", json={"keyword": "x"})
 
     assert empty.status_code == 200
-    assert empty.json() == {"total": 0, "results": []}
+    assert empty.json() == {
+        "total": 0,
+        "results": [],
+        "query_intent": None,
+    }
     # Only the omitted-parameter request reached the search plugin.
     assert len(calls) == 1
     assert calls[0]["sites"] is None

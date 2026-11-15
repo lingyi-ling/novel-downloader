@@ -450,7 +450,7 @@ def test_search_sites_are_stripped_and_deduplicated(
     payload = eserver._handle_search(
         {"keyword": "x", "sites": [" Qidian ", "qidian"]}, {}, {}
     )
-    assert payload == {"total": 0, "results": []}
+    assert payload == {"total": 0, "results": [], "query_intent": None}
     assert seen["sites"] == ["Qidian"]
 
 

@@ -61,6 +61,8 @@
     <string name="search_match_score_label">相关度 %1$s</string>
     <string name="search_match_desc">匹配度：%1$s</string>
     <string name="search_match_desc_scored">匹配度：%1$s，相关度评分 %2$s</string>
+    <string name="search_intent_title">书名匹配</string>
+    <string name="search_intent_author">作者匹配</string>
     <string name="search_follow_add">追更</string>
     <string name="search_follow_in_progress">正在加入追更…</string>
     <string name="search_follow_in_list">已在追更列表中</string>

@@ -260,7 +260,8 @@ class NovelApiClient:
         """
         Search all (or the selected) sites.
 
-        :return: A payload with ``total`` and ``results`` keys.
+        :return: A payload with ``total``, ``results`` and the nullable
+            ``query_intent`` verdict (``"title"`` / ``"author"`` / ``None``).
         """
         body: dict[str, Any] = {
             "keyword": keyword,

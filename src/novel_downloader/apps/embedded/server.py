@@ -23,9 +23,9 @@ Contract parity with the REST API
 * Success bodies mirror ``routes.py`` field for field: ``GET /tasks``
   paginates and carries ``total`` / ``offset`` / ``limit``, task dicts carry
   ``export_stage`` and a nullable ``error``, watchlist entries are exactly
-  ``WatchEntry.to_dict()``, search responses have ``total`` / ``results``
-  only, and a watchlist check only carries ``task`` when ``download=true``
-  and the book changed.
+  ``WatchEntry.to_dict()``, search responses carry ``total`` / ``results``
+  plus the nullable ``query_intent`` verdict, and a watchlist check only
+  carries ``task`` when ``download=true`` and the book changed.
 * Request validation mirrors ``apps.api.schemas`` even though this module is
   stdlib-only: field bounds (keyword/title/site/book_id/platform, search and
   music paging, track text/URL/headers), stripping/deduplication and the
@@ -1187,7 +1187,7 @@ def _sites_field(
 def _handle_search(
     body: dict[str, Any], _params: dict[str, str], _query: dict[str, list[str]]
 ) -> dict[str, Any]:
-    from novel_downloader.plugins.search import search
+    from novel_downloader.plugins.search import query_intent_of, search
 
     entries: list[dict[str, Any]] = []
     keyword, keyword_err = _required_text(body, "keyword")
@@ -1234,7 +1234,7 @@ def _handle_search(
     if sites is not None and not sites:
         # An explicit empty selection means "search no site": the REST handler
         # returns the same empty envelope without starting a search.
-        return {"total": 0, "results": []}
+        return {"total": 0, "results": [], "query_intent": None}
 
     # Only forward filters that were actually requested: a request without
     # them keeps calling ``search`` with its historical keyword set.
@@ -1261,7 +1261,13 @@ def _handle_search(
         timeout=_SEARCH_TIMEOUT,
         label="Search",
     )
-    return {"total": len(results), "results": [dict(r) for r in results]}
+    return {
+        "total": len(results),
+        "results": [dict(r) for r in results],
+        # Derived, additive and nullable, exactly like ``routes.search_books``:
+        # clients that predate it keep reading the unchanged total/results pair.
+        "query_intent": query_intent_of(results),
+    }
 
 
 _BROWSE_GENDERS = ("male", "female", "1", "2")

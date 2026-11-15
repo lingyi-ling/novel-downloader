@@ -297,11 +297,53 @@ def test_search_round_trip(running_server: SimpleNamespace) -> None:
     assert body["results"][0]["title"] == "凡人"
 
 
+@pytest.mark.parametrize(
+    ("intents", "expected"),
+    [
+        (["author"], "author"),
+        (["title", "title"], "title"),
+        (["title", "author"], None),
+        (["bogus"], None),
+        ([None], None),
+    ],
+)
+def test_search_surfaces_the_detected_query_intent(
+    running_server: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    intents: list[str | None],
+    expected: str | None,
+) -> None:
+    """The embedded envelope derives the verdict exactly like the REST route.
+
+    Every final row of one call carries the same value; missing, unknown or
+    conflicting values stay ``None`` instead of guessing.
+    """
+
+    async def fake_search(keyword: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "site": "qidian",
+                "book_id": str(index),
+                "title": keyword,
+                "query_intent": intent,
+            }
+            for index, intent in enumerate(intents)
+        ]
+
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+    status, body = _post("/api/v1/search", {"keyword": "x"})
+
+    assert status == 200
+    assert body["query_intent"] == expected
+    assert body["total"] == len(intents)
+
+
 def test_search_defaults_mirror_api(running_server: SimpleNamespace) -> None:
     status, body = _post("/api/v1/search", {"keyword": "凡人"})
     assert status == 200
     # exactly the REST response shape: no extra "elapsed" field
-    assert set(body) == {"total", "results"}
+    assert set(body) == {"total", "results", "query_intent"}
+    assert body["query_intent"] is None
     kwargs = running_server.calls["search"][-1]
     assert kwargs["per_site_limit"] == 5
     assert kwargs["timeout"] == 5.0
@@ -328,7 +370,7 @@ def test_search_forwards_local_filters(running_server: SimpleNamespace) -> None:
 
     assert status == 200
     # The response envelope is unchanged by the new request fields.
-    assert set(body) == {"total", "results"}
+    assert set(body) == {"total", "results", "query_intent"}
     kwargs = running_server.calls["search"][-1]
     assert kwargs["min_words"] == 10_000
     assert kwargs["max_words"] == 500_000
@@ -388,7 +430,7 @@ def test_search_empty_sites_list_searches_none(running_server: SimpleNamespace) 
     """
     status, body = _post("/api/v1/search", {"keyword": "x", "sites": []})
     assert status == 200
-    assert body == {"total": 0, "results": []}
+    assert body == {"total": 0, "results": [], "query_intent": None}
     assert running_server.calls["search"] == []
 
 

@@ -68,6 +68,13 @@ data class SearchRequest(
 data class SearchResponse(
     val total: Int = 0,
     val results: List<SearchResult> = emptyList(),
+    /**
+     * List-level verdict from `POST /api/v1/search`: `"title"` / `"author"`
+     * when the quality ordering clearly matched that field, else `null`.
+     * Additive and nullable: browse responses, older embedded engines and
+     * cached payloads omit it, and the UI then hides the intent chip.
+     */
+    val query_intent: String? = null,
 )
 
 @Serializable

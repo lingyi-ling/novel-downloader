@@ -658,8 +658,13 @@ def test_novel_api_client_end_to_end_against_create_app(
         assert "qidian" in sites["search"]
         assert "qidian" in sites["download"]
 
-        # 3) search: an empty result set round-trips through validation.
-        assert api.search("斗破", sites=["demo"]) == {"total": 0, "results": []}
+        # 3) search: an empty result set round-trips through validation, and the
+        #    additive intent field reaches the client untouched.
+        assert api.search("斗破", sites=["demo"]) == {
+            "total": 0,
+            "results": [],
+            "query_intent": None,
+        }
 
         # 4) add_task: the created task is serialised by the server's own
         #    ``task_to_dict``.

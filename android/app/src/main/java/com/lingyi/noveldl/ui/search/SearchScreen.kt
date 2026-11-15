@@ -120,6 +120,9 @@ fun SearchScreen(onMessage: (String) -> Unit) {
     var showSiteDialog by rememberSaveable { mutableStateOf(false) }
     var loading by remember { mutableStateOf(false) }
     var total by remember { mutableIntStateOf(0) }
+    // List-level verdict for the current results; null when the server had no
+    // clear one (browse rankings, older engines, ambiguous queries).
+    var queryIntent by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var results by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
     // Keys ("site/book_id") already in the watchlist: seeded from the server
@@ -197,6 +200,7 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 .onSuccess {
                     results = it.results
                     total = it.total
+                    queryIntent = it.query_intent
                     searched = true
                     retryAction = null
                 }
@@ -217,6 +221,8 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 .onSuccess {
                     results = it.results
                     total = it.total
+                    // Rankings are not keyword matches, so no intent applies.
+                    queryIntent = null
                     searched = true
                     retryAction = null
                 }
@@ -257,6 +263,8 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 .onSuccess {
                     results = it.results
                     total = it.total
+                    // Category browsing has no keyword, hence no intent.
+                    queryIntent = null
                     searched = true
                     retryAction = null
                 }
@@ -523,10 +531,20 @@ fun SearchScreen(onMessage: (String) -> Unit) {
         }
         Spacer(Modifier.height(8.dp))
         if (results.isNotEmpty()) {
-            Text(
-                stringResource(R.string.search_results, total),
-                style = MaterialTheme.typography.bodySmall,
-            )
+            // The count and the list-level intent chip wrap together on a
+            // narrow screen or at a 2.0 font scale.
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    stringResource(R.string.search_results, total),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                searchIntentBadge(queryIntent)?.let { badge ->
+                    SearchMatchBadgeChip(badge)
+                }
+            }
         } else {
             searchPlaceholderRes(
                 hasSearched = searched,
@@ -631,6 +649,17 @@ internal data class SearchMatchBadge(
     @StringRes val descriptionRes: Int = labelRes,
     val descriptionUsesScore: Boolean = false,
 )
+
+/**
+ * Maps the response-level `query_intent` to the chip shown next to the result
+ * count, or `null` when the server has no clear verdict. Unknown values from a
+ * newer server are hidden rather than guessed, matching the desktop front.
+ */
+internal fun searchIntentBadge(intent: String?): SearchMatchBadge? = when (intent) {
+    "title" -> SearchMatchBadge(labelRes = R.string.search_intent_title)
+    "author" -> SearchMatchBadge(labelRes = R.string.search_intent_author)
+    else -> null
+}
 
 /**
  * Maps a search row's `match_tier` / `rank_score` to its badge, or `null` when

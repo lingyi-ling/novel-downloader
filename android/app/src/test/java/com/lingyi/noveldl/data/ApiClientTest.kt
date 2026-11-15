@@ -140,6 +140,23 @@ class ApiClientTest {
     }
 
     @Test
+    fun searchDecodesTheTopLevelQueryIntentAndToleratesItsAbsence() = runBlocking {
+        server.enqueue(
+            json("""{"total":1,"results":[],"query_intent":"author"}"""),
+        )
+        server.enqueue(json("""{"total":0,"results":[]}"""))
+        Api.configure(baseUrl(), null)
+
+        val withIntent = Api.call { Api.service().search(SearchRequest(keyword = "x")) }
+        val legacy = Api.call { Api.service().search(SearchRequest(keyword = "y")) }
+
+        assertTrue(withIntent.isSuccess)
+        assertEquals("author", withIntent.getOrNull()?.query_intent)
+        assertTrue(legacy.isSuccess)
+        assertNull(legacy.getOrNull()?.query_intent)
+    }
+
+    @Test
     fun taskAndMusicEndpointsUseExpectedPaths() = runBlocking {
         server.enqueue(json("""{"task_id":"t1"}"""))
         server.enqueue(json("""{"ok":true}"""))

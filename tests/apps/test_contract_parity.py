@@ -605,15 +605,13 @@ async def test_search_request_forwarding_parity(
             client, "POST", "/api/v1/search", body
         )
         emb_status, emb_body, _ = _embedded_call("POST", "/api/v1/search", body)
-        # The REST response adds the derived top-level ``query_intent``; the
-        # Android embedded engine keeps its documented ``total``/``results``
-        # envelope (an additive field the mobile client does not consume).
-        # Everything else — including the forwarded call — stays identical.
+        # Both envelopes carry the same derived, nullable ``query_intent``;
+        # everything else — including the forwarded call — stays identical.
         assert api_status == 200
         assert isinstance(api_body, dict)
-        assert api_body.pop("query_intent") is None
         assert (api_status, api_body) == (emb_status, emb_body)
-        assert set(api_body) == {"total", "results"}
+        assert set(api_body) == {"total", "results", "query_intent"}
+        assert api_body["query_intent"] is None
         # both engines saw the same request, ``group`` included
         assert parity_engines.search_calls[0] == parity_engines.search_calls[1]
         assert parity_engines.search_calls[0] == {
@@ -658,6 +656,49 @@ async def test_search_request_forwarding_parity(
                 api_status,
                 emb_status,
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("intents", "expected"),
+    [
+        (["author", "author"], "author"),
+        (["title", "title"], "title"),
+        (["title", "author"], None),
+        ([None], None),
+        (["bogus"], None),
+    ],
+)
+async def test_search_query_intent_parity(
+    parity_engines: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    intents: list[str | None],
+    expected: str | None,
+) -> None:
+    """Both transports derive the same list-level verdict from the same rows."""
+    rows = [
+        {**_SAMPLE_RESULT, "book_id": str(index), "query_intent": intent}
+        for index, intent in enumerate(intents)
+    ]
+
+    async def fake_search(_keyword: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [dict(row) for row in rows]
+
+    # The REST router binds ``search`` at import time; the embedded handler
+    # imports it per request, so both bindings are patched.
+    monkeypatch.setattr(api_routes, "search", fake_search)
+    monkeypatch.setattr("novel_downloader.plugins.search.search", fake_search)
+
+    async with _api_client(parity_engines) as client:
+        api_status, api_body, _ = await _api_call(
+            client, "POST", "/api/v1/search", {"keyword": "x"}
+        )
+        emb_status, emb_body, _ = _embedded_call(
+            "POST", "/api/v1/search", {"keyword": "x"}
+        )
+
+    assert (api_status, api_body) == (emb_status, emb_body)
+    assert api_body["query_intent"] == expected
 
 
 # ---------------------------------------------------------------------------

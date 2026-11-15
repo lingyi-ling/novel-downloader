@@ -57,6 +57,8 @@
     <string name="search_match_score_label">Relevance %1$s</string>
     <string name="search_match_desc">Match: %1$s</string>
     <string name="search_match_desc_scored">Match: %1$s, relevance score %2$s</string>
+    <string name="search_intent_title">Title match</string>
+    <string name="search_intent_author">Author match</string>
     <string name="search_follow_add">Follow updates</string>
     <string name="search_follow_in_progress">Following…</string>
     <string name="search_follow_in_list">Already in the follow list</string>
