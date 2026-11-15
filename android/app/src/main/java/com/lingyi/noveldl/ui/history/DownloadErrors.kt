@@ -3,6 +3,8 @@ package com.lingyi.noveldl.ui.history
 import android.app.DownloadManager
 import androidx.annotation.StringRes
 import com.lingyi.noveldl.R
+import com.lingyi.noveldl.data.DownloadDirectoryUnavailableException
+import com.lingyi.noveldl.data.DownloadFailureException
 import com.lingyi.noveldl.data.DownloadFailureKind
 
 /**
@@ -46,3 +48,18 @@ internal fun downloadFailureMessageRes(kind: DownloadFailureKind): Int = when (k
     DownloadFailureKind.Permission -> R.string.download_error_permission
     DownloadFailureKind.Provider -> R.string.download_error_provider
 }
+
+/**
+ * Whether a failed custom-directory download may be retried into the system
+ * Downloads directory.
+ *
+ * Only a missing/deleted tree ([DownloadDirectoryUnavailableException]) or a
+ * revoked write grant ([DownloadFailureKind.Permission]) can succeed there: the
+ * destination changed, not the file. A full volume, a broken provider, a
+ * network/HTTP failure or a cancellation would fail at the fallback destination
+ * too, and silently moving the file would hide the real cause, so those are
+ * reported instead.
+ */
+internal fun shouldFallBackToSystemDownloads(error: Throwable): Boolean =
+    error is DownloadDirectoryUnavailableException ||
+        (error is DownloadFailureException && error.kind == DownloadFailureKind.Permission)

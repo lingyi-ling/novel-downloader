@@ -49,9 +49,7 @@ import com.lingyi.noveldl.R
 import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiSettings
-import com.lingyi.noveldl.data.DownloadDirectoryUnavailableException
 import com.lingyi.noveldl.data.DownloadFailureException
-import com.lingyi.noveldl.data.DownloadFailureKind
 import com.lingyi.noveldl.data.DownloadProgress
 import com.lingyi.noveldl.data.DownloadTarget
 import com.lingyi.noveldl.data.HistoryDownloader
@@ -239,11 +237,7 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                                 // provider is reported instead, because a
                                 // silent destination change would hide the
                                 // real problem.
-                                val fallback = error is DownloadDirectoryUnavailableException ||
-                                    (
-                                        error is DownloadFailureException &&
-                                            error.kind == DownloadFailureKind.Permission
-                                        )
+                                val fallback = shouldFallBackToSystemDownloads(error)
                                 if (fallback) {
                                     enqueueSystemDownloads(fallback = true)
                                 } else {

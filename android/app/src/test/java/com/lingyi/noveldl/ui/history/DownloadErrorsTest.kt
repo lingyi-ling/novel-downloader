@@ -2,10 +2,16 @@ package com.lingyi.noveldl.ui.history
 
 import android.app.DownloadManager
 import com.lingyi.noveldl.R
+import com.lingyi.noveldl.data.DownloadDirectoryUnavailableException
+import com.lingyi.noveldl.data.DownloadFailureException
 import com.lingyi.noveldl.data.DownloadFailureKind
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
+import java.util.concurrent.CancellationException
 
 /**
  * `DownloadManager` failure reasons mapped to readable text instead of the
@@ -75,5 +81,43 @@ class DownloadErrorsTest {
         // the failure the user is asked to fix.
         val resources = DownloadFailureKind.values().map(::downloadFailureMessageRes)
         assertEquals(DownloadFailureKind.values().size, resources.toSet().size)
+    }
+
+    // ------------------------------------------------------------------
+    // Fallback: only a vanished tree / revoked permission can succeed in the
+    // system Downloads directory; every other cause is reported in place.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun aMissingOrPermissionDeniedTreeFallsBackToSystemDownloads() {
+        assertTrue(
+            shouldFallBackToSystemDownloads(
+                DownloadDirectoryUnavailableException("tree deleted"),
+            ),
+        )
+        assertTrue(
+            shouldFallBackToSystemDownloads(
+                DownloadFailureException(DownloadFailureKind.Permission),
+            ),
+        )
+    }
+
+    @Test
+    fun spaceProviderNetworkAndCancellationNeverFallBack() {
+        val terminal = listOf(
+            DownloadFailureException(DownloadFailureKind.NoSpace),
+            DownloadFailureException(DownloadFailureKind.Provider),
+            DownloadFailureException(DownloadFailureKind.Network),
+            IOException("unexpected end of stream"),
+            IllegalStateException("HTTP 500"),
+            CancellationException("navigated away"),
+        )
+
+        for (error in terminal) {
+            assertFalse(
+                "must not change the destination for ${error::class.simpleName}",
+                shouldFallBackToSystemDownloads(error),
+            )
+        }
     }
 }
