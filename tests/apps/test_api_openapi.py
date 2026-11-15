@@ -37,8 +37,13 @@ from fastapi.routing import APIRoute
 
 from novel_downloader import __version__
 from novel_downloader.apps.api import create_app
+from novel_downloader.apps.api.app import CORS_ALLOW_HEADERS, CORS_EXPOSE_HEADERS
 from novel_downloader.apps.api.auth import AUTH_ERROR_DETAIL
-from novel_downloader.apps.api.middleware import RATE_LIMIT_EXEMPT_PATHS
+from novel_downloader.apps.api.middleware import (
+    MAX_REQUEST_ID_LENGTH,
+    RATE_LIMIT_EXEMPT_PATHS,
+    REQUEST_ID_HEADER,
+)
 from novel_downloader.apps.api.routes import OPENAPI_TAGS
 
 #: Methods that may appear in an OpenAPI path item.
@@ -162,6 +167,41 @@ def _resolve_ref(spec: dict[str, Any], ref: str) -> dict[str, Any]:
         node = node[part]
     assert isinstance(node, dict)
     return node
+
+
+def _parameters(
+    spec: dict[str, Any], operation: dict[str, Any]
+) -> Iterator[dict[str, Any]]:
+    """Yield an operation's parameters, resolving local ``$ref`` entries."""
+    for parameter in operation.get("parameters", []):
+        if "$ref" in parameter:
+            yield _resolve_ref(spec, parameter["$ref"])
+        else:
+            yield parameter
+
+
+def _request_id_parameter(
+    spec: dict[str, Any], operation: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Return the resolved ``X-Request-ID`` request parameter, if documented."""
+    for parameter in _parameters(spec, operation):
+        if (
+            parameter.get("in") == "header"
+            and str(parameter.get("name", "")).lower() == REQUEST_ID_HEADER.lower()
+        ):
+            return parameter
+    return None
+
+
+def _request_id_response_header(
+    spec: dict[str, Any], response: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Return the resolved ``X-Request-ID`` response header, if documented."""
+    for name, header in response.get("headers", {}).items():
+        if name.lower() != REQUEST_ID_HEADER.lower():
+            continue
+        return _resolve_ref(spec, header["$ref"]) if "$ref" in header else header
+    return None
 
 
 def _iter_app_routes(
@@ -331,15 +371,16 @@ def test_operations_use_declared_tags(spec: dict[str, Any]) -> None:
 
 def test_path_parameters_are_documented(spec: dict[str, Any]) -> None:
     for path, method, operation in _operations(spec):
+        parameters = list(_parameters(spec, operation))
         declared = {
             parameter["name"]
-            for parameter in operation.get("parameters", [])
+            for parameter in parameters
             if parameter.get("in") == "path"
         }
         in_template = set(re.findall(r"\{([^{}]+)\}", path))
         assert declared == in_template, f"{method.upper()} {path} path params"
 
-        for parameter in operation.get("parameters", []):
+        for parameter in parameters:
             if parameter.get("in") == "path":
                 assert parameter.get("required") is True
 
@@ -406,6 +447,76 @@ def test_rate_limit_errors_are_documented(spec: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Request correlation
+# ---------------------------------------------------------------------------
+
+
+def test_info_description_documents_request_correlation(
+    spec: dict[str, Any],
+) -> None:
+    """A generated client learns the X-Request-ID contract from the info block."""
+    description = spec["info"]["description"]
+    lowered = description.lower()
+
+    assert "x-request-id" in lowered
+    assert "optional" in lowered
+    assert "echoed" in lowered
+    assert "uuid4" in lowered
+    assert "access log" in lowered
+    assert "error responses" in lowered
+    assert str(MAX_REQUEST_ID_LENGTH) in description
+    # Browser clients need both the request and the response direction.
+    assert "access-control-allow-headers" in lowered
+    assert "access-control-expose-headers" in lowered
+    assert "retry-after" in lowered
+
+
+def test_every_operation_documents_optional_request_id_header(
+    spec: dict[str, Any],
+) -> None:
+    """The middleware reads ``X-Request-ID`` for every route, so say so."""
+    for path, method, operation in _operations(spec):
+        parameter = _request_id_parameter(spec, operation)
+
+        assert parameter is not None, f"{method.upper()} {path}"
+        assert parameter["in"] == "header"
+        assert parameter["required"] is False
+        assert parameter["schema"] == {"type": "string"}
+        # The value is sanitised, not validated: no schema keyword may imply
+        # that an overlong or malformed id is rejected with a 422.
+        assert "pattern" not in parameter["schema"]
+        assert "maxLength" not in parameter["schema"]
+        description = str(parameter.get("description", ""))
+        assert description.strip()
+        lowered = description.lower()
+        assert "optional" in lowered
+        assert "echoed" in lowered
+        assert "uuid4" in lowered
+
+
+def test_every_documented_response_carries_the_request_id_header(
+    spec: dict[str, Any],
+) -> None:
+    """Clients can correlate any documented response, not just successes."""
+    for path, method, operation in _operations(spec):
+        for code, response in operation["responses"].items():
+            header = _request_id_response_header(spec, response)
+
+            assert header is not None, f"{method.upper()} {path} {code}"
+            assert header["schema"] == {"type": "string"}
+            description = str(header.get("description", ""))
+            assert description.strip()
+            assert "x-request-id" in description.lower()
+            assert "uuid4" in description.lower()
+
+
+def test_cors_configuration_documents_the_exposed_correlation_headers() -> None:
+    """The documented CORS promise matches the middleware configuration."""
+    assert REQUEST_ID_HEADER in CORS_ALLOW_HEADERS
+    assert set(CORS_EXPOSE_HEADERS) == {"Retry-After", REQUEST_ID_HEADER}
+
+
+# ---------------------------------------------------------------------------
 # Security
 # ---------------------------------------------------------------------------
 
@@ -441,7 +552,7 @@ def test_operations_document_the_headers_the_auth_layer_reads(
     for path, method, operation in _operations(spec):
         headers = {
             parameter["name"]
-            for parameter in operation.get("parameters", [])
+            for parameter in _parameters(spec, operation)
             if parameter.get("in") == "header"
         }
         assert {"authorization", "X-API-Key"} <= headers, (
@@ -632,8 +743,8 @@ def test_sse_search_documents_its_query_parameters(spec: dict[str, Any]) -> None
     operation = _operation(spec, "/api/v1/search/stream")
     parameters = {
         parameter["name"]: parameter
-        for parameter in operation["parameters"]
-        if parameter["in"] == "query"
+        for parameter in _parameters(spec, operation)
+        if parameter.get("in") == "query"
     }
 
     assert set(parameters) == {
@@ -703,7 +814,9 @@ def test_rate_limit_opt_out_is_startup_configuration_not_a_request_field(
 
     for path, method, operation in _operations(spec):
         documented = {
-            parameter["name"] for parameter in operation.get("parameters", [])
+            parameter["name"]
+            for parameter in _parameters(spec, operation)
+            if "name" in parameter
         }
         assert not forbidden & documented, f"{method.upper()} {path}"
 

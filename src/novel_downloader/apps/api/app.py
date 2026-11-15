@@ -101,6 +101,7 @@ from .middleware import (
     DEFAULT_RATE_LIMIT,
     DEFAULT_RATE_LIMIT_MAX_KEYS,
     DEFAULT_RATE_LIMIT_WINDOW,
+    MAX_REQUEST_ID_LENGTH,
     RATE_LIMIT_EXEMPT_PATHS,
     REQUEST_ID_HEADER,
     BodySizeLimitMiddleware,
@@ -147,6 +148,44 @@ CORS_ALLOW_HEADERS: tuple[str, ...] = (
 #: is needed so a rate-limited browser client can back off correctly, and
 #: ``X-Request-ID`` so it can quote the id of a failed request in a bug report.
 CORS_EXPOSE_HEADERS: tuple[str, ...] = ("Retry-After", REQUEST_ID_HEADER)
+
+#: OpenAPI description of the optional ``X-Request-ID`` request header. The
+#: value is read before routing by
+#: :class:`novel_downloader.apps.api.middleware.RequestIdMiddleware`; an
+#: unsafe value is replaced rather than rejected, so the schema deliberately
+#: carries no ``pattern``/``maxLength`` that would imply a ``422``.
+REQUEST_ID_PARAMETER_DESCRIPTION: str = (
+    "Optional client-chosen correlation id, at most "
+    f"{MAX_REQUEST_ID_LENGTH} characters from 'A-Z', 'a-z', '0-9', '.', "
+    "'_', ':' and '-'. Only the first occurrence is read. A safe value is "
+    "echoed unchanged in the response 'X-Request-ID' header; a missing, "
+    "overlong or unsafe value is replaced by a server-generated UUID4 "
+    "instead of being rejected, so this header never causes a 422. Quote "
+    "the effective id when reporting a failure: it prefixes the server "
+    "access-log line and is present on error responses too."
+)
+
+#: OpenAPI description of the ``X-Request-ID`` response header. Every
+#: documented response carries it because the middleware is installed
+#: outermost.
+REQUEST_ID_RESPONSE_DESCRIPTION: str = (
+    "Effective correlation id for this request: the client-supplied "
+    "'X-Request-ID' when it was safe, otherwise a generated UUID4. It "
+    "matches the '[request_id]' prefix of the server access-log line and "
+    "is present on both success and error responses. With '--cors' it is "
+    "readable from browser JavaScript via 'Access-Control-Expose-Headers'."
+)
+
+#: Refs reused on every operation and response so the two header descriptions
+#: are not duplicated once per route in the generated document.
+_REQUEST_ID_PARAMETER_REF = "#/components/parameters/RequestId"
+_REQUEST_ID_RESPONSE_REF = "#/components/headers/RequestId"
+
+#: Path-item keys that hold an operation (as opposed to ``parameters``,
+#: ``servers`` or ``summary``).
+_OPENAPI_HTTP_METHODS = frozenset(
+    {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
+)
 
 #: Upper bound accepted for ``rate_limit``. A larger value would not protect a
 #: local service anyway and is almost certainly a configuration mistake.
@@ -273,12 +312,34 @@ AUTH_SECURITY_SCHEMES: dict[str, dict[str, Any]] = {
 }
 
 
+def _documents_request_id_parameter(parameters: list[Any]) -> bool:
+    """Whether an operation already documents the ``X-Request-ID`` header."""
+    for parameter in parameters:
+        if not isinstance(parameter, dict):
+            continue
+        if parameter.get("$ref") == _REQUEST_ID_PARAMETER_REF:
+            return True
+        if (
+            parameter.get("in") == "header"
+            and str(parameter.get("name", "")).lower() == REQUEST_ID_HEADER.lower()
+        ):
+            return True
+    return False
+
+
 def _install_openapi_metadata(application: FastAPI) -> None:
     """
-    Add the authentication schemes to the generated OpenAPI document.
+    Augment the generated document with cross-cutting API metadata.
 
-    The schema is otherwise produced from the routes; this wrapper only
-    augments it, so it stays in sync with the router automatically.
+    Adds the authentication schemes, documents the optional ``X-Request-ID``
+    request header and its echoed response header on every operation, and
+    removes the ``429`` response from paths the rate limiter exempts. The
+    schema is otherwise produced from the routes, so it stays in sync with the
+    router automatically.
+
+    The header parameter deliberately has no ``pattern`` or ``maxLength``:
+    unsafe values are replaced by a generated id rather than rejected, so a
+    validating schema would promise a ``422`` the API never sends.
     """
     original_openapi = application.openapi
 
@@ -289,12 +350,59 @@ def _install_openapi_metadata(application: FastAPI) -> None:
         for name, definition in AUTH_SECURITY_SCHEMES.items():
             security_schemes.setdefault(name, dict(definition))
         schema.setdefault("security", [{"BearerAuth": []}, {"ApiKeyAuth": []}])
+
+        components.setdefault("parameters", {}).setdefault(
+            "RequestId",
+            {
+                "name": REQUEST_ID_HEADER,
+                "in": "header",
+                "required": False,
+                "description": REQUEST_ID_PARAMETER_DESCRIPTION,
+                "schema": {"type": "string"},
+            },
+        )
+        components.setdefault("headers", {}).setdefault(
+            "RequestId",
+            {
+                "description": REQUEST_ID_RESPONSE_DESCRIPTION,
+                "schema": {"type": "string"},
+            },
+        )
+
+        for path_item in schema.get("paths", {}).values():
+            if not isinstance(path_item, dict):
+                continue
+            for method, operation in path_item.items():
+                if method not in _OPENAPI_HTTP_METHODS or not isinstance(
+                    operation, dict
+                ):
+                    continue
+                parameters = operation.setdefault("parameters", [])
+                if not isinstance(parameters, list):
+                    parameters = []
+                    operation["parameters"] = parameters
+                if not _documents_request_id_parameter(parameters):
+                    parameters.append({"$ref": _REQUEST_ID_PARAMETER_REF})
+                for response in operation.get("responses", {}).values():
+                    if not isinstance(response, dict):
+                        continue
+                    headers = response.get("headers")
+                    if not isinstance(headers, dict):
+                        headers = {}
+                        response["headers"] = headers
+                    headers.setdefault(
+                        REQUEST_ID_HEADER, {"$ref": _REQUEST_ID_RESPONSE_REF}
+                    )
+
         # ``SHARED_ERROR_RESPONSES`` applies to every route, but the rate
         # limiter exempts a few paths (``/api/v1/health``); drop the 429 there
         # so the document never promises an error that cannot occur.
         for path in RATE_LIMIT_EXEMPT_PATHS:
-            for operation in schema.get("paths", {}).get(path, {}).values():
-                if isinstance(operation, dict):
+            path_item = schema.get("paths", {}).get(path, {})
+            if not isinstance(path_item, dict):
+                continue
+            for method, operation in path_item.items():
+                if method in _OPENAPI_HTTP_METHODS and isinstance(operation, dict):
                     operation.get("responses", {}).pop("429", None)
         return schema
 
@@ -440,7 +548,22 @@ def create_app(
             "management, watchlist checks, exported-file history and the "
             "optional music engine. Rate limiting is configured when the "
             "server starts (``--no-rate-limit`` disables it); it is not a "
-            "request parameter or body field."
+            "request parameter or body field. Request correlation: every "
+            "response carries an ``X-Request-ID`` header. A client may send "
+            "its own ``X-Request-ID`` (optional; at most "
+            f"{MAX_REQUEST_ID_LENGTH} characters from ``A-Z``, ``a-z``, "
+            "``0-9``, ``.``, ``_``, ``:`` and ``-``; only the first "
+            "occurrence is read). A safe value is echoed unchanged, while a "
+            "missing, overlong or unsafe value is replaced by a "
+            "server-generated UUID4 rather than rejected, so the header "
+            "never produces a validation error. The effective id prefixes "
+            "the server access log line and is stamped on error responses "
+            "(including 401, 413, 422, 429 and 500), so quoting it in a bug "
+            "report lets the failure be located. When the server runs with "
+            "``--cors``, ``X-Request-ID`` is listed in "
+            "``Access-Control-Allow-Headers`` so a browser may send it and "
+            "in ``Access-Control-Expose-Headers`` so browser JavaScript may "
+            "read it; ``Retry-After`` is exposed for the same reason."
         ),
         version=__version__,
         openapi_tags=OPENAPI_TAGS,
