@@ -52,6 +52,7 @@ plugins:
             常见任务: Common Recipes
             本地 API 服务: Local API Service
             更新与自动更新: Updates and Auto-update
+            更新清单签名: Update Manifest Signing
             Android 客户端: Android Client
             音乐下载: Music Downloads
             书源: Book Sources
@@ -137,6 +138,7 @@ nav:
     - 常见任务: guide/recipes.md
     - 本地 API 服务: guide/api.md
     - 更新与自动更新: guide/updates.md
+    - 更新清单签名: guide/update-signing.md
     - Android 客户端: guide/android-app.md
     - 音乐下载: guide/music.md
     - 书源: guide/book-sources.md

@@ -189,7 +189,7 @@ icacls .\novel_cache
 
 ---
 
-### 更新链的威胁模型
+### 更新链的威胁模型 {#update-chain-threat-model}
 
 自动更新把"第三方内容"换成了"可执行程序", 因此单独列出。链路上的信任锚:
 
@@ -201,7 +201,7 @@ icacls .\novel_cache
 | 安装前 | 启动安装器**前再复算一次摘要**, 关闭"校验后到安装前被替换"的 TOCTOU 窗口 | `webview_app._install_verified`、`installPrecheck` |
 | 发布侧 | 上传前运行 `scripts/audit_release_assets.py` 做**资产泄漏审计** (允许清单、归档成员路径、用 `scan_secrets` 规则扫描归档内文本成员、原始字节中的私钥/部署口令/令牌), 命中只报标记名, 不回显明文 | `scripts/release.py` 的 `audit_release_content` |
 
-**可选的清单签名**: 更新清单支持 Ed25519 签名。`updater.TRUSTED_UPDATE_KEYS` 默认为空, 即**默认不验签**, 信任锚是 HTTPS 加每个资产的 SHA-256。一旦配置可信公钥, 清单缺失、未签名、签名不符或使用未知 `key_id` 都会被拒绝, 且客户端**不再回退** GitHub API——否则攻击者删掉清单即可绕过验签。
+**可选的清单签名**: 更新清单支持 Ed25519 签名。`updater.TRUSTED_UPDATE_KEYS` 默认为空, 即**默认不验签**, 信任锚是 HTTPS 加每个资产的 SHA-256。一旦配置可信公钥, 清单缺失、未签名、签名不符或使用未知 `key_id` 都会被拒绝, 且客户端**不再回退** GitHub API——否则攻击者删掉清单即可绕过验签。签名覆盖的字段、启用步骤与换钥流程见[更新清单签名](./update-signing.md)。
 
 残余风险:
 

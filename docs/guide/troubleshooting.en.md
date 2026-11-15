@@ -803,6 +803,29 @@ path):
    reports the selected asset shape (for the CLI it is `cli` or `null`). `--json`
    alone behaves like `--check` and never attempts a download.
 
+### 13.1 Manifest Signature Rejected (once signing is enabled)
+
+**Symptoms**: `novel-cli update` prints
+`Update check failed: untrusted-manifest: …`, or `error` is
+`untrusted-manifest: …` / `manifest-unavailable`; the desktop sidebar shows no
+"update available" bar and no error either.
+
+**How it works**: while `TRUSTED_UPDATE_KEYS` is non-empty the manifest is the
+only trust anchor and the client **does not** fall back to the GitHub API.
+`untrusted-manifest: …` means the manifest arrived but is not trusted (unsigned,
+unknown `key_id`, bad signature); `manifest-unavailable` means it never arrived
+(the release has no `latest.json`, is still a draft, or the network failed). The
+desktop UI does not surface check errors as a notice, so both look like "no
+update" there.
+
+**Diagnose**: inspect the manifest's public fields (`key_id`, whether
+`signature` is present), confirm `key_id` equals the first 16 hex characters of
+the compiled public key's digest, then verify the signature with the public key.
+The full procedure, the symptom table and what **not** to do are in
+[Update manifest signing § troubleshooting](update-signing.en.md#signing-troubleshooting).
+Do not empty `TRUSTED_UPDATE_KEYS` to make a check pass, and do not print the
+private key.
+
 ---
 
 ## 14. Confirm What a Clean or Restore Will Do First
@@ -831,7 +854,7 @@ novel-cli storage backup --out ~/novel-backups
 novel-cli storage verify
 
 # Restore from a backup; replacing an existing database requires -y
-novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<timestamp>.sqlite -y
+novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<timestamp>.sqlite --force
 ```
 
 `restore` validates the backup (integrity, schema version, required columns) before

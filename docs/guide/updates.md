@@ -83,7 +83,7 @@ installer / portable / api。副本的安装形态由卸载注册表的 `Install
 installer。从安装器安装的副本只会更新到安装器，从免安装包解压的副本只会更新到
 免安装包，两者不会互相切换。
 
-## 发布前的资产审计
+## 发布前的资产审计 {#pre-release-asset-audit}
 
 `scripts/release.py` 在上传前会对 `dist/release/` 里的产物运行 `scripts/audit_release_assets.py`：zip / apk（以及实际是 zip 的 `.exe`）中的文本成员会逐行套用 `scripts/scan_secrets.py` 的凭据规则，命中以 `secret-marker` 标记，只报 `资产: 成员:行号: 规则`，不回显明文。它和构建前对 Git 跟踪文件的工作区扫描互补——工作区扫描看源码，资产审计看真正要上传的字节。
 
@@ -107,4 +107,4 @@ v1.34.0 的发布产物通过资产内容扫描，0 命中。
 
 - **安卓不能静默安装**：那需要系统签名权限，普通应用拿不到。流程是「下载 → 校验 → 拉起系统安装器 → 用户确认」。
 - **只发布 Windows 与 Android 产物**：macOS / Linux 需要对应 runner，PyInstaller 不支持交叉编译。
-- **清单默认未签名**：当前的信任锚是 HTTPS + 每个资产的 SHA-256。签名机制已内置（Ed25519），启用方式见仓库的 `AGENTS.md`；启用后客户端会拒绝未签名或签名不符的清单。
+- **清单默认未签名**：当前的信任锚是 HTTPS + 每个资产的 SHA-256。Ed25519 签名机制已内置但尚未启用，格式、启用步骤、换钥流程与各端差异见[更新清单签名](update-signing.md)；启用后客户端会拒绝未签名或签名不符的清单。

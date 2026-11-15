@@ -83,7 +83,7 @@ directory still updates to the installer. A copy installed from the installer
 only ever updates to the installer, and a portable copy only to the portable
 archive.
 
-## Pre-release asset audit
+## Pre-release asset audit {#pre-release-asset-audit}
 
 Before uploading, `scripts/release.py` runs `scripts/audit_release_assets.py` over the artifacts in `dist/release/`: text members inside zip / apk files (and inside an `.exe` that really is a zip) are streamed line by line through the credential rules in `scripts/scan_secrets.py`. A hit is tagged `secret-marker` and reports only `asset: member:line: rule`, never the value. This complements the pre-build working-tree scan of Git-tracked files — the workspace scan sees source, the asset audit sees the bytes that will actually be uploaded.
 
@@ -107,4 +107,4 @@ See the [security guide](security.en.md#release-asset-scan) for the full rule se
 
 - **Android cannot install silently**: that needs a system signature permission ordinary apps do not have. The flow is download → verify → hand off to the system installer → user confirms.
 - **Only Windows and Android artifacts are published**: macOS/Linux need their own runners; PyInstaller cannot cross-compile.
-- **The manifest is unsigned by default**: the trust anchor is HTTPS plus the per-asset SHA-256. Ed25519 signing is built in and can be enabled (see `AGENTS.md`); once a key is trusted the client rejects unsigned or badly signed manifests.
+- **The manifest is unsigned by default**: the trust anchor is HTTPS plus the per-asset SHA-256. Ed25519 signing is built in but not enabled; [Update manifest signing](update-signing.en.md) covers the format, the enabling steps, key rotation and the per-client differences. Once a key is trusted the client rejects unsigned or badly signed manifests.

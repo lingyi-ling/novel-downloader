@@ -753,6 +753,22 @@ novel-cli music search "关键词" --platform tidal --limit 5
    下载失败的原因在 `error` 字段里，`asset_shape` 标明实际选择的资产形态
    （CLI 只会是 `cli` 或 `null`；只加 `--json` 等价于 `--check`，不会尝试下载）。
 
+### 13.1 清单验签失败（启用签名后）
+
+**现象**：`novel-cli update` 打印 `Update check failed: untrusted-manifest: …`，或
+`error` 为 `untrusted-manifest: …` / `manifest-unavailable`；桌面端侧栏不出现「有新版本」，
+也没有任何错误提示。
+
+**机制**：`TRUSTED_UPDATE_KEYS` 非空时，清单是唯一信任锚，且**不再回退** GitHub API。
+`untrusted-manifest: …` 表示清单拿到了但不可信（未签名、未知 `key_id`、签名不符）；
+`manifest-unavailable` 表示根本没拿到（release 没带 `latest.json`、仍是草稿、网络失败）。
+桌面端不把检查错误显示成提示条，所以这两种情况在 UI 上都表现为「没有更新」。
+
+**排查**：先看清单里的公开字段（`key_id` 与是否有 `signature`），再确认 `key_id` 与内置
+公钥的摘要前 16 位一致，最后用公钥复核签名。完整步骤、症状对照与「不要做什么」见
+[更新清单签名 § 故障排查](update-signing.md#signing-troubleshooting)。不要为了让检查通过而清空
+`TRUSTED_UPDATE_KEYS`，也不要打印私钥。
+
 ---
 
 ## 14. 清理或恢复前先确认会删什么
@@ -779,7 +795,7 @@ novel-cli storage backup --out ~/novel-backups
 novel-cli storage verify
 
 # 从备份恢复; 覆盖已有数据库需要 -y
-novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<时间戳>.sqlite -y
+novel-cli storage restore --from ~/novel-backups/<site>/<book>/chapter.raw.<时间戳>.sqlite --force
 ```
 
 `restore` 会先校验备份文件 (完整性、schema 版本、必需列) 再原子替换; 覆盖已有数据库时

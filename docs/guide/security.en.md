@@ -185,7 +185,7 @@ Recommendations:
 
 ---
 
-### Threat Model for the Update Chain
+### Threat Model for the Update Chain {#update-chain-threat-model}
 
 Automatic updates turn "third-party content" into "an executable program", so the chain gets its own threat model. Its trust anchors, in order:
 
@@ -197,7 +197,7 @@ Automatic updates turn "third-party content" into "an executable program", so th
 | Before install | The digest is **recomputed right before the installer starts**, closing the time-of-check/time-of-use window between verification and installation | `webview_app._install_verified`, `installPrecheck` |
 | Release side | Before upload, `scripts/audit_release_assets.py` performs a **release asset leak audit** (allowlist, archive member paths, archive text members scanned with the `scan_secrets` rules, private keys / deploy passwords / tokens in raw bytes); matches report only the marker name, never the value | `audit_release_content` in `scripts/release.py` |
 
-**Optional manifest signing**: update manifests support Ed25519 signatures. `updater.TRUSTED_UPDATE_KEYS` is empty by default, so manifests are **accepted unsigned** and the trust anchor is HTTPS plus each asset's SHA-256. Once a trusted key is configured, a missing manifest, an unsigned manifest, a bad signature or an unknown `key_id` is rejected, and the client **stops falling back** to the GitHub API — otherwise deleting the manifest would bypass signature checking.
+**Optional manifest signing**: update manifests support Ed25519 signatures. `updater.TRUSTED_UPDATE_KEYS` is empty by default, so manifests are **accepted unsigned** and the trust anchor is HTTPS plus each asset's SHA-256. Once a trusted key is configured, a missing manifest, an unsigned manifest, a bad signature or an unknown `key_id` is rejected, and the client **stops falling back** to the GitHub API — otherwise deleting the manifest would bypass signature checking. See [Update manifest signing](./update-signing.en.md) for the signed fields, the enabling steps and key rotation.
 
 Residual risks:
 
