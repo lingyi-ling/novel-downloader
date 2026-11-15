@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,7 +49,9 @@ from novel_downloader.apps.cli.commands import update as update_module
 from novel_downloader.apps.common.updater import ReleaseAsset, UpdateCheck, UpdateInfo
 from novel_downloader.infra.persistence.chapter_storage import ChapterStorage
 from tests.apps.test_cli_e2e import (
+    CLI_MODULE,
     _bindable_port,
+    _child_env,
     _seed_config,
     run_cli,
     run_cli_inproc,
@@ -87,8 +91,10 @@ MOCK_RULE: dict[str, Any] = {
 }
 
 
-def _mock_page() -> bytes:
-    """Render the search result page for :data:`MOCK_BOOKS`."""
+def _mock_page(
+    books: tuple[tuple[str, str, str, str, str], ...] = MOCK_BOOKS,
+) -> bytes:
+    """Render the search result page for ``books``."""
     rows = "\n".join(
         (
             '<div class="item">'
@@ -98,19 +104,22 @@ def _mock_page() -> bytes:
             f'<span class="update">{updated}</span>'
             "</div>"
         )
-        for book_id, title, author, words, updated in MOCK_BOOKS
+        for book_id, title, author, words, updated in books
     )
     return f"<html><body>{rows}</body></html>".encode()
 
 
 class _MockSiteHandler(BaseHTTPRequestHandler):
-    """Answer every ``/search`` request with the fixed result page."""
+    """Answer every ``/search`` request with the class's fixed result page."""
+
+    #: Books served by this handler; subclasses swap in a richer corpus.
+    books: tuple[tuple[str, str, str, str, str], ...] = MOCK_BOOKS
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler hook
         if not self.path.startswith("/search"):
             self.send_error(404)
             return
-        body = _mock_page()
+        body = _mock_page(self.books)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -892,3 +901,500 @@ def test_update_json_check_failure_is_one_line_and_exits_one(
     assert payload["error"] == "unreachable"
     assert payload["available"] is False
     assert captured.err == ""
+
+
+# ---------------------------------------------------------------------------
+# search ranking matrix (v1.35/v1.36): intent, telemetry, sort/order, filters
+# ---------------------------------------------------------------------------
+
+#: Corpus that exercises every ranking signal.  Row 204 is the title/author
+#: collision: its *title* is row 201's author, which is exactly the case the
+#: intent-aware ordering has to keep below that author's own books.
+MATRIX_BOOKS: tuple[tuple[str, str, str, str, str], ...] = (
+    ("201", "斗破苍穹", "天蚕土豆", "30万字", "2026-01-01"),
+    ("202", "斗破苍穹 外传", "天蚕土豆", "120万字", "2020-05-01"),
+    ("203", "斗破苍穹 番外", "某作者", "-", ""),
+    ("204", "天蚕土豆", "另一位", "5万字", "2023-03-03"),
+)
+
+
+def _handler_serving(
+    books: tuple[tuple[str, str, str, str, str], ...],
+) -> type[_MockSiteHandler]:
+    """Return a handler class that serves ``books`` on every search request."""
+
+    class _Handler(_MockSiteHandler):
+        pass
+
+    _Handler.books = books
+    return _Handler
+
+
+@contextmanager
+def _serving_books(
+    books: tuple[tuple[str, str, str, str, str], ...],
+) -> Iterator[str]:
+    """Run ``books`` on a free loopback port for the duration of the block."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_serving(books))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        yield f"http://{host}:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def ranking_site() -> Iterator[str]:
+    """Serve :data:`MATRIX_BOOKS` through the same rule the other tests use."""
+    with _serving_books(MATRIX_BOOKS) as base:
+        yield base
+
+
+def _install_named_rule(
+    work: Path,
+    base_url: str,
+    *,
+    site_key: str,
+    priority: int,
+) -> Path:
+    """Install :data:`MOCK_RULE` under ``site_key`` with a distinct priority."""
+    rules = work / "rules"
+    rules.mkdir(exist_ok=True)
+    rule = json.loads(json.dumps(MOCK_RULE).replace("{base}", base_url))
+    rule["site_key"] = site_key
+    rule["site_name"] = f"Mock {site_key}"
+    rule["search"]["priority"] = priority
+    path = rules / f"{site_key}.json"
+    path.write_text(json.dumps(rule, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _ranking_work(
+    tmp_path: Path,
+    base_url: str,
+    *,
+    sites: tuple[tuple[str, int], ...] = (("mocksearch", 10),),
+) -> tuple[Path, Path]:
+    """Seed an isolated workdir/home with one rule per requested site."""
+    work = tmp_path / "work"
+    home = tmp_path / "home"
+    work.mkdir()
+    home.mkdir()
+    _seed_config(work)
+    for site_key, priority in sites:
+        _install_named_rule(work, base_url, site_key=site_key, priority=priority)
+    return work, home
+
+
+def _search_json(*options: str, keyword: str, cwd: Path, home: Path) -> list[Any]:
+    """Run ``search --json`` and return the single-line decoded document."""
+    result = run_cli(
+        "search",
+        "--json",
+        "--site-limit",
+        "20",
+        *options,
+        keyword,
+        cwd=cwd,
+        home=home,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("\n") == 1, result.stdout
+    return _one_line_json(result.stdout)
+
+
+def _run_cli_closed_stdin(
+    *args: str, cwd: Path, home: Path
+) -> subprocess.CompletedProcess[str]:
+    """Run the CLI with stdin closed, so the prompt cancels after the table."""
+    return subprocess.run(
+        [sys.executable, "-m", CLI_MODULE, *args],
+        capture_output=True,
+        cwd=str(cwd),
+        env=_child_env(home),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        timeout=240,
+        check=False,
+    )
+
+
+def _assert_telemetry(rows: list[Any]) -> None:
+    """Assert every row carries a usable ``rank_score`` and ``match_tier``."""
+    for row in rows:
+        score = row["rank_score"]
+        tier = row["match_tier"]
+        assert not isinstance(score, bool)
+        assert isinstance(score, (int, float))
+        assert 0.0 <= score <= 1.0
+        assert not isinstance(tier, bool)
+        assert isinstance(tier, int)
+        assert 0 <= tier <= 4
+
+
+def test_search_json_intent_and_match_telemetry(
+    tmp_path: Path, ranking_site: str
+) -> None:
+    """A title search and an author search each explain their own ordering."""
+    work, home = _ranking_work(tmp_path, ranking_site)
+
+    title_rows = _search_json(
+        "--site", "mocksearch", keyword="斗破苍穹", cwd=work, home=home
+    )
+    _assert_telemetry(title_rows)
+    title_ids = [row["book_id"] for row in title_rows]
+    assert title_ids[0] == "201"
+    assert set(title_ids[1:]) == {"202", "203"}
+    assert {row["query_intent"] for row in title_rows} == {"title"}
+    assert title_rows[0]["title"] == "斗破苍穹"
+    assert title_rows[0]["match_tier"] == 4
+    assert {row["match_tier"] for row in title_rows[1:]} == {3}
+    # Row 204 collides on neither field; the default relevance floor drops it.
+    assert "204" not in title_ids
+
+    author_rows = _search_json(
+        "--site", "mocksearch", keyword="天蚕土豆", cwd=work, home=home
+    )
+    _assert_telemetry(author_rows)
+    author_ids = [row["book_id"] for row in author_rows]
+    assert set(author_ids[:2]) == {"201", "202"}
+    assert author_ids[-1] == "204"
+    assert {row["query_intent"] for row in author_rows} == {"author"}
+    assert [row["match_tier"] for row in author_rows[:2]] == [4, 4]
+    # The title-only collision survives the relevance floor but ranks last:
+    # the author field is the primary one under an author verdict.
+    assert author_rows[-1]["title"] == "天蚕土豆"
+    assert author_rows[-1]["match_tier"] == 0
+    assert "203" not in author_ids
+
+    # The tier is the outer key, so scores within one tier descend.
+    for rows in (title_rows, author_rows):
+        for left, right in zip(rows, rows[1:], strict=False):
+            if left["match_tier"] == right["match_tier"]:
+                assert left["rank_score"] >= right["rank_score"]
+
+    # Non-quality sort keys ignore intent entirely, but the row telemetry the
+    # badge renders is still attached.
+    word_rows = _search_json(
+        "--site",
+        "mocksearch",
+        "--sort",
+        "words",
+        keyword="斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert [row["book_id"] for row in word_rows] == ["202", "201", "204", "203"]
+    assert {row["query_intent"] for row in word_rows} == {None}
+    _assert_telemetry(word_rows)
+
+
+#: ``(options, expected book ids)`` for every sort key and both directions.
+SORT_ORDER_CASES: tuple[tuple[tuple[str, ...], list[str]], ...] = (
+    ((), ["201", "202", "203"]),
+    (("--sort", "quality", "--order", "desc"), ["201", "202", "203"]),
+    (("--sort", "priority"), ["201", "202", "203", "204"]),
+    (("--sort", "priority", "--order", "desc"), ["204", "203", "202", "201"]),
+    (("--sort", "site"), ["204", "201", "202", "203"]),
+    (("--sort", "title"), ["204", "201", "202", "203"]),
+    (("--sort", "title", "--order", "desc"), ["203", "202", "201", "204"]),
+    (("--sort", "author"), ["204", "201", "202", "203"]),
+    (("--sort", "words"), ["202", "201", "204", "203"]),
+    (("--sort", "words", "--order", "asc"), ["203", "204", "201", "202"]),
+    (("--sort", "update"), ["201", "204", "202", "203"]),
+    (("--sort", "update", "--order", "asc"), ["203", "202", "204", "201"]),
+)
+
+
+def test_search_sort_key_and_direction_matrix(
+    tmp_path: Path, ranking_site: str
+) -> None:
+    """Every ``--sort`` key and explicit ``--order`` reach the real ordering."""
+    work, home = _ranking_work(tmp_path, ranking_site)
+
+    for options, expected in SORT_ORDER_CASES:
+        rows = _search_json(
+            "--site", "mocksearch", *options, keyword="斗破苍穹", cwd=work, home=home
+        )
+        assert [row["book_id"] for row in rows] == expected, options
+        _assert_telemetry(rows)
+
+
+def test_search_filter_combinations_and_limit_order(
+    tmp_path: Path, ranking_site: str
+) -> None:
+    """Combined local filters intersect, and filtering runs before ``limit``."""
+    work, home = _ranking_work(tmp_path, ranking_site)
+
+    combined = _search_json(
+        "--site",
+        "mocksearch",
+        "--min-words",
+        "300000",
+        "--max-words",
+        "1200000",
+        "--updated-after",
+        "2020-01-01",
+        keyword="斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert [row["book_id"] for row in combined] == ["201", "202"]
+    # Only the filter parsed the display label; it is still the raw site text.
+    assert {row["word_count"] for row in combined} == {"30万字", "120万字"}
+
+    # Both bounds are inclusive, including their exact boundary.
+    exact = _search_json(
+        "--site",
+        "mocksearch",
+        "--min-words",
+        "300000",
+        "--max-words",
+        "300000",
+        keyword="斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert [row["book_id"] for row in exact] == ["201"]
+
+    # A limit must count surviving rows: the higher-quality 201 is filtered out
+    # first, so a pre-filter limit would have returned nothing here.
+    limited = _search_json(
+        "--site",
+        "mocksearch",
+        "--min-words",
+        "500000",
+        "--limit",
+        "1",
+        keyword="斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert [row["book_id"] for row in limited] == ["202"]
+
+    date_and_word = _search_json(
+        "--site",
+        "mocksearch",
+        "--updated-after",
+        "2021-01-01",
+        "--max-words",
+        "60000",
+        keyword="斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert [row["book_id"] for row in date_and_word] == ["204"]
+
+    # Sorting is orthogonal to filtering: the survivors keep the words order.
+    sorted_filtered = _search_json(
+        "--site",
+        "mocksearch",
+        "--sort",
+        "words",
+        "--min-words",
+        "300000",
+        keyword="斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert [row["book_id"] for row in sorted_filtered] == ["202", "201"]
+
+    # An over-tight filter is still a successful, empty document.
+    empty = _search_json(
+        "--site",
+        "mocksearch",
+        "--max-words",
+        "0",
+        keyword="斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert empty == []
+
+    leftovers = _residual_files(work, ignored_roots={"settings.toml", "rules", "logs"})
+    assert leftovers == set()
+    assert not list(work.rglob("*.tmp"))
+    assert not list(work.rglob("*.part"))
+    assert list(home.rglob("*")) == []
+
+
+def test_search_grouped_json_keeps_rank_telemetry(
+    tmp_path: Path, ranking_site: str
+) -> None:
+    """``--group`` merges sources but keeps the best source's telemetry."""
+    work, home = _ranking_work(
+        tmp_path,
+        ranking_site,
+        sites=(("mocksearch", 10), ("mocksearch2", 100)),
+    )
+
+    flat = _search_json(
+        "--site",
+        "mocksearch",
+        "--site",
+        "mocksearch2",
+        keyword="斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert sorted(row["book_id"] for row in flat) == [
+        "201",
+        "201",
+        "202",
+        "202",
+        "203",
+        "203",
+    ]
+    assert {row["site"] for row in flat} == {"mocksearch", "mocksearch2"}
+
+    grouped = _search_json(
+        "--site",
+        "mocksearch",
+        "--site",
+        "mocksearch2",
+        "--group",
+        keyword="斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert [row["book_id"] for row in grouped] == ["201", "202", "203"]
+    assert {row["query_intent"] for row in grouped} == {"title"}
+    assert all(row["sources"] == ["mocksearch", "mocksearch2"] for row in grouped)
+    _assert_telemetry(grouped)
+
+    # With grouping, ``limit`` counts books, not raw site rows.
+    limited = _search_json(
+        "--site",
+        "mocksearch",
+        "--site",
+        "mocksearch2",
+        "--group",
+        "--limit",
+        "2",
+        keyword="斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert len(limited) == 2
+
+
+def test_search_human_table_shows_intent_and_match_suffix(
+    tmp_path: Path, ranking_site: str
+) -> None:
+    """The interactive table carries the same verdict and badge as JSON."""
+    work, home = _ranking_work(tmp_path, ranking_site)
+
+    title = _run_cli_closed_stdin(
+        "search",
+        "--site",
+        "mocksearch",
+        "--site-limit",
+        "20",
+        "斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert title.returncode == 0, title.stderr
+    # Human output is diagnostics; stdout stays reserved for machine documents.
+    assert title.stdout == ""
+    title_err = title.stderr
+    assert "Search Results · Page 1/1 · Title match" in title_err
+    assert re.search(r"斗破苍穹 · Exact \d\.\d{2}", title_err)
+    assert re.search(r"斗破苍穹 外传 · Prefix \d\.\d{2}", title_err)
+    assert re.search(r"斗破苍穹 番外 · Prefix \d\.\d{2}", title_err)
+    assert (
+        title_err.index("斗破苍穹 · Exact")
+        < title_err.index("斗破苍穹 外传 · Prefix")
+        < title_err.index("斗破苍穹 番外 · Prefix")
+    )
+    # A redirected stream never receives ANSI escapes.
+    assert "\x1b" not in title_err
+
+    author = _run_cli_closed_stdin(
+        "search",
+        "--site",
+        "mocksearch",
+        "--site-limit",
+        "20",
+        "天蚕土豆",
+        cwd=work,
+        home=home,
+    )
+    assert author.returncode == 0, author.stderr
+    assert author.stdout == ""
+    author_err = author.stderr
+    assert "Search Results · Page 1/1 · Author match" in author_err
+    assert re.search(r"斗破苍穹 · Exact \d\.\d{2}", author_err)
+    assert re.search(r"天蚕土豆 · No match \d\.\d{2}", author_err)
+    assert author_err.index("斗破苍穹 · Exact") < author_err.index(
+        "天蚕土豆 · No match"
+    )
+
+    # A non-quality sort has no intent note, but the badge still explains each
+    # row's score and its rank_score-derived order.
+    words = _run_cli_closed_stdin(
+        "search",
+        "--site",
+        "mocksearch",
+        "--site-limit",
+        "20",
+        "--sort",
+        "words",
+        "斗破苍穹",
+        cwd=work,
+        home=home,
+    )
+    assert words.returncode == 0, words.stderr
+    assert words.stdout == ""
+    words_err = words.stderr
+    assert "Title match" not in words_err
+    assert "Author match" not in words_err
+    assert re.search(r"斗破苍穹 外传 · Prefix \d\.\d{2}", words_err)
+    assert words_err.index("斗破苍穹 外传 · Prefix") < words_err.index(
+        "斗破苍穹 · Exact"
+    )
+
+    leftovers = _residual_files(work, ignored_roots={"settings.toml", "rules", "logs"})
+    assert leftovers == set()
+    assert not list(work.rglob("*.tmp"))
+    assert not list(work.rglob("*.part"))
+    assert list(home.rglob("*")) == []
+
+
+@pytest.mark.parametrize(
+    ("options", "needles"),
+    [
+        (("--sort", "sideways"), ("--sort", "invalid choice")),
+        (("--order", "sideways"), ("--order", "invalid choice")),
+        (("--max-words", "1000000001"), ("--min-words/--max-words", "between 0")),
+        (("--updated-after", "2024-13-01"), ("Invalid --updated-after",)),
+        (("--json", "--first"), ("--json and --first cannot be combined",)),
+        (
+            ("--min-words", "100", "--max-words", "50"),
+            ("Min words cannot be greater than max words",),
+        ),
+    ],
+)
+def test_search_invalid_values_exit_usage(
+    tmp_path: Path,
+    options: tuple[str, ...],
+    needles: tuple[str, ...],
+) -> None:
+    """Malformed sort/order/filter values fail before any search is attempted."""
+    # No server is needed: every case is rejected before the searcher runs.
+    work, home = _ranking_work(tmp_path, "http://127.0.0.1:9")
+
+    result = run_cli("search", *options, "斗破苍穹", cwd=work, home=home)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    for needle in needles:
+        assert needle in result.stderr
+    assert not list(work.rglob("*.tmp"))
+    assert not list(work.rglob("*.part"))

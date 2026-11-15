@@ -226,6 +226,12 @@ class SearchCmd(Command):
                     ),
                     EXIT_USAGE,
                 )
+        # Contradictory bounds can never match a row.  Without this they ran a
+        # full search and returned an empty array with exit 0 -- the same
+        # document as "no such book", which hides a typo such as swapped
+        # bounds.  The desktop already rejects the pair as a usage error.
+        if min_words is not None and max_words is not None and min_words > max_words:
+            fail(t("Min words cannot be greater than max words"), EXIT_USAGE)
 
         updated_after: date | None = None
         if args.updated_after is not None:
