@@ -121,6 +121,73 @@ Before writing, if the preferences file exists, it is copied to `<name>.bak` in 
 * There is only one `.bak`: every import that reaches the write stage overwrites it. It is a rollback for the most recent import, not a history archive.
 * After a successful import the UI immediately refreshes the theme and the Settings cards and reloads the task / follow lists, but the process is **not restarted**; the interface language was never part of the import.
 
+### Keyboard and accessibility (desktop) {#desktop-keyboard-accessibility}
+
+This section describes what `novel-desktop` actually implements today. Every shortcut is **window-scoped**, not a system-wide hotkey: it responds only while the desktop window's web content has focus and does nothing while the window is in the background. While focus is in an input, select, textarea or editable region, the custom combinations are left to text entry and the IME, and `Ctrl+D` does not fire either.
+
+#### Cross-page shortcuts
+
+The sidebar is a vertical `tablist` with six tabs: Search, Download, History, Music, Follow and Settings.
+
+| Shortcut | Action | Applies when |
+| --- | --- | --- |
+| `Ctrl+1` … `Ctrl+6` | Switch to the corresponding tab (in the order above) | Focus is not in an editable control; switching to Search or Music also moves focus into that page's keyword field |
+| `Ctrl+F` | Switch to Search and put focus in the keyword field; this is an in-app jump, not the browser's find bar | Same as above |
+| `Ctrl+D` | Download the selected tracks on the Music tab | Only on the Music tab, with at least one track selected, the download button enabled, and focus outside editable controls |
+
+The navigation has no additional letter shortcuts. Once focus is on a nav item, `↑`/`↓`/`←`/`→` switch to the adjacent tab and activate it in step, `Home`/`End` jump to the first/last item, and `Tab` moves through the individual tabs (each is an ordinary button); `Enter`/`Space` activates the current one.
+
+#### Search page
+
+| Action | Keyboard behaviour |
+| --- | --- |
+| Run a search | Press `Enter` in the keyword field; `Enter` in the Min words, Max words or Updated after fields of the Filters panel also runs the search. You can also `Tab` to the Search button and press `Enter`/`Space` |
+| Open a result | The result title itself is a button: `Tab` to it and press `Enter`/`Space` to open the details. The row's Download control is a separate button and needs another `Tab`; pressing `Enter` on blank card space does not open the details |
+| Sorting | Sort by and Sort direction are native select dropdowns, so the usual dropdown keyboard behaviour applies after focus (`↑`/`↓` changes the option). There is no custom sort chip group and no arrow-key movement between chips |
+| Filters panel | The Filters button exposes `aria-expanded` and `aria-controls`; `Esc` only closes the panel and returns focus to the Filters button, leaving the keyword and results untouched |
+| Categories panel | After it opens and finishes loading, focus moves to the first category chip; `Esc` closes the panel and returns focus to the Categories button. Category chips and the Male/Female switches are ordinary buttons: move with `Tab` and activate with `Enter`/`Space`; arrow-key movement between chips is not implemented |
+| Search field `Esc` | Two-step behaviour: cancel the running search first if one is in progress; otherwise clear the input. It neither cancels the displayed results nor blurs the field; use `Tab`/`Shift+Tab` to leave it |
+| Details (narrow window) | At a width of 1180 px or less the details are a bottom modal drawer: opening it moves focus to the Close button, `Tab`/`Shift+Tab` stay inside the drawer, and `Esc` closes it and returns focus to the result title that opened it (or the search field when that target is gone) |
+| Details (wide window) | Above 1180 px the details are a permanent third column, not a dialog; selecting a result does not move focus and `Esc` does not close the column |
+| Add-book dialog | `Tab` loops inside the dialog rather than reaching the page behind it; `Esc` closes it and returns focus to the button that opened it. `Enter` in a dialog input does not submit (the dialog has no form-submit semantics); `Tab` to OK and press `Enter`/`Space` |
+| Show more | Show more is an ordinary button; once the final batch is loaded the button disappears. Keyboard focus does not automatically land on a new result title, so `Tab` back into the list |
+
+#### Settings page
+
+| Action | Keyboard behaviour |
+| --- | --- |
+| Moving through the form | Inputs, selects, switches and buttons in the Settings cards follow DOM order in the `Tab` sequence; inputs get their accessible names from visually hidden `<label>` elements, and the switches are native checkboxes |
+| Output folder / proxy / backup paths | Type the path directly. `Enter` neither saves the settings nor triggers export or import; `Tab` to the corresponding button and press `Enter`/`Space` |
+| Export settings | With focus on Export settings, `Enter`/`Space` runs it. A blank path writes to the default location; on success the resolved path is filled back into the input |
+| Import settings | Type the file path, then `Tab` to Import settings and press `Enter`/`Space`. With a blank path the status line and toast report "Enter a file path" and focus returns to the path input |
+| Clear search cache (two-step confirmation) | The first `Enter`/`Space` only changes the button label to "Click again to clear" and keeps it armed for four seconds; a second activation within four seconds performs the clear, and a timeout restores the normal label. The status line is an `aria-live` region and receives the armed state when it has no other message; the button is disabled while the clear runs and the stats are refreshed on success |
+| Clear saved filters | A single activation clears them; there is no second confirmation |
+| Save settings | Submit with the Save changes button; `Enter` inside a field does not submit. Save failures appear as a summary in the `role="alert"` region at the top of the form |
+
+#### Screen-reader semantics
+
+* The first focusable element is a "Skip to content" link targeting the main content region (`tabindex="-1"`); focusable controls use a `:focus-visible` outline, and `prefers-reduced-motion: reduce` collapses animations and transitions to near zero.
+* Navigation uses a `tablist` / `tab` / `tabpanel` structure; `aria-selected` follows the active tab, and each panel is associated with its tab through `aria-labelledby`.
+* Primary inputs and selects have accessible names: visual labels are hidden with `.sr-only` but stay in the accessibility tree; at startup an input or select without a name mirrors its placeholder into `aria-label`. Icon-only buttons get a name through `aria-label` or `aria-labelledby`.
+* Dynamic messages use `role="status"` (which implies `aria-live="polite"`): search progress, the applied-filter strip, category hints, Settings status lines, search-cache status, import/export status, follow status, the update notice and the toast container are announced without stealing focus. Settings save failures and filter validation errors use `role="alert"`.
+* The result container is marked `aria-busy="true"` while a search runs and cleared afterwards; the music result list uses the same busy state.
+* The selected result card carries `aria-current="true"`; the title button's accessible name contains the title and, when match telemetry exists, the match tier and score explanation.
+* The narrow-window details drawer carries `role="dialog"` and `aria-modal="true"` and is named by the details title; the same node has no dialog role in the wide layout. The add-book dialog also uses `dialog` / `aria-modal` and focuses its first input when opened.
+* The toast close button is removed from the `Tab` sequence (`tabindex="-1"`). An action toast (for example "Open Settings") is itself a `role="button"`, does not auto-dismiss while focused, and runs its action on `Enter`/`Space`.
+
+#### Known limitations
+
+* There are no system-wide global hotkeys and no window-menu accelerators; shortcuts do nothing while the window is unfocused.
+* Cross-page combinations (`Ctrl+F`, `Ctrl+1`–`Ctrl+6`, `Ctrl+D`) are ignored while focus is in an input, select, textarea or editable region; move focus to a non-editable control first, for example `Tab` to a button or nav item. The field- and panel-specific `Esc` behaviour is described in the preceding section.
+* `Ctrl+D` only serves "download selected" on the Music tab; it does nothing on the other tabs. The sidebar text "Ctrl+D download selected" should be read with that restriction.
+* Sorting uses native `<select>` controls, not a custom sort chip group; category chips likewise have no arrow-key roving tabindex and are reached one by one with `Tab`.
+* `Esc` in the search field does not leave the field; it cancels a running search first and clears the text second. Use `Tab` to move out.
+* The wide-layout details column is not modal and `Esc` does not collapse it; only the narrow-window (≤ 1180 px) bottom drawer supports `Esc` closing and focus return.
+* The path inputs on the Settings page do not trigger export, import or save on `Enter`; focus must be moved to the corresponding button.
+* When Show more is activated from the keyboard and loads the final batch, the button is removed and focus may fall back to the start of the document instead of a new result title; `Tab` back into the list.
+* Toasts dismiss themselves after about four seconds by default (error messages last longer), and the close button on an ordinary toast is not in the `Tab` sequence; to re-read a message, check the corresponding status line or trigger the action again.
+* This section describes the keyboard and ARIA semantics in the code; it is not a claim that the app has passed a formal accessibility audit across every screen reader, webview engine, IME and high-contrast theme combination.
+
 ### general Settings
 
 Global runtime settings for downloads / concurrency / rate limits / directories and storage.
