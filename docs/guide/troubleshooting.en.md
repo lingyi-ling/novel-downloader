@@ -416,6 +416,19 @@ If the command succeeds, Python itself handles the path fine; the problem usuall
 * Files are written into a `NovelDL/` subdirectory of the chosen tree. Name clashes become `name (1).ext`, `name (2).ext`, … (case-insensitive), so existing files are never silently overwritten.
 * This setting only affects downloads of exported files from the History tab; music files keep using the music engine's own directories / system download flow.
 
+### 5.2 SAF Download Fails or Progress Stalls
+
+**Symptoms**: a History download into the custom directory fails with "Not enough storage space", "The file provider failed to write…", or "Network error…", and the file never appears in `NovelDL/`; or progress stays at "Connecting and preparing the file…".
+
+**Cause and fix**:
+
+1. **"Not enough storage space"**: the target volume (internal storage or SD card) is full or over quota (`ENOSPC` / `quota exceeded`). The app deliberately does **not** fall back to system Downloads here — switching targets usually fails the same way and would hide the real problem. Free space, or choose another directory / "Use system Downloads" in Settings → Download.
+2. **"The file provider failed to write…"**: the directory provider (system Files, a third-party file manager, cloud storage, and so on) failed to create or write the document. Retry first; if it persists, choose another directory or "Use system Downloads". System Downloads is written by DownloadManager and does not depend on that provider.
+3. **"Network error…" or "The server returned HTTP …"**: reading the file failed, which is unrelated to the target directory, so there is no fallback either. Check the API address and network as described in [§ 5 Android Cannot Reach the Computer](#5-android-cannot-reach-the-computer), then retry.
+4. **Progress stays at "Connecting and preparing the file…"**: the destination document exists but the server has not responded. The connect timeout is 10 seconds and the read timeout is 60 seconds; after a timeout the download fails as a network error. First confirm that novel-api is still running and reachable from the phone.
+5. **The bar is indeterminate and shows only "Written X"**: the server sent no `Content-Length` (for example, chunked transfer). That is normal, not a hang; the transfer still completes normally.
+6. Only permission/directory-unavailable failures (see § 5.1) fall back to system Downloads. On failure or cancellation the incomplete document from that attempt is deleted, and a retry downloads from the beginning rather than resuming the partial file.
+
 ---
 
 ## 6. Music Download Missing Dependencies

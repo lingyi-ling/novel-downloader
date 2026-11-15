@@ -186,8 +186,35 @@ When the grant stops working (revoked in system settings, the provider app was u
 
 "Use system Downloads" releases the persisted grant and returns to the default. If the directory is reachable but a file cannot be created (for example, the provider errors), the save fails with a message instead of silently writing somewhere else.
 
+### SAF download progress
+
+Downloads into the custom directory finish inside the History tab; they do not go through the notification shade:
+
+- After tapping "Download", that row's button is disabled and a progress display appears in the card. Only one transfer per file is allowed at a time; the button returns once the transfer finishes or fails.
+- **Connecting**: while the destination document exists but the server has not answered yet, the row shows "Connecting and preparing the file…" with an indeterminate bar, so it does not look frozen.
+- **Writing**: once the response arrives it shows "Written 1.2 MB / 8.0 MB (15%)"; the percentage comes from the server's `Content-Length` and is clamped to 0–100%.
+- **Unknown total length**: when the server uses chunked transfer or sends no `Content-Length`, the bar stays indeterminate and the text is only "Written 1.2 MB". At completion it settles on the bytes actually written instead of pretending 0% or jumping to an invented percentage.
+- **Throttling**: progress samples are emitted at most once per **150 ms** or per **256 KiB** written (whichever comes first); the first sample (0 bytes) and the final sample are always delivered. The bar therefore does not redraw for every 8 KiB chunk, while a slow network still gets a refresh at least every 150 ms.
+- The progress row disappears when the transfer finishes or fails, and the result is reported by a notice. Cancelling mid-transfer (leaving the History tab, closing the app) deletes the partial document that was created, so no truncated file is left behind.
+
+### SAF failure classes and fallback
+
+Write failures are classified by cause, and the target changes only when the directory itself is unusable:
+
+| Class | Typical cause | Behaviour and actionable message |
+| --- | --- | --- |
+| Permission / directory unavailable | Grant revoked in system settings, provider uninstalled or replaced, directory deleted or moved, app data restored to another device | **Falls back to system Downloads**: the partial document created by this attempt is deleted, DownloadManager downloads the file again into system Downloads, and the app reports "The custom download directory is unavailable; saving to system Downloads instead". The grant is checked both before the download and during the write, so nothing is written to the wrong place |
+| No space | Target volume full or quota exceeded (`ENOSPC`, `quota exceeded`) | **No fallback**; the app reports "Download failed: <file> (Not enough storage space)". Free space on the target volume, or choose another directory / "Use system Downloads" in Settings |
+| Provider write failure | The provider itself errors and cannot create or write the document | **No fallback**; the app reports "Download failed: <file> (The file provider failed to write; retry or switch to the system Downloads folder)". Retry first; if it persists, choose another directory or use system Downloads |
+| Network / HTTP | Connection dropped, non-2xx response | **No fallback**; the app reports "Network error — check the network or API address" or "The server returned HTTP <code>; the file was not saved". Fix the network/API problem and retry |
+
+- Why only permission failures fall back: a full volume or a broken provider usually fails in system Downloads as well, and switching would hide the real problem with the target directory. A lost grant, by contrast, means the directory is no longer usable, so staying on it has no point.
+- Every failure and every cancellation deletes the incomplete document created by that attempt, so no truncated file is left in `NovelDL/`; a fallback or retry downloads from the beginning rather than resuming the partial file.
+- The success notice names the actual location and file: "Saved to <folder>/NovelDL: <file>". If the provider adjusts the display name (for example, enforces an extension), the name it created is what appears.
+- None of this changes the naming rule: before every write the app lists the existing names in the directory and still de-duplicates clashes as `name (1).ext`, `name (2).ext`, … (case-insensitive), never overwriting existing files.
+
 !!! note "Scope"
-    The custom directory only affects downloads from the History tab. Downloading an exported file from a task's detail panel still goes through the system DownloadManager into system Downloads; music files follow the next section. See [Troubleshooting § custom download directory](./troubleshooting.en.md#51-the-custom-download-directory-saf-is-unavailable).
+    The custom directory only affects downloads from the History tab. Downloading an exported file from a task's detail panel still goes through the system DownloadManager into system Downloads; music files follow the next section. See [Troubleshooting § custom download directory](./troubleshooting.en.md#51-the-custom-download-directory-saf-is-unavailable) and [§ SAF download fails or progress stalls](./troubleshooting.en.md#52-saf-download-fails-or-progress-stalls).
 
 ## Tasks, Notifications, and Recovery
 
@@ -216,7 +243,12 @@ On the Music tab, choose a platform, search songs, select several results, and c
 
 - **Standalone mode**: when a track finishes, the app hands the audio to the system DownloadManager, which copies it into the public Downloads directory.
 - **Remote mode**: files stay on the computer; the app only shows the server-side path and does not pull the audio onto the phone.
-- **Lyrics**: the music engine saves lyrics by default (`save_lyric`) as `<stem>.lrc` next to the audio, plus `<stem>.zh.lrc` when a translation exists. The Android client currently **transfers only the audio file and does not copy the `.lrc` files into system Downloads**: in standalone mode they remain in the app-private engine directory, and in remote mode they remain on the computer. Use the desktop app or `novel-cli music download` when you need the lyric files.
+- **Lyrics**: the music engine saves lyrics by default (`save_lyric`) as `<stem>.lrc` next to the audio, plus `<stem>.zh.lrc` when a translation exists. In standalone mode a finished result row gets **lyric buttons**:
+    - With a single lyric file the original one-button row is kept and labelled "Lyrics"; a lone `.zh.lrc` (a translation without the original) is labelled "Translated lyrics" and is never mislabelled as the original. When the engine has only a translation it writes it into `<stem>.lrc`; that case still shows the single generic "Lyrics" button, which does not claim the file is the original.
+    - When both the original and the translation exist, the row shows "Original lyrics" and "Translated lyrics" buttons opening `<stem>.lrc` and `<stem>.zh.lrc`; they wrap on narrow screens or large font scales.
+    - A button appears **only when the file actually exists** inside the app-private engine music directory (`files/engine_home/downloads/music/`) and its path passes both the containment and existence checks. Lyric paths returned by the server (`lyric_paths`) are never trusted: remote-mode paths lie outside the local private directory, so **no lyric button appears**. Lyrics kept for a track skipped by `skip_existing` are checked and offered too, while a failed row never gets a button.
+    - Tapping a button hands the file to the system viewer (an app that handles lyrics or any text editor) through the existing `FileProvider` (`${applicationId}.fileprovider`) with a single-file, read-only URI grant: `text/x-lyric` is tried first, then `text/plain`. The provider exposes only `cache/updates/` and `files/engine_home/downloads/music/`, so a lyric URI cannot reach beyond the latter. A deleted file reports "The lyrics file is missing or was deleted"; when no app handles it the message is "No app can open the lyrics file".
+    - The `.lrc` files are still **not copied into system Downloads**: the buttons open the original files in the app-private directory, which disappear when the app is uninstalled. Use the desktop app or `novel-cli music download` when you need the `.lrc` files in a public directory. When at least one track has lyrics, the job-completion message also reports how many ("N with lyrics"); a track's original and translation count once.
 
 ## Built-in Update Check
 
