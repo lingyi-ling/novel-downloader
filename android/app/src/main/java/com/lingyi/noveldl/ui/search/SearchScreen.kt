@@ -16,7 +16,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -30,7 +32,9 @@ import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.BookmarkAdded
 import androidx.compose.material.icons.outlined.Clear
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -67,6 +71,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -77,6 +82,8 @@ import com.lingyi.noveldl.data.AddTaskRequest
 import com.lingyi.noveldl.data.BrowseCategory
 import com.lingyi.noveldl.data.BrowseRequest
 import com.lingyi.noveldl.data.Api
+import com.lingyi.noveldl.data.SearchHistoryEntry
+import com.lingyi.noveldl.data.SearchHistoryStore
 import com.lingyi.noveldl.data.SearchResult
 import com.lingyi.noveldl.data.SelectionStore
 import com.lingyi.noveldl.data.decodeSelectedSites
@@ -106,6 +113,13 @@ fun SearchScreen(onMessage: (String) -> Unit) {
     var showFilters by rememberSaveable { mutableStateOf(false) }
     var showDatePicker by remember { mutableStateOf(false) }
     var keyword by rememberSaveable { mutableStateOf("") }
+    // Recent search terms, newest first. Loaded once from the private file and
+    // updated from each store mutation, so an offline search is still quick to
+    // repeat. The list never contains account information.
+    val historyStore = remember(context) { SearchHistoryStore(context) }
+    var searchHistory by remember {
+        mutableStateOf<List<SearchHistoryEntry>>(emptyList())
+    }
     // Stored as the comma-separated format shared with SelectionStore.
     var selectedSitesEncoded by rememberSaveable {
         mutableStateOf(encodeSelectedSites(selectionStore.selectedSites()))
@@ -162,6 +176,13 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             }
     }
 
+    // Load the persisted terms once. Guard with isEmpty so a search submitted
+    // during startup is not overwritten by the (older) snapshot.
+    LaunchedEffect(historyStore) {
+        val stored = historyStore.snapshot()
+        if (searchHistory.isEmpty()) searchHistory = stored
+    }
+
     LaunchedEffect(siteReloadKey) {
         sitesLoading = true
         Api.call { Api.service().sites() }
@@ -192,6 +213,10 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             showFilters = true
             return
         }
+        // Remember the submitted term before the network call: a search that
+        // fails or runs offline is exactly the one worth repeating later.
+        // The store trims, de-duplicates and caps the list.
+        scope.launch { searchHistory = historyStore.record(query) }
         loading = true
         error = null
         scope.launch {
@@ -210,6 +235,12 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                 }
             loading = false
         }
+    }
+
+    /** Fills the field from a remembered term and searches it immediately. */
+    fun searchFromHistory(query: String) {
+        keyword = query
+        runSearch(query)
     }
 
     fun runRank() {
@@ -363,6 +394,19 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(8.dp))
+        if (searchHistory.isNotEmpty()) {
+            SearchHistorySection(
+                entries = searchHistory,
+                onPick = ::searchFromHistory,
+                onDelete = { query ->
+                    scope.launch { searchHistory = historyStore.remove(query) }
+                },
+                onClear = {
+                    scope.launch { searchHistory = historyStore.clear() }
+                },
+            )
+            Spacer(Modifier.height(8.dp))
+        }
         Box {
             // The field is only a display: the overlay below owns the
             // semantics, so TalkBack gets one control carrying the current
@@ -638,9 +682,88 @@ fun SearchScreen(onMessage: (String) -> Unit) {
     }
 
 /**
+ * Recent-search section: a heading with a clear-all action and one chip per
+ * term. Tapping a chip re-runs that search; the trailing X deletes only that
+ * term. Chips wrap via [FlowRow] so a long translation or a 2.0 font scale
+ * does not push entries off screen, and each control names the term it acts on
+ * for screen readers.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SearchHistorySection(
+    entries: List<SearchHistoryEntry>,
+    onPick: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onClear: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                stringResource(R.string.search_history_title),
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onClear) {
+                Text(stringResource(R.string.search_history_clear))
+            }
+        }
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            entries.forEach { entry ->
+                val deleteLabel = stringResource(
+                    R.string.search_history_delete_named,
+                    entry.query,
+                )
+                AssistChip(
+                    onClick = { onPick(entry.query) },
+                    label = {
+                        Text(
+                            entry.query,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 220.dp),
+                        )
+                    },
+                    trailingIcon = {
+                        // Separate delete target: the chip itself re-searches,
+                        // so a tap on the X must remove only that one term.
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clickable(
+                                    role = Role.Button,
+                                    onClickLabel = deleteLabel,
+                                ) { onDelete(entry.query) }
+                                .semantics { contentDescription = deleteLabel },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Outlined.Close,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+/**
  * The read-only relevance annotation the server adds to search rows: a short
  * visible label ([labelRes], optionally with [labelArgs]) plus an accessible
  * description. [scoreText] is appended to the visible label when present.
+ *
+ * [descriptionUsesScore] and [descriptionUsesLabel] select which placeholders
+ * [descriptionRes] receives: the score variant takes the label and the score,
+ * the label variant only the label, and the default receives [labelArgs].
  */
 internal data class SearchMatchBadge(
     @StringRes val labelRes: Int,
@@ -648,16 +771,30 @@ internal data class SearchMatchBadge(
     val scoreText: String? = null,
     @StringRes val descriptionRes: Int = labelRes,
     val descriptionUsesScore: Boolean = false,
+    val descriptionUsesLabel: Boolean = false,
 )
 
 /**
  * Maps the response-level `query_intent` to the chip shown next to the result
  * count, or `null` when the server has no clear verdict. Unknown values from a
  * newer server are hidden rather than guessed, matching the desktop front.
+ *
+ * The visible label stays the documented `书名匹配` / `作者匹配`, while the
+ * spoken description names the chip's meaning ("查询意图：…"): beside the bare
+ * result count, "书名匹配" alone reads like an active filter. The description
+ * embeds the same visible label, so both stay in sync.
  */
 internal fun searchIntentBadge(intent: String?): SearchMatchBadge? = when (intent) {
-    "title" -> SearchMatchBadge(labelRes = R.string.search_intent_title)
-    "author" -> SearchMatchBadge(labelRes = R.string.search_intent_author)
+    "title" -> SearchMatchBadge(
+        labelRes = R.string.search_intent_title,
+        descriptionRes = R.string.search_intent_desc,
+        descriptionUsesLabel = true,
+    )
+    "author" -> SearchMatchBadge(
+        labelRes = R.string.search_intent_author,
+        descriptionRes = R.string.search_intent_desc,
+        descriptionUsesLabel = true,
+    )
     else -> null
 }
 
@@ -716,10 +853,12 @@ private fun SearchMatchBadgeChip(badge: SearchMatchBadge) {
     val visible = badge.scoreText?.let { "$label · $it" } ?: label
     // The terse badge alone ("Exact") lacks context for a screen reader, so
     // replace its semantics with the full description.
-    val description = if (badge.descriptionUsesScore && badge.scoreText != null) {
-        stringResource(badge.descriptionRes, label, badge.scoreText)
-    } else {
-        stringResource(badge.descriptionRes, *badge.labelArgs.toTypedArray())
+    val description = when {
+        badge.descriptionUsesScore && badge.scoreText != null -> {
+            stringResource(badge.descriptionRes, label, badge.scoreText)
+        }
+        badge.descriptionUsesLabel -> stringResource(badge.descriptionRes, label)
+        else -> stringResource(badge.descriptionRes, *badge.labelArgs.toTypedArray())
     }
     Text(
         visible,
@@ -901,6 +1040,36 @@ private fun searchOrderLabelRes(order: SearchOrder): Int = when (order) {
 }
 
 /**
+ * Role announced for the sort-key and direction chips. Material3's
+ * [FilterChip] is a multi-select control and hard-codes `Role.Checkbox`, but
+ * each group here allows exactly one active option, so the chip must report a
+ * radio button instead. Exposed as a value so the JVM unit test can pin the
+ * contract without a Compose UI test dependency.
+ */
+internal val searchSortChipRole: Role = Role.RadioButton
+
+/**
+ * One chip of a mutually exclusive sort group. The [Role.RadioButton] is set
+ * on the caller's modifier: Compose merges a node's semantics inner-to-outer,
+ * so this outer role overrides the checkbox role [FilterChip] applies inside
+ * itself, while the chip's own selected state is preserved. Chips sit in a
+ * [selectableGroup], so TalkBack announces e.g. "升序, radio button, selected".
+ */
+@Composable
+private fun SearchSortChip(
+    selected: Boolean,
+    label: String,
+    onClick: () -> Unit,
+) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(label) },
+        modifier = Modifier.semantics { role = searchSortChipRole },
+    )
+}
+
+/**
  * Sort-key and direction chips. [FlowRow] is used for both groups so a long
  * translation or a 2.0 font scale wraps onto a second line instead of
  * squeezing the chips or clipping the last one.
@@ -927,10 +1096,10 @@ private fun SearchSortSelector(
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             SearchSort.entries.forEach { option ->
-                FilterChip(
+                SearchSortChip(
                     selected = sort == option,
+                    label = stringResource(searchSortLabelRes(option)),
                     onClick = { onSortChange(option) },
-                    label = { Text(stringResource(searchSortLabelRes(option))) },
                 )
             }
         }
@@ -949,10 +1118,10 @@ private fun SearchSortSelector(
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             SearchOrder.entries.forEach { option ->
-                FilterChip(
+                SearchSortChip(
                     selected = order == option,
+                    label = stringResource(searchOrderLabelRes(option)),
                     onClick = { onOrderChange(option) },
-                    label = { Text(stringResource(searchOrderLabelRes(option))) },
                 )
             }
         }

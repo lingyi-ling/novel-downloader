@@ -4,7 +4,9 @@ import com.lingyi.noveldl.R
 import com.lingyi.noveldl.data.SearchResponse
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -66,5 +68,22 @@ class SearchIntentTest {
         assertNull(searchIntentBadge("either"))
         assertNull(searchIntentBadge("book"))
         assertNull(searchIntentBadge("Title"))
+    }
+
+    @Test
+    fun chipsCarryAQueryIntentDescriptionThatKeepsTheVisibleLabel() {
+        val title = searchIntentBadge("title")!!
+        assertEquals(R.string.search_intent_title, title.labelRes)
+        assertEquals(R.string.search_intent_desc, title.descriptionRes)
+        assertTrue(title.descriptionUsesLabel)
+        assertFalse(title.descriptionUsesScore)
+        assertTrue(title.labelArgs.isEmpty())
+
+        val author = searchIntentBadge("author")!!
+        assertEquals(R.string.search_intent_author, author.labelRes)
+        assertEquals(R.string.search_intent_desc, author.descriptionRes)
+        assertTrue(author.descriptionUsesLabel)
+        assertFalse(author.descriptionUsesScore)
+        assertTrue(author.labelArgs.isEmpty())
     }
 }

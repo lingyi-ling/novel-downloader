@@ -108,6 +108,7 @@ class SearchMatchBadgeTest {
         assertEquals("0.76", badge.scoreText)
         assertEquals(R.string.search_match_desc_scored, badge.descriptionRes)
         assertTrue(badge.descriptionUsesScore)
+        assertFalse(badge.descriptionUsesLabel)
         assertTrue(badge.labelArgs.isEmpty())
     }
 
@@ -119,6 +120,7 @@ class SearchMatchBadgeTest {
         assertNull(badge.scoreText)
         assertEquals(R.string.search_match_desc, badge.descriptionRes)
         assertFalse(badge.descriptionUsesScore)
+        assertFalse(badge.descriptionUsesLabel)
     }
 
     @Test
@@ -130,6 +132,7 @@ class SearchMatchBadgeTest {
         assertNull(badge.scoreText)
         assertEquals(R.string.search_match_score_label, badge.descriptionRes)
         assertFalse(badge.descriptionUsesScore)
+        assertFalse(badge.descriptionUsesLabel)
     }
 
     @Test
