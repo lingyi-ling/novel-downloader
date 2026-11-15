@@ -111,8 +111,8 @@ The "Advanced filters" row below the search box expands optional conditions:
 The top of the expanded "Advanced filters" panel also holds the result ordering:
 
 - **Sort by**: `Relevance` (default), `Quality`, `Word count`, `Updated`. `Relevance` uses the same combined score as the match badge (`quality`); `Quality` orders by source priority (`priority`); `Word count` by word count (`words`); `Updated` by the last update date (`update`).
-- **Direction**: `Descending` (default) / `Ascending`.
-- The ordering lives in the screen's `SavedStateHandle` alongside the filters, so it is restored after a tab switch and after a system-initiated process death when the app is restored from Recents. A re-search or retry sends the current selection.
+- **Direction**: `Descending` / `Ascending`. Each key has a natural direction: `Relevance`, `Word count` and `Updated` are descending, while `Quality` (source priority) is ascending, so preferred sources come first. **Switching to another sort key resets the direction to that key's natural direction**; re-selecting the active key leaves the direction alone, so a manual `Descending`/`Ascending` choice survives an accidental tap.
+- The ordering lives in the screen's `SavedStateHandle` alongside the filters, so it is restored after a tab switch and after a system-initiated process death when the app is restored from Recents. A re-search or retry sends the current selection. On restore, the saved direction wins; only a missing or invalid direction falls back to the restored key's natural direction.
 - Ordering is not counted in "Active filters: N" because it changes the presentation, not the result set. "Clear filters" resets the ordering to `Relevance` + `Descending`.
 - Ordering only changes the list order, not the result contents. The match badge still explains keyword relevance (`match_tier` / `rank_score`) and does not change with the sort key or direction.
 
