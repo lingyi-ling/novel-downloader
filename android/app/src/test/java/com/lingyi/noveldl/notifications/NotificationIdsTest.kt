@@ -67,4 +67,16 @@ class NotificationIdsTest {
         val floor = NotificationIds.TASK_ID_FLOOR
         assertEquals(floor + 1, NotificationIds.nextCandidate(floor))
     }
+
+    @Test
+    fun theSummaryIdCanNeverBeHandedToATask() {
+        assertTrue(NotificationIds.SUMMARY_ID >= 1)
+        assertTrue(NotificationIds.SUMMARY_ID < NotificationIds.TASK_ID_FLOOR)
+        repeat(5_000) { index ->
+            assertNotEquals(
+                NotificationIds.SUMMARY_ID,
+                NotificationIds.stableTaskId("site/book/$index"),
+            )
+        }
+    }
 }

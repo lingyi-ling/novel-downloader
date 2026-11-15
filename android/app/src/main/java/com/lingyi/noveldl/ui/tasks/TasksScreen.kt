@@ -197,6 +197,10 @@ fun TasksScreen(
                         onMessage(context.getString(R.string.tasks_notification_off_hint))
                     }
                 }
+                // The same poll feeds the notification group: the summary can
+                // report running tasks only because it sees them here, not
+                // just the transitions that posted a child notification.
+                TaskNotifier.sync(context, tasks)
                 // Merge the authoritative live list into the persisted
                 // history. A stored task that is active but absent from the
                 // response is marked interrupted (and therefore retryable)

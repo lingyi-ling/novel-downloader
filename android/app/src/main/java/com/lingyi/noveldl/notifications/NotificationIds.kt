@@ -16,10 +16,20 @@ package com.lingyi.noveldl.notifications
  */
 object NotificationIds {
 
-    /** Lowest id handed out; keeps clear of any future summary/fixed ids. */
+    /** Lowest id handed out; keeps clear of the group summary's fixed id. */
     const val TASK_ID_FLOOR: Int = 1_000
 
     const val TASK_ID_SPAN: Int = Int.MAX_VALUE - TASK_ID_FLOOR
+
+    /**
+     * The one notification id owned by the group summary.
+     *
+     * It sits below [TASK_ID_FLOOR] so no task hash can ever land on it, and it
+     * doubles as the summary PendingIntent's request code: task request codes
+     * start at 1000, so a task tap can never retarget the summary or vice
+     * versa.
+     */
+    const val SUMMARY_ID: Int = 1
 
     private val processAllocator = TaskNotificationIds()
 
