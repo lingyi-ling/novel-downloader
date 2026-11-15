@@ -26,6 +26,18 @@ data class SearchResult(
     val update_date: String = "",
     val word_count: String = "",
     val priority: Int = 0,
+    /**
+     * Read-only relevance annotations added by `POST /api/v1/search` and
+     * `novel-cli search --json`. They are absent from cached rows, browse
+     * results, and older embedded-engine responses, so they stay optional and
+     * the UI hides the badge when neither is present.
+     *
+     * [rank_score] is `0..1`; [match_tier] is `0..4` (4 exact, 3 prefix,
+     * 2 contains, 1 partial, 0 none). Both are derived per call and never
+     * sent back to the server.
+     */
+    val rank_score: Double? = null,
+    val match_tier: Int? = null,
 )
 
 /**

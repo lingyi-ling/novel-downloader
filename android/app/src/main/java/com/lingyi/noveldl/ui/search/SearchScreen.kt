@@ -1,5 +1,7 @@
 package com.lingyi.noveldl.ui.search
 
+import androidx.annotation.StringRes
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -83,6 +86,7 @@ import com.lingyi.noveldl.data.toggleSiteSelection
 import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.ui.searchPlaceholderRes
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -538,16 +542,28 @@ fun SearchScreen(onMessage: (String) -> Unit) {
                     Column(Modifier.padding(12.dp)) {
                         Text(result.title, style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(4.dp))
-                        Text(
-                            stringResource(
-                                R.string.search_meta,
-                                result.author.ifBlank { "-" },
-                                result.word_count.ifBlank { "-" },
-                                result.update_date.ifBlank { "-" },
-                            ),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        // Badge and metadata share a flow row: on a narrow
+                        // screen or at a 2.0 font scale they wrap instead of
+                        // squeezing the title or the identity line.
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            searchMatchBadge(result)?.let { badge ->
+                                SearchMatchBadgeChip(badge)
+                            }
+                            Text(
+                                stringResource(
+                                    R.string.search_meta,
+                                    result.author.ifBlank { "-" },
+                                    result.word_count.ifBlank { "-" },
+                                    result.update_date.ifBlank { "-" },
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         if (result.latest_chapter.isNotBlank()) {
                             Text(
                                 result.latest_chapter,
@@ -597,6 +613,93 @@ fun SearchScreen(onMessage: (String) -> Unit) {
             }
         }
     }
+
+/**
+ * The read-only relevance annotation the server adds to search rows: a short
+ * visible label ([labelRes], optionally with [labelArgs]) plus an accessible
+ * description. [scoreText] is appended to the visible label when present.
+ */
+internal data class SearchMatchBadge(
+    @StringRes val labelRes: Int,
+    val labelArgs: List<String> = emptyList(),
+    val scoreText: String? = null,
+    @StringRes val descriptionRes: Int = labelRes,
+    val descriptionUsesScore: Boolean = false,
+)
+
+/**
+ * Maps a search row's `match_tier` / `rank_score` to its badge, or `null` when
+ * both are absent (cached rows, browse results, older embedded engines). An
+ * out-of-range score is treated as absent; a known tier still shows without it.
+ */
+internal fun searchMatchBadge(result: SearchResult): SearchMatchBadge? {
+    val score = formatSearchRankScore(result.rank_score)
+    val labelRes = result.match_tier?.let(::matchTierLabelRes)
+    return when {
+        labelRes != null -> SearchMatchBadge(
+            labelRes = labelRes,
+            scoreText = score,
+            descriptionRes = if (score != null) {
+                R.string.search_match_desc_scored
+            } else {
+                R.string.search_match_desc
+            },
+            descriptionUsesScore = score != null,
+        )
+        // A score without a tier still conveys relevance; label it as such
+        // instead of dropping a field the server did send.
+        score != null -> SearchMatchBadge(
+            labelRes = R.string.search_match_score_label,
+            labelArgs = listOf(score),
+        )
+        else -> null
+    }
+}
+
+/** `4` exact, `3` prefix, `2` contains, `1` partial, `0` none. */
+internal fun matchTierLabelRes(tier: Int): Int? = when (tier) {
+    4 -> R.string.search_match_exact
+    3 -> R.string.search_match_prefix
+    2 -> R.string.search_match_contains
+    1 -> R.string.search_match_partial
+    0 -> R.string.search_match_none
+    else -> null
+}
+
+/**
+ * Renders `rank_score` as two decimals, or `null` when it is absent, not a
+ * finite number, or outside the documented `0..1` range — a malformed value
+ * must not produce a misleading badge.
+ */
+internal fun formatSearchRankScore(score: Double?): String? {
+    if (score == null || score.isNaN() || score < 0.0 || score > 1.0) return null
+    return String.format(Locale.US, "%.2f", score)
+}
+
+@Composable
+private fun SearchMatchBadgeChip(badge: SearchMatchBadge) {
+    val label = stringResource(badge.labelRes, *badge.labelArgs.toTypedArray())
+    val visible = badge.scoreText?.let { "$label · $it" } ?: label
+    // The terse badge alone ("Exact") lacks context for a screen reader, so
+    // replace its semantics with the full description.
+    val description = if (badge.descriptionUsesScore && badge.scoreText != null) {
+        stringResource(badge.descriptionRes, label, badge.scoreText)
+    } else {
+        stringResource(badge.descriptionRes, *badge.labelArgs.toTypedArray())
+    }
+    Text(
+        visible,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSecondaryContainer,
+        modifier = Modifier
+            .background(
+                MaterialTheme.colorScheme.secondaryContainer,
+                RoundedCornerShape(4.dp),
+            )
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+            .clearAndSetSemantics { contentDescription = description },
+    )
+}
 
 /**
  * The "advanced filters" disclosure row. The count includes entries that are

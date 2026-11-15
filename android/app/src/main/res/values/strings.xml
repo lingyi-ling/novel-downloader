@@ -53,6 +53,14 @@
     <string name="search_task_added">已加入下载队列</string>
     <string name="search_add_task_named">将 %1$s 加入下载队列</string>
     <string name="search_meta">%1$s · %2$s · %3$s</string>
+    <string name="search_match_exact">精确</string>
+    <string name="search_match_prefix">前缀</string>
+    <string name="search_match_contains">包含</string>
+    <string name="search_match_partial">部分</string>
+    <string name="search_match_none">无匹配</string>
+    <string name="search_match_score_label">相关度 %1$s</string>
+    <string name="search_match_desc">匹配度：%1$s</string>
+    <string name="search_match_desc_scored">匹配度：%1$s，相关度评分 %2$s</string>
     <string name="search_follow_add">追更</string>
     <string name="search_follow_in_progress">正在加入追更…</string>
     <string name="search_follow_in_list">已在追更列表中</string>

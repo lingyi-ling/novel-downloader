@@ -49,6 +49,14 @@
     <string name="search_task_added">Added to the download queue</string>
     <string name="search_add_task_named">Add %1$s to the download queue</string>
     <string name="search_meta">%1$s · %2$s · %3$s</string>
+    <string name="search_match_exact">Exact</string>
+    <string name="search_match_prefix">Prefix</string>
+    <string name="search_match_contains">Contains</string>
+    <string name="search_match_partial">Partial</string>
+    <string name="search_match_none">No match</string>
+    <string name="search_match_score_label">Relevance %1$s</string>
+    <string name="search_match_desc">Match: %1$s</string>
+    <string name="search_match_desc_scored">Match: %1$s, relevance score %2$s</string>
     <string name="search_follow_add">Follow updates</string>
     <string name="search_follow_in_progress">Following…</string>
     <string name="search_follow_in_list">Already in the follow list</string>
