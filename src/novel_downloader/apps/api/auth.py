@@ -74,8 +74,25 @@ def is_authorized(
 
 async def require_token(
     request: Request,
-    authorization: Annotated[str | None, Header()] = None,
-    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    authorization: Annotated[
+        str | None,
+        Header(
+            description=(
+                "Optional bearer credential: 'Bearer <token>'. Required only "
+                "when the server was started with an API token."
+            )
+        ),
+    ] = None,
+    x_api_key: Annotated[
+        str | None,
+        Header(
+            alias="X-API-Key",
+            description=(
+                "Optional API key alternative to the Authorization header. "
+                "Required only when the server was started with an API token."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """
     Enforce ``Authorization: Bearer <token>`` or ``X-API-Key: <token>``.

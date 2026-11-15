@@ -297,7 +297,13 @@ def _gender_code(gender: str) -> str:
 
 
 @router.get("/browse/categories", tags=["browse"])
-async def browse_categories(site: SiteKey, request: Request) -> dict[str, Any]:
+async def browse_categories(
+    site: Annotated[
+        SiteKey,
+        Query(description="Site key whose browse categories are returned."),
+    ],
+    request: Request,
+) -> dict[str, Any]:
     """Return a site's browse categories, grouped by audience."""
     searcher_cls = _browse_searcher(site, "categories")
     timeout = _blocking_timeout(request, "browse")
@@ -741,15 +747,60 @@ def _reject_unknown_stream_sites(sites: list[str]) -> None:
     responses=SSE_RESPONSES,
 )
 async def stream_search(
-    keyword: Annotated[Keyword, Query()],
-    sites: Annotated[str | None, Query(max_length=4096)] = None,
-    per_site_limit: Annotated[int, Query(ge=1, le=MAX_PER_SITE_LIMIT)] = 5,
+    keyword: Annotated[
+        Keyword, Query(description="Search keyword, 1-200 characters after trimming.")
+    ],
+    sites: Annotated[
+        str | None,
+        Query(
+            max_length=4096,
+            description=(
+                "Comma-separated site keys. Omit to search every enabled site; "
+                "an empty value searches none."
+            ),
+        ),
+    ] = None,
+    per_site_limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=MAX_PER_SITE_LIMIT,
+            description="Maximum number of results requested from each site.",
+        ),
+    ] = 5,
     timeout: Annotated[
-        float, Query(gt=0, le=MAX_SEARCH_TIMEOUT, allow_inf_nan=False)
+        float,
+        Query(
+            gt=0,
+            le=MAX_SEARCH_TIMEOUT,
+            allow_inf_nan=False,
+            description="Per-site wall-clock budget in seconds.",
+        ),
     ] = 5.0,
-    min_words: Annotated[int | None, Query(ge=0, le=MAX_SEARCH_WORDS)] = None,
-    max_words: Annotated[int | None, Query(ge=0, le=MAX_SEARCH_WORDS)] = None,
-    updated_after: Annotated[date | None, Query()] = None,
+    min_words: Annotated[
+        int | None,
+        Query(
+            ge=0,
+            le=MAX_SEARCH_WORDS,
+            description="Keep only results whose word count is at least this value.",
+        ),
+    ] = None,
+    max_words: Annotated[
+        int | None,
+        Query(
+            ge=0,
+            le=MAX_SEARCH_WORDS,
+            description="Keep only results whose word count is at most this value.",
+        ),
+    ] = None,
+    updated_after: Annotated[
+        date | None,
+        Query(
+            description=(
+                "Keep only results updated on or after this date (YYYY-MM-DD)."
+            )
+        ),
+    ] = None,
 ) -> StreamingResponse:
     """
     Stream search results as Server-Sent Events.
@@ -909,10 +960,26 @@ def _tasks_snapshot(mgr: TaskManager) -> dict[str, list[dict[str, Any]]]:
 @router.get("/tasks", tags=["tasks"])
 async def list_tasks(
     mgr: Annotated[TaskManager, Depends(get_manager)],
-    status_filter: Annotated[Status | None, Query(alias="status")] = None,
-    site: Annotated[SiteKey | None, Query()] = None,
-    offset: Annotated[int | None, Query(ge=0)] = None,
-    limit: Annotated[int | None, Query(ge=1, le=MAX_PAGE_LIMIT)] = None,
+    status_filter: Annotated[
+        Status | None,
+        Query(alias="status", description="Keep only tasks in this lifecycle state."),
+    ] = None,
+    site: Annotated[
+        SiteKey | None,
+        Query(description="Keep only tasks for this site key (case-insensitive)."),
+    ] = None,
+    offset: Annotated[
+        int | None,
+        Query(ge=0, description="Number of filtered tasks to skip."),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            le=MAX_PAGE_LIMIT,
+            description="Maximum number of filtered tasks to return.",
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """
     Return pending, running and recently completed tasks.
@@ -1005,7 +1072,10 @@ def _find_task(mgr: TaskManager, task_id: str) -> DownloadTask | None:
 
 @router.get("/tasks/{task_id}", tags=["tasks"])
 async def get_task(
-    task_id: str,
+    task_id: Annotated[
+        str,
+        PathParam(description="Task id issued by POST /api/v1/tasks."),
+    ],
     mgr: Annotated[TaskManager, Depends(get_manager)],
 ) -> dict[str, Any]:
     """Return a single task by id."""
@@ -1031,7 +1101,10 @@ async def create_task(
 
 @router.post("/tasks/{task_id}/cancel", tags=["tasks"])
 async def cancel_task(
-    task_id: str,
+    task_id: Annotated[
+        str,
+        PathParam(description="Task id issued by POST /api/v1/tasks."),
+    ],
     mgr: Annotated[TaskManager, Depends(get_manager)],
 ) -> dict[str, bool]:
     """Cancel a pending or running task."""
@@ -1137,7 +1210,12 @@ async def stream_login_requests() -> StreamingResponse:
 
 @router.post("/login/requests/{req_id}", tags=["login"])
 async def submit_login_request(
-    req_id: str,
+    req_id: Annotated[
+        str,
+        PathParam(
+            description="Login credential request id from GET /api/v1/login/requests."
+        ),
+    ],
     body: LoginSubmitRequest,
 ) -> dict[str, bool]:
     """
@@ -1314,8 +1392,10 @@ async def add_watchlist(
 
 @router.delete("/watchlist/{site}/{book_id}", tags=["watchlist"])
 async def remove_watchlist(
-    site: SiteKey,
-    book_id: BookId,
+    site: Annotated[SiteKey, PathParam(description="Site key of the followed book.")],
+    book_id: Annotated[
+        BookId, PathParam(description="Site-specific id of the followed book.")
+    ],
     store: Annotated[WatchlistStore, Depends(get_watchlist_store)],
 ) -> dict[str, bool]:
     """Stop following a book."""
@@ -1364,8 +1444,18 @@ async def check_watchlist(
 
 @router.get("/history", tags=["history"])
 async def history(
-    offset: Annotated[int | None, Query(ge=0)] = None,
-    limit: Annotated[int | None, Query(ge=1, le=MAX_PAGE_LIMIT)] = None,
+    offset: Annotated[
+        int | None,
+        Query(ge=0, description="Number of newest matching files to skip."),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            le=MAX_PAGE_LIMIT,
+            description="Maximum number of newest matching files to return.",
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """
     List exported ``txt`` / ``epub`` files in the configured output dir.
@@ -1749,9 +1839,22 @@ async def music_export(body: MusicExportRequest) -> dict[str, Any]:
 
 @router.get("/music/health", tags=["music"])
 async def music_health(
-    platform: Annotated[str | None, Query()] = None,
+    platform: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Music platform key to probe. Omit to probe every registered platform."
+            )
+        ),
+    ] = None,
     timeout: Annotated[
-        float, Query(gt=0, le=60, allow_inf_nan=False)
+        float,
+        Query(
+            gt=0,
+            le=60,
+            allow_inf_nan=False,
+            description="Per-platform health-check budget in seconds.",
+        ),
     ] = DEFAULT_MUSIC_HEALTH_TIMEOUT,
 ) -> list[dict[str, Any]]:
     """
@@ -2149,7 +2252,13 @@ async def create_music_job(
 
 @router.get("/music/jobs/{job_id}", tags=["music"])
 async def music_job_status(
-    job_id: Annotated[str, PathParam(pattern=MUSIC_ID_PATTERN)],
+    job_id: Annotated[
+        str,
+        PathParam(
+            pattern=MUSIC_ID_PATTERN,
+            description="Music job id returned by POST /api/v1/music/jobs.",
+        ),
+    ],
 ) -> dict[str, Any]:
     """
     Return the status of a queued, running or finished music job.
