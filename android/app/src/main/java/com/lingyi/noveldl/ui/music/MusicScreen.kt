@@ -60,6 +60,7 @@ import com.lingyi.noveldl.data.ApiErrorCode
 import com.lingyi.noveldl.data.EmbeddedEngine
 import com.lingyi.noveldl.data.MusicHealthItem
 import com.lingyi.noveldl.data.MUSIC_ALL_PLATFORMS
+import com.lingyi.noveldl.data.MusicLyricFile
 import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.ui.progressFraction
 import kotlinx.coroutines.delay
@@ -521,9 +522,10 @@ fun MusicScreen(
             val trackKey = MusicJobResults.trackKey(track)
             val checked = trackKey in search.selectedKeys
             // Verified by [MusicJobRunner]: absent until a finished download
-            // really wrote `<stem>.lrc` next to the audio inside the app's
-            // private music directory.
-            val lyricPath = jobState.lyricPaths[trackKey]
+            // really wrote lyrics next to the audio inside the app's private
+            // music directory. The list holds the original first and the
+            // `.zh.lrc` translation second when it exists.
+            val lyricFiles = jobState.lyricPaths[trackKey].orEmpty()
             Card(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     // The whole card selects the track: a 24 dp checkbox alone
@@ -561,16 +563,14 @@ fun MusicScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            // Only present when a lyric was really saved: a
-                            // stale path would make the button a silent no-op.
-                            if (lyricPath != null) {
-                                val openLabel = stringResource(
-                                    R.string.music_lyric_open_named,
-                                    track.name,
-                                )
-                                TextButton(
-                                    onClick = {
-                                        when (MusicLyricOpener.open(context, lyricPath)) {
+                            // Only present when a lyric really was saved: a
+                            // stale path would make a button a silent no-op.
+                            if (lyricFiles.isNotEmpty()) {
+                                MusicLyricButtons(
+                                    trackName = track.name,
+                                    files = lyricFiles,
+                                    onResult = { result ->
+                                        when (result) {
                                             MusicLyricOpenResult.Missing -> onMessage(
                                                 context.getString(R.string.music_lyric_missing),
                                             )
@@ -580,15 +580,7 @@ fun MusicScreen(
                                             MusicLyricOpenResult.Opened -> Unit
                                         }
                                     },
-                                    modifier = Modifier.semantics {
-                                        contentDescription = openLabel
-                                    },
-                                ) {
-                                    Text(
-                                        stringResource(R.string.music_lyrics),
-                                        style = MaterialTheme.typography.labelSmall,
-                                    )
-                                }
+                                )
                             }
                         }
                         if (track.vip) {
@@ -621,6 +613,75 @@ fun MusicScreen(
             }
         }
     }
+
+/**
+ * Lyric buttons of one downloaded track.
+ *
+ * A single saved file keeps the historical one-button row (the original is
+ * labelled "Lyrics"/"歌词"). When the engine also wrote the `.zh.lrc`
+ * translation, each slot gets its own button ("Original lyrics"/"Translated
+ * lyrics"), laid out in a [FlowRow] so a narrow phone or a large font scale
+ * wraps instead of clipping. The lane is decided by the stable lang slot; an
+ * unknown slot falls back to the generic label.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MusicLyricButtons(
+    trackName: String,
+    files: List<MusicLyricFile>,
+    onResult: (MusicLyricOpenResult) -> Unit,
+) {
+    val context = LocalContext.current
+
+    fun open(path: String) {
+        onResult(MusicLyricOpener.open(context, path))
+    }
+
+    if (files.size == 1) {
+        val entry = files.single()
+        val label = if (entry.lang == MusicLyrics.LANG_ORIGINAL) {
+            stringResource(R.string.music_lyrics)
+        } else {
+            lyricSlotLabel(entry.lang)
+        }
+        val openLabel = stringResource(R.string.music_lyric_open_named, trackName)
+        TextButton(
+            onClick = { open(entry.path) },
+            modifier = Modifier.semantics { contentDescription = openLabel },
+        ) {
+            Text(label, style = MaterialTheme.typography.labelSmall)
+        }
+        return
+    }
+
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        files.forEach { entry ->
+            val label = lyricSlotLabel(entry.lang)
+            val openLabel = stringResource(
+                R.string.music_lyric_open_slot_named,
+                label,
+                trackName,
+            )
+            TextButton(
+                onClick = { open(entry.path) },
+                modifier = Modifier.semantics { contentDescription = openLabel },
+            ) {
+                Text(label, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+/** Localized label for a stable lyric language slot. */
+@Composable
+private fun lyricSlotLabel(lang: String): String = when (lang) {
+    MusicLyrics.LANG_ORIGINAL -> stringResource(R.string.music_lyric_original)
+    MusicLyrics.LANG_TRANSLATION -> stringResource(R.string.music_lyric_translation)
+    else -> stringResource(R.string.music_lyrics)
+}
 
 /**
  * Auto-trigger + status row for paged music search: fires [onLoadMore] once

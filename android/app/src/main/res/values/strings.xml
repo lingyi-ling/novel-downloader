@@ -63,10 +63,16 @@
     <string name="search_match_desc_scored">匹配度：%1$s，相关度评分 %2$s</string>
     <string name="search_intent_title">书名匹配</string>
     <string name="search_intent_author">作者匹配</string>
+    <string name="search_intent_desc">查询意图：%1$s</string>
     <string name="search_follow_add">追更</string>
     <string name="search_follow_in_progress">正在加入追更…</string>
     <string name="search_follow_in_list">已在追更列表中</string>
     <string name="search_follow_added">已加入追更</string>
+
+    <!-- 搜索：最近搜索 -->
+    <string name="search_history_title">最近搜索</string>
+    <string name="search_history_clear">清空搜索记录</string>
+    <string name="search_history_delete_named">删除搜索记录：%1$s</string>
 
     <!-- 搜索：高级筛选 -->
     <string name="search_filters_show">高级筛选</string>
@@ -92,7 +98,7 @@
     <string name="search_sort_quality">质量</string>
     <string name="search_sort_words">字数</string>
     <string name="search_sort_update">更新时间</string>
-    <string name="search_sort_quality_hint">「质量」按书源优先级排序，数值越大越靠前。</string>
+    <string name="search_sort_quality_hint">「质量」按书源优先级排序，默认升序：数值越小，书源越优先。</string>
     <string name="search_sort_order_title">排序方向</string>
     <string name="search_sort_asc">升序</string>
     <string name="search_sort_desc">降序</string>
@@ -160,7 +166,12 @@
     <string name="history_download_custom_done">已保存到 %1$s：%2$s</string>
     <string name="history_download_http_error">服务器返回 HTTP %1$d，文件没有保存</string>
     <string name="history_download_network_error">网络错误，请检查网络或 API 地址</string>
+    <string name="history_download_progress_waiting">正在连接，准备写入…</string>
+    <string name="history_download_progress">已写入 %1$s / %2$s（%3$d%%）</string>
+    <string name="history_download_progress_unknown">已写入 %1$s</string>
     <string name="download_error_no_space">存储空间不足</string>
+    <string name="download_error_permission">没有目录写入权限，请在设置中重新选择下载目录</string>
+    <string name="download_error_provider">文件提供方写入失败，请重试或改用系统 Downloads</string>
     <string name="download_error_file">文件写入失败，请检查下载目录权限或剩余空间</string>
     <string name="download_error_file_exists">同名文件已存在</string>
     <string name="download_error_http_data">服务器响应中断</string>
@@ -177,6 +188,8 @@
     <string name="notification_task_failed_title">下载失败</string>
     <string name="notification_task_failed_text">%1$s 下载失败</string>
     <string name="notification_task_unknown_title">未命名任务</string>
+    <string name="notification_group_title">下载任务</string>
+    <string name="notification_group_counts">运行 %1$d · 完成 %2$d · 失败 %3$d</string>
 
     <!-- 音乐 -->
     <string name="music_platform">平台</string>
@@ -197,7 +210,10 @@
     <string name="music_job_server_files">任务完成，文件保存在服务器端：%1$s</string>
     <string name="music_job_done_lyrics">完成：成功 %1$d，跳过 %2$d，失败 %3$d（%4$d 首已保存歌词）</string>
     <string name="music_lyrics">歌词</string>
+    <string name="music_lyric_original">原文歌词</string>
+    <string name="music_lyric_translation">译文歌词</string>
     <string name="music_lyric_open_named">打开歌词：%1$s</string>
+    <string name="music_lyric_open_slot_named">打开%1$s：%2$s</string>
     <string name="music_lyric_missing">歌词文件不存在或已被删除</string>
     <string name="music_lyric_no_app">没有可打开歌词的应用</string>
     <string name="music_no_selection">请先选择歌曲</string>

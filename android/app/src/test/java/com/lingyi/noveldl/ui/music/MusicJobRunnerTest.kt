@@ -4,6 +4,7 @@ import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiErrorCode
 import com.lingyi.noveldl.data.ApiFailure
 import com.lingyi.noveldl.data.MusicJobResult
+import com.lingyi.noveldl.data.MusicLyricFile
 import com.lingyi.noveldl.data.MusicTrack
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -173,12 +174,18 @@ class MusicJobRunnerTest {
             ),
         )
 
-        // Only track 1 and the skipped track 3 have a lyric beside them.
+        // Only tracks 1 and 3 have lyrics beside them; track 1 also has the
+        // `.zh.lrc` translation, so its row gets two buttons.
         val lookup = MusicLyricLookup { path ->
             when (path) {
-                "/music/1.mp3" -> "/music/1.lrc"
-                "/music/3.mp3" -> "/music/3.lrc"
-                else -> null
+                "/music/1.mp3" -> listOf(
+                    MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/1.lrc"),
+                    MusicLyricFile(MusicLyrics.LANG_TRANSLATION, "/music/1.zh.lrc"),
+                )
+                "/music/3.mp3" -> listOf(
+                    MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/3.lrc"),
+                )
+                else -> emptyList()
             }
         }
         val run = MusicJobRunner(
@@ -194,15 +201,52 @@ class MusicJobRunnerTest {
 
         assertEquals(
             mapOf(
-                MusicJobResults.trackKey(first) to "/music/1.lrc",
-                MusicJobResults.trackKey(skipped) to "/music/3.lrc",
+                MusicJobResults.trackKey(first) to listOf(
+                    MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/1.lrc"),
+                    MusicLyricFile(MusicLyrics.LANG_TRANSLATION, "/music/1.zh.lrc"),
+                ),
+                MusicJobResults.trackKey(skipped) to
+                    listOf(MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/3.lrc")),
             ),
             run.lyricPathsByTrack,
         )
+        // Two tracks carry lyrics; the translation does not double the count.
         assertEquals(2, run.lyricsSaved)
         assertNull(run.lyricPathsByTrack[MusicJobResults.trackKey(second)])
         // Audio paths stay independent of lyric resolution.
         assertEquals("/music/2.mp3", run.pathsByTrack[MusicJobResults.trackKey(second)])
+    }
+
+    @Test
+    fun wireLyricPathsAreDiscardedWhenNothingIsVerifiedLocally() = runBlocking {
+        val first = track("1")
+
+        server.enqueue(created("jA"))
+        server.enqueue(
+            done(
+                "jA",
+                """[{
+                    "status":"ok",
+                    "path":"/music/1.mp3",
+                    "lyric_paths":[
+                        {"lang":"原文","path":"/etc/passwd.lrc"},
+                        {"lang":"译文","path":"/music/1.zh.lrc"}
+                    ]
+                }]""",
+            ),
+        )
+
+        val run = MusicJobRunner(
+            { Api.service() },
+            RecordingSaver(),
+            // No local lyric exists: wire-supplied paths must not become
+            // buttons, because the FileProvider cannot expose them.
+            lyrics = MusicLyricLookup { emptyList() },
+            pollIntervalMs = 0,
+        ).run("all", listOf(first), idsByTrack(first to "sid-A"))
+
+        assertTrue(run.lyricPathsByTrack.isEmpty())
+        assertEquals(0, run.lyricsSaved)
     }
 
     @Test
@@ -215,11 +259,11 @@ class MusicJobRunnerTest {
         val run = MusicJobRunner(
             { Api.service() },
             RecordingSaver(),
-            lyrics = MusicLyricLookup { null },
+            lyrics = MusicLyricLookup { emptyList() },
             pollIntervalMs = 0,
         ).run("all", listOf(first), idsByTrack(first to "sid-A"))
 
-        assertEquals(emptyMap<String, String>(), run.lyricPathsByTrack)
+        assertEquals(emptyMap<String, List<MusicLyricFile>>(), run.lyricPathsByTrack)
         assertEquals(0, run.lyricsSaved)
         assertEquals("/music/1.mp3", run.pathsByTrack[MusicJobResults.trackKey(first)])
     }

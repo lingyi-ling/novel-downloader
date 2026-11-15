@@ -59,10 +59,15 @@
     <string name="search_match_desc_scored">Match: %1$s, relevance score %2$s</string>
     <string name="search_intent_title">Title match</string>
     <string name="search_intent_author">Author match</string>
+    <string name="search_intent_desc">Query intent: %1$s</string>
     <string name="search_follow_add">Follow updates</string>
     <string name="search_follow_in_progress">Following…</string>
     <string name="search_follow_in_list">Already in the follow list</string>
     <string name="search_follow_added">Added to follow updates</string>
+
+    <string name="search_history_title">Recent searches</string>
+    <string name="search_history_clear">Clear search history</string>
+    <string name="search_history_delete_named">Delete search history entry: %1$s</string>
 
     <string name="search_filters_show">Advanced filters</string>
     <string name="search_filters_hide">Hide filters</string>
@@ -87,7 +92,7 @@
     <string name="search_sort_quality">Quality</string>
     <string name="search_sort_words">Word count</string>
     <string name="search_sort_update">Updated</string>
-    <string name="search_sort_quality_hint">Quality orders by source priority; higher-priority sources come first.</string>
+    <string name="search_sort_quality_hint">Quality orders by source priority, ascending by default: a lower value means a more preferred source.</string>
     <string name="search_sort_order_title">Direction</string>
     <string name="search_sort_asc">Ascending</string>
     <string name="search_sort_desc">Descending</string>
@@ -153,7 +158,12 @@
     <string name="history_download_custom_done">Saved to %1$s: %2$s</string>
     <string name="history_download_http_error">Server returned HTTP %1$d; the file was not saved</string>
     <string name="history_download_network_error">Network error; check the connection or API address</string>
+    <string name="history_download_progress_waiting">Connecting and preparing the file…</string>
+    <string name="history_download_progress">Written %1$s / %2$s (%3$d%%)</string>
+    <string name="history_download_progress_unknown">Written %1$s</string>
     <string name="download_error_no_space">Not enough storage space</string>
+    <string name="download_error_permission">No permission to write to this folder; choose the download folder again in Settings</string>
+    <string name="download_error_provider">The file provider failed to write; retry or switch to the system Downloads folder</string>
     <string name="download_error_file">Could not write the file; check the download folder permission or free space</string>
     <string name="download_error_file_exists">A file with the same name already exists</string>
     <string name="download_error_http_data">The server response was interrupted</string>
@@ -169,6 +179,8 @@
     <string name="notification_task_failed_title">Download failed</string>
     <string name="notification_task_failed_text">%1$s failed to download</string>
     <string name="notification_task_unknown_title">Untitled task</string>
+    <string name="notification_group_title">Download tasks</string>
+    <string name="notification_group_counts">%1$d running · %2$d completed · %3$d failed</string>
 
     <string name="music_platform">Platform</string>
     <string name="music_platform_all">All platforms</string>
@@ -188,7 +200,10 @@
     <string name="music_job_server_files">Done; the files are kept on the server: %1$s</string>
     <string name="music_job_done_lyrics">Done: %1$d succeeded, %2$d skipped, %3$d failed (%4$d with lyrics)</string>
     <string name="music_lyrics">Lyrics</string>
+    <string name="music_lyric_original">Original lyrics</string>
+    <string name="music_lyric_translation">Translated lyrics</string>
     <string name="music_lyric_open_named">Open lyrics: %1$s</string>
+    <string name="music_lyric_open_slot_named">Open %1$s: %2$s</string>
     <string name="music_lyric_missing">The lyrics file is missing or was deleted</string>
     <string name="music_lyric_no_app">No app can open the lyrics file</string>
     <string name="music_no_selection">Select songs first</string>

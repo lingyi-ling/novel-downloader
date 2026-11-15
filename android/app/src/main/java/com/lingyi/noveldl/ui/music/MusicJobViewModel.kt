@@ -8,6 +8,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiService
+import com.lingyi.noveldl.data.MusicLyricFile
 import com.lingyi.noveldl.data.MusicPathPersistence
 import com.lingyi.noveldl.data.MusicPathStore
 import com.lingyi.noveldl.data.MusicTrack
@@ -41,12 +42,12 @@ data class MusicJobUiState(
      */
     val paths: Map<String, String> = emptyMap(),
     /**
-     * Verified `<stem>.lrc` paths, keyed like [paths]. A key is present only
-     * when the engine saved the lyric and the file still exists inside the
-     * app's private music directory; the screen renders the per-track lyric
-     * button from it.
+     * Verified lyric files, keyed like [paths]: original first, translation
+     * second when the engine saved one. A key is present only when the file
+     * still exists inside the app's private music directory; the screen
+     * renders one or two lyric buttons from it.
      */
-    val lyricPaths: Map<String, String> = emptyMap(),
+    val lyricPaths: Map<String, List<MusicLyricFile>> = emptyMap(),
     /**
      * Client-side failure of the last run (job creation or polling). The
      * screen localizes the [com.lingyi.noveldl.data.ApiErrorCode] it carries.

@@ -1,6 +1,7 @@
 package com.lingyi.noveldl.ui.music
 
 import com.lingyi.noveldl.data.MusicJobResult
+import com.lingyi.noveldl.data.MusicLyricFile
 import com.lingyi.noveldl.data.MusicTrack
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -25,7 +26,14 @@ class MusicJobResultsTest {
         path: String = "",
         url: String = "",
         lyric: String? = null,
-    ) = MusicJobResult(status = status, path = path, download_url = url, lyricPath = lyric)
+        lyrics: List<MusicLyricFile> = emptyList(),
+    ) = MusicJobResult(
+        status = status,
+        path = path,
+        download_url = url,
+        lyricPath = lyric,
+        lyricPaths = lyrics,
+    )
 
     // ---------- per-page search ids ----------
 
@@ -150,12 +158,15 @@ class MusicJobResultsTest {
     @Test
     fun lyricsByTrackAlignsResultsWithTheSubmittedOrder() {
         val chosen = listOf(track("1"), track("2"), track("3"))
+        val failedLyrics = listOf(
+            MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/b.lrc"),
+        )
 
         val lyrics = MusicJobResults.lyricsByTrack(
             chosen,
             listOf(
                 result("ok", lyric = "/music/a.lrc"),
-                result("fail", lyric = "/music/b.lrc"),
+                result("fail", lyric = "/music/b.lrc", lyrics = failedLyrics),
                 result("skip", lyric = "/music/c.lrc"),
             ),
         )
@@ -164,8 +175,85 @@ class MusicJobResultsTest {
         // a skipped track keeps its lyric (the engine writes it on skip too).
         assertEquals(
             mapOf(
-                MusicJobResults.trackKey(track("1")) to "/music/a.lrc",
-                MusicJobResults.trackKey(track("3")) to "/music/c.lrc",
+                MusicJobResults.trackKey(track("1")) to
+                    listOf(MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/a.lrc")),
+                MusicJobResults.trackKey(track("3")) to
+                    listOf(MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/c.lrc")),
+            ),
+            lyrics,
+        )
+    }
+
+    @Test
+    fun lyricsByTrackKeepsTheOriginalAndTranslationSlots() {
+        val chosen = listOf(track("1"))
+
+        val lyrics = MusicJobResults.lyricsByTrack(
+            chosen,
+            listOf(
+                result(
+                    "ok",
+                    lyric = "/music/a.lrc",
+                    lyrics = listOf(
+                        MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/a.lrc"),
+                        MusicLyricFile(MusicLyrics.LANG_TRANSLATION, "/music/a.zh.lrc"),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(
+            mapOf(
+                MusicJobResults.trackKey(track("1")) to listOf(
+                    MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/a.lrc"),
+                    MusicLyricFile(MusicLyrics.LANG_TRANSLATION, "/music/a.zh.lrc"),
+                ),
+            ),
+            lyrics,
+        )
+    }
+
+    @Test
+    fun lyricsByTrackDropsBlankEntriesButKeepsTheRemainingSlot() {
+        val chosen = listOf(track("1"))
+
+        val lyrics = MusicJobResults.lyricsByTrack(
+            chosen,
+            listOf(
+                result(
+                    "ok",
+                    lyrics = listOf(
+                        MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "   "),
+                        MusicLyricFile(MusicLyrics.LANG_TRANSLATION, " /music/a.zh.lrc "),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(
+            mapOf(
+                MusicJobResults.trackKey(track("1")) to
+                    listOf(MusicLyricFile(MusicLyrics.LANG_TRANSLATION, "/music/a.zh.lrc")),
+            ),
+            lyrics,
+        )
+    }
+
+    @Test
+    fun lyricsByTrackTreatsTheLegacyFieldAsTheOriginalSlot() {
+        // Older results only carry `lyric_path`; the screen still needs a
+        // single original button instead of none.
+        val chosen = listOf(track("1"))
+
+        val lyrics = MusicJobResults.lyricsByTrack(
+            chosen,
+            listOf(result("ok", lyric = " /music/a.lrc ")),
+        )
+
+        assertEquals(
+            mapOf(
+                MusicJobResults.trackKey(track("1")) to
+                    listOf(MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/a.lrc")),
             ),
             lyrics,
         )
@@ -176,13 +264,16 @@ class MusicJobResultsTest {
         val chosen = listOf(track("1"), track("2"))
 
         assertEquals(
-            emptyMap<String, String>(),
+            emptyMap<String, List<MusicLyricFile>>(),
             MusicJobResults.lyricsByTrack(
                 chosen,
                 listOf(result("ok"), result("ok", lyric = "   ")),
             ),
         )
-        assertEquals(emptyMap<String, String>(), MusicJobResults.lyricsByTrack(emptyList(), emptyList()))
+        assertEquals(
+            emptyMap<String, List<MusicLyricFile>>(),
+            MusicJobResults.lyricsByTrack(emptyList(), emptyList()),
+        )
     }
 
     @Test
@@ -195,7 +286,13 @@ class MusicJobResultsTest {
             listOf(result("ok", lyric = "/music/a.lrc")),
         )
 
-        assertEquals(mapOf(MusicJobResults.trackKey(track("1")) to "/music/a.lrc"), lyrics)
+        assertEquals(
+            mapOf(
+                MusicJobResults.trackKey(track("1")) to
+                    listOf(MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/music/a.lrc")),
+            ),
+            lyrics,
+        )
     }
 
     // ---------- selection keys ----------

@@ -1,6 +1,7 @@
 package com.lingyi.noveldl.ui.music
 
 import com.lingyi.noveldl.data.MusicJobResult
+import com.lingyi.noveldl.data.MusicLyricFile
 import com.lingyi.noveldl.data.MusicTrack
 
 /**
@@ -91,27 +92,47 @@ object MusicJobResults {
     }
 
     /**
-     * Verified lyric paths of [results], keyed like [trackKey].
+     * Verified lyric files of [results], keyed like [trackKey].
      *
      * Results are aligned with [chosen] exactly like [pathsByTrack]. Both
-     * `ok` and `skip` count: the engine also writes/keeps the `.lrc` when it
-     * skips an already downloaded track, and the user still wants to open it.
-     * A failed row never contributes, even if the engine echoed a path.
+     * `ok` and `skip` count: the engine also writes/keeps the lyrics when it
+     * skips an already downloaded track, and the user still wants to open
+     * them. A failed row never contributes, even if the engine echoed a path.
+     *
+     * The list comes from [MusicJobResult.lyricPaths] (original first, then
+     * the translation). A result produced by an older build carries only the
+     * legacy [MusicJobResult.lyricPath], which is treated as the original
+     * slot; entries with a blank path are dropped.
      */
     fun lyricsByTrack(
         chosen: List<MusicTrack>,
         results: List<MusicJobResult>,
-    ): Map<String, String> {
+    ): Map<String, List<MusicLyricFile>> {
         if (chosen.isEmpty() || results.isEmpty()) return emptyMap()
-        val lyrics = LinkedHashMap<String, String>()
+        val lyrics = LinkedHashMap<String, List<MusicLyricFile>>()
         chosen.forEachIndexed { index, track ->
             val result = results.getOrNull(index) ?: return@forEachIndexed
             if (result.status != "ok" && result.status != "skip") return@forEachIndexed
-            val lyric = result.lyricPath?.trim().orEmpty()
-            if (lyric.isEmpty()) return@forEachIndexed
-            lyrics[trackKey(track)] = lyric
+            val files = verifiedLyrics(result)
+            if (files.isEmpty()) return@forEachIndexed
+            lyrics[trackKey(track)] = files
         }
         return lyrics
+    }
+
+    /** Non-blank lyric entries of one result, with the legacy field as fallback. */
+    private fun verifiedLyrics(result: MusicJobResult): List<MusicLyricFile> {
+        val listed = result.lyricPaths.mapNotNull { entry ->
+            val path = entry.path.trim()
+            if (path.isEmpty()) null else MusicLyricFile(entry.lang, path)
+        }
+        if (listed.isNotEmpty()) return listed
+        val legacy = result.lyricPath?.trim().orEmpty()
+        return if (legacy.isEmpty()) {
+            emptyList()
+        } else {
+            listOf(MusicLyricFile(MusicLyrics.LANG_ORIGINAL, legacy))
+        }
     }
 
     /**

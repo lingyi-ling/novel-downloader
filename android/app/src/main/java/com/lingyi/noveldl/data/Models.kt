@@ -280,6 +280,22 @@ data class MusicJobProgress(
     val total: Int = 0,
 )
 
+/**
+ * One lyric file saved beside an audio download.
+ *
+ * [lang] is a stable language slot, not display copy: `"原文"` for the
+ * original `<stem>.lrc` and `"译文"` for the translated `<stem>.zh.lrc`
+ * (the same identifiers the desktop bridge reports). The UI maps a slot to
+ * localized text, so an old result still labels correctly after a language
+ * change. [path] is an absolute local path; on Android it is only trusted
+ * after [com.lingyi.noveldl.ui.music.MusicLyrics] verified it.
+ */
+@Serializable
+data class MusicLyricFile(
+    val lang: String = "",
+    val path: String = "",
+)
+
 @Serializable
 data class MusicJobResult(
     val status: String = "",
@@ -298,6 +314,17 @@ data class MusicJobResult(
      * "no lyric saved", which is distinct from an empty, checked path.
      */
     @SerialName("lyric_path") val lyricPath: String? = null,
+    /**
+     * Every lyric file saved beside [path], original first and the
+     * translation second.
+     *
+     * Newer engines/desktop bridges report this list (`lyric_paths`), and a
+     * remote server may echo one. The app never trusts the wire value: each
+     * downloaded result is re-resolved from the audio path and rewritten with
+     * only the files that exist inside the app's private music directory.
+     * Empty means "no verified lyric", distinct from a missing field.
+     */
+    @SerialName("lyric_paths") val lyricPaths: List<MusicLyricFile> = emptyList(),
 )
 
 @Serializable

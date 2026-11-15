@@ -4,6 +4,7 @@ import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiService
 import com.lingyi.noveldl.data.MusicJobRequest
 import com.lingyi.noveldl.data.MusicJobResult
+import com.lingyi.noveldl.data.MusicLyricFile
 import com.lingyi.noveldl.data.MusicTrack
 import com.lingyi.noveldl.ui.MUSIC_JOB_POLL_INTERVAL_MS
 import kotlinx.coroutines.Dispatchers
@@ -38,12 +39,13 @@ data class MusicJobRun(
     val errors: List<Throwable>,
     val jobFailure: String?,
     /**
-     * Verified `<stem>.lrc` paths, keyed like [pathsByTrack]. The screen uses
-     * this map for the per-row lyric button; it covers `ok` and `skip`
-     * results, because the engine keeps the lyric when it skips a track.
+     * Verified lyric files, keyed like [pathsByTrack], original first and
+     * translation second. The screen uses this map for the per-row lyric
+     * buttons; it covers `ok` and `skip` results, because the engine keeps the
+     * lyrics when it skips a track.
      */
-    val lyricPathsByTrack: Map<String, String> = emptyMap(),
-    /** Results that landed with a lyric file, for the batch summary line. */
+    val lyricPathsByTrack: Map<String, List<MusicLyricFile>> = emptyMap(),
+    /** Results that landed with at least one lyric file, for the summary. */
     val lyricsSaved: Int = 0,
 )
 
@@ -89,7 +91,7 @@ class MusicJobRunner(
         val total = chosen.size
         val results = mutableListOf<MusicJobResult>()
         val paths = LinkedHashMap<String, String>()
-        val lyricPaths = LinkedHashMap<String, String>()
+        val lyricPaths = LinkedHashMap<String, List<MusicLyricFile>>()
         val failedKeys = LinkedHashSet<String>()
         val errors = mutableListOf<Throwable>()
         var jobFailure: String? = null
@@ -124,23 +126,28 @@ class MusicJobRunner(
                     )
                 ) {
                     is Watch.Done -> {
-                        // The engine already wrote `<stem>.lrc` beside the
-                        // audio; only verify it exists inside the app sandbox.
-                        // Probes touch the filesystem, so keep them off the
-                        // caller's thread even though a batch is small.
+                        // The engine already wrote the lyric files beside the
+                        // audio; only verify which ones exist inside the app
+                        // sandbox. Probes touch the filesystem, so keep them
+                        // off the caller's thread even though a batch is small.
                         val enriched = withContext(Dispatchers.IO) {
                             watch.results.map { result ->
-                                val lyric = if (
+                                val files = if (
                                     result.status == "ok" || result.status == "skip"
                                 ) {
                                     lyrics.find(result.path)
                                 } else {
-                                    null
+                                    emptyList()
                                 }
-                                // Always replace, never trust a value that
-                                // came over the wire: only a path this client
-                                // verified may drive the lyric button.
-                                result.copy(lyricPath = lyric)
+                                // Always replace both fields, never trust a
+                                // value that came over the wire: only files
+                                // this client verified may drive a button.
+                                result.copy(
+                                    lyricPath = files
+                                        .firstOrNull { it.lang == MusicLyrics.LANG_ORIGINAL }
+                                        ?.path,
+                                    lyricPaths = files,
+                                )
                             }
                         }
                         results += enriched

@@ -1,5 +1,7 @@
 package com.lingyi.noveldl.security
 
+import com.lingyi.noveldl.data.EmbeddedEngine
+import com.lingyi.noveldl.ui.music.MusicLyrics
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -119,8 +121,8 @@ class AndroidSecurityConfigTest {
         assertEquals("paths", paths.tagName)
         val entries = paths.elements()
         // Exactly two narrow ranges: the verified update APK and the music
-        // engine's output (where `<stem>.lrc` lives). The provider never
-        // exposes an entire domain.
+        // engine's output (where `<stem>.lrc` and `<stem>.zh.lrc` live). The
+        // provider never exposes an entire domain.
         assertEquals(2, entries.size)
 
         val updates = entries.single { it.getAttribute("name") == "updates" }
@@ -129,7 +131,13 @@ class AndroidSecurityConfigTest {
 
         val music = entries.single { it.getAttribute("name") == "music" }
         assertEquals("files-path", music.tagName)
-        assertEquals("engine_home/downloads/music/", music.getAttribute("path"))
+        // The declared range must be the same directory PrivateMusicLyricLookup
+        // verifies against, otherwise a verified `.zh.lrc` would still be
+        // unreachable through the provider.
+        assertEquals(
+            "${EmbeddedEngine.HOME_DIRECTORY}/${MusicLyrics.EMBEDDED_MUSIC_SUBDIRECTORY}/",
+            music.getAttribute("path"),
+        )
     }
 
     // ------------------------------------------------------------------

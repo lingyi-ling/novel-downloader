@@ -3,6 +3,7 @@ package com.lingyi.noveldl.ui.music
 import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiErrorCode
 import com.lingyi.noveldl.data.ApiFailure
+import com.lingyi.noveldl.data.MusicLyricFile
 import com.lingyi.noveldl.data.MusicPathPersistence
 import com.lingyi.noveldl.data.MusicTrack
 import kotlinx.coroutines.Dispatchers
@@ -171,7 +172,14 @@ class MusicJobViewModelTest {
         val model = MusicJobViewModel(
             { Api.service() },
             lyrics = MusicLyricLookup { path ->
-                if (path == "/a/1.mp3") "/a/1.lrc" else null
+                if (path == "/a/1.mp3") {
+                    listOf(
+                        MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/a/1.lrc"),
+                        MusicLyricFile(MusicLyrics.LANG_TRANSLATION, "/a/1.zh.lrc"),
+                    )
+                } else {
+                    emptyList()
+                }
             },
             pollIntervalMs = 0,
         )
@@ -183,9 +191,12 @@ class MusicJobViewModelTest {
         )
         val finished = model.awaitIdle()
 
-        // The screen keys the lyric button by provider + id, like the paths.
+        // The screen keys the lyric buttons by provider + id, like the paths.
         assertEquals(
-            "/a/1.lrc",
+            listOf(
+                MusicLyricFile(MusicLyrics.LANG_ORIGINAL, "/a/1.lrc"),
+                MusicLyricFile(MusicLyrics.LANG_TRANSLATION, "/a/1.zh.lrc"),
+            ),
             finished.lyricPaths[MusicJobResults.trackKey(first)],
         )
         assertNull(finished.lyricPaths[MusicJobResults.trackKey(second)])
