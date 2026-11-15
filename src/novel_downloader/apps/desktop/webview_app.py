@@ -1014,6 +1014,7 @@ def _i18n_catalog() -> dict[str, str]:
             "No package for this platform in v{ver}; open the release page"
         ),
         "Release notes": t("Release notes"),
+        "Skip this version": t("Skip this version"),
         "Later": t("Later"),
         "Downloading…": t("Downloading…"),
         "Installing…": t("Installing…"),
@@ -1807,6 +1808,19 @@ def _update_due(prefs: Mapping[str, Any], now: float) -> bool:
         # A hand-edited preference file must not break the check.
         last = 0.0
     return (now - last) >= _UPDATE_CHECK_INTERVAL
+
+
+def _skipped_update_version(prefs: Mapping[str, Any]) -> str:
+    """The version the user asked not to be reminded about again."""
+    value = prefs.get("skipped_update_version")
+    return _normalise_version(value) if isinstance(value, str) else ""
+
+
+def _version_skipped(prefs: Mapping[str, Any], latest: str | None) -> bool:
+    """Whether ``latest`` is exactly the persisted "skip this version"."""
+    skipped = _skipped_update_version(prefs)
+    announced = _normalise_version(latest)
+    return bool(skipped and announced and skipped == announced)
 
 
 def _safe_platform_tag() -> str:
@@ -3611,7 +3625,7 @@ class ApiBridge:
         # not retry the (up to 8 s) fetch every time the panel is opened.
         _save_prefs({"last_update_check": str(now)})
 
-        platform_tag = detect_platform()
+        platform_tag = _safe_platform_tag()
         try:
             import json as _json
             import urllib.request
@@ -3623,7 +3637,7 @@ class ApiBridge:
                     "User-Agent": "novel-downloader-desktop",
                 },
             )
-            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=_UPDATE_TIMEOUT) as resp:  # noqa: S310
                 payload = _json.loads(resp.read().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("release payload is not a JSON object")
@@ -3658,7 +3672,8 @@ class ApiBridge:
         )
 
         url = info.notes_url or _RELEASES_PAGE
-        if not info.available:
+        skipped = bool(info.available) and _version_skipped(prefs, info.latest)
+        if not info.available or skipped:
             return {
                 "available": False,
                 "current": current,
@@ -3666,6 +3681,7 @@ class ApiBridge:
                 "url": url,
                 "message": "",
                 "platform": platform_tag,
+                "skipped": skipped,
             }
         asset = info.asset
         return {
@@ -3678,6 +3694,7 @@ class ApiBridge:
             "asset_size": asset.size if asset is not None else None,
             "sha256": asset.sha256 if asset is not None else None,
             "message": t("Update available: v{ver}").replace("{ver}", info.latest),
+            "skipped": False,
         }
 
     # ------------------------------------------------------------------
@@ -3763,6 +3780,47 @@ class ApiBridge:
                 "started": False,
                 "reason": "error",
             }
+
+    def skip_update_version(self, version: str | None = None) -> dict[str, Any]:
+        """
+        Persist "skip this version" so the bar stays hidden for that release.
+
+        The preference is a single normalised version string.  A later release
+        has a different value, so the notice returns on its own; the user never
+        has to clear the skip.  The argument is optional, so a page that
+        predates this method can still skip the cached release; it is
+        normalised (``v`` prefix, whitespace) before it is stored.
+
+        Never raises.
+
+        :param version: version to skip; defaults to the announced release.
+        :return: ``{"ok", "version", "error"}``.
+        """
+        try:
+            with self._update_guard:
+                cache = self._update_cache
+            announced = ""
+            if cache is not None and cache.info is not None:
+                announced = _normalise_version(cache.info.latest)
+            target = _normalise_version(version if isinstance(version, str) else "")
+            target = target or announced
+            if not target or len(target) > 64:
+                return {
+                    "ok": False,
+                    "version": "",
+                    "error": t("No update is available to skip"),
+                }
+            if not _save_prefs({"skipped_update_version": target}):
+                return {
+                    "ok": False,
+                    "version": target,
+                    "error": t("Could not save the settings"),
+                }
+            logger.info("Skipping the update notice for v%s", target)
+            return {"ok": True, "version": target, "error": None}
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Could not skip the update version", exc_info=True)
+            return {"ok": False, "version": "", "error": format_error(exc)}
 
     def download_update(self) -> dict[str, Any]:
         """
@@ -4023,6 +4081,7 @@ class ApiBridge:
             "error": error,
             "pending": False,
             "downloaded": False,
+            "skipped": False,
             "auto_check": auto,
             "auto_install": True,
         }
@@ -4043,10 +4102,14 @@ class ApiBridge:
         notes_url = (
             info.notes_url if info is not None and info.notes_url else _RELEASES_PAGE
         )
+        latest = info.latest if info is not None else ""
+        skipped = bool(info is not None and info.available) and _version_skipped(
+            stored, latest
+        )
         return {
             "current": cache.current if cache is not None else self._version(),
-            "latest": info.latest if info is not None else "",
-            "available": bool(info is not None and info.available),
+            "latest": latest,
+            "available": bool(info is not None and info.available) and not skipped,
             "notes_url": notes_url,
             # Alias kept in step with ``notes_url``; see ``_empty_update_payload``.
             "url": notes_url,
@@ -4058,6 +4121,7 @@ class ApiBridge:
             "pending": inflight,
             "downloaded": self._has_downloaded_update(),
             "downloaded_size": self._downloaded_update_size(),
+            "skipped": skipped,
             "auto_check": _prefs_flag(stored, "auto_check_updates", True),
             "auto_install": _prefs_flag(stored, "auto_install_on_exit", True),
         }
@@ -4124,11 +4188,17 @@ class ApiBridge:
         button still downloads on demand.
         """
         try:
-            if not _prefs_flag(_load_prefs(), "auto_download_updates", True):
+            prefs = _load_prefs()
+            if not _prefs_flag(prefs, "auto_download_updates", True):
                 return
             with self._update_guard:
                 cache = self._update_cache
             if cache is None or cache.info is None or not cache.info.available:
+                return
+            # A skipped release must not be fetched either: the background
+            # transfer would spend the user's bandwidth on a build they asked
+            # not to be reminded about.
+            if _version_skipped(prefs, cache.info.latest):
                 return
             with self._download_guard:
                 if self._downloaded is not None or self._download_active:

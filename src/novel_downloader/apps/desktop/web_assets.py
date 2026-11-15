@@ -834,6 +834,7 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
         <div class="u-acts">
           <button class="btn btn-primary btn-sm" id="update-install" data-i18n="Download and install">Download and install</button>
           <button class="btn btn-ghost btn-sm" id="update-notes" data-i18n="Release notes">Release notes</button>
+          <button class="btn btn-ghost btn-sm" id="update-skip" data-i18n="Skip this version">Skip this version</button>
           <button class="btn btn-ghost btn-sm" id="update-later" data-i18n="Later">Later</button>
         </div>
       </div>
@@ -1889,7 +1890,7 @@ $("#btn-music-cred-clear").onclick = async () => {
 /* ================================================================ updates */
 // Low-key bar in the sidebar: it only exists while a newer release is known.
 // "Later" hides it for this session (localStorage is never touched).
-const updates = { busy: false, dismissed: false, finished: false, state: null };
+const updates = { busy: false, dismissed: false, dismissedVersion: "", finished: false, state: null };
 let updatePollTimer = null;
 let updateDownloadPromise = null;
 const updateSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -1904,6 +1905,11 @@ function setUpdateInstallLabel(downloaded) {
 function applyUpdateState(st) {
   if (!st) return;
   updates.state = st;
+  // A dismissal is tied to the version it hid: when a different release is
+  // announced, the bar comes back instead of staying hidden forever.
+  if (updates.dismissed && st.latest !== updates.dismissedVersion) {
+    updates.dismissed = false;
+  }
   const bar = $("#update-bar");
   const show = !!st.available && !updates.dismissed;
   bar.hidden = !show;
@@ -1980,7 +1986,7 @@ function trackUpdateDownload() {
 
 function setUpdateBusy(busy) {
   updates.busy = busy;
-  for (const id of ["#update-install", "#update-notes", "#update-later"]) $(id).disabled = busy;
+  for (const id of ["#update-install", "#update-notes", "#update-skip", "#update-later"]) $(id).disabled = busy;
 }
 
 function pollUpdateState() {
@@ -2014,7 +2020,29 @@ function bootUpdateCheck() {
 
 $("#update-later").onclick = () => {
   updates.dismissed = true;
+  updates.dismissedVersion = (updates.state && updates.state.latest) || "";
   $("#update-bar").hidden = true;
+};
+
+$("#update-skip").onclick = async () => {
+  // Persisted server-side: unlike "Later", this survives a restart and is
+  // forgotten automatically once a different version is announced.
+  const st = updates.state || {};
+  setUpdateBusy(true);
+  try {
+    const r = await api("skip_update_version", st.latest || "");
+    if (!r || r.ok === false) {
+      toast((r && r.error) || t("Could not save the settings"), "err", 8000);
+      return;
+    }
+    updates.dismissed = true;
+    updates.dismissedVersion = st.latest || "";
+    $("#update-bar").hidden = true;
+  } catch (e) {
+    toast(String((e && e.message) || e), "err", 8000);
+  } finally {
+    setUpdateBusy(false);
+  }
 };
 
 $("#update-notes").onclick = () => {

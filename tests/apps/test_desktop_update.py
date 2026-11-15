@@ -873,7 +873,10 @@ def test_app_html_update_buttons_are_disabled_while_downloading() -> None:
     guard = APP_HTML.index("setUpdateBusy(true)")
     first_await = APP_HTML.index('await api("download_update")')
     assert guard < first_await
-    selector = 'for (const id of ["#update-install", "#update-notes", "#update-later"])'
+    selector = (
+        'for (const id of ["#update-install", "#update-notes", '
+        '"#update-skip", "#update-later"])'
+    )
     assert selector in APP_HTML
 
 
