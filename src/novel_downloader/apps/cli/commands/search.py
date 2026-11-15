@@ -8,6 +8,7 @@ novel_downloader.apps.cli.commands.search
 from __future__ import annotations
 
 import json
+import math
 import re
 from argparse import ArgumentParser, BooleanOptionalAction, Namespace
 from collections.abc import Sequence
@@ -233,6 +234,21 @@ class SearchCmd(Command):
         if min_words is not None and max_words is not None and min_words > max_words:
             fail(t("Min words cannot be greater than max words"), EXIT_USAGE)
 
+        # ``argparse`` accepts ``nan``/``inf`` for ``type=float``.  ``inf``
+        # reaches ``aiohttp.ClientTimeout``, whose timer calls ``ceil(inf)``
+        # and raises ``OverflowError`` on the first request -- every site then
+        # looks like an outage (exit 1, empty array) although nothing was
+        # wrong with the network.  ``nan`` survives ``max(0.1, nan)`` as
+        # ``0.1`` and silently collapses the budget.  Neither is a usable
+        # duration, so both are usage errors, exactly like ``follow``.
+        # Finite non-positive values keep their historical clamp to 0.1 s.
+        timeout_arg = float(args.timeout)
+        if not math.isfinite(timeout_arg):
+            fail(
+                f"{t('Invalid input.')} (--timeout={timeout_arg!r})",
+                EXIT_USAGE,
+            )
+
         updated_after: date | None = None
         if args.updated_after is not None:
             raw_date = str(args.updated_after).strip()
@@ -263,7 +279,7 @@ class SearchCmd(Command):
 
         overall_limit = None if args.limit is None else max(1, args.limit)
         per_site_limit = max(1, args.site_limit)
-        timeout = max(0.1, float(args.timeout))
+        timeout = max(0.1, timeout_arg)
         result_sort: str = args.sort
         # ``None`` keeps the ranking layer's natural direction for the key.
         result_order: str | None = args.order
