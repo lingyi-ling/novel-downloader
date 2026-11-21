@@ -6,6 +6,7 @@ v1.0 关键决策：
 - 受限歌曲（VIP/付费/无版权）不报错中断，而是记录原因跳过
 """
 
+import codecs
 import contextlib
 import errno
 import logging
@@ -1144,6 +1145,22 @@ MAX_LYRIC_BYTES = 1024 * 1024
 #: 支持内嵌歌词的容器（按扩展名分派）。
 _LYRIC_TAG_EXTS = frozenset({".mp3", ".flac", ".m4a"})
 
+#: 歌词文件可能带的字节序标记；UTF-32 必须排在 UTF-16 前面，因为它的
+#: 前两个字节与 UTF-16 的标记相同。``utf-16``/``utf-32`` 解码时自己会
+#: 吃掉 BOM，``utf-8-sig`` 同样如此。
+_LYRIC_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+#: 解码后仍含 NUL/DEL 等二进制控制字符（TAB/CR/LF 除外）的「歌词」多半
+#: 是无 BOM 的 UTF-16 或根本不是文本。按损坏文件跳过，不能把 NUL 塞进
+#: 播放器或音频标签。
+_LYRIC_BINARY_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
 #: MP3（TXXX 兼容写法）/FLAC 里存放原文歌词的标签名。
 _LYRIC_TAG_KEYS = ("LYRICS", "UNSYNCEDLYRICS")
 
@@ -1335,9 +1352,52 @@ def _write_text(path, text):
     return True
 
 
+def _decode_lyric_bytes(data: bytes) -> str | None:
+    """解码歌词文件字节；无法安全解码时返回 ``None``（调用方跳过）。
+
+    检测顺序固定，先命中者胜出：
+
+    1. 文件头 BOM（UTF-32 / UTF-8 / UTF-16，LE 与 BE 都支持）；
+    2. 严格 UTF-8（覆盖绝大多数来源，也是本程序写出的格式）；
+    3. 严格 GB18030（GBK/GB2312 的超集，Windows 上常见的老歌词）。
+
+    无 BOM 的 UTF-16 里 ASCII 字符常与 NUL 交错，而 NUL 本身是合法
+    UTF-8，直接按 UTF-8 解码会把整段「歌词」变成带 NUL 的乱码。因此
+    解码结果中一旦出现 TAB/CR/LF 之外的二进制控制字符，就判定为损坏
+    并返回 ``None``，而不是把它写进播放器或音频标签。
+
+    注意：GBK 字节串如果恰好每一对都构成合法 UTF-8（例如「一」的
+    ``\\xd2\\xbb``），会按 UTF-8 优先得到 Cyrillic 等字符；没有统计
+    检测器时无法区分，本函数与 ``Response.text`` 一样优先 UTF-8。
+    """
+    for bom, encoding in _LYRIC_BOMS:
+        if data.startswith(bom):
+            try:
+                text = data.decode(encoding)
+            except UnicodeDecodeError:
+                return None
+            return None if _LYRIC_BINARY_CONTROLS.search(text) else text
+
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            text = data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if _LYRIC_BINARY_CONTROLS.search(text):
+            continue
+        return text
+    return None
+
+
 def _normalize_lrc(text):
-    """LRC 文本统一换行为 ``\\n``（部分来源是 CRLF，很多播放器解析不了）。"""
-    return (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    """LRC 文本统一换行为 ``\\n``（部分来源是 CRLF，很多播放器解析不了）。
+
+    开头若带 U+FEFF（例如来源把 BOM 当普通字符传回来），一并去掉：
+    ``save_lyric`` 的契约是「UTF-8 无 BOM」，不能让输入里的 BOM 变成
+    输出文件头的 BOM 字节。
+    """
+    text = (text or "").lstrip("\ufeff")
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def save_lyric(audio_path, lyric, translated=""):
@@ -1529,7 +1589,12 @@ def _embed_lyric_or_warn(path, text):
 
 
 def _read_lyric_file(path):
-    """读取 UTF-8 歌词文件；不存在、超限或解码失败时返回空串。"""
+    """读取歌词文件；不存在、超限或无法安全解码时返回空串。
+
+    编码按 :func:`_decode_lyric_bytes` 的顺序检测（BOM → UTF-8 →
+    GB18030）。损坏文件只跳过，不抛异常：调用方通常正在补写内嵌歌词，
+    不能因为一个坏 ``.lrc`` 把已下载的音频判为失败。
+    """
     try:
         with open(path, "rb") as f:
             data = f.read(MAX_LYRIC_BYTES + 1)
@@ -1537,10 +1602,10 @@ def _read_lyric_file(path):
         return ""
     if len(data) > MAX_LYRIC_BYTES:
         return ""
-    try:
-        return _normalize_lrc(data.decode("utf-8-sig"))
-    except UnicodeDecodeError:
+    text = _decode_lyric_bytes(data)
+    if text is None:
         return ""
+    return _normalize_lrc(text)
 
 
 # ---------------------------------------------------------------------------
