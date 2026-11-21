@@ -5,6 +5,46 @@ import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
+import java.security.SecureRandom
+import java.util.Base64
+
+/**
+ * Environment variable the Python engine reads its bearer token from.
+ *
+ * Kept in sync with `novel_downloader.apps.embedded.server.TOKEN_ENV_VAR`; a
+ * Python test pins the two literals together.
+ */
+internal const val EMBEDDED_TOKEN_ENV_VAR = "NOVEL_DOWNLOADER_EMBEDDED_TOKEN"
+
+/** Entropy of the per-process token (bytes, before base64url encoding). */
+internal const val EMBEDDED_TOKEN_BYTES = 32
+
+/**
+ * Generates a fresh bearer token: [EMBEDDED_TOKEN_BYTES] CSPRNG bytes as
+ * unpadded base64url (`[A-Za-z0-9_-]{43}` for the default size).
+ *
+ * base64url keeps the value usable as an HTTP header value without escaping
+ * and as a plain environment string.
+ */
+internal fun generateEmbeddedToken(random: SecureRandom = SecureRandom()): String {
+    val bytes = ByteArray(EMBEDDED_TOKEN_BYTES)
+    random.nextBytes(bytes)
+    return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+}
+
+/**
+ * The environment entries installed into the Python interpreter for [token].
+ *
+ * Pure so the hand-off can be asserted on the JVM: an empty token yields no
+ * entry (the engine then keeps its unauthenticated desktop/test behaviour).
+ * The token is passed as an environment variable rather than a
+ * `start_server` argument because an argument would land in the interpreter's
+ * visible call signature/log lines, whereas the environment block is private
+ * to the process (and `os.environ` here is only ever set in memory, never
+ * written to disk).
+ */
+internal fun embeddedTokenEnvironment(token: String): Map<String, String> =
+    if (token.isEmpty()) emptyMap() else mapOf(EMBEDDED_TOKEN_ENV_VAR to token)
 
 /**
  * Boots the embedded Python engine: the full novel_downloader service layer
@@ -12,6 +52,15 @@ import com.chaquo.python.android.AndroidPlatform
  *
  * `start_server` is idempotent and binds loopback only; a daemon thread is
  * left running for the process lifetime.
+ *
+ * ## Loopback is not a trust boundary
+ *
+ * Any app on the device can reach `127.0.0.1`, so the engine is not left open:
+ * a per-process random [token] is generated here, installed into the Python
+ * interpreter's environment, and required by every `/api/v1` and `/downloads`
+ * request. It lives in process memory only — never in a log line, a
+ * preference file or the argument list — and is regenerated on every process
+ * start (so it dies with the app that owns it).
  */
 object EmbeddedEngine {
     private const val TAG = "EmbeddedEngine"
@@ -24,6 +73,18 @@ object EmbeddedEngine {
      * it, which is where the music engine also writes `<stem>.lrc`.
      */
     const val HOME_DIRECTORY = "engine_home"
+
+    /**
+     * The bearer token the engine expects from this process.
+     *
+     * Generated eagerly (not on the bootstrap thread) because `Api.configure`
+     * can run before the engine finished starting and must already know which
+     * credential to attach. Empty only after [resetForTest] was called without
+     * a subsequent generation.
+     */
+    @Volatile
+    var token: String = generateEmbeddedToken()
+        private set
 
     @Volatile
     private var started = false
@@ -73,7 +134,18 @@ object EmbeddedEngine {
         ensureStarted(home) {
             try {
                 if (!Python.isStarted()) Python.start(AndroidPlatform(appContext))
-                Python.getInstance()
+                // Hand the credential over in memory, before the server binds
+                // its port: the interpreter is in this process, so nothing is
+                // written to disk and no argv is visible to other apps.
+                // `os.environ` (not `os.putenv`) is used because the Python
+                // side reads `os.environ.get(...)`.
+                val python = Python.getInstance()
+                val environ = python.getModule("os").get("environ")
+                    ?: error("os.environ is unavailable in the embedded interpreter")
+                embeddedTokenEnvironment(token).forEach { (name, value) ->
+                    environ.put(name, value)
+                }
+                python
                     .getModule("novel_downloader.apps.embedded.server")
                     .callAttr("start_server", home, PORT)
                 Log.i(TAG, "embedded engine ready on port $PORT")
@@ -123,6 +195,7 @@ object EmbeddedEngine {
             started = false
             ready = false
             lastError = null
+            token = generateEmbeddedToken()
         }
     }
 

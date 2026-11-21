@@ -163,6 +163,41 @@ internal fun apiOriginPolicy(baseUrl: String, apiKey: String): ApiOriginPolicy? 
     baseUrl.toHttpUrlOrNull()?.let { ApiOriginPolicy(ApiOrigin.of(it), apiKey) }
 
 /**
+ * Whether [baseUrl] addresses the in-process engine at [engineBaseUrl].
+ *
+ * Compared after trimming the trailing slash only: the two URLs differ solely
+ * in spelling (`.../` vs `...`), never in host or port.
+ */
+internal fun isEmbeddedBaseUrl(baseUrl: String, engineBaseUrl: String): Boolean =
+    baseUrl.trim().trimEnd('/') == engineBaseUrl.trim().trimEnd('/')
+
+/**
+ * Picks the credential a request to [baseUrl] carries.
+ *
+ * The engine token is attached only when the app is actually in embedded mode
+ * *and* the target is the engine URL; every other target gets the user's
+ * remote key. That keeps the two credentials strictly apart in both
+ * directions: a remote API never sees the local token, and the loopback
+ * engine never sees the user's remote key.
+ *
+ * The URL check is a second condition on purpose: a developer who points a
+ * non-embedded configuration at `127.0.0.1:8081` (for example through
+ * `adb reverse` to a PC) must keep authenticating with the key they typed,
+ * not with this process's engine token.
+ */
+internal fun effectiveRequestKey(
+    baseUrl: String,
+    apiKey: String,
+    embeddedEngine: Boolean,
+    engineToken: String,
+    engineBaseUrl: String,
+): String = if (embeddedEngine && isEmbeddedBaseUrl(baseUrl, engineBaseUrl)) {
+    engineToken
+} else {
+    apiKey
+}
+
+/**
  * Reads at most [limit] bytes of [this] body as UTF-8 (a diagnostic only).
  *
  * Unlike [Response.readBoundedText] this never throws for a large body: the

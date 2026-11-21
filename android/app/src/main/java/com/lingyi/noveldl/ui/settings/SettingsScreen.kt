@@ -122,7 +122,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             // In standalone mode the engine stays the API target; the typed
             // URL is persisted for when the user switches back.
             val target = latest.configureTargetUrl(baseUrl)
-            val usable = Api.configure(target, apiKey)
+            val usable = Api.configure(target, apiKey, embeddedEngine = latest.standalone)
             store.save(baseUrl, apiKey)
             when {
                 baseUrl.isBlank() ->
@@ -146,7 +146,11 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             // Same freshness rule as save(): test the target the switch is
             // actually in, not a possibly stale snapshot of the flow.
             val latest = store.settings.first()
-            Api.configure(latest.configureTargetUrl(baseUrl), apiKey)
+            Api.configure(
+                latest.configureTargetUrl(baseUrl),
+                apiKey,
+                embeddedEngine = latest.standalone,
+            )
             Api.call { Api.service().health() }
                 .onSuccess {
                     health = healthSummary(it.status, it.version, unknownStatus)
@@ -247,6 +251,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             val usable = Api.configure(
                 standaloneTargetUrl(enabled, latest),
                 latest.apiKey,
+                embeddedEngine = enabled,
             )
             if (enabled && !usable) {
                 // The engine URL is always valid; unreachable in practice,

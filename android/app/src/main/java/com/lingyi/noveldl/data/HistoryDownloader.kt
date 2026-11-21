@@ -59,7 +59,7 @@ object HistoryDownloader {
      */
     private fun httpClient(): OkHttpClient {
         val builder = baseClient.newBuilder()
-        apiOriginPolicy(Api.baseUrl, Api.apiKey)?.let { policy ->
+        apiOriginPolicy(Api.baseUrl, Api.requestKey)?.let { policy ->
             builder.addNetworkInterceptor(policy.interceptor())
         }
         return builder.build()
@@ -99,7 +99,7 @@ object HistoryDownloader {
         // which is what an API started without --token expects. A URL on
         // another origin gets no key: DownloadManager would forward it across
         // redirects.
-        downloadRequestHeaders(Api.apiKey, url, Api.baseUrl).forEach { (name, value) ->
+        downloadRequestHeaders(Api.requestKey, url, Api.baseUrl).forEach { (name, value) ->
             request.addRequestHeader(name, value)
         }
         Result.success(manager.enqueue(request))
@@ -174,7 +174,7 @@ object HistoryDownloader {
                 val savedName = prepared.name ?: desiredName
 
                 val builder = Request.Builder().url(url)
-                downloadRequestHeaders(Api.apiKey, url, Api.baseUrl).forEach { (name, value) ->
+                downloadRequestHeaders(Api.requestKey, url, Api.baseUrl).forEach { (name, value) ->
                     builder.header(name, value)
                 }
                 // Enqueued so cancellation (navigating away, closing the

@@ -88,7 +88,8 @@ fun downloadFileName(name: String, downloadUrl: String, fallbackExt: String): St
  * configured, so a null/blank key yields no headers and the download still
  * works. A configured key is trimmed (matching [Api.configure]) and sent as
  * `X-API-Key`, the header alias accepted by the server alongside
- * `Authorization: Bearer`.
+ * `Authorization: Bearer`. Callers pass [Api.requestKey], which is the
+ * per-process engine token in standalone mode and the user's key otherwise.
  *
  * When both [url] and [baseUrl] are supplied the key is attached only if the
  * download lives on the configured API origin. DownloadManager cannot strip

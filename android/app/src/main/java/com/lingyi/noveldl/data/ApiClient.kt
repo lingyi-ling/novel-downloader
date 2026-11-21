@@ -75,6 +75,19 @@ object Api {
         private set
 
     /**
+     * The credential the active configuration sends: the per-process engine
+     * token when [baseUrl] is the in-process engine, otherwise the user's
+     * remote [apiKey]. Empty when the target needs none.
+     *
+     * Kept separate from [apiKey] so a remote key can never be replayed to
+     * the loopback engine and the engine token can never leave the device
+     * (the origin policy also strips it on any cross-origin redirect).
+     */
+    @Volatile
+    var requestKey: String = ""
+        private set
+
+    /**
      * Builds the Retrofit service. [baseUrl] is trimmed and normalized to end
      * with a slash; a blank value falls back to [DEFAULT_BASE_URL].
      *
@@ -98,6 +111,7 @@ object Api {
         readTimeoutMillis: Long = 60_000,
         writeTimeoutMillis: Long = 60_000,
         callTimeoutMillis: Long = DEFAULT_CALL_TIMEOUT_MILLIS,
+        embeddedEngine: Boolean = false,
     ): Boolean {
         val trimmed = baseUrl.trim()
         val candidate = if (trimmed.endsWith("/")) trimmed else "$trimmed/"
@@ -107,6 +121,19 @@ object Api {
         this.baseUrl = normalized
         val key = apiKey?.trim().orEmpty()
         this.apiKey = key
+        // The in-process engine authenticates with its own per-process token;
+        // the user's remote key is never sent there. A remote target gets the
+        // user's key and never the local token. [embeddedEngine] is the
+        // persisted standalone flag, so a URL that merely looks like the
+        // engine (a `adb reverse` target) keeps using the typed key.
+        val effectiveKey = effectiveRequestKey(
+            baseUrl = normalized,
+            apiKey = key,
+            embeddedEngine = embeddedEngine,
+            engineToken = EmbeddedEngine.token,
+            engineBaseUrl = EmbeddedEngine.BASE_URL,
+        )
+        this.requestKey = effectiveKey
         val origin = ApiOrigin.of(normalized.toHttpUrl())
         val client = baseClient.newBuilder()
             .connectTimeout(connectTimeoutMillis, TimeUnit.MILLISECONDS)
@@ -117,7 +144,7 @@ object Api {
             .addInterceptor(responseSizeGuard())
             // Network (not application) interceptor: redirects must be seen so
             // the key is not forwarded to another origin.
-            .addNetworkInterceptor(ApiOriginPolicy(origin, key).interceptor())
+            .addNetworkInterceptor(ApiOriginPolicy(origin, effectiveKey).interceptor())
             .build()
         service = Retrofit.Builder()
             .baseUrl(normalized)
