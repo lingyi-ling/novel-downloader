@@ -52,7 +52,7 @@
   "app": "novel-downloader",
   "kind": "desktop-preferences",
   "format_version": 1,
-  "app_version": "1.37.0",
+  "app_version": "1.37.1",
   "exported_at": "2026-11-15T00:00:00Z",
   "settings": {
     "theme": "dark",
