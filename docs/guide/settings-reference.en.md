@@ -28,6 +28,19 @@ A missing value (the cache has not been used yet) or a failed read renders as `0
 
 On success a "Search cache cleared" toast appears and the card is refreshed; on failure the toast shows the error text, the card keeps its previous values, and the action can be retried immediately.
 
+### Desktop Settings: Updates {#desktop-settings-updates}
+
+The **Settings → Updates** card has three switches and a check-now button:
+
+| Control | Preference key | Behaviour |
+| --- | --- | --- |
+| Check for updates automatically | `auto_check_updates` | Checks after start-up, at most once every 24 hours; when off, no automatic check runs, but **Check now** still works |
+| Download updates in the background | `auto_download_updates` | Downloads a new release in the background once it is found |
+| Install the downloaded update when quitting | `auto_install_on_exit` | Launches the verified installer when the app exits (Windows only) |
+| Check now | — | Forces a check, ignoring the 24-hour throttle and the automatic-check switch |
+
+For "Later" versus "Skip this version", the pre-request `last_update_check` write, and where `skipped_update_version` is stored and how to clear it, see [The desktop update notice](updates.en.md#desktop-update-notice). These runtime values are outside the settings export (see the table below).
+
 ### Exporting and importing desktop settings
 
 The **Settings → Backup** card exports the **desktop preferences** as JSON and imports them on another machine. It exports `desktop_prefs.json` (by default under the application data directory's `music/` folder), not `settings.toml`; the file contains only preferences that are safe to move between machines. An import **merges** the file into the current preferences; it is not a factory reset.
@@ -83,7 +96,7 @@ The **Settings → Backup** card exports the **desktop preferences** as JSON and
 | Proxy address, proxy username / password | Credentials must not travel in a file, and an address may be tied to the local network |
 | Music account tokens (TIDAL / Apple Music / SoundCloud, etc.) | Account credentials; device-private data |
 | Output folder, interface language | Stored in `settings.toml` / a separate state file and chosen per device and person; not part of the desktop preferences file |
-| Throttle state such as `last_update_check` | Local runtime state; migrating it is meaningless |
+| Throttle state such as `last_update_check`, and `skipped_update_version` | Local runtime state; migrating it is meaningless, and a skipped version would only give the new machine an equally meaningless "skipped" marker |
 | Music download options such as `embed_lyric` | Shared with the CLI through the music settings file; exporting them would create a second source of truth |
 
 The exported JSON is therefore safe to put in a sync folder or a chat message; the trade-off is that the proxy, accounts, output folder and language must be set again on the new machine (see "Limits of moving to another machine").

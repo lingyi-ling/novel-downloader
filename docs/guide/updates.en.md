@@ -10,7 +10,7 @@ The desktop app, the CLI and the Android client all check for new versions. They
 | CLI | silently after any command (TTY only, never with `--json`) | once per 24 hours |
 | Android | at start-up | once per 24 hours |
 
-The result is cached, so restarting within that window does not hit the network again.
+The result is cached, so restarting within that window does not hit the network again. The desktop app writes `last_update_check` before the request is sent, so an offline machine does not retry on every start; see [The desktop update notice](#desktop-update-notice).
 
 ## Turning it off
 
@@ -43,6 +43,35 @@ The desktop app checks once every 24 hours by default; a newer version is downlo
 - **Installer build**: on quit, the verified Inno Setup installer starts silently and replaces the installation directory in place; once the silent install finishes, Setup starts the new build itself, so nothing needs to be opened manually.
 - **Portable build**: the downloaded asset is a zip; after the app exits, a PowerShell helper waits for the process to end, expands the zip to `%TEMP%`, deletes `_internal` in the current folder, then copies the new files over it and restarts the app. That removes plugins dropped from the product, while settings and downloads under `app_home` stay untouched. It does not install a second copy into `%LOCALAPPDATA%`.
 - Leftover `.part` files older than a day and finished packages older than a week are pruned from the update folder.
+
+## The desktop update notice: Later vs Skip this version {#desktop-update-notice}
+
+Neither button on the right of the update bar turns updates off permanently; the difference is whether the choice is persisted:
+
+| Button | Scope | When the notice returns |
+| --- | --- | --- |
+| **Later** | In-memory state of the current page instance only; nothing is written to the preferences file | After restarting the app or reloading the page, or when a different release is detected in the same session |
+| **Skip this version** | Persisted to the preferences file, for **that one** version only | Automatically once a newer release is published; no manual reset needed |
+
+"Skip this version" calls `skip_update_version`, which stores the normalised version string (leading `v` and surrounding whitespace removed) under the `skipped_update_version` key in `desktop_prefs.json`. The next check for the same version reports `available: false`, the bar stays hidden, and **the background download skips it too**, so bandwidth is not spent on a build the user explicitly declined. When the next release appears, the cached `latest` no longer matches the stored value and the notice returns on its own; the old `skipped_update_version` stays in the file but is inert, so there is nothing to clear.
+
+### Automatic and manual checks
+
+- After start-up the front end calls `check_update_async`, which allows at most one network check per 24 hours (`_UPDATE_CHECK_INTERVAL`). The result is cached, so restarting within that window reuses the cache.
+- The current time is written to `last_update_check` **before** the request is sent, and the request times out after 8 seconds. An offline or unreachable GitHub therefore still counts as an attempt and is not retried every time the panel opens; use **Check now** to retry immediately.
+- With "Check for updates automatically" off, neither the start-up check nor a non-forced check runs (`update_state` does not start one and `check_update_async` returns `reason: "disabled"`). **Check now** in Settings still works: it forces past both the 24-hour throttle and that switch.
+- To check manually, use **Settings → Updates → Check now**.
+
+### Where the skipped version is stored, and how to clear it
+
+- File: `desktop_prefs.json`, by default in the music data directory (usually `%LOCALAPPDATA%\novel_downloader\music\desktop_prefs.json` on Windows; `NOVEL_MUSIC_HOME` overrides that directory).
+- Key: `skipped_update_version`, holding the normalised version string (for example `1.42.0`).
+- Settings has **no** separate "unskip" control, and "Settings export / import" only covers the six whitelisted keys, so an import does **not** clear this key. To lift a skip early, quit the app, delete `skipped_update_version` with a text editor (or change it to another version), save, start the app and click **Check now**. Deleting the whole `desktop_prefs.json` also resets the theme, the update switches and every other desktop preference.
+
+### Known limitations
+
+- **A download already in progress is not interrupted**: Skip only affects later notices and background downloads. A transfer that has already started runs to completion and stays in the update folder; a package already downloaded is not deleted either, and with "install when quitting" enabled it may still be launched on exit.
+- **The legacy check does not surface error details**: when the front end can only use the older blocking `check_update` (a backend without `check_update_async`), the page shows the bar only when `available` is true, so the `error` from an offline, rate-limited or malformed check never reaches the UI and the failure looks silent. Failures on the newer path are recorded in `update_state().error`; check the log when diagnosing.
 
 ## What gets verified
 

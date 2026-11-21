@@ -28,6 +28,19 @@
 
 成功时 Toast 提示「搜索缓存已清除」并刷新卡片；失败时 Toast 显示错误文本，卡片保留原值，可直接重试。
 
+### 桌面设置页：更新 (Updates) {#desktop-settings-updates}
+
+「设置 → Updates」卡片有三个开关和一个立即检查按钮：
+
+| 控件 | 偏好键 | 行为 |
+| --- | --- | --- |
+| Check for updates automatically（自动检查更新） | `auto_check_updates` | 启动后自动检查，每 24 小时最多一次；关闭后不再自动检查，但 **立即检查** 仍可用 |
+| Download updates in the background（后台下载更新） | `auto_download_updates` | 发现新版本后在后台下载 |
+| Install the downloaded update when quitting（退出时安装已下载的更新） | `auto_install_on_exit` | 退出应用时启动已校验的安装器（仅 Windows） |
+| Check now（立即检查） | — | 强制检查，忽略 24 小时节流和自动检查开关 |
+
+提示条的「稍后」与「跳过此版本」、`last_update_check` 先写后请求、`skipped_update_version` 的存储位置与清除方式，见[桌面端更新提示](updates.md#desktop-update-notice)。这些运行时状态不在设置导出范围内（见下表）。
+
 ### 桌面设置导出 / 导入 (Settings export / import)
 
 「设置 → Backup」卡片把**桌面偏好**导出为 JSON，并可在另一台机器上导入。导出的不是 `settings.toml`，而是桌面偏好文件 `desktop_prefs.json`（默认位于应用数据目录的 `music/` 下）；文件只包含可跨机器迁移的偏好项，不含任何凭据。导入是**合并写入**，不是恢复出厂设置。
@@ -83,7 +96,7 @@
 | 代理地址、代理用户名 / 密码 | 凭据不能随文件传播；地址也可能与本机网络绑定 |
 | 音乐账号 token（TIDAL / Apple Music / SoundCloud 等） | 账号凭据，属于设备私密数据 |
 | 输出目录、界面语言 | 存在 `settings.toml` / 独立状态文件中，按设备与个人习惯设置，不属于桌面偏好文件 |
-| `last_update_check` 等节流状态 | 属于本机运行时状态，迁移没有意义 |
+| `last_update_check`、`skipped_update_version` 等运行时状态 | 属于本机运行时状态，迁移没有意义；跳过版本还会让新机器继承一个无意义的「已跳过」标记 |
 | 音乐下载选项（如 `embed_lyric`） | 与 CLI 共用音乐设置文件，导出会产生第二个事实来源 |
 
 因此导出的 JSON 可以安全地放进同步盘或聊天工具；代价是换机后代理、账号、输出目录与语言需要重新设置（见「换机迁移的局限」）。
