@@ -1209,6 +1209,103 @@ function applyI18n(root) {
 /* ================================================================ helpers */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+/* Network book/site data reaches URL attributes ("cover_url", "book_url") and
+   the release bar ("notes_url"). Only fetch/navigate http(s): javascript:,
+   data:, vbscript: and file: parse as other protocols and are rejected. The
+   WHATWG URL parser is the same one the browser uses, so a value it reads as
+   http(s) cannot be read as an active-content scheme by the element. Values
+   with userinfo ("https://user:pass@host"), control characters/whitespace or
+   a backslash are rejected too, and relative URLs have no document base that
+   could resolve them. The bridge repeats these checks before the OS sees a
+   link. */
+/* url-safety-start */
+/* safe-external-url-start */
+const EXTERNAL_URL_MAX_LENGTH = 2048;
+function safeExternalUrl(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s || s.length > EXTERNAL_URL_MAX_LENGTH) return "";
+  if (/[\u0000-\u001f\u007f]/.test(s) || /\s/.test(s)) return "";
+  if (s.includes("\\")) return "";
+  const candidate = s.startsWith("//") ? "https:" + s : s;
+  try {
+    const u = new URL(candidate);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    if (!u.hostname || u.username || u.password) return "";
+    return u.href;
+  } catch { return ""; }
+}
+/* safe-external-url-end */
+/* Capture the platform opener before the override below: it is the fallback
+   when the pywebview bridge is not available (a plain-browser preview), and
+   pywebview itself routes it to the system browser. */
+const nativeWindowOpen = typeof window.open === "function" ? window.open.bind(window) : null;
+function openExternal(raw) {
+  const url = safeExternalUrl(raw);
+  if (!url) {
+    toast(t("Only http:// and https:// links can be opened"), "err", 6000);
+    return false;
+  }
+  const bridge = window.pywebview && window.pywebview.api;
+  if (bridge && typeof bridge.open_url === "function") {
+    Promise.resolve(bridge.open_url(url))
+      .then(r => {
+        if (r && r.ok === false) {
+          toast((r && r.error) || t("Could not open the link in your browser"), "err", 7000);
+        }
+      })
+      .catch(() => {
+        // The bridge went away mid-flight: the system browser is the fallback.
+        if (!nativeWindowOpen || !nativeWindowOpen(url, "_blank", "noopener,noreferrer")) {
+          toast(t("Could not open the link in your browser"), "err", 7000);
+        }
+      });
+    return true;
+  }
+  if (nativeWindowOpen) {
+    nativeWindowOpen(url, "_blank", "noopener,noreferrer");
+    return true;
+  }
+  toast(t("Could not open the link in your browser"), "err", 7000);
+  return false;
+}
+function linkHref(target) {
+  const link = target && target.closest ? target.closest("a[href]") : null;
+  return link ? String(link.getAttribute("href") || "").trim() : "";
+}
+/* A page may only navigate itself within this document. A raw anchor click,
+   window.open or dropped link would load a remote document into this WebView
+   and keep the js_api bridge attached to it. Local "#..." anchors stay. */
+window.open = function (url) { openExternal(url); return null; };
+document.addEventListener("click", e => {
+  const href = linkHref(e.target);
+  if (!href || href.startsWith("#")) return;
+  e.preventDefault();
+  openExternal(href);
+}, true);
+document.addEventListener("auxclick", e => {
+  if (e.button !== 1) return;
+  const href = linkHref(e.target);
+  if (!href || href.startsWith("#")) return;
+  e.preventDefault();
+  openExternal(href);
+}, true);
+["dragover", "drop"].forEach(name => {
+  document.addEventListener(name, e => e.preventDefault(), true);
+});
+/* The Navigation API also sees programmatic location changes that no click
+   guard can. A same-document fragment stays; a cross-document target is
+   cancelled, and an http(s) target is offered to the system browser. */
+if (window.navigation && typeof window.navigation.addEventListener === "function") {
+  window.navigation.addEventListener("navigate", e => {
+    const dest = e.destination || {};
+    if (dest.sameDocument) return;
+    const url = String(dest.url || "");
+    if (!url || url.startsWith("about:")) return;
+    e.preventDefault();
+    openExternal(url);
+  });
+}
+/* url-safety-end */
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
@@ -1368,12 +1465,14 @@ function fmtTime(ts) { if (!ts) return ""; const d = new Date(ts * 1000); const 
 function pill(status) { return `<span class="pill ${esc(status)}">${esc(t(status_label_key(status)))}</span>`; }
 function status_label_key(status) { return { queued: "Queued", running: "Downloading", processing: "Processing", exporting: "Exporting", completed: "Completed", failed: "Failed", cancelled: "Cancelled" }[status] || status; }
 
+/* highlight-start */
 function highlight(text, kw) {
   const raw = String(text ?? "");
   if (!kw) return esc(raw);
   try { return esc(raw).replace(new RegExp(esc(kw).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), m => `<mark>${m}</mark>`); }
   catch { return esc(raw); }
 }
+/* highlight-end */
 
 /* ================================================================ router */
 let currentPage = "search";
@@ -2048,7 +2147,7 @@ $("#update-skip").onclick = async () => {
 $("#update-notes").onclick = () => {
   const st = updates.state || {};
   const url = st.notes_url || st.url;
-  if (url) api("open_url", url).catch(() => {});
+  if (url) openExternal(url);
 };
 
 $("#update-install").onclick = async () => {
@@ -2229,14 +2328,17 @@ function selectResult(i) {
 function renderDetail(r, kw) {
   const box = $("#detail");
   if (!r) { hideDetail(); box.innerHTML = ""; return; }
-  let cover = r.cover_url || "";
-  if (cover.startsWith("//")) cover = "https:" + cover;
+  const cover = safeExternalUrl(r.cover_url || "");
   const img = cover
     ? `<img class="detail-cover" src="${esc(cover)}" alt="" referrerpolicy="no-referrer">`
     : `<div class="detail-cover detail-cover-blank"><span>${esc((r.title || "?").trim().slice(0, 1) || "?")}</span></div>`;
   // The panel is narrow: the "Author:" prefix would push this line into a
   // ragged wrap, so the values speak for themselves here.
   const meta = [r.author, r.word_count, r.update_date].filter(Boolean).map(esc).join('<span style="opacity:.45"> · </span>');
+  const bookUrl = safeExternalUrl(r.book_url || "");
+  const openBtn = bookUrl
+    ? `<button class="btn btn-ghost btn-sm" style="margin-top:7px;width:100%" data-open-url="${esc(bookUrl)}"><svg class="icon"><use href="#i-ext"/></svg>${esc(t("Open in browser"))}</button>`
+    : "";
   box.hidden = false;
   box.innerHTML = `
     <button type="button" class="detail-close" data-detail-close aria-label="${esc(t("Close"))}" title="${esc(t("Close"))}"><svg class="icon"><use href="#i-x"/></svg></button>
@@ -2253,7 +2355,7 @@ function renderDetail(r, kw) {
       <button class="btn btn-primary btn-sm" data-add="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-down"/></svg>${esc(t("Download"))}</button>
       <button class="btn btn-ghost btn-sm" data-follow="${esc(r.site)}" data-bid="${esc(r.book_id)}" data-title="${esc(r.title)}"><svg class="icon"><use href="#i-heart"/></svg>${esc(t("Follow"))}</button>
     </div>
-    <button class="btn btn-ghost btn-sm" style="margin-top:7px;width:100%" data-open-url="${esc(r.book_url || "")}"><svg class="icon"><use href="#i-ext"/></svg>${esc(t("Open in browser"))}</button>`;
+    ${openBtn}`;
 }
 
 function endSearchUi() {
@@ -2694,7 +2796,7 @@ function matchBadgeHtml(r) {
   if (!hit) return "";
   const grouped = Array.isArray(r.sources) && r.sources.length > 1;
   const tip = matchTip(hit, grouped);
-  return `<span class="match-badge tier-${hit.tier}" data-rank-tier="${hit.tier}" data-rank-score="${esc(hit.score)}" data-rank-scope="${grouped ? "group" : "row"}" title="${esc(tip)}" aria-label="${esc(tip)}">${esc(matchTierLabel(hit.tier))}</span>`;
+  return `<span class="match-badge tier-${esc(hit.tier)}" data-rank-tier="${esc(hit.tier)}" data-rank-score="${esc(hit.score)}" data-rank-scope="${grouped ? "group" : "row"}" title="${esc(tip)}" aria-label="${esc(tip)}">${esc(matchTierLabel(hit.tier))}</span>`;
 }
 /** The result card's accessible name: escaped title plus the explanation. */
 function resultCardLabel(r) {
@@ -2824,13 +2926,14 @@ function appendResultChunk() {
  * simply reveals it instead of leaving an empty framed box (no onerror
  * bookkeeping, and the image is decorative because the title is right there).
  */
+/* cover-box-start */
 function coverBox(r) {
   const letter = esc((r.title || "?").trim().slice(0, 1) || "?");
-  let src = r.cover_url || "";
-  if (src.startsWith("//")) src = "https:" + src;
+  const src = safeExternalUrl(r.cover_url || "");
   const img = src ? `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : "";
   return `<div class="rc-cover">${img}<span>${letter}</span></div>`;
 }
+/* cover-box-end */
 function sourceCaps(r) {
   // Merged rows ("Merge same book" on) carry ``sources``: every site holding
   // the book, best first. The first capsule (the best source, the row's own
@@ -2882,7 +2985,7 @@ $("#results").addEventListener("click", async e => {
     const r = await call("add_watch", fol.dataset.follow, fol.dataset.bid, fol.dataset.title);
     if (r) toast(r.message || (r.ok ? t("Added to follow list") : t("Already followed")), r.ok ? "ok" : "info");
   } else if (url && url.dataset.openUrl) {
-    api("open_url", url.dataset.openUrl).catch(() => {});
+    openExternal(url.dataset.openUrl);
   }
 });
 $("#detail").addEventListener("click", async e => {
@@ -2898,7 +3001,7 @@ $("#detail").addEventListener("click", async e => {
     const r = await call("add_watch", fol.dataset.follow, fol.dataset.bid, fol.dataset.title);
     if (r) toast(r.message || (r.ok ? t("Added to follow list") : t("Already followed")), r.ok ? "ok" : "info");
   } else if (url && url.dataset.openUrl) {
-    api("open_url", url.dataset.openUrl).catch(() => {});
+    openExternal(url.dataset.openUrl);
   }
 });
 $("#btn-rank").onclick = async () => {
@@ -3150,7 +3253,7 @@ function taskCard(k) {
   if (stage) meta.push(`<span>${stage}</span>`);
   if (speed) meta.push(`<span>${speed}</span>`);
   const err = k.error ? `<div class="task-error" title="${esc(k.error)}">${esc(k.error)}</div>` : "";
-  const retry = k.retry_count > 0 ? ` <span class="hint">(↻${k.retry_count})</span>` : "";
+  const retry = k.retry_count > 0 ? ` <span class="hint">(↻${esc(k.retry_count)})</span>` : "";
   const exports = (k.exports || []).map(p =>
     `<button class="btn btn-ghost btn-sm" data-open-file="${esc(p)}"><svg class="icon"><use href="#i-folder"/></svg>${esc(p.split(/[\\/]/).pop())}</button>`).join("");
   // A failed row keeps its evidence actionable: the message can be copied
@@ -4022,7 +4125,7 @@ function openModal(fields, onOk) {
   // the trap below is the keyboard equivalent of that promise.
   mask.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <h3 id="modal-title">${esc(t("Add book"))}</h3>
-    ${fields.map(f => `<div class="field"><input id="${f.id}" aria-label="${esc(t(f.ph))}" placeholder="${esc(t(f.ph))}" autocomplete="off"></div>`).join("")}
+    ${fields.map(f => `<div class="field"><input id="${esc(f.id)}" aria-label="${esc(t(f.ph))}" placeholder="${esc(t(f.ph))}" autocomplete="off"></div>`).join("")}
     <div class="modal-actions">
       <button class="btn btn-ghost" data-no>${esc(t("Cancel"))}</button>
       <button class="btn btn-primary" data-ok>${esc(t("OK"))}</button>

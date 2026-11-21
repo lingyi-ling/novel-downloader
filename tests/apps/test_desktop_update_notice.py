@@ -616,7 +616,7 @@ def test_the_release_notes_button_only_opens_the_page() -> None:
     handler = APP_HTML.split('$("#update-notes").onclick', 1)[1].split(
         '$("#update-install").onclick', 1
     )[0]
-    assert 'api("open_url", url)' in handler
+    assert "openExternal(url)" in handler
     assert 'api("download_update"' not in handler
     assert 'api("install_update")' not in handler
     assert "update_download_state" not in handler

@@ -158,6 +158,8 @@ _RELEASES_API = (
     "https://api.github.com/repos/lingyi-ling/novel-downloader/releases/latest"
 )
 _RELEASES_PAGE = "https://github.com/lingyi-ling/novel-downloader/releases/latest"
+#: Longest external URL the desktop shell will hand to the OS browser.
+_MAX_EXTERNAL_URL_LENGTH = 2048
 #: Minimum interval between update checks (24 hours).
 _UPDATE_CHECK_INTERVAL = 24 * 3600.0
 #: Network timeout for an update check, in seconds.  Mirrors
@@ -1100,6 +1102,12 @@ def _i18n_catalog() -> dict[str, str]:
         "Author match": t("Author match"),
         "Show more": t("Show more"),
         "Open in browser": t("Open in browser"),
+        "Only http:// and https:// links can be opened": t(
+            "Only http:// and https:// links can be opened"
+        ),
+        "Could not open the link in your browser": t(
+            "Could not open the link in your browser"
+        ),
         "Queued: {title}": t("Queued: {title}"),
         # download page
         "Active": t("Active"),
@@ -1776,6 +1784,67 @@ def _inside_dir(path: Path, root: Path) -> bool:
         return Path(path).resolve().is_relative_to(Path(root).resolve())
     except OSError:
         return False
+
+
+def _safe_external_url(
+    url: Any,
+    *,
+    schemes: tuple[str, ...] = ("http", "https"),
+    max_length: int = _MAX_EXTERNAL_URL_LENGTH,
+) -> str:
+    """
+    Normalise *url* into an absolute web URL, or return ``""`` when unsafe.
+
+    This is the single gate for anything the desktop shell hands to the OS
+    browser.  It accepts only the schemes in *schemes* (http/https by default),
+    requires a host, and rejects values that browsers parse inconsistently:
+
+    * userinfo (``https://user:pass@host``, ``https://good\\@evil``) — the host
+      starts at the last ``@`` for some parsers and at the first for others;
+    * control characters and literal whitespace (including tabs/newlines that
+      a browser would silently strip, changing the authority);
+    * backslashes, which Chromium treats as path separators;
+    * over-long strings, empty values and relative URLs.
+
+    :param url: candidate returned by a site, a release payload or the page.
+    :param schemes: accepted lowercase schemes.
+    :param max_length: hard length cap.
+    :return: the normalised URL, or ``""`` when it must not be opened.
+    """
+    raw = str(url or "").strip()
+    if not raw or len(raw) > max_length:
+        return ""
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+        return ""
+    if "\\" in raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        return ""
+    if parts.scheme.lower() not in schemes:
+        return ""
+    if not parts.netloc or not parts.hostname:
+        return ""
+    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        return ""
+    if port is not None and not 0 < port <= 65535:
+        return ""
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc, parts.path, parts.query, parts.fragment)
+    )
+
+
+def _safe_release_url(url: Any) -> str:
+    """
+    The release page to open from the update bar, HTTPS-only.
+
+    GitHub supplies ``html_url`` in the release payload; a cached or crafted
+    value is never allowed to downgrade the link or point at another scheme.
+    A rejected value falls back to the project's fixed releases page.
+    """
+    return _safe_external_url(url, schemes=("https",)) or _RELEASES_PAGE
 
 
 def _is_https_asset_url(url: str) -> bool:
@@ -3521,11 +3590,37 @@ class ApiBridge:
             return False
         return True
 
-    def open_url(self, url: str) -> None:
-        """Open an external URL in the default browser."""
-        target = str(url or "").strip()
-        if target.startswith(("http://", "https://")):
-            webbrowser.open(target)
+    def open_url(self, url: str) -> dict[str, Any]:
+        """
+        Open a validated external URL in the default browser.
+
+        Only absolute ``http://``/``https://`` URLs without userinfo, control
+        characters or backslashes reach the OS handler.  Everything else
+        (``file:``, ``javascript:``, ``data:``, ``vbscript:``, a relative link
+        returned by a site) is refused.  The page shows the returned error
+        instead of turning the click into a silent no-op.
+
+        :return: ``{"ok", "url", "error"}``.
+        """
+        target = _safe_external_url(url)
+        if not target:
+            return {
+                "ok": False,
+                "url": "",
+                "error": t("Only http:// and https:// links can be opened"),
+            }
+        try:
+            opened = webbrowser.open(target)
+        except Exception as exc:  # noqa: BLE001 - a broken handler is not fatal
+            logger.warning("Could not open %s: %s", target, exc)
+            opened = False
+        if not opened:
+            return {
+                "ok": False,
+                "url": target,
+                "error": t("Could not open the link in your browser"),
+            }
+        return {"ok": True, "url": target, "error": None}
 
     def open_downloads_dir(self) -> dict[str, Any]:
         """
@@ -3680,7 +3775,7 @@ class ApiBridge:
             error=None,
         )
 
-        url = info.notes_url or _RELEASES_PAGE
+        url = _safe_release_url(info.notes_url)
         skipped = bool(info.available) and _version_skipped(prefs, info.latest)
         if not info.available or skipped:
             return {
@@ -4108,9 +4203,7 @@ class ApiBridge:
             inflight = (
                 self._update_thread is not None and self._update_thread.is_alive()
             )
-        notes_url = (
-            info.notes_url if info is not None and info.notes_url else _RELEASES_PAGE
-        )
+        notes_url = _safe_release_url(info.notes_url if info is not None else None)
         latest = info.latest if info is not None else ""
         skipped = bool(info is not None and info.available) and _version_skipped(
             stored, latest
@@ -6511,6 +6604,17 @@ def run_webview_app() -> int:
         load_window_geometry,
         window_state_file,
     )
+
+    # Pin pywebview's popup policy: ``window.open``/``target=_blank`` must go
+    # to the system browser, never become a second in-app window that would
+    # inherit this window's js_api bridge.  The default is the same; writing
+    # it keeps an upstream default change from silently loosening the app.
+    shell_settings = getattr(webview, "settings", None)
+    if shell_settings is not None:
+        try:
+            shell_settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
+        except (KeyError, TypeError):
+            logger.debug("pywebview does not expose external-link routing")
 
     # Held until the process exits so the installer's Restart Manager can see
     # (and close) this instance deterministically.

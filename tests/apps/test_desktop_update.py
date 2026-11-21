@@ -882,7 +882,7 @@ def test_app_html_update_buttons_are_disabled_while_downloading() -> None:
 
 def test_app_html_release_notes_open_in_the_system_browser() -> None:
     assert '$("#update-notes").onclick' in APP_HTML
-    assert 'api("open_url", url)' in APP_HTML
+    assert "openExternal(url)" in APP_HTML
 
 
 def test_app_html_later_dismisses_for_the_session_only() -> None:

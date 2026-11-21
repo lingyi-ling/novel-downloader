@@ -845,7 +845,7 @@ def test_app_html_narrow_result_cards_stack_the_side_column() -> None:
 def test_app_html_renders_match_telemetry_badges() -> None:
     """Final ranked rows explain their order; source capsules stay plain."""
     assert "function matchBadgeHtml(" in APP_HTML
-    assert 'data-rank-tier="${hit.tier}"' in APP_HTML
+    assert 'data-rank-tier="${esc(hit.tier)}"' in APP_HTML
     assert 'data-rank-score="${esc(hit.score)}"' in APP_HTML
     assert 'data-rank-scope="${grouped ? "group" : "row"}"' in APP_HTML
     assert "${matchBadgeHtml(r)}" in APP_HTML
