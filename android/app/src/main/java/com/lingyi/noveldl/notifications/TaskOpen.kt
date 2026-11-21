@@ -14,8 +14,16 @@ import kotlinx.coroutines.flow.asStateFlow
  * identity includes the action, so two tasks still can never share (and
  * silently retarget) one PendingIntent.
  *
+ * `MainActivity` is exported (it is the launcher entry point), so any installed
+ * app can start it explicitly with an arbitrary action and extras. Nothing here
+ * may therefore turn intent data into a privileged effect: the action is
+ * matched against a strict allow-list and the id is bounded and character
+ * checked, so a forged intent can at most open the local task list. It can
+ * never read a file, start a download, or reach a cancel/share path.
+ *
  * The decision logic here is Android-free so the JVM tests can exercise it
- * (`TaskOpenTest`); the activity only forwards `action` / extra into it.
+ * (`TaskOpenTest`, `TaskOpenValidationTest`); the activity only forwards
+ * `action` / extra into it.
  */
 object TaskOpen {
 
@@ -26,17 +34,64 @@ object TaskOpen {
      */
     const val EXTRA_TASK_ID: String = "com.lingyi.noveldl.extra.TASK_ID"
 
+    /**
+     * Longest task id accepted from an intent.
+     *
+     * Server ids are `uuid4().hex` (32 chars), so this leaves ample room for
+     * other implementations while refusing an unbounded string that would be
+     * carried in the activity's state. Anything longer is treated as "no id":
+     * the task list still opens, it just cannot focus a card.
+     */
+    const val MAX_TASK_ID_CHARS: Int = 128
+
     private const val ACTION_PREFIX = "com.lingyi.noveldl.action.OPEN_TASKS:"
+
+    /** `Int.MAX_VALUE` has 10 digits; a longer suffix cannot be an id. */
+    private const val MAX_ACTION_ID_DIGITS = 10
 
     /** The per-task PendingIntent action; must stay unique per notification id. */
     fun openTasksAction(notificationId: Int): String = "$ACTION_PREFIX$notificationId"
 
-    /** Whether [action] was produced by [TaskNotifier]. */
-    fun isOpenTasksAction(action: String?): Boolean =
-        action != null && action.startsWith(ACTION_PREFIX)
+    /**
+     * Whether [action] was produced by [TaskNotifier].
+     *
+     * This is an allow-list, not a prefix test: the suffix must be the canonical
+     * decimal form of a positive int, exactly as [openTasksAction] emits it. A
+     * forged `OPEN_TASKS:abc`, `OPEN_TASKS:007`, `OPEN_TASKS:` or an overflow
+     * value is rejected, so the accepted action space is exactly the one the
+     * app can produce.
+     */
+    fun isOpenTasksAction(action: String?): Boolean {
+        if (action == null || !action.startsWith(ACTION_PREFIX)) return false
+        val suffix = action.substring(ACTION_PREFIX.length)
+        if (suffix.isEmpty() || suffix.length > MAX_ACTION_ID_DIGITS) return false
+        // Canonical form only: no sign, no zero padding.
+        if (suffix.length > 1 && suffix[0] == '0') return false
+        if (!suffix.all { it in '0'..'9' }) return false
+        val id = suffix.toLong()
+        return id in 1..Int.MAX_VALUE.toLong()
+    }
 
-    /** Normalizes an extra: surrounding whitespace is not part of any task id. */
-    fun taskId(raw: String?): String? = raw?.trim()?.takeIf { it.isNotEmpty() }
+    /**
+     * Normalizes an extra: surrounding whitespace is not part of any task id,
+     * and an id that could not be one is dropped.
+     *
+     * The id is only ever compared against the task list, so the checks are the
+     * ones that keep the value inert: bounded length, no embedded whitespace,
+     * and no control or bidi-format characters that would let a forged extra
+     * smuggle invisible content into UI state.
+     */
+    fun taskId(raw: String?): String? {
+        val trimmed = raw?.trim() ?: return null
+        if (trimmed.isEmpty() || trimmed.length > MAX_TASK_ID_CHARS) return null
+        val unusable = trimmed.any { char ->
+            char.isWhitespace() ||
+                Character.isSpaceChar(char) ||
+                Character.isISOControl(char) ||
+                Character.getType(char) == Character.FORMAT.toInt()
+        }
+        return trimmed.takeUnless { unusable }
+    }
 
     /**
      * The request encoded by a delivered intent, or `null` when the intent did

@@ -72,7 +72,11 @@ class MainActivity : ComponentActivity() {
             if (settings.standalone) {
                 EmbeddedEngine.ensureStarted(this@MainActivity)
             }
-            Api.configure(settings.effectiveBaseUrl, settings.apiKey)
+            Api.configure(
+                settings.effectiveBaseUrl,
+                settings.apiKey,
+                embeddedEngine = settings.standalone,
+            )
             setContent {
                 NovelTheme {
                     Box {
@@ -110,6 +114,14 @@ class MainActivity : ComponentActivity() {
      * Cold start, foreground delivery and recreation from recents all funnel
      * through here: only a task-notification intent (unique OPEN_TASKS action)
      * produces a request; a launcher tap leaves the pending request alone.
+     *
+     * This activity is exported (launcher entry point), so any installed app
+     * can start it explicitly with a forged action and extras. The only effect
+     * reachable from here is local navigation to the task list, and even that
+     * requires [TaskOpen.isOpenTasksAction] to accept the action as one this
+     * app actually emits. The delivered intent's data/clipData is deliberately
+     * never read (pinned by `tests/test_android_fileprovider.py`), so a forged
+     * extra can never become a file read, a download, a cancel or a share.
      */
     private fun handleOpenIntent(intent: Intent?, recreated: Boolean = false) {
         // A rotation redelivers the same intent; the surviving ViewModel

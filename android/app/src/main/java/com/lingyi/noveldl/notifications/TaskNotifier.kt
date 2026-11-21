@@ -167,6 +167,13 @@ object TaskNotifier {
             "fallback:${event.task.site}:${event.task.title}"
         }
         val notificationId = NotificationIds.taskNotificationId(taskKey)
+        // The id crosses a process boundary twice (system server, then the
+        // activity) and the record came from a remote server, so it is bounded
+        // and character-checked here: an oversized extra would make
+        // PendingIntent.getActivity throw TransactionTooLargeException, and a
+        // control character has no business in UI state. An unusable id is
+        // posted as an empty extra, which merely opens the task list.
+        val taskIdExtra = TaskOpen.taskId(event.task.task_id).orEmpty()
 
         val intent = Intent(appContext, MainActivity::class.java).apply {
             // Unique per task: PendingIntent identity includes the action, and
@@ -174,7 +181,7 @@ object TaskNotifier {
             action = TaskOpen.openTasksAction(notificationId)
             // The real task id, never the fallback key above: only a real id
             // can be located in the task list.
-            putExtra(TaskOpen.EXTRA_TASK_ID, event.task.task_id.trim())
+            putExtra(TaskOpen.EXTRA_TASK_ID, taskIdExtra)
             // SINGLE_TOP keeps a foreground activity alive, so the tap arrives
             // through onNewIntent and the 2 s poll/composition state survives.
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
