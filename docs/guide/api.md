@@ -1081,6 +1081,8 @@ NOVEL_API_WEBHOOK=https://example.invalid/hooks/novel novel-api
 
 `tracks` 超过 `200` 首返回 `422`，`detail` 会指明数量上限。
 
+遇到 `413` / `415` 时如何判断是哪一条限制命中、如何改小请求，以及内嵌引擎的差异（chunked 返回 `501`、缺失 `Content-Type` 的行为不同），见 [故障排查 § API 返回 413 / 415](./troubleshooting.md#api-413-415)。
+
 阻塞型端点的默认超时预算（超出返回 `504`）：
 
 | 端点 | 默认预算 | 说明 |
@@ -1281,8 +1283,8 @@ curl 不发 `Origin`，不受影响。
 | `401` | 已配置 token，但请求缺少或携带了错误的 token。 |
 | `404` | 任务 ID 不存在；登录凭据请求 ID 不存在；音乐任务 ID 不存在；追更条目不存在；静态文件不存在。 |
 | `409` | 登录凭据请求已完成、尚未被任务取走时再次提交。 |
-| `413` | 请求体超过该端点的大小上限。 |
-| `415` | 携带请求体的端点收到非 JSON `Content-Type`（含压缩请求体）。 |
+| `413` | 请求体超过该端点的大小上限（[排查](./troubleshooting.md#api-413-415)）。 |
+| `415` | 携带请求体的端点收到非 JSON `Content-Type`（含压缩请求体，[排查](./troubleshooting.md#api-413-415)）。 |
 | `422` | 请求参数校验失败（缺少必填字段、数值越界、`tracks` 过多等）。 |
 | `429` | 超出按客户端 IP 的请求频率限制，响应带 `Retry-After` 头；或活跃音乐任务已达 `4` 个（该 `429` 也带 `Retry-After: 5`，`detail` 为 `Too many music jobs are already running (limit 4); retry later`）。 |
 | `500` | 服务端内部错误，通用处理器固定返回 `{"detail": "Internal server error"}`，不泄漏堆栈；音乐平台初始化失败与歌单写入失败返回各自的固定消息，只含异常类名。 |

@@ -193,7 +193,7 @@ not from this tool.
 
 ---
 
-## 3. API Returns 401 / Port Already in Use
+## 3. API Returns 401 / 413 / 415 / Port Already in Use
 
 ### 3.1 401 Unauthorized
 
@@ -308,6 +308,226 @@ long it took.
 The id only correlates debugging information: it is not used for
 authentication, rate-limit accounting, or request de-duplication. After a
 server restart, old ids no longer map to any log context.
+
+### 3.4 API Returns 413 / 415 {#api-413-415}
+
+**Symptoms**: a request whose body looks fine comes back as
+`413 Request Entity Too Large`; or a client that clearly sends JSON gets
+`415 Unsupported Media Type`.
+
+Both are produced by the **request-body guard**
+(`BodySizeLimitMiddleware` in `apps/api/middleware.py`) *before the body is
+read*. No route or business code ran. The `detail` text is fixed, so it
+identifies the case:
+
+| Status | `detail` |
+| --- | --- |
+| `413` | `Request body too large: the limit for this endpoint is 1048576 bytes` |
+| `415` | `Unsupported Content-Type: send the request body as application/json` |
+| `415` | `Unsupported Content-Encoding: send the request body uncompressed (identity)` |
+
+The response carries `Cache-Control: no-store` and the usual `X-Request-ID`
+header, so the previous section's method finds the matching log line. Neither
+rejection runs any side effect (no task queued, no watchlist entry written).
+
+**Scope**: every `POST` / `PUT` / `PATCH` / `DELETE` under `/api/v1`, including
+bodyless writes such as `/tasks/{id}/cancel` and `DELETE /watchlist/...`, and
+including unknown paths and routes added in the future (the guard works on the
+path prefix, not a route list). `GET` / `HEAD` / `OPTIONS` and `/downloads` are
+outside the guard, so their bodies are not checked (a `GET` with a 1 MB body is
+still served normally). The cap is `1 MiB` (`1048576` bytes, inclusive): exactly
+1 MiB passes the guard and continues to field validation (which may still return
+`422`), one byte more is `413`. Size is counted in **raw bytes**, not
+characters: a CJK character is 3 bytes in UTF-8.
+
+#### 413: declared versus streamed
+
+Both paths return an identical response; they differ in how much the server
+reads:
+
+| Trigger | Server behaviour | What the client observes |
+| --- | --- | --- |
+| `Content-Length` already over the cap | Reads nothing, answers `413` at once | A client sending `Expect: 100-continue` (curl does this for large bodies) gets `413` before uploading; `size_upload=0` |
+| No `Content-Length` (`Transfer-Encoding: chunked`) | Reads chunk by chunk and aborts at the chunk that crosses 1 MiB | Almost the whole body is uploaded before the `413`; `size_upload` ≈ the body size |
+
+How to tell them apart:
+
+```bash
+BASE=http://127.0.0.1:8081
+
+# Look at the request headers: Content-Length > 1048576 means a declared overrun
+curl -sv -o /dev/null -H "Content-Type: application/json" \
+  --data-binary @payload.json "$BASE/api/v1/search" 2>&1 \
+  | grep -E '^[<>] (Content-Length|Transfer-Encoding|HTTP/)'
+
+# Look at the bytes actually sent: uploaded=0 → declared; uploaded≈file size → streamed
+curl -s -o /dev/null -w 'code=%{http_code} uploaded=%{size_upload}\n' \
+  -H "Content-Type: application/json" \
+  --data-binary @payload.json "$BASE/api/v1/search"
+```
+
+**Which requests really get this large**: normal bodies for `search`, `browse`,
+`tasks`, `watchlist` and `login/requests` are a few hundred bytes to a few KB,
+so a `413` there almost always means the client sent the wrong content (an
+uploaded file, an echoed response body, a field appended in a loop). The music
+endpoints are the ones that legitimately approach the cap: `music/download`,
+`music/export` and `music/jobs` each accept up to `200` tracks, and each
+track's `lyric` (up to `100000` characters), `download_url`, `http_headers`,
+`extra`, `path` and `sources` all count toward the size. Measured: 200 tracks
+with 6000-character lyrics each is about 1.2 MB and returns `413`; the same 200
+tracks as `provider` + `id` only is about 7 KB and passes.
+
+**Shrinking the request**, in order of preference:
+
+1. **Send `search_id` and only minimal tracks.** `search_id` from the search
+   response lets the server restore the original Track objects, so each track
+   only needs `provider` + `id`:
+
+   ```bash
+   curl -s -X POST "$BASE/api/v1/music/download" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"search_id":"9f2c1b0a9d8e4f7c8b6a5d4e",
+          "tracks":[{"provider":"netease","id":"186016"}]}'
+   ```
+
+   The cache keeps up to 32 entries for 30 minutes; after that, search again
+   (the server falls back to the submitted dictionaries, which normally shows
+   up as per-track failures, not `413`).
+
+2. **Drop fields you do not need.** A download request does not need `lyric`,
+   `extra`, `http_headers`, `cover_url`, `download_url` or `sources`; only
+   `music/export` needs `path`. Individual fields also have their own limits
+   (`lyric` 100k characters, `http_headers` 32 entries, ...); exceeding those is
+   `422`.
+3. **Split the batch.** `tracks` has its own `200`-item limit (exceeding it is
+   `422`, not `413`), so trimming fields cannot get around the item cap and
+   splitting cannot get around the size cap — both must hold. For large batches
+   use the asynchronous `POST /api/v1/music/jobs`, submit `≤ 200` tracks per
+   job, and poll each job.
+
+**Do not just raise the cap**: `novel-api` has no flag or environment variable
+for it; the only entry point is `create_app(max_body_bytes=...)` in code, and
+the embedded engine is fixed at 1 MiB. Raising it only makes every concurrent
+request hold more memory and pushes JSON parsing cost onto the server; it does
+not relax the `200`-track or field-length limits, which are `422` boundaries.
+A `413` is nearly always a client-side construction problem — fix the request
+first.
+
+**Interaction with 401 / 429**: the guard is an inner layer, the rate limiter
+(`429`) wraps it, and the token check (`401`) sits inside it. Once the rate
+budget is exhausted even an oversized body gets `429` (the guard never runs);
+conversely an oversized request without a token gets `413`, not `401`, on the
+REST transport. Fix the 413 first, then look at 401 / 429.
+
+#### 415: Content-Type and compression
+
+The guard accepts JSON media types only: `application/json` and any
+`application/*+json` (for example `application/vnd.api+json`). Parameters are
+stripped and case is ignored before comparing, so
+`application/json; charset=utf-8` and `APPLICATION/JSON` pass. Everything else
+is `415`:
+
+- `text/plain`, `text/json`, `application/octet-stream`,
+  `application/x-www-form-urlencoded`, `multipart/form-data`;
+- **compressed bodies**: `Content-Encoding` must be absent or `identity`;
+  `gzip`, `br`, `deflate` and combined values such as `identity, gzip` are
+  refused before reading (the API parses raw JSON only, so a compressed body
+  could only be a compression bomb);
+- a header that is present but empty (`Content-Type:` with no value) is also
+  `415`.
+
+The rule is independent of body size: even an empty body, or an endpoint that
+takes no body at all (`POST /api/v1/tasks/{id}/cancel`,
+`DELETE /api/v1/watchlist/{site}/{book_id}`), returns `415` when it explicitly
+declares a non-JSON `Content-Type`. Omitting the header avoids the guard.
+
+A **missing** `Content-Type` header is the exception: on the REST transport it
+is handed to FastAPI and becomes `422` (`Input should be a valid dictionary or
+object ...`), not `415`; the embedded engine decodes it as JSON instead.
+
+Correct and incorrect curl usage:
+
+```bash
+BASE=http://127.0.0.1:8081
+
+# Wrong 1: -d defaults to application/x-www-form-urlencoded → 415
+curl -i -d '{"keyword":"three body"}' "$BASE/api/v1/search"
+
+# Wrong 2: -F sends multipart/form-data → 415
+curl -i -F 'keyword=three body' "$BASE/api/v1/search"
+
+# Wrong 3: compressed body → 415 (the detail names Content-Encoding)
+curl -i -H "Content-Type: application/json" -H "Content-Encoding: gzip" \
+  --data-binary @payload.json.gz "$BASE/api/v1/search"
+
+# Right: declare JSON explicitly; --data-binary preserves the bytes
+curl -i -H "Content-Type: application/json" \
+  --data-binary @payload.json "$BASE/api/v1/search"
+
+# Right: curl 7.82+ --json sets Content-Type and Accept for you
+curl -i --json '{"keyword":"three body"}' "$BASE/api/v1/search"
+```
+
+On Windows, do not put non-ASCII JSON directly on the command line: the Git
+Bash / PowerShell code page can turn the argument into non-UTF-8 bytes and the
+server then answers `400 There was an error parsing the body` (a decode
+failure, not `415`). Write the JSON to a file (UTF-8, no BOM) and use
+`--data-binary @file`.
+
+`415` wins over `413`: a request that is both compressed and oversized returns
+`415`, because the encoding is refused before anything is read. `415` also
+wins over `401` on the REST transport: a non-JSON `Content-Type` without a
+token returns `415`.
+
+#### Telling it apart from 422 (field validation)
+
+| Status | Meaning | Typical example |
+| --- | --- | --- |
+| `413` | Body **never parsed**: over 1 MiB | 200 tracks with full lyrics (about 1.2 MB) |
+| `415` | Body **never read**: media type or encoding is not JSON | `curl -d` (form), `Content-Encoding: gzip` |
+| `422` | Body **parsed**, a field is invalid | `tracks` with 201 items, missing `keyword`, `keyword` over 200 characters, `limit` out of range |
+| `400` | Malformed at the transport layer: bad `Content-Length`, or a body that is not valid UTF-8 (REST transport only) | `Content-Length: abc`, a shell that turned non-ASCII text into non-UTF-8 bytes |
+
+A JSON **syntax** error is `422` (`errors[].type` is `json_invalid`, `detail`
+contains `JSON decode error`), not `400` and not `415`: the guard only inspects
+declarations, it does not parse content. An empty body is likewise `422`
+(`Field required`).
+
+Read the status code first to see which layer answered, then the `detail` /
+`errors`. When several limits could apply, the layer order decides: `415`
+before `413`, `413` before `422`; `429` sits further out and masks all of them
+once the budget is exhausted.
+
+#### Differences on the embedded engine (desktop / Android standalone)
+
+The stdlib HTTP engine in `apps/embedded/server.py` (started by `start_server`
+for Android standalone mode) mirrors the same contract with four differences:
+
+| Item | REST (`novel-api` / uvicorn) | Embedded engine |
+| --- | --- | --- |
+| Cap and scope | 1 MiB; `POST`/`PUT`/`PATCH`/`DELETE` under `/api/v1` | Same, with the same `413` text |
+| `Transfer-Encoding: chunked` | Counted per chunk; `413` when over | **`501 Chunked request bodies are not supported`** (no chunked decoding) |
+| Missing `Content-Type` | Handed to FastAPI → `422` | Decoded as JSON |
+| Connection after a rejection | Kept alive and reusable | Closed; the client must reconnect |
+
+So on the embedded engine:
+
+- A client must buffer the body, compute `Content-Length` and send it. A
+  streamed upload (`chunked`) returns `501` regardless of size;
+  `curl -H "Transfer-Encoding: chunked"` and HTTP libraries that stream the
+  body will hit this.
+- An invalid or negative `Content-Length` returns
+  `400 Invalid Content-Length header`.
+- When the embedded engine has a token enabled (`start_server(..., token=...)`
+  or `NOVEL_DOWNLOADER_EMBEDDED_TOKEN`; the check is off when neither is set),
+  **authentication runs before the body check**: an oversized request without a
+  token gets `401`, not the REST transport's `413`. Verify the token first, then
+  look at 413 / 415.
+- Bodyless write endpoints (`POST /api/v1/tasks/{id}/cancel`) are still subject
+  to the cap and return `413` for an oversized body; `GET` / `HEAD` do not
+  check the body (same status as REST, but the embedded engine closes the
+  connection after reading an oversized body, while REST keeps it reusable).
 
 ---
 

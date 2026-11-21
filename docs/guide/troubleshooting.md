@@ -189,7 +189,7 @@ novel-cli login fanqienovel
 
 ---
 
-## 3. API 返回 401 / 端口被占用
+## 3. API 返回 401 / 413 / 415 / 端口被占用
 
 ### 3.1 401 Unauthorized
 
@@ -291,6 +291,140 @@ Get-Process -Id <PID>
 4. 上报问题时提供：`X-Request-ID`、大致时间、请求方法与路径、状态码。不要附带 `Authorization`、token、Cookie 或请求体。
 
 这个 ID 只用于关联排障，不参与鉴权、限流计数或请求去重；服务重启后旧 ID 不再对应任何日志。
+
+### 3.4 API 返回 413 / 415 {#api-413-415}
+
+**现象**：请求体看起来正常却收到 `413 Request Entity Too Large`；或客户端明明发的是 JSON，却收到 `415 Unsupported Media Type`。
+
+两者都由**请求体守卫**（`apps/api/middleware.py` 的 `BodySizeLimitMiddleware`）在**读取请求体之前**直接返回，路由和业务代码从未执行。`detail` 是固定文案，可据此区分三种情况：
+
+| 状态码 | `detail` |
+| --- | --- |
+| `413` | `Request body too large: the limit for this endpoint is 1048576 bytes` |
+| `415` | `Unsupported Content-Type: send the request body as application/json` |
+| `415` | `Unsupported Content-Encoding: send the request body uncompressed (identity)` |
+
+响应带 `Cache-Control: no-store`，并照常回写 `X-Request-ID`；用上一小节的方法可在日志里定位到那一行。两种拒绝都不会执行任何业务副作用（不建任务、不写追更条目）。
+
+**作用范围**：`/api/v1` 下所有 `POST` / `PUT` / `PATCH` / `DELETE`，包括没有请求体的 `/tasks/{id}/cancel`、`DELETE /watchlist/...`，也包括不存在的路径和将来新增的路由（守卫按前缀生效，不按路由清单）。`GET` / `HEAD` / `OPTIONS` 与 `/downloads` 不在守卫范围内，请求体不会被检查（`GET` 带 1 MB body 仍会正常处理）。上限是 `1 MiB`（`1048576` 字节，含边界）：恰好 1 MiB 会通过守卫进入字段校验（可能随后返回 `422`），多 1 字节即 `413`。大小按**原始字节**计，不是字符数：中文在 UTF-8 下每字 3 字节。
+
+#### 413：先确认是声明超限还是流式累计
+
+两条路径的响应完全一样，区别只在服务端**读了多少字节**：
+
+| 触发方式 | 服务端行为 | 客户端可观察到的现象 |
+| --- | --- | --- |
+| `Content-Length` 已超限 | 一个字节都不读，立即回 `413` | 带 `Expect: 100-continue` 的客户端（curl 对大请求体默认如此）在上传前就收到 `413`，`size_upload=0` |
+| 无 `Content-Length`（`Transfer-Encoding: chunked`） | 逐块读取，累计超过 1 MiB 的那一块立即中止 | 请求体已几乎全部上传后才收到 `413`，`size_upload` ≈ 实际大小 |
+
+确认方法：
+
+```bash
+BASE=http://127.0.0.1:8081
+
+# 看请求头：有 Content-Length 且值 > 1048576，就是声明超限
+curl -sv -o /dev/null -H "Content-Type: application/json" \
+  --data-binary @payload.json "$BASE/api/v1/search" 2>&1 \
+  | grep -E '^[<>] (Content-Length|Transfer-Encoding|HTTP/)'
+
+# 看实际发出的字节数：413 时 uploaded=0 → 声明超限；uploaded≈文件大小 → 流式累计
+curl -s -o /dev/null -w 'code=%{http_code} uploaded=%{size_upload}\n' \
+  -H "Content-Type: application/json" \
+  --data-binary @payload.json "$BASE/api/v1/search"
+```
+
+**哪些请求真的会这么大**：`search`、`browse`、`tasks`、`watchlist`、`login/requests` 的正常请求体只有几百字节到几 KB，出现 `413` 基本说明客户端发错了内容（上传了文件、把响应体原样回传、循环拼接了字段）。真正接近上限的是音乐端点：`music/download`、`music/export`、`music/jobs` 各接受最多 `200` 首曲目，每首的 `lyric`（单首最多 `100000` 字符）、`download_url`、`http_headers`、`extra`、`path`、`sources` 都计入体积。实测 200 首各带 6000 字符歌词约 1.2 MB，直接 `413`；同样 200 首只发 `provider` + `id` 约 7 KB，正常通过。
+
+**怎么把请求改小**（按优先级）：
+
+1. **回传 `search_id`，只发最小曲目**。搜索结果里的 `search_id` 能让服务端取回原始 Track 对象，请求里每首只需 `provider` + `id`：
+
+   ```bash
+   curl -s -X POST "$BASE/api/v1/music/download" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"search_id":"9f2c1b0a9d8e4f7c8b6a5d4e",
+          "tracks":[{"provider":"netease","id":"186016"}]}'
+   ```
+
+   `search_id` 缓存 30 分钟、最多 32 份；过期后需重新搜索（服务端会按提交的字典降级处理，通常表现为逐曲失败，而不是 `413`）。
+
+2. **删掉不需要的字段**。下载请求不需要 `lyric`、`extra`、`http_headers`、`cover_url`、`download_url`、`sources`；只有 `music/export` 需要 `path`。字段本身也有各自上限（如 `lyric` 10 万字符、`http_headers` 32 项），超限是 `422`。
+3. **分批**。`tracks` 有独立的 `200` 首上限（超出是 `422`，不是 `413`），所以既不能靠删字段绕过条数上限，也不能靠分批绕过大小上限——两个限制都要满足。批量大时改用异步 `POST /api/v1/music/jobs`，按每批 `≤ 200` 首提交，再轮询各自任务。
+
+**不要直接把上限调大**：`novel-api` 没有对应参数或环境变量，唯一入口是代码里的 `create_app(max_body_bytes=...)`；内嵌引擎固定为 1 MiB。调大只会让每个并发请求多占内存、把 JSON 解析成本推给服务端，并不会放宽 `200` 首、字段长度这些 `422` 边界。`413` 几乎总是客户端构造请求的问题，先按上面三步改小。
+
+**和 401 / 429 的关系**：守卫在最内层，限流（`429`）在它外层、token 校验（`401`）在它内层。因此预算耗尽后，连超限请求体也直接得到 `429`（此时守卫根本没运行）；而未带 token 的超大请求在 REST 传输上返回 `413` 而不是 `401`。先解决 413，再排查 401 / 429。
+
+#### 415：Content-Type 与压缩
+
+守卫只接受 JSON 媒体类型：`application/json`，以及任何 `application/*+json`（如 `application/vnd.api+json`）。比较前会去掉参数并忽略大小写，所以 `application/json; charset=utf-8`、`APPLICATION/JSON` 都通过。其余一律 `415`：
+
+- `text/plain`、`text/json`、`application/octet-stream`、`application/x-www-form-urlencoded`、`multipart/form-data`；
+- **压缩请求体**：`Content-Encoding` 只接受缺省或 `identity`；`gzip`、`br`、`deflate` 以及 `identity, gzip` 这类组合都在读取前被拒（API 只解析未压缩 JSON，压缩体只可能是压缩炸弹）；
+- 头存在但值为空（`Content-Type:` 后面什么都没有）也是 `415`。
+
+这条规则与请求体大小无关：即使请求体为空、甚至端点本身不接收请求体（如 `POST /api/v1/tasks/{id}/cancel`、`DELETE /api/v1/watchlist/{site}/{book_id}`），只要显式声明了非 JSON 的 `Content-Type`，同样返回 `415`。反过来，不声明这个头就不会被守卫拦下。
+
+**缺失** `Content-Type` 头是例外：REST 传输把它交给 FastAPI，得到 `422`（`Input should be a valid dictionary or object ...`），而不是 `415`；内嵌引擎则直接按 JSON 解码。
+
+curl 常见写法对照：
+
+```bash
+BASE=http://127.0.0.1:8081
+
+# 错误 1：-d 默认发 application/x-www-form-urlencoded → 415
+curl -i -d '{"keyword":"santi"}' "$BASE/api/v1/search"
+
+# 错误 2：-F 发 multipart/form-data → 415
+curl -i -F 'keyword=santi' "$BASE/api/v1/search"
+
+# 错误 3：压缩请求体 → 415（detail 提到 Content-Encoding）
+curl -i -H "Content-Type: application/json" -H "Content-Encoding: gzip" \
+  --data-binary @payload.json.gz "$BASE/api/v1/search"
+
+# 正确：显式声明 JSON；--data-binary 不改变字节，适合含中文的文件
+curl -i -H "Content-Type: application/json" \
+  --data-binary @payload.json "$BASE/api/v1/search"
+
+# 正确：curl 7.82+ 的 --json 会自动加 Content-Type 与 Accept
+curl -i --json '{"keyword":"santi"}' "$BASE/api/v1/search"
+```
+
+Windows 上不要把含中文的 JSON 直接写在命令行里：Git Bash / PowerShell 的代码页可能把参数转成非 UTF-8 字节，服务端解不出 JSON，返回 `400 There was an error parsing the body`（这是解码失败，不是 `415`）。把 JSON 写进文件（UTF-8、无 BOM）再用 `--data-binary @file`。
+
+`415` 优先于 `413`：同一个请求既压缩又超限时返回 `415`，因为编码在读取前就被拒。`415` 也优先于 `401`（REST）：未带 token 但 `Content-Type` 非 JSON 时返回 `415`。
+
+#### 与 422（字段校验）的区分
+
+| 状态码 | 含义 | 典型例子 |
+| --- | --- | --- |
+| `413` | 请求体**没被解析**：超过 1 MiB | 200 首带完整歌词的曲目（约 1.2 MB） |
+| `415` | 请求体**没被读取**：媒体类型或编码不是 JSON | `curl -d`（表单）、`Content-Encoding: gzip` |
+| `422` | 请求体**已解析**，字段不合法 | `tracks` 201 首、缺 `keyword`、`keyword` 超 200 字符、`limit` 越界 |
+| `400` | 传输层畸形：`Content-Length` 非法，或请求体不是合法 UTF-8（仅 REST 传输） | `Content-Length: abc`、命令行把中文转成了非 UTF-8 字节 |
+
+JSON **语法**错误属于 `422`（`errors[].type` 为 `json_invalid`，`detail` 含 `JSON decode error`），不是 `400`，也不是 `415`：守卫只检查声明，不解析内容。空请求体同样是 `422`（`Field required`）。
+
+判断顺序：先看状态码落在哪一层，再看 `detail` / `errors`。同时可能命中多条限制时，实际返回取决于层序：`415` 先于 `413`，`413` 先于 `422`；`429` 在更外层，预算耗尽时以上都被 `429` 覆盖。
+
+#### 内嵌引擎（桌面端 / Android 独立模式）的差异
+
+`apps/embedded/server.py` 的 stdlib HTTP 引擎（Android 独立模式由 `start_server` 启动）镜像同一套契约，但有四处差别：
+
+| 项目 | REST（`novel-api` / uvicorn） | 内嵌引擎 |
+| --- | --- | --- |
+| 上限与范围 | 1 MiB；`/api/v1` 下 `POST`/`PUT`/`PATCH`/`DELETE` | 相同，`413` 文案也相同 |
+| `Transfer-Encoding: chunked` | 逐块累计，超限 `413` | **`501 Chunked request bodies are not supported`**（不实现 chunked 解码） |
+| 缺失 `Content-Type` | 交给 FastAPI → `422` | 直接按 JSON 解码 |
+| 拒绝后的连接 | 保持 keep-alive，可复用 | 关闭连接，客户端必须重连 |
+
+因此在内嵌引擎上：
+
+- 客户端必须先缓冲请求体、算出 `Content-Length` 再发。流式上传（`chunked`）无论多小都返回 `501`，`curl -H "Transfer-Encoding: chunked"` 或某些 HTTP 库的流式 body 都会命中。
+- 非法或负数 `Content-Length` 返回 `400 Invalid Content-Length header`。
+- 若内嵌引擎启用了 token（`start_server(..., token=...)` 或 `NOVEL_DOWNLOADER_EMBEDDED_TOKEN`；未设置时校验关闭），**鉴权先于请求体检查**：未带 token 的超大请求得到 `401`，而不是 REST 传输的 `413`。先确认 token，再看 413 / 415。
+- 无请求体的写端点（`POST /api/v1/tasks/{id}/cancel`）同样受大小限制，超大 body 仍返回 `413`；`GET` / `HEAD` 不检查请求体（状态码与 REST 一致，但内嵌引擎读到超大 body 时会关闭连接，REST 会继续复用）。
 
 ---
 
