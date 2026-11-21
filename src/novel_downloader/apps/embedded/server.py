@@ -38,7 +38,11 @@ Contract parity with the REST API
   fails, ``503`` while the music extras are absent, ``504`` when an engine
   call exceeds its budget, and a stack-trace-free ``500``.
 * Every state-changing request below ``/api/v1`` shares the REST body cap
-  (``413``) and refuses non-identity ``Content-Encoding`` (``415``).
+  (``413``) and refuses a non-JSON ``Content-Type`` or non-identity
+  ``Content-Encoding`` (``415``) before reading the body. Unlike the REST
+  transport, which rejects an oversized *chunked* stream as it accumulates,
+  the stdlib server does not implement chunked request bodies and answers
+  ``501`` instead.
 * ``HEAD`` is answered like ``GET`` (headers, no body) so probes work.
 
 Lifecycle
@@ -223,6 +227,9 @@ _MSG_BODY_TOO_LARGE = (
 )
 _MSG_UNSUPPORTED_ENCODING = (
     "Unsupported Content-Encoding: send the request body uncompressed (identity)"
+)
+_MSG_UNSUPPORTED_CONTENT_TYPE = (
+    "Unsupported Content-Type: send the request body as application/json"
 )
 _MSG_MUSIC_PLATFORM_INIT_FAILED = (
     "Could not initialise music platform {platform!r}: {error}"
@@ -3106,11 +3113,32 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             raise _ApiError(415, _MSG_UNSUPPORTED_ENCODING)
 
+    def _check_body_content_type(self) -> None:
+        """Refuse non-JSON request bodies exactly like the REST middleware.
+
+        No covered route binds a form or multipart body; the stdlib engine only
+        ever JSON-decodes the bytes. A declared ``text/plain``/form/multipart
+        type is therefore a ``415`` before the body is read. A missing header
+        is still decoded as JSON here, matching older embedded clients; the
+        REST transport instead defers a headerless body to FastAPI's 422.
+        """
+        raw = self.headers.get("Content-Type")
+        if raw is None:
+            return
+        media_type = raw.split(";", 1)[0].strip().lower()
+        if media_type == "application/json" or (
+            media_type.startswith("application/") and media_type.endswith("+json")
+        ):
+            return
+        self.close_connection = True
+        raise _ApiError(415, _MSG_UNSUPPORTED_CONTENT_TYPE)
+
     def _drain_body(self, path: str) -> None:
         """Consume an unread request body so keep-alive stays in sync."""
         guarded = _is_body_guarded(self.command, path)
         if guarded:
             self._check_body_encoding()
+            self._check_body_content_type()
         if self.headers.get("Transfer-Encoding"):
             self.close_connection = True
             return
@@ -3136,6 +3164,7 @@ class _Handler(BaseHTTPRequestHandler):
         guarded = _is_body_guarded(self.command, path)
         if guarded:
             self._check_body_encoding()
+            self._check_body_content_type()
         if self.headers.get("Transfer-Encoding"):
             self.close_connection = True
             raise _ApiError(501, "Chunked request bodies are not supported")

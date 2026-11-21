@@ -17,7 +17,10 @@ Request-hardening helpers shared by the REST API application.
   into a memory/CPU burden by the JSON decoder. Every state-changing request
   below ``/api/v1`` is covered (not just the endpoints that happened to exist
   when the cap was introduced), so a new ``POST`` route cannot silently opt
-  out of the limit.
+  out of the limit. The same layer refuses a body that declares a non-JSON
+  ``Content-Type`` (form, multipart, ``text/plain``, ...) or a non-identity
+  ``Content-Encoding`` with ``415`` before reading it: no covered route binds
+  anything but JSON, so those bodies could only be rejected later at best.
 * :class:`DownloadsAuthMiddleware` applies the same token check as
   ``/api/v1`` to the ``/downloads`` static mount, which is not covered by the
   router-level dependency.
@@ -102,6 +105,12 @@ BODY_LIMIT_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"
 #: gzip stream expanding to gigabytes) is refused instead of being handed to any
 #: future decompressor or buffered on the way.
 SUPPORTED_CONTENT_ENCODINGS: frozenset[str] = frozenset({"", "identity"})
+
+#: ``detail`` of the ``415`` response for a body whose ``Content-Type`` is not
+#: JSON. The value of the header is deliberately not echoed.
+UNSUPPORTED_CONTENT_TYPE_DETAIL = (
+    "Unsupported Content-Type: send the request body as application/json"
+)
 
 # ---------------------------------------------------------------------------
 # Rate limiting
@@ -291,6 +300,24 @@ def _content_length(scope: Scope) -> int | None:
     return None
 
 
+def _is_json_content_type(value: str) -> bool:
+    """
+    Whether a ``Content-Type`` header value denotes a JSON media type.
+
+    ``application/json`` and any structured ``application/*+json`` type are
+    accepted; parameters such as ``charset=utf-8`` are ignored. Every JSON
+    route is parsed by FastAPI's JSON machinery, so a form, multipart or
+    ``text/plain`` body can never bind and is refused before it is read. A
+    *missing* ``Content-Type`` is left to FastAPI rather than turned into a
+    ``415`` here: FastAPI does not treat a headerless body as JSON and reports
+    its own ``422``, so the guard keeps the historical routing behaviour.
+    """
+    media_type = value.split(";", 1)[0].strip().lower()
+    if media_type == "application/json":
+        return True
+    return media_type.startswith("application/") and media_type.endswith("+json")
+
+
 # ---------------------------------------------------------------------------
 # Browser-origin gate
 # ---------------------------------------------------------------------------
@@ -405,9 +432,10 @@ class BodySizeLimitMiddleware:
     chunk by chunk and the request is aborted as soon as the running total
     crosses the limit (so chunked uploads without ``Content-Length`` are
     covered too). Accepted bodies are replayed to the application unchanged.
-    A body declaring a content encoding other than ``identity`` is refused with
-    ``415`` before anything is read: the API parses raw JSON, so a compressed
-    payload could only be a compression bomb.
+    A body declaring a ``Content-Type`` other than JSON — or a content encoding
+    other than ``identity`` — is refused with ``415`` before anything is read:
+    the API parses raw JSON, so a form/multipart/text body cannot bind and a
+    compressed payload could only be a compression bomb.
 
     :param app: The wrapped ASGI application.
     :param max_bytes: Maximum accepted body size in bytes.
@@ -459,9 +487,10 @@ class BodySizeLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
+        headers = Headers(scope=scope)
         encodings = [
             part.strip().lower()
-            for value in Headers(scope=scope).getlist("content-encoding")
+            for value in headers.getlist("content-encoding")
             for part in value.split(",")
         ]
         if any(encoding not in SUPPORTED_CONTENT_ENCODINGS for encoding in encodings):
@@ -475,6 +504,20 @@ class BodySizeLimitMiddleware:
                         "uncompressed (identity)"
                     )
                 },
+            )
+            await response(scope, receive, send)
+            return
+
+        content_type = headers.get("content-type")
+        if content_type is not None and not _is_json_content_type(content_type):
+            # No covered route binds anything but JSON (FastAPI form models
+            # are not used), so a declared form/multipart/text body is refused
+            # before it is read rather than handed to a parser that would
+            # reject it anyway. A bodyless request still fails here only when
+            # it deliberately declares a non-JSON type.
+            response = JSONResponse(
+                status_code=415,
+                content={"detail": UNSUPPORTED_CONTENT_TYPE_DETAIL},
             )
             await response(scope, receive, send)
             return

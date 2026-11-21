@@ -61,7 +61,13 @@ def _call(
     target = _port if port is None else port
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
-        f"http://127.0.0.1:{target}{path}", data=data, method=method
+        f"http://127.0.0.1:{target}{path}",
+        data=data,
+        method=method,
+        # urllib defaults a request with ``data`` to
+        # ``application/x-www-form-urlencoded``; the engine now mirrors the
+        # REST transport and refuses that with 415, so speak JSON explicitly.
+        headers={"Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -1114,6 +1120,27 @@ def test_compressed_body_is_415(running_server: SimpleNamespace) -> None:
     data = _raw_exchange(_port, raw)
     assert data.startswith(b"HTTP/1.1 415")
     assert b"Unsupported Content-Encoding" in data
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [b"text/plain", b"application/x-www-form-urlencoded", b"multipart/form-data"],
+)
+def test_non_json_content_type_is_415(
+    running_server: SimpleNamespace, content_type: bytes
+) -> None:
+    """A non-JSON body is refused before it is read, matching the REST API."""
+    raw = (
+        b"POST /api/v1/search HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Type: " + content_type + b"\r\n"
+        b"Content-Length: 8\r\n"
+        b"\r\n{not jsn"
+    )
+    data = _raw_exchange(_port, raw)
+    assert data.startswith(b"HTTP/1.1 415")
+    assert b"Unsupported Content-Type" in data
+    assert b"application/json" in data
 
 
 # ---------------------------------------------------------------------------
