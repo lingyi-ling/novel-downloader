@@ -23,7 +23,11 @@ The policy implemented here:
 * ``..`` components and symlinks cannot escape: paths are ``resolve()``-d
   (which follows existing links) before the containment check;
 * a bare directory (no suffix) is accepted as a playlist target and a
-  ``playlist-*.m3u8`` file is created inside it.
+  ``playlist-*.m3u8`` file is created inside it;
+* a value carrying NUL / control characters, a lone surrogate, or more
+  characters than :data:`MAX_PLAYLIST_PATH_LENGTH` is rejected before it
+  reaches ``open()``.  The OS reports NUL as ``ValueError`` (not ``OSError``),
+  so a caller that only maps write errors would leak a traceback.
 
 :class:`PlaylistTargetError` and :class:`OutDirTargetError` deliberately carry
 fixed messages: they are returned to clients verbatim, so they must never
@@ -33,11 +37,13 @@ embed the rejected absolute path.
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Iterable
 from pathlib import Path
 
 __all__ = [
+    "MAX_PLAYLIST_PATH_LENGTH",
     "MSG_OUT_DIR_INVALID",
     "MSG_PLAYLIST_TARGET_INVALID",
     "MSG_PLAYLIST_WRITE_FAILED",
@@ -52,6 +58,19 @@ __all__ = [
 
 #: File extensions this module is willing to write.
 PLAYLIST_SUFFIXES = frozenset({".m3u", ".m3u8"})
+
+#: Longest ``out_path`` this module accepts.  Mirrors the REST schema's
+#: ``MAX_TRACK_PATH_LENGTH`` and the embedded server's
+#: ``_MAX_OPTIONAL_PATH_LENGTH``; the HTTP layer rejects longer values as a
+#: validation error, and this bound keeps direct callers (desktop bridge, CLI)
+#: from handing the OS a path no real file has.
+MAX_PLAYLIST_PATH_LENGTH = 1024
+
+#: Characters no legitimate playlist path contains and the filesystem cannot
+#: represent.  NUL makes ``open()``/``abspath()`` raise ``ValueError`` instead
+#: of ``OSError``; C0/C1 controls and the Unicode line separators enable log
+#: injection; lone surrogates cannot be encoded to UTF-8.
+_UNSAFE_PATH_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
 
 #: Returned to clients when ``out_path`` is rejected.  It intentionally does
 #: not contain the offending value (it may be an absolute server path).
@@ -165,7 +184,8 @@ def resolve_playlist_target(
         treated as an allowed root as well (it is server-controlled).
     :param default_name: file name used for the directory form; defaults to a
         timestamped ``playlist-*.m3u8``.
-    :raises PlaylistTargetError: for a bad suffix or an escaping path.
+    :raises PlaylistTargetError: for a bad suffix, an unusable character, an
+        oversized value, or an escaping path.
     :return: the resolved, confined playlist file path.
     """
     name = default_name or default_playlist_name()
@@ -177,6 +197,11 @@ def resolve_playlist_target(
         raise PlaylistTargetError(MSG_PLAYLIST_TARGET_INVALID)
 
     text = (out_path or "").strip()
+    if len(text) > MAX_PLAYLIST_PATH_LENGTH or _UNSAFE_PATH_CHARS.search(text):
+        # Reject before ``Path``/``open``: NUL surfaces as ``ValueError`` and
+        # would bypass a handler that only maps ``OSError``.  The fixed
+        # message never echoes the value (it may be a server path).
+        raise PlaylistTargetError(MSG_PLAYLIST_TARGET_INVALID)
     if not text:
         target = default_root / name
     else:

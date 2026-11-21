@@ -38,7 +38,23 @@ _CHUNK = 64 * 1024
 #: in as well: they cannot be encoded to UTF-8 and would abort the write with
 #: a ``UnicodeEncodeError`` instead of the sanitised text.
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]+")
+#: Characters that make ``open()``/``abspath()`` raise ``ValueError`` rather
+#: than ``OSError`` (embedded NUL, lone surrogates) or that no filesystem
+#: accepts.  ``export_m3u`` rejects them up front so callers only have to
+#: handle one exception type for a failed write.
+_UNWRITABLE_PATH = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
 _CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)")
+
+
+class PlaylistWriteError(OSError):
+    """A playlist could not be written.
+
+    Subclasses ``OSError`` so REST, embedded, CLI and desktop callers can use
+    one ``except OSError``.  ``export_m3u`` normalises destination/track paths
+    the OS refuses with ``ValueError`` (embedded NUL, lone surrogates) to this
+    type; the message is fixed and never embeds the path.
+    """
+
 
 #: Cover art is a small image.  A hostile CDN (or a broken ``cover_url``) must
 #: not be able to make the process buffer an arbitrary document in memory.
@@ -1657,8 +1673,18 @@ def export_m3u(tracks, path, *, absolute=False):
 
     同一个文件（按 ``normcase(abspath(...))`` 判断）只写一条，保留第一次出现
     的顺序。写入是原子的：失败不会毁掉已有的同名歌单。
+
+    :raises PlaylistWriteError: 目标或曲目路径无法被文件系统表示（NUL、孤立
+        代理项等），或实际的写入失败；它是 ``OSError`` 的子类。
     """
     playlist_path = str(path)
+    if _UNWRITABLE_PATH.search(playlist_path):
+        # ``open``/``abspath`` would raise ``ValueError`` here; normalise it so
+        # callers that map write failures only have to catch ``OSError``.
+        raise PlaylistWriteError(
+            errno.EINVAL,
+            "playlist path contains characters the filesystem cannot accept",
+        )
     playlist_dir = os.path.dirname(os.path.abspath(playlist_path))
     entries = []
     seen = set()
@@ -1694,9 +1720,25 @@ def export_m3u(tracks, path, *, absolute=False):
             duration = 0
         if duration <= 0:
             duration = -1  # M3U 用 -1 表示时长未知
-        location = _playlist_location(file_path, playlist_dir, absolute)
+        try:
+            location = _playlist_location(file_path, playlist_dir, absolute)
+        except (OSError, ValueError) as exc:
+            # A track path the OS refuses (NUL, lone surrogate) must not escape
+            # as a bare ValueError; it is an unwritable playlist.
+            raise PlaylistWriteError(
+                errno.EINVAL,
+                "track path cannot be represented on this filesystem",
+            ) from exc
         entries.append(f"#EXTINF:{duration},{artists} - {name}\n{location}")
 
     text = "#EXTM3U\n" + "".join(entry + "\n" for entry in entries)
-    _write_playlist_text(playlist_path, text)
+    try:
+        _write_playlist_text(playlist_path, text)
+    except ValueError as exc:
+        # ``UnicodeEncodeError`` (a ``ValueError``) for text the chosen
+        # encoding cannot represent: normalise it like a path failure.
+        raise PlaylistWriteError(
+            errno.EINVAL,
+            "playlist cannot be encoded for this destination",
+        ) from exc
     return playlist_path
