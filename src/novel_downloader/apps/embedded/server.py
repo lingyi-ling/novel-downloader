@@ -45,6 +45,24 @@ Contract parity with the REST API
   ``501`` instead.
 * ``HEAD`` is answered like ``GET`` (headers, no body) so probes work.
 
+Authentication
+--------------
+The engine binds loopback, but every app on the device shares that loopback
+namespace: without a credential any installed app could drive the downloader
+(and read the exported files) by talking to ``127.0.0.1:8081``.  The Kotlin
+launcher therefore generates a per-process random token and hands it to
+:func:`start_server` (environment variable ``NOVEL_DOWNLOADER_EMBEDDED_TOKEN``
+preferred, explicit argument accepted); it never touches disk or a log line.
+
+When a token is configured, every request below ``/api/v1`` and every
+``/downloads`` request must carry ``Authorization: Bearer <token>`` or
+``X-API-Key: <token>``.  A missing/mismatched credential is a ``401`` with the
+REST API's exact ``detail`` and ``WWW-Authenticate: Bearer``, emitted before
+routing so an unauthenticated client cannot enumerate routes.  The token is
+compared with :func:`hmac.compare_digest` on UTF-8 bytes.  An unconfigured
+token disables the check, which keeps desktop and test callers working exactly
+as before (the same rule as :mod:`novel_downloader.apps.api.auth`).
+
 Lifecycle
 ---------
 * ``start_server`` is idempotent and thread-safe.  A busy port raises
@@ -61,6 +79,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hmac
 import json
 import logging
 import math
@@ -222,6 +241,31 @@ _SECURITY_HEADERS = (
 #: script on the engine's own origin.
 _DOWNLOADS_CSP = "sandbox; default-src 'none'"
 
+#: Environment variable carrying the per-process bearer token.
+#:
+#: The Android launcher sets it before calling ``start_server`` and reads it
+#: from process memory only.  An environment variable is used instead of a
+#: command-line argument because ``/proc/<pid>/cmdline`` is world-readable on
+#: Android: any installed app could read the token from the argument list,
+#: while a process's environment block is restricted to the same UID.
+TOKEN_ENV_VAR = "NOVEL_DOWNLOADER_EMBEDDED_TOKEN"
+
+#: Prefixes whose requests require the token when one is configured.  The
+#: whole ``/api/v1`` tree plus the static export mount, matching the REST
+#: API's router dependency + ``DownloadsAuthMiddleware`` pair.
+_AUTH_PREFIXES = ("/api/v1", "/downloads")
+
+#: Error text on a rejected request, byte-identical to
+#: ``apps.api.auth.AUTH_ERROR_DETAIL`` so a client cannot tell the transports
+#: apart (and Android's existing 401 message rendering keeps working).
+_AUTH_ERROR_DETAIL = (
+    "Invalid or missing API token. "
+    "Send 'Authorization: Bearer <token>' or 'X-API-Key: <token>'."
+)
+
+#: ``WWW-Authenticate`` challenge on a 401, mirroring the REST API.
+_AUTH_CHALLENGE = {"WWW-Authenticate": "Bearer"}
+
 _MSG_BODY_TOO_LARGE = (
     f"Request body too large: the limit for this endpoint is {_MAX_BODY_BYTES} bytes"
 )
@@ -281,6 +325,11 @@ _loop_lock = threading.Lock()
 _request_slots = threading.BoundedSemaphore(_MAX_CONCURRENT_REQUESTS)
 _store_lock = threading.Lock()
 _watchlist_stores: dict[Path, Any] = {}
+
+#: The bearer token every guarded request must present, or ``None`` when
+#: authentication is disabled (desktop/tests).  Set once by :func:`start_server`
+#: from the environment or its explicit argument; never logged.
+_auth_token: str | None = None
 
 #: Handler signature: ``(body, path params, query params) -> JSON payload``.
 #: Handlers return a JSON-serialisable payload; ``/music/health`` answers a
@@ -2990,6 +3039,68 @@ def _allowed_methods(path: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# authentication
+# ---------------------------------------------------------------------------
+
+
+def _requires_auth(path: str) -> bool:
+    """Whether ``path`` belongs to a guarded tree (``/api/v1``, ``/downloads``).
+
+    The path is normalised exactly like the router normalises it
+    (``_pattern_matches`` and ``_serve_download`` both work on
+    ``path.strip("/")``), so a request spelled ``//api/v1/health`` or
+    ``/api/v1/health/`` cannot reach a guarded handler while looking
+    unguarded here.
+    """
+    cleaned = "/" + path.strip("/")
+    return any(
+        cleaned == prefix or cleaned.startswith(prefix + "/")
+        for prefix in _AUTH_PREFIXES
+    )
+
+
+def _extract_token(authorization: str | None, api_key: str | None) -> str | None:
+    """Extract the presented credential from either supported header.
+
+    Mirrors :func:`novel_downloader.apps.api.auth.extract_token`: the bearer
+    scheme is case-insensitive, surrounding whitespace is stripped, and an
+    empty value counts as absent.
+    """
+    if authorization:
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer" and value.strip():
+            return value.strip()
+    if api_key:
+        return api_key.strip() or None
+    return None
+
+
+def _token_matches(provided: str, expected: str) -> bool:
+    """Compare two tokens in constant time (bytes, so non-ASCII is safe)."""
+    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _is_authorized(headers: Any) -> bool:
+    """Whether this request passes the token gate (a no-op without a token)."""
+    expected = _auth_token
+    if not expected:
+        return True
+    provided = _extract_token(headers.get("Authorization"), headers.get("X-API-Key"))
+    return provided is not None and _token_matches(provided, expected)
+
+
+def _resolve_token(token: str | None) -> str | None:
+    """Resolve the token from the argument or the environment, else ``None``.
+
+    An explicit argument wins over ``NOVEL_DOWNLOADER_EMBEDDED_TOKEN`` so a
+    caller can pin the value; blank values disable authentication.
+    """
+    candidate = token if token is not None else os.environ.get(TOKEN_ENV_VAR, "")
+    resolved = (candidate or "").strip()
+    return resolved or None
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 
@@ -3152,6 +3263,34 @@ class _Handler(BaseHTTPRequestHandler):
             if guarded:
                 raise _ApiError(413, _MSG_BODY_TOO_LARGE)
             return
+        self._consume_body(remaining)
+
+    def _discard_body(self) -> None:
+        """Consume (never decode) a rejected request's body, bounded.
+
+        A ``401`` is sent before any parsing, but the bytes the client already
+        wrote must still leave the socket: closing with an unread body makes
+        the peer see a reset instead of the response. Only the declared length
+        is drained and only up to the normal body cap; anything larger or
+        chunked closes the connection (a hostile client is not worth reading).
+        The bytes are never parsed, so a hostile payload costs the engine
+        nothing beyond the socket read.
+        """
+        if self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            return
+        remaining = self._content_length()
+        if remaining is None:
+            if self.headers.get("Content-Length") is not None:
+                self.close_connection = True
+            return
+        if remaining > _MAX_BODY_BYTES:
+            self.close_connection = True
+            return
+        self._consume_body(remaining)
+
+    def _consume_body(self, remaining: int) -> None:
+        """Read and drop exactly ``remaining`` body bytes."""
         while remaining > 0:
             chunk = self.rfile.read(min(65536, remaining))
             if not chunk:
@@ -3303,6 +3442,14 @@ class _Handler(BaseHTTPRequestHandler):
         # engine silently accept requests REST rejects with 422.
         query = parse_qs(parsed.query, keep_blank_values=True)
         try:
+            # The token gate runs before the concurrency slot and before any
+            # body is parsed: an unauthenticated caller must not be able to
+            # enumerate routes (404 vs 405 vs 422), occupy a handler slot, or
+            # make the engine decode a payload.
+            if _requires_auth(path) and not _is_authorized(self.headers):
+                self._discard_body()
+                self._send_json({"detail": _AUTH_ERROR_DETAIL}, 401, _AUTH_CHALLENGE)
+                return
             if not _request_slots.acquire(blocking=False):
                 self.close_connection = True
                 self._send_json({"detail": "Embedded engine busy"}, 503)
@@ -3372,7 +3519,7 @@ def _prepare_home(home_dir: str) -> None:
         copy_default_config(config_path)
 
 
-def start_server(home_dir: str, port: int = 8081) -> int:
+def start_server(home_dir: str, port: int = 8081, token: str | None = None) -> int:
     """
     Prepare the app home and start serving on ``127.0.0.1:<port>``.
 
@@ -3384,13 +3531,20 @@ def start_server(home_dir: str, port: int = 8081) -> int:
     must learn the engine is unavailable rather than send its requests to
     whatever else occupies it.
 
+    :param token: Bearer token required for ``/api/v1`` and ``/downloads``.
+        When omitted (``None``) the value is read from
+        ``NOVEL_DOWNLOADER_EMBEDDED_TOKEN``; when that is unset or blank the
+        token check is disabled, which is the desktop/test default.  A blank
+        explicit argument also disables the check.  The token is held in
+        memory only and never logged.
     :return: The bound port.
     """
-    global _server
+    global _server, _auth_token
     with _server_lock:
         if _server is not None:
             return int(_server.server_address[1])
         _prepare_home(home_dir)
+        _auth_token = _resolve_token(token)
         # Resume the queue saved by the previous engine run before the first
         # request can observe it.
         from novel_downloader.apps.core.task_manager import manager
@@ -3404,6 +3558,8 @@ def start_server(home_dir: str, port: int = 8081) -> int:
         daemon=True,
     ).start()
     bound_port = int(server.server_address[1])
+    # Deliberately does not name the token (or whether one is set): this line
+    # reaches logcat on Android.
     logger.info("embedded engine listening on %s:%s", _HOST, bound_port)
     # Return the socket's actual port, not the requested one: ``port=0`` asks
     # the OS for a free loopback port so parallel test runs cannot collide.
@@ -3420,10 +3576,18 @@ def stop_server() -> None:
     in-flight ``_run`` calls (and any loop-bound waiter).  ``start_server``
     after this reuses the same loop.
     """
-    global _server
+    global _server, _auth_token
     with _server_lock:
         server = _server
         _server = None
     if server is not None:
+        # Stop accepting before dropping the credential: requests already
+        # inside a handler keep authenticating normally until they finish.
         server.shutdown()
         server.server_close()
+        with _server_lock:
+            # Only clear when no replacement server was started meanwhile;
+            # ``start_server`` always resolves the token itself, so nothing is
+            # ever inherited, but a concurrent restart must keep its own value.
+            if _server is None:
+                _auth_token = None

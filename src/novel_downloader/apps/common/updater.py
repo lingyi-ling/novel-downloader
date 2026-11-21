@@ -953,10 +953,14 @@ def download_asset(
                 attempt -= 1
                 continue
             last_error = exc
+            if not resume:
+                # A non-resume transfer never reuses a prefix, so whatever this
+                # attempt wrote is garbage whether or not another attempt
+                # follows.  Removing it here (not only before a retry) is what
+                # keeps a final failure from leaving a half file behind.
+                part.unlink(missing_ok=True)
             if attempt >= tries:
                 break
-            if not resume:
-                part.unlink(missing_ok=True)
             time.sleep(min(5.0, 1.5 * attempt))
         except ValueError:
             # Policy refusals (bad digest, oversized body, HTTPS->HTTP
@@ -966,10 +970,12 @@ def download_asset(
             raise
         except Exception as exc:  # noqa: BLE001 - retried below
             last_error = exc
+            if not resume:
+                # Same rule as the HTTPError branch: a non-resume failure never
+                # keeps a partial, including the last one.
+                part.unlink(missing_ok=True)
             if attempt >= tries:
                 break
-            if not resume:
-                part.unlink(missing_ok=True)
             # Keep a verified prefix for the next attempt; a digest failure
             # already deleted it above.
             time.sleep(min(5.0, 1.5 * attempt))

@@ -533,6 +533,11 @@ class SearchCache:
             return
         for candidate in candidates:
             try:
+                # A directory whose name happens to match the payload pattern
+                # is not a payload: it must not take a prune slot (it cannot
+                # be unlinked anyway) or push a real payload out.
+                if not candidate.is_file():
+                    continue
                 found.append((candidate.stat().st_mtime_ns, candidate.name, candidate))
             except OSError:
                 continue
@@ -591,17 +596,90 @@ class SearchCache:
         if path is not None:
             self._disk_prune(directory, keep=path)
 
+    @staticmethod
+    def _file_identity(info: os.stat_result) -> tuple[int, int, int, int]:
+        """Return the tuple that decides whether a payload was replaced."""
+        return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+
     def _disk_clear(self) -> None:
-        """Best-effort removal of this cache format's payload files."""
+        """
+        Remove this cache format's payload files, reporting what survives.
+
+        A missing directory (or a path that is not a directory) is a no-op:
+        there is nothing to clear.  Any other failure -- the directory cannot
+        be listed, or a payload cannot be removed (a read-only directory, a
+        file held open on Windows) -- is raised after every other candidate
+        has been attempted, so an explicit "clear" action never claims success
+        while payload files survive.  ``Path.glob`` is deliberately not used
+        here: it swallows ``PermissionError`` and would make an unreadable
+        directory look empty.
+
+        Only regular files and symlinks whose name matches this format are
+        touched; subdirectories, unrelated files and in-flight ``*.tmp``
+        payloads are left alone.  Each candidate is unlinked only when its
+        identity is unchanged since it was listed: a file replaced by a
+        concurrent ``put`` in the meantime is a *new* snapshot, not the one
+        this clear was asked to drop, and deleting it would lose a search that
+        just completed.
+        """
         if self._disk_dir is None:
             return
+        directory = self._disk_dir
+        candidates: list[tuple[Path, tuple[int, int, int, int]]] = []
         try:
-            candidates = list(self._disk_dir.glob(f"{_DISK_PREFIX}*{_DISK_SUFFIX}"))
-        except (OSError, ValueError):
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not entry.name.startswith(_DISK_PREFIX):
+                        continue
+                    if not entry.name.endswith(_DISK_SUFFIX):
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            continue
+                        # ``os.stat`` is used instead of ``entry.stat``: on
+                        # Windows the latter reports ``st_dev``/``st_ino`` as
+                        # zero, which would never match the ``Path.stat``
+                        # sample taken before unlinking.
+                        info = os.stat(entry.path, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    candidates.append((Path(entry.path), self._file_identity(info)))
+        except (FileNotFoundError, NotADirectoryError):
             return
-        for candidate in candidates:
-            with contextlib.suppress(OSError):
+        failure: OSError | None = None
+        for candidate, identity in candidates:
+            try:
+                info = candidate.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                failure = failure or exc
+                continue
+            if self._file_identity(info) != identity:
+                # Replaced by a concurrent write after enumeration.
+                continue
+            try:
                 candidate.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                # A concurrent ``put`` replacing the payload can make
+                # ``unlink`` fail with a sharing violation on Windows.  The
+                # file is then a *new* snapshot, so this clear was never asked
+                # to remove it; a file still holding the listed identity is a
+                # real failure (read-only directory, held open elsewhere).
+                try:
+                    current = candidate.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    failure = failure or exc
+                    continue
+                if self._file_identity(current) != identity:
+                    continue
+                failure = failure or exc
+        if failure is not None:
+            raise failure
 
     def _purge_expired(self, now: float) -> None:
         """
@@ -694,6 +772,13 @@ class SearchCache:
         losing its hit/miss/eviction history.  Clearing the disk layer only
         removes payload files of this cache's format; unrelated files in the
         directory are left alone.
+
+        Memory is always cleared.  If the disk layer cannot be cleared -- an
+        unreadable directory, a read-only directory, a payload held open by
+        another process -- the first :class:`OSError` is raised *after* the
+        other candidates were attempted, so an explicit clear action reports
+        the failure instead of silently leaving stale payloads behind.  The
+        next ``get`` still misses for every key that was cleared from memory.
         """
         with self._lock:
             self._entries.clear()
@@ -726,12 +811,14 @@ class SearchCache:
             )
             disk_entries = 0
             if self._disk_dir is not None:
+                pattern = f"{_DISK_PREFIX}*{_DISK_SUFFIX}"
                 try:
                     disk_entries = sum(
                         1
-                        for _path in self._disk_dir.glob(
-                            f"{_DISK_PREFIX}*{_DISK_SUFFIX}"
-                        )
+                        for path in self._disk_dir.glob(pattern)
+                        # Only files are payloads; a directory with a matching
+                        # name is not one and must not inflate the count.
+                        if path.is_file()
                     )
                 except (OSError, ValueError):
                     disk_entries = 0

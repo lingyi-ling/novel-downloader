@@ -64,3 +64,19 @@ def _force_english_locale(monkeypatch: pytest.MonkeyPatch) -> None:
     file would make assertions on English user-facing messages fail randomly.
     """
     monkeypatch.setenv("NOVEL_LANG", "en_US")
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_embedded_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Keep the embedded engine's bearer token out of every test.
+
+    ``start_server`` reads ``NOVEL_DOWNLOADER_EMBEDDED_TOKEN`` when no token
+    argument is given, so a developer who exported one (or ran the Android
+    bootstrap in the same shell) would turn every embedded request into a
+    ``401`` and fail unrelated contract tests. Tests that exercise the token
+    set the variable themselves.
+    """
+    from novel_downloader.apps.embedded.server import TOKEN_ENV_VAR
+
+    monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)

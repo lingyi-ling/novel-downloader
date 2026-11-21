@@ -109,7 +109,14 @@ logger = logging.getLogger(__name__)
 #: result.  Normal rules match far fewer items.
 MAX_MULTI_ITEMS = 1000
 
-_NESTED_HTML_RE = re.compile(r"<!DOCTYPE.*?>", re.I | re.S)
+#: Opener for a nested-document ``<!DOCTYPE ...>`` declaration.  Only the
+#: opener is a pattern; the closing ``>`` is found with :meth:`str.find` so a
+#: page full of unterminated openers cannot make the scan quadratic.
+_DOCTYPE_OPEN_RE = re.compile(r"<!DOCTYPE", re.I)
+
+#: Openers for the comment/tag strippers in :func:`_py_strip_html`.
+_COMMENT_OPEN_RE = re.compile(r"<!--")
+_TAG_OPEN_RE = re.compile(r"<")
 
 # a ``{name}`` placeholder used by :func:`render` (single pass)
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
@@ -130,9 +137,38 @@ def _selector_preview(selector: str) -> str:
     return selector[:_MAX_SELECTOR_PREVIEW] + "…"
 
 
+def _strip_delimited(text: str, opener: re.Pattern[str], closer: str) -> str:
+    """
+    Remove every ``opener ... closer`` span in one left-to-right pass.
+
+    Equivalent to ``re.sub(opener + r".*?" + closer, "", text, re.S)`` but
+    linear in ``len(text)``.  The regex form is quadratic when the page holds
+    many openers and no closer: the engine retries the failing lazy match at
+    every position, so a 128 KB body of ``<!--`` took ~40 s.  Here a closer
+    that is absent after an opener means no later opener can match either, so
+    the scan stops instead of retrying.
+    """
+    out: list[str] = []
+    pos = 0
+    size = len(text)
+    while pos < size:
+        match = opener.search(text, pos)
+        if match is None:
+            out.append(text[pos:])
+            break
+        close = text.find(closer, match.end())
+        if close == -1:
+            # No closer after this opener, hence none after any later one.
+            out.append(text[pos:])
+            break
+        out.append(text[pos : match.start()])
+        pos = close + len(closer)
+    return "".join(out)
+
+
 def strip_nested_html(s: str) -> str:
     """Remove a nested document wrapper some sites embed inside a page."""
-    s = _NESTED_HTML_RE.sub("", s)
+    s = _strip_delimited(s, _DOCTYPE_OPEN_RE, ">")
     for tag in ("html", "body"):
         s = s.replace(f"<{tag}>", "").replace(f"</{tag}>", "")
     return s
@@ -337,13 +373,11 @@ def _node_str(node: Any, attr: str, fmt: str) -> str:
 # --------------------------------------------------------------------------- #
 # post-processing steps
 # --------------------------------------------------------------------------- #
-_TAG_RE = re.compile(r"<[^>]*>")
-_TAG_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
-
-
 def _py_strip_html(value: str) -> str:
     """Drop HTML comments and tags, leaving the text content."""
-    return _TAG_RE.sub("", _TAG_COMMENT_RE.sub("", value))
+    return _strip_delimited(
+        _strip_delimited(value, _COMMENT_OPEN_RE, "-->"), _TAG_OPEN_RE, ">"
+    )
 
 
 def _py_normalize_space(value: str) -> str:

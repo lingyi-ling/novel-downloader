@@ -36,6 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi import Path as PathParam
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.types import Receive, Scope, Send
 
 from novel_downloader import __version__
 from novel_downloader.apps.common import history_files
@@ -581,6 +582,52 @@ def _sse_frame(event: str, payload: Any) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
+def _consume_task_result(task: asyncio.Future[Any]) -> None:
+    """Mark a detached task's outcome as retrieved (no unraisable warning)."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _aclose_quietly(iterator: Any) -> None:
+    """
+    Close an async iterator without letting cancellation abandon the close.
+
+    ``aclose`` is awaited behind a shield: if the calling task is cancelled
+    again while the cleanup runs, the closer keeps going on its own and the
+    cancellation still propagates to the caller.
+    """
+    aclose = getattr(iterator, "aclose", None)
+    if aclose is None:
+        return
+    closer = asyncio.ensure_future(aclose())
+    closer.add_done_callback(_consume_task_result)
+    await asyncio.shield(closer)
+
+
+class _SSEStreamingResponse(StreamingResponse):
+    """
+    A ``StreamingResponse`` that always closes its body iterator.
+
+    On a client disconnect Starlette cancels the task that is iterating the
+    body while it is suspended in ``send``. That cancellation is delivered to
+    the ``send`` await, not into the generator, so a generator parked at its
+    ``yield`` is simply abandoned: its ``finally`` -- and the ``aclosing`` of
+    the source underneath -- never runs, and the pull task it owns stays alive
+    until the garbage collector happens to close the generator.
+
+    Closing the iterator here restores the documented contract: a disconnect
+    runs the source's cleanup promptly, so a silent or slow source cannot
+    outlive its request. A response that ends normally is unaffected, because
+    closing an exhausted async generator is a no-op.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await _aclose_quietly(self.body_iterator)
+
+
 async def _stream_with_keepalive(
     source: AsyncIterator[str],
     interval: float | None = None,
@@ -624,16 +671,24 @@ async def _stream_with_keepalive(
             yield frame
             pending = asyncio.ensure_future(anext(iterator))
     finally:
-        if pending is not None and not pending.done():
-            pending.cancel()
-            with suppress(asyncio.CancelledError):
-                await pending
+        if pending is not None:
+            if not pending.done():
+                pending.cancel()
+                # A source that swallows the cancellation and returns instead
+                # of re-raising surfaces ``StopAsyncIteration`` here; either
+                # way the stream is over.
+                with suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await pending
+            # A pull that failed just before the stream was abandoned still
+            # holds its exception; retrieving it here keeps asyncio from
+            # reporting an unretrieved future exception at GC time.
+            _consume_task_result(pending)
         # A source suspended at its last ``yield`` is still open; closing it
-        # runs the cleanup its caller is entitled to (``aclosing`` etc.).
-        aclose = getattr(iterator, "aclose", None)
-        if aclose is not None:
-            with suppress(asyncio.CancelledError, RuntimeError):
-                await aclose()
+        # runs the cleanup its caller is entitled to (``aclosing`` etc.). The
+        # close is shielded so a second cancellation cannot abandon it
+        # half-done and leave the source's tasks running.
+        with suppress(asyncio.CancelledError, RuntimeError):
+            await _aclose_quietly(iterator)
 
 
 async def _search_event_stream(
@@ -830,7 +885,7 @@ async def stream_search(
                 detail=f"Request validation failed: sites: {exc}",
             ) from exc
 
-    return StreamingResponse(
+    return _SSEStreamingResponse(
         _stream_with_keepalive(
             _search_event_stream(
                 keyword,
@@ -1050,7 +1105,7 @@ async def stream_tasks(
     ``: keepalive`` comment frame is written. Comments carry no event; clients
     may ignore them.
     """
-    return StreamingResponse(
+    return _SSEStreamingResponse(
         _stream_with_keepalive(_task_event_stream(mgr, TASK_STREAM_INTERVAL)),
         media_type="text/event-stream",
         headers={
@@ -1198,7 +1253,7 @@ async def stream_login_requests() -> StreamingResponse:
     ``: keepalive`` comment frame. Comments carry no event; clients may ignore
     them.
     """
-    return StreamingResponse(
+    return _SSEStreamingResponse(
         _stream_with_keepalive(_login_request_event_stream(LOGIN_STREAM_INTERVAL)),
         media_type="text/event-stream",
         headers={
