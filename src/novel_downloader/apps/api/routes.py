@@ -1814,6 +1814,21 @@ async def music_export(body: MusicExportRequest) -> dict[str, Any]:
     target = _resolve_export_target(components, body.out_path)
     try:
         written = await run_in_threadpool(components.export_m3u, tracks, target)
+    except ValueError as exc:
+        # Defense in depth: ``export_m3u`` normalises path ``ValueError``
+        # (NUL, lone surrogates) to ``PlaylistWriteError`` (an ``OSError``),
+        # but an injected/older exporter may still raise a plain one. The
+        # target was unusable, so this is a 400 with the fixed message; the
+        # rejected value is never echoed.
+        from novel_downloader.apps.music.export_path import (
+            MSG_PLAYLIST_TARGET_INVALID,
+        )
+
+        logger.warning("Playlist target rejected for %s: %s", target, exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=MSG_PLAYLIST_TARGET_INVALID,
+        ) from exc
     except OSError as exc:
         # Neither the raw OS error nor the resolved target is echoed back:
         # both can embed server-internal absolute paths. The full reason is

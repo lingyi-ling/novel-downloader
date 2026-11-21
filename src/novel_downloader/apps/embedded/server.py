@@ -1887,6 +1887,7 @@ def _optional_text_field(
     entries: list[dict[str, Any]],
     *,
     choices: tuple[str, ...] | None = None,
+    label: str | None = None,
 ) -> str | None:
     """
     Validate an optional path/level field like ``schemas.OptionalPath``.
@@ -1895,7 +1896,9 @@ def _optional_text_field(
     error (the old code ``str()``-coerced it, accepting payloads REST rejects)
     and a blank value collapses to ``None``.  ``choices`` mirrors an
     enumerated field (the audio ``level``): a non-matching value is the same
-    ``value_error`` REST's ``AfterValidator`` produces.
+    ``value_error`` REST's ``AfterValidator`` produces.  ``label`` mirrors the
+    name the REST schema uses in its message (``path`` for ``out_path`` and
+    ``out_dir``), so both transports return the same fixed detail.
     """
     raw, error = _typed_string(body, name)
     if error is not None:
@@ -1903,7 +1906,7 @@ def _optional_text_field(
         return None
     if raw is None:
         return None
-    cleaned, error = _clean_string(raw, name, max_length, allow_blank=True)
+    cleaned, error = _clean_string(raw, name, max_length, allow_blank=True, label=label)
     if error is not None:
         entries.append(error)
         return None
@@ -2503,7 +2506,7 @@ def _music_download_args(
         choices=_MUSIC_AUDIO_LEVELS,
     )
     raw_out_dir = _optional_text_field(
-        body, "out_dir", _MAX_OPTIONAL_PATH_LENGTH, entries
+        body, "out_dir", _MAX_OPTIONAL_PATH_LENGTH, entries, label="path"
     )
     if entries:
         raise _validation_error(entries)
@@ -2597,7 +2600,7 @@ def _handle_music_export(
         entries.append(platform_err)
     tracks = _music_tracks_field(body, components, entries)
     raw_out_path = _optional_text_field(
-        body, "out_path", _MAX_OPTIONAL_PATH_LENGTH, entries
+        body, "out_path", _MAX_OPTIONAL_PATH_LENGTH, entries, label="path"
     )
     if entries:
         raise _validation_error(entries)
@@ -2614,6 +2617,16 @@ def _handle_music_export(
     target = _resolve_music_export_target(components, raw_out_path)
     try:
         written_path = components.export_m3u(usable, target)
+    except ValueError as exc:
+        from novel_downloader.apps.music.export_path import (
+            MSG_PLAYLIST_TARGET_INVALID,
+        )
+
+        # Mirror REST: a plain ``ValueError`` from an older/injected exporter
+        # means the destination is unusable, so answer 400 with the fixed
+        # message (never the value or the target).
+        logger.warning("Embedded playlist target rejected for %s: %s", target, exc)
+        raise _ApiError(400, MSG_PLAYLIST_TARGET_INVALID) from exc
     except OSError as exc:
         from novel_downloader.apps.music.export_path import MSG_PLAYLIST_WRITE_FAILED
 

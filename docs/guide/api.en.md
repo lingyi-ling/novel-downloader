@@ -82,6 +82,21 @@ A missing or wrong token returns `401`:
 {"detail": "Invalid or missing API token. Send 'Authorization: Bearer <token>' or 'X-API-Key: <token>'."}
 ```
 
+The OpenAPI document (`/openapi.json`, also the source for `/docs`) declares
+both forms: `components.securitySchemes` contains `BearerAuth`
+(`http`/`bearer`) and `ApiKeyAuth` (`apiKey`, header name `X-API-Key`), and
+every token-protected operation carries `security` with the two entries as
+alternatives (either one authenticates). `/docs`, `/redoc` and
+`/openapi.json` are not part of the `/api/v1` router, so reading them needs no
+token and they declare no `security`.
+
+!!! note "Embedded engine (desktop / Android standalone mode)"
+    The embedded HTTP engine binds `127.0.0.1` only and serves native clients
+    on the same machine. It does **not** implement token authentication: there
+    is no `Authorization` / `X-API-Key` layer and it never returns `401`. The
+    authentication contract in this section applies to the `novel-api` REST
+    server only.
+
 ## Endpoint overview
 
 All business endpoints are prefixed with `/api/v1`; requests and responses are

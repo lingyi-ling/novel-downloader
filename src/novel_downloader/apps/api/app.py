@@ -83,7 +83,7 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -96,6 +96,7 @@ from novel_downloader import __version__
 from novel_downloader.apps.core.task_manager import manager
 from novel_downloader.infra.config import get_config_value
 
+from .auth import require_token
 from .middleware import (
     DEFAULT_MAX_BODY_BYTES,
     DEFAULT_RATE_LIMIT,
@@ -311,6 +312,81 @@ AUTH_SECURITY_SCHEMES: dict[str, dict[str, Any]] = {
     },
 }
 
+#: Operation-level ``security`` requirement for a token-protected request.
+#: Both entries in one list are alternatives (OpenAPI OR semantics): a client
+#: may send either ``Authorization: Bearer`` or ``X-API-Key``, exactly as
+#: :func:`novel_downloader.apps.api.auth.extract_token` accepts.
+AUTH_SECURITY_REQUIREMENT: list[dict[str, list[str]]] = [
+    {"BearerAuth": []},
+    {"ApiKeyAuth": []},
+]
+
+
+def _auth_security_requirement() -> list[dict[str, list[str]]]:
+    """Return a fresh requirement so operations never share scope lists."""
+    return [
+        {scheme: list(scopes) for scheme, scopes in requirement.items()}
+        for requirement in AUTH_SECURITY_REQUIREMENT
+    ]
+
+
+def _iter_api_routes(routes: Any) -> Iterator[Any]:
+    """
+    Yield the ``APIRoute``-like objects behind ``application.routes``.
+
+    FastAPI versions differ in how ``include_router`` is represented: some
+    expand the router into a flat list of ``APIRoute`` objects, while others
+    keep a lazy ``_IncludedRouter`` whose ``effective_candidates()`` returns
+    the routes. Both shapes expose ``path``, ``methods`` and ``dependant``.
+    """
+    for route in routes:
+        if getattr(route, "dependant", None) is not None and hasattr(route, "path"):
+            yield route
+            continue
+        candidates = getattr(route, "effective_candidates", None)
+        if callable(candidates):
+            yield from _iter_api_routes(candidates())
+
+
+def _dependant_requires_token(dependant: Any) -> bool:
+    """
+    Whether a FastAPI dependency tree contains ``require_token``.
+
+    The router declares ``dependencies=[Depends(require_token)]``; walking the
+    dependant tree instead of comparing paths keeps the OpenAPI declaration in
+    sync automatically when a route moves to (or out of) the protected router.
+    """
+    pending = [dependant]
+    seen: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if getattr(node, "call", None) is require_token:
+            return True
+        pending.extend(getattr(node, "dependencies", ()) or ())
+    return False
+
+
+def _protected_operations(application: FastAPI) -> set[tuple[str, str]]:
+    """
+    Return ``(path, lowercase method)`` pairs guarded by ``require_token``.
+
+    Public routes (``/docs``, ``/redoc``, ``/openapi.json``) are not part of
+    the generated document and therefore never appear here.
+    """
+    protected: set[tuple[str, str]] = set()
+    for route in _iter_api_routes(application.routes):
+        if not _dependant_requires_token(getattr(route, "dependant", None)):
+            continue
+        path = getattr(route, "path", None)
+        if not isinstance(path, str):
+            continue
+        for method in getattr(route, "methods", ()) or ():
+            protected.add((path, method.lower()))
+    return protected
+
 
 def _documents_request_id_parameter(parameters: list[Any]) -> bool:
     """Whether an operation already documents the ``X-Request-ID`` header."""
@@ -331,11 +407,13 @@ def _install_openapi_metadata(application: FastAPI) -> None:
     """
     Augment the generated document with cross-cutting API metadata.
 
-    Adds the authentication schemes, documents the optional ``X-Request-ID``
-    request header and its echoed response header on every operation, and
-    removes the ``429`` response from paths the rate limiter exempts. The
-    schema is otherwise produced from the routes, so it stays in sync with the
-    router automatically.
+    Adds the authentication schemes, declares ``security`` on every operation
+    that actually sits behind ``require_token`` (public operations get an
+    explicit empty list so they never inherit a document-wide requirement),
+    documents the optional ``X-Request-ID`` request header and its echoed
+    response header on every operation, and removes the ``429`` response from
+    paths the rate limiter exempts. The schema is otherwise produced from the
+    routes, so it stays in sync with the router automatically.
 
     The header parameter deliberately has no ``pattern`` or ``maxLength``:
     unsafe values are replaced by a generated id rather than rejected, so a
@@ -349,7 +427,12 @@ def _install_openapi_metadata(application: FastAPI) -> None:
         security_schemes = components.setdefault("securitySchemes", {})
         for name, definition in AUTH_SECURITY_SCHEMES.items():
             security_schemes.setdefault(name, dict(definition))
-        schema.setdefault("security", [{"BearerAuth": []}, {"ApiKeyAuth": []}])
+
+        # ``security`` is declared per operation, derived from the route's
+        # actual dependency tree. A document-level requirement would also
+        # apply to any future public operation unless it overrode it, so the
+        # root deliberately carries none.
+        protected = _protected_operations(application)
 
         components.setdefault("parameters", {}).setdefault(
             "RequestId",
@@ -369,7 +452,7 @@ def _install_openapi_metadata(application: FastAPI) -> None:
             },
         )
 
-        for path_item in schema.get("paths", {}).values():
+        for path, path_item in schema.get("paths", {}).items():
             if not isinstance(path_item, dict):
                 continue
             for method, operation in path_item.items():
@@ -377,6 +460,16 @@ def _install_openapi_metadata(application: FastAPI) -> None:
                     operation, dict
                 ):
                     continue
+                # A protected operation names the alternatives a client may
+                # use; a public one is explicitly empty so no document-wide
+                # default can ever leak onto it. A requirement FastAPI already
+                # produced from an explicit ``Security()`` dependency is kept.
+                if "security" not in operation:
+                    operation["security"] = (
+                        _auth_security_requirement()
+                        if (path, method) in protected
+                        else []
+                    )
                 parameters = operation.setdefault("parameters", [])
                 if not isinstance(parameters, list):
                     parameters = []

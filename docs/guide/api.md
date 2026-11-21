@@ -75,6 +75,18 @@ X-API-Key: my-secret
 {"detail": "Invalid or missing API token. Send 'Authorization: Bearer <token>' or 'X-API-Key: <token>'."}
 ```
 
+OpenAPI 文档（`/openapi.json`，也是 `/docs` 的数据源）同样声明了这两种方式：
+`components.securitySchemes` 含 `BearerAuth`（`http` / `bearer`）与
+`ApiKeyAuth`（`apiKey`，头名 `X-API-Key`）；每个受 token 保护的 operation
+都带 `security`，两项为 OR（任选其一即可）。`/docs`、`/redoc` 与
+`/openapi.json` 本身不在 `/api/v1` 路由内，读取它们不需要 token，也不声明
+`security`。
+
+!!! note "内嵌引擎（桌面端 / Android 独立模式）"
+    内嵌 HTTP 引擎只绑定 `127.0.0.1`、只服务本机原生客户端，**不实现**
+    token 校验：它没有 `Authorization` / `X-API-Key` 认证层，也不会返回
+    `401`。本节及上表的鉴权约定只适用于 `novel-api` REST 服务。
+
 ## 端点一览
 
 所有业务端点前缀为 `/api/v1`，请求与响应通常为 JSON（`search/stream`、

@@ -537,8 +537,13 @@ def test_security_schemes_match_the_api_key_auth(spec: dict[str, Any]) -> None:
 def test_security_requirement_references_only_declared_schemes(
     spec: dict[str, Any],
 ) -> None:
+    """Every operation-level requirement names a declared scheme."""
     declared = set(spec["components"]["securitySchemes"])
-    requirements = spec["security"]
+    requirements = [
+        requirement
+        for _path, _method, operation in _operations(spec)
+        for requirement in operation.get("security", [])
+    ]
 
     assert requirements
     referenced = {scheme for requirement in requirements for scheme in requirement}
