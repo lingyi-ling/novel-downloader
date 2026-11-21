@@ -70,6 +70,7 @@ plugins:
             API 示例: API Examples
             插件: Plugins
             官网部署: Website Deployment
+            发布流程: Release Process
             技术笔记: Notes
             AES 笔记: AES Notes
             多看的 EPUB 笔记: Duokan EPUB Notes
@@ -158,6 +159,7 @@ nav:
     - API 示例: reference/api-examples.md
     - 插件: reference/plugins.md
     - 官网部署: guide/website-deploy.md
+    - 发布流程: guide/release-process.md
 
   - 技术笔记:
     - AES 笔记: notes/aes.md
