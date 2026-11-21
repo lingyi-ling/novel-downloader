@@ -125,6 +125,13 @@ def verify_sha256(path: Path, expected: str) -> bool:
     return impl(path, expected)
 
 
+def verify_file(path: Path, expected: str, *, expected_size: int | None = None) -> bool:
+    """Deferred :func:`updater.verify_file` (single-descriptor check)."""
+    from novel_downloader.apps.common.updater import verify_file as impl
+
+    return impl(path, expected, expected_size=expected_size)
+
+
 #: Per-site search timeout handed to :func:`plugins.search.search`.
 SEARCH_SITE_TIMEOUT = 6.0
 #: Upper bound for awaiting a submitted search on the engine loop.
@@ -229,16 +236,43 @@ function Test-Protected([string]$Path) {
     return $false
 }
 
-# Wait for the running instance to release its executable and DLLs.
+function Test-ReparsePoint([string]$Path) {
+    # A junction/symlink redirects every delete and copy below it.  Removing
+    # such a directory with -Recurse can walk into its target, so it must be
+    # handled as a link (unlink only) instead of a directory.
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    return [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+}
+
+# Wait for the running instance to release its executable and DLLs.  Two
+# minutes is a hard limit: continuing while the app is still alive would fail
+# the copy halfway and leave a broken install, so it stops with an error the
+# (still running) app can surface instead.
+$exited = $false
 for ($i = 0; $i -lt 240; $i++) {
-    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { break }
+    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+        $exited = $true
+        break
+    }
     Start-Sleep -Milliseconds 500
+}
+if (-not $exited) {
+    throw "The application did not exit within 120 seconds; nothing was replaced"
 }
 
 $AppDir = [System.IO.Path]::GetFullPath($AppDir)
 # A misdetected install shape must never turn an update into "clean a drive".
 if ($AppDir -eq [System.IO.Path]::GetPathRoot($AppDir)) {
     throw "Refusing to update a drive root: $AppDir"
+}
+# The program folder itself must be a real directory: writing through a link
+# would replace files in whatever it points at.
+if (Test-ReparsePoint $AppDir) {
+    throw "Refusing to update a linked program folder: $AppDir"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $AppDir $Exe))) {
     throw "The installed executable is missing: $AppDir\$Exe"
@@ -251,46 +285,112 @@ if ($items.Count -eq 0) { throw "The update archive is empty" }
 $source = $temp
 if ($items.Count -eq 1 -and $items[0].PSIsContainer) { $source = $items[0].FullName }
 
+# An archive may smuggle a link (or an entry that resolves outside the staging
+# directory).  Copying that tree would write wherever the link points, so any
+# reparse point or path outside $temp aborts the update before the install is
+# touched.
+if (Test-ReparsePoint $source) {
+    throw "The update archive root is a link: $source"
+}
+foreach ($entry in @(Get-ChildItem -LiteralPath $source -Recurse -Force)) {
+    if (-not (Test-PathWithin $entry.FullName $temp)) {
+        throw "The update archive escapes the staging directory: $($entry.FullName)"
+    }
+    if (Test-ReparsePoint $entry.FullName) {
+        throw "The update archive contains a link: $($entry.FullName)"
+    }
+}
+
 # PyInstaller puts every module/resource below _internal.  Overwriting files
 # alone leaves removed plugins behind (the registry enumerates them from
-# disk), so the old payload directory is cleared first.  User data lives in
+# disk), so the old payload directory is moved aside first.  User data lives in
 # app_home(), never in _internal; the $Keep guard only matters when NOVEL_HOME
 # points inside the payload, and then the protected subtree is preserved.
+#
+# The old payload is renamed to a sibling backup rather than deleted, so a
+# failure during the copy can put it back instead of leaving an app that
+# cannot start.
 $payload = Join-Path $AppDir '_internal'
-for ($attempt = 0; $attempt -lt 10; $attempt++) {
-    try {
-        if (Test-Path -LiteralPath $payload) {
-            if (Test-Protected $payload) {
-                # NOVEL_HOME points inside the payload.  Keep that subtree but
-                # still clear its unprotected siblings: skipping the whole
-                # cleanup would leave plugins removed from the new build behind.
+if (Test-ReparsePoint $payload) {
+    # A junction here would make the copy below write outside the program
+    # folder.  Drop the link itself (never its target) and let the copy
+    # recreate a real directory.
+    Remove-Item -LiteralPath $payload -Force
+}
+$backup = Join-Path $AppDir ('_internal.old-' + [guid]::NewGuid().ToString('N'))
+$movedAside = $false
+if (Test-Path -LiteralPath $payload) {
+    if (Test-Protected $payload) {
+        # NOVEL_HOME points inside the payload: it cannot be moved wholesale.
+        # Clear the unprotected siblings instead and let the copy overwrite
+        # the protected subtree's own files.
+        for ($attempt = 0; $attempt -lt 10; $attempt++) {
+            try {
                 foreach ($child in @(Get-ChildItem -LiteralPath $payload -Force)) {
-                    if (-not (Test-Protected $child.FullName)) {
+                    if (Test-Protected $child.FullName) { continue }
+                    if (Test-ReparsePoint $child.FullName) {
+                        Remove-Item -LiteralPath $child.FullName -Force
+                    } else {
                         Remove-Item -LiteralPath $child.FullName -Recurse -Force
                     }
                 }
-            } else {
-                Remove-Item -LiteralPath $payload -Recurse -Force
+                break
+            } catch {
+                if ($attempt -eq 9) { throw }
+                Start-Sleep -Seconds 1
             }
         }
-        break
-    } catch {
-        if ($attempt -eq 9) { throw }
-        Start-Sleep -Seconds 1
+    } else {
+        for ($attempt = 0; $attempt -lt 10; $attempt++) {
+            try {
+                Move-Item -LiteralPath $payload -Destination $backup -Force
+                $movedAside = $true
+                break
+            } catch {
+                if ($attempt -eq 9) { throw }
+                Start-Sleep -Seconds 1
+            }
+        }
     }
 }
 
 # A slow antivirus scan can keep a file locked for a moment; retry briefly.
+$copied = $false
 for ($attempt = 0; $attempt -lt 10; $attempt++) {
     try {
         Copy-Item -Path (Join-Path $source '*') -Destination $AppDir -Recurse -Force
+        $copied = $true
         break
     } catch {
-        if ($attempt -eq 9) { throw }
+        if ($attempt -eq 9) { break }
         Start-Sleep -Seconds 1
     }
 }
-Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+if (-not $copied) {
+    # Put the previous payload back so the old build still starts.
+    if ($movedAside -and (Test-Path -LiteralPath $backup)) {
+        if (Test-Path -LiteralPath $payload) {
+            Remove-Item -LiteralPath $payload -Recurse -Force `
+                -ErrorAction SilentlyContinue
+        }
+        Move-Item -LiteralPath $backup -Destination $payload -Force `
+            -ErrorAction SilentlyContinue
+    }
+    throw "Copying the update failed; the previous installation was restored"
+}
+if ($movedAside) {
+    Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+}
+# Only the staging directory this run created is removed, and only while it
+# still sits inside %TEMP% and is a real directory: a redirected TEMP or a
+# pre-planted junction must not turn cleanup into "delete elsewhere".
+if ((Test-Path -LiteralPath $temp) -and (Test-PathWithin $temp $env:TEMP)) {
+    if (Test-ReparsePoint $temp) {
+        Remove-Item -LiteralPath $temp -Force
+    } else {
+        Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 Remove-Item -LiteralPath $Zip -Force -ErrorAction SilentlyContinue
 Start-Process -FilePath (Join-Path $AppDir $Exe)
 """
@@ -1632,12 +1732,16 @@ class _DownloadedUpdate:
     ``version`` is the release the file was fetched for.  It stays optional so
     records restored from older builds (and tests that only care about the
     file) remain valid; a record without a version is never treated as stale.
+    ``size`` is the size published by the release, when it had one; it is
+    checked again before launch so a file that was truncated or padded after
+    verification is refused even if a digest collision were found.
     """
 
     path: Path
     sha256: str
     name: str
     version: str | None = None
+    size: int | None = None
 
 
 def _idle_download_state() -> dict[str, Any]:
@@ -1704,13 +1808,20 @@ def _updates_dir() -> Path:
     Directory receiving downloaded updates (``app_home()/updates``).
 
     Created on demand so :func:`download_asset` always has a root to stay
-    inside.
+    inside.  A ``updates`` entry that is a link (or a plain file) is refused:
+    every later download and launch trusts this directory, so it must be a
+    real directory owned by the app rather than a redirect planted in the
+    user's home.
 
     :return: The resolved update directory.
+    :raises OSError: when ``updates`` exists but is not a usable directory.
     """
     from novel_downloader.infra.paths import app_home
 
     path = Path(app_home()) / _UPDATES_DIRNAME
+    # ``is_symlink`` misses an NTFS junction, which redirects just as well.
+    if _is_link(path) or (path.exists() and not path.is_dir()):
+        raise OSError(f"the update directory is not a real directory: {path}")
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -1754,6 +1865,12 @@ def _prune_updates(updates_dir: Path) -> None:
     finished installers/zips for a week.  Nothing here is fatal: a file that
     cannot be removed (still mapped by a running installer) is simply left for
     the next pass.
+
+    A symlink or junction is never followed: pruning a link would delete the
+    tree it points at (``shutil.rmtree`` walks the target), which is exactly
+    the "delete the user's data" failure this guard exists to prevent.  The
+    app never creates a link in ``updates/``, so any link found there is
+    planted and is unlinked immediately rather than aged out.
     """
     now = time.time()
     try:
@@ -1762,6 +1879,11 @@ def _prune_updates(updates_dir: Path) -> None:
         return
     for entry in entries:
         try:
+            if _is_link(entry):
+                # Remove only the link, never what it points at.  No age
+                # check: the app never writes links here.
+                entry.unlink()
+                continue
             stat = entry.stat()
         except OSError:
             continue
@@ -1784,6 +1906,58 @@ def _inside_dir(path: Path, root: Path) -> bool:
         return Path(path).resolve().is_relative_to(Path(root).resolve())
     except OSError:
         return False
+
+
+def _is_link(path: Path) -> bool:
+    """Whether *path* is a symlink or an NTFS junction."""
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if callable(is_junction) and is_junction():
+            return True
+    except OSError:
+        # A path we cannot classify is treated as hostile.
+        return True
+    return False
+
+
+def _stat_identity(path: Path) -> tuple[int, int, int, int] | None:
+    """The identity fields that change when a path is replaced or rewritten."""
+    try:
+        info = Path(path).stat()
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _safe_update_file(path: Path, root: Path) -> bool:
+    """
+    Whether *path* is a regular file inside *root*, reached without any link.
+
+    ``_inside_dir`` follows symlinks, so a link planted in ``updates/`` that
+    points at another file inside ``updates/`` would pass it and be executed
+    under a name the download never used.  This rejects a link anywhere in the
+    path below *root*, so the file that runs is the file that was verified
+    under that exact name.
+    """
+    if not _inside_dir(path, root):
+        return False
+    candidate = Path(path)
+    base = Path(root)
+    current = candidate
+    for _ in range(64):
+        if os.path.normcase(os.path.abspath(str(current))) == os.path.normcase(
+            os.path.abspath(str(base))
+        ):
+            return True
+        if _is_link(current):
+            return False
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
+    return False
 
 
 def _safe_external_url(
@@ -4065,12 +4239,14 @@ class ApiBridge:
             target = record.path
             suffix = target.suffix.lower()
             updates_dir = _updates_dir()
-            if suffix not in {".exe", ".zip"} or not _inside_dir(target, updates_dir):
+            if suffix not in {".exe", ".zip"} or not _safe_update_file(
+                target, updates_dir
+            ):
                 return
             if not target.is_file():
                 self._forget_download(record)
                 return
-            if not verify_sha256(target, record.sha256):
+            if not verify_file(target, record.sha256, expected_size=record.size):
                 self._forget_download(record, remove=True)
                 return
             if suffix == ".exe" and detect_install_shape() == "portable":
@@ -4402,6 +4578,7 @@ class ApiBridge:
                     resume=True,
                     progress=on_progress,
                     attempts=3,
+                    expected_size=asset.size,
                 )
             except (ValueError, OSError) as exc:
                 logger.debug("Asset transfer failed: %s", exc)
@@ -4417,7 +4594,11 @@ class ApiBridge:
                 return self._download_error(
                     t("The download landed outside the update folder")
                 )
-            if not verify_sha256(final, digest):
+            # Verify the whole file once more from a single descriptor and
+            # against the published size.  The shared helper already hashed
+            # the completed ``.part``; this closes the gap between that check
+            # and the ``replace`` plus any file swapped in afterwards.
+            if not verify_file(final, digest, expected_size=asset.size):
                 try:
                     final.unlink(missing_ok=True)
                 except OSError:
@@ -4432,6 +4613,7 @@ class ApiBridge:
                     sha256=digest,
                     name=final.name,
                     version=version or None,
+                    size=asset.size,
                 )
                 self._update_download_state = {
                     "active": False,
@@ -4607,7 +4789,7 @@ class ApiBridge:
                 ),
             }
         updates_dir = _updates_dir()
-        if not _inside_dir(target, updates_dir):
+        if not _safe_update_file(target, updates_dir):
             self._release_claim(record)
             return {
                 "ok": False,
@@ -4621,7 +4803,7 @@ class ApiBridge:
                     "The downloaded installer is missing; please download it again"
                 ),
             }
-        if not verify_sha256(target, record.sha256):
+        if not verify_file(target, record.sha256, expected_size=record.size):
             # The file changed after verification: never launch it.
             try:
                 target.unlink(missing_ok=True)
@@ -4634,6 +4816,11 @@ class ApiBridge:
                     "please download it again"
                 ),
             }
+        # Record the file identity that was just verified.  A replacement
+        # between the hash and ``Popen`` changes at least one of these fields,
+        # so it is caught after the launch and the installer is not left to
+        # run unattended.
+        verified_identity = _stat_identity(target)
 
         if suffix == ".zip":
             return self._launch_portable_update(record, updates_dir)
@@ -4657,6 +4844,23 @@ class ApiBridge:
             return {"ok": False, "error": format_error(exc)}
 
         pid = getattr(process, "pid", None)
+        replaced = (
+            verified_identity is not None
+            and _stat_identity(target) != verified_identity
+        )
+        if replaced:
+            # The name now resolves to a different file than the one hashed.
+            # The installer already started, so the only safe action is to
+            # stop it and refuse to close this instance for it.
+            self._terminate_process(process)
+            logger.error("The installer was replaced after verification; aborted")
+            return {
+                "ok": False,
+                "error": t(
+                    "The downloaded installer changed while it was being "
+                    "started and was stopped; please download it again"
+                ),
+            }
         logger.info("Launched the update installer (pid=%s)", pid)
         # One install per download: the claim taken above stays consumed.
         self._schedule_exit()
@@ -4750,6 +4954,23 @@ class ApiBridge:
         with self._download_guard:
             if self._downloaded is None:
                 self._downloaded = record
+
+    @staticmethod
+    def _terminate_process(process: Any) -> None:
+        """Best-effort kill of a process that must not keep running."""
+        killer = getattr(process, "kill", None)
+        if callable(killer):
+            with contextlib.suppress(Exception):
+                killer()
+                return
+        pid = getattr(process, "pid", None)
+        if isinstance(pid, int) and sys.platform == "win32":
+            with contextlib.suppress(Exception):
+                subprocess.run(  # noqa: S603, S607 - fixed argv, numeric pid
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    check=False,
+                )
 
     def _schedule_exit(self) -> None:
         """

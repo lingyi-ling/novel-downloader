@@ -40,7 +40,7 @@ from novel_downloader.apps.common.updater import (
     ReleaseAsset,
     UpdateCheck,
     UpdateInfo,
-    verify_sha256,
+    verify_file,
 )
 from novel_downloader.apps.desktop import webview_app as wa
 from novel_downloader.apps.desktop.web_assets import APP_HTML
@@ -805,10 +805,12 @@ def test_download_and_install_survive_unexpected_errors(
     bridge = wa.ApiBridge()
     bridge._downloaded = wa._DownloadedUpdate(path=path, sha256=_SHA, name=path.name)
 
-    def broken_verify(*_args: Any) -> bool:
+    def broken_verify(*_args: Any, **_kwargs: Any) -> bool:
         raise IndexError("boom")
 
-    monkeypatch.setattr(wa, "verify_sha256", broken_verify)
+    # The launch path re-verifies from one descriptor (TOCTOU hardening), so
+    # that is the hook a raising verifier has to be injected into.
+    monkeypatch.setattr(wa, "verify_file", broken_verify)
     installed = bridge.install_update()
     assert installed["ok"] is False
     assert "boom" in str(installed["error"])
@@ -1069,14 +1071,16 @@ def test_install_update_launches_one_installer_under_concurrency(
 
     entered = threading.Event()
     release = threading.Event()
-    real_verify = verify_sha256
+    real_verify = verify_file
 
-    def slow_verify(candidate: Path, expected: str) -> bool:
+    def slow_verify(
+        candidate: Path, expected: str, *, expected_size: int | None = None
+    ) -> bool:
         entered.set()
         assert release.wait(5.0)
-        return real_verify(candidate, expected)
+        return real_verify(candidate, expected, expected_size=expected_size)
 
-    monkeypatch.setattr(wa, "verify_sha256", slow_verify)
+    monkeypatch.setattr(wa, "verify_file", slow_verify)
     results: dict[str, Any] = {}
     worker = threading.Thread(
         target=lambda: results.update(first=bridge.install_update())
@@ -1499,14 +1503,20 @@ def test_install_update_launches_the_portable_helper(
 
 
 def test_portable_helper_clears_the_old_payload_before_copying() -> None:
-    """Removed plugins survive a plain overwrite, so _internal is cleared."""
+    """Removed plugins survive a plain overwrite, so the old payload goes first."""
     script = wa._PORTABLE_UPDATE_SCRIPT
     assert "_internal" in script
-    removal = script.index("Remove-Item -LiteralPath $payload -Recurse -Force")
+    # The payload is moved aside (and only deleted once the copy succeeded),
+    # never left in place for the overwrite to merge into.
+    aside = script.index("Move-Item -LiteralPath $payload -Destination $backup")
     copy = script.index("Copy-Item -Path (Join-Path $source '*')")
-    assert removal < copy
-    # The user-data guard must be consulted before deleting the payload.
+    assert aside < copy
+    # The user-data guard must be consulted before touching the payload.
     assert "Test-Protected $payload" in script
+    # A failed copy restores the previous payload instead of leaving a
+    # half-replaced install.
+    restore = script.index("Move-Item -LiteralPath $backup -Destination $payload")
+    assert copy < restore
 
 
 def test_portable_keep_paths_only_cover_data_inside_the_payload(
@@ -1735,6 +1745,70 @@ def test_portable_helper_keeps_novel_home_inside_the_payload(
     assert not (payload / "old_plugin.py").exists()
     assert not (payload / "sub" / "old.dll").exists()
     assert exe.read_text(encoding="utf-8") == "new build"
+
+
+def _helper_function_text() -> str:
+    """Only the helper's ``Test-*`` functions, for isolated behaviour checks."""
+    script = wa._PORTABLE_UPDATE_SCRIPT
+    start = script.index("function Test-PathWithin")
+    end = script.index("# Wait for the running instance")
+    return script[start:end]
+
+
+@_requires_powershell
+def test_portable_helper_helpers_detect_links_and_containment(
+    tmp_path: Path,
+) -> None:
+    """The guard primitives behave as the safety comments claim."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("data", encoding="utf-8")
+    inside = tmp_path / "app"
+    inside.mkdir()
+    (inside / "file.txt").write_text("x", encoding="utf-8")
+    link = inside / "linked"
+    created = subprocess.run(  # noqa: S603, S607 - fixed argv, local paths
+        ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+        capture_output=True,
+        check=False,
+    )
+    if created.returncode != 0:
+        pytest.skip("this host cannot create junctions")
+
+    probe = tmp_path / "_probe.ps1"
+    contained = inside / "file.txt"
+    outside_file = outside / "keep.txt"
+    probe.write_text(
+        _helper_function_text()
+        + f"""
+if (-not (Test-PathWithin '{contained}' '{inside}')) {{ throw 'containment' }}
+if (Test-PathWithin '{outside_file}' '{inside}') {{ throw 'containment-escape' }}
+if (-not (Test-ReparsePoint '{link}')) {{ throw 'junction-not-detected' }}
+if (Test-ReparsePoint '{contained}') {{ throw 'file-is-a-link' }}
+Write-Output 'ok'
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(  # noqa: S603 - fixed argv
+        [
+            _POWERSHELL or "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(probe),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ok" in result.stdout
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "data"
 
 
 @_requires_powershell

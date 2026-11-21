@@ -361,6 +361,7 @@ def test_yes_downloads_and_prints_path(
         *,
         root: Path | None = None,
         timeout: float = 30.0,
+        **extra: Any,
     ) -> Path:
         calls.update(
             url=url,
@@ -369,6 +370,7 @@ def test_yes_downloads_and_prints_path(
             mirror=mirror,
             root=root,
             timeout=timeout,
+            **extra,
         )
         return Path(root or Path.cwd()) / asset.name
 
@@ -553,7 +555,7 @@ def test_json_yes_reports_download_path(
     monkeypatch.setattr(
         update_module,
         "download_asset",
-        lambda url, dest, sha=None, mirror=None, *, root=None, timeout=0: (
+        lambda url, dest, sha=None, mirror=None, *, root=None, timeout=0, **extra: (
             Path(root or Path.cwd()) / asset.name
         ),
     )
@@ -664,7 +666,12 @@ def test_bad_digest_is_deleted_and_never_executed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A checksum mismatch must leave no file behind and launch nothing."""
-    _patch_check(monkeypatch, _info(asset=_asset(sha256="0" * 64)))
+    # A real transfer: the published size must describe the body actually
+    # served, otherwise the size check (not the digest) is what fails.
+    _patch_check(
+        monkeypatch,
+        _info(asset=_asset(sha256="0" * 64, size=len(b"tampered bytes"))),
+    )
     messages = _capture_ui(monkeypatch)
     _real_download(monkeypatch)
     monkeypatch.setattr("urllib.request.urlopen", _serve(b"tampered bytes"))
@@ -723,7 +730,9 @@ def test_verified_download_lands_inside_updates_and_is_not_executed(
 ) -> None:
     payload = b"PK\x03\x04 portable bundle"
     digest = hashlib.sha256(payload).hexdigest()
-    asset = _asset(name="novel-cli-1.5.0-windows-x64.zip", sha256=digest)
+    asset = _asset(
+        name="novel-cli-1.5.0-windows-x64.zip", sha256=digest, size=len(payload)
+    )
     _patch_check(monkeypatch, _info(asset=asset))
     messages = _capture_ui(monkeypatch)
     _real_download(monkeypatch)
@@ -748,7 +757,9 @@ def test_non_installer_asset_is_never_executed_or_unpacked(
     """The CLI only fetches files: an archive is stored, never launched."""
     payload = b"PK\x03\x04 console.log('not an installer')"
     digest = hashlib.sha256(payload).hexdigest()
-    asset = _asset(name="novel-cli-1.5.0-windows-x64.zip", sha256=digest)
+    asset = _asset(
+        name="novel-cli-1.5.0-windows-x64.zip", sha256=digest, size=len(payload)
+    )
     _patch_check(monkeypatch, _info(asset=asset))
     messages = _capture_ui(monkeypatch)
     _real_download(monkeypatch)

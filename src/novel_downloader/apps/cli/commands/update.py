@@ -254,6 +254,9 @@ def _download(asset: ReleaseAsset, *, use_mirror: bool) -> Path:
         mirror,
         root=root,
         timeout=DOWNLOAD_TIMEOUT,
+        # The CLI only stores the file (it never executes it), and the digest
+        # already covers the whole content; the size bound is optional.
+        expected_size=asset.size,
     )
 
 

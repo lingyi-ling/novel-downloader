@@ -38,6 +38,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import sys
 import time
 import urllib.error
@@ -75,6 +76,7 @@ __all__ = [
     "parse_version",
     "resolve_mirror",
     "select_asset",
+    "verify_file",
     "verify_sha256",
 ]
 
@@ -619,6 +621,74 @@ def verify_sha256(path: Path, expected: str) -> bool:
     return hmac.compare_digest(digest.hexdigest(), wanted)
 
 
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    """The fields that change when a path is replaced or rewritten in place."""
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def verify_file(
+    path: Path,
+    expected_sha256: str,
+    *,
+    expected_size: int | None = None,
+) -> bool:
+    """
+    Verify a file that is about to be executed, from one open descriptor.
+
+    :func:`verify_sha256` re-opens the path by name, so a file swapped between
+    the hash and the launch would still pass.  This variant opens the file
+    once, rejects anything that is not a regular file, hashes exactly those
+    bytes and confirms the inode/size/mtime did not change while it read them.
+    It narrows the window between "verified" and "executed" to the caller's
+    own launch call rather than a second path lookup.
+
+    :param path: file to check.
+    :param expected_sha256: digest published by the release.
+    :param expected_size: published size, when the release provides one.
+    :return: ``True`` only when every check passes.
+    """
+    wanted = _normalise_sha(expected_sha256)
+    if wanted is None:
+        return False
+    size = _expected_size(expected_size)
+    candidate = Path(path)
+    # Reject anything that is not a regular file *before* opening it: opening
+    # a FIFO blocks until a writer appears, and a device node has no digest.
+    try:
+        pre = candidate.stat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(pre.st_mode):
+        return False
+    if size is not None and pre.st_size != size:
+        return False
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(candidate, flags)
+    except OSError:
+        return False
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            return False
+        if size is not None and before.st_size != size:
+            return False
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, _CHUNK_SIZE)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(fd)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    if _file_identity(before) != _file_identity(after):
+        return False
+    return hmac.compare_digest(digest.hexdigest(), wanted)
+
+
 def _is_http_url(url: str) -> bool:
     """Whether ``url`` starts with an accepted scheme."""
     return str(url or "").strip().lower().startswith(("http://", "https://"))
@@ -753,6 +823,74 @@ def _free_disk_bytes(path: Path) -> int | None:
         return None
 
 
+def _expected_size(value: int | None) -> int | None:
+    """
+    A usable advertised size, or ``None`` when the value is not usable.
+
+    ``0`` is treated as "unknown": an empty asset cannot be a valid installer,
+    and enforcing an exact zero would reject every real body if a producer
+    emitted a placeholder.  Bools and negatives are likewise ignored.
+    """
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _is_link(path: Path) -> bool:
+    """
+    Whether *path* is a symbolic link or an NTFS junction.
+
+    Junctions are directory reparse points that :meth:`Path.is_symlink` does
+    not report (before 3.12 there is no ``is_junction`` at all), yet they
+    redirect reads and writes exactly like a symlink, so both are treated as
+    links here.  An unreadable path is reported as a link: refusing to write
+    through something we cannot classify is the safe answer.
+    """
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if callable(is_junction) and is_junction():
+            return True
+    except OSError:
+        return True
+    return False
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    """Whether two paths name the same location (case-insensitive on Windows)."""
+    return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
+        os.path.abspath(str(right))
+    )
+
+
+def _refuse_links(path: Path, root: Path) -> None:
+    """
+    Raise when *path* or a directory between *root* and it is a link.
+
+    ``Path.resolve`` already rejects a link that points out of ``root``; this
+    catches the remaining case, a link that stays inside the tree but still
+    redirects the write to a different file than the name suggests.  Only the
+    components *below* ``root`` are inspected, so a symlinked home directory
+    (a legitimate setup on POSIX) is not a false positive.  The walk is by
+    parent rather than by ``relative_to`` so a case or separator difference in
+    the spelling of ``root`` cannot skip the check.
+    """
+    candidate = Path(path)
+    current = candidate
+    for _ in range(64):
+        if _same_path(current, root):
+            return
+        if _is_link(current):
+            raise ValueError(f"refusing to write through a link: {current}")
+        parent = current.parent
+        if parent == current:
+            # Reached a drive/filesystem root without meeting ``root``: the
+            # caller's containment check is the authority in that case.
+            return
+        current = parent
+
+
 def download_asset(
     url: str,
     dest: Path,
@@ -765,6 +903,7 @@ def download_asset(
     progress: Callable[[int, int], None] | None = None,
     attempts: int = 1,
     max_bytes: int | None = None,
+    expected_size: int | None = None,
 ) -> Path:
     """
     Download one release asset to ``dest`` and verify its checksum.
@@ -777,13 +916,22 @@ def download_asset(
     * only ``http://`` / ``https://`` URLs are accepted;
     * the written file must stay inside ``root`` (default: the current
       directory), so a crafted asset name cannot escape the app home;
+    * neither the target nor any directory below ``root`` may be a symlink or
+      junction, so a planted link cannot redirect the write;
     * the target name is sanitised to a single safe path component;
-    * a checksum mismatch deletes the partial file and raises.
+    * the *whole* file is hashed once it is complete -- a resumed transfer is
+      checked end to end, not just over the newly received bytes;
+    * an advertised size must match exactly, so a truncated body or extra
+      bytes are rejected;
+    * a checksum or size mismatch deletes the partial file and raises.
 
     :param url: absolute asset URL.
     :param dest: desired output path; a relative path is taken relative to
         ``root`` and its parent and name are normalised.
     :param expected_sha256: digest to verify, when the release provides one.
+        ``None`` disables verification; any other value must be a valid
+        SHA-256 hex digest (an empty or malformed one is refused rather than
+        silently skipping the check).
     :param mirror: optional prefix (or prefixes) tried before ``url``.
     :param root: directory the output must stay inside.
     :param timeout: request timeout in seconds.  Mirror probes are capped at
@@ -799,20 +947,35 @@ def download_asset(
     :param max_bytes: refusal threshold for the transfer (default 1 GiB).  A
         manifest is remote data: without a bound, a crafted ``size``/body
         could fill the disk.
+    :param expected_size: size published by the manifest, when known.  The
+        finished file must be exactly this long; a body that ends early is
+        kept as a resumable ``.part``, one that grows beyond it is discarded.
     :return: the path actually written.
-    :raises ValueError: for a non-HTTP URL, an escaping path or a bad digest.
+    :raises ValueError: for a non-HTTP URL, an escaping path, a link target,
+        a bad digest or a body larger than the advertised size.
     :raises OSError: when the transfer itself fails after every attempt.
     """
     if not _is_http_url(url):
         raise ValueError(f"refusing non-HTTP(S) update URL: {url!r}")
 
+    if expected_sha256 is not None and _normalise_sha(expected_sha256) is None:
+        # ``if expected_sha256 and ...`` below would silently skip the check
+        # for "", " ", "sha256:" and similar, which is the one thing the
+        # caller passed the digest for.
+        raise ValueError(f"refusing an invalid expected sha256: {expected_sha256!r}")
+
+    size = _expected_size(expected_size)
     wanted = Path(str(dest))
     root_dir = (Path(root) if root is not None else Path.cwd()).resolve()
     target_dir = wanted.parent
     if not wanted.is_absolute():
         target_dir = root_dir / target_dir
     filename = _sanitize_filename(wanted.name)
-    final = (target_dir / filename).resolve()
+    candidate = target_dir / filename
+    # ``resolve`` would follow a planted link and then happily write to its
+    # target; refuse the link itself so the name and the file always agree.
+    _refuse_links(candidate, root_dir)
+    final = candidate.resolve()
     if not final.is_relative_to(root_dir):
         raise ValueError(f"refusing to write outside {root_dir}: {final}")
     if final.is_dir():
@@ -833,6 +996,9 @@ def download_asset(
             progress(received, total)
 
     limit = _MAX_ASSET_BYTES if max_bytes is None else max(1, int(max_bytes))
+    # A published size is itself a bound: never write past it, so a hostile
+    # server cannot pad the file to the 1 GiB ceiling.
+    cap = limit if size is None else min(limit, size)
     tries = max(1, int(attempts))
     last_error: BaseException | None = None
     restart_budget = 1
@@ -842,14 +1008,27 @@ def download_asset(
         offset = 0
         if resume and part.is_file():
             offset = max(0, part.stat().st_size)
-        if offset > limit:
+        if offset > cap:
             # A leftover larger than the whole asset can only be stale.
             part.unlink(missing_ok=True)
             offset = 0
+        if size is not None and offset == size:
+            # A previous run already fetched every byte (it died before the
+            # rename, or a retry is repeating a failed digest).  Verifying it
+            # costs one hash; asking for ``Range: bytes=<size>-`` would just
+            # earn a 416 and throw the complete prefix away.
+            if expected_sha256 and not verify_sha256(part, expected_sha256):
+                part.unlink(missing_ok=True)
+                raise ValueError(f"checksum mismatch for {filename}")
+            part.replace(final)
+            return final
         headers = {"User-Agent": _USER_AGENT}
         if offset:
             headers["Range"] = f"bytes={offset}-"
         try:
+            # Re-checked every attempt: the ``.part`` name is predictable, so
+            # a local process could plant a link between two attempts.
+            _refuse_links(part, root_dir)
             request = urllib.request.Request(  # noqa: S310 - validated above
                 resolved_url, headers=headers
             )
@@ -897,6 +1076,11 @@ def download_asset(
                     raise ValueError(
                         f"{filename} is larger than the {limit} byte limit"
                     )
+                if size is not None and total > size:
+                    raise ValueError(
+                        f"{filename}: server advertises {total} bytes but the "
+                        f"release publishes {size}"
+                    )
                 if total > 0 and offset == 0:
                     # Only refuse a fresh transfer: an existing ``.part`` is
                     # worth keeping for a resume once space is freed.
@@ -914,7 +1098,12 @@ def download_asset(
                         if not chunk:
                             break
                         received += len(chunk)
-                        if received > limit:
+                        if received > cap:
+                            if size is not None and received > size:
+                                raise ValueError(
+                                    f"{filename}: the transfer exceeds the "
+                                    f"published size of {size} bytes"
+                                )
                             raise ValueError(
                                 f"{filename} is larger than the {limit} byte limit"
                             )
@@ -926,9 +1115,24 @@ def download_asset(
                     raise OSError(
                         f"{filename}: transfer ended after {received} of {total} bytes"
                     )
+            if size is not None and received != size:
+                if received < size:
+                    # Resumable: the prefix is correct, only short.  Keeping it
+                    # is what lets the next attempt continue with a Range.
+                    raise OSError(
+                        f"{filename}: transfer ended after {received} of {size} bytes"
+                    )
+                # Too long: the extra bytes are garbage, so nothing is kept.
+                part.unlink(missing_ok=True)
+                raise ValueError(
+                    f"{filename}: the transfer wrote {received} bytes but the "
+                    f"release publishes {size}"
+                )
             if expected_sha256 and not verify_sha256(part, expected_sha256):
                 # A stale partial from an older release can make a resumed
-                # transfer fail its digest; it is useless either way.
+                # transfer fail its digest; it is useless either way.  The
+                # digest covers the whole file, so a resumed prefix is checked
+                # together with the bytes just received.
                 part.unlink(missing_ok=True)
                 raise ValueError(f"checksum mismatch for {filename}")
             part.replace(final)
