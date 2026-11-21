@@ -46,8 +46,11 @@ keyPassword=...
 ./gradlew assembleRelease    # produces app/build/outputs/apk/release/app-release.apk
 ```
 
-When the file is missing or incomplete, release builds fall back to the debug
-signature (fine for local testing, not for distribution). **Keep
+When the file is missing or incomplete, `assembleRelease` **fails** instead of
+falling back to the debug key: a debug-signed APK installs and reports the
+release `versionName`, but the real key can never replace it afterwards
+(Android refuses a signature change), so the fallback would silently break the
+update channel. `assembleDebug` and the JVM unit tests are unaffected. **Keep
 `keystore.properties` and the keystore file local; never commit them.**
 
 ## Run the Unit Tests

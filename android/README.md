@@ -3,7 +3,7 @@
 原生 Android 客户端（Kotlin + Jetpack Compose），通过本机的 **本地 REST API**（`novel-api`）工作：
 搜索、下载任务队列、历史文件、多平台音乐下载。
 
-当前版本：**1.28.1**（`versionCode 40`，与主项目 `novel_downloader.__version__` 一致）。
+当前版本：**1.37.0**（`versionCode 51`，与主项目 `novel_downloader.__version__` 一致）。
 
 ## 环境要求
 
@@ -58,7 +58,16 @@ keyAlias=你的别名
 keyPassword=你的密钥密码
 ```
 
-文件缺失或不完整时，`assembleRelease` 会**回退到 debug 签名**继续构建（仅用于本地验证，不要这样分发）。
+文件缺失、字段不全或 `storeFile` 指向的 keystore 不存在时，`assembleRelease` **直接失败**并给出提示，不会回退到 debug 签名——debug 签名的 APK 同样报 release 版本号、能安装，但之后真机无法用正式密钥覆盖升级（Android 拒绝签名变更），等于永久堵死该版本的更新通道。`assembleDebug`、JVM 单元测试、`--dry-run` 与 IDE 同步不受影响。
+
+仅本地实验需要一份未签名 APK 时：
+
+```bash
+./gradlew assembleRelease -PnovelDownloader.allowUnsignedRelease=true
+```
+
+产出的 APK 无法安装、也绝不可发布；`scripts/release.py` 不传这个开关。
+
 生成密钥示例：
 
 ```bash

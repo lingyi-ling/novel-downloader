@@ -45,8 +45,10 @@ keyPassword=...
 ./gradlew assembleRelease    # 产出 app/build/outputs/apk/release/app-release.apk
 ```
 
-密钥文件缺失或不完整时，Release 包会回退到 debug 签名（仅适合本机测试，
-不能对外发布）。**`keystore.properties` 与密钥文件必须留在本地，切勿提交。**
+密钥文件缺失或不完整时，`assembleRelease` **直接失败**，不会回退到 debug 签名——
+debug 签名的 APK 能装、会报 release 的 `versionName`，但之后真钥匙再也覆盖不了它
+（Android 拒绝签名变更），等于把缺文件变成一条断掉的更新通道。`assembleDebug` 与
+JVM 单测不受影响。**`keystore.properties` 与密钥文件必须留在本地，切勿提交。**
 
 ## 运行单元测试
 

@@ -8,28 +8,43 @@ plugins {
     id("com.chaquo.python")
 }
 
-// Release signing is opt-in. Create android/keystore.properties (git-ignored)
-// with:
+// Release signing comes from android/keystore.properties (git-ignored):
 //   storeFile=release.jks        # absolute, or relative to the android/ dir
 //   storePassword=...
 //   keyAlias=...
 //   keyPassword=...
-// When the file is absent or incomplete, release builds fall back to the debug
-// key so the module still assembles without real signing material.
+//
+// There is deliberately no fallback to the debug key. A debug-signed APK is
+// installable, reports the release versionName and cannot be upgraded by the
+// real release key afterwards (Android refuses the signature change), so a
+// silent fallback turns a missing file into a broken update channel. Release
+// packaging therefore fails with an actionable message instead; `assembleDebug`
+// and the JVM unit tests are unaffected.
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.isFile) {
         keystorePropertiesFile.inputStream().use { load(it) }
     }
 }
+val missingSigningKeys = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+    .filter { key -> keystoreProperties.getProperty(key).isNullOrBlank() }
+val releaseStoreFile = keystoreProperties.getProperty("storeFile")
+    ?.takeIf { it.isNotBlank() }
+    ?.let { rootProject.file(it) }
 val hasReleaseSigning = keystorePropertiesFile.isFile &&
-    listOf("storeFile", "storePassword", "keyAlias", "keyPassword").all { key ->
-        !keystoreProperties.getProperty(key).isNullOrBlank()
-    }
+    missingSigningKeys.isEmpty() &&
+    releaseStoreFile?.isFile == true
+
+// Escape hatch for local experiments only: produces an *unsigned* release APK
+// instead of failing. Never used by scripts/release.py, which requires the
+// keystore before it even invokes Gradle.
+val allowUnsignedRelease =
+    providers.gradleProperty("novelDownloader.allowUnsignedRelease").orNull == "true"
+
 if (!hasReleaseSigning) {
     logger.warn(
-        "keystore.properties is missing or incomplete; " +
-            "release builds will fall back to the debug signing config.",
+        "keystore.properties is missing, incomplete or points at a missing " +
+            "keystore; `assembleRelease` will fail. `assembleDebug` still works.",
     )
 }
 
@@ -51,7 +66,7 @@ android {
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
-                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storeFile = releaseStoreFile
                 storePassword = keystoreProperties.getProperty("storePassword")
                 keyAlias = keystoreProperties.getProperty("keyAlias")
                 keyPassword = keystoreProperties.getProperty("keyPassword")
@@ -61,12 +76,24 @@ android {
 
     buildTypes {
         release {
+            // No debug fallback: without signing material the variant is left
+            // unsigned and packaging fails in the task guard below.
             signingConfig = if (hasReleaseSigning) {
                 signingConfigs.getByName("release")
             } else {
-                signingConfigs.getByName("debug")
+                null
             }
+            // Minification stays off on purpose: Chaquopy embeds the Python
+            // source tree, kotlinx.serialization and Compose both rely on
+            // generated/shaken-but-referenced code, and R8 has no rules for
+            // the Python bridge. isShrinkResources requires minify, so it is
+            // implicitly false; the APK size is dominated by CPython anyway.
             isMinifyEnabled = false
+            isShrinkResources = false
+            // Explicit, not just the AGP default: a debuggable release APK
+            // ships android:debuggable="true" (any installed app can attach a
+            // debugger and read app-private data) and is refused by Play.
+            isDebuggable = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -91,6 +118,41 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+}
+
+// Hard gate: a release APK must carry the release key. Checked against the
+// task graph so `assembleDebug`, `testDebugUnitTest`, `--dry-run` and IDE sync
+// still work on a machine without signing material.
+gradle.taskGraph.whenReady {
+    // Prefix match: ABI/density splits name their tasks `packageReleaseArm64-v8a`
+    // and an app bundle uses `bundleRelease`, so an exact-name check would let
+    // a future `splits` block bypass the guard.
+    val releasePackaging = allTasks.any {
+        it.name.startsWith("packageRelease") || it.name == "bundleRelease"
+    }
+    if (
+        releasePackaging &&
+        !hasReleaseSigning &&
+        !allowUnsignedRelease &&
+        !gradle.startParameter.isDryRun
+    ) {
+        val reason = when {
+            !keystorePropertiesFile.isFile ->
+                "android/keystore.properties does not exist"
+            missingSigningKeys.isNotEmpty() ->
+                "android/keystore.properties is missing: " + missingSigningKeys.joinToString()
+            else -> "the storeFile in android/keystore.properties does not exist"
+        }
+        throw GradleException(
+            "Refusing to build a release APK without the release signing key " +
+                "($reason).\n" +
+                "Create android/keystore.properties with storeFile/storePassword/" +
+                "keyAlias/keyPassword, or run `assembleDebug` instead.\n" +
+                "Local experiments only: add " +
+                "-PnovelDownloader.allowUnsignedRelease=true to produce an " +
+                "unsigned APK (not installable, never publishable).",
+        )
     }
 }
 
