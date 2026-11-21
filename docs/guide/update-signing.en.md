@@ -78,9 +78,11 @@ newline; the **newline is not signed**, because it is not part of the re-seriali
 
 !!! warning "Verifiers must use the same serialisation"
     The signature is over the parsed document, not over file bytes. Any verifier must
-    re-serialise with the rule above or it will only ever report "does not verify". Today the
-    only verifiers are the Python client (`updater.verify_manifest_signature`) and the release
-    script (`build_update_manifest.verify_document`), which share one implementation.
+    re-serialise with the rule above or it will only ever report "does not verify". There are
+    three verifiers: the Python client (`updater.verify_manifest_signature`) and the release
+    script (`build_update_manifest.verify_document`), which share one implementation, and the
+    Android client (`CanonicalJson` in `data/ManifestSignature.kt`), which reproduces the same
+    rules byte for byte and is pinned by fixed-vector tests.
 
 ### Key formats and `key_id`
 
@@ -197,11 +199,18 @@ is no environment variable or runtime switch. Changing it requires rebuilding an
 client — which is exactly the point of pinning: a running program cannot be talked into trusting
 another key.
 
+Android has a **separate** table compiled into the APK, `UpdateChecker.TRUSTED_UPDATE_KEYS`
+(`android/app/src/main/java/com/lingyi/noveldl/data/ManifestSignature.kt`), with the same key
+format. Filling only the Python table does not make phones verify, and vice versa — each client
+has to be rebuilt and shipped on its own.
+
 After editing, run the tests that pin the format and the fail-closed behaviour:
 
 ```bash
 .venv/Scripts/python.exe -m pytest tests/apps/test_update_manifest_signature.py -q
 .venv/Scripts/python.exe -m pytest tests/test_build_update_manifest.py -q
+# Android (Windows)
+cd android && ./gradlew.bat :app:testDebugUnitTest --tests "*Manifest*"
 ```
 
 ### 3.3 Sign at release time
@@ -300,16 +309,21 @@ old — it simply refuses the manifest. Consequently:
 | --- | --- | --- | --- |
 | Desktop | yes (`update_state` / `check_update_async` go through `check_for_update`) | yes | No API fallback; the reason lands in `update_state`'s `error` |
 | CLI | yes (`novel-cli update` and the post-command hint both use `check_for_update`) | yes | No API fallback; `novel-cli update` prints `Update check failed: untrusted-manifest: …`, the silent hint prints nothing |
-| Android | yes | **no** | Always falls back to the GitHub API |
+| Android | yes | yes (when `UpdateChecker.TRUSTED_UPDATE_KEYS` is non-empty) | No API fallback |
 
 Stated plainly:
 
-- **Android does not verify signatures today.** `UpdateChecker.parseManifest` checks `schema`,
-  `version`, `platforms` and the HTTPS/digest requirements only; it ignores `key_id` and
-  `signature` entirely. Unknown keys are tolerated, so a signed manifest will not break parsing —
-  but it also gains **no** protection. Android's trust anchor remains HTTPS plus the APK's
-  SHA-256. Until Android implements verification, enabling signing protects the desktop app and
-  the CLI only.
+- **Android verification is off by default, with the same contract as desktop and CLI.** Android
+  uses its own compiled key table, `UpdateChecker.TRUSTED_UPDATE_KEYS`
+  (`android/app/src/main/java/com/lingyi/noveldl/data/ManifestSignature.kt`); while it is empty
+  an unsigned manifest is accepted as before, and the trust anchor stays HTTPS plus the APK's
+  SHA-256. Once a key is compiled in, an unsigned manifest, an unknown `key_id`, a bad signature
+  or a manifest that cannot be fetched refuses that update, and the GitHub API is **not**
+  consulted as a fallback. The verifier is a pure-JVM RFC 8032 implementation (`Ed25519.kt`),
+  because the platform's `Signature.getInstance("Ed25519")` only exists from API 33 while
+  minSdk is 26. Its canonical JSON matches the Python output byte for byte, pinned by the fixed
+  vectors in `app/src/test/resources/update-signature/` (Unicode, escapes and number formats
+  included).
 - The desktop app's legacy `check_update` bridge (only used when the front end lacks
   `check_update_async`) reads the GitHub API directly and never goes through
   `check_for_update`, so it is outside the pinned-key protection. Desktop code and front-end
@@ -390,7 +404,8 @@ self-consistent digest" is refused.
 
 **Does not protect:**
 
-- **Android clients** — no verification today (see section 5).
+- **Clients without a compiled-in key** — while `TRUSTED_UPDATE_KEYS` is empty (the default on
+  every client) manifests are not verified at all; see section 5.
 - **A compromised signing machine or private key** — whoever holds the key can sign valid
   manifests; that is this mechanism's root of trust.
 - **Manual downloads by users** — everything outside the update path is unconstrained.

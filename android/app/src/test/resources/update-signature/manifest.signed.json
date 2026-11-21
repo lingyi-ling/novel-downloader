@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "version": "1.36.0",
+  "tag": "v1.36.0",
+  "repo": "lingyi-ling/novel-downloader",
+  "generated_from": "https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.36.0",
+  "notes_url": "https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.36.0",
+  "pub_date": "2026-11-16T08:00:00Z",
+  "channel": "稳定版 \"stable\" \\ path\nsecond\tline\u0001\b\f    ",
+  "emoji": "update 🚀 done",
+  "zeta": "lower key sorts after every upper-case key",
+  "Alpha": "upper key sorts first",
+  "platforms": {
+    "android": {
+      "name": "novel-downloader-1.36.0-android.apk",
+      "url": "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.36.0/novel-downloader-1.36.0-android.apk",
+      "sha256": "7133f789a9a3b43d8aae5897fd41f62a5e91d45dba6f82d80fcc4e5a2cce0ac7",
+      "size": 62714163
+    },
+    "windows-x64-portable": {
+      "name": "NovelDownloader-1.36.0-windows-x64.zip",
+      "url": "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.36.0/NovelDownloader-1.36.0-windows-x64.zip",
+      "sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "size": 43259516
+    },
+    "中文-extra": {
+      "name": "novel-downloader-1.36.0-android-universal.apk",
+      "url": "https://github.com/lingyi-ling/novel-downloader/releases/download/v1.36.0/novel-downloader-1.36.0-android-universal.apk",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "size": 1
+    }
+  },
+  "counts": {
+    "big_int": 123456789012345678901234567890,
+    "neg_zero_int": 0,
+    "one_tenth": 0.1,
+    "tiny": 0.0001,
+    "scientific": 1e+16,
+    "small_scientific": 1e-05,
+    "neg_zero_float": -0.0,
+    "simple_float": 1.5
+  },
+  "nested": {
+    "b": [
+      1,
+      2,
+      {
+        "z": true,
+        "a": null
+      }
+    ],
+    "a": {
+      "deep": [
+        0.5
+      ]
+    }
+  },
+  "key_id": "78f10fd09411afed",
+  "signature": "yfYWuc6gqly4y/wJywMsVuwBTwngXbDN5F9LptnsdW8ZxoqCPvh+29vbRBqSbg2+Uv9PG5zWlg5pe33EUEosCA=="
+}

@@ -594,6 +594,12 @@ private fun selectAndroidEntry(platforms: JsonObject, supportedAbis: List<String
  * "up to date": a manifest that forgot to list the APK must not suppress an
  * update for the next 24 hours.
  *
+ * When [trustedKeys] is non-empty the document must additionally carry an
+ * Ed25519 signature from one of those keys (see [ManifestSignature]); an
+ * unsigned or badly signed manifest is rejected like any other unusable one.
+ * [UpdateChecker.check] then stops falling back to the API, so removing the
+ * manifest cannot downgrade the client to an unauthenticated path.
+ *
  * [currentVersion] defaults to empty so the document can be inspected without
  * a running version; callers that decide `available` must pass it.
  */
@@ -601,9 +607,15 @@ internal fun parseManifest(
     payload: String,
     currentVersion: String = "",
     supportedAbis: List<String> = emptyList(),
+    trustedKeys: Map<String, String> = TRUSTED_UPDATE_KEYS,
 ): UpdateInfo? {
     val root = runCatching { manifestJson.parseToJsonElement(payload) }.getOrNull()
         as? JsonObject ?: return null
+
+    // Signature first: the rest of this function reads fields the signature is
+    // meant to authenticate, so an unauthenticated document must not influence
+    // any decision. `isTrusted` is a no-op while no key is configured.
+    if (!ManifestSignature.isTrusted(root, trustedKeys)) return null
 
     // A future schema may move the digest elsewhere; reading it the old way
     // would silently defeat the checksum, so it is refused outright.
@@ -747,6 +759,13 @@ object UpdateChecker {
      * (it must be one of the `Dispatchers.IO` workers, never the UI thread).
      * [manifestUrl] is exposed for the same reason — tests point it at a
      * loopback server, so no unit test ever touches the real endpoint.
+     *
+     * [trustedKeys] mirrors the desktop/CLI contract: while it is empty (the
+     * default) the manifest is used when it parses and the API is the
+     * fallback.  Once a key is configured the manifest is the **sole** trust
+     * anchor; a missing, unsigned or badly signed manifest ends the check with
+     * `null` and the API is never consulted, because an attacker who controls
+     * the repository could otherwise delete the manifest to force that path.
      */
     suspend fun check(
         currentVersion: String,
@@ -755,6 +774,7 @@ object UpdateChecker {
         manifestUrl: String = MANIFEST_URL,
         preferredAbis: List<String> = emptyList(),
         client: OkHttpClient? = null,
+        trustedKeys: Map<String, String> = TRUSTED_UPDATE_KEYS,
     ): UpdateInfo? = withContext(Dispatchers.IO) {
         val http = client ?: updaterHttpClient(timeoutMs, timeoutMs, callTimeoutMs = timeoutMs)
         // The caller's list wins; when it has none (JVM callers, unusual
@@ -766,7 +786,15 @@ object UpdateChecker {
         // 1. The manifest: one small request that also carries the checksums.
         // A multi-APK release publishes `android-<abi>` keys, so the device
         // ABI list decides which entry is the right one.
-        fetchBody(http, manifestUrl, manifestHeaders)
+        val manifestBody = fetchBody(http, manifestUrl, manifestHeaders)
+        if (trustedKeys.isNotEmpty()) {
+            // Fail closed: no manifest, no update. Falling back here would let
+            // whoever can delete latest.json bypass the signature entirely.
+            return@withContext manifestBody?.let { body ->
+                parseManifest(body, currentVersion, abis, trustedKeys)
+            }
+        }
+        manifestBody
             ?.let { body -> parseManifest(body, currentVersion, abis) }
             ?.let { info -> return@withContext info }
 

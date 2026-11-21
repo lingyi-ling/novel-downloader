@@ -1,0 +1,35 @@
+Fixed Ed25519 manifest test vectors
+===================================
+
+Provenance
+----------
+Generated with the repository's own publisher code (no hand-editing):
+
+    scripts/build_update_manifest.py
+        generate_keypair()        -> one throwaway Ed25519 keypair, in memory
+        build_manifest()/sign_document() -> the signed document
+        canonical_bytes()         -> manifest.canonical.json
+
+The private seed existed only in memory for that one signing run and was
+discarded: it is not stored in this directory, the repository, or anywhere
+else. Nothing in the app trusts this key — `TRUSTED_UPDATE_KEYS` ships empty —
+so the vectors are inert test data.
+
+Files
+-----
+manifest.signed.json     the manifest as published (pretty-printed, with
+                         `key_id` and `signature`); formatting is irrelevant,
+                         only the parsed document matters
+manifest.canonical.json  the exact UTF-8 bytes Python signed, i.e.
+                         json.dumps(body, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False) where `body` is the manifest
+                         without `signature`/`key_id`; no trailing newline
+public-key.hex           the 32-byte raw public key, lowercase hex
+key-id.txt               sha256(public key).hex()[:16]
+
+The document deliberately contains non-ASCII text, ASCII escapes, C0 controls,
+U+2028/U+2029, an astral-plane emoji, ints beyond 64 bits, negative zero, and
+floats on both sides of Python's fixed/scientific switch, so any divergence in
+canonical encoding breaks `ManifestSignatureTest` byte-for-byte.
+
+Do not add a private key here.

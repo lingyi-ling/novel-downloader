@@ -71,9 +71,10 @@ json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).enco
 
 !!! warning "验证方必须用同一套序列化"
     签名是对"解析后的文档"做的，不是对文件字节做的。任何读取清单的验证器都必须按上面的
-    规则重新序列化，否则只会得到"签名不符"。目前的验证器只有 Python 客户端
-    （`updater.verify_manifest_signature`）与发布脚本（`build_update_manifest.verify_document`），
-    两者共用同一份实现。
+    规则重新序列化，否则只会得到"签名不符"。验证方有三处：Python 客户端
+    （`updater.verify_manifest_signature`）、发布脚本（`build_update_manifest.verify_document`），
+    两者共用同一份实现；以及安卓端（`data/ManifestSignature.kt` 里的 `CanonicalJson`），
+    它逐字节复刻同一套规则，并由固定向量测试锁定。
 
 ### 密钥格式与 `key_id`
 
@@ -181,11 +182,17 @@ TRUSTED_UPDATE_KEYS: Mapping[str, str] = {
 改它必须重新构建并发布客户端——这正是"固定公钥"的意义：运行中的程序无法被说服去信任
 另一把钥匙。
 
+安卓端是**另一张**同样编译进 APK 的常量表 `UpdateChecker.TRUSTED_UPDATE_KEYS`
+（`android/app/src/main/java/com/lingyi/noveldl/data/ManifestSignature.kt`），键值格式相同。
+只填 Python 那张不会让手机开始验签，反之亦然——两端要分别构建、分别发布。
+
 填完后建议跑一遍相关测试，它们锁定了格式与 fail-closed 行为：
 
 ```bash
 .venv/Scripts/python.exe -m pytest tests/apps/test_update_manifest_signature.py -q
 .venv/Scripts/python.exe -m pytest tests/test_build_update_manifest.py -q
+# 安卓端（Windows）
+cd android && ./gradlew.bat :app:testDebugUnitTest --tests "*Manifest*"
 ```
 
 ### 3.3 发布时签名
@@ -279,14 +286,18 @@ python scripts/build_update_manifest.py \
 | --- | --- | --- | --- |
 | 桌面端 | 是（`update_state` / `check_update_async` 走 `check_for_update`） | 是 | 不回退 API，`error` 记录在 `update_state` 的 payload 里 |
 | CLI | 是（`novel-cli update` 与命令结束后的静默提示都走 `check_for_update`） | 是 | 不回退 API；`novel-cli update` 打印 `Update check failed: untrusted-manifest: …`，静默提示则什么都不说 |
-| 安卓 | 是 | **否** | 始终回退 GitHub API |
+| 安卓 | 是 | 是（`UpdateChecker.TRUSTED_UPDATE_KEYS` 非空时） | 不回退 API |
 
 几点必须如实说明：
 
-- **安卓目前不验签**。`UpdateChecker.parseManifest` 只检查 `schema`、`version`、`platforms`
-  和 HTTPS/摘要，完全忽略 `key_id` 与 `signature`；未知字段会被忽略，所以签名清单不会让
-  安卓解析失败，但也**不会**给它任何额外保护。安卓的信任锚仍然是 HTTPS 加 APK 的 SHA-256。
-  在安卓实现验签之前，启用清单签名只保护桌面端与 CLI。
+- **安卓的验签默认关闭，契约与桌面端/CLI 相同**。安卓用的是另一张编译期常量表
+  `UpdateChecker.TRUSTED_UPDATE_KEYS`（`android/app/src/main/java/com/lingyi/noveldl/data/ManifestSignature.kt`），
+  默认为空：此时清单未签名也照常接受，信任锚仍是 HTTPS 加 APK 的 SHA-256。一旦内置公钥，
+  未签名、未知 `key_id`、签名不符或清单取不到都会拒绝本次更新，并且**不再回退** GitHub API。
+  安卓端使用纯 JVM 的 RFC 8032 实现（`Ed25519.kt`）：系统的
+  `Signature.getInstance("Ed25519")` 要到 API 33 才有，而 minSdk 是 26。canonical JSON
+  与 Python 端的输出逐字节一致，由 `app/src/test/resources/update-signature/` 下的固定
+  向量（含 Unicode、转义与浮点格式）锁定。
 - 桌面端旧桥接 `check_update`（仅当前端缺少 `check_update_async` 时才会用到）直接读
   GitHub API，不经过 `check_for_update`，因此不在固定公钥的保护范围内。桌面端与前端资源
   是一起发布的，实际构建里走不到这条路径，但它是"验签只在 `check_for_update` 里生效"
@@ -358,7 +369,7 @@ python scripts/build_update_manifest.py \
 
 **不保护**：
 
-- **安卓客户端**——目前不验签（见第 5 节）。
+- **未内置公钥的客户端**——`TRUSTED_UPDATE_KEYS` 为空时（各端默认）根本不验签，见第 5 节。
 - **签名机器或私钥本身被攻破**——能拿到私钥的人就能签出合法清单，这是该机制的信任根。
 - **用户手动下载安装**——绕过更新链路的一切约束。
 - **客户端二进制被替换**——公钥是编译进去的，能替换二进制的人已经不需要走更新链路。
