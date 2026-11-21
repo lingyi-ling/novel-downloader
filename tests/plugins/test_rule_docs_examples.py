@@ -20,6 +20,7 @@ All checks are offline and read-only.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -31,8 +32,10 @@ from novel_downloader.plugins.rule.engine import (
     PY_STEP_FUNCTIONS,
     apply_steps,
     extract,
+    matches_stop_when,
     parse_page,
 )
+from novel_downloader.plugins.rule.fetcher import RuleFetcher
 from novel_downloader.plugins.rule.model import (
     MAX_EXTRA_PAGES,
     Field,
@@ -59,6 +62,17 @@ _KEYS_ROW_RE = re.compile(r"^\|\s*`([^`]+)`\s*\|", re.M)
 _DOC_STEP_NAMES_RE = re.compile(r"^`([^`]+)`(?:\s*/\s*`([^`]+)`)+$", re.M)
 
 _SITE_KEY = "doc-example"
+
+#: ``site_key`` of every rule in the "complete examples" section.  Keeping the
+#: list here means a renamed or deleted example fails the test instead of
+#: silently reducing coverage.
+_DOC_EXAMPLE_KEYS = (
+    "doc-search-paged",
+    "doc-catalog-next",
+    "doc-content-steps",
+    "doc-json-api",
+    "doc-auth-headers",
+)
 
 _BASE_BOOK: dict[str, Any] = {
     "url": "https://doc.example/book/{book_id}/",
@@ -124,7 +138,8 @@ def _wrap_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
     base: dict[str, Any] = {"site_key": _SITE_KEY}
 
     if "site_key" in keys:
-        # A complete rule (the private-source walkthrough) needs no wrapping.
+        # A complete rule (the private-source walkthrough and the "complete
+        # examples" section) needs no wrapping: it is already a full document.
         return fragment
 
     if "lang" in keys and keys <= {"lang", "code", "name"}:
@@ -159,16 +174,36 @@ def _wrap_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _decoded_blocks() -> list[dict[str, Any]]:
+    return [_load_fragment(block) for block in ZH_BLOCKS]
+
+
+def _fragments() -> list[dict[str, Any]]:
+    """Blocks that are *not* complete rules (no ``site_key``)."""
+    return [obj for obj in _decoded_blocks() if "site_key" not in obj]
+
+
+def _complete_rules() -> list[dict[str, Any]]:
+    """Blocks that are full rule documents (they carry ``site_key``)."""
+    return [obj for obj in _decoded_blocks() if "site_key" in obj]
+
+
+def _complete_rule(site_key: str) -> dict[str, Any]:
+    matches = [obj for obj in _complete_rules() if obj["site_key"] == site_key]
+    assert len(matches) == 1, f"expected exactly one complete example for {site_key!r}"
+    return matches[0]
+
+
 def _block_with_key(key: str) -> dict[str, Any]:
-    matches = [block for block in ZH_BLOCKS if key in _load_fragment(block)]
+    # Complete rules contain nested sections too; a key lookup means "the
+    # snippet that documents this key", so only fragments are considered.
+    matches = [obj for obj in _fragments() if key in obj]
     assert len(matches) == 1, f"expected exactly one documented {key!r} example"
-    return _load_fragment(matches[0])
+    return matches[0]
 
 
 def _blocks_with_key(key: str) -> list[dict[str, Any]]:
-    return [
-        _load_fragment(block) for block in ZH_BLOCKS if key in _load_fragment(block)
-    ]
+    return [obj for obj in _fragments() if key in obj]
 
 
 # --------------------------------------------------------------------------- #
@@ -656,3 +691,326 @@ def test_documented_unsupported_js_fails_at_runtime(code: str) -> None:
 def test_js_only_helpers_are_not_py_steps() -> None:
     with pytest.raises(RuleError, match="unknown py step"):
         Step.from_dict({"lang": "py", "name": "replace_all"})
+
+
+# --------------------------------------------------------------------------- #
+# complete examples: search + pagination
+# --------------------------------------------------------------------------- #
+def _complete(site_key: str) -> Rule:
+    return parse_rule(_complete_rule(site_key), source=f"rule-dsl.md {site_key}")
+
+
+def test_complete_examples_are_all_parseable_and_distinct() -> None:
+    rules = _complete_rules()
+    keys = [str(rule["site_key"]) for rule in rules]
+    assert len(set(keys)) == len(keys), "complete examples must use distinct site_keys"
+    # The five "complete examples" section entries must all be present.
+    assert set(_DOC_EXAMPLE_KEYS) <= set(keys), (
+        "missing complete examples: "
+        + ", ".join(sorted(set(_DOC_EXAMPLE_KEYS) - set(keys)))
+    )
+    for rule in rules:
+        parsed = parse_rule(rule, source=str(rule["site_key"]))
+        assert parsed.book is not None or parsed.chapter is not None
+
+
+def test_search_paged_example_documents_the_page_variable_and_max_pages() -> None:
+    rule = _complete("doc-search-paged")
+    assert rule.search is not None
+    assert "{page}" in rule.search.url
+    assert rule.book is not None and rule.book.pages is not None
+    # ``search`` has no pagination section: the only page control is max_pages.
+    assert rule.book.pages.max_pages == 12
+    assert rule.book.pages.start == 2
+    assert rule.search.book_id_group == 1
+
+
+def test_search_paged_example_extracts_digits_from_a_word_count() -> None:
+    rule = _complete("doc-search-paged")
+    searcher = _searcher(rule)
+    searcher._request_url = "https://doc-search.example/search?q=a&p=1"
+    searcher._final_url = searcher._request_url
+    page = """
+    <ul class="result">
+      <li>
+        <a class="title" href="/book/77/"> A  Book </a>
+        <span class="author"> Au Thor </span>
+        <span class="latest">L1</span>
+        <span class="words">12.3万字</span>
+      </li>
+    </ul>
+    """
+    results = searcher._parse_html(page)
+    assert len(results) == 1
+    assert results[0]["title"] == "A Book"
+    assert results[0]["author"] == "Au Thor"
+    assert results[0]["latest_chapter"] == "L1"
+    assert results[0]["word_count"] == "12"
+    assert results[0]["book_id"] == "77"
+
+
+# --------------------------------------------------------------------------- #
+# complete examples: catalog next-page walk
+# --------------------------------------------------------------------------- #
+def test_catalog_next_example_walks_pages_and_reverses_desc_order() -> None:
+    rule = _complete("doc-catalog-next")
+    assert rule.book is not None and rule.book.pages is not None
+    pages_rule = rule.book.pages
+    # No max_pages: the walk depends on the next link staying visible.
+    assert pages_rule.max_pages is None
+    assert pages_rule.stop_when is not None
+    assert pages_rule.loop_guard is True
+    assert rule.book.chapters.is_desc is True
+
+    first = (
+        '<ul class="chapter-list"><li><a href="/read/1.html">One</a></li></ul>'
+        '<a href="/book/7/page_2.html">next</a>'
+    )
+    second = (
+        '<ul class="chapter-list"><li><a href="/read/2.html">Two</a></li></ul>'
+        '<a href="/book/7/page_3.html">next</a>'
+    )
+    third = (
+        '<ul class="chapter-list"><li><a href="/read/3.html">Three</a></li></ul>'
+        '<div id="no-more-chapters"></div>'
+    )
+
+    class _StubFetcher(RuleFetcher):
+        site_name = "doc-catalog-next"
+
+        def __init__(self) -> None:
+            self.pages = {
+                "https://doc-catalog.example/book/7/page_2.html": second,
+                "https://doc-catalog.example/book/7/page_3.html": third,
+            }
+            self.calls: list[str] = []
+
+        async def _get(
+            self, url: str, extra_headers: dict[str, str] | None = None, **kwargs: Any
+        ) -> str:
+            self.calls.append(url)
+            return self.pages[url]
+
+    fetcher = _StubFetcher()
+    extra = asyncio.run(
+        fetcher._collect_pages(
+            pages_rule,
+            first,
+            rule.base_url,
+            None,
+            first_url="https://doc-catalog.example/book/7/",
+            book_id="7",
+        )
+    )
+    assert fetcher.calls == [
+        "https://doc-catalog.example/book/7/page_2.html",
+        "https://doc-catalog.example/book/7/page_3.html",
+    ]
+    assert extra == [second, third]
+
+    info = _parser(rule).parse_book_info([first, *extra])
+    assert info is not None
+    # is_desc reverses the merged list once: newest first across pages.
+    assert [c["title"] for c in info["volumes"][0]["chapters"]] == [
+        "Three",
+        "Two",
+        "One",
+    ]
+
+
+def test_catalog_next_example_stops_when_the_link_disappears() -> None:
+    rule = _complete("doc-catalog-next")
+    assert rule.book is not None and rule.book.pages is not None
+    first = '<ul class="chapter-list"><li><a href="/read/1.html">One</a></li></ul>'
+
+    class _StubFetcher(RuleFetcher):
+        site_name = "doc-catalog-next"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def _get(
+            self, url: str, extra_headers: dict[str, str] | None = None, **kwargs: Any
+        ) -> str:
+            self.calls.append(url)
+            return "<html>unexpected</html>"
+
+    fetcher = _StubFetcher()
+    extra = asyncio.run(
+        fetcher._collect_pages(
+            rule.book.pages,
+            first,
+            rule.base_url,
+            None,
+            first_url="https://doc-catalog.example/book/7/",
+            book_id="7",
+        )
+    )
+    assert extra == []
+    assert fetcher.calls == []
+
+
+def test_chapters_rule_has_no_next_key() -> None:
+    # The prose states the catalog "next" page comes from ``book.pages``; a
+    # literal ``next`` key would be rejected as an unknown key.
+    with pytest.raises(RuleError, match="unknown key 'next'"):
+        parse_rule(
+            {
+                "site_key": _SITE_KEY,
+                "book": {
+                    **_BASE_BOOK,
+                    "chapters": {**_BASE_BOOK["chapters"], "next": "a.next"},
+                },
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
+# complete examples: content steps + fallback
+# --------------------------------------------------------------------------- #
+def test_content_steps_example_cleans_body_and_falls_back() -> None:
+    rule = _complete("doc-content-steps")
+    assert rule.chapter is not None
+    assert rule.chapter.content.steps, "the example must demonstrate steps"
+    assert len(rule.chapter.content.fallback) == 2
+
+    primary = (
+        '<html><body><h1 class="chapter-title">  Chapter   1 </h1>'
+        '<div id="content">  <b>Alpha</b>\n[3/9]Beta  </div>'
+        '<div class="read-content">decoy</div></body></html>'
+    )
+    chapter = _parser(rule).parse_chapter_content([primary], "1")
+    assert chapter is not None
+    assert chapter["title"] == "Chapter 1"
+    # strip_html removes <b>, the js step drops the "[3/9]" page marker, and
+    # normalize_space collapses the whitespace left behind.
+    assert chapter["content"] == "Alpha Beta"
+
+    css_fallback = (
+        "<html><body><div class='read-content'> Fallback  Body </div></body></html>"
+    )
+    fallback = _parser(rule).parse_chapter_content([css_fallback], "2")
+    assert fallback is not None
+    assert fallback["content"] == "Fallback Body"
+
+    xpath_fallback = (
+        "<html><body><article id='content'> XPath  Body </article></body></html>"
+    )
+    xpath = _parser(rule).parse_chapter_content([xpath_fallback], "3")
+    assert xpath is not None
+    assert xpath["content"] == "XPath Body"
+
+
+# --------------------------------------------------------------------------- #
+# complete examples: JSON API
+# --------------------------------------------------------------------------- #
+def test_json_api_example_uses_json_body_and_dot_paths() -> None:
+    rule = _complete("doc-json-api")
+    assert rule.format == "json"
+    assert rule.search is not None
+    body = rule.search.json_body
+    assert body is not None
+    assert body["query"]["text"] == "{raw_keyword}"
+    assert body["size"] == 20
+
+    rendered = RuleSearcher._render_body(body, "a b")
+    assert rendered["query"]["text"] == "a b"
+    assert rendered["query"]["page"] == 1
+    assert rendered["size"] == 20  # numbers are not templated
+
+    searcher = _searcher(rule)
+    searcher._request_url = "https://doc-api.example/v2/search"
+    searcher._final_url = searcher._request_url
+    payload = {
+        "data": {
+            "items": [
+                {
+                    "title": " T1 ",
+                    "link": "/book/9/1",
+                    "author": {"name": "A"},
+                    "stats": {"words": 1234},
+                },
+                {"title": "T2", "link": "/book/9/2", "authorName": "B"},
+            ]
+        }
+    }
+    results = searcher._parse_html(json.dumps(payload))
+    assert [(r["title"], r["author"], r["word_count"]) for r in results] == [
+        ("T1", "A", "1234"),
+        ("T2", "B", "-"),
+    ]
+    assert [r["book_id"] for r in results] == ["9", "9"]
+
+
+def test_json_api_example_parses_book_and_chapter() -> None:
+    rule = _complete("doc-json-api")
+    book = {
+        "data": {
+            "title": "Book X",
+            "intro": "Intro text",
+            "tags": ["t1", "t2"],
+            "items": [
+                {"name": "C1", "url": "/book/5/1"},
+                {"name": "C2", "url": "/book/5/2"},
+            ],
+        }
+    }
+    info = _parser(rule).parse_book_info([json.dumps(book)])
+    assert info is not None
+    assert info["book_name"] == "Book X"
+    assert info["summary"] == "Intro text"
+    assert info["tags"] == ["t1", "t2"]
+    assert [(c["title"], c["chapterId"]) for c in info["volumes"][0]["chapters"]] == [
+        ("C1", "1"),
+        ("C2", "2"),
+    ]
+
+    chapter = _parser(rule).parse_chapter_content(
+        [json.dumps({"data": {"title": "T", "body": "l1\nl2"}})], "1"
+    )
+    assert chapter is not None
+    assert chapter["title"] == "T"
+    assert chapter["content"] == "l1\nl2"
+
+
+def test_json_api_example_stop_when_matches_an_empty_list() -> None:
+    rule = _complete("doc-json-api")
+    assert rule.book is not None and rule.book.pages is not None
+    assert matches_stop_when(rule.book.pages, '{"data": {"items": []}}')
+    assert not matches_stop_when(rule.book.pages, '{"data": {"items": [1]}}')
+
+
+# --------------------------------------------------------------------------- #
+# complete examples: headers
+# --------------------------------------------------------------------------- #
+def test_header_example_renders_variables_only_in_book_and_chapter() -> None:
+    rule = _complete("doc-auth-headers")
+    assert rule.headers["User-Agent"] == "novel-downloader-doc/1.0"
+    assert rule.search is not None and rule.search.headers == {
+        "Accept": "text/html,application/xhtml+xml"
+    }
+    assert rule.book is not None and rule.chapter is not None
+
+    class _StubFetcher(RuleFetcher):
+        site_name = "doc-auth-headers"
+
+    # ``_render_headers`` is pure: skip the HTTP session setup entirely.
+    fetcher = object.__new__(_StubFetcher)
+    book_headers = fetcher._render_headers(
+        rule.book.headers, rule.base_url, book_id="7"
+    )
+    assert book_headers["Referer"] == "https://doc-auth.example/search"
+    # The cookie value is a placeholder, not a real credential.
+    assert "<paste-your-session-cookie-here>" in book_headers["Cookie"]
+
+    chapter_headers = fetcher._render_headers(
+        rule.chapter.headers, rule.base_url, book_id="7", chapter_id="1"
+    )
+    assert chapter_headers["Referer"] == "https://doc-auth.example/book/7/"
+
+
+def test_header_example_contains_no_credentials() -> None:
+    text = json.dumps(_complete_rule("doc-auth-headers"))
+    lowered = text.lower()
+    for marker in ("password", "bearer ", "token=", "apikey", "api_key"):
+        assert marker not in lowered, f"documented header example leaks {marker!r}"

@@ -5,6 +5,8 @@
 > **与代码同步**: 本文的字段表带有 `rule-dsl:keys:*` 注释标记, `tests/plugins/test_rule_docs.py` 会解析这些表格, 与 `novel_downloader.plugins.rule.model` 中的真实集合 (`_TOP_LEVEL_KEYS` / `_SEARCH_KEYS` / `_FIELD_KEYS` / `_STEP_KEYS` / `_LIMIT_KEYS` 等) 比对。新增或删除字段时, 必须同时修改本文, 否则测试失败并列出差异。
 >
 > 本文以当前代码为准。示例规则位于 `rules/_example-advanced-html.json` 与 `rules/_example-json-api.json`, 均以 `_` 开头, 不会被加载器注册为真实站点。
+>
+> 文末的「完整示例」给出五份可直接另存为 `rules/*.json` 的整份规则; 本文所有 `json` 代码块都由 `tests/plugins/test_rule_docs_examples.py` 抽取并交给真实的 `parse_rule` 校验, 中英两页的 JSON 必须逐字节一致。
 
 ---
 
@@ -595,6 +597,300 @@ JSON 解码后是 `regex_replace(input, '\\d+', '#')`, mini-js 再把 `\\` 解�
 - `max_pages` 在解析期只校验上限 (`<= 50`, 即 `MAX_EXTRA_PAGES`); 小于 `start` 时只是不抓任何额外页, 不报错。
 - `priority` 数值越大越靠前; 搜索结果内部按顺序加 `0`、`1`、`2`…, 用于同分时的稳定排序。
 - `encoding` 在解析期用 Python 的 codec 注册表校验 (`codecs.lookup`): 无法识别的名字直接报错; 能识别但与站点实际编码不符时, 才会在下载解码阶段失败。
+
+---
+
+### 完整示例
+
+下面五个示例都是**可以直接另存为 `rules/*.json` 的完整规则** (含 `site_key`), 不是片段。它们与本文其它片段一起由 `tests/plugins/test_rule_docs_examples.py` 逐个 `parse_rule` 并跑通, 因此示例里出现未知键会直接让测试失败。中英文两页的 JSON 块必须逐字节一致。
+
+示例站点、选择器与路径都是虚构的, 只演示字段写法。
+
+#### 示例 1: 搜索 + 固定范围的目录分页
+
+`search` 本身**没有分页字段**: `search.url` 里的 `{page}` 在搜索阶段恒为 `1`。真正的分页发生在目录段, 由 `book.pages.max_pages` 指定"最后一个要抓的页码", 因此不依赖响应里是否还有"下一页"链接。
+
+```json
+{
+  "site_key": "doc-search-paged",
+  "site_name": "Search plus a paginated catalog (documentation example)",
+  "base_url": "https://doc-search.example",
+  "headers": {
+    "User-Agent": "novel-downloader-doc/1.0"
+  },
+  "search": {
+    "url": "{base_url}/search?q={keyword}&p={page}",
+    "item": "ul.result > li",
+    "book_id_regex": "/book/(\\d+)/",
+    "book_id_group": 1,
+    "fields": {
+      "title": {
+        "selector": "a.title",
+        "attr": "text",
+        "steps": [{"lang": "py", "name": "normalize_space"}]
+      },
+      "url": {"selector": "a.title", "attr": "href"},
+      "author": {"selector": "span.author", "attr": "text"},
+      "latest": {"selector": "span.latest", "attr": "text"},
+      "word": {"selector": "span.words", "attr": "text", "regex": "(\\d+)"}
+    }
+  },
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "fields": {
+      "book_name": {"selector": "h1", "attr": "text"},
+      "author": {"selector": "span.author", "attr": "text"},
+      "summary": {"selector": "div#intro", "attr": "inner_text"}
+    },
+    "pages": {
+      "url": "{base_url}/book/{book_id}/index_{page}.html",
+      "start": 2,
+      "max_pages": 12
+    },
+    "chapters": {
+      "item": "div#list dd a",
+      "title": {"attr": "text"},
+      "url": {"attr": "href"},
+      "id_regex": "/(\\d+)\\.html$",
+      "id_group": 1
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/chapter/{chapter_id}.html",
+    "content": {"selector": "div#content", "attr": "inner_text"}
+  }
+}
+```
+
+要点:
+
+- `search.fields.url` 是必填项; 提取不到链接的条目会被丢弃, 不会产生空结果。
+- `book_id_regex` 从结果链接里取 `book_id`; 正则不匹配时回退到路径最后一段。
+- `word` 用 `regex` 只保留数字, 站点写成 `12.3万字` 也能得到 `12`。
+- `pages.max_pages` 是**页码**而不是"额外页数": `start: 2` + `max_pages: 12` 表示固定抓取第 2 页到第 12 页。
+
+#### 示例 2: 详情 + 目录, 靠"下一页链接"走到最后一页
+
+不写 `max_pages` 时, 目录分页走启发式: 只要**当前页**里还能看到下一页 URL 的完整后缀或文件名, 就继续抓; 看不到就停。`stop_when` 与 `loop_guard` 用来兜住"最后一页指向自己"和"站点永远不删下一页链接"两种情况。
+
+```json
+{
+  "site_key": "doc-catalog-next",
+  "site_name": "Catalog that follows next-page links (documentation example)",
+  "base_url": "https://doc-catalog.example",
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "fields": {
+      "book_name": {
+        "selector": "meta[property='og:title']",
+        "attr": "content",
+        "fallback": [{"selector": "h1", "attr": "text"}]
+      },
+      "author": {"selector": "meta[name='author']", "attr": "content"},
+      "serial_status": {"selector": "span.status", "attr": "text"},
+      "tags": {"selector": "a.tag", "attr": "text", "multi": true}
+    },
+    "pages": {
+      "url": "{base_url}/book/{book_id}/page_{page}.html",
+      "start": 2,
+      "stop_when": "id=\"no-more-chapters\"",
+      "loop_guard": true
+    },
+    "chapters": {
+      "item": "ul.chapter-list li a",
+      "title": {"attr": "text"},
+      "url": {"attr": "href"},
+      "is_desc": true
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/read/{chapter_id}.html",
+    "content": {"selector": "article#content", "attr": "inner_text"},
+    "replace": [["\u3000", " "]],
+    "drop": ["^本章未完.*$"]
+  }
+}
+```
+
+要点:
+
+- **`book.chapters` 没有 `next` 键。** 目录的"下一页"完全由 `book.pages` 驱动; 写 `"next": ...` 会因为未知键在 `parse_rule` 阶段被拒绝。
+- 第 N 页的响应里必须仍然出现第 N+1 页的 URL (完整后缀或文件名), 否则抓取在第 N 页停止。
+- `stop_when` 命中时**保留**当前页再停; `loop_guard` (默认 `true`) 在 URL 重复或响应体完全相同时停止。
+- `is_desc: true` 表示站点"最新在前": 合并全部分页后把整条列表反转一次, 不是逐页反转。
+- `book.fields` 里的字符串回退项会继承主字段的 `attr`, 所以这里 `meta` 与 `h1` 混用时回退项必须写成对象并显式给 `attr: "text"`。
+
+#### 示例 3: 正文 `steps` + `fallback`
+
+正文先按 `selector` 提取, 为空时依次尝试 `fallback`; 取到值后再跑 `steps`。字符串形式的回退项继承主字段的 `attr` 与 `steps`, 因此三个候选选择器共用同一套清洗逻辑。
+
+```json
+{
+  "site_key": "doc-content-steps",
+  "site_name": "Body cleanup with steps and fallback (documentation example)",
+  "base_url": "https://doc-content.example",
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "fields": {
+      "book_name": {"selector": "h1", "attr": "text"}
+    },
+    "chapters": {
+      "item": "div#catalog a",
+      "title": {"attr": "text"},
+      "url": {"attr": "href"}
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/chapter/{chapter_id}.html",
+    "title": {
+      "selector": "h1.chapter-title",
+      "attr": "text",
+      "steps": [{"lang": "py", "name": "normalize_space"}]
+    },
+    "content": {
+      "selector": "div#content",
+      "attr": "inner_text",
+      "fallback": ["div.read-content", "//article[@id='content']"],
+      "steps": [
+        {"lang": "py", "name": "strip_html"},
+        {"lang": "js", "code": "regex_replace(input, '\\\\[\\\\d+/\\\\d+\\\\]', '')"},
+        {"lang": "py", "name": "normalize_space"}
+      ]
+    }
+  }
+}
+```
+
+要点:
+
+- `regex_replace` 的 pattern 在 `.json` 文件里要写**四个反斜杠** (`\\\\d`), 原因见上文"正则的反斜杠要经过三层"。
+- `steps` 只在当前值非空时执行; 选择器一个都没匹配上时不会凭空产出内容。
+- `normalize_space` 会把多段正文压成一行。正文需要保留段落时, 把这一步换成 `dedupe_lines`, 或干脆只保留 `regex_replace` + `strip`。
+- `//article[@id='content']` 以 `//` 开头, 按 XPath 解析; 前两个选择器按 CSS 解析。
+
+#### 示例 4: JSON 接口 (`json_body` + 点路径)
+
+整站走 JSON 接口时, 顶层写 `"format": "json"` 即可; 各段的 `selector` 从此按点路径解析, `attr` 读取对象的同名键。**没有单独的 `json_path` 键**: JSON 路径就写在 `selector` 里。
+
+```json
+{
+  "site_key": "doc-json-api",
+  "site_name": "JSON API with a request body (documentation example)",
+  "base_url": "https://doc-api.example",
+  "format": "json",
+  "search": {
+    "url": "{base_url}/v2/search",
+    "method": "POST",
+    "json_body": {
+      "query": {"text": "{raw_keyword}", "page": 1},
+      "size": 20
+    },
+    "item": "data.items",
+    "book_id_regex": "/book/(\\d+)",
+    "fields": {
+      "title": {"selector": "title", "attr": "text"},
+      "url": {"selector": "link", "attr": "text"},
+      "author": {
+        "selector": "author.name",
+        "attr": "text",
+        "fallback": ["authorName"]
+      },
+      "word": {"selector": "stats.words", "attr": "text"}
+    }
+  },
+  "book": {
+    "url": "{base_url}/v2/books/{book_id}",
+    "pages": {
+      "url": "{base_url}/v2/books/{book_id}/chapters?page={page}",
+      "start": 2,
+      "max_pages": 20,
+      "stop_when": "\"items\"\\s*:\\s*\\[\\s*\\]"
+    },
+    "fields": {
+      "book_name": {"selector": "data.title", "attr": "text"},
+      "summary": {"selector": "data.intro", "attr": "text"},
+      "tags": {"selector": "data.tags[*]", "attr": "text", "multi": true}
+    },
+    "chapters": {
+      "item": "data.items",
+      "title": {"selector": "name", "attr": "text"},
+      "url": {"selector": "url", "attr": "text"},
+      "id_regex": "/(\\d+)$"
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/v2/chapters/{chapter_id}",
+    "title": {"selector": "data.title", "attr": "text"},
+    "content": {"selector": "data.body", "attr": "inner_text"}
+  }
+}
+```
+
+要点:
+
+- 提供 `json_body` 时总是以 JSON POST 发送, 并自动带 `Content-Type: application/json`; 它优先于 `method` 与 `data`。
+- `json_body` 里**字符串值**才做模板展开 (`{raw_keyword}` / `{keyword}` / `{page}`), 嵌套对象与数组会逐层展开; 数字 (`"size": 20`) 保持原样。
+- `item: "data.items"` 展开数组, 之后的字段路径相对于每个元素 (`title` 而不是 `data.items.title`)。
+- `data.tags[*]` 展开全部元素, 配合 `multi: true` 才能收齐标签。
+- JSON 响应通常不含下一页链接, 因此**必须**用 `max_pages`; `stop_when` 命中空列表可以提前结束。
+- 路径末段是数组时只会取到第一个元素 (见上文"注意 (JSON 数组)"), 正文接口应返回字符串。
+
+#### 示例 5: 需要请求头的站点
+
+凭据只能放在 `headers` 里, 不要拼进 URL。顶层 `headers` 与 `search.headers` **原样发送**, book / chapter 段的 `headers` 值支持模板变量。
+
+```json
+{
+  "site_key": "doc-auth-headers",
+  "site_name": "Source that needs request headers (documentation example)",
+  "base_url": "https://doc-auth.example",
+  "headers": {
+    "User-Agent": "novel-downloader-doc/1.0",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "X-Requested-With": "XMLHttpRequest"
+  },
+  "search": {
+    "url": "{base_url}/search?kw={keyword}",
+    "headers": {
+      "Accept": "text/html,application/xhtml+xml"
+    },
+    "item": ".search-item",
+    "fields": {
+      "title": {"selector": "a", "attr": "text"},
+      "url": {"selector": "a", "attr": "href"}
+    }
+  },
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "headers": {
+      "Referer": "{base_url}/search",
+      "Cookie": "session=<paste-your-session-cookie-here>"
+    },
+    "fields": {
+      "book_name": {"selector": "h1", "attr": "text"}
+    },
+    "chapters": {
+      "item": "#catalog a",
+      "title": {"attr": "text"},
+      "url": {"attr": "href"}
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/chapter/{chapter_id}.html",
+    "headers": {
+      "Referer": "{base_url}/book/{book_id}/"
+    },
+    "content": {"selector": "#content", "attr": "inner_text"}
+  }
+}
+```
+
+要点:
+
+- `session=<paste-your-session-cookie-here>` 是占位符, 不是凭据。使用时替换成你自己的会话值, 并确保规则文件没有被提交到仓库。
+- 顶层 `headers` 作用于 book / chapter 抓取; `search.headers` 只作用于搜索, 且两者都不做模板替换。
+- book / chapter 段的 `headers` 值里的 `{base_url}` / `{book_id}` / `{chapter_id}` 会被渲染; 渲染结果中的控制字符会被清洗, 并记一条 warning。
+- 头名不能含冒号或空白 (写 `{"X-Token": "abc"}`, 不要写 `{"X-Token: abc": ""}`); 头值里的 CR / LF / NUL 在加载期直接拒绝。
 
 ---
 

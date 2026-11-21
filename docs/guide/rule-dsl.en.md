@@ -5,6 +5,8 @@ This page is the **field-level reference** for rule-based book-source JSON. It c
 > **Kept in sync with the code**: the Chinese master page (`rule-dsl.md`) carries `rule-dsl:keys:*` comment markers around its field tables. `tests/plugins/test_rule_docs.py` parses those tables and compares them with the real sets in `novel_downloader.plugins.rule.model` (`_TOP_LEVEL_KEYS` / `_SEARCH_KEYS` / `_FIELD_KEYS` / `_STEP_KEYS` / `_LIMIT_KEYS` and others). When you add or remove a field, update both pages, or the test fails and lists the difference.
 >
 > This page follows the current code. Example rules live in `rules/_example-advanced-html.json` and `rules/_example-json-api.json`; both start with `_` and are therefore never registered as real sites by the loader.
+>
+> The "Complete examples" section at the end carries five full rules that can be saved directly as `rules/*.json`. Every `json` block on this page is extracted by `tests/plugins/test_rule_docs_examples.py` and fed to the real `parse_rule`, and the JSON must be byte-identical between the Chinese and English pages.
 
 ---
 
@@ -564,6 +566,300 @@ Two boundaries worth noting:
 - `max_pages` is only checked against its upper bound at parse time (`<= 50`, i.e. `MAX_EXTRA_PAGES`); when it is smaller than `start`, no extra page is fetched and no error is raised.
 - A larger `priority` sorts earlier; within search results, `0`, `1`, `2` ... are added in order for stable ordering of ties.
 - `encoding` is validated at parse time against Python's codec registry (`codecs.lookup`): an unknown name fails immediately; a known name that does not match the site still fails later while decoding the download.
+
+---
+
+### Complete examples
+
+The five rules below are **complete, runnable rule files** (each carries `site_key`), not fragments: save one as `rules/*.json` and it loads. Together with the fragments above they are parsed by the real `parse_rule` in `tests/plugins/test_rule_docs_examples.py` and driven through the parser, so an unknown key in an example fails the test. The JSON blocks must stay byte-identical between the Chinese and English pages.
+
+Every host, selector and path is fictional and only demonstrates field usage.
+
+#### Example 1: search plus a fixed-range catalog
+
+`search` has **no pagination field of its own**: `{page}` inside `search.url` is always `1` during a search. Real pagination happens in the catalog section, where `book.pages.max_pages` names the last page number to fetch, so it does not depend on a next-page link being present.
+
+```json
+{
+  "site_key": "doc-search-paged",
+  "site_name": "Search plus a paginated catalog (documentation example)",
+  "base_url": "https://doc-search.example",
+  "headers": {
+    "User-Agent": "novel-downloader-doc/1.0"
+  },
+  "search": {
+    "url": "{base_url}/search?q={keyword}&p={page}",
+    "item": "ul.result > li",
+    "book_id_regex": "/book/(\\d+)/",
+    "book_id_group": 1,
+    "fields": {
+      "title": {
+        "selector": "a.title",
+        "attr": "text",
+        "steps": [{"lang": "py", "name": "normalize_space"}]
+      },
+      "url": {"selector": "a.title", "attr": "href"},
+      "author": {"selector": "span.author", "attr": "text"},
+      "latest": {"selector": "span.latest", "attr": "text"},
+      "word": {"selector": "span.words", "attr": "text", "regex": "(\\d+)"}
+    }
+  },
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "fields": {
+      "book_name": {"selector": "h1", "attr": "text"},
+      "author": {"selector": "span.author", "attr": "text"},
+      "summary": {"selector": "div#intro", "attr": "inner_text"}
+    },
+    "pages": {
+      "url": "{base_url}/book/{book_id}/index_{page}.html",
+      "start": 2,
+      "max_pages": 12
+    },
+    "chapters": {
+      "item": "div#list dd a",
+      "title": {"attr": "text"},
+      "url": {"attr": "href"},
+      "id_regex": "/(\\d+)\\.html$",
+      "id_group": 1
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/chapter/{chapter_id}.html",
+    "content": {"selector": "div#content", "attr": "inner_text"}
+  }
+}
+```
+
+Notes:
+
+- `search.fields.url` is required; a result without a link is dropped rather than producing an empty entry.
+- `book_id_regex` pulls `book_id` out of the result link; when it does not match, the last path segment is used.
+- `word` uses `regex` to keep the digits only, so a site writing `12.3万字` still yields `12`.
+- `pages.max_pages` is a **page number**, not an extra-page count: `start: 2` plus `max_pages: 12` fetches pages 2 through 12 unconditionally.
+
+#### Example 2: details plus a catalog that follows next-page links
+
+Without `max_pages`, catalog pagination uses the heuristic: as long as the **current** page still mentions the next page's URL (full suffix or file name), keep fetching; stop when it does not. `stop_when` and `loop_guard` cover the two classic failure modes: the last page links to itself, and the site never removes the next link.
+
+```json
+{
+  "site_key": "doc-catalog-next",
+  "site_name": "Catalog that follows next-page links (documentation example)",
+  "base_url": "https://doc-catalog.example",
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "fields": {
+      "book_name": {
+        "selector": "meta[property='og:title']",
+        "attr": "content",
+        "fallback": [{"selector": "h1", "attr": "text"}]
+      },
+      "author": {"selector": "meta[name='author']", "attr": "content"},
+      "serial_status": {"selector": "span.status", "attr": "text"},
+      "tags": {"selector": "a.tag", "attr": "text", "multi": true}
+    },
+    "pages": {
+      "url": "{base_url}/book/{book_id}/page_{page}.html",
+      "start": 2,
+      "stop_when": "id=\"no-more-chapters\"",
+      "loop_guard": true
+    },
+    "chapters": {
+      "item": "ul.chapter-list li a",
+      "title": {"attr": "text"},
+      "url": {"attr": "href"},
+      "is_desc": true
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/read/{chapter_id}.html",
+    "content": {"selector": "article#content", "attr": "inner_text"},
+    "replace": [["\u3000", " "]],
+    "drop": ["^本章未完.*$"]
+  }
+}
+```
+
+Notes:
+
+- **`book.chapters` has no `next` key.** The catalog's "next page" is driven entirely by `book.pages`; writing `"next": ...` is rejected as an unknown key by `parse_rule`.
+- Page N's response must still contain page N+1's URL (full suffix or file name); otherwise the walk stops at page N.
+- `stop_when` keeps the current page and then stops; `loop_guard` (default `true`) stops on a repeated URL or an identical response body.
+- `is_desc: true` means the site lists newest first: the whole merged list is reversed once, not page by page.
+- A string fallback entry inherits the main field's `attr`, so when mixing `meta` and `h1` the fallback must be an object with an explicit `attr: "text"`.
+
+#### Example 3: body `steps` plus `fallback`
+
+The body is extracted with `selector`; when that yields nothing, each `fallback` entry is tried in order, and only then do `steps` run. A string fallback inherits the main field's `attr` and `steps`, so all three candidate selectors share one cleanup chain.
+
+```json
+{
+  "site_key": "doc-content-steps",
+  "site_name": "Body cleanup with steps and fallback (documentation example)",
+  "base_url": "https://doc-content.example",
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "fields": {
+      "book_name": {"selector": "h1", "attr": "text"}
+    },
+    "chapters": {
+      "item": "div#catalog a",
+      "title": {"attr": "text"},
+      "url": {"attr": "href"}
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/chapter/{chapter_id}.html",
+    "title": {
+      "selector": "h1.chapter-title",
+      "attr": "text",
+      "steps": [{"lang": "py", "name": "normalize_space"}]
+    },
+    "content": {
+      "selector": "div#content",
+      "attr": "inner_text",
+      "fallback": ["div.read-content", "//article[@id='content']"],
+      "steps": [
+        {"lang": "py", "name": "strip_html"},
+        {"lang": "js", "code": "regex_replace(input, '\\\\[\\\\d+/\\\\d+\\\\]', '')"},
+        {"lang": "py", "name": "normalize_space"}
+      ]
+    }
+  }
+}
+```
+
+Notes:
+
+- The `regex_replace` pattern needs **four backslashes** (`\\\\d`) in the `.json` file; see "regex backslashes pass through three layers" above.
+- `steps` run only when the current value is non-empty, so a constant expression cannot invent content when no selector matched.
+- `normalize_space` collapses multi-paragraph bodies into one line. To keep paragraphs, swap it for `dedupe_lines`, or keep only `regex_replace` plus `strip`.
+- `//article[@id='content']` starts with `//`, so it is parsed as XPath; the first two selectors are CSS.
+
+#### Example 4: a JSON API (`json_body` plus dot paths)
+
+When the whole site is a JSON API, set `"format": "json"` at the top level; every section's `selector` is then a dot path and `attr` reads a key of the matched object. **There is no separate `json_path` key**: the JSON path is the `selector`.
+
+```json
+{
+  "site_key": "doc-json-api",
+  "site_name": "JSON API with a request body (documentation example)",
+  "base_url": "https://doc-api.example",
+  "format": "json",
+  "search": {
+    "url": "{base_url}/v2/search",
+    "method": "POST",
+    "json_body": {
+      "query": {"text": "{raw_keyword}", "page": 1},
+      "size": 20
+    },
+    "item": "data.items",
+    "book_id_regex": "/book/(\\d+)",
+    "fields": {
+      "title": {"selector": "title", "attr": "text"},
+      "url": {"selector": "link", "attr": "text"},
+      "author": {
+        "selector": "author.name",
+        "attr": "text",
+        "fallback": ["authorName"]
+      },
+      "word": {"selector": "stats.words", "attr": "text"}
+    }
+  },
+  "book": {
+    "url": "{base_url}/v2/books/{book_id}",
+    "pages": {
+      "url": "{base_url}/v2/books/{book_id}/chapters?page={page}",
+      "start": 2,
+      "max_pages": 20,
+      "stop_when": "\"items\"\\s*:\\s*\\[\\s*\\]"
+    },
+    "fields": {
+      "book_name": {"selector": "data.title", "attr": "text"},
+      "summary": {"selector": "data.intro", "attr": "text"},
+      "tags": {"selector": "data.tags[*]", "attr": "text", "multi": true}
+    },
+    "chapters": {
+      "item": "data.items",
+      "title": {"selector": "name", "attr": "text"},
+      "url": {"selector": "url", "attr": "text"},
+      "id_regex": "/(\\d+)$"
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/v2/chapters/{chapter_id}",
+    "title": {"selector": "data.title", "attr": "text"},
+    "content": {"selector": "data.body", "attr": "inner_text"}
+  }
+}
+```
+
+Notes:
+
+- A `json_body` is always sent as a JSON POST and carries `Content-Type: application/json` automatically; it takes precedence over `method` and `data`.
+- Only **string values** inside `json_body` are templated (`{raw_keyword}` / `{keyword}` / `{page}`); nested objects and arrays are walked recursively, while numbers (`"size": 20`) stay as they are.
+- `item: "data.items"` expands the array, and each field path is then relative to one element (`title`, not `data.items.title`).
+- `data.tags[*]` expands every element; only with `multi: true` are all tags collected.
+- JSON responses usually carry no next-page link, so `max_pages` is **required**; `stop_when` matching an empty list ends the walk early.
+- When a path's last segment is an array only the first element is seen (see the note on JSON arrays above); a body endpoint should return a string.
+
+#### Example 5: a source that needs request headers
+
+Credentials belong in `headers`, never in a URL. Top-level `headers` and `search.headers` are **sent as-is**; `headers` values in the `book` / `chapter` sections support template variables.
+
+```json
+{
+  "site_key": "doc-auth-headers",
+  "site_name": "Source that needs request headers (documentation example)",
+  "base_url": "https://doc-auth.example",
+  "headers": {
+    "User-Agent": "novel-downloader-doc/1.0",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "X-Requested-With": "XMLHttpRequest"
+  },
+  "search": {
+    "url": "{base_url}/search?kw={keyword}",
+    "headers": {
+      "Accept": "text/html,application/xhtml+xml"
+    },
+    "item": ".search-item",
+    "fields": {
+      "title": {"selector": "a", "attr": "text"},
+      "url": {"selector": "a", "attr": "href"}
+    }
+  },
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "headers": {
+      "Referer": "{base_url}/search",
+      "Cookie": "session=<paste-your-session-cookie-here>"
+    },
+    "fields": {
+      "book_name": {"selector": "h1", "attr": "text"}
+    },
+    "chapters": {
+      "item": "#catalog a",
+      "title": {"attr": "text"},
+      "url": {"attr": "href"}
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/chapter/{chapter_id}.html",
+    "headers": {
+      "Referer": "{base_url}/book/{book_id}/"
+    },
+    "content": {"selector": "#content", "attr": "inner_text"}
+  }
+}
+```
+
+Notes:
+
+- `session=<paste-your-session-cookie-here>` is a placeholder, not a credential. Replace it with your own session value and keep the rule file out of version control.
+- Top-level `headers` apply to book / chapter fetches; `search.headers` applies to search only, and neither is templated.
+- `{base_url}` / `{book_id}` / `{chapter_id}` inside `book` / `chapter` header values are rendered; control characters in the rendered value are stripped and a warning is logged.
+- A header name cannot contain a colon or whitespace (write `{"X-Token": "abc"}`, not `{"X-Token: abc": ""}`); CR / LF / NUL in a value are rejected at load time.
 
 ---
 
