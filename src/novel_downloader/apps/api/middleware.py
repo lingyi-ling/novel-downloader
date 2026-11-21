@@ -217,6 +217,36 @@ def current_request_id() -> str:
     return _REQUEST_ID.get()
 
 
+def routed_path(scope: Scope) -> str:
+    """
+    Return the path *the router will match*, i.e. with ``root_path`` removed.
+
+    When the application is mounted below a prefix — ``app.mount("/noveldl",
+    api)``, ``uvicorn --root-path /noveldl``, or a reverse proxy that strips a
+    prefix — Starlette matches routes against the path with that prefix
+    removed, while ``scope["path"]`` still carries it. A prefix test on the
+    raw path therefore fails to recognise a guarded tree: under
+    ``root_path="/noveldl"`` the request ``/noveldl/downloads/book.txt``
+    reaches the static mount (matched as ``/downloads/book.txt``) but the raw
+    path does not start with ``/downloads``, so the token guard, the body cap,
+    the cache policy and the sandbox CSP were all skipped. Every middleware
+    that decides by path prefix must use this value instead of
+    ``scope["path"]``.
+
+    Mirrors :func:`starlette._utils.get_route_path` (which is private, so the
+    few lines are duplicated rather than importing it).
+    """
+    path = str(scope.get("path", ""))
+    root_path = str(scope.get("root_path") or "")
+    if not root_path or not path.startswith(root_path):
+        return path
+    if path == root_path:
+        return ""
+    if path[len(root_path)] == "/":
+        return path[len(root_path) :]
+    return path
+
+
 def _new_request_id() -> str:
     """Generate a server-side correlation id."""
     return str(uuid.uuid4())
@@ -482,7 +512,7 @@ class BodySizeLimitMiddleware:
             return
 
         method = str(scope.get("method", ""))
-        path = str(scope.get("path", ""))
+        path = routed_path(scope)
         if not self._applies(method, path):
             await self.app(scope, receive, send)
             return
@@ -591,7 +621,7 @@ class DownloadsAuthMiddleware:
         return path == self.prefix or path.startswith(self.prefix + "/")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") != "http" or not self._guards(str(scope.get("path", ""))):
+        if scope.get("type") != "http" or not self._guards(routed_path(scope)):
             await self.app(scope, receive, send)
             return
 
@@ -801,7 +831,7 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        path = str(scope.get("path", ""))
+        path = routed_path(scope)
         if self.limit <= 0 or self._is_exempt(path):
             await self.app(scope, receive, send)
             return
@@ -866,7 +896,7 @@ class CacheControlMiddleware:
             await self.app(scope, receive, send)
             return
 
-        cleaned = str(scope.get("path", "")).rstrip("/") or "/"
+        cleaned = routed_path(scope).rstrip("/") or "/"
         if not self._governs(cleaned):
             await self.app(scope, receive, send)
             return
@@ -913,7 +943,7 @@ class SecurityHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
-        cleaned = str(scope.get("path", "")).rstrip("/") or "/"
+        cleaned = routed_path(scope).rstrip("/") or "/"
         governs_api = self._matches(cleaned, "/api/v1")
         governs_downloads = self._matches(cleaned, DOWNLOADS_PREFIX)
         if not (governs_api or governs_downloads):

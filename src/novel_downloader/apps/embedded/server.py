@@ -85,6 +85,7 @@ import logging
 import math
 import os
 import re
+import stat
 import threading
 import time
 import uuid
@@ -3100,6 +3101,37 @@ def _resolve_token(token: str | None) -> str | None:
     return resolved or None
 
 
+def _resolve_download_file(directory: Path, name: str) -> Path | None:
+    """
+    Resolve one file inside ``directory`` for ``/downloads``, or ``None``.
+
+    The caller has already reduced the request to a single path component
+    (``Path(...).name``), so ``..`` and separators cannot appear. This helper
+    adds the checks that a bare ``directory / name`` misses on Windows:
+
+    * the joined path must stay inside ``directory`` *after* resolving links
+      and junctions (``realpath``), so a symlink/junction planted in the
+      export directory cannot read outside it — the same containment rule
+      Starlette's ``StaticFiles`` applies for the REST mount;
+    * it must be a regular file. A directory named ``x.txt`` or a Windows
+      device name such as ``NUL.txt`` / ``CON.txt`` otherwise stat()s as a
+      zero-length "file" and was served as a ``200`` with an empty body;
+    * embedded NUL bytes (``%00``) raise ``ValueError`` from ``stat``/``open``
+      and used to escape as a ``500``; they are a plain ``404`` here.
+    """
+    try:
+        candidate = directory / name
+        root = os.path.realpath(directory)
+        resolved = os.path.realpath(candidate)
+        if os.path.commonpath([resolved, root]) != root:
+            return None
+        if not stat.S_ISREG(os.stat(resolved).st_mode):
+            return None
+    except (OSError, ValueError):
+        return None
+    return Path(resolved)
+
+
 # ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
@@ -3351,23 +3383,27 @@ class _Handler(BaseHTTPRequestHandler):
 
         decoded = unquote(name)
         prefix, _, rest = decoded.partition("/")
+        root = _output_dir()
         if prefix == "music":
             safe = Path(rest).name
             ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
             if not safe or ext not in _MUSIC_EXTS:
                 self._send_json({"detail": "Not Found"}, 404)
                 return
-            path = _output_dir() / "music" / safe
+            path = _resolve_download_file(root / "music", safe)
         else:
             safe = Path(decoded).name
             ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
             if not safe or ext not in _EXTS:
                 self._send_json({"detail": "Not Found"}, 404)
                 return
-            path = _output_dir() / safe
+            path = _resolve_download_file(root, safe)
+        if path is None:
+            self._send_json({"detail": "Not Found"}, 404)
+            return
         try:
             size = path.stat().st_size
-        except OSError:
+        except (OSError, ValueError):
             self._send_json({"detail": "Not Found"}, 404)
             return
 
