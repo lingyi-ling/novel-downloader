@@ -905,13 +905,21 @@ def _plan_retention(
     other. ``protect`` holds the resolved paths written by the current run:
     they are still counted for ordering but are never selected for removal (a
     skewed clock can therefore leave one extra file behind, never delete a
-    fresh backup).
+    fresh backup). Protection compares the case-folded spelling: ``Path``
+    equality already folds case on Windows, but POSIX paths compare
+    case-sensitively even when the volume they name does not (the default macOS
+    filesystem), and ``resolve()`` keeps the caller's spelling there. Folding
+    can only keep one extra backup, never remove a fresh one.
 
     Unreadable directories are appended to ``failures`` instead of aborting the
     scan, so one bad subtree cannot make pruning look successful.
     """
 
     groups: dict[tuple[Path, str], list[tuple[str, int, Path, Path]]] = {}
+    # Spelled once, compared case-insensitively: a Windows ``Path`` already
+    # compares case-insensitively, but a POSIX one (macOS's default volume) does
+    # not, while ``resolve()`` preserves the caller's spelling there.
+    protected = {str(path).casefold() for path in protect}
 
     def _onerror(exc: OSError) -> None:
         failing = Path(exc.filename) if exc.filename else out_dir
@@ -958,7 +966,7 @@ def _plan_retention(
         doomed.extend(
             path
             for _stamp, _seq, path, resolved in entries[keep:]
-            if resolved not in protect
+            if str(resolved).casefold() not in protected
         )
     return sorted(doomed, key=str)
 
