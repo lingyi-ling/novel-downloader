@@ -1200,7 +1200,9 @@ Request body cap (default `1 MiB`; above it returns `413`):
 
 | Endpoint | Body | List length |
 | --- | --- | --- |
+| `POST /api/v1/browse` | ≤ 1 MiB | — |
 | `POST /api/v1/search` | ≤ 1 MiB | — |
+| `POST /api/v1/tasks` | ≤ 1 MiB | — |
 | `POST /api/v1/login/requests/{req_id}` | ≤ 1 MiB | — |
 | `POST /api/v1/watchlist` | ≤ 1 MiB | — |
 | `POST /api/v1/watchlist/check` | ≤ 1 MiB | — |
@@ -1208,6 +1210,13 @@ Request body cap (default `1 MiB`; above it returns `413`):
 | `POST /api/v1/music/download` | ≤ 1 MiB | `tracks` ≤ 200 |
 | `POST /api/v1/music/export` | ≤ 1 MiB | `tracks` ≤ 200 |
 | `POST /api/v1/music/jobs` | ≤ 1 MiB | `tracks` ≤ 200 |
+
+The cap applies to every `POST` / `PUT` / `PATCH` / `DELETE` under `/api/v1`
+(including routes added later); an oversized `Content-Length` is rejected
+without reading the body. Endpoints that take a body also require
+`Content-Type: application/json` (`application/*+json` is accepted):
+`text/plain`, form types, `multipart/form-data` and compressed bodies return
+`415` and are never parsed.
 
 More than `200` tracks returns `422` and `detail` names the limit.
 
@@ -1450,6 +1459,7 @@ clients can branch on it):
 | `404` | Task ID not found; login credential request ID not found; music job ID not found; watchlist entry not found; static file not found. |
 | `409` | A completed login credential request is submitted again before the task takes its result. |
 | `413` | Request body exceeds the endpoint's size cap. |
+| `415` | A body-bearing endpoint received a non-JSON `Content-Type` (including compressed bodies). |
 | `422` | Request parameter validation failed (missing required field, out-of-range value, too many `tracks`, etc.). |
 | `429` | Per-client-IP rate limit exceeded, with a `Retry-After` header; or `4` music jobs are already active (this `429` also carries `Retry-After: 5`, with detail `Too many music jobs are already running (limit 4); retry later`). |
 | `500` | Internal server error; the generic handler always returns `{"detail": "Internal server error"}` without leaking a stack trace. Music platform initialization and playlist write failures return their own fixed messages, containing only the exception class name. |

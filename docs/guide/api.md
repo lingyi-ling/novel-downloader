@@ -1063,7 +1063,9 @@ NOVEL_API_WEBHOOK=https://example.invalid/hooks/novel novel-api
 
 | 端点 | 请求体 | 列表长度 |
 | --- | --- | --- |
+| `POST /api/v1/browse` | ≤ 1 MiB | — |
 | `POST /api/v1/search` | ≤ 1 MiB | — |
+| `POST /api/v1/tasks` | ≤ 1 MiB | — |
 | `POST /api/v1/login/requests/{req_id}` | ≤ 1 MiB | — |
 | `POST /api/v1/watchlist` | ≤ 1 MiB | — |
 | `POST /api/v1/watchlist/check` | ≤ 1 MiB | — |
@@ -1071,6 +1073,11 @@ NOVEL_API_WEBHOOK=https://example.invalid/hooks/novel novel-api
 | `POST /api/v1/music/download` | ≤ 1 MiB | `tracks` ≤ 200 |
 | `POST /api/v1/music/export` | ≤ 1 MiB | `tracks` ≤ 200 |
 | `POST /api/v1/music/jobs` | ≤ 1 MiB | `tracks` ≤ 200 |
+
+上限对 `/api/v1` 下所有 `POST`/`PUT`/`PATCH`/`DELETE` 生效（含未来新增路由）；
+`Content-Length` 声明超限时不会读取请求体。携带请求体的端点还要求
+`Content-Type: application/json`（`application/*+json` 亦可）：`text/plain`、
+表单、`multipart/form-data` 与压缩请求体一律返回 `415`，不会被解析。
 
 `tracks` 超过 `200` 首返回 `422`，`detail` 会指明数量上限。
 
@@ -1275,6 +1282,7 @@ curl 不发 `Origin`，不受影响。
 | `404` | 任务 ID 不存在；登录凭据请求 ID 不存在；音乐任务 ID 不存在；追更条目不存在；静态文件不存在。 |
 | `409` | 登录凭据请求已完成、尚未被任务取走时再次提交。 |
 | `413` | 请求体超过该端点的大小上限。 |
+| `415` | 携带请求体的端点收到非 JSON `Content-Type`（含压缩请求体）。 |
 | `422` | 请求参数校验失败（缺少必填字段、数值越界、`tracks` 过多等）。 |
 | `429` | 超出按客户端 IP 的请求频率限制，响应带 `Retry-After` 头；或活跃音乐任务已达 `4` 个（该 `429` 也带 `Retry-After: 5`，`detail` 为 `Too many music jobs are already running (limit 4); retry later`）。 |
 | `500` | 服务端内部错误，通用处理器固定返回 `{"detail": "Internal server error"}`，不泄漏堆栈；音乐平台初始化失败与歌单写入失败返回各自的固定消息，只含异常类名。 |
