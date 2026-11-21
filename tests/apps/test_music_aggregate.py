@@ -565,7 +565,12 @@ def test_search_all_skips_platforms_that_failed_before(
     calls.clear()
     second = aggregate.search_all("晴天")
     assert calls == ["good"]  # dead is in the breaker window
-    assert [item.platform for item in second.platforms] == ["good"]
+    # The skipped platform is still reported (with a fixed reason) so the UI
+    # can explain the gap instead of pretending it answered with zero rows.
+    assert [item.platform for item in second.platforms] == ["good", "dead"]
+    skipped = second.platforms[1]
+    assert skipped.ok is False
+    assert skipped.error == aggregate.SKIPPED_BREAKER_ERROR
 
     calls.clear()
     aggregate.search_all("晴天", platforms=["good", "dead"])
@@ -796,7 +801,8 @@ def test_search_all_records_a_budget_timeout_in_the_breaker(
     good_seen.clear()
     second = aggregate.search_all("晴天", timeout=0.05, on_update=on_update)
     assert calls == ["good"]  # the timed-out platform is skipped
-    assert [item.platform for item in second.platforms] == ["good"]
+    assert [item.platform for item in second.platforms] == ["good", "slow"]
+    assert second.platforms[1].error == aggregate.SKIPPED_BREAKER_ERROR
 
 
 # ---------------------------------------------------------------------------

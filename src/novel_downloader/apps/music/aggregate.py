@@ -52,8 +52,10 @@ __all__ = [
     "per_platform_limit_for",
     "clear_failure_cache",
     "failed_platforms",
+    "record_health",
     "search_all",
     "search_all_isolated",
+    "SKIPPED_BREAKER_ERROR",
 ]
 
 #: ``platform`` 参数的「全部平台」取值。
@@ -85,6 +87,11 @@ SLOW_EMPTY_TTL = 300.0
 #: 而它们多数返回空；继续等只会让用户盯着进度条。未完成的平台不记为失败
 #: （它们可能只是慢），下次搜索照常参与。
 EARLY_EXIT_GRACE = 2.0
+
+#: 熔断期被跳过的平台在 ``platforms[]`` 里的原因。它们没有被请求，所以既
+#: 不能算成功也不能算本次失败；但界面必须能解释「为什么这个平台没出现」，
+#: 否则用户会以为它返回了零结果。
+SKIPPED_BREAKER_ERROR = "熔断跳过（冷却后自动恢复）"
 
 #: 搜索线程数上限。每个平台一个线程：以前固定 10 个 worker 会让队列里的
 #: 平台饿死——前 10 个恰好全是卡死的站时，netease 这种 1 秒就能返回的
@@ -471,6 +478,38 @@ def failed_platforms() -> list[str]:
         ]
 
 
+def record_health(key: str, ok: bool, elapsed_ms: int = 0) -> None:
+    """Merge one health-probe outcome into the persisted breaker stats.
+
+    A probe is a real bounded search, so it is a valid observation:
+
+    * ``ok`` clears the platform's ban *and* its slow-empty streak. Without
+      this a platform that recovered stayed skipped for up to ten minutes, and
+      ``music health`` reported it healthy while aggregate search still ignored
+      it — the two disagreed.
+    * a failed probe records a normal :data:`FAILURE_TTL` ban, so
+      ``music health``'s ``failed`` count and the breaker state stay in sync.
+
+    The update never deletes the entry: :func:`_save_stats` merges foreign
+    process records, which would re-add a deleted key.
+    """
+    name = str(key or "").strip()
+    if not name:
+        return
+    try:
+        with _FAILURE_LOCK:
+            entry = _load_stats().setdefault(name, {})
+            elapsed = _bounded_int(elapsed_ms, 0, maximum=_STATS_MAX_MS)
+            if ok:
+                entry.update(ok=True, last_ms=elapsed, failed_until=0.0)
+                entry.pop("empty_streak", None)
+            else:
+                _record_failure(name, elapsed)
+        _save_stats()
+    except Exception:  # noqa: BLE001 - stats must never break a health probe
+        logger.debug("music aggregate: could not record health", exc_info=True)
+
+
 def _ordered_keys(keys: list[str]) -> list[str]:
     """把优先平台提到前面，其余保持注册表顺序；重复项只保留第一次。"""
     priority = {key: index for index, key in enumerate(_SEARCH_PRIORITY)}
@@ -736,13 +775,27 @@ def search_all(
         return AggregateResult()
     explicit = platforms is not None
     skip = (not explicit) if skip_failed is None else bool(skip_failed)
+    #: Platforms inside their breaker window. They are not searched, but they
+    #: still appear in ``platforms[]`` (``ok=False`` with a fixed reason):
+    #: otherwise "all platforms" silently loses rows and the UI cannot tell a
+    #: skipped site from one that answered with zero results.
+    skipped: list[str] = []
     if skip:
-        keys = [key for key in keys if not _breaker_open(key)]
+        selected = keys
+        keys = [key for key in selected if not _breaker_open(key)]
         if not keys:
             # 所有平台都在熔断期：给用户一次完整的重试机会，而不是直接空结果。
             clear_failure_cache()
             keys = _select_platforms(platforms)
-    keys = _ordered_keys(keys)
+        else:
+            live = set(keys)
+            skipped = [key for key in selected if key not in live]
+    # One display order for both lists: live platforms first, then the ones
+    # the breaker skipped, each in registry priority order.
+    all_keys = _ordered_keys([*keys, *skipped])
+    skip_set = set(skipped)
+    keys = [key for key in all_keys if key not in skip_set]
+    skipped = [key for key in all_keys if key in skip_set]
 
     per_platform = max(1, int(per_platform_limit))
     deadline_seconds = max(0.1, float(timeout))
@@ -813,6 +866,11 @@ def search_all(
             outcomes.append(PlatformOutcome(key, True, count=len(tracks)))
             if tracks:
                 groups.append((key, tracks))
+        # Breaker-skipped platforms are reported after the ones that ran. They
+        # are neither a success nor a fresh failure: the reason is fixed so the
+        # UI can explain the gap without counting them as "did not respond".
+        for key in skipped:
+            outcomes.append(PlatformOutcome(key, False, error=SKIPPED_BREAKER_ERROR))
         merged = merge_tracks(
             sorted(groups, key=lambda pair: _platform_position(pair[0])),
             text,

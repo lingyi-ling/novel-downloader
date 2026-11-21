@@ -36,6 +36,7 @@ def health_check(
     *,
     timeout: float = 6.0,
     limit: int = 1,
+    record_stats: bool = True,
 ) -> dict[str, Any]:
     """检查某平台能否完成一次搜索。
 
@@ -43,6 +44,10 @@ def health_check(
     :param keyword: 用于探测的关键词。
     :param timeout: 总耗时上限（秒）；超时视为不健康。
     :param limit: 请求的结果条数（只做连通性探测，默认 1）。
+    :param record_stats: 是否把这次探测并入熔断统计。默认 ``True``：探测
+        本身就是一次真实的有界搜索，成功即解除该平台的熔断（``music
+        health`` 说健康、聚合搜索却继续跳过它是不一致的），失败则与聚合
+        搜索的超时一样记一次熔断。
     :return: ``{"ok", "elapsed_ms", "error"}``，成功时 ``error`` 为空串。
         搜索成功但零结果也算连通——鉴权型平台没配凭据时就是空结果。
     """
@@ -75,11 +80,44 @@ def health_check(
     elapsed_ms = int((time.perf_counter() - started) * 1000)
 
     if worker.is_alive():
-        return {
+        result: dict[str, Any] = {
             "ok": False,
             "elapsed_ms": elapsed_ms,
             "error": f"搜索超时（>{bound:g}s）",
         }
-    if "error" in box:
-        return {"ok": False, "elapsed_ms": elapsed_ms, "error": _describe(box["error"])}
-    return {"ok": True, "elapsed_ms": elapsed_ms, "error": ""}
+    elif "error" in box:
+        result = {
+            "ok": False,
+            "elapsed_ms": elapsed_ms,
+            "error": _describe(box["error"]),
+        }
+    else:
+        result = {"ok": True, "elapsed_ms": elapsed_ms, "error": ""}
+    if record_stats:
+        _record_probe(platform, result)
+    return result
+
+
+def _record_probe(platform: str, result: dict[str, Any]) -> None:
+    """Best-effort merge of one probe into the persisted breaker stats."""
+    try:
+        from .. import aggregate
+        from . import get_capability
+    except Exception:  # noqa: BLE001 - stats are optional; never fail a probe
+        return
+    # Probing a name that is not in the registry (a typo, or a test double)
+    # must not create a breaker entry: nothing would ever search it, and the
+    # entry would only show up as a phantom "failed" platform.
+    try:
+        if get_capability(platform) is None:
+            return
+    except Exception:  # noqa: BLE001 - capability probing is advisory
+        return
+    try:
+        aggregate.record_health(
+            platform,
+            bool(result.get("ok")),
+            int(result.get("elapsed_ms") or 0),
+        )
+    except Exception:  # noqa: BLE001 - ditto
+        return

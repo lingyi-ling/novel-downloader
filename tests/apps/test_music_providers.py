@@ -157,7 +157,9 @@ def test_health_check_does_not_misclassify_search_keyerror(
     provider = _Provider(error=KeyError("trackId"))
     monkeypatch.setattr(providers, "create", lambda *a, **k: provider)
 
-    result = health_check("migu")
+    # ``record_stats=False``: this test is about error classification, and a
+    # real key would otherwise write a breaker entry other tests could see.
+    result = health_check("migu", record_stats=False)
 
     assert result["ok"] is False
     assert "未知平台" not in result["error"]
