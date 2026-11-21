@@ -32,7 +32,7 @@ Do not confuse the two `_` conventions:
 - A **file name** starting with `_`: the whole file is not loaded;
 - A **key name** starting with `_`: ignored at the structural levels of a rule (top level and each section) and usable as a comment. Free-form key/value tables such as `data` / `json_body` / `headers` are not affected inside.
 
-### Resource limits and URL safety
+### Resource limits
 
 A rule file is configuration, not a program. The loader enforces the following hard limits and rejects a rule that exceeds one with a `RuleError` (without taking down the whole load):
 
@@ -41,17 +41,113 @@ A rule file is configuration, not a program. The loader enforces the following h
 | Single rule file size | 1 MiB (`1024 * 1024` bytes) | Disk loading (`load_rules`) and remote install/fetch each use the same limit |
 | `fallback` chain nesting depth | 16 levels | Per-field fallback chain |
 | `search.json_body` nesting depth | 32 levels | JSON request body |
-| URL length | 8192 characters | Rule templates, rendered fetch URLs and scraped links |
-| URL scheme | Literals may only be `http` / `https` | `search.url`, `book.url`, `chapter.url` and other templates; relative paths are still allowed |
-| URL userinfo | Rejected | `https://user:pass@host/` fails at load time; put credentials in `headers` |
-| Header characters | Names may not contain whitespace, a colon or control characters; values may not contain control characters | Top-level and per-section `headers`; rendered values are filtered again |
 
-* The depth limits stop a malicious rule from triggering `RecursionError` during **validation** (which would be a crash rather than a readable rule error).
-* `{name}` placeholders in a URL template are removed before the scheme check, so common forms such as `{base_url}/book/{book_id}/` are unaffected; `base_url` is validated separately.
-* The final rendered URL is checked again for its scheme before fetching: even when the template itself is valid, a `file://` / `javascript:` value substituted from page data is rejected.
-* Control characters (C0 / DEL) in a URL are always rejected: curl forwards those bytes verbatim while aiohttp/httpx refuse them, so the check is done at the entry point.
-* Fetched URLs may point at `http://127.0.0.1` or a LAN address (self-hosted sources and local test sites are legitimate). **Remote rule downloads** use the stricter public-address policy in `plugins/rule/remote.py`.
-* Cover images share the same allow-list as chapter links: a `file:` / `data:` value is cleared and never written into the media directory.
+The depth limits stop a malicious rule from triggering `RecursionError` during **validation** (which would be a crash rather than a readable rule error).
+
+---
+
+### URL and request-header safety
+
+A rule's URLs come from three places: templates in the rule file, the rendered template (`book_id` / `chapter_id` may come from page data), and scraped `href` / `src` values. All three go through the same allow-list in `plugins/utils/url_safety.py`, independently of the configured HTTP backend; each backend adds its own backstop.
+
+#### URL allow-list
+
+| Check | Rule |
+| --- | --- |
+| scheme | Only `http` / `https`; `file:` / `ftp:` / `gopher:` / `javascript:` / `data:` and similar are rejected. Templates and page links may be scheme-less relative paths (resolved against `base_url` later); media downloads (`fetch_data`) require an absolute `http(s)` URL |
+| Length | At most 8192 characters; the same limit covers rule templates, rendered fetch URLs and scraped links |
+| userinfo | `https://user:pass@host/` is rejected. A backend would turn it into an `Authorization` header; put credentials in `headers` instead |
+| Host confusion | A backslash in the authority (including `//host`) is rejected, e.g. `http://127.0.0.1\@evil.com`; Windows and URL parsers do not agree on its meaning |
+| Control characters | C0 (`\x00`-`\x1f`) and DEL (`\x7f`) are rejected; curl forwards some of them verbatim while aiohttp / httpx fail |
+| Host and port | An absolute URL needs a host; malformed IPv6 literals, non-numeric ports and ports outside `1`-`65535` are rejected |
+
+* `{name}` placeholders in a template are removed before the scheme check, so common forms such as `{base_url}/book/{book_id}/` are unaffected; `base_url` is validated separately.
+* A valid literal template does not make the rendered result valid: the final URL goes through the full allow-list again before it reaches the HTTP client. A `file://` / `javascript:` value substituted from page data raises a readable `RuleError` instead of being left to a backend.
+* Scraped chapter and cover links are cleaned by the same list: a non-`http(s)` value is cleared (relative addresses are resolved against `base_url`) and never written into the media directory.
+* The curl backend also sets `PROTOCOLS_STR` / `REDIR_PROTOCOLS_STR = "http,https"` as a backend-level backstop; aiohttp / httpx only support http(s) anyway. Switching backends does not widen the reachable protocol set.
+
+#### Private and loopback addresses: intentionally allowed
+
+`url_safety` deliberately does **not** reject private, loopback or link-local addresses. Self-hosted sources, LAN mirrors and local test sites are legitimate uses, e.g. `http://127.0.0.1:8080`, `http://localhost:8000` or `http://192.168.1.10`.
+
+That exception applies only to **targets a rule fetches while running**. **Remote rule downloads** (`sources add --url`, `fetch_rule` in `plugins/rule/remote.py`) use a much stricter public-address policy:
+
+* only `http(s)`; credentials in the URL, a backslash in the host, spaces / control characters and values over 8192 characters are rejected;
+* `localhost`, `*.localhost`, `*.local`, `*.localdomain`, `*.internal`, `*.home.arpa`, `*.lan` and cloud metadata hostnames (`metadata.google.internal` and similar) are rejected;
+* a literal IP must be globally routable; non-canonical numeric hosts such as `127.1`, `2130706433` and `0x7f000001` are rejected outright;
+* the hostname is resolved first and rejected when any result is a private / loopback / link-local address;
+* the final URL of a redirect chain is revalidated against the same policy, and an `https -> http` downgrade is refused;
+* the response body is capped at 1 MiB, and an obviously non-JSON `Content-Type` is rejected.
+
+Installing from a local file (putting the rule in `rules/` or the user config directory) is not affected by the remote-download policy; conversely, the remote path cannot install a rule document hosted at `127.0.0.1`.
+
+#### Request headers
+
+`headers` must be an object; any other type is an error instead of being silently treated as `{}`. Names and values are checked at load time:
+
+| Part | Rule |
+| --- | --- |
+| Name | No control characters (including CR / LF / NUL), whitespace or colon; a key such as `"X: Y"` makes the header ambiguous |
+| Value | No C0 control characters or DEL other than tab (`\t`); CR / LF / NUL are rejected to block header injection |
+
+* Top-level and per-section (`search` / `book` / `chapter`) `headers` are all validated at load time.
+* Header values in `book` / `chapter` support template variables. A rendered value is filtered for control characters again (tab is kept) and a warning is logged when filtering occurs; the substituted part may come from page data and cannot be rejected at load time, so the policy is "clean, then send" rather than "reject the whole rule".
+* Top-level `headers` and `search.headers` are **not templated**; variables only work in `book` / `chapter` `headers`.
+* Do not put credentials in a URL; use request headers such as `Authorization` / `Cookie`.
+
+#### Known residual risks
+
+These checks reduce the attack surface but are not a sandbox:
+
+* **DNS rebinding**: a remote rule download does one `getaddrinfo` pre-flight lookup before connecting, but the resolver may return a different address at connection time; without pinning the resolved address to the connection this cannot be fully eliminated.
+* **Redirects to private addresses**: for remote rule downloads, `urlopen` follows a redirect and the final URL is validated afterwards, so a private host may still observe one connection (the response body is not read). Normal book-source fetches validate only the initial URL and let the HTTP client follow redirects; there is **no per-hop private-target check**, so an untrusted site can redirect a request to your LAN or a loopback service.
+* **TOCTOU**: validation and the actual request are separated in time (DNS changes, redirects, server behaviour changes, a replaced rule file). A rule that passed at load time may still face a different network environment when it fetches.
+
+So the **private-address exception plus rules that can issue requests** means: installing an untrusted rule lets it reach the intranet and local services you can reach (including management interfaces bound to loopback only). Install only rules you trust, and do not treat the client's SSRF checks as an isolation boundary.
+
+#### Safe private-source example
+
+```json
+{
+  "site_key": "local_test",
+  "site_name": "Local test source",
+  "base_url": "http://127.0.0.1:8080",
+  "headers": {
+    "User-Agent": "novel-downloader-local-test/1.0"
+  },
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "fields": {
+      "book_name": {"selector": "h1", "attr": "text"}
+    },
+    "chapters": {
+      "item": "ul.chapters li a",
+      "title": {"attr": "text"},
+      "url": {"attr": "href"}
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/chapter/{chapter_id}/",
+    "content": {"selector": "div#content"}
+  }
+}
+```
+
+Draft it as `rules/_local_test.json` (a leading underscore means it is not loaded); remove the underscore and rename it to `rules/local_test.json` to enable it. Keep credentials in `headers`, never in `base_url` or any URL.
+
+#### URL / header: do not do this
+
+| Do not | Why, and what to do instead |
+| --- | --- |
+| `https://user:pass@example.com/` | userinfo is rejected at load time; carry credentials in `headers` |
+| `file:///etc/passwd`, `data:text/html,...`, `javascript:...`, `ftp://...`, `gopher://...` | non-http(s) values are always rejected; scraped links like these are cleared |
+| newlines or other control characters in a URL | rejected; percent-encode characters such as spaces instead of relying on implicit backend handling |
+| `http://127.0.0.1\@evil.com` | a backslash in the authority is rejected; parsers disagree about its meaning |
+| URLs over 8192 characters | rejected outright so one link cannot bloat logs and memory |
+| naming a header `"X-Token: abc"` | a name cannot contain a colon or whitespace; write `{"X-Token": "abc"}` |
+| building `\r\n` into a header value | CR / LF are rejected (header injection); use a single header the site understands |
+| exposing a private source to untrusted rules | the private exception is for self-hosted / local tests; an untrusted rule can use it to scan your intranet |
+| relying on client SSRF checks to isolate remote rules | DNS rebinding, redirects and TOCTOU remain; the trust boundary is the rule's origin |
 
 ---
 

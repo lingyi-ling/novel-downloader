@@ -32,7 +32,7 @@
 - **文件名**以 `_` 开头: 整个文件不加载;
 - **键名**以 `_` 开头: 在规则的结构层 (顶层与各 section) 被忽略, 用作注释。`data` / `json_body` / `headers` 这类自由键值表的内部不受此约定影响。
 
-### 资源上限与 URL 安全
+### 资源上限
 
 规则文件是配置而不是程序, 加载器对以下边界做硬性检查, 越界时拒绝该规则并抛出
 `RuleError` (不会拖垮整个加载流程):
@@ -42,24 +42,143 @@
 | 单个规则文件大小 | 1 MiB (`1024 * 1024` 字节) | 从磁盘读取 (`load_rules`) 与远程安装/抓取分别使用同值的上限 |
 | `fallback` 链嵌套深度 | 16 层 | 每个字段的回退链 |
 | `search.json_body` 嵌套深度 | 32 层 | JSON 请求体 |
-| URL 长度 | 8192 字符 | 规则模板、渲染后的抓取 URL、页面里的链接 |
-| URL scheme | 字面量只允许 `http` / `https` | `search.url`、`book.url`、`chapter.url` 等模板; 相对路径仍允许 |
-| URL userinfo | 禁止 | `https://user:pass@host/` 在加载期即被拒绝, 凭据请写进 `headers` |
-| 请求头字符 | 名称不得含空白/冒号/控制字符, 值不得含控制字符 | 顶层与各段 `headers`; 渲染后的值会再过滤一次 |
 
-* 深度上限防止恶意规则在**校验阶段**就触发 `RecursionError` (那会变成崩溃而不是
-  一条可读的规则错误)。
-* URL 模板里的 `{name}` 占位符会先移除再检查 scheme, 所以
+深度上限防止恶意规则在**校验阶段**就触发 `RecursionError` (那会变成崩溃而不是
+一条可读的规则错误)。
+
+---
+
+### URL 与请求头安全
+
+规则里的 URL 来自三个地方: 规则文件中的模板、模板渲染结果 (`book_id` /
+`chapter_id` 可能取自页面), 以及从页面抓到的 `href` / `src`。三者共用
+`plugins/utils/url_safety.py` 的同一套 allow-list, 不依赖当前配置的是哪个 HTTP
+后端; 各后端再各自加一层底线。
+
+#### URL 白名单
+
+| 检查项 | 规则 |
+| --- | --- |
+| scheme | 只允许 `http` / `https`; `file:` / `ftp:` / `gopher:` / `javascript:` / `data:` 等一律拒绝。模板与页面链接允许无 scheme 的相对路径 (之后按 `base_url` 补全); 媒体下载 (`fetch_data`) 要求绝对 `http(s)` |
+| 长度 | 不超过 8192 字符; 规则模板、渲染后的抓取 URL、页面里的链接使用同一上限 |
+| userinfo | 拒绝 `https://user:pass@host/`。后端会把它变成 `Authorization` 头; 凭据请写进 `headers` |
+| host 混淆 | 拒绝 authority (含 `//host`) 中的反斜杠, 例如 `http://127.0.0.1\@evil.com`; Windows 与 URL 解析器对它的解释不一致 |
+| 控制字符 | 拒绝 C0 (`\x00`-`\x1f`) 与 DEL (`\x7f`); curl 会原样发送其中一部分, aiohttp / httpx 会直接报错 |
+| 主机与端口 | 绝对 URL 必须有主机; 畸形 IPv6 字面量、非数字端口或超出 `1`-`65535` 的端口拒绝 |
+
+* 模板里的 `{name}` 占位符会先移除再检查 scheme, 所以
   `{base_url}/book/{book_id}/` 这类常见写法不受影响; `base_url` 单独校验。
-* 模板渲染后的最终 URL 还会在抓取前再过一次 scheme 检查: 即使模板本身合法,
-  页面数据替换出来的 `file://` / `javascript:` 也会被拒绝。
-* URL 中出现控制字符 (C0 / DEL) 一律拒绝; curl 后端会把这些字节原样发出, 而
-  aiohttp / httpx 会直接报错, 因此统一在入口拦掉。
-* 抓取用的 URL 允许 `http://127.0.0.1`、局域网地址等私网目标 (自建书源与本地
-  测试站点是合法用法); **远程规则下载**走更严的公开地址策略, 见
-  `plugins/rule/remote.py`。
-* 封面等图片链接与章节链接共用同一套 allow-list; `file:` / `data:` 等非 http(s)
-  值会被清空, 不会写进媒体目录。
+* 模板字面量合法不代表渲染结果合法: 最终 URL 在交给 HTTP 客户端前还会再过一次
+  完整 allow-list。页面数据替换出来的 `file://` / `javascript:` 会以可读的
+  `RuleError` 拒绝, 而不是留给某个后端自行处理。
+* 页面里抓到的章节链接与封面链接按同一份名单清洗: 非 `http(s)` 值被清空
+  (相对地址按 `base_url` 补全), 不会写进媒体目录。
+* curl 后端另有 `PROTOCOLS_STR` / `REDIR_PROTOCOLS_STR = "http,https"` 作为
+  后端级兜底; aiohttp / httpx 本身只支持 http(s)。换一个后端不会扩大可访问的
+  协议范围。
+
+#### 私网与回环: 有意允许
+
+`url_safety` **不**拒绝私网、回环和 link-local 地址。自建书源、局域网镜像和本地
+测试站点都是合法用法, 例如 `http://127.0.0.1:8080`、`http://localhost:8000`、
+`http://192.168.1.10`。
+
+这条例外只适用于**规则执行时访问的目标**。**远程规则下载**
+(`sources add --url`、`plugins/rule/remote.py` 的 `fetch_rule`) 走严格得多的
+公开地址策略:
+
+* 只接受 `http(s)`; 拒绝 URL 中的凭据、反斜杠 host、空格 / 控制字符和超过
+  8192 字符的值;
+* 拒绝 `localhost`、`*.localhost`、`*.local`、`*.localdomain`、`*.internal`、
+  `*.home.arpa`、`*.lan`, 以及云元数据主机名 (`metadata.google.internal` 等);
+* 字面 IP 必须是全球可路由地址; `127.1`、`2130706433`、`0x7f000001` 这类
+  非规范数值 host 直接拒绝;
+* 主机名会先做 DNS 解析, 任一解析结果落到私网 / 回环 / link-local 就拒绝;
+* 重定向链的最终地址会重新按同一策略校验, 并拒绝 `https -> http` 降级;
+* 响应体上限 1 MiB, 明显不是 JSON 的 `Content-Type` 会被拒绝。
+
+本地文件安装 (把规则放进 `rules/` 或用户配置目录) 不受远程下载策略影响; 反过来,
+不能用远程下载路径安装一个指向 `127.0.0.1` 的规则文档。
+
+#### 请求头
+
+`headers` 必须是对象; 非对象直接报错, 不会静默当成 `{}`。加载期逐条检查名称和值:
+
+| 部分 | 规则 |
+| --- | --- |
+| 名称 | 不得含控制字符 (含 CR / LF / NUL)、空白或冒号; 形如 `"X: Y"` 的键会让头的语义变得歧义 |
+| 值 | 不得含除制表符 (`\t`) 以外的 C0 控制字符与 DEL; CR / LF / NUL 被拒绝, 用于阻断头注入 |
+
+* 顶层与各段 (`search` / `book` / `chapter`) 的 `headers` 都在加载期校验。
+* book / chapter 段的头值支持模板变量。渲染后的值会再过滤一次控制字符
+  (制表符保留), 并在发生过滤时记录一条 warning; 渲染部分可能来自页面数据,
+  无法在加载期拒绝, 所以这里采用"清洗后发送"而不是"拒绝整条规则"。
+* 顶层 `headers` 与 `search.headers` **不做模板替换**, 变量只写在 book / chapter
+  段的 `headers` 里。
+* 不要把凭据放进 URL; 需要认证时写 `Authorization` / `Cookie` 等请求头。
+
+#### 已知残余风险
+
+这些检查缩小了攻击面, 但不是沙箱:
+
+* **DNS rebinding**: 远程规则下载在连接前做一次 `getaddrinfo` 预检, 实际连接时
+  解析器可能返回另一个地址; 不把解析结果钉死到连接上就无法完全消除。
+* **重定向到私网**: 远程规则下载的重定向是 `urlopen` 先跟随、再校验最终 URL,
+  私网主机仍可能看到一次连接 (响应体不会被读取)。普通书源抓取只校验初始 URL,
+  HTTP 客户端自行跟随重定向, **不会逐跳检查私网目标**; 一个不可信的站点可以把
+  请求重定向到你的局域网或回环服务。
+* **TOCTOU**: 校验与真正发起请求之间存在时间差 (DNS 变化、重定向、服务端行为
+  变化、规则文件被替换)。加载期通过的规则, 在抓取时仍可能面对不同的网络环境。
+
+因此, **私网例外 + 规则可发起请求**意味着: 安装一个来路不明的规则, 等于允许它
+访问你能访问的内网和本机服务 (包括只监听回环的管理接口)。只安装你信任的规则,
+不要把"客户端有 SSRF 防护"当成隔离边界。
+
+#### 安全的私有书源示例
+
+```json
+{
+  "site_key": "local_test",
+  "site_name": "本地测试源",
+  "base_url": "http://127.0.0.1:8080",
+  "headers": {
+    "User-Agent": "novel-downloader-local-test/1.0"
+  },
+  "book": {
+    "url": "{base_url}/book/{book_id}/",
+    "fields": {
+      "book_name": {"selector": "h1", "attr": "text"}
+    },
+    "chapters": {
+      "item": "ul.chapters li a",
+      "title": {"attr": "text"},
+      "url": {"attr": "href"}
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/chapter/{chapter_id}/",
+    "content": {"selector": "div#content"}
+  }
+}
+```
+
+草稿可命名为 `rules/_local_test.json` (下划线开头不加载); 要启用时去掉下划线,
+改成 `rules/local_test.json`。认证信息放在 `headers` 里, 不要拼进 `base_url`
+或任何 URL。
+
+#### URL / 请求头: 不要这样做
+
+| 不要 | 原因与替代做法 |
+| --- | --- |
+| `https://user:pass@example.com/` | userinfo 在加载期就被拒绝; 用 `headers` 携带认证信息 |
+| `file:///etc/passwd`、`data:text/html,...`、`javascript:...`、`ftp://...`、`gopher://...` | 非 http(s) 一律拒绝; 页面里抓到的这类链接会被清空 |
+| URL 中带换行或其他控制字符 | 会被拒绝; 空格等字符请先做百分号编码, 不要依赖后端的隐式处理 |
+| `http://127.0.0.1\@evil.com` | authority 中的反斜杠会被拒绝, 解析器之间没有一致语义 |
+| 超过 8192 字符的 URL | 直接拒绝, 避免日志和内存被单条链接放大 |
+| 在 `headers` 名称里写 `"X-Token: abc"` | 名称不能含冒号或空白; 应拆成 `{"X-Token": "abc"}` |
+| 在 header 值里拼 `\r\n` | CR / LF 被拒绝 (头注入); 需要多值请使用站点支持的单个头 |
+| 对来路不明的规则开放私网源 | 私网允许是给自建 / 本地测试的; 不可信规则可以借它扫描内网 |
+| 依赖客户端 SSRF 检查隔离远程规则 | 仍有 DNS rebinding、重定向、TOCTOU; 信任边界是规则来源 |
 
 ---
 
