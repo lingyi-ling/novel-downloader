@@ -77,6 +77,7 @@ SITE_FILES: tuple[str, ...] = (
     "favicon.svg",
     "og-image.png",
     "robots.txt",
+    "sitemap.xml",
     "sitemap.txt",
 )
 

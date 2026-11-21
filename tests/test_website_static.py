@@ -25,6 +25,7 @@ import struct
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -36,6 +37,7 @@ CSS_FILE = SITE / "style.css"
 JS_FILE = SITE / "main.js"
 ROBOTS = SITE / "robots.txt"
 SITEMAP = SITE / "sitemap.txt"
+SITEMAP_XML = SITE / "sitemap.xml"
 VERSION_FILE = ROOT / "src" / "novel_downloader" / "__init__.py"
 
 VOID_ELEMENTS = {
@@ -1303,9 +1305,16 @@ def test_robots_and_sitemap_agree(doc: _Doc) -> None:
     ][0]
 
     assert "Allow: /" in robots
-    expected = "Sitemap: http://43.165.170.43/noveldl/sitemap.txt"
-    assert expected in robots
+    assert "Sitemap: http://43.165.170.43/noveldl/sitemap.xml" in robots
+    assert "Sitemap: http://43.165.170.43/noveldl/sitemap.txt" in robots
     assert sitemap.strip() == canonical
+
+    root = ET.parse(SITEMAP_XML).getroot()
+    locs = [
+        (loc.text or "").strip()
+        for loc in root.iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
+    ]
+    assert locs == [canonical]
     # no fixed old releases anywhere on the page
     assert "/releases/tag/v" not in INDEX.read_text(encoding="utf-8")
 

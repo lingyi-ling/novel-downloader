@@ -8,8 +8,8 @@ Crawler-facing guards for the hand-written site in ``website/``.
 ``tests/test_website_static.py`` owns accessibility, the no-JS fallback, i18n
 coverage and the loading budget.  This module owns the SEO surface instead:
 title/description budgets in every language the page can render, Open Graph
-and Twitter cards, JSON-LD, hreflang, robots.txt, sitemap.txt, and the local
-link graph that makes the sitemap truthful.
+and Twitter cards, JSON-LD, hreflang, robots.txt, sitemap.xml, sitemap.txt,
+and the local link graph that makes both sitemaps truthful.
 
 Everything is static: no network, no browser, stdlib only.
 """
@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -30,6 +32,7 @@ INDEX = SITE / "index.html"
 ERROR_PAGE = SITE / "404.html"
 ROBOTS = SITE / "robots.txt"
 SITEMAP = SITE / "sitemap.txt"
+SITEMAP_XML = SITE / "sitemap.xml"
 JS = SITE / "main.js"
 
 SITE_ORIGIN = "http://43.165.170.43"
@@ -37,6 +40,10 @@ SITE_PREFIX = "/noveldl/"
 SITE_BASE = f"{SITE_ORIGIN}{SITE_PREFIX}"
 INDEX_URL = SITE_BASE
 ERROR_URL = f"{SITE_BASE}404.html"
+
+#: Namespaces used by the XML sitemap (sitemaps.org core plus hreflang).
+SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
+XHTML_NS = "http://www.w3.org/1999/xhtml"
 
 #: Served for mistyped URLs, never advertised to crawlers.
 NON_INDEXABLE = {"404.html"}
@@ -224,6 +231,15 @@ def _sitemap_urls() -> list[str]:
         for line in text.splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
+
+
+def _xml_sitemap_root() -> ET.Element:
+    """Parse sitemap.xml; a malformed file fails here with a clear error."""
+    return ET.parse(SITEMAP_XML).getroot()
+
+
+def _xml_sitemap_urls(root: ET.Element) -> list[str]:
+    return [(loc.text or "").strip() for loc in root.iter(f"{{{SITEMAP_NS}}}loc")]
 
 
 def _local_page(url: str) -> Path:
@@ -425,20 +441,24 @@ def test_hreflang_alternates_are_self_consistent(index_page: _Page, js: str) -> 
 
 
 # --------------------------------------------------------------------------
-# robots.txt / sitemap.txt
+# robots.txt / sitemap.xml / sitemap.txt
 # --------------------------------------------------------------------------
-def test_robots_points_crawlers_at_the_deployed_sitemap() -> None:
+def test_robots_points_crawlers_at_the_deployed_sitemaps() -> None:
     lines, sitemaps = _parse_robots()
 
     assert "User-agent: *" in lines
     assert "Allow: /" in lines
     assert not any(line.lower() in {"disallow: /", "disallow: *"} for line in lines)
 
-    assert len(sitemaps) == 1, "exactly one Sitemap: directive belongs here"
-    sitemap_url = sitemaps[0]
-    assert sitemap_url == f"{SITE_BASE}sitemap.txt"
-    assert _local_page(sitemap_url) == SITEMAP
-    assert SITEMAP.is_file()
+    # Both formats are advertised, XML first because it carries lastmod and
+    # hreflang; the plain-text list stays for crawlers that prefer it.
+    assert sitemaps == [
+        f"{SITE_BASE}sitemap.xml",
+        f"{SITE_BASE}sitemap.txt",
+    ]
+    assert _local_page(sitemaps[0]) == SITEMAP_XML
+    assert _local_page(sitemaps[1]) == SITEMAP
+    assert SITEMAP_XML.is_file() and SITEMAP.is_file()
     # The robots file itself must be reachable under the same prefix.
     assert _local_page(f"{SITE_BASE}robots.txt") == ROBOTS
 
@@ -467,6 +487,55 @@ def test_sitemap_lists_every_indexable_page_once(index_page: _Page) -> None:
     indexable = {path.name for path in SITE.glob("*.html")} - NON_INDEXABLE
     listed = {_local_page(url).name for url in urls}
     assert listed == indexable
+
+
+def test_xml_sitemap_is_wellformed_and_matches_the_canonical(
+    index_page: _Page,
+) -> None:
+    root = _xml_sitemap_root()
+    assert root.tag == f"{{{SITEMAP_NS}}}urlset"
+    assert not root.findall(f"{{{SITEMAP_NS}}}sitemapindex"), (
+        "sitemap.xml is a URL set, not an index of other sitemaps"
+    )
+
+    entries = root.findall(f"{{{SITEMAP_NS}}}url")
+    locs = _xml_sitemap_urls(root)
+    canonical = _canonical(index_page)
+
+    assert len(entries) == len(locs) == 1
+    assert locs == [canonical], "the XML sitemap must list the canonical URL"
+    assert len(locs) == len(set(locs)), "sitemap.xml contains duplicates"
+
+    # Each <loc> must serve a real page under the deployed prefix.
+    page = _local_page(locs[0])
+    assert page.is_file()
+    assert page == INDEX
+
+    # Every deployed HTML page except the 404 is listed exactly once.
+    indexable = {path.name for path in SITE.glob("*.html")} - NON_INDEXABLE
+    assert {_local_page(loc).name for loc in locs} == indexable
+    assert ERROR_URL not in locs, "a 404 page must never be advertised"
+    assert "404" not in SITEMAP_XML.read_text(encoding="utf-8")
+
+    # lastmod is a stable, hand-maintained date: present, ISO, not in the
+    # future.  Deriving it from mtimes would drift on every fresh checkout.
+    lastmod = entries[0].findtext(f"{{{SITEMAP_NS}}}lastmod")
+    assert lastmod is not None
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", lastmod), lastmod
+    assert date.fromisoformat(lastmod) <= date.today(), lastmod
+
+    # The hreflang annotations must match the page's own <link rel=alternate>
+    # set, or the sitemap would advertise languages the page does not render.
+    links = [
+        link
+        for link in entries[0].findall(f"{{{XHTML_NS}}}link")
+        if link.get("rel") == "alternate"
+    ]
+    tags = [link.get("hreflang", "") for link in links]
+    assert len(tags) == len(set(tags)), "duplicate hreflang in sitemap.xml"
+    alternates = {link.get("hreflang", ""): link.get("href", "") for link in links}
+    assert alternates == _alternates(index_page)
+    assert parse_qs(urlparse(alternates["en"]).query) == {"lang": ["en"]}
 
 
 # --------------------------------------------------------------------------
@@ -538,6 +607,7 @@ def test_404_is_not_advertised_to_crawlers(error_text: str, error_page: _Page) -
     assert "noindex" in robots[0].lower()
 
     assert ERROR_URL not in _sitemap_urls()
+    assert ERROR_URL not in _xml_sitemap_urls(_xml_sitemap_root())
     # A noindex page must not claim the home page's canonical (or any other).
     assert not [link for link in error_page.links if link.get("rel") == "canonical"]
     assert not [

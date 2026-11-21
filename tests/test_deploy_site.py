@@ -111,6 +111,34 @@ def test_the_404_page_is_published() -> None:
     assert (_SCRIPT.parent.parent / "website" / "404.html").is_file()
 
 
+def test_both_sitemaps_are_published() -> None:
+    """An unpublishable sitemap is invisible to crawlers, so list both."""
+    website = _SCRIPT.parent.parent / "website"
+    assert "sitemap.xml" in deploy_site.SITE_FILES
+    assert "sitemap.txt" in deploy_site.SITE_FILES
+    assert (website / "sitemap.xml").is_file()
+    assert (website / "sitemap.txt").is_file()
+    # sitemap.xml comes first in the declared order: it is the richer format.
+    assert deploy_site.SITE_FILES.index("sitemap.xml") < deploy_site.SITE_FILES.index(
+        "sitemap.txt"
+    )
+
+
+def test_dry_run_includes_the_xml_sitemap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site = _make_site(tmp_path, deploy_site.SITE_FILES)
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("dry run must not open a connection")
+
+    monkeypatch.setattr(deploy_site, "_connect", _boom)
+
+    names = deploy_site.deploy(site_dir=site, dry_run=True)
+
+    assert names.count("sitemap.xml") == 1
+
+
 def test_dry_run_includes_the_404_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

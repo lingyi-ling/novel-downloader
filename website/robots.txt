@@ -1,4 +1,5 @@
 User-agent: *
 Allow: /
 
+Sitemap: http://43.165.170.43/noveldl/sitemap.xml
 Sitemap: http://43.165.170.43/noveldl/sitemap.txt
