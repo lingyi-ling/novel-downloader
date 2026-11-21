@@ -854,10 +854,22 @@ def _recency_score(updated: datetime | None, now: datetime) -> float:
     # datetime onto that naive local timeline first: subtracting mixed
     # offset-aware/naive datetimes raises ``TypeError`` and would take down
     # the whole aggregate search.
+    #
+    # ``astimezone()`` consults the platform time-zone library for the
+    # conversion.  On Windows it rejects an out-of-range result with
+    # ``OSError`` (year 9999 + a positive offset overflows, year 1 + a
+    # negative one underflows); a mis-scraped date must not crash a search,
+    # so fall back to the value's own wall time with the offset dropped.
     if now.tzinfo is not None:
-        now = now.astimezone().replace(tzinfo=None)
+        try:
+            now = now.astimezone().replace(tzinfo=None)
+        except (OSError, OverflowError, ValueError):
+            now = now.replace(tzinfo=None)
     if updated.tzinfo is not None:
-        updated = updated.astimezone().replace(tzinfo=None)
+        try:
+            updated = updated.astimezone().replace(tzinfo=None)
+        except (OSError, OverflowError, ValueError):
+            updated = updated.replace(tzinfo=None)
     days = max(0.0, (now - updated).total_seconds() / 86400.0)
     if days <= 1:
         return 1.0
