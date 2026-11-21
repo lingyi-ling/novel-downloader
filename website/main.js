@@ -423,23 +423,51 @@ if (releaseEl) {
   const MANIFEST_URL =
     "https://github.com/lingyi-ling/novel-downloader/releases/latest/download/latest.json";
 
-  async function latestVersion() {
+  /* The chip is decorative: a version is only shown once one has been
+     confirmed, so a failed lookup leaves it hidden instead of advertising a
+     stale number baked into the HTML. The pattern is deliberately loose about
+     suffixes (1.36.0rc1, 1.36.0.dev1, 1.36.0+build) but still refuses anything
+     that does not start with a major.minor number. */
+  const VERSION_RE = /^\d+\.\d+[0-9A-Za-z.+-]*$/;
+  /* GitHub serves release assets from a signed CDN host that sends no
+     Access-Control-Allow-Origin header, so a browser fetch of the manifest is
+     normally rejected by CORS. Remember that verdict for the session and go
+     straight to the API on the next page view instead of re-issuing a request
+     that can only fail. */
+  const MANIFEST_BLOCKED_KEY = "noveldl-manifest-blocked";
+
+  async function manifestVersion() {
     try {
-      const resp = await fetch(MANIFEST_URL, { cache: "no-cache" });
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data && typeof data.version === "string" && data.version) {
-          return data.version;
-        }
-      }
+      if (sessionStorage.getItem(MANIFEST_BLOCKED_KEY) === "1") return "";
+    } catch { /* private mode: try the request anyway */ }
+    let resp;
+    try {
+      resp = await fetch(MANIFEST_URL, { cache: "no-cache" });
     } catch {
-      /* offline or blocked: fall through to the API */
+      // A thrown fetch means offline or a CORS rejection, not a bad document:
+      // remember it so the next page view skips a request that cannot succeed.
+      try { sessionStorage.setItem(MANIFEST_BLOCKED_KEY, "1"); } catch { /* private mode */ }
+      return "";
     }
+    if (!resp.ok) return "";
+    try {
+      const data = await resp.json();
+      if (data && typeof data.version === "string" && VERSION_RE.test(data.version)) {
+        return data.version;
+      }
+    } catch { /* not JSON: fall through to the API */ }
+    return "";
+  }
+
+  async function latestVersion() {
+    const fromManifest = await manifestVersion();
+    if (fromManifest) return fromManifest;
     const d = await ghJson(
       "/repos/lingyi-ling/novel-downloader/releases/latest",
       "gh-release",
     );
-    return String(d.tag_name || "").replace(/^v/, "");
+    const tag = String(d.tag_name || "").replace(/^v/, "");
+    return VERSION_RE.test(tag) ? tag : "";
   }
 
   whenIdle(() => {
@@ -451,9 +479,13 @@ if (releaseEl) {
           n.textContent = ver;
           releaseEl.hidden = false;
         }
-        // keep the showcase mock's version pill in sync with the real release
+        // keep the showcase mock's version pill in sync with the real release;
+        // it starts hidden so the mock never shows a stale hard-coded number
         const pill = document.getElementById("appwin-ver");
-        if (pill) pill.textContent = "v" + ver;
+        if (pill) {
+          pill.textContent = "v" + ver;
+          pill.hidden = false;
+        }
         // keep the JSON-LD softwareVersion in sync too
         const ld = document.getElementById("ld-software");
         if (ld) {

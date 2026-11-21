@@ -482,6 +482,9 @@ svg { display: block; }
   color: var(--accent-ink); background: var(--accent-soft);
   border-radius: 99px; padding: 2px 9px;
 }
+/* The pill starts empty and hidden: main.js fills it from the live release,
+   so the mock must not paint an empty capsule (or a stale version) first. */
+.appwin-pill[hidden] { display: none; }
 .appwin-body {
   display: grid; grid-template-columns: 150px 1fr; min-height: 300px;
 }

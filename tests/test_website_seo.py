@@ -402,6 +402,60 @@ def test_jsonld_describes_the_canonical_page(index_page: _Page) -> None:
     )
 
 
+def test_jsonld_download_url_is_the_stable_release_alias(index_page: _Page) -> None:
+    """Structured data must point at the "latest" alias, not a fixed tag.
+
+    ``downloadUrl`` is what a search result's install link resolves to. A
+    ``/releases/tag/v1.36.0`` or ``/releases/download/v1.36.0/...`` URL there
+    turns into a stale (or 404) link the moment the next release ships, and
+    crawlers cache it far longer than the page's own markup.
+    """
+    payloads = [json.loads(raw) for raw in index_page.ld_json]
+    app = next(
+        payload for payload in payloads if payload.get("@type") == "SoftwareApplication"
+    )
+    url = app["downloadUrl"]
+    assert url == ("https://github.com/lingyi-ling/novel-downloader/releases/latest"), (
+        url
+    )
+    assert "/releases/tag/" not in url
+    assert not re.search(r"/releases/download/v?\d", url)
+
+
+def test_software_version_is_the_only_static_version(index_text: str) -> None:
+    """Exactly one version literal may be in the markup, and it must be JSON-LD.
+
+    The JSON-LD ``softwareVersion`` is the one value that has to be static for
+    crawlers (and ``test_jsonld_is_parsable_and_version_matches`` pins it to
+    the package version). Every *visible* version — the hero chip and the
+    showcase pill — is filled in by main.js from the live manifest, so no
+    second literal may drift out of date between releases.
+    """
+    # drop scripts and comments: neither renders a version a visitor reads
+    without_scripts = re.sub(
+        r"<script\b[^>]*>.*?</script>", "", index_text, flags=re.S | re.I
+    )
+    without_comments = re.sub(r"<!--.*?-->", "", without_scripts, flags=re.S)
+    visible = re.sub(r"<[^>]+>", " ", without_comments)
+    # 127.0.0.1 in the curl examples is not a version; require three numeric
+    # components that are not part of a dotted quad or an asset filename
+    literals = [
+        match.group(1)
+        for match in re.finditer(r"(?<![\d.])(\d+\.\d+\.\d+)(?![\d.])", visible)
+    ]
+    literals = [value for value in literals if value != "127.0.0"]
+    assert not literals, f"hard-coded version(s) in visible markup: {literals}"
+
+    # the JSON-LD block is allowed exactly one, and it is present
+    ld_blocks = re.findall(
+        r'<script id="ld-software" type="application/ld\+json">(.*?)</script>',
+        index_text,
+        re.S,
+    )
+    assert len(ld_blocks) == 1
+    assert re.search(r'"softwareVersion"\s*:\s*"\d+\.\d+\.\d+"', ld_blocks[0])
+
+
 # --------------------------------------------------------------------------
 # hreflang
 # --------------------------------------------------------------------------

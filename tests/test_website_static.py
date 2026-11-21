@@ -1168,6 +1168,133 @@ def test_download_links_use_the_latest_release(doc: _Doc) -> None:
         assert "/releases/tag/" not in href, href
 
 
+def test_release_asset_links_use_stable_download_urls(doc: _Doc) -> None:
+    """Asset links must resolve through the ``releases/latest/download`` alias.
+
+    A ``releases/download/v<version>/<asset>`` URL pins one release and starts
+    returning 404 the moment a newer one is published; the alias always points
+    at the newest release, so the two verification links keep working without
+    a site edit on every version bump.
+    """
+    base = "https://github.com/lingyi-ling/novel-downloader/releases/latest/download/"
+    asset_links = [
+        data["href"]
+        for data in doc.with_attr("href")
+        if re.search(r"/releases/(?:latest/)?download/", data.get("href", ""))
+    ]
+    assert asset_links, "the download section must link its published assets"
+    for href in asset_links:
+        assert href.startswith(base), f"pinned or foreign asset URL: {href}"
+        # a versioned path here would go stale on the next release
+        assert not re.search(r"/releases/download/v?\d", href), href
+
+
+def test_download_links_work_without_javascript(doc: _Doc) -> None:
+    """Every download entry point is a real ``<a href>`` in the static HTML.
+
+    The section is inside the scroll-reveal system, so it must also carry no
+    ``hidden`` attribute and no JS-only handler: with scripting off (or a
+    blocked main.js) the links still navigate.
+    """
+    section_links = [
+        (data, ancestors)
+        for data, ancestors in doc.by_tag("a")
+        if any(
+            tag == "section" and attrs.get("id") == "download"
+            for tag, attrs in ancestors
+        )
+    ]
+    assert len(section_links) >= 3
+    for data, ancestors in section_links:
+        assert data.get("href", "").strip(), "a download link has no href"
+        assert not data.get("href", "").startswith("javascript:"), data
+        assert "hidden" not in data
+        assert "onclick" not in data
+        # scroll-reveal may hide the card until observed; noscript un-hides it,
+        # and no ancestor may be unconditionally hidden either
+        assert all("hidden" not in attrs for _, attrs in ancestors)
+
+    # the anchor targets resolve to sections that actually exist
+    for data in doc.with_attr("href"):
+        href = data["href"]
+        if href.startswith("#") and href != "#":
+            assert href[1:] in set(doc.ids), f"dead in-page download anchor: {href}"
+
+
+def test_version_chip_is_never_hardcoded(doc: _Doc, js: str) -> None:
+    """The displayed release version comes from the live manifest/API.
+
+    A version baked into the markup silently rots between releases: the page
+    keeps advertising whatever number was current when it was last edited. The
+    chip and the showcase pill must therefore ship empty and hidden, and
+    main.js must be the only writer.
+    """
+    for element_id in ("gh-release-n", "appwin-ver"):
+        matches = [data for data in doc.with_attr("id") if data["id"] == element_id]
+        assert len(matches) == 1, element_id
+
+    # Each version node must start hidden, either on itself or on its chip
+    # wrapper, so an unresolved lookup never paints an empty or stale value.
+    for element_id in ("gh-release-n", "appwin-ver"):
+        nodes = [
+            (data, ancestors)
+            for _, data, ancestors in doc.elements
+            if data.get("id") == element_id
+        ]
+        assert len(nodes) == 1, element_id
+        data, ancestors = nodes[0]
+        assert "hidden" in data or any("hidden" in attrs for _, attrs in ancestors), (
+            f"#{element_id} must start hidden"
+        )
+
+    # neither node may ship a version literal: the value is always fetched
+    for element_id in ("gh-release-n", "appwin-ver"):
+        texts = [
+            text.strip()
+            for text, ancestors in doc.texts
+            if any(attrs.get("id") == element_id for _, attrs in ancestors)
+        ]
+        assert not any(re.search(r"\d+\.\d+\.\d+", text) for text in texts), (
+            f"#{element_id} ships a hard-coded version: {texts}"
+        )
+
+    # the chip's wrapping element also starts hidden
+    release = [data for data in doc.with_attr("id") if data["id"] == "gh-release"]
+    assert len(release) == 1 and "hidden" in release[0]
+
+    assert "releaseEl.hidden = false" in js
+    assert re.search(r'pill\.textContent = "v" \+ ver', js)
+    assert re.search(r"pill\.hidden = false", js)
+
+
+def test_manifest_lookup_falls_back_to_the_github_api(js: str) -> None:
+    """latest.json is tried first, the rate-limited API is the fallback.
+
+    GitHub serves release assets without an Access-Control-Allow-Origin
+    header, so the manifest fetch is expected to be blocked in a browser; the
+    code must therefore treat a rejection as "fall back", never as a fatal
+    error, and must still hide the chip when both sources fail.
+    """
+    assert (
+        "https://github.com/lingyi-ling/novel-downloader/"
+        "releases/latest/download/latest.json" in js
+    )
+    assert re.search(r"async function manifestVersion\(\)", js)
+    # a rejected manifest fetch is caught and remembered, not thrown onward
+    assert re.search(
+        r"resp = await fetch\(MANIFEST_URL[\s\S]{0,400}?catch \{[\s\S]{0,300}?"
+        r"sessionStorage\.setItem\(MANIFEST_BLOCKED_KEY",
+        js,
+    ), "a CORS/offline rejection must be caught and remembered"
+    # the API fallback stays in place
+    assert "/repos/lingyi-ling/novel-downloader/releases/latest" in js
+    assert re.search(r'\.replace\(/\^v/, ""\)', js)
+    # a failed lookup leaves the chip hidden instead of showing a stale number
+    assert re.search(r"if \(!ver\) return;", js)
+    # no render path can write a version without a validated value
+    assert re.search(r"VERSION_RE\.test", js)
+
+
 def test_footer_release_notes_link_is_static_and_safe(doc: _Doc) -> None:
     """The changelog entry must be a plain footer link: usable with JS off,
     opened safely, bilingual, and pointed at a file that actually exists."""
@@ -1277,6 +1404,71 @@ def test_download_verification_is_fully_bilingual(html_text: str) -> None:
     assert "Verify your download" in english
     assert "Windows (PowerShell)" in english
     assert "not a signature" in english
+
+
+def test_verification_commands_are_executable_and_cover_the_apk(
+    html_text: str,
+) -> None:
+    """The copy-paste recipes must cover every shipped artifact, including the APK.
+
+    ``Get-FileHash -Path`` does expand wildcards in Windows PowerShell 5.1, so
+    a glob is a valid argument (verified against the real command). What the
+    recipe must guarantee is *coverage*: the previous single pattern only
+    matched ``NovelDownloader-setup-*.exe``, leaving the portable zip and the
+    hand-sideloaded APK — the artifact most in need of a checksum — with no
+    recipe at all. Both globs together match every published Windows asset and
+    the APK, and ``Get-FileHash`` deduplicates the overlap between them.
+    """
+    block = _verify_dl_block(html_text)
+    code = " ".join(re.findall(r"<code>(.*?)</code>", block, re.S))
+    code = re.sub(r"<[^>]+>", "", code)
+
+    # the PowerShell recipe is a single Get-FileHash call over globs
+    assert re.search(r"Get-FileHash\s+\.\\[^\n]*\*[^\n]*-Algorithm SHA256", code), (
+        "the PowerShell recipe must hash the published archives by glob"
+    )
+    # a lone setup-exe glob would silently skip the portable zip and the APK
+    assert not re.search(
+        r"Get-FileHash\s+\.\\NovelDownloader-setup-[^\n]*$", code, re.M
+    ), "the recipe must not be limited to the setup exe"
+
+    # every shipped archive shape is covered by at least one recipe: the
+    # desktop archives (zip/exe) via the NovelDownloader-* glob, the APK by
+    # name, and the zip/apk named explicitly in the shasum/sha256sum lines
+    assert ".apk" in code, "the Android APK has no verification recipe"
+    assert ".zip" in code
+    assert "NovelDownloader-*" in code, "the desktop archives must be hashed too"
+    for recipe in ("shasum -a 256", "sha256sum"):
+        line = next(line for line in code.splitlines() if recipe in line)
+        assert ".apk" in line, f"{recipe} recipe must hash the APK too"
+
+
+def test_checksum_instructions_name_the_published_file(html_text: str) -> None:
+    """A reader must be able to find SHA256SUMS.txt from the prose alone.
+
+    The link label alone is not enough: the explanatory paragraph has to name
+    the file and say what it contains, so someone who only reads the copy (and
+    never clicks) still knows what to download and compare against.
+    """
+    block = _verify_dl_block(html_text)
+    paragraphs = re.findall(r"<p\b[^>]*>(.*?)</p>", block, re.S)
+    prose = " ".join(re.sub(r"<[^>]+>", " ", p) for p in paragraphs)
+
+    # the prose itself names the checksum file, not just the link label
+    assert "SHA256SUMS.txt" in prose
+    # and explains that it lists each file with its digest
+    assert "SHA-256" in prose
+    assert "latest.json" in prose
+    # both languages carry the instruction
+    assert re.search(r'data-en="[^"]*SHA256SUMS\.txt', block), (
+        "the English copy must name SHA256SUMS.txt too"
+    )
+
+    # and it is linked on the stable alias, next to the manifest
+    assert (
+        "https://github.com/lingyi-ling/novel-downloader/"
+        "releases/latest/download/SHA256SUMS.txt"
+    ) in block
 
 
 def test_canonical_and_locale_metadata(doc: _Doc) -> None:
