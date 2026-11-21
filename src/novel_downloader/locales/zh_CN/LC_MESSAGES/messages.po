@@ -642,7 +642,7 @@ msgstr "清理应用日志、缓存与书籍数据"
 #: src/novel_downloader/apps/cli/commands/follow.py:360
 #: src/novel_downloader/apps/cli/commands/music.py:582
 #: src/novel_downloader/apps/cli/commands/sources.py:227
-#: src/novel_downloader/apps/cli/commands/storage.py:470
+#: src/novel_downloader/apps/cli/commands/storage.py:505
 msgid "Subcommands"
 msgstr "子命令"
 
@@ -677,7 +677,7 @@ msgstr "确定要删除内部状态吗?"
 #: src/novel_downloader/apps/cli/commands/clean.py:685
 #: src/novel_downloader/apps/cli/commands/clean.py:736
 #: src/novel_downloader/apps/cli/commands/music.py:907
-#: src/novel_downloader/apps/cli/commands/storage.py:425
+#: src/novel_downloader/apps/cli/commands/storage.py:460
 #: src/novel_downloader/apps/cli/commands/update.py:385
 #: src/novel_downloader/apps/cli/interactive.py:94
 #: src/novel_downloader/apps/cli/interactive.py:125
@@ -792,7 +792,7 @@ msgstr "在 {path} 未找到 {desc}"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:294
 #: src/novel_downloader/apps/cli/commands/clean.py:464
-#: src/novel_downloader/apps/cli/commands/storage.py:396
+#: src/novel_downloader/apps/cli/commands/storage.py:431
 #, python-brace-format
 msgid "Failed to inspect {desc}: {error}"
 msgstr "检查 {desc} 失败：{error}"
@@ -810,14 +810,14 @@ msgstr "确定要删除缓存目录 {desc} 吗？"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:323
 #: src/novel_downloader/apps/cli/commands/clean.py:615
-#: src/novel_downloader/apps/cli/commands/storage.py:439
+#: src/novel_downloader/apps/cli/commands/storage.py:474
 #, python-brace-format
 msgid "Successfully removed {desc}."
 msgstr "已成功删除 {desc}"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:326
 #: src/novel_downloader/apps/cli/commands/clean.py:617
-#: src/novel_downloader/apps/cli/commands/storage.py:443
+#: src/novel_downloader/apps/cli/commands/storage.py:478
 #, python-brace-format
 msgid "Failed to remove {desc}: {error}"
 msgstr "删除 {desc} 失败: {error}"
@@ -904,7 +904,7 @@ msgstr "未提供站点"
 
 #: src/novel_downloader/apps/cli/commands/clean.py:526
 #: src/novel_downloader/apps/cli/commands/clean.py:727
-#: src/novel_downloader/apps/cli/commands/storage.py:414
+#: src/novel_downloader/apps/cli/commands/storage.py:449
 msgid "Nothing to clean."
 msgstr "没有需要清理的内容。"
 
@@ -1044,7 +1044,7 @@ msgstr "如果文件已存在则强制覆盖"
 #: src/novel_downloader/apps/cli/commands/music.py:810
 #: src/novel_downloader/apps/cli/commands/music.py:1351
 #: src/novel_downloader/apps/cli/commands/sources.py:249
-#: src/novel_downloader/apps/cli/commands/storage.py:487
+#: src/novel_downloader/apps/cli/commands/storage.py:522
 msgid "Print machine-readable JSON on stdout and exit."
 msgstr "以 JSON 输出到标准输出并退出。"
 
@@ -2518,406 +2518,406 @@ msgstr "远程规则不是合法的 UTF-8：{err}"
 msgid "Removed rule '{key}' from {target}"
 msgstr "已从 {target} 移除规则 '{key}'"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:109
+#: src/novel_downloader/apps/cli/commands/storage.py:112
 msgid "Raw data"
 msgstr "原始数据"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:110
+#: src/novel_downloader/apps/cli/commands/storage.py:113
 msgid "Cache"
 msgstr "缓存"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:111
+#: src/novel_downloader/apps/cli/commands/storage.py:114
 msgid "Downloads"
 msgstr "下载"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:112
+#: src/novel_downloader/apps/cli/commands/storage.py:115
 msgid "Logs"
 msgstr "日志"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:339
+#: src/novel_downloader/apps/cli/commands/storage.py:374
 msgid "Total"
 msgstr "总计"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:341
+#: src/novel_downloader/apps/cli/commands/storage.py:376
 msgid "Storage usage"
 msgstr "存储占用"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:342
+#: src/novel_downloader/apps/cli/commands/storage.py:377
 msgid "Directory"
 msgstr "目录"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:342
+#: src/novel_downloader/apps/cli/commands/storage.py:377
 msgid "Path"
 msgstr "路径"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:342
+#: src/novel_downloader/apps/cli/commands/storage.py:377
 msgid "Files"
 msgstr "文件"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:342
+#: src/novel_downloader/apps/cli/commands/storage.py:377
 msgid "Size"
 msgstr "大小"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:342
+#: src/novel_downloader/apps/cli/commands/storage.py:377
 msgid "Free"
 msgstr "可用"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:349
+#: src/novel_downloader/apps/cli/commands/storage.py:384
 #, python-brace-format
 msgid "Reclaimable with 'clean cache' and 'clean logs': {size}"
 msgstr "可通过 'clean cache' 和 'clean logs' 释放：{size}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:418
+#: src/novel_downloader/apps/cli/commands/storage.py:453
 #, python-brace-format
 msgid "{label}: {path}"
 msgstr "{label}：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:421
+#: src/novel_downloader/apps/cli/commands/storage.py:456
 #, python-brace-format
 msgid "Remove all data in these {count} director(ies)?"
 msgstr "要删除这 {count} 个目录中的全部数据吗？"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:452
+#: src/novel_downloader/apps/cli/commands/storage.py:487
 msgid "Show disk usage of the application's data directories."
 msgstr "显示应用数据目录的磁盘占用。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:472
+#: src/novel_downloader/apps/cli/commands/storage.py:507
 msgid ""
 "Manage chapter databases; without a subcommand this command reports disk "
 "usage."
 msgstr "管理章节数据库；不带子命令时，本命令报告磁盘占用。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:492
+#: src/novel_downloader/apps/cli/commands/storage.py:527
 msgid "Remove the data directories listed by this command."
 msgstr "删除本命令列出的数据目录。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:498
+#: src/novel_downloader/apps/cli/commands/storage.py:533
 msgid "Skip the confirmation prompt used by --clean."
 msgstr "跳过 --clean 的确认提示。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:503
+#: src/novel_downloader/apps/cli/commands/storage.py:538
 msgid "Show what --clean would remove without deleting anything."
 msgstr "显示 --clean 会删除哪些内容，但不实际删除。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:513
+#: src/novel_downloader/apps/cli/commands/storage.py:548
 msgid "--dry-run requires --clean."
 msgstr "--dry-run 需要 --clean。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:515
+#: src/novel_downloader/apps/cli/commands/storage.py:550
 msgid "--json and --clean cannot be combined."
 msgstr "--json 与 --clean 不能同时使用。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:994
+#: src/novel_downloader/apps/cli/commands/storage.py:1033
 #, python-brace-format
 msgid "Would remove old backup {path}."
 msgstr "将删除旧备份 {path}。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1001
+#: src/novel_downloader/apps/cli/commands/storage.py:1045
 #, python-brace-format
 msgid "Failed to remove old backup {path}: {error}"
 msgstr "删除旧备份 {path} 失败：{error}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1008
+#: src/novel_downloader/apps/cli/commands/storage.py:1052
 #, python-brace-format
 msgid "Removed old backup {path}."
 msgstr "已删除旧备份 {path}。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1016
+#: src/novel_downloader/apps/cli/commands/storage.py:1060
 #, python-brace-format
 msgid ""
 "Retention: {count} old backup(s) would be removed, keeping the newest "
 "{keep} per book and stage."
 msgstr "保留策略：将删除 {count} 个旧备份，每本书的每个阶段保留最新 {keep} 个。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1023
+#: src/novel_downloader/apps/cli/commands/storage.py:1067
 #, python-brace-format
 msgid ""
 "Retention: removed {count} old backup(s), keeping the newest {keep} per "
 "book and stage."
 msgstr "保留策略：已删除 {count} 个旧备份，每本书的每个阶段保留最新 {keep} 个。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1065
+#: src/novel_downloader/apps/cli/commands/storage.py:1138
 #, python-brace-format
 msgid "Backup target already exists, refusing to overwrite: {path}"
 msgstr "备份目标已存在，拒绝覆盖：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1112
+#: src/novel_downloader/apps/cli/commands/storage.py:1375
 #, python-brace-format
 msgid ""
 "Backup verification failed for {target}: {reason}. No backup from this "
 "run was kept; the source databases are unchanged."
 msgstr "备份校验失败（{target}）：{reason}。本次运行未保留任何备份；源数据库保持不变。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1152
+#: src/novel_downloader/apps/cli/commands/storage.py:1415
 #, python-brace-format
 msgid "Backup destination is not a directory: {path}"
 msgstr "备份目标不是目录：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1171
-#: src/novel_downloader/apps/cli/commands/storage.py:1283
+#: src/novel_downloader/apps/cli/commands/storage.py:1434
+#: src/novel_downloader/apps/cli/commands/storage.py:1560
 #, python-brace-format
 msgid "Failed to back up {source}: {error}"
 msgstr "备份 {source} 失败：{error}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1211
+#: src/novel_downloader/apps/cli/commands/storage.py:1474
 msgid "No chapter databases found to back up."
 msgstr "未找到可备份的章节数据库。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1256
+#: src/novel_downloader/apps/cli/commands/storage.py:1533
 #, python-brace-format
 msgid "Backed up {source} -> {target}."
 msgstr "已将 {source} 备份到 {target}。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1322
+#: src/novel_downloader/apps/cli/commands/storage.py:1587
+#, python-brace-format
+msgid "Created {count} backup file(s) in {path}."
+msgstr "已在 {path} 创建 {count} 个备份文件。"
+
+#: src/novel_downloader/apps/cli/commands/storage.py:1618
 #, python-brace-format
 msgid ""
 "Retention failed: {count} old backup(s) could not be removed; the new "
 "backups were kept."
 msgstr "轮转失败: {count} 份旧备份无法删除; 新备份已保留。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1333
-#, python-brace-format
-msgid "Created {count} backup file(s) in {path}."
-msgstr "已在 {path} 创建 {count} 个备份文件。"
-
-#: src/novel_downloader/apps/cli/commands/storage.py:1360
-#: src/novel_downloader/apps/cli/commands/storage.py:1374
-#: src/novel_downloader/apps/cli/commands/storage.py:1569
+#: src/novel_downloader/apps/cli/commands/storage.py:1643
+#: src/novel_downloader/apps/cli/commands/storage.py:1657
+#: src/novel_downloader/apps/cli/commands/storage.py:1852
 #, python-brace-format
 msgid "Cannot derive a restore target from {path}; pass --to."
 msgstr "无法从 {path} 推断恢复目标；请传入 --to。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1458
-#: src/novel_downloader/apps/cli/commands/storage.py:1558
+#: src/novel_downloader/apps/cli/commands/storage.py:1741
+#: src/novel_downloader/apps/cli/commands/storage.py:1841
 #, python-brace-format
 msgid "Restore target must be named like chapter.<stage>.sqlite: {path}"
 msgstr "恢复目标的文件名必须形如 chapter.<stage>.sqlite：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1473
+#: src/novel_downloader/apps/cli/commands/storage.py:1756
 #, python-brace-format
 msgid "Restore target must be inside the raw data directory: {path}"
 msgstr "恢复目标必须位于原始数据目录内：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1493
+#: src/novel_downloader/apps/cli/commands/storage.py:1776
 #, python-brace-format
 msgid "Refusing to restore through a symbolic link: {path}"
 msgstr "拒绝通过符号链接恢复：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1502
+#: src/novel_downloader/apps/cli/commands/storage.py:1785
 #, python-brace-format
 msgid "Restore target is not a database file: {path}"
 msgstr "恢复目标不是数据库文件：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1637
+#: src/novel_downloader/apps/cli/commands/storage.py:1920
 #, python-brace-format
 msgid "--to must name a directory when the backup set holds {count} database(s)."
 msgstr "备份集中有 {count} 个数据库时，--to 必须指向目录。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1668
+#: src/novel_downloader/apps/cli/commands/storage.py:1951
 #, python-brace-format
 msgid "Refusing to restore from a symbolic link: {path}"
 msgstr "拒绝从符号链接恢复：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1681
+#: src/novel_downloader/apps/cli/commands/storage.py:1964
 #, python-brace-format
 msgid "Refusing to restore a file onto itself: {path}"
 msgstr "拒绝将文件恢复到自身：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1688
+#: src/novel_downloader/apps/cli/commands/storage.py:1971
 #, python-brace-format
 msgid "Refusing to restore into the backup directory: {path}"
 msgstr "拒绝恢复到备份目录内：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1703
+#: src/novel_downloader/apps/cli/commands/storage.py:1986
 #, python-brace-format
 msgid ""
 "Refusing to overwrite {path} without --force (the existing database would"
 " be backed up first)."
 msgstr "未指定 --force，拒绝覆盖 {path}（会先备份现有数据库）。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1893
-#: src/novel_downloader/apps/cli/commands/storage.py:1902
+#: src/novel_downloader/apps/cli/commands/storage.py:2176
+#: src/novel_downloader/apps/cli/commands/storage.py:2185
 #, python-brace-format
 msgid "Restore source does not exist: {path}"
 msgstr "要恢复的源文件不存在：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1918
+#: src/novel_downloader/apps/cli/commands/storage.py:2201
 #, python-brace-format
 msgid "Failed to read {source}: {error}"
 msgstr "读取 {source} 失败：{error}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1928
+#: src/novel_downloader/apps/cli/commands/storage.py:2211
 #, python-brace-format
 msgid "No backup files found in {path}."
 msgstr "在 {path} 中没有找到备份文件。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1945
+#: src/novel_downloader/apps/cli/commands/storage.py:2228
 #, python-brace-format
 msgid "Backup file is not a valid chapter database: {error}"
 msgstr "备份文件不是有效的章节数据库：{error}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1966
+#: src/novel_downloader/apps/cli/commands/storage.py:2249
 #, python-brace-format
 msgid "Would restore {source} to {target}."
 msgstr "将把 {source} 恢复到 {target}。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1972
+#: src/novel_downloader/apps/cli/commands/storage.py:2255
 #, python-brace-format
 msgid "Dry run: {count} database(s) would be restored from {source}."
 msgstr "试运行：将从 {source} 恢复 {count} 个数据库。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:1993
+#: src/novel_downloader/apps/cli/commands/storage.py:2276
 #, python-brace-format
 msgid "Preserved the existing database as {path}."
 msgstr "现有数据库已另存为 {path}。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2021
-#: src/novel_downloader/apps/cli/commands/storage.py:2087
+#: src/novel_downloader/apps/cli/commands/storage.py:2304
+#: src/novel_downloader/apps/cli/commands/storage.py:2370
 #, python-brace-format
 msgid "Restored {source} to {target}."
 msgstr "已将 {source} 恢复到 {target}。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2030
+#: src/novel_downloader/apps/cli/commands/storage.py:2313
 #, python-brace-format
 msgid "Restore failed and could not be rolled back completely: {error}"
 msgstr "恢复失败，且未能完整回滚：{error}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2043
+#: src/novel_downloader/apps/cli/commands/storage.py:2326
 #, python-brace-format
 msgid "Failed to restore {source}: {error}"
 msgstr "恢复 {source} 失败：{error}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2058
+#: src/novel_downloader/apps/cli/commands/storage.py:2341
 #, python-brace-format
 msgid "Skipped {count} older backup(s) in the backup set."
 msgstr "已跳过备份集中的 {count} 个较旧备份。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2093
+#: src/novel_downloader/apps/cli/commands/storage.py:2376
 #, python-brace-format
 msgid "Restored {count} database(s) from {source}."
 msgstr "已从 {source} 恢复 {count} 个数据库。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2166
+#: src/novel_downloader/apps/cli/commands/storage.py:2449
 #, python-brace-format
 msgid "damaged write-ahead log: {problem}"
 msgstr "预写日志 (WAL) 损坏：{problem}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2218
+#: src/novel_downloader/apps/cli/commands/storage.py:2501
 msgid "Scanning for chapter databases..."
 msgstr "正在扫描章节数据库…"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2239
+#: src/novel_downloader/apps/cli/commands/storage.py:2522
 #, python-brace-format
 msgid "Checking {index}/{total}: {path}"
 msgstr "正在检查 {index}/{total}：{path}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2253
+#: src/novel_downloader/apps/cli/commands/storage.py:2536
 #, python-brace-format
 msgid "{path}: ok"
 msgstr "{path}：正常"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2256
+#: src/novel_downloader/apps/cli/commands/storage.py:2539
 #, python-brace-format
 msgid "{path}: corrupt: {reason}"
 msgstr "{path}：损坏：{reason}"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2293
+#: src/novel_downloader/apps/cli/commands/storage.py:2576
 #, python-brace-format
 msgid ""
 "Interrupted after checking {checked} of {total} database(s): {healthy} "
 "healthy, {corrupt} corrupt."
 msgstr "已中断：共 {total} 个数据库，已检查 {checked} 个；{healthy} 个正常，{corrupt} 个损坏。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2303
+#: src/novel_downloader/apps/cli/commands/storage.py:2586
 msgid "No chapter databases found to verify."
 msgstr "未找到可校验的章节数据库。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2306
+#: src/novel_downloader/apps/cli/commands/storage.py:2589
 #, python-brace-format
 msgid "Verified {total} database(s): {healthy} healthy, {corrupt} corrupt."
 msgstr "已校验 {total} 个数据库：{healthy} 个正常，{corrupt} 个损坏。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2323
+#: src/novel_downloader/apps/cli/commands/storage.py:2606
 msgid "Verify every chapter database without modifying it."
 msgstr "校验所有章节数据库，且不修改任何文件。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2331
-#: src/novel_downloader/apps/cli/commands/storage.py:2358
-#: src/novel_downloader/apps/cli/commands/storage.py:2470
+#: src/novel_downloader/apps/cli/commands/storage.py:2614
+#: src/novel_downloader/apps/cli/commands/storage.py:2641
+#: src/novel_downloader/apps/cli/commands/storage.py:2753
 msgid "Print a single-line JSON report on stdout."
 msgstr "在标准输出上打印单行 JSON 报告。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2345
+#: src/novel_downloader/apps/cli/commands/storage.py:2628
 msgid "Back up every chapter database to a directory."
 msgstr "将所有章节数据库备份到一个目录。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2352
+#: src/novel_downloader/apps/cli/commands/storage.py:2635
 msgid "Directory that receives the timestamped backup files."
 msgstr "存放带时间戳备份文件的目录。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2366
+#: src/novel_downloader/apps/cli/commands/storage.py:2649
 msgid ""
 "After a successful backup, delete all but the newest N backups of each "
 "book database (0 disables cleanup)."
 msgstr "备份成功后，每本书的数据库只保留最新的 N 个备份，更旧的备份会被删除（0 表示不清理）。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2374
+#: src/novel_downloader/apps/cli/commands/storage.py:2657
 msgid ""
 "Report which old backups --keep would delete without deleting them; the "
 "new backup itself is still written."
 msgstr "只报告 --keep 会删除哪些旧备份，不实际删除；新备份仍会正常写入。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2384
+#: src/novel_downloader/apps/cli/commands/storage.py:2667
 msgid ""
 "Write the new backups without the post-write integrity and schema check "
 "that 'storage verify' performs."
 msgstr "写入新备份后不执行 'storage verify' 的完整性与结构校验。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2396
+#: src/novel_downloader/apps/cli/commands/storage.py:2679
 msgid "--keep must be 0 (disabled) or a positive integer."
 msgstr "--keep 必须为 0（禁用）或正整数。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2400
+#: src/novel_downloader/apps/cli/commands/storage.py:2683
 msgid "--dry-run requires --keep."
 msgstr "--dry-run 需要 --keep。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2417
+#: src/novel_downloader/apps/cli/commands/storage.py:2700
 msgid "Could not load the configuration; no backup was made."
 msgstr "无法加载配置; 未创建任何备份。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2439
+#: src/novel_downloader/apps/cli/commands/storage.py:2722
 msgid "Restore chapter databases from a backup file or directory."
 msgstr "从备份文件或备份目录恢复章节数据库。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2448
+#: src/novel_downloader/apps/cli/commands/storage.py:2731
 msgid ""
 "Backup file or backup directory to restore. A directory restores the "
 "newest copy of every stage it contains."
 msgstr "要恢复的备份文件或备份目录。目录会恢复其中每个 stage 的最新副本。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2456
+#: src/novel_downloader/apps/cli/commands/storage.py:2739
 msgid ""
 "Database path or raw-data root to write (must be inside the raw data "
 "directory). Derived from the backup's site/book path when omitted."
 msgstr "要写入的数据库路径或原始数据根目录（必须位于原始数据目录内）。省略时按备份的站点/书籍路径推断。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2464
+#: src/novel_downloader/apps/cli/commands/storage.py:2747
 msgid "Report what would be restored without writing anything."
 msgstr "只报告将恢复什么，不写入任何内容。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2479
+#: src/novel_downloader/apps/cli/commands/storage.py:2762
 msgid ""
 "Allow replacing existing databases (each one is backed up as a .pre-"
 "restore-*.bak first)."
 msgstr "允许替换已存在的数据库（每个都会先备份为 .pre-restore-*.bak）。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2489
+#: src/novel_downloader/apps/cli/commands/storage.py:2772
 msgid ""
 "Skip the strict schema check on the backup (the SQLite integrity check is"
 " still enforced)."
 msgstr "跳过备份的严格 schema 检查（仍会执行 SQLite 完整性检查）。"
 
-#: src/novel_downloader/apps/cli/commands/storage.py:2512
+#: src/novel_downloader/apps/cli/commands/storage.py:2795
 msgid "Could not load the configuration; nothing was restored."
 msgstr "无法加载配置；未恢复任何内容。"
 
