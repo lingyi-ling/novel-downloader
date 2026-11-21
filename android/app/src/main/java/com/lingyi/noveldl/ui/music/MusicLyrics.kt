@@ -47,6 +47,20 @@ object MusicLyrics {
     const val EMBEDDED_MUSIC_SUBDIRECTORY: String = "downloads/music"
 
     /**
+     * Absolute path of the single private directory declared in
+     * `res/xml/file_paths.xml` (`files/engine_home/downloads/music/`).
+     *
+     * The lyric lookup and [MusicLyricOpener] both validate against this one
+     * definition instead of the whole app sandbox: a path that passes the
+     * check is always inside the provider range, and anything else is rejected
+     * before `FileProvider.getUriForFile` is reached.
+     */
+    fun providerRoot(context: Context): String = File(
+        context.applicationContext.filesDir,
+        "${EmbeddedEngine.HOME_DIRECTORY}/$EMBEDDED_MUSIC_SUBDIRECTORY",
+    ).absolutePath
+
+    /**
      * Sibling `.lrc` path for [audioPath]: the last extension of the file name
      * is replaced, so `.mp3`/`.flac`/`.m4a` all map to the same lyric name.
      * A name without an extension gets `.lrc` appended; blank input yields
@@ -178,14 +192,7 @@ class PrivateMusicLyricLookup(
     private val exists: (String) -> Boolean = { File(it).isFile },
 ) : MusicLyricLookup {
 
-    constructor(context: Context) : this(
-        listOf(
-            File(
-                context.applicationContext.filesDir,
-                "${EmbeddedEngine.HOME_DIRECTORY}/${MusicLyrics.EMBEDDED_MUSIC_SUBDIRECTORY}",
-            ).absolutePath,
-        ),
-    )
+    constructor(context: Context) : this(listOf(MusicLyrics.providerRoot(context)))
 
     override fun find(audioPath: String): List<MusicLyricFile> =
         MusicLyrics.findAll(audioPath, roots, exists)

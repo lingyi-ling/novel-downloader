@@ -31,8 +31,9 @@ enum class MusicLyricOpenResult {
  * neither resolves, instead of failing silently.
  *
  * The path is re-validated here rather than trusting the caller: the URI is
- * only produced for files inside the app's own directories, so a stale or
- * engine-supplied path outside the sandbox can never be exposed.
+ * only produced for a `.lrc` inside the single directory declared in
+ * `res/xml/file_paths.xml`, so a stale or engine-supplied path outside the
+ * provider range can never be exposed.
  */
 object MusicLyricOpener {
 
@@ -47,7 +48,15 @@ object MusicLyricOpener {
     fun open(context: Context, lyricPath: String): MusicLyricOpenResult {
         val path = lyricPath.trim()
         if (path.isEmpty()) return MusicLyricOpenResult.Missing
-        if (!MusicLocalPaths.isLocal(path, MusicLocalPaths.deviceRoots(context))) {
+        // The provider range also holds the audio files; only the `.lrc`
+        // sidecars this screen opens may ever be handed out.
+        if (!path.endsWith(MusicLyrics.EXTENSION, ignoreCase = true)) {
+            return MusicLyricOpenResult.Missing
+        }
+        // Narrower than the app-wide sandbox roots: the check is exactly the
+        // range file_paths.xml exposes, so passing it guarantees the
+        // getUriForFile below succeeds for an existing file.
+        if (!MusicLocalPaths.isInside(MusicLyrics.providerRoot(context), path)) {
             return MusicLyricOpenResult.Missing
         }
         val file = File(path)
