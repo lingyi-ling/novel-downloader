@@ -123,6 +123,10 @@ def _wrap_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
     keys = set(fragment)
     base: dict[str, Any] = {"site_key": _SITE_KEY}
 
+    if "site_key" in keys:
+        # A complete rule (the private-source walkthrough) needs no wrapping.
+        return fragment
+
     if "lang" in keys and keys <= {"lang", "code", "name"}:
         return {
             **base,
@@ -217,7 +221,8 @@ def test_field_tables_cover_the_same_keys_in_both_languages() -> None:
 def test_every_documented_json_example_loads(index: int) -> None:
     fragment = _load_fragment(ZH_BLOCKS[index])
     rule = parse_rule(_wrap_fragment(fragment), source=f"rule-dsl.md block {index}")
-    assert rule.site_key == _SITE_KEY
+    if "site_key" not in fragment:
+        assert rule.site_key == _SITE_KEY
 
 
 # --------------------------------------------------------------------------- #

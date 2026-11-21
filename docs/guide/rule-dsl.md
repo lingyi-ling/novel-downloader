@@ -139,7 +139,7 @@
 ```json
 {
   "site_key": "local_test",
-  "site_name": "本地测试源",
+  "site_name": "Local test source",
   "base_url": "http://127.0.0.1:8080",
   "headers": {
     "User-Agent": "novel-downloader-local-test/1.0"
