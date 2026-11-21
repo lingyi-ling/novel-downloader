@@ -29,7 +29,9 @@ from pathlib import Path
 
 import pytest
 
+from novel_downloader.apps.cli.commands import commands as ALL_COMMANDS
 from novel_downloader.apps.cli.commands.base import localize_help
+from novel_downloader.apps.cli.commands.batch import BatchCmd
 from novel_downloader.apps.cli.commands.clean import CleanCmd
 from novel_downloader.apps.cli.commands.completion import (
     SHELLS,
@@ -43,6 +45,7 @@ from novel_downloader.apps.cli.commands.export import ExportCmd
 from novel_downloader.apps.cli.commands.music import MusicCmd
 from novel_downloader.apps.cli.commands.search import SearchCmd
 from novel_downloader.apps.cli.commands.storage import StorageCmd
+from novel_downloader.apps.cli.commands.update import UpdateCmd
 
 #: The command families whose options this module is responsible for.
 COMMAND_CLASSES = (CleanCmd, DoctorCmd, ExportCmd, SearchCmd, StorageCmd, MusicCmd)
@@ -59,6 +62,7 @@ DRIFT_PATHS = (
     " search",
     " storage",
     " storage backup",
+    " storage restore",
     " storage verify",
     " music download",
     " music health",
@@ -85,7 +89,16 @@ NEW_OPTIONS = (
     (" storage", "--clean"),
     (" storage backup", "--out"),
     (" storage backup", "--keep"),
+    (" storage restore", "--from"),
+    (" storage restore", "--to"),
+    (" storage restore", "--dry-run"),
+    (" storage restore", "--force"),
+    (" storage restore", "--yes"),
+    (" storage restore", "--no-verify"),
+    (" storage restore", "--json"),
     (" storage verify", "--json"),
+    (" music download", "--embed-lyric"),
+    (" music download", "--no-embed-lyric"),
     (" music health", "--platform"),
     (" music health", "--keyword"),
     (" music health", "--json"),
@@ -102,14 +115,30 @@ NEW_SURFACE = {
         "--max-words",
         "--updated-after",
     ),
-    " storage backup": ("--out", "--json", "--keep", "--dry-run"),
+    " storage backup": ("--out", "--json", "--keep", "--dry-run", "--no-verify"),
+    " storage restore": (
+        "--from",
+        "--to",
+        "--dry-run",
+        "--force",
+        "--yes",
+        "--no-verify",
+        "--json",
+    ),
     " storage verify": ("--json",),
+    " music download": (
+        "--embed-lyric",
+        "--no-embed-lyric",
+        "--out",
+        "--json",
+    ),
 }
 
 #: Subcommand words that must stay completable at their parent path.
 NEW_SUBCOMMANDS = (
     (" storage", "verify"),
     (" storage", "backup"),
+    (" storage", "restore"),
     (" music", "download"),
 )
 
@@ -135,18 +164,22 @@ def _node(path: str, tree: CompletionNode | None = None) -> CompletionNode:
 # ---------------------------------------------------------------------------
 
 
-def _real_parser_for(path: str) -> ArgumentParser:
-    """Build the parser exactly as ``completion`` and ``cli_main`` do, then walk."""
+def _build_parser(command_classes: tuple[type, ...]) -> ArgumentParser:
+    """Build a parser exactly as ``completion`` and ``cli_main`` do."""
     parser = ArgumentParser(prog="novel-cli", add_help=False)
     localize_help(parser)
     parser.add_argument("-v", "--version", action="version", version="novel-cli")
     parser.add_argument("--lang")
 
     subparsers = parser.add_subparsers(dest="command", title="Commands")
-    for cls in COMMAND_CLASSES:
+    for cls in command_classes:
         cls.register(subparsers)
+    return parser
 
-    current = parser
+
+def _real_parser_for(path: str) -> ArgumentParser:
+    """Build the parser exactly as ``completion`` and ``cli_main`` do, then walk."""
+    current = _build_parser(COMMAND_CLASSES)
     for part in path.split():
         nested = next(
             action
@@ -155,6 +188,15 @@ def _real_parser_for(path: str) -> ArgumentParser:
         )
         current = nested.choices[part]
     return current
+
+
+def _all_command_classes() -> tuple[type, ...]:
+    """The full command list ``cli_main`` registers, including the two extras."""
+    classes: list[type] = list(ALL_COMMANDS)
+    for extra in (BatchCmd, UpdateCmd):
+        if extra not in classes:
+            classes.append(extra)
+    return tuple(classes)
 
 
 def _registered_options(parser: ArgumentParser) -> set[str]:
@@ -166,10 +208,38 @@ def _registered_options(parser: ArgumentParser) -> set[str]:
     }
 
 
+def _assert_tree_matches(
+    parser: ArgumentParser, node: CompletionNode, path: str = ""
+) -> None:
+    """Recursively compare a completion node with the parser it came from."""
+    assert set(node.options) == _registered_options(parser), path or "<root>"
+
+    nested = next(
+        (action for action in parser._actions if isinstance(action, _SubParsersAction)),
+        None,
+    )
+    choices = {} if nested is None else nested.choices
+    assert set(node.subcommands) == set(choices), path or "<root>"
+
+    for name, child in node.subcommands.items():
+        _assert_tree_matches(choices[name], child, f"{path} {name}".strip())
+
+
 @pytest.mark.parametrize("path", DRIFT_PATHS)
 def test_completion_tree_matches_registered_argparse_options(path: str) -> None:
     """The completion tree must expose exactly the options argparse knows."""
     assert set(_node(path).options) == _registered_options(_real_parser_for(path))
+
+
+def test_every_command_matches_registered_argparse() -> None:
+    """Every command and nested subcommand, not just the curated paths.
+
+    This is the anti-drift guarantee: any option added to (or removed from)
+    ``add_arguments`` is reflected in the completion tree without a second
+    hand-maintained list, and a whole command family cannot be skipped.
+    """
+    classes = _all_command_classes()
+    _assert_tree_matches(_build_parser(classes), build_completion_tree(list(classes)))
 
 
 @pytest.mark.parametrize(("path", "option"), NEW_OPTIONS)
@@ -204,6 +274,12 @@ def test_scripts_offer_the_new_options(shell: str) -> None:
         "--updated-after",
         "--fix",
         "--fix-age-days",
+        "--from",
+        "--to",
+        "--force",
+        "--no-verify",
+        "--embed-lyric",
+        "--no-embed-lyric",
     ):
         assert option in script, f"{shell} script lost {option}"
 
