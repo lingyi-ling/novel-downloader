@@ -95,6 +95,17 @@ The timestamp is UTC. Two backups can land in the same second (concurrent runs, 
 scheduled job overlapping a manual one, or insufficient clock precision). The name
 is claimed atomically with `O_CREAT|O_EXCL`; the loser tries
 `chapter.<stage>.<timestamp>.1.sqlite`, then `.2`, and so on, up to `.1000`.
+The sequence always continues past the **highest existing number** rather than
+filling a gap, so filename order matches creation order; otherwise retention could
+mistake a fresh copy for an old one.
+
+Concurrent runs writing to the same `--out` serialize their claim → publish →
+verify → prune phases through a lock in the system temporary directory (named by a
+hash of the destination). That prevents two processes from deleting each other's
+freshly published copies. The wait is capped at 60 seconds; after that the run
+continues unlocked (publishing is still atomic and name claims still use `O_EXCL`).
+The lock file never lives in the backup directory, and the OS releases it when a
+process exits or crashes.
 
 * **An existing file is never overwritten.** Same-name backups, placeholder
   directories, and files another process is creating are all skipped.

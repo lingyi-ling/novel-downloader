@@ -60,13 +60,16 @@ line on stdout.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
+import importlib
 import json
 import os
 import re
 import shutil
 import sqlite3
 import tempfile
+import time
 from argparse import ArgumentParser, Namespace, _SubParsersAction
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -144,6 +147,38 @@ _TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 #: collision takes the next ``.<n>`` suffix; a directory holding a thousand
 #: copies of one database from a single second is not a supported workload.
 _MAX_BACKUP_SEQUENCE = 1000
+
+#: Sidecar file that serializes the publish/prune phase of concurrent backup
+#: runs writing into the same ``--out`` directory. The name never matches the
+#: backup or source grammar, so discovery, restore and retention ignore it.
+_BACKUP_LOCK_NAME = ".storage-backup.lock"
+
+#: How long a run waits for that lock before continuing without it. A backup
+#: run is short (copy + verify), so a real overlap is measured in seconds; the
+#: generous ceiling only exists so a wedged holder cannot stall a scheduled job
+#: forever. Proceeding unlocked keeps the pre-lock behaviour (atomic publishes
+#: and ``O_EXCL`` claims still hold) instead of failing the run.
+_BACKUP_LOCK_TIMEOUT = 60.0
+
+#: Poll interval while waiting for the backup lock.
+_BACKUP_LOCK_INTERVAL = 0.02
+
+#: Temporary file names :func:`_write_snapshot` creates next to a backup
+#: (``.<backup name>.<random>.tmp``). Only these are swept: a name this
+#: command never produces is never deleted.
+_BACKUP_TEMP_RE = re.compile(r"^\..+\.sqlite\.[^.]+\.tmp$")
+
+#: Windows sharing/access violations that a just-created file can report for a
+#: few milliseconds (an antivirus scanner, the search indexer, or a reader that
+#: has not closed yet). They are transient, so the publish step retries them.
+_TRANSIENT_REPLACE_WINERRORS = frozenset({5, 32, 33})
+
+#: Total time :func:`_replace_with_retry` keeps retrying a transient
+#: ``os.replace`` failure before giving up.
+_REPLACE_RETRY_TIMEOUT = 5.0
+
+#: Poll interval between ``os.replace`` retries.
+_REPLACE_RETRY_INTERVAL = 0.02
 
 
 @dataclass
@@ -697,7 +732,11 @@ def _write_snapshot(source: Path, target: Path) -> ChapterDatabaseInfo:
             )
         with temp.open("r+b") as handle:
             os.fsync(handle.fileno())
-        os.replace(temp, target)
+        # A concurrent retention pass may have removed our empty placeholder
+        # after claiming it; ``os.replace`` simply recreates the name then.
+        # On Windows a scanner can briefly hold the freshly written bytes, so
+        # a sharing violation is retried instead of failing the whole set.
+        _replace_with_retry(temp, target)
     except BaseException:
         _remove_database_files(temp)
         raise
@@ -995,6 +1034,11 @@ def _prune_old_backups(
             continue
         try:
             path.unlink()
+        except FileNotFoundError:
+            # The candidate disappeared between planning and removal: another
+            # run pruned it, or the user deleted it. The goal state is already
+            # reached, so this is a success, not a retention failure.
+            report.removed.append(path)
         except OSError as exc:
             report.failed.append((path, str(exc)))
             ui.error(
@@ -1027,22 +1071,49 @@ def _prune_old_backups(
     return report
 
 
+def _next_backup_sequence(target: Path) -> int:
+    """Return one past the highest existing sequence for ``target``'s second.
+
+    Retention groups same-second copies by sequence, so a new copy must sort
+    after every existing one. Filling the first *free* gap instead (the old
+    behaviour) let a later run reclaim ``.0`` after retention removed it while
+    a ``.1`` from an earlier run still existed; retention then saw the fresh
+    ``.0`` as older than ``.1`` and the ``--keep`` promise could be broken.
+    """
+    base = target.stem
+    suffix = target.suffix
+    pattern = re.compile(re.escape(base) + r"(?:\.(\d+))?" + re.escape(suffix) + r"\Z")
+    highest = -1
+    try:
+        names = os.listdir(target.parent)
+    except OSError:
+        return 0
+    for name in names:
+        match = pattern.match(name)
+        if match is None:
+            continue
+        highest = max(highest, int(match.group(1) or 0))
+    return highest + 1
+
+
 def _reserve_backup_target(target: Path) -> Path:
-    """Atomically claim ``target``, or the first free ``.<n>`` sibling.
+    """Atomically claim the next unused ``.<n>`` name for ``target``.
 
     Two backups of the same database can land in the same UTC second: two
     concurrent runs, a scheduled job overlapping a manual one, or a clock
     whose sub-second detail the fixed-width stamp cannot express. The name is
     claimed with ``O_CREAT|O_EXCL``, so racers can never pick the same file;
-    the loser moves on to ``chapter.<stage>.<UTC>.1.sqlite``, then ``.2``, and
-    so on. The returned path is an empty placeholder owned by the caller: the
-    snapshot writer replaces it atomically and the caller removes it if the
-    snapshot fails.
+    the loser moves on to the next number. Starting past the highest existing
+    sequence (rather than at the first free gap) keeps sequence order equal to
+    creation order for retention. The returned path is an empty placeholder
+    owned by the caller: the snapshot writer replaces it atomically and the
+    caller removes it if the snapshot fails.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     base = target.stem  # chapter.<stage>.<UTC>
     suffix = target.suffix
-    for index in range(0, _MAX_BACKUP_SEQUENCE + 1):
+    index = _next_backup_sequence(target)
+    while index <= _MAX_BACKUP_SEQUENCE:
         candidate = (
             target if index == 0 else target.with_name(f"{base}.{index}{suffix}")
         )
@@ -1050,11 +1121,13 @@ def _reserve_backup_target(target: Path) -> Path:
         # claimed; skip it without opening anything. This also covers Windows,
         # where opening an existing directory reports EACCES instead of EEXIST.
         if os.path.lexists(candidate):
+            index += 1
             continue
         try:
             handle = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             # Lost the race to a concurrent run; take the next name.
+            index += 1
             continue
         os.close(handle)
         return candidate
@@ -1066,6 +1139,196 @@ def _reserve_backup_target(target: Path) -> Path:
             path=target
         )
     )
+
+
+def _destination_lock_path(out_dir: Path) -> Path:
+    """Return the lock file shared by every run writing into ``out_dir``.
+
+    The lock lives in the system temporary directory rather than in the
+    destination: a backup directory is the user's data, and a lock file left
+    there would show up in listings and in every "what did this run write"
+    check. The name is derived from the case-folded resolved destination, so
+    ``--out BACKUPS`` and ``--out backups`` map to the same lock on Windows and
+    macOS instead of racing on two different files.
+    """
+    key = hashlib.sha256(
+        os.path.normcase(str(out_dir)).encode("utf-8", "surrogatepass")
+    ).hexdigest()[:32]
+    return Path(tempfile.gettempdir()) / f"noveldl-backup-{key}.lock"
+
+
+def _try_lock(fd: int) -> bool:
+    """Take an exclusive non-blocking lock on ``fd``; ``False`` when busy.
+
+    ``msvcrt.locking`` and ``fcntl.flock`` both release the lock when the
+    holding process dies, so a killed run never wedges the destination.
+    """
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
+        with contextlib.suppress(OSError):
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+        with contextlib.suppress(OSError):
+            os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+
+    fcntl = importlib.import_module("fcntl")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(fd: int) -> None:
+    """Release a lock taken by :func:`_try_lock`, ignoring any failure."""
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
+        with contextlib.suppress(OSError):
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+
+    fcntl = importlib.import_module("fcntl")
+    with contextlib.suppress(OSError):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@dataclass
+class _DestinationLock:
+    """Handle for the per-destination lock; ``fd`` is ``None`` when unusable.
+
+    ``acquired`` distinguishes "we own the destination" from "we gave up
+    waiting and are running unserialized". Locking is best effort: a backup
+    that cannot lock must still be written, because the publish step itself is
+    atomic and the name claim is ``O_EXCL``.
+    """
+
+    fd: int | None = None
+    acquired: bool = False
+
+
+def _acquire_destination_lock(out_dir: Path) -> _DestinationLock:
+    """Serialize the publish/prune phase of concurrent runs into one ``--out``.
+
+    Without this, two runs that pick the same UTC second each publish a
+    complete set and then each prune the *other's* fresh copy as "older", so
+    ``--keep 1`` can delete a file that is still being verified or leave more
+    copies than it promised. Waiting is bounded by
+    :data:`_BACKUP_LOCK_TIMEOUT`; on timeout the run proceeds unlocked rather
+    than failing, which is the pre-lock behaviour and still leaves every source
+    with a complete, uniquely named backup.
+    """
+    try:
+        path = _destination_lock_path(out_dir)
+        fd = os.open(
+            str(path),
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+    except OSError:
+        return _DestinationLock()
+
+    deadline = time.monotonic() + _BACKUP_LOCK_TIMEOUT
+    try:
+        while True:
+            if _try_lock(fd):
+                return _DestinationLock(fd=fd, acquired=True)
+            if time.monotonic() >= deadline:
+                return _DestinationLock(fd=fd)
+            time.sleep(_BACKUP_LOCK_INTERVAL)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
+
+
+def _release_destination_lock(lock: _DestinationLock) -> None:
+    """Release the destination lock, if this run holds it."""
+    fd = lock.fd
+    lock.fd = None
+    if fd is None:
+        return
+    if lock.acquired:
+        _unlock(fd)
+        lock.acquired = False
+    with contextlib.suppress(OSError):
+        os.close(fd)
+
+
+def _sweep_stale_backup_artifacts(out_dir: Path) -> list[Path]:
+    """Delete artifacts a crashed run left in ``out_dir``; return them.
+
+    Called only while the destination lock is held, so no cooperating run can
+    be writing here: a temp copy or an empty name claim found now is garbage.
+    Two shapes are swept -- the ``.<backup>.<random>.tmp`` file
+    :func:`_write_snapshot` builds and a zero-byte
+    ``chapter.<stage>.<UTC>[.<n>].sqlite`` claimed by
+    :func:`_reserve_backup_target` -- and their SQLite sidecars. A file with
+    content is a real backup and is never touched.
+    """
+    removed: list[Path] = []
+    if not out_dir.is_dir():
+        return removed
+
+    for dirpath, dirnames, filenames in os.walk(out_dir):
+        dirnames[:] = [
+            name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))
+        ]
+        for name in filenames:
+            candidate = Path(dirpath) / name
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                if _BACKUP_TEMP_RE.match(name) is None:
+                    if _BACKUP_NAME_RE.match(name) is None:
+                        continue
+                    if candidate.stat().st_size != 0:
+                        continue
+            except OSError:
+                continue
+            _remove_database_files(candidate)
+            if not candidate.exists():
+                removed.append(candidate)
+    return removed
+
+
+def _is_transient_replace_error(exc: OSError) -> bool:
+    """True when ``os.replace`` failed for a reason that may clear on retry.
+
+    On Windows a just-written file can be held open for a few milliseconds by
+    an antivirus scanner or the search indexer, which makes ``MoveFileEx``
+    report a sharing/access violation even though this process holds no
+    handle. Every other error (a real permission problem, a full disk) is
+    reported at once instead of being retried.
+    """
+    if os.name == "nt":
+        return getattr(exc, "winerror", None) in _TRANSIENT_REPLACE_WINERRORS
+    return exc.errno in (errno.EACCES, errno.EPERM, errno.EBUSY)
+
+
+def _replace_with_retry(source: Path, target: Path) -> None:
+    """Publish ``source`` over ``target`` with a bounded transient retry.
+
+    The move stays atomic: a retry either publishes the complete file or fails
+    for a real reason. ``source`` is untouched until a retry succeeds, so the
+    caller's rollback still finds and removes it.
+    """
+    deadline = time.monotonic() + _REPLACE_RETRY_TIMEOUT
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            if not _is_transient_replace_error(exc):
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(_REPLACE_RETRY_INTERVAL)
 
 
 class _BackupVerificationError(RuntimeError):
@@ -1215,94 +1478,127 @@ def _run_backup(
     created: list[Path] = []
     total_bytes = 0
     source = plan[0][0]
-    try:
-        for source, base_target in plan:
-            # Claim the name first: an existing same-second backup (from an
-            # earlier or concurrent run) must be neither overwritten nor fatal.
-            target = _reserve_backup_target(base_target)
-            try:
-                info = _write_snapshot(source, target)
-                if verify:
-                    reason = _verify_database(target)
-                    if reason is not None:
-                        raise _BackupVerificationError(
-                            source,
-                            target,
-                            reason,
-                            getattr(reason, "category", "verification_failed"),
-                        )
-            except BaseException:
-                # The placeholder and any copy written for this source are
-                # ours; a failure (including Ctrl+C during verification) must
-                # not leave them behind for retention or a retry to count.
-                _remove_database_files(target)
-                raise
-            created.append(target)
-            size = target.stat().st_size
-            total_bytes += size
-            entries.append(
-                {
-                    "source": str(source),
-                    "target": str(target),
-                    "bytes": size,
-                    "sha256": _sha256(target),
-                    "schema_version": info.schema_version,
-                    "chapters": info.chapter_count,
-                    "verified": verify,
-                }
-            )
-            if not as_json:
-                ui.info(
-                    t("Backed up {source} -> {target}.").format(
-                        source=source, target=target
-                    )
-                )
-    except _BackupVerificationError as exc:
-        # A backup set is only useful as a whole; drop the files this run
-        # already produced so a retry cannot mistake them for a full set.
-        for path in created:
-            _remove_database_files(path)
-        _report_verification_failure(
-            exc,
-            out_dir=out_dir,
-            stamp=stamp,
-            keep=keep,
-            dry_run=dry_run,
-            as_json=as_json,
-        )
-    except BaseException as exc:
-        # Same rollback for every other failure, including Ctrl+C: a run that
-        # did not publish its complete set must not leave the files it did
-        # write behind.  Interrupts are re-raised so the CLI aborter keeps its
-        # usual contract; ordinary errors are reported and exit 1.
-        for path in created:
-            _remove_database_files(path)
-        if not isinstance(exc, Exception):
-            raise
-        _report_backup_failure(
-            t("Failed to back up {source}: {error}").format(source=source, error=exc),
-            category=_classify_backup_error(exc),
-            source=source,
-            out_dir=out_dir,
-            stamp=stamp,
-            keep=keep,
-            dry_run=dry_run,
-            as_json=as_json,
-        )
 
-    protected: set[Path] = set()
-    for path in created:
-        with contextlib.suppress(OSError):
-            protected.add(path.resolve())
+    # The claim -> publish -> verify -> prune sequence is one critical section
+    # per destination. Without it, two runs sharing ``--out`` can prune each
+    # other's fresh copies (each sees the other's set as "older"), which both
+    # breaks the ``--keep`` promise and can delete a copy still being verified.
+    lock = _acquire_destination_lock(out_dir)
+    try:
+        if lock.acquired:
+            # Nothing else is writing here, so leftovers from a killed run are
+            # garbage: an empty name claim or a half-written temp copy. This is
+            # the "no half files after a crash" half of the cleanup guarantee.
+            _sweep_stale_backup_artifacts(out_dir)
+        try:
+            for source, base_target in plan:
+                # Claim the name first: an existing same-second backup (from an
+                # earlier or concurrent run) must be neither overwritten nor
+                # fatal.
+                target = _reserve_backup_target(base_target)
+                try:
+                    info = _write_snapshot(source, target)
+                    if verify:
+                        reason = _verify_database(target)
+                        if reason is not None:
+                            raise _BackupVerificationError(
+                                source,
+                                target,
+                                reason,
+                                getattr(reason, "category", "verification_failed"),
+                            )
+                except BaseException:
+                    # The placeholder and any copy written for this source are
+                    # ours; a failure (including Ctrl+C during verification)
+                    # must not leave them behind for retention or a retry to
+                    # count.
+                    _remove_database_files(target)
+                    raise
+                created.append(target)
+                size = target.stat().st_size
+                total_bytes += size
+                entries.append(
+                    {
+                        "source": str(source),
+                        "target": str(target),
+                        "bytes": size,
+                        "sha256": _sha256(target),
+                        "schema_version": info.schema_version,
+                        "chapters": info.chapter_count,
+                        "verified": verify,
+                    }
+                )
+                if not as_json:
+                    ui.info(
+                        t("Backed up {source} -> {target}.").format(
+                            source=source, target=target
+                        )
+                    )
+        except _BackupVerificationError as exc:
+            # A backup set is only useful as a whole; drop the files this run
+            # already produced so a retry cannot mistake them for a full set.
+            for path in created:
+                _remove_database_files(path)
+            _report_verification_failure(
+                exc,
+                out_dir=out_dir,
+                stamp=stamp,
+                keep=keep,
+                dry_run=dry_run,
+                as_json=as_json,
+            )
+        except BaseException as exc:
+            # Same rollback for every other failure, including Ctrl+C: a run
+            # that did not publish its complete set must not leave the files it
+            # did write behind.  Interrupts are re-raised so the CLI aborter
+            # keeps its usual contract; ordinary errors are reported and exit 1.
+            for path in created:
+                _remove_database_files(path)
+            if not isinstance(exc, Exception):
+                raise
+            _report_backup_failure(
+                t("Failed to back up {source}: {error}").format(
+                    source=source, error=exc
+                ),
+                category=_classify_backup_error(exc),
+                source=source,
+                out_dir=out_dir,
+                stamp=stamp,
+                keep=keep,
+                dry_run=dry_run,
+                as_json=as_json,
+            )
+
+        protected: set[Path] = set()
+        for path in created:
+            with contextlib.suppress(OSError):
+                protected.add(path.resolve())
+
+        if as_json:
+            retention = _prune_old_backups(
+                out_dir,
+                keep=keep,
+                dry_run=dry_run,
+                protect=protected,
+                as_json=True,
+            )
+        else:
+            ui.success(
+                t("Created {count} backup file(s) in {path}.").format(
+                    count=len(entries), path=out_dir
+                )
+            )
+            retention = _prune_old_backups(
+                out_dir,
+                keep=keep,
+                dry_run=dry_run,
+                protect=protected,
+                as_json=False,
+            )
+    finally:
+        _release_destination_lock(lock)
 
     if as_json:
-        retention = _prune_old_backups(
-            out_dir,
-            keep=keep,
-            dry_run=dry_run,
-            protect=protected,
-            as_json=True,
-        )
         _emit_json(
             {
                 "command": "storage backup",
@@ -1327,19 +1623,6 @@ def _run_backup(
                     else {}
                 ),
             }
-        )
-    else:
-        ui.success(
-            t("Created {count} backup file(s) in {path}.").format(
-                count=len(entries), path=out_dir
-            )
-        )
-        retention = _prune_old_backups(
-            out_dir,
-            keep=keep,
-            dry_run=dry_run,
-            protect=protected,
-            as_json=False,
         )
 
     # A backup that cannot prune is still a good backup; the files are kept and
