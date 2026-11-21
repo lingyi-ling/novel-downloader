@@ -41,8 +41,8 @@ android {
         applicationId = "com.lingyi.noveldl"
         minSdk = 26
         targetSdk = 35
-        versionCode = 50
-        versionName = "1.36.0"
+        versionCode = 51
+        versionName = "1.37.0"
         // Chaquopy requires explicit ABIs; arm64 covers modern phones, x86_64
         // keeps the emulator usable.
         ndk.abiFilters += listOf("arm64-v8a", "x86_64")

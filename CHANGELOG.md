@@ -1,3 +1,32 @@
+## v1.37.0 (2026-11-21)
+
+安全加固、并发正确性与全端体验补齐。
+
+### Feature
+
+- **Android 更新验签**：`UpdateChecker.TRUSTED_UPDATE_KEYS` 非空时校验 Ed25519 清单签名（canonical JSON 与 Python 端逐字节一致），未签名/未知密钥/篡改即拒绝且不回退 GitHub API
+- **Android 内嵌 API token**：启动引擎时生成 per-process bearer token，仅本应用可访问 `127.0.0.1` 引擎
+- **桌面**：设置页新增歌词内嵌开关；“跳过此版本”持久化；设置导出/导入（白名单 + `.bak` + 原子写）；搜索缓存清理两步确认；键盘导航与读屏语义
+- **存储**：`storage restore` 支持备份目录整组恢复、`--dry-run`/`--force`/`--no-verify`、失败与 Ctrl+C 整组回滚；`storage backup --json` 所有失败路径输出稳定 `error` 类别
+- **CLI**：`music download --embed-lyric/--no-embed-lyric`; `sources list --json` 统一单行；`search` 拒绝 `nan/inf` 超时
+- **API**：OpenAPI 认证方案与参数描述；SSE 断连立即清理源与拉取任务；413/415 全路由契约
+
+### Fix
+
+- **规则引擎**：URL 仅允许 http(s)、拒绝 userinfo/控制字符/反斜杠混淆，请求头 CRLF 清洗；畸形 IPv6/URL 与组合正则不再抛裸异常；HTML 剥离改为线性扫描，避免大页面 DoS
+- **音乐**：失败路径归还批次字节预算；歌词路径越界与 `.lrc` 覆盖音频防护；LRC 编码探测（UTF-8/UTF-16/GB18030/BOM）；歌单换行注入清洗
+- **存储**：备份并发加锁 + 单调序号；verify 中断统计一致；大小写折叠保留；句柄泄漏导致损坏副本残留
+- **桌面**：XSS 转义与 URL 属性校验；外链/导航统一收口；主题/语言写盘失败回滚；注入 `XSS` 与外部链接安全
+- **API**：`security headers` 覆盖 CORS 预检与 embedded；`X-Request-ID` 在 embedded 同步；请求体仅接受 JSON 并限制 1 MiB；限流 429 `Retry-After` 契约
+- **Android**：通知 action/task id 严格校验、PendingIntent flags；FileProvider 授权收窄至 Provider 根；备份规则排除 device-protected 存储
+- **官网**：版本徽章不再硬编码；latest.json 失败即降级 GitHub API；下载校验命令覆盖 APK；SEO 描述/hreflang/sitemap.xml
+
+### Test
+
+- Python **14787 passed / 58 skipped**；ruff check/format、mypy src 全绿
+- Android 全量 `testDebugUnitTest` 与 `lintDebug` 通过
+- 新增请求体/限流/SSE 背压、规则 URL 安全、存储并发、桌面 XSS/链接安全、更新签名、Android 静态安全等矩阵
+
 ## v1.36.0 (2026-11-15)
 
 查询意图贯通全端，排序体验补齐，文档与官网同步。
