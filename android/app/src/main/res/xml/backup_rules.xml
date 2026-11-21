@@ -36,4 +36,19 @@
     <exclude
         domain="external"
         path="." />
+    <!-- Device-protected storage is a separate tree (getDeviceProtectedStorageContext);
+         the app keeps nothing there today, but a credential written there later
+         must not become the one path a cloud backup misses. -->
+    <exclude
+        domain="device_root"
+        path="." />
+    <exclude
+        domain="device_file"
+        path="." />
+    <exclude
+        domain="device_database"
+        path="." />
+    <exclude
+        domain="device_sharedpref"
+        path="." />
 </full-backup-content>

@@ -36,5 +36,20 @@
         <exclude
             domain="external"
             path="." />
+        <!-- Device-protected storage is a separate tree; keep it aligned with
+             backup_rules.xml so no credential can land in the one domain a
+             cloud backup still covers. -->
+        <exclude
+            domain="device_root"
+            path="." />
+        <exclude
+            domain="device_file"
+            path="." />
+        <exclude
+            domain="device_database"
+            path="." />
+        <exclude
+            domain="device_sharedpref"
+            path="." />
     </cloud-backup>
 </data-extraction-rules>

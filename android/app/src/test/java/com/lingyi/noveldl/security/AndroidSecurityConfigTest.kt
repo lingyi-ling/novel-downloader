@@ -162,7 +162,9 @@ class AndroidSecurityConfigTest {
         // files/.local/share/...). Excluding the whole private tree is the
         // only list that cannot silently miss one of them. "root" is the app
         // data directory; file/database/sharedpref/external are sibling
-        // domains.
+        // domains. Device-protected storage (device_*) is a separate tree;
+        // nothing lives there today, but excluding it means a future
+        // credential cannot become the single path cloud backup still covers.
         assertEquals(
             setOf(
                 "root:.",
@@ -170,6 +172,10 @@ class AndroidSecurityConfigTest {
                 "database:.",
                 "sharedpref:.",
                 "external:.",
+                "device_root:.",
+                "device_file:.",
+                "device_database:.",
+                "device_sharedpref:.",
             ),
             legacy,
         )
