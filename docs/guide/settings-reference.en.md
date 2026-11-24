@@ -150,6 +150,25 @@ Before writing, if the preferences file exists, it is copied to `<name>.bak` in 
 * There is only one `.bak`: every import that reaches the write stage overwrites it. It is a rollback for the most recent import, not a history archive.
 * After a successful import the UI immediately refreshes the theme and the Settings cards and reloads the task / follow lists, but the process is **not restarted**; the interface language was never part of the import.
 
+### Desktop diagnostics {#desktop-diagnostics}
+
+The **Copy diagnostics** button on the Settings → Diagnostics card writes a plain-text report to the clipboard so a bug report can include the environment. The bridge method `diagnostics_text()` produces only these fields:
+
+| Group | Fields |
+| --- | --- |
+| Application | Version, desktop UI layer (pywebview version), whether this is a packaged build |
+| Runtime | Python version and implementation, operating system and architecture, platform tag |
+| Paths | Data directory, output directory, log directory, config file, desktop preferences file, newest log file |
+| Key preferences | Theme, language, the three update switches, whether window geometry is saved |
+
+**Redaction**: the current user's home directory is replaced with `~` in every path. Matching accepts both `/` and `\` separators and is case-insensitive, so the account name does not appear.
+
+**Never included**: proxy address and password, site cookies, music-platform tokens, book-source accounts and search history. Only the preference keys listed above are read; other keys in the preferences file are never echoed. Logs are named by path only — their contents are **not read**.
+
+Copying uses `navigator.clipboard` first and falls back to the legacy `document.execCommand("copy")`; if both fail, the report is placed in the read-only box below the card and selected, so it can still be copied by hand. A successful copy shows a "Diagnostics copied to the clipboard" toast.
+
+Compared with `novel-cli doctor`: doctor actively probes the network, directory permissions and plugin state from a terminal; this button is a local, read-only snapshot that does not touch the network or create directories.
+
 ### Desktop window geometry {#desktop-window-geometry}
 
 The desktop client stores the main window's position, size and maximized state in the **desktop preferences file** `desktop_prefs.json` under the `window_*` keys, not in `settings.toml`. The file normally lives in the application data directory's `music/` folder (on Windows usually `%LOCALAPPDATA%\novel_downloader\music\desktop_prefs.json`); when `NOVEL_MUSIC_HOME` is set, that directory is used instead.

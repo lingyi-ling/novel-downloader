@@ -664,6 +664,13 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
 }
 .settings-errors ul { margin: 5px 0 0 18px; }
 .settings-errors li { overflow-wrap: anywhere; }
+.diagnostics-text {
+  width: 100%; margin-top: 10px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--card-2); color: var(--text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px; line-height: 1.5; resize: vertical;
+}
 .field.bad { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-bg); }
 .track-row {
   display: flex; align-items: center; gap: 10px;
@@ -1181,6 +1188,16 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             <div class="settings-actions">
               <button class="btn btn-ghost btn-sm" id="btn-set-shortcut"><svg class="icon"><use href="#i-desktop"/></svg><span data-i18n="Create desktop shortcut">Create desktop shortcut</span></button>
             </div>
+          </div>
+
+          <div class="card settings-card wide">
+            <div class="settings-title" data-i18n="Diagnostics">Diagnostics</div>
+            <div class="settings-help" data-i18n="Copy a short report for bug reports: version, runtime, paths and key preferences. Tokens, cookies, proxy passwords and account details are never included.">Copy a short report for bug reports: version, runtime, paths and key preferences. Tokens, cookies, proxy passwords and account details are never included.</div>
+            <div class="settings-actions">
+              <button class="btn btn-ghost btn-sm" id="btn-copy-diagnostics"><svg class="icon"><use href="#i-pulse"/></svg><span data-i18n="Copy diagnostics">Copy diagnostics</span></button>
+            </div>
+            <textarea class="diagnostics-text" id="set-diagnostics-text" rows="8" readonly hidden spellcheck="false"></textarea>
+            <div class="settings-note" id="set-diagnostics-note" role="status" aria-live="polite"></div>
           </div>
 
           <div class="card settings-card wide">
@@ -1884,6 +1901,43 @@ $("#btn-set-shortcut").onclick = async () => {
   const r = await call("create_shortcut");
   if (r && r.message) toast(r.message, r.ok ? "ok" : "warn");
   initSettings();
+};
+
+/* Diagnostics: the bridge builds a plain-text report that never contains
+   credentials. Copying reuses copyText (navigator.clipboard with the legacy
+   command fallback); when both fail the report is put in the read-only box so
+   it can still be selected and copied by hand. */
+$("#btn-copy-diagnostics").onclick = async () => {
+  const button = $("#btn-copy-diagnostics");
+  const note = $("#set-diagnostics-note");
+  const box = $("#set-diagnostics-text");
+  button.disabled = true;
+  let text = "";
+  try { text = await api("diagnostics_text"); } catch {}
+  button.disabled = false;
+  if (!text || typeof text !== "string") {
+    const message = t("Could not build the diagnostics report");
+    if (note) { note.textContent = message; note.className = "settings-note err"; }
+    toast(message, "err", 7000);
+    return;
+  }
+  const copied = await copyText(text);
+  if (copied) {
+    if (box) { box.hidden = true; box.value = ""; }
+    const message = t("Diagnostics copied to the clipboard");
+    if (note) { note.textContent = message; note.className = "settings-note ok"; }
+    toast(message, "ok");
+    return;
+  }
+  if (box) {
+    box.value = text;
+    box.hidden = false;
+    box.focus();
+    if (box.select) box.select();
+  }
+  const message = t("Could not copy; the report is selected below");
+  if (note) { note.textContent = message; note.className = "settings-note warn"; }
+  toast(message, "warn", 7000);
 };
 
 $("#btn-reset-window").onclick = async () => {

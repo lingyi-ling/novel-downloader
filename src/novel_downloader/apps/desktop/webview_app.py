@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -1092,6 +1093,22 @@ def _i18n_catalog() -> dict[str, str]:
         "Import settings": t("Import settings"),
         "Current preferences are backed up to a .bak file before an import.": t(
             "Current preferences are backed up to a .bak file before an import."
+        ),
+        "Diagnostics": t("Diagnostics"),
+        "Copy a short report for bug reports: version, runtime, paths and "
+        "key preferences. Tokens, cookies, proxy passwords and account "
+        "details are never included.": t(
+            "Copy a short report for bug reports: version, runtime, paths and "
+            "key preferences. Tokens, cookies, proxy passwords and account "
+            "details are never included."
+        ),
+        "Copy diagnostics": t("Copy diagnostics"),
+        "Diagnostics copied to the clipboard": t("Diagnostics copied to the clipboard"),
+        "Could not build the diagnostics report": t(
+            "Could not build the diagnostics report"
+        ),
+        "Could not copy; the report is selected below": t(
+            "Could not copy; the report is selected below"
         ),
         "Enter a file path": t("Enter a file path"),
         "Not a valid settings file": t("Not a valid settings file"),
@@ -3298,6 +3315,129 @@ def _shared_search_cache() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# diagnostics
+# ---------------------------------------------------------------------------
+
+#: Desktop log basename, mirroring ``desktop.main._LOG_NAME``.  Duplicated so
+#: a diagnostics call does not import the entry point (and its startup work).
+_DESKTOP_LOG_NAME = "novel-desktop.log"
+
+
+def _home_directories() -> tuple[str, ...]:
+    """
+    Path prefixes that identify the current user, longest first.
+
+    ``Path.home()`` is the authoritative source; the ``USERPROFILE``/``HOME``
+    environment variables are included because a launcher may resolve a
+    different spelling (forward slashes, a mapped drive) than Python does.
+    """
+    candidates: list[str] = []
+    with contextlib.suppress(Exception):
+        candidates.append(str(Path.home()))
+    for name in ("USERPROFILE", "HOME"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            candidates.append(value)
+
+    seen: set[str] = set()
+    homes: list[str] = []
+    for raw in candidates:
+        try:
+            text = str(Path(raw).expanduser())
+        except (OSError, RuntimeError, ValueError):
+            continue
+        key = os.path.normcase(os.path.normpath(text))
+        if text and key not in seen:
+            seen.add(key)
+            homes.append(text)
+    # Longest first: a nested home must win over a prefix of itself.
+    homes.sort(key=len, reverse=True)
+    return tuple(homes)
+
+
+def _redact_home(text: str) -> str:
+    """
+    Replace the current user's home directory with ``~``.
+
+    Both separator styles are accepted and the match is case-insensitive on
+    every platform: the report is plain text that may be pasted into a bug
+    tracker, so a path written by a differently-spelled launcher must be
+    redacted too.
+    """
+    result = str(text)
+    for home in _home_directories():
+        parts = [part for part in re.split(r"[\\/]+", home) if part]
+        if not parts:
+            continue
+        pattern = re.compile(
+            r"[\\/]+".join(re.escape(part) for part in parts), re.IGNORECASE
+        )
+        result = pattern.sub("~", result)
+    return result
+
+
+def _safe_path_text(factory: Callable[[], str | Path]) -> str:
+    """Resolve a path for the report, degrading to a marker on failure."""
+    try:
+        return _redact_home(str(factory()))
+    except (OSError, RuntimeError, ValueError):
+        return "(unavailable)"
+
+
+def _desktop_ui_version() -> str:
+    """The pywebview version, or a stable marker when metadata is missing."""
+    try:
+        from importlib.metadata import version
+
+        return f"pywebview {version('pywebview')}"
+    except Exception:  # noqa: BLE001 - a frozen build may ship no metadata
+        return "pywebview (unknown)"
+
+
+def _desktop_log_dir() -> Path:
+    """Directory the desktop client writes its rotating log into."""
+    from novel_downloader.infra.paths import app_home
+
+    return app_home() / "logs"
+
+
+def _recent_log_file() -> Path | None:
+    """
+    The newest desktop log file, selected by name only.
+
+    The report names the file so the user can attach it; its contents are
+    never read here (a log may contain request metadata the user did not mean
+    to paste).
+    """
+    try:
+        candidates = [
+            path
+            for path in _desktop_log_dir().glob(f"{_DESKTOP_LOG_NAME}*")
+            if path.is_file()
+        ]
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    try:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return candidates[0]
+
+
+def _has_window_geometry(prefs: Mapping[str, Any]) -> bool:
+    """Whether any ``window_*`` preference is present (values not reported)."""
+    from novel_downloader.apps.desktop.window_state import WINDOW_PREFS_KEYS
+
+    return any(key in prefs for key in WINDOW_PREFS_KEYS)
+
+
+def _on_off(flag: bool) -> str:
+    """Render a switch for the plain-text report."""
+    return "on" if flag else "off"
+
+
+# ---------------------------------------------------------------------------
 # the bridge
 # ---------------------------------------------------------------------------
 
@@ -3506,6 +3646,66 @@ class ApiBridge:
             return str(_expand_output_dir(_configured_output_dir()))
         except OSError:  # pragma: no cover - exotic filesystem failures
             return _configured_output_dir()
+
+    def diagnostics_text(self) -> str:
+        """
+        Plain-text support report for a bug report.
+
+        It carries only stable identity/runtime fields, redacted paths and the
+        non-secret preference *values*: the proxy address and password, site
+        cookies, account tokens and search history are all absent.  Log
+        contents are never read; only the newest log file's path is named.
+        Never raises.
+        """
+        try:
+            return self._diagnostics_text()
+        except Exception:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Could not build the diagnostics report", exc_info=True)
+            return "BookTone desktop diagnostics\n(unavailable)\n"
+
+    def _diagnostics_text(self) -> str:
+        """Implementation of :meth:`diagnostics_text` (may raise on I/O bugs)."""
+        from novel_downloader.infra.paths import app_home
+
+        prefs = _load_prefs()
+        recent_log = _recent_log_file()
+        recent_text = (
+            _redact_home(str(recent_log)) if recent_log is not None else "(none)"
+        )
+        auto_check = _on_off(_prefs_flag(prefs, "auto_check_updates", True))
+        auto_download = _on_off(_prefs_flag(prefs, "auto_download_updates", True))
+        auto_install = _on_off(_prefs_flag(prefs, "auto_install_on_exit", True))
+        lines = [
+            "BookTone desktop diagnostics",
+            f"Generated: {datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+            "",
+            "[Application]",
+            f"Version: {self._version() or 'unknown'}",
+            f"Desktop UI: {_desktop_ui_version()}",
+            f"Frozen bundle: {'yes' if getattr(sys, 'frozen', False) else 'no'}",
+            "",
+            "[Runtime]",
+            f"Python: {platform.python_version()} ({platform.python_implementation()})",
+            f"OS: {platform.system()} {platform.release()} ({platform.machine()})",
+            f"Platform: {sys.platform}",
+            "",
+            "[Paths]",
+            f"Data directory: {_safe_path_text(app_home)}",
+            f"Output directory: {_safe_path_text(self.get_data_dir)}",
+            f"Log directory: {_safe_path_text(_desktop_log_dir)}",
+            f"Config file: {_safe_path_text(_settings_config_path)}",
+            f"Preferences file: {_safe_path_text(_prefs_path)}",
+            f"Recent log file: {recent_text}",
+            "",
+            "[Preferences]",
+            f"Theme: {_prefs_theme(prefs)}",
+            f"Language: {_active_language() or 'unknown'}",
+            f"Auto-check updates: {auto_check}",
+            f"Auto-download updates: {auto_download}",
+            f"Auto-install on exit: {auto_install}",
+            f"Window geometry saved: {'yes' if _has_window_geometry(prefs) else 'no'}",
+        ]
+        return "\n".join(lines) + "\n"
 
     def save_prefs(self, values: dict[str, Any]) -> dict[str, Any]:
         """
