@@ -169,6 +169,20 @@
 
         <article class="card cl-entry">
           <div class="cl-head">
+            <h3>v1.43.0</h3>
+            <p class="cl-date"><time datetime="2026-11-25">2026-11-25</time></p>
+          </div>
+          <p class="cl-summary" data-en="A changelog page, desktop diagnostics and runtime API metrics.">官网更新日志页、桌面诊断信息与 API 运行指标。</p>
+          <ul class="cl-points">
+            <li data-en="The website gains a bilingual release-notes page, linked from the navigation, footer and 404 page, and listed in the sitemap.">官网新增中英更新日志页，导航、页脚与 404 页均可进入，并纳入 sitemap。</li>
+            <li data-en="Desktop settings can copy a diagnostics block (version, OS, data/log paths, key preferences) with usernames masked and no credentials.">桌面设置页可复制诊断信息（版本、系统、数据/日志路径、关键偏好），用户名脱敏且不含凭据。</li>
+            <li data-en="GET /api/v1/metrics reports request counts by status and method, rejections, SSE active/peak and uptime; it is token-protected, no-store and records no paths or keywords.">GET /api/v1/metrics 返回按状态/方法分类的请求数、拒绝计数、SSE 活跃/峰值与运行时长；受 token 保护、no-store，且不记录路径或关键词。</li>
+          </ul>
+          <a class="cl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.43.0" target="_blank" rel="noopener" data-en="View v1.43.0 on GitHub →">在 GitHub 查看 v1.43.0 →</a>
+        </article>
+
+        <article class="card cl-entry">
+          <div class="cl-head">
             <h3>v1.42.0</h3>
             <p class="cl-date"><time datetime="2026-11-25">2026-11-25</time></p>
           </div>
@@ -246,22 +260,6 @@
             <li data-en="A provider SecurityException is treated as a permission issue and falls back to system Downloads; HTTP status travels in DownloadHttpException.">provider 的 SecurityException 归为权限问题并回退系统 Downloads；HTTP 状态由 DownloadHttpException 携带。</li>
           </ul>
           <a class="cl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.39.0" target="_blank" rel="noopener" data-en="View v1.39.0 on GitHub →">在 GitHub 查看 v1.39.0 →</a>
-        </article>
-
-        <article class="card cl-entry">
-          <div class="cl-head">
-            <h3>v1.38.1</h3>
-            <p class="cl-date"><time datetime="2026-11-22">2026-11-22</time></p>
-          </div>
-          <p class="cl-summary" data-en="Patch release: credential redaction, retries and diagnostics contracts.">补丁版：凭据脱敏、重试与诊断契约。</p>
-          <ul class="cl-points">
-            <li data-en="Music health, search and download now redact MUSIC_U, Bearer tokens and signed query strings in error text, http_headers and logs.">音乐 health/search/download 的错误文本、http_headers 与日志统一脱敏 MUSIC_U、Bearer 与签名 query。</li>
-            <li data-en="doctor now also redacts prefixed credential keys such as proxy_password, client_secret and auth_token.">doctor 现在同样脱敏 proxy_password、client_secret、auth_token 等带前缀的凭据键。</li>
-            <li data-en="Rule fetching classifies timeouts as RuleError while keeping TransportError semantics; extra-page timeouts and redirects are no longer swallowed.">规则抓取把超时归类为 RuleError 并保留 TransportError 语义，额外页超时与重定向不再被静默吞掉。</li>
-            <li data-en="The Android API client retries 5xx and 429 responses bounded by Retry-After (max 10 s); only GET and HEAD retry network errors.">Android API 客户端对 5xx/429 有界重试并支持 Retry-After（上限 10 秒），仅 GET/HEAD 重试网络异常。</li>
-            <li data-en="Release tooling queries tags over REST when git ls-remote is unreachable, and retries truncated responses as network errors.">发布工具在 git ls-remote 不可达时经 REST 查询 tag，截断响应按网络错误重试。</li>
-          </ul>
-          <a class="cl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.38.1" target="_blank" rel="noopener" data-en="View v1.38.1 on GitHub →">在 GitHub 查看 v1.38.1 →</a>
         </article>
 
       </div>

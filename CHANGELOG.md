@@ -1,3 +1,23 @@
+## v1.43.0 (2026-11-25)
+
+更新日志页、桌面诊断与运行指标。
+
+### Feature
+
+- **官网更新日志**：新增 `changelog.html`（中英双语、最近 6 个版本、指向各 release），导航/页脚/404 与 sitemap 同步；测试防止版本条目与 `CHANGELOG.md` 漂移
+- **桌面诊断**：设置页可复制诊断信息（版本、pywebview、Python、OS、数据/日志/配置路径、主题/语言/更新开关、窗口几何是否存在）；主目录替换为 `~`，不读取任何凭据
+- **API 指标**：`GET /api/v1/metrics` 返回请求总数与状态/方法分类、限流与 413/415 计数、SSE 活跃/峰值、运行时长；token 保护、`no-store`、无路径/关键词等高基数标签
+
+### Fix
+
+- **诊断脱敏**：主目录替换按路径段边界，避免 `C:\Users\bob` 误伤 `C:\Users\bobby`
+
+### Test
+
+- Python **16207 passed / 64 skipped**；ruff/format、mypy 全绿
+- Android 全量单测与 `lintDebug` 通过
+- 新增 15 例指标、13 例桌面诊断、5 例更新日志页测试
+
 ## v1.42.0 (2026-11-25)
 
 桌面取消下载、embedded 缓存策略与规则模糊修复。
