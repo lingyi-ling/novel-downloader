@@ -3370,7 +3370,8 @@ def _redact_home(text: str) -> str:
         if not parts:
             continue
         pattern = re.compile(
-            r"[\\/]+".join(re.escape(part) for part in parts), re.IGNORECASE
+            r"[\\/]+".join(re.escape(part) for part in parts) + r"(?=$|[\\/])",
+            re.IGNORECASE,
         )
         result = pattern.sub("~", result)
     return result

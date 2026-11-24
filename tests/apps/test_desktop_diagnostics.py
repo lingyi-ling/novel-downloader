@@ -93,7 +93,7 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     monkeypatch.setattr(
         wa.ApiBridge, "get_data_dir", lambda _self: str(home / "downloads")
     )
-    return {"wa": wa, "home": home, "logs": logs, "prefs": prefs, "config": config}
+    return {"home": home, "logs": logs, "prefs": prefs}
 
 
 def _write_prefs(path: Path, values: dict[str, Any]) -> None:
@@ -170,6 +170,9 @@ def test_redact_home_accepts_both_separator_styles(
     mixed = str(home).replace(os.sep, "/") + "/books"
     assert _redact_home(mixed) == "~/books"
     assert _redact_home(str(home)) == "~"
+    # A longer sibling name is not a home prefix and must not be mangled.
+    sibling = str(home) + "by"
+    assert _redact_home(sibling) == sibling
 
 
 def test_report_never_contains_credentials_or_history(
